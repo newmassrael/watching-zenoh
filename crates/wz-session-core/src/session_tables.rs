@@ -55,10 +55,16 @@
 
 use core::cell::Cell;
 use core::fmt;
+// The split the request plane uses: the host profile has the native atomics, the `no_std` profile
+// gets the critical-section ones for the cores that have none.
+#[cfg(not(feature = "no_std"))]
+use core::sync::atomic::AtomicU32;
+#[cfg(feature = "no_std")]
+use portable_atomic::AtomicU32;
 
 use crate::bounded::{
-    Arena, CapacityFull, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Region,
-    RegionLines, Storage, TableLender, ZeroEmpty,
+    Arena, CapacityFull, KeyBacking, KeyLength, KeyMaker, KeyUnkept, LendRefused, Lent, Profile,
+    Region, RegionLines, Storage, TableLender, ZeroEmpty,
 };
 use crate::caps;
 use crate::declare_form::RetractionKey;
@@ -578,7 +584,21 @@ impl<Key: KeyBacking> EntityKey<Key> {
     }
 }
 
+impl<Key: KeyBacking> EntityKey<Key> {
+    /// The key as the row keeps it ([`RowKey`]), lent with the declaration of the entity's own
+    /// key when the row holds one, else the one the key is named by.
+    pub fn lent(&self) -> RowKey {
+        RowKey::of(self.key.as_str(), self.named.or(self.prefix))
+    }
+}
+
 impl<Key> EntityKey<Key> {
+    /// The declaration of the entity's own key the row holds, `None` when it holds none: what a
+    /// program asking for the entity's key is lent beside the key's text.
+    pub fn named(&self) -> Option<KeyexprHandle> {
+        self.named
+    }
+
     /// The declarations the row holds, each once: the one the key is named by, and the one of the
     /// entity's own key when that is another.
     pub fn holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>) {
@@ -603,28 +623,240 @@ pub struct WireForm<'a> {
 /// whose count is at its `MAX` takes no further holder.
 pub type KeyexprHolds = u16;
 
-/// A key expression the session declares.
+/// A key expression the session declares. `Len` is the integer its key's length is kept in
+/// ([`Storage::KeyLen`]).
 #[derive(Debug)]
-pub struct KeyexprRow<Key> {
-    id: ExprId,
+pub struct KeyexprRow<Key, Len = caps::KeyLen> {
     key: Key,
-    holds: KeyexprHolds,
+    head: KeyexprHead<Len>,
 }
 
-impl<Key: KeyBacking> KeyexprRow<Key> {
+impl<Key, Len: crate::bounded::KeyLength> KeyexprRow<Key, Len> {
     /// The id the wire names it by.
     pub fn id(&self) -> ExprId {
-        self.id
-    }
-
-    /// The key.
-    pub fn key(&self) -> &str {
-        self.key.as_str()
+        self.head.id()
     }
 
     /// Its holders: the declarations of the program and the entities that name it.
     pub fn holds(&self) -> KeyexprHolds {
-        self.holds
+        self.head.holds()
+    }
+
+    /// What a holder reads and counts at the row's own address ([`KeyexprHead`]).
+    pub fn head(&self) -> &KeyexprHead<Len> {
+        &self.head
+    }
+}
+
+impl<Key: KeyBacking, Len> KeyexprRow<Key, Len> {
+    /// The key.
+    pub fn key(&self) -> &str {
+        self.key.as_str()
+    }
+}
+
+/// The part of a key expression declaration's row a holder reaches by the row's address, with no
+/// lock of the session: the declaration's id, the length of its key, its count of holders and the
+/// tables the row lies in. The address stays the row's while the row stands on every policy:
+/// a table placed in a region or lent at the open keeps its rows where they are, and a growable
+/// one keeps them in chunks that are only ever added ([`Chunked`](crate::slot_map::Chunked)).
+///
+/// The count is the declaration's one count: the table's own declarations and entities take and
+/// give back holds of it under the session's lock, and a holder that keeps the row's address takes
+/// and gives back its own at its count ([`KeyexprCount`]), by the row it holds. The last hold is let go of only by the table
+/// ([`SessionTables::undeclare_keyexpr`]), which removes the row and has the declaration retracted.
+///
+/// A holder names the row by its address, so the count's word carries only what tells the row's
+/// declarations apart: the generation of the row's slot, which moves each time a row leaves it.
+/// A hold kept past a retraction that took the declaration whatever held it is then told from the
+/// declaration that took the row next, up to the bound the generation has: a stale hold given back
+/// after the slot was taken again a multiple of 65536 times reads as the new one's. The generation
+/// is not held at its last value to close that: a slot that stopped being taken would leave a
+/// bounded table one row short for good, a refusal every later declaration would meet, against a
+/// stale holder outliving that many declarations of one row, which only a program that retracts a
+/// key it still holds can make.
+#[derive(Debug)]
+pub struct KeyexprHead<Len = caps::KeyLen> {
+    /// The count of the declaration's holders, the one part of the head a holder that is not the
+    /// table touches: the same type whatever `Len` is, so a holder names it alone.
+    count: KeyexprCount,
+    /// The id the wire names the declaration by.
+    id: ExprId,
+    /// The length of the declared key, in bytes, in the integer of the table's policy
+    /// ([`Storage::KeyLen`]).
+    key_len: Len,
+    /// The address of the tables the row lies in.
+    table: usize,
+}
+
+impl<Len: crate::bounded::KeyLength> KeyexprHead<Len> {
+    /// The head of a declaration of `id` on a key of `key_len` bytes in the tables at `table`. It
+    /// is held by none until the table takes its first hold at the generation of the row it was
+    /// put in ([`KeyexprCount::first_hold`]): a hold kept of the row's last declaration takes and
+    /// gives back nothing in between.
+    fn new(id: ExprId, key_len: Len, table: usize) -> Self {
+        Self {
+            count: KeyexprCount(AtomicU32::new(0)),
+            id,
+            key_len,
+            table,
+        }
+    }
+
+    /// The id the wire names the declaration by.
+    pub fn id(&self) -> ExprId {
+        self.id
+    }
+
+    /// Its holders now.
+    pub fn holds(&self) -> KeyexprHolds {
+        self.count.holds()
+    }
+
+    /// How many bytes of a key the declaration covers: the length of its own key, which every key
+    /// named by it begins with.
+    pub fn key_len(&self) -> usize {
+        self.key_len.get()
+    }
+
+    /// The count of the declaration's holders, where a holder takes and gives back its hold.
+    pub fn count(&self) -> &KeyexprCount {
+        &self.count
+    }
+}
+
+/// A declaration's count of holders at its row's address ([`KeyexprHead`]): the generation of
+/// the row's slot in the upper half of one word of the machine's atomic width and the count in
+/// the lower, so a hold taken or given back here is of the declaration its holder took it of.
+#[derive(Debug)]
+pub struct KeyexprCount(AtomicU32);
+
+/// Why a declaration's row took no more hold at its address ([`KeyexprCount::retain`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowHoldRefused {
+    /// The count holds as many holders as it can.
+    Full,
+    /// The row holds no declaration at the generation asked: its last holder let go of it, or a
+    /// retraction took it whatever held it, whatever took the row's place since.
+    Released,
+}
+
+impl KeyexprCount {
+    /// The table's first hold of the declaration it put in `row`, at `row`'s generation.
+    fn first_hold(&self, row: KeyexprHandle) {
+        self.0.store(
+            Self::word(Self::generation_of(row), 1),
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// No holder of the declaration in `row` from here on, whatever held it: a holder at the
+    /// address takes no more hold of it and gives its own back to the table, which finds the row
+    /// gone.
+    fn retract(&self, row: KeyexprHandle) {
+        self.0.store(
+            Self::word(Self::generation_of(row), 0),
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// The count's word of `holds` holders at `generation`.
+    fn word(generation: u16, holds: KeyexprHolds) -> u32 {
+        (u32::from(generation) << 16) | u32::from(holds)
+    }
+
+    /// The generation `row` was taken at.
+    fn generation_of(row: KeyexprHandle) -> u16 {
+        (row.to_bits().get() >> 16) as u16
+    }
+
+    /// The generation in `word`.
+    fn generation_in(word: u32) -> u16 {
+        (word >> 16) as u16
+    }
+
+    /// The count of holders in `word`.
+    fn holds_of(word: u32) -> KeyexprHolds {
+        (word & 0xffff) as KeyexprHolds
+    }
+
+    /// Its holders now.
+    pub fn holds(&self) -> KeyexprHolds {
+        Self::holds_of(self.0.load(core::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// One more hold of the declaration in `row`, for a holder that already holds one: refused,
+    /// taking none, when the count holds as many as it can, and when the row holds no declaration
+    /// at `row`'s generation (its last holder let go of it, or a retraction took it, whatever
+    /// took the row's place since).
+    pub fn retain(&self, row: KeyexprHandle) -> Result<(), RowHoldRefused> {
+        let generation = Self::generation_of(row);
+        let mut now = self.0.load(core::sync::atomic::Ordering::Relaxed);
+        loop {
+            let holds = Self::holds_of(now);
+            if Self::generation_in(now) != generation || holds == 0 {
+                return Err(RowHoldRefused::Released);
+            }
+            if holds == KeyexprHolds::MAX {
+                return Err(RowHoldRefused::Full);
+            }
+            // Under the bound, so the count does not carry into the generation.
+            match self.0.compare_exchange_weak(
+                now,
+                now.wrapping_add(1),
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(seen) => now = seen,
+            }
+        }
+    }
+
+    /// Let go of one hold of the declaration in `row` when it is not the last: `false`, taking
+    /// nothing, when it is the last, or the row holds no declaration at `row`'s generation. The
+    /// last is let go of by the table, under the session's lock
+    /// ([`SessionTables::undeclare_keyexpr`]), which removes the row: a count that reached none
+    /// here would leave a row no one removes.
+    pub fn release_shared(&self, row: KeyexprHandle) -> bool {
+        let generation = Self::generation_of(row);
+        let mut now = self.0.load(core::sync::atomic::Ordering::Relaxed);
+        loop {
+            if Self::generation_in(now) != generation || Self::holds_of(now) <= 1 {
+                return false;
+            }
+            match self.0.compare_exchange_weak(
+                now,
+                now.wrapping_sub(1),
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(seen) => now = seen,
+            }
+        }
+    }
+
+    /// Let go of one hold, for the table that holds the row: `true` when it was the last, and the
+    /// row is to go. A count of none, which a row the table still holds never has, lets go of
+    /// nothing.
+    fn release(&self) -> bool {
+        let mut now = self.0.load(core::sync::atomic::Ordering::Relaxed);
+        loop {
+            let holds = Self::holds_of(now);
+            if holds == 0 {
+                return false;
+            }
+            match self.0.compare_exchange_weak(
+                now,
+                now.wrapping_sub(1),
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return holds == 1,
+                Err(seen) => now = seen,
+            }
+        }
     }
 }
 
@@ -893,6 +1125,9 @@ pub struct WriteFilterRow<Key> {
     /// The Interest it holds, `None` for a filter that asks the peers nothing.
     interest: Option<InterestHandle>,
     key: Key,
+    /// The declaration the entity's key is named by, which the row holds as an entity's row holds
+    /// its own ([`EntityKey::named`]), so the entity keeps no hold of its key; `None` for none.
+    own: Option<KeyexprHandle>,
     count_local: bool,
     /// Whether a matching listener declared on a key owns it: it counts apart from the publishers'
     /// and the queriers' bounds, and goes with that listener.
@@ -991,6 +1226,12 @@ impl<Key: KeyBacking> WriteFilterRow<Key> {
     /// The key it filters on.
     pub fn key(&self) -> &str {
         self.key.as_str()
+    }
+
+    /// The declaration the row holds that its key is named by, `None` when it holds none: what a
+    /// program asking for the entity's key is lent beside the key's text.
+    pub fn own(&self) -> Option<KeyexprHandle> {
+        self.own
     }
 
     /// How a write that brings nothing of its own is sent the plain way, when its entity said.
@@ -1129,8 +1370,12 @@ impl<Key: KeyBacking, Cb> PendingGetRow<Key, Cb> {
 }
 
 /// The key expression declarations' table.
-pub type Keyexprs<P> =
-    SlotMap<kind::Keyexpr, KeyexprRow<<P as Storage>::Key>, { caps::MAX_DECLARED_KEYEXPRS }, P>;
+pub type Keyexprs<P> = SlotMap<
+    kind::Keyexpr,
+    KeyexprRow<<P as Storage>::Key, <P as Storage>::KeyLen>,
+    { caps::MAX_DECLARED_KEYEXPRS },
+    P,
+>;
 /// A subscriber's row of a build's tables.
 pub type Subscriber<F, P> = SubscriberRow<<P as Storage>::Key, <F as RowCallbacks>::Subscriber>;
 /// The subscribers' table.
@@ -1312,6 +1557,41 @@ pub struct Declared<K> {
     pub handle: Handle<K>,
     /// Its entity id.
     pub id: EntityId,
+    /// Its key as the row keeps it, read where the row was put.
+    pub key: RowKey,
+}
+
+/// An entity's key as its row keeps it: where its text lies, and the declaration the row holds
+/// that the key is lent with, the one of the entity's own key or else the one the key is named by.
+/// Read off the row where it is put (`Declared::key`), so a declaration lends its key with no
+/// second look at the row. The text stays where it is while the row stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowKey {
+    start: *const u8,
+    len: usize,
+    /// The declaration the key is lent with, `None` for none.
+    pub held: Option<KeyexprHandle>,
+}
+
+impl RowKey {
+    /// `text`, as a row keeps it, lent with `held`.
+    pub fn of(text: &str, held: Option<KeyexprHandle>) -> Self {
+        Self {
+            start: text.as_ptr(),
+            len: text.len(),
+            held,
+        }
+    }
+
+    /// The key's text.
+    ///
+    /// # Safety
+    /// The row this was read off stands, so its text is where it was read.
+    pub unsafe fn text<'a>(&self) -> &'a str {
+        // SAFETY: the caller's: the row stands, and keeps at `start` the `len` bytes of the
+        // `str` this was made of.
+        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(self.start, self.len)) }
+    }
 }
 
 /// A key expression declared, or found declared already and held once more.
@@ -1323,6 +1603,22 @@ pub struct KeyexprDeclared {
     pub id: ExprId,
     /// Whether it is new, and so to be declared on every link.
     pub new: bool,
+    /// The address of the row's count of holders, read where the hold was taken, so a holder
+    /// names its row with no second look at the table ([`Self::count`]).
+    count: usize,
+}
+
+impl KeyexprDeclared {
+    /// The count of holders of the row the hold was taken in, where it lies.
+    ///
+    /// # Safety
+    /// The row stands (a hold of it is not given back) and the tables keep their rows in place
+    /// (a region, a lent span, or the growable policy's chunks), so the count is where it was read.
+    pub unsafe fn count<'a>(&self) -> &'a KeyexprCount {
+        // SAFETY: the caller's: the address is of the count of a row that still stands where it
+        // was when the hold was taken.
+        unsafe { &*(self.count as *const KeyexprCount) }
+    }
 }
 
 /// A declaration refused: why, and the callback it was handed, for the caller to drop.
@@ -1380,6 +1676,11 @@ pub struct Unwatched<R> {
     pub row: Option<R>,
     /// The id of the Interest it held last, whose Final goes on the wire.
     pub interest_final: Option<EntityId>,
+    /// The declaration the row held that the entity's key is named by ([`WriteFilterRow::own`]),
+    /// `None` for none: the row's hold of it is the caller's from here on, given back as any
+    /// holder's is ([`SessionTables::undeclare_keyexpr`]), so a key's last hold is let go of, and
+    /// its retraction sent, by one body whoever held it.
+    pub held: Option<KeyexprHandle>,
 }
 
 /// What ending one leg of a get left of it.
@@ -1521,9 +1822,11 @@ trait Entity {
     fn retire(&self) -> bool;
     /// Whether the row, retired, has no call left running ([`RowCallback::drained`]).
     fn drained(&self) -> bool;
+    /// The key as the row keeps it, lent with its declaration ([`EntityKey::lent`]).
+    fn row_key(&self) -> RowKey;
 }
 
-impl<Key, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
+impl<Key: KeyBacking, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
@@ -1536,9 +1839,12 @@ impl<Key, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
     fn drained(&self) -> bool {
         self.callback.drained()
     }
+    fn row_key(&self) -> RowKey {
+        self.key.lent()
+    }
 }
 
-impl<Key, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
+impl<Key: KeyBacking, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
@@ -1551,9 +1857,12 @@ impl<Key, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
     fn drained(&self) -> bool {
         self.callback.drained()
     }
+    fn row_key(&self) -> RowKey {
+        self.key.lent()
+    }
 }
 
-impl<Key> Entity for TokenRow<Key> {
+impl<Key: KeyBacking> Entity for TokenRow<Key> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
@@ -1566,9 +1875,12 @@ impl<Key> Entity for TokenRow<Key> {
     fn drained(&self) -> bool {
         true
     }
+    fn row_key(&self) -> RowKey {
+        self.key.lent()
+    }
 }
 
-impl<Key, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
+impl<Key: KeyBacking, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
@@ -1580,6 +1892,20 @@ impl<Key, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     }
     fn drained(&self) -> bool {
         self.callback.drained()
+    }
+    fn row_key(&self) -> RowKey {
+        self.key.lent()
+    }
+}
+
+/// Hold the declaration `held` names once more, for a row put in its table after its count was
+/// found to have room ([`Declaring::holdable`]). A holder at the row's address that filled the
+/// count since is let be, as a count at its bound is.
+fn hold_keyexpr<P: Storage>(keyexprs: &Keyexprs<P>, held: Option<KeyexprHandle>) {
+    if let Some(held) = held {
+        if let Some(row) = keyexprs.get(held) {
+            let _ = row.head.count.retain(held);
+        }
     }
 }
 
@@ -1589,13 +1915,12 @@ fn release_keyexpr<P: Storage>(
     keyexprs: &mut Keyexprs<P>,
     handle: KeyexprHandle,
 ) -> Option<ExprId> {
-    let mut entry = keyexprs.entry(handle)?;
-    let row = entry.get_mut()?;
-    row.holds = row.holds.saturating_sub(1);
-    if row.holds > 0 {
+    let entry = keyexprs.entry(handle)?;
+    let row = entry.get()?;
+    if !row.head.count.release() {
         return None;
     }
-    let id = row.id;
+    let id = row.id();
     let _ = entry.remove();
     Some(id)
 }
@@ -1664,21 +1989,21 @@ impl<P: Storage> Declaring<'_, P> {
             self.keyexprs
                 .get(prefix)
                 .filter(|row| text.starts_with(KeyBacking::as_str(&row.key)))
-                .map(|row| (prefix, row.holds))
+                .map(|row| (prefix, row.holds()))
         }))?;
         // The declaration of the entity's own key: the one the form states, or else the one a
         // named retraction names, found by its id once, here, and held by handle from here on.
         // One no longer declared is not held, and a retraction that named it names the key whole.
         let stated = form
             .own
-            .and_then(|own| Some((own, self.keyexprs.get(own)?.holds)));
+            .and_then(|own| Some((own, self.keyexprs.get(own)?.holds())));
         let named = Self::holdable(stated.or_else(|| {
             match form.retraction {
                 Retraction::Named(named) if named.mapping_id != 0 => self
                     .keyexprs
                     .iter()
-                    .find(|(_, row)| row.id == named.mapping_id)
-                    .map(|(handle, row)| (handle, row.holds)),
+                    .find(|(_, row)| row.id() == named.mapping_id)
+                    .map(|(handle, row)| (handle, row.holds())),
                 _ => None,
             }
         }))?;
@@ -1726,11 +2051,11 @@ impl<P: Storage> Declaring<'_, P> {
         self.next_entity.take().ok_or(RegisterError::IdsExhausted)
     }
 
-    /// Hold the declaration `prefix` names once more.
+    /// Hold the declaration `prefix` names once more. Its count was found to have room
+    /// ([`Self::holdable`]); a holder at the row's address that filled it since is let be, as a
+    /// count at its bound is.
     fn hold(&mut self, prefix: Option<KeyexprHandle>) {
-        if let Some(row) = prefix.and_then(|prefix| self.keyexprs.get_mut(prefix)) {
-            row.holds = row.holds.saturating_add(1);
-        }
+        hold_keyexpr(self.keyexprs, prefix);
     }
 
     /// Declare an entity on `text` into `table`: the row `make` builds of its id, its key and
@@ -1738,7 +2063,7 @@ impl<P: Storage> Declaring<'_, P> {
     // Out of line: the declaration of each kind measured smaller with the row built and placed
     // apart from the caller that hands it its parts.
     #[inline(never)]
-    fn declare<K, R, C, const N: usize>(
+    fn declare<K, R: Entity, C, const N: usize>(
         mut self,
         table: &mut SlotMap<K, R, N, P>,
         text: &str,
@@ -1755,13 +2080,14 @@ impl<P: Storage> Declaring<'_, P> {
         let (prefix, named) = key.holds();
         // The row is built only in the slot it is kept in: a table that refuses it after all hands
         // its parts back whole, the key let go of here and the callback with the refusal.
-        match table.insert_with((id, key, callback), |(id, key, callback)| {
+        match table.insert_with_row((id, key, callback), |(id, key, callback)| {
             make(id, key, callback)
         }) {
-            Ok(handle) => {
+            Ok((handle, row)) => {
+                let key = row.row_key();
                 self.hold(prefix);
                 self.hold(named);
-                Ok(Declared { handle, id })
+                Ok(Declared { handle, id, key })
             }
             Err((_, _, callback)) => Err(Refused {
                 why: RegisterError::TableFull,
@@ -1892,42 +2218,56 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         apart: bool,
         usable: impl Fn(ExprId) -> bool,
     ) -> Result<KeyexprDeclared, RegisterError> {
+        // The row's count is read once, by the hold taken of it: a row stands with a holder, since
+        // a holder at its address never lets go of the last hold (`KeyexprCount::release_shared`)
+        // and a retraction removes the row it emptied, and a count that holds none even so takes no
+        // hold, so the key is declared apart.
         let found = if apart {
             None
         } else {
             self.keyexprs
                 .iter()
                 .find(|(_, row)| text(&row.key) == key)
-                .map(|(handle, row)| (handle, row.id, row.holds))
+                .map(|(handle, row)| (handle, row, row.head.count.retain(handle)))
         };
-        if let Some((handle, id, holds)) = found {
-            let holds = holds.checked_add(1).ok_or(RegisterError::TableFull)?;
-            if let Some(row) = self.keyexprs.get_mut(handle) {
-                row.holds = holds;
+        match found {
+            Some((handle, row, Ok(()))) => {
+                return Ok(KeyexprDeclared {
+                    handle,
+                    id: row.id(),
+                    new: false,
+                    count: core::ptr::from_ref(&row.head.count) as usize,
+                })
             }
-            return Ok(KeyexprDeclared {
-                handle,
-                id,
-                new: false,
-            });
+            Some((_, _, Err(RowHoldRefused::Full))) => return Err(RegisterError::TableFull),
+            Some((_, _, Err(RowHoldRefused::Released))) | None => {}
         }
         if self.keyexprs.is_full() {
             return Err(RegisterError::TableFull);
         }
+        // A key longer than its row can state is refused as one longer than a row keeps.
+        let key_len =
+            <P::KeyLen as KeyLength>::of(key.len()).ok_or(RegisterError::KeyexprTooLong)?;
+        let table = self.address();
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.mint_expr(usable).ok_or(RegisterError::IdsExhausted)?;
-        let handle = self
+        // The first hold is taken on the row where it is put, with no second look at the table.
+        let (handle, row) = self
             .keyexprs
-            .insert(KeyexprRow {
-                id,
-                key: kept,
-                holds: 1,
-            })
+            .insert_with_row(
+                KeyexprRow {
+                    key: kept,
+                    head: KeyexprHead::new(id, key_len, table),
+                },
+                core::convert::identity,
+            )
             .map_err(|_| RegisterError::TableFull)?;
+        row.head.count.first_hold(handle);
         Ok(KeyexprDeclared {
             handle,
             id,
             new: true,
+            count: core::ptr::from_ref(&row.head.count) as usize,
         })
     }
 
@@ -1940,17 +2280,21 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Take one more hold of the declaration `handle` names, for a holder of it that is copied,
     /// with nothing on the wire: `false`, changing nothing, when it names no row now or the row
     /// holds as many as its count holds.
-    pub fn retain_keyexpr(&mut self, handle: KeyexprHandle) -> bool {
-        let Some(row) = self.keyexprs.get_mut(handle) else {
-            return false;
-        };
-        match row.holds.checked_add(1) {
-            Some(holds) => {
-                row.holds = holds;
-                true
-            }
-            None => false,
-        }
+    pub fn retain_keyexpr(&self, handle: KeyexprHandle) -> bool {
+        self.keyexprs
+            .get(handle)
+            .is_some_and(|row| row.head.count.retain(handle).is_ok())
+    }
+
+    /// Whether `head` is of a row of these tables: the address its row names as its tables'
+    /// ([`KeyexprHead`]), which a row of another session's tables does not name.
+    pub fn is_own_row(&self, head: &KeyexprHead<P::KeyLen>) -> bool {
+        head.table == self.address()
+    }
+
+    /// The address of these tables, which each row of a declaration names as its tables'.
+    fn address(&self) -> usize {
+        self as *const Self as usize
     }
 
     /// Retract the declaration `handle` names whatever holds it: its id, for its retraction to go
@@ -1958,7 +2302,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// ([`Self::wire_of`]).
     pub fn retract_keyexpr(&mut self, handle: KeyexprHandle) -> Option<ExprId> {
         let entry = self.keyexprs.entry(handle)?;
-        let id = entry.get()?.id;
+        let row = entry.get()?;
+        let id = row.id();
+        // Its count goes to none first: a holder at the row's address takes no more hold of it and
+        // gives its own back to the table, which finds the row gone.
+        row.head.count.retract(handle);
         let _ = entry.remove();
         Some(id)
     }
@@ -1976,9 +2324,21 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .filter(|&row| {
                 self.keyexprs
                     .get(row)
-                    .is_some_and(|kept| kept.id == declared.id)
+                    .is_some_and(|kept| kept.id() == declared.id)
             })
             .or_else(|| self.keyexpr_by_id(declared.id))
+    }
+
+    /// The declaration in row `row` when it declares the first bytes of `key`: its id and how many
+    /// bytes of `key` it covers. `None` for a row that went and for one that declares another key,
+    /// so a holder that names a row of another session's tables, or one whose generation moved on,
+    /// names `key` whole. Wire names concatenate, so a row whose key is a prefix of `key` names
+    /// `key` with its id and the rest, whoever holds it.
+    pub fn declared_prefix(&self, row: KeyexprHandle, key: &str) -> Option<(ExprId, usize)> {
+        let kept = self.keyexprs.get(row)?;
+        let declared = kept.key();
+        key.starts_with(declared)
+            .then_some((kept.id(), declared.len()))
     }
 
     /// The declaration the wire names by `id`: a search of the declarations, which a holder that
@@ -1986,7 +2346,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn keyexpr_by_id(&self, id: ExprId) -> Option<KeyexprHandle> {
         self.keyexprs
             .iter()
-            .find(|(_, row)| row.id == id)
+            .find(|(_, row)| row.id() == id)
             .map(|(handle, _)| handle)
     }
 
@@ -2012,7 +2372,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         for _ in 0..=usize::from(ExprId::MAX) {
             let id = self.next_expr.max(1);
             self.next_expr = id.wrapping_add(1);
-            if usable(id) && !self.keyexprs.iter().any(|(_, row)| row.id == id) {
+            if usable(id) && !self.keyexprs.iter().any(|(_, row)| row.id() == id) {
                 return Some(id);
             }
         }
@@ -2060,7 +2420,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         };
         match whole.get(text(&row.key).len()..) {
             Some(suffix) => WireForm {
-                mapping: row.id,
+                mapping: row.id(),
                 suffix,
             },
             None => literal,
@@ -2082,7 +2442,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             Retraction::Named(named) => {
                 let (mapping, rest) = named.names(text(&key.key));
                 Some(match key.named.and_then(|held| self.keyexprs.get(held)) {
-                    Some(row) if mapping == row.id => RetractionKey::declared(row.id, rest),
+                    Some(row) if mapping == row.id() => RetractionKey::declared(row.id(), rest),
                     _ => RetractionKey::literal(),
                 })
             }
@@ -2097,7 +2457,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         let declared = key
             .prefix
             .and_then(|prefix| self.keyexprs.get(prefix))
-            .and_then(|row| Some(Prefix::of(MappedId::new(row.id)?, text(&row.key))));
+            .and_then(|row| Some(Prefix::of(MappedId::new(row.id())?, text(&row.key))));
         NamedKey::under_or_whole(whole, declared)
     }
 
@@ -2299,11 +2659,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     // ---- Interests, write filters and matching listeners ------------------------------------
 
     /// Open an Interest of `kind` on `key`, handed back to be sent: one for each holder, as
-    /// zenoh-pico adds one for each write filter, whatever is open on the same key already.
+    /// zenoh-pico adds one for each write filter, whatever is open on the same key already. Its
+    /// row keeps `kept`, the holder's own key: one key kept for both rows, not a copy for each.
     fn open_interest(
         &mut self,
         kind: InterestKind,
         key: &str,
+        kept: P::Key,
         name: InterestName<'_>,
     ) -> Result<OpenedInterest, RegisterError> {
         // Tables that keep no write filter hold no Interest of one.
@@ -2318,7 +2680,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             aggregate,
             suffix,
         } = kept_name(key, name).ok_or(RegisterError::KeyexprTooLong)?;
-        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.next_entity.take().ok_or(RegisterError::IdsExhausted)?;
         let handle = interests
             .insert(InterestRow {
@@ -2355,7 +2716,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         key: &str,
         count_local: bool,
     ) -> Result<Watching<kind::WriteFilter>, RegisterError> {
-        self.declare_write_filter_as(plane, key, count_local, Some(InterestName::whole(key)))
+        self.declare_write_filter_as(
+            plane,
+            key,
+            count_local,
+            Some(InterestName::whole(key)),
+            None,
+        )
     }
 
     /// Whether a write filter of `plane`, or a key listener's, finds room under its own bound in
@@ -2374,15 +2741,19 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     }
 
     /// Declare the write filter of a publisher or a querier on `key`, holding an Interest named as
-    /// `ask` says, or none for a filter that asks the peers nothing.
+    /// `ask` says, or none for a filter that asks the peers nothing, and `own`, the declaration the
+    /// entity's key is named by, until it is undeclared. One no longer declared is not held; one
+    /// whose count holds as many holders as it can refuses the filter
+    /// ([`RegisterError::KeyexprHoldsFull`]), keeping nothing.
     pub fn declare_write_filter_as(
         &mut self,
         plane: Plane,
         key: &str,
         count_local: bool,
         ask: Option<InterestName<'_>>,
+        own: Option<KeyexprHandle>,
     ) -> Result<Watching<kind::WriteFilter>, RegisterError> {
-        self.declare_filter(plane, key, count_local, ask, false)
+        self.declare_filter(plane, key, count_local, ask, own, false)
     }
 
     /// [`Self::declare_write_filter_as`] for an entity, or for the matching listener declared on
@@ -2393,6 +2764,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         key: &str,
         count_local: bool,
         ask: Option<InterestName<'_>>,
+        own: Option<KeyexprHandle>,
         for_listener: bool,
     ) -> Result<Watching<kind::WriteFilter>, RegisterError> {
         // Tables that keep no write filter have no room for one, nor has an owner at its own
@@ -2402,9 +2774,17 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 if !filters.is_full() && self.plane_has_room(filters, plane, for_listener) => {}
             _ => return Err(RegisterError::TableFull),
         }
+        // The declaration the key is named by is looked up once, and a count with no room for the
+        // row refuses the filter before anything is kept or asked. It is held once the row is in,
+        // as an entity's row holds its key's (`Declaring::hold`), so no refusal gives a hold back.
+        let own = Declaring::<P>::holdable(
+            own.and_then(|own| Some((own, self.keyexprs.get(own)?.holds()))),
+        )?;
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let asked = match ask {
-            Some(name) => Some(self.open_interest(plane.interest_kind(), key, name)?),
+            Some(name) => {
+                Some(self.open_interest(plane.interest_kind(), key, kept.clone(), name)?)
+            }
             None => None,
         };
         let interest = asked.map(|opened| opened.handle);
@@ -2412,6 +2792,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             plane,
             interest,
             key: kept,
+            own,
             count_local,
             for_listener,
             listeners: 0,
@@ -2426,10 +2807,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .kept_write_filters_mut()
             .and_then(|filters| filters.insert(row).ok());
         match inserted {
-            Some(handle) => Ok(Watching {
-                handle,
-                interest: asked,
-            }),
+            Some(handle) => {
+                hold_keyexpr(&self.keyexprs, own);
+                Ok(Watching {
+                    handle,
+                    interest: asked,
+                })
+            }
             None => {
                 if let Some(interest) = interest {
                     let _ = self.close_interest(interest);
@@ -2442,13 +2826,17 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Undeclare the write filter `handle` names, and every matching listener declared on it:
     /// `each` is handed each listener's handle and its removal, the row when no call of it runs,
     /// else [`Removal::AfterCalls`], when the call that ends last lets it go
-    /// ([`Self::release_matching_listener`]).
+    /// ([`Self::release_matching_listener`]). The row's hold of the declaration its key is named
+    /// by goes to the caller ([`Unwatched::held`]).
     pub fn undeclare_write_filter(
         &mut self,
         handle: WriteFilterHandle,
         mut each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>),
     ) -> Option<Unwatched<WriteFilterRow<<P as Storage>::Key>>> {
-        let interest = self.kept_write_filters()?.get(handle)?.interest;
+        let (interest, own) = {
+            let row = self.kept_write_filters()?.get(handle)?;
+            (row.interest, row.own)
+        };
         let mut cursor = 0usize;
         while let Some((listener, owned)) = self
             .kept_matching()
@@ -2466,6 +2854,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         Some(Unwatched {
             row: removal.taken(),
             interest_final,
+            held: own,
         })
     }
 
@@ -2553,6 +2942,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             key,
             count_local,
             Some(InterestName::whole(key)),
+            None,
             true,
         ) {
             Ok(filter) => filter,
@@ -2609,9 +2999,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         } else {
             None
         };
+        // A filter declared on a key holds no declaration of it.
         Some(Unwatched {
             row: removal.taken(),
             interest_final,
+            held: None,
         })
     }
 
@@ -3083,24 +3475,23 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if fan.reaches_none {
             return None;
         }
-        let from = fan.next;
-        let (place, call) = self
-            .subscribers
-            .live_handles()
-            .skip_while(|(place, _, _)| *place < from)
-            .find_map(|(place, _, row)| {
-                let found = RowRef {
-                    pattern: text(&row.key.key),
-                    facts: row.facts,
-                    origin: row.origin,
-                };
-                if !row_reaches(&found, fan.key, fan.facts, fan.remote) {
-                    return None;
-                }
-                row.callback.begin().map(|call| (place, call))
-            })?;
-        fan.next = place.saturating_add(1);
-        Some(call)
+        // Taken up at the place after the last row reached: the rows before it are not read again.
+        let mut cursor = fan.next;
+        while let Some((_, row)) = self.subscribers.next_from(&mut cursor) {
+            let found = RowRef {
+                pattern: text(&row.key.key),
+                facts: row.facts,
+                origin: row.origin,
+            };
+            if !row_reaches(&found, fan.key, fan.facts, fan.remote) {
+                continue;
+            }
+            if let Some(call) = row.callback.begin() {
+                fan.next = cursor;
+                return Some(call);
+            }
+        }
+        None
     }
 
     /// Let go of the subscriber `handle` named, undeclared while a call of it ran, once that call
@@ -3155,24 +3546,23 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         const {
             assert!(row_may_lie_in::<F::Queryable, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
-        let from = query.reached_from();
-        let (place, row) = self
-            .kept_queryables()?
-            .live_handles()
-            .skip_while(|(place, _, _)| *place < from)
-            .find_map(|(place, _, row)| {
-                let found = QueryableRef {
-                    #[cfg(feature = "alloc")]
-                    id: u64::from(row.id),
-                    pattern: text(&row.key.key),
-                    facts: row.facts,
-                    origin: row.origin,
-                    complete: row.complete,
-                };
-                query.reaches(found).then_some((place, row))
-            })?;
-        query.passed(place);
-        Some(&row.callback)
+        let queryables = self.kept_queryables()?;
+        let mut cursor = query.reached_from();
+        while let Some((handle, row)) = queryables.next_from(&mut cursor) {
+            let found = QueryableRef {
+                #[cfg(feature = "alloc")]
+                id: u64::from(row.id),
+                pattern: text(&row.key.key),
+                facts: row.facts,
+                origin: row.origin,
+                complete: row.complete,
+            };
+            if query.reaches(found) {
+                query.passed(handle.place());
+                return Some(&row.callback);
+            }
+        }
+        None
     }
 
     /// Begin a call of the liveliness subscriber `handle` names, with the tables held: what the call is made
@@ -3219,19 +3609,18 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         const {
             assert!(row_may_lie_in::<F::LivelinessSubscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
-        let from = fan.next;
-        let (place, call) = self
-            .kept_liveliness_subscribers()?
-            .live_handles()
-            .skip_while(|(place, _, _)| *place < from)
-            .find_map(|(place, _, row)| {
-                if !token_reaches(row, fan.key, fan.historical) {
-                    return None;
-                }
-                row.callback.begin().map(|call| (place, call))
-            })?;
-        fan.next = place.saturating_add(1);
-        Some(call)
+        let subscribers = self.kept_liveliness_subscribers()?;
+        let mut cursor = fan.next;
+        while let Some((_, row)) = subscribers.next_from(&mut cursor) {
+            if !token_reaches(row, fan.key, fan.historical) {
+                continue;
+            }
+            if let Some(call) = row.callback.begin() {
+                fan.next = cursor;
+                return Some(call);
+            }
+        }
+        None
     }
 
     /// Begin a call of the matching listener `handle` names, with the tables held: what the call is made

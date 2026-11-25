@@ -28,6 +28,7 @@ the gates that use this module is driven by a file whose defect is known.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
 import sys
@@ -41,6 +42,8 @@ SHT_DYNSYM = 11
 SHT_RELA = 4
 SHT_REL = 9
 SHN_UNDEF = 0
+SHF_ALLOC = 0x2
+SHF_EXECINSTR = 0x4
 
 DT_NULL, DT_NEEDED, DT_SONAME, DT_RPATH, DT_RUNPATH = 0, 1, 14, 15, 29
 
@@ -67,14 +70,19 @@ class ElfError(Exception):
 
 
 class Section:
-    __slots__ = ("name", "kind", "offset", "size", "link")
+    __slots__ = ("name", "kind", "offset", "size", "link", "flags", "addr")
 
-    def __init__(self, name: str, kind: int, offset: int, size: int, link: int) -> None:
+    def __init__(self, name: str, kind: int, offset: int, size: int, link: int, flags: int = 0,
+                 addr: int = 0) -> None:
         self.name = name
         self.kind = kind
         self.offset = offset
         self.size = size
         self.link = link
+        # sh_flags and sh_addr: whether the section is code (SHF_EXECINSTR) or compressed
+        # (SHF_COMPRESSED), and where it is loaded.
+        self.flags = flags
+        self.addr = addr
 
 
 class Note:
@@ -126,21 +134,30 @@ def sections(data: bytes) -> list[Section]:
         entry = _span(data, shoff + i * shentsize, need, f"section header {i}")
         fields = struct.unpack_from(shdr, entry, 0)
         # name, type, flags, addr, offset, size, link
-        raw.append((fields[0], fields[1], fields[4], fields[5], fields[6]))
+        raw.append((fields[0], fields[1], fields[4], fields[5], fields[6], fields[2], fields[3]))
     if shstrndx >= len(raw):
         raise ElfError("the section name table index is outside the section headers")
     names = _span(data, raw[shstrndx][2], raw[shstrndx][3], "the section name table")
     out = []
-    for name_off, kind, offset, size, link in raw:
+    for name_off, kind, offset, size, link, flags, addr in raw:
         stop = names.find(b"\x00", name_off)
         if name_off >= len(names) or stop < 0:
             raise ElfError("a section name is outside the name table")
-        out.append(Section(names[name_off:stop].decode("utf-8", "replace"), kind, offset, size, link))
+        out.append(Section(names[name_off:stop].decode("utf-8", "replace"), kind, offset, size, link,
+                           flags, addr))
     return out
 
 
 def section_bytes(data: bytes, section: Section) -> bytes:
     return _span(data, section.offset, section.size, f"section {section.name}")
+
+
+def code_digests(data: bytes) -> dict[str, tuple[int, str]]:
+    """Each executable section (SHF_EXECINSTR) by name: its address and the SHA-256 of its bytes.
+    Two files whose digests are equal hold the same code at the same places, whatever else differs
+    (the debug information one carries and the other does not)."""
+    return {s.name: (s.addr, hashlib.sha256(section_bytes(data, s)).hexdigest())
+            for s in sections(data) if s.flags & SHF_EXECINSTR}
 
 
 def notes(data: bytes) -> list[Note]:
@@ -651,6 +668,18 @@ def _selftest() -> int:
                imported_symbols(with_syms) == ["getifaddrs", "socket"])
     expect("a file with no dynamic symbol table imports nothing",
            imported_symbols(build_test_elf(needed=["libc.so.6"])) == [])
+    code = bytearray(build_elf([(".text", SHT_PROGBITS, b"\x90" * 8, None),
+                                (".data", SHT_PROGBITS, b"\x01", None)], machine=62))
+    shoff = struct.unpack_from("<Q", code, 0x28)[0]
+    # sh_flags of section 1 (.text): the header after the null one, 8 bytes in.
+    struct.pack_into("<Q", code, shoff + 64 + 8, SHF_ALLOC | SHF_EXECINSTR)
+    expect("the executable sections are digested by name and address, the others are not",
+           code_digests(bytes(code)) == {".text": (0, hashlib.sha256(b"\x90" * 8).hexdigest())})
+    changed = bytearray(code)
+    changed[64] ^= 0xFF  # the first byte of .text, the first section after the 64-byte header
+    expect("a changed byte of code changes the digest, and a file with no code has none",
+           code_digests(bytes(changed))[".text"] != code_digests(bytes(code))[".text"]
+           and code_digests(build_test_elf(needed=["libc.so.6"])) == {})
     print("elf-facts: selftest OK")
     return 0
 

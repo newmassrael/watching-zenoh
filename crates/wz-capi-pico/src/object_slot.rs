@@ -22,6 +22,8 @@
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
+// `Box` places an object only where no pool does; the tests make their objects with it too.
+#[cfg(any(not(wz_process_pools), test))]
 use crate::prelude::*;
 
 /// Which object a place is for. With the pools reserved each kind has a pool of its own, so the
@@ -312,7 +314,7 @@ const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::all
         )),
         Kind::Subscriber => Some((
             EntityKind::Subscriber,
-            InSession::<crate::pubsub::SubscriberPlace>::LAYOUT,
+            InSession::<crate::pubsub::SubscriberState>::LAYOUT,
         )),
         #[cfg(feature = "queryable")]
         Kind::Queryable => Some((
@@ -327,7 +329,7 @@ const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::all
         #[cfg(feature = "liveliness")]
         Kind::LivelinessSubscriber => Some((
             EntityKind::LivelinessSubscriber,
-            InSession::<crate::pubsub::SubscriberPlace>::LAYOUT,
+            InSession::<crate::pubsub::SubscriberState>::LAYOUT,
         )),
         #[cfg(feature = "query")]
         Kind::Querier => Some((
@@ -483,8 +485,8 @@ pub(crate) const fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::ar
 }
 
 /// An entity's object, the count of the program's closures it answers for (a querier's gets, a
-/// queryable's or a subscriber's closure), and what those closures keep in the place past the
-/// object (`K`: the C closure a queryable's or a subscriber's row calls), inline in the entity's
+/// queryable's closure), and what those closures keep in the place past the object (`K`: the C
+/// closure a queryable's row calls), inline in the entity's
 /// place. The handle of the
 /// object is the place itself, the object first, so a handle read as a `T` reads the object. The
 /// owner's release lets go of the object and leaves the place, with the count and what is kept in
@@ -843,17 +845,35 @@ impl<T> Drop for Placed<T> {
     }
 }
 
-/// Give back a place whose value is gone: to its pool when it lies in one, else to the heap.
+/// Give back a place whose value is gone: to its pool when it lies in one, else to the heap. The
+/// typed face of [`give_back_laid`], which every type shares.
 ///
 /// # Safety
 /// `place` was taken for a `T` (by a [`Slot`] or a `Box`), holds no live value, and is given
 /// back once.
 unsafe fn give_back<T>(place: NonNull<MaybeUninit<T>>) {
+    // SAFETY: the caller's; a `Box` of a `T` was allocated with the layout of a `T`.
+    unsafe { give_back_laid(place.cast::<u8>(), core::alloc::Layout::new::<T>()) }
+}
+
+/// Give back the place at `place`, laid out by `layout`: to its pool when it lies in one, else
+/// to the heap it was allocated from with `layout`. Inlined into each release: few types are
+/// released through it, and a body of its own cost more than the copies it replaced.
+///
+/// # Safety
+/// `place` holds no live value, is given back once, and lies in a pool or was allocated from the
+/// global heap with `layout`.
+#[inline]
+unsafe fn give_back_laid(place: NonNull<u8>, layout: core::alloc::Layout) {
     #[cfg(wz_process_pools)]
-    if crate::process_pool::give_back(place.cast::<u8>()) {
+    if crate::process_pool::give_back(place) {
         return;
     }
-    drop(Box::from_raw(place.as_ptr()));
+    // A `Box` of nothing allocated nothing, so there is nothing to give back.
+    if layout.size() != 0 {
+        // SAFETY: the caller's: the heap allocated `place` with `layout`.
+        unsafe { alloc::alloc::dealloc(place.as_ptr(), layout) };
+    }
 }
 
 #[cfg(test)]
@@ -934,6 +954,25 @@ mod tests {
         // SAFETY: a live `Box::into_raw` handle, released once.
         unsafe { release(object) };
         assert_eq!(drops.get(), 1);
+    }
+
+    /// The shared give-back hands a heap place back with the layout its `Box` was allocated by,
+    /// whatever the type: one over-aligned, and one of no bytes, which allocated nothing and so is
+    /// given nothing back. Turned red (the test process aborts in the heap) by a give-back that
+    /// frees the dangling place of a type of no bytes.
+    #[test]
+    fn a_heap_object_of_any_layout_goes_back_through_the_one_body() {
+        #[repr(align(64))]
+        struct Wide(u8);
+        struct Nothing;
+        let wide = Box::into_raw(Box::new(Wide(7)));
+        let nothing = Box::into_raw(Box::new(Nothing));
+        // SAFETY: two live `Box::into_raw` handles, each released once.
+        unsafe {
+            assert_eq!((*wide).0, 7);
+            release(wide);
+            release(nothing);
+        }
     }
 
     /// An object that does not fit the place its kind is laid out with, by size or by alignment, is
@@ -1288,14 +1327,14 @@ mod tests {
     #[ignore = "a measurement printed for reading, not a check"]
     fn print_the_parts_of_the_publisher_and_subscriber_places() {
         use core::mem::size_of;
-        let parts: [(&str, usize); 24] = [
+        let parts: [(&str, usize); 23] = [
             (
                 "publisher place",
                 InSession::<crate::pubsub::PublisherState>::LAYOUT.size(),
             ),
             (
                 "subscriber place",
-                InSession::<crate::pubsub::SubscriberPlace>::LAYOUT.size(),
+                InSession::<crate::pubsub::SubscriberState>::LAYOUT.size(),
             ),
             ("PublisherState", size_of::<crate::pubsub::PublisherState>()),
             ("PlainPublisher", size_of::<crate::pubsub::PlainPublisher>()),
@@ -1330,7 +1369,6 @@ mod tests {
                 "Option<DeclaredSubscriber>",
                 size_of::<Option<crate::pubsub::DeclaredSubscriber>>(),
             ),
-            ("SubscriberKept", size_of::<crate::pubsub::SubscriberKept>()),
             ("OpenClosures", size_of::<crate::ffi::OpenClosures>()),
             ("Option<HeldIn>", size_of::<Option<crate::ffi::HeldIn>>()),
             ("Lender", size_of::<Lender>()),

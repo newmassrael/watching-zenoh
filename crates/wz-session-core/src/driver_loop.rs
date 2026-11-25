@@ -1162,7 +1162,7 @@ enum LentRecord<'a, 'f> {
             feature = "rx-push"
         )
     ))]
-    Push(&'a wz_codecs::push::PushView<'f>),
+    Push(&'a crate::network_message::PushRead<'f>),
     #[cfg(feature = "codec-request")]
     Request(&'a wz_codecs::request::RequestView<'f>),
     #[cfg(all(
@@ -1293,7 +1293,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn push_of_frame(
-        push: &'a wz_codecs::push::PushView<'f>,
+        push: &'a crate::network_message::PushRead<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -1553,6 +1553,29 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     /// Always `None` in a build that reads no Push off the wire (`rx-push`).
     #[cfg(feature = "codec-push")]
     pub fn push(&self) -> Option<&'a wz_codecs::push::PushView<'f>> {
+        match self.record {
+            #[cfg(any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-push"
+            ))]
+            LentRecord::Push(push) => Some(&push.view),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Push as the reader read it: its view, and the extensions its delivery reads, picked out
+    /// of its chains as the reader decoded them, so the delivery walks no chain again. `None`
+    /// when the record is of another kind, and always in a build that reads no Push off the wire.
+    // Read by the delivery of a lent Push (`pubsub`'s `in_place`).
+    #[cfg(all(
+        feature = "storage-profile",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    ))]
+    pub(crate) fn push_read(&self) -> Option<&'a crate::network_message::PushRead<'f>> {
         match self.record {
             #[cfg(any(
                 all(

@@ -922,10 +922,10 @@ pub(crate) unsafe fn declare_publisher_stated(
                 base.allowed_destination.allows_local(),
             );
             match asked {
-                Some(id) => Some(id),
+                Ok(declared) => Some(declared.id),
                 // The session has no entity id left to ask by: the declaration is refused, as
                 // a publisher that cannot ask could never be told it matches.
-                None => {
+                Err(_) => {
                     if let Some(hold) = own_declaration {
                         hold.release(&*state.shared);
                     }

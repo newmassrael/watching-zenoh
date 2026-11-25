@@ -1664,7 +1664,7 @@ mod facts_lock {
         let (awaiting, lease, bound) = actions.with_facts(|facts| {
             (
                 facts.handshake.awaiting_open_ack,
-                facts.handshake.peer_open_lease_ms,
+                actions.fact_peer_open_lease_ms(|slot| *slot),
                 facts.handshake.peer_remote_bound,
             )
         });
@@ -1689,7 +1689,7 @@ mod facts_lock {
         let (awaiting, lease, bound) = actions.with_facts(|facts| {
             (
                 facts.handshake.awaiting_open_ack,
-                facts.handshake.peer_open_lease_ms,
+                actions.fact_peer_open_lease_ms(|slot| *slot),
                 facts.handshake.peer_remote_bound,
             )
         });
@@ -1723,7 +1723,7 @@ mod facts_lock {
         let (awaiting, lease, bound) = actions.with_facts(|facts| {
             (
                 facts.handshake.awaiting_open_ack,
-                facts.handshake.peer_open_lease_ms,
+                actions.fact_peer_open_lease_ms(|slot| *slot),
                 facts.handshake.peer_remote_bound,
             )
         });
@@ -1812,16 +1812,17 @@ mod facts_lock {
         );
     }
 
-    /// An admitted OpenSyn spends the nonce that admitted it and takes the peer's lease in one
-    /// hold.
+    /// An admitted OpenSyn spends the nonce that admitted it and takes the peer's lease.
     #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     #[test]
     fn an_admitted_open_syn_spends_the_nonce_and_takes_the_lease() {
         let (actions, _link) = bundle();
         actions.fact_cookie_nonce(|slot| *slot = Some(7));
         actions.admit_open_syn(5, 10);
-        let (nonce, lease) =
-            actions.with_facts(|facts| (facts.cookie_nonce, facts.handshake.peer_open_lease_ms));
+        let (nonce, lease) = (
+            actions.fact_cookie_nonce(|slot| *slot),
+            actions.fact_peer_open_lease_ms(|slot| *slot),
+        );
         assert_eq!(nonce, None, "a spent nonce admits no replay");
         assert_eq!(lease, Some(5), "the lease the OpenSyn advertised");
     }
@@ -1909,23 +1910,24 @@ mod batch_budget {
     }
 }
 
-/// A link's time stamps are one row under one lock: what a door writes is what the row reads, the
-/// deadlines read the two stamps they compare in one hold, and a reopen clears all three.
+/// A link's time stamps are words of their own, read under no lock: what a door writes is what the
+/// row reads, the deadlines read the stamps they compare only while their duty is armed, a tick
+/// ends once, and a reopen clears all three.
 mod link_stamps {
     use super::{bundle, holds_in};
     use crate::session_actions::LinkStamps;
 
     /// Turned red by a door that writes another stamp than it names, or by a read of the row
-    /// that holds the lock once per stamp.
+    /// that takes a lock.
     #[test]
-    fn a_stamp_written_through_its_door_is_read_in_the_one_row() {
+    fn a_stamp_written_through_its_door_is_read_in_the_row_under_no_lock() {
         let (actions, _link) = bundle();
         actions.link.fact_established_at(|slot| *slot = Some(1));
         actions.link.fact_last_inbound_at(|slot| *slot = Some(2));
         actions.link.fact_keepalive_tick_at(|slot| *slot = Some(3));
         let mut stamps = LinkStamps::default();
         let holds = holds_in(|| stamps = actions.link.stamps());
-        assert_eq!(holds, 1, "the row is read in one hold");
+        assert_eq!(holds, 0, "the row is read under no lock");
         assert_eq!(
             stamps,
             LinkStamps {
@@ -1937,10 +1939,10 @@ mod link_stamps {
     }
 
     /// The lease deadline counts from the later of the establishment and the last receipt, and
-    /// reads the two in one hold; the other hold is the peer's lease. Turned red by a deadline
-    /// that reads each stamp in a hold of its own.
+    /// reads them under no lock; the one hold is the peer's lease. Turned red by a deadline that
+    /// takes a lock to read a stamp.
     #[test]
-    fn the_lease_deadline_reads_its_two_stamps_in_one_hold() {
+    fn the_lease_deadline_reads_its_two_stamps_under_no_lock() {
         let (actions, _link) = bundle();
         actions
             .link
@@ -1957,8 +1959,8 @@ mod link_stamps {
             "the later stamp is the baseline"
         );
         assert_eq!(
-            holds, 2,
-            "the stamps in one hold, the peer's lease in another"
+            holds, 0,
+            "the stamps and the peer's lease are read under no lock"
         );
     }
 
@@ -1988,8 +1990,8 @@ mod link_stamps {
             "the earlier of the expiry and the watch"
         );
         assert_eq!(
-            holds, 2,
-            "the stamps in one hold, the peer's lease in another"
+            holds, 0,
+            "the stamps and the peer's lease are read under no lock"
         );
     }
 
@@ -2030,17 +2032,201 @@ mod link_stamps {
             "nothing before the expiry, the expiry at it"
         );
         assert_eq!(
-            holds, 2,
-            "the stamps in one hold, the peer's lease in another"
+            holds, 0,
+            "the stamps and the peer's lease are read under no lock"
+        );
+    }
+
+    /// The bundle the timers are handed, and the machine over it.
+    type Actions = super::SessionLinkActions<super::PlainRuntime, super::StillClock>;
+    type Machine = crate::drive::SessionEngine<super::PlainRuntime, super::StillClock>;
+
+    /// The session's machine over `actions`, entered in its initial state.
+    fn machine(actions: &alloc::sync::Arc<Actions>) -> Machine {
+        let mut engine = crate::drive::new_session_engine::<super::PlainRuntime, super::StillClock>(
+            actions,
+            super::NoEntropy,
+        );
+        engine.initialize().unwrap_or_else(|never| match never {});
+        engine
+    }
+
+    /// The lease's checks a step of `timers` at `now_ms` raises.
+    fn lease_checks(
+        timers: &mut crate::transport_timers::TransportTimers,
+        engine: &mut Machine,
+        actions: &Actions,
+        now_ms: u64,
+    ) -> alloc::vec::Vec<crate::lease::LeaseCheckOutcome> {
+        use crate::driver_loop::IterationEvent;
+        let mut seen = alloc::vec::Vec::new();
+        let mut sink = |event: IterationEvent<'_, '_>| {
+            if let IterationEvent::Lease(outcome) = event {
+                seen.push(outcome);
+            }
+        };
+        timers.fire_due(engine, actions, now_ms, &mut sink);
+        seen
+    }
+
+    /// Timers that read the deadlines keep them: a step before the first of them falls due reads
+    /// no stamp and no lease. Turned red by timers that read the deadlines at every step.
+    #[test]
+    fn a_step_before_the_deadlines_fall_due_reads_none_of_them() {
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        assert!(
+            101 < 100 + actions.adopted_lease_ms(),
+            "CONTROL: 101 is before the expiry"
+        );
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
+        let mut checks = alloc::vec::Vec::new();
+        let first = holds_in(|| checks = step(100));
+        assert_eq!(first, 1, "CONTROL: the first step reads the peer's lease");
+        let later = holds_in(|| checks = step(101));
+        assert_eq!(later, 0, "a step before the expiry reads nothing");
+        assert!(checks.is_empty(), "and judges nothing");
+    }
+
+    /// A receipt moves the lease's deadline later with one store and no count: the timers find the
+    /// later deadline when the one they held comes, and judge the lease at the later one. Turned
+    /// red by timers that judge the deadline they held without reading it again.
+    #[test]
+    fn a_receipt_moves_the_lease_later_and_the_timers_find_it_when_the_old_deadline_comes() {
+        use crate::lease::LeaseCheckOutcome;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let lease = actions.adopted_lease_ms();
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
+        assert!(step(100).is_empty());
+        let moved = actions.link.deadlines_moved();
+        actions.link.note_received_at(250);
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            moved,
+            "a receipt counts no move"
+        );
+        assert!(
+            step(100 + lease).is_empty(),
+            "the deadline held comes, and the lease read again runs on"
+        );
+        assert!(step(250 + lease - 1).is_empty());
+        assert_eq!(
+            step(250 + lease),
+            [LeaseCheckOutcome::Expired],
+            "the lease ends a window after the receipt"
+        );
+    }
+
+    /// A stamp changed through its door may bring a deadline earlier, so the timers read the
+    /// deadlines again at the next step; a door only read counts nothing. Turned red by a door that
+    /// counts no move when it changes its stamp (the earlier expiry missed), or one that counts a
+    /// read.
+    #[test]
+    fn a_stamp_changed_through_its_door_has_the_timers_read_again() {
+        use crate::lease::LeaseCheckOutcome;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(900));
+        let lease = actions.adopted_lease_ms();
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
+        assert!(step(900).is_empty());
+        let moved = actions.link.deadlines_moved();
+        let _ = actions.link.fact_established_at(|slot| *slot);
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            moved,
+            "a door only read counts nothing"
+        );
+        actions.link.fact_established_at(|slot| *slot = Some(10));
+        assert_ne!(
+            actions.link.deadlines_moved(),
+            moved,
+            "a door written counts"
+        );
+        assert_eq!(
+            step(10 + lease),
+            [LeaseCheckOutcome::Expired],
+            "the earlier expiry is judged at its time"
+        );
+    }
+
+    /// A duty armed after the timers read the deadlines without it is read at the next step, though
+    /// it was armed by a store that counts nothing. Turned red by timers that compare the count
+    /// alone.
+    #[test]
+    fn a_duty_armed_after_a_read_has_the_timers_read_again() {
+        use crate::lease::LeaseCheckOutcome;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let lease = actions.adopted_lease_ms();
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
+        assert!(
+            step(100).is_empty(),
+            "CONTROL: no lease while the monitor is not running"
+        );
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(step(100 + lease), [LeaseCheckOutcome::Expired]);
+    }
+
+    /// The first event of the peer's declarations begins their watch, which gives the lease a
+    /// deadline it did not have, and counts a move; a later one moves the watch only later and
+    /// counts nothing. Turned red by a first event that counts no move, or a later one that does.
+    #[test]
+    fn the_first_event_of_the_peers_declarations_counts_a_move() {
+        use crate::driver_loop::IterationEvent;
+        let (actions, _link) = bundle();
+        let before = actions.link.deadlines_moved();
+        actions.note_declaration_progress(IterationEvent::AppWake);
+        let begun = actions.link.deadlines_moved();
+        assert_ne!(begun, before, "the watch begun");
+        actions.note_declaration_progress(IterationEvent::AppWake);
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            begun,
+            "a later event moves the watch only later"
         );
     }
 
     /// The keepalive deadline counts from the later of the establishment and the tick's start, and
-    /// reads the two in one hold. Turned red by a deadline that reads each stamp in a hold of its
-    /// own.
+    /// reads them under no lock. Turned red by a deadline that takes a lock to read a stamp.
     #[cfg(feature = "transport-keepalive")]
     #[test]
-    fn the_keepalive_deadline_reads_its_two_stamps_in_one_hold() {
+    fn the_keepalive_deadline_reads_its_two_stamps_under_no_lock() {
         let (actions, _link) = bundle();
         actions
             .link
@@ -2059,26 +2245,98 @@ mod link_stamps {
             "the later stamp is the baseline"
         );
         assert_eq!(
-            holds, 2,
-            "the stamps in one hold, the peer's lease in another"
+            holds, 0,
+            "the stamps and the peer's lease are read under no lock"
         );
     }
 
-    /// Every stamp is the closed transport's: a reopen clears the three in one hold of the row.
-    /// Turned red by a reopen that leaves one of them standing.
+    /// Every stamp is the closed transport's: a reopen clears the three, and lowers the lease
+    /// duty that reads them. Turned red by a reopen that leaves one of them standing.
     #[cfg(feature = "session-reconnect")]
     #[test]
     fn a_reopen_clears_every_stamp() {
         let (actions, _link) = bundle();
-        actions.link.with_stamps(|stamps| {
-            *stamps = LinkStamps {
-                established_at: Some(1),
-                last_inbound_at: Some(2),
-                keepalive_tick_at: Some(3),
-            }
-        });
+        actions.link.fact_established_at(|slot| *slot = Some(1));
+        actions.link.fact_last_inbound_at(|slot| *slot = Some(2));
+        actions.link.fact_keepalive_tick_at(|slot| *slot = Some(3));
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
         actions.reset_for_reopen();
         assert_eq!(actions.link.stamps(), LinkStamps::default());
+        assert_eq!(
+            actions.link.stamps_while(&actions.link.lease_armed),
+            None,
+            "the duty is lowered with them"
+        );
+    }
+
+    /// A duty reads the stamps only while it is armed: lowered, it is answered with nothing,
+    /// whatever the stamps hold. Turned red by a read that does not ask the duty's flag.
+    #[test]
+    fn a_duty_reads_the_stamps_only_while_it_is_armed() {
+        let (actions, _link) = bundle();
+        actions.link.fact_established_at(|slot| *slot = Some(7));
+        let armed = &actions.link.lease_armed;
+        armed.store(false, core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(actions.link.stamps_while(armed), None, "a lowered duty");
+        armed.store(true, core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            actions
+                .link
+                .stamps_while(armed)
+                .map(|row| row.established_at),
+            Some(Some(7)),
+            "an armed one reads the row"
+        );
+    }
+
+    /// No stamp reads as none: the word that means none is never what a stamp is written as, so
+    /// the latest instant reads as one below it, and a door that writes nothing leaves the stamp.
+    /// Turned red by a stamp of the latest instant read back as none.
+    #[test]
+    fn the_latest_instant_is_still_a_stamp() {
+        let (actions, _link) = bundle();
+        actions
+            .link
+            .fact_last_inbound_at(|slot| *slot = Some(u64::MAX));
+        assert_eq!(
+            actions.link.fact_last_inbound_at(|slot| *slot),
+            Some(u64::MAX - 1)
+        );
+        actions.link.fact_last_inbound_at(|slot| *slot = Some(4));
+        assert_eq!(actions.link.fact_last_inbound_at(|slot| *slot), Some(4));
+        actions.link.fact_last_inbound_at(|slot| *slot = None);
+        assert_eq!(actions.link.fact_last_inbound_at(|slot| *slot), None);
+    }
+
+    /// A keepalive tick ends once: the judge that read it ends it, and a second judge that read the
+    /// same tick finds it ended and writes nothing. Turned red by an end that does not compare the
+    /// tick it read.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn a_keepalive_tick_ends_once() {
+        let (actions, _link) = bundle();
+        actions.link.fact_keepalive_tick_at(|slot| *slot = Some(10));
+        assert!(
+            actions.link.end_keepalive_tick(Some(10), 20),
+            "the first judge"
+        );
+        assert!(
+            !actions.link.end_keepalive_tick(Some(10), 30),
+            "the second finds it ended"
+        );
+        assert_eq!(actions.link.stamps().keepalive_tick_at, Some(20));
+        assert!(
+            actions.link.end_keepalive_tick(Some(20), 40),
+            "the tick running now ends"
+        );
+        assert!(
+            !actions.link.end_keepalive_tick(None, 50),
+            "a tick read as not yet begun does not end one that runs"
+        );
+        assert_eq!(actions.link.stamps().keepalive_tick_at, Some(40));
     }
 
     /// An established bundle whose keepalive worker runs, as the machine's `Established` entry
@@ -2184,6 +2442,46 @@ mod link_stamps {
         );
     }
 
+    /// The keep-alive's checks a step of `timers` at `now_ms` raises.
+    #[cfg(feature = "transport-keepalive")]
+    fn keepalive_checks(
+        timers: &mut crate::transport_timers::TransportTimers,
+        engine: &mut Machine,
+        actions: &Actions,
+        now_ms: u64,
+    ) -> alloc::vec::Vec<crate::lease::KeepAliveCheckOutcome> {
+        use crate::driver_loop::IterationEvent;
+        let mut seen = alloc::vec::Vec::new();
+        let mut sink = |event: IterationEvent<'_, '_>| {
+            if let IterationEvent::KeepAlive(outcome) = event {
+                seen.push(outcome);
+            }
+        };
+        timers.fire_due(engine, actions, now_ms, &mut sink);
+        seen
+    }
+
+    /// The timers send the keepalive at the end of each tick they read, and read the next tick
+    /// after the judge that ended one. Turned red by timers that keep the deadline they held after
+    /// judging it (no second keepalive), or that send before the tick ends.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn the_timers_send_a_keepalive_at_the_end_of_every_silent_tick() {
+        use crate::lease::KeepAliveCheckOutcome as K;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link, interval) = keeping_alive();
+        let mut engine = machine(&actions);
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| keepalive_checks(&mut timers, &mut engine, &actions, now_ms);
+        assert!(step(0).is_empty(), "the first tick runs");
+        assert!(step(interval - 1).is_empty(), "nothing before it ends");
+        assert_eq!(step(interval), [K::Emitted], "the first tick was silent");
+        assert!(step(interval + 1).is_empty(), "the next tick runs");
+        assert_eq!(step(2 * interval), [K::Emitted], "and the next");
+    }
+
     /// Two judges that read the same deadlines (the tokio pacer beside the drive loop) end the
     /// tick once and send one keepalive for it. Turned red by a judge that ends a tick another
     /// has already ended.
@@ -2232,6 +2530,129 @@ mod link_stamps {
         assert_eq!(
             crate::drive::check_keepalive_deadline(&*actions, interval),
             K::Emitted
+        );
+    }
+}
+
+/// The inbound SN gates, kept in words of the runtime's: a frame is judged with no hold of a lock,
+/// on the ring the peer's capabilities give.
+mod rx_sn_gate {
+    use alloc::vec::Vec;
+
+    use super::{bundle, holds_in};
+    use crate::peer_init_caps::PeerInitCaps;
+    use crate::qos::Priority;
+    use crate::sn::{mask_from_res, RxAdmit, RxConduits};
+
+    /// The peer's capabilities with the sequence-number resolution `seq_num_res`.
+    fn caps(seq_num_res: u8) -> Option<PeerInitCaps> {
+        Some(PeerInitCaps {
+            seq_num_res,
+            req_id_res: 2,
+            batch_size: 1024,
+        })
+    }
+
+    /// Every frame of a walk is judged under no lock: the first taken as the baseline, the next
+    /// one accepted, its duplicate stale, a skip a gap. Turned red by a judgement that takes a
+    /// lock to read the baseline or the ring.
+    #[test]
+    fn a_frame_is_judged_under_no_lock() {
+        let (actions, _link) = bundle();
+        let mut verdicts = Vec::new();
+        let holds = holds_in(|| {
+            for sn in [5, 6, 6, 9] {
+                verdicts.push(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, sn));
+            }
+        });
+        assert_eq!(
+            verdicts,
+            [
+                RxAdmit::Accept,
+                RxAdmit::Accept,
+                RxAdmit::Stale,
+                RxAdmit::Gap { missing: 2 }
+            ]
+        );
+        assert_eq!(
+            holds, 0,
+            "the baseline and the ring are words, read under no lock"
+        );
+    }
+
+    /// The gate judges on the ring the peer's capabilities give, followed as they are written:
+    /// a jump of 64 is stale on the seven-bit ring a peer names and a gap on the session's own
+    /// once the capabilities are withdrawn. Turned red by a ring the gate reads once, or one a
+    /// write of the capabilities does not move.
+    #[test]
+    fn the_gate_judges_on_the_ring_the_peers_capabilities_give() {
+        let (actions, _link) = bundle();
+        actions.set_peer_init_caps(caps(0x00));
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 0),
+            RxAdmit::Accept
+        );
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 64),
+            RxAdmit::Stale,
+            "past half the seven-bit ring"
+        );
+        actions.set_peer_init_caps(None);
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 64),
+            RxAdmit::Gap { missing: 63 },
+            "within half the session's own 28-bit ring"
+        );
+    }
+
+    /// An admitted OpenAck seeds every channel one before the peer's initial SN, on the ring the
+    /// peer's capabilities give. Turned red by a seed on another ring or of one channel.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn an_admitted_open_ack_seeds_the_gate_on_the_peers_ring() {
+        use crate::session_actions::OpenAckAdmission;
+        let (actions, _link) = bundle();
+        actions.set_peer_init_caps(caps(0x00));
+        actions.fact_awaiting_open_ack(|slot| *slot = true);
+        assert_eq!(
+            actions.admit_open_ack(5, 0, Ok(None)),
+            OpenAckAdmission::Taken
+        );
+        let mut expected = RxConduits::default();
+        expected.seed(mask_from_res(0x00), 0);
+        assert_eq!(
+            actions.rx_sn(),
+            expected,
+            "one before 0 on the seven-bit ring is 127"
+        );
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, false, 0),
+            RxAdmit::Accept,
+            "the first frame at the initial SN passes"
+        );
+    }
+
+    /// A reopen clears every channel and puts the gate back on the session's own ring, with the
+    /// capabilities it clears. Turned red by a reopen that leaves a baseline or the peer's ring.
+    #[cfg(feature = "session-reconnect")]
+    #[test]
+    fn a_reopen_clears_the_gate_and_its_ring() {
+        let (actions, _link) = bundle();
+        actions.set_peer_init_caps(caps(0x00));
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 0),
+            RxAdmit::Accept
+        );
+        actions.reset_for_reopen();
+        assert_eq!(actions.rx_sn(), RxConduits::default(), "no baseline left");
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 0),
+            RxAdmit::Accept
+        );
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 64),
+            RxAdmit::Gap { missing: 63 },
+            "judged on the session's own ring again"
         );
     }
 }
@@ -2366,6 +2787,81 @@ mod unicast_transport {
             transport.rx().path_counts(),
             counted,
             "the receive counted the one datagram on the path it took"
+        );
+    }
+
+    /// A datagram its link keeps is read on from where the last turn stopped, which the receive
+    /// notes beside its record: two KeepAlives in one datagram are read over two lends of the same
+    /// bytes, one a lend, and the turn between says the link is to keep it. A kept datagram read
+    /// to its end has nothing left, and finding so takes no lock. Turned red by a receive that
+    /// reads a kept datagram from its start again, that does not say the link is to keep it, or
+    /// that notes where it stopped under a lock.
+    #[cfg(all(feature = "rx-in-place", feature = "alloc"))]
+    #[test]
+    fn a_kept_datagram_is_read_on_from_where_its_receive_noted_it_stopped() {
+        use super::holds_in;
+        use crate::driver_loop::EventSink;
+
+        /// A host whose link keeps its datagram and that takes one message a lend.
+        #[derive(Default)]
+        struct OneALend {
+            events: usize,
+        }
+
+        impl EventSink for OneALend {
+            fn event(&mut self, _event: IterationEvent<'_, '_>) {
+                self.events += 1;
+            }
+
+            fn takes_another(&mut self) -> bool {
+                false
+            }
+
+            fn holds_datagram(&self) -> bool {
+                true
+            }
+        }
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let transport =
+            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
+        let keep_alive = wz_codecs::wire_const::T_MID_KEEP_ALIVE;
+        let datagram = [keep_alive, keep_alive];
+        let mut host = OneALend::default();
+
+        let mut first = transport.input_at(0);
+        first.datagram(&datagram, &mut engine, &*actions, &mut host);
+        assert_eq!(
+            host.events, 1,
+            "the first message, and no other in this lend"
+        );
+        assert!(first.resumes_datagram(), "the link is to keep the datagram");
+
+        let mut second = transport.input_at(0);
+        second.datagram(&datagram, &mut engine, &*actions, &mut host);
+        assert_eq!(
+            host.events, 2,
+            "the second message, read on from where the first lend stopped"
+        );
+        assert!(!second.resumes_datagram(), "read to its end");
+
+        let mut third = transport.input_at(0);
+        let holds = holds_in(|| {
+            third.datagram(&[], &mut engine, &*actions, &mut host);
+        });
+        assert_eq!(
+            host.events, 2,
+            "a kept datagram with nothing left reads nothing"
+        );
+        assert!(!third.resumes_datagram());
+        assert_eq!(
+            holds, 0,
+            "where the receive stands is its own, under no lock"
         );
     }
 

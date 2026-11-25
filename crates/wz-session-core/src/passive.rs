@@ -1255,9 +1255,13 @@ impl ShmHandshake {
         open_ack: None,
     };
 
+    /// The encoding of the last entry at the extension's id: upstream's decoders assign each
+    /// entry they meet (`commons/zenoh-codec/src/transport/init.rs` @ `ext_shm = Some(s);`), so
+    /// a message that repeats the extension says what its last entry says.
     fn extension(extensions: &[ExtEntryOwned]) -> Option<ShmExtEncoding> {
         extensions
             .iter()
+            .rev()
             .find(|e| crate::ext_header::ext_id(e.header) == est_ext::SHM)
             .map(|e| ShmExtEncoding::of(e.header))
     }
@@ -5272,6 +5276,28 @@ mod tests {
     fn a_session_is_small_in_every_build() {
         let size = core::mem::size_of::<PassiveSession>();
         assert!(size < 64 * 1024, "PassiveSession is {size} bytes");
+    }
+
+    /// A handshake message whose chain repeats the shared-memory extension says the encoding of
+    /// its last entry, in either order; a chain without it says none. Turned red by a reader that
+    /// keeps the first entry.
+    #[test]
+    fn a_repeated_shm_extension_is_read_by_its_last_entry() {
+        let entry = |header: u8| ExtEntryOwned {
+            header,
+            ..Default::default()
+        };
+        let z64 = entry(crate::ext_header::EXT_ENC_Z64 | est_ext::SHM);
+        let zbuf = entry(crate::ext_header::EXT_ENC_ZBUF | est_ext::SHM);
+        assert_eq!(
+            ShmHandshake::extension(&[z64.clone(), zbuf.clone()]),
+            Some(ShmExtEncoding::ZBuf)
+        );
+        assert_eq!(
+            ShmHandshake::extension(&[zbuf, z64]),
+            Some(ShmExtEncoding::Z64)
+        );
+        assert_eq!(ShmHandshake::extension(&[]), None);
     }
 
     /// A unit is counted in exactly one class, with its own bytes, and the

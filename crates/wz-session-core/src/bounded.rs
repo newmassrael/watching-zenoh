@@ -107,6 +107,36 @@ impl<T> fmt::Display for CapacityFull<T> {
 
 impl<T> core::error::Error for CapacityFull<T> {}
 
+/// An integer a row keeps a key's length in ([`Storage::KeyLen`]).
+pub trait KeyLength: Copy + core::fmt::Debug + 'static {
+    /// `len` in this integer, `None` past what it holds.
+    fn of(len: usize) -> Option<Self>;
+
+    /// The length.
+    fn get(self) -> usize;
+}
+
+impl KeyLength for u16 {
+    fn of(len: usize) -> Option<Self> {
+        u16::try_from(len).ok()
+    }
+
+    fn get(self) -> usize {
+        usize::from(self)
+    }
+}
+
+impl KeyLength for u32 {
+    fn of(len: usize) -> Option<Self> {
+        u32::try_from(len).ok()
+    }
+
+    fn get(self) -> usize {
+        // No target this crate builds for has a `usize` narrower than 32 bits.
+        self as usize
+    }
+}
+
 /// How a container holds its elements: the storage policy, a type parameter of
 /// the session shell rather than a feature. Implemented by [`Heap`] and
 /// [`Static`]; a container is generic over it and the algorithm around the
@@ -132,6 +162,12 @@ pub trait Storage: 'static {
     /// The element sequence of a [`BoundedVec<T, N, Self>`].
     type Seq<T, const N: usize>: SeqBacking<T>;
 
+    /// The column a [`SlotMap`](crate::slot_map::SlotMap) of this policy keeps its rows in, in
+    /// which a row stays where it was put while it stands: the policy's own sequence where it
+    /// never moves an element to make room, and on the growable policy chunks that are only ever
+    /// added ([`Chunked`](crate::slot_map::Chunked)).
+    type Rows<T, const N: usize>: crate::slot_map::RowColumn<T>;
+
     /// The UTF-8 text of a [`BoundedString<N, Self>`].
     type Text<const N: usize>: TextBacking;
 
@@ -140,6 +176,13 @@ pub trait Storage: 'static {
     /// static one, and on the lent one the place of a block of the session's key arena
     /// ([`KeyRef`](crate::key_arena::KeyRef)), a few words whatever the key's length.
     type Key: KeyBacking;
+
+    /// The integer a declaration's row keeps the length of its key in
+    /// ([`KeyexprHead`](crate::session_tables::KeyexprHead)): on the bounded policies the
+    /// narrowest that holds the build's bound on a key's length ([`crate::caps::KeyLen`]), so a
+    /// row is as small as its fields allow; on the growable one `u32`, the most a key's length is
+    /// on the wire, as that policy bounds no key.
+    type KeyLen: KeyLength;
 
     /// Where a table of this policy makes the keys its rows keep ([`Self::Key`]): nothing to hand
     /// a table where the key is its own text, and on the lent policy the session's key arena,
@@ -589,8 +632,10 @@ impl Storage for Heap {
     const LENT_AT_OPEN: bool = false;
     type Scratch = Heap;
     type Seq<T, const N: usize> = Vec<T>;
+    type Rows<T, const N: usize> = crate::slot_map::Chunked<T>;
     type Text<const N: usize> = String;
     type Key = String;
+    type KeyLen = u32;
     type Keys = InlineKeys;
     type Offset = u32;
     type Ids<V, const N: usize> = crate::id_map::GrowableIdMap<V>;
@@ -612,8 +657,10 @@ impl Storage for Static {
     const LENT_AT_OPEN: bool = false;
     type Scratch = Static;
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
+    type Rows<T, const N: usize> = BoundedVec<T, N, Static>;
     type Text<const N: usize> = heapless::String<N>;
     type Key = heapless::String<{ crate::caps::MAX_KEYEXPR_BYTES }>;
+    type KeyLen = crate::caps::KeyLen;
     type Keys = InlineKeys;
     type Offset = u16;
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
@@ -648,9 +695,11 @@ impl Storage for Lent {
     const LENT_AT_OPEN: bool = true;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
+    type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
     // A working text (a key being canonized) is on the stack; what a row keeps is its `Key`.
     type Text<const N: usize> = heapless::String<N>;
     type Key = crate::key_arena::KeyRef;
+    type KeyLen = crate::caps::KeyLen;
     type Keys = crate::key_arena::LentKeys;
     // A span of a lent table addresses rows of an arena a host session may size past 64 KiB.
     type Offset = u32;
@@ -686,8 +735,10 @@ impl Storage for Region {
     const LENT_AT_OPEN: bool = true;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
+    type Rows<T, const N: usize> = BoundedVec<T, N, Region>;
     type Text<const N: usize> = heapless::String<N>;
     type Key = crate::key_arena::KeyRef;
+    type KeyLen = crate::caps::KeyLen;
     type Keys = crate::key_arena::LentKeys;
     type Offset = u32;
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;

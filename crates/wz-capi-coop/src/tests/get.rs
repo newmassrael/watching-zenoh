@@ -237,6 +237,60 @@ fn a_get_nobody_answers_ends_at_its_deadline() {
     assert_eq!(router.seen(|s| s.queries), 1, "the query went out");
 }
 
+/// A get asked between two reads of a session whose reads wait long ends at its deadline, and a
+/// later get asked before it bounds the wait after it: the legs held lower the ledger a read's
+/// wait reads, and the service that sweeps the first settles it to the deadline left. The
+/// CONTROL is the wait before any get, which no deadline bounds. Turned red by a leg held without
+/// lowering the ledger, by a read whose wait does not read it (the get ends an idle wait late),
+/// or by a settling that keeps the deadline of the get swept.
+#[test]
+fn a_get_between_long_reads_ends_at_its_deadline() {
+    let router = Router::start(CatchAll::None);
+    let mut config = super::config(&router);
+    config.idle_wait_ms = 2_000;
+    let engine = super::open_with(config);
+    settle(&router, &engine, Command::Silence);
+    assert_eq!(
+        engine.get_wait_ms(),
+        None,
+        "CONTROL: no get bounds a read's wait"
+    );
+    let mut later = remote_get();
+    later.timeout_ms = 4_000;
+    let (issued, later_leg) = ask(&engine, "demo/g/later", &later, None, None, None);
+    assert_eq!(issued, Ok(1));
+    let mut sooner = remote_get();
+    sooner.timeout_ms = 200;
+    let asked = Instant::now();
+    let (issued, leg) = ask(&engine, "demo/g/sooner", &sooner, None, None, None);
+    assert_eq!(issued, Ok(1));
+    let wait = engine.get_wait_ms().expect("the legs bound a read's wait");
+    assert!(
+        wait <= 201,
+        "a read waits past the earlier leg's deadline: {wait} ms"
+    );
+    until(&engine, "the earlier deadline", || {
+        leg.lock().unwrap().ended
+    });
+    let took = asked.elapsed();
+    assert!(took >= Duration::from_millis(200), "ended early: {took:?}");
+    assert!(
+        took < Duration::from_millis(1_500),
+        "ended an idle wait late: {took:?}"
+    );
+    let replies = leg.lock().unwrap().replies.clone();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0].2, b"Timeout");
+    let left = engine
+        .get_wait_ms()
+        .expect("the later leg still bounds a read's wait");
+    assert!(
+        left > 1_000 && left <= 4_001,
+        "the deadline left is not the later leg's: {left} ms"
+    );
+    assert!(!later_leg.lock().unwrap().ended, "the later leg is open");
+}
+
 /// A cancelled token ends the get's leg at once, though nothing steps the session: `cancel`
 /// returns only once the leg's callback is dropped.
 #[test]
@@ -266,6 +320,57 @@ fn a_cancelled_get_ends_without_a_step() {
     let leg = leg.lock().unwrap();
     assert!(leg.ended, "cancel returns once the leg is over");
     assert!(leg.replies.is_empty(), "{:?}", leg.replies);
+    assert_eq!(token.active(), 0);
+}
+
+/// A get cancelled before its deadline bounds a read's wait no longer, with no step between: the
+/// index of the gets' deadlines reads the table its earliest key names when a read asks, so the
+/// end it was not told of is read then. The CONTROL is the wait while the sooner get is open,
+/// which its deadline bounds. Turned red by a wait read off a bound that an end does not raise
+/// (the read wakes at a deadline no get holds), or by a root answered without its table read.
+#[test]
+fn a_get_cancelled_before_its_deadline_bounds_the_wait_no_longer() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let mut later = remote_get();
+    later.timeout_ms = 4_000;
+    let (issued, later_leg) = ask(&engine, "demo/g/later", &later, None, None, None);
+    assert_eq!(issued, Ok(1));
+    let token = CancellationToken::new().expect("a token place is free");
+    let fan = register_fan(&token)
+        .expect("the test's heap")
+        .expect("a fresh token registers");
+    let mut sooner = remote_get();
+    sooner.timeout_ms = 200;
+    let (issued, leg) = ask(
+        &engine,
+        "demo/g/sooner",
+        &sooner,
+        Some(&fan),
+        Some(fan.clone()),
+        None,
+    );
+    drop(fan);
+    assert_eq!(issued, Ok(1));
+    let wait = engine.get_wait_ms().expect("the legs bound a read's wait");
+    assert!(
+        wait <= 201,
+        "CONTROL: the sooner get bounds the wait: {wait} ms"
+    );
+    token.cancel();
+    assert!(
+        leg.lock().unwrap().ended,
+        "cancel returns once the leg is over"
+    );
+    let left = engine
+        .get_wait_ms()
+        .expect("the later get still bounds a read's wait");
+    assert!(
+        left > 1_000 && left <= 4_001,
+        "the cancelled get's deadline still bounds the wait: {left} ms"
+    );
+    assert!(!later_leg.lock().unwrap().ended, "the later get is open");
     assert_eq!(token.active(), 0);
 }
 

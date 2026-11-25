@@ -75,28 +75,32 @@ fn declare_subscriber(
     key: &str,
     dropped: &Arc<AtomicUsize>,
 ) -> Result<SubId, Refusal> {
-    engine.declare_subscriber_on_wire(
-        key,
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        subscriber_sink(dropped),
-    )
+    engine
+        .declare_subscriber_on_wire(
+            key,
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            subscriber_sink(dropped),
+        )
+        .map(|declared| declared.id)
 }
 
 /// A write filter that asks for `key`, on `plane`.
 fn filter(engine: &Engine, plane: FilterPlane, key: &str) -> Result<FilterId, Refusal> {
-    engine.declare_write_filter(
-        plane,
-        key,
-        &WireKey::literal(),
-        Some(InterestAsk {
-            mapping_id: 0,
-            suffix: Some(key),
-            aggregate: false,
-        }),
-        false,
-    )
+    engine
+        .declare_write_filter(
+            plane,
+            key,
+            &WireKey::literal(),
+            Some(InterestAsk {
+                mapping_id: 0,
+                suffix: Some(key),
+                aggregate: false,
+            }),
+            false,
+        )
+        .map(|declared| declared.id)
 }
 
 /// Each declaration asked of a closed session is refused as closed, with its callback let go of and
@@ -437,13 +441,15 @@ fn a_filter_that_finds_no_id_left_gives_its_row_back() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     fn quiet(engine: &Engine) -> Result<FilterId, Refusal> {
-        engine.declare_write_filter(
-            FilterPlane::Subscribers,
-            "demo/quiet/1",
-            &WireKey::literal(),
-            None,
-            false,
-        )
+        engine
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "demo/quiet/1",
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .map(|declared| declared.id)
     }
     engine.entity_ids_from(None);
     assert_eq!(quiet(&engine), Err(Refusal::NoEntityId));
@@ -556,14 +562,16 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
         )
     };
     let declare = |key: &str| {
-        engine.declare_queryable_on_wire(
-            key,
-            WireKey::literal(),
-            false,
-            Locality::Remote,
-            None,
-            sink(&let_go),
-        )
+        engine
+            .declare_queryable_on_wire(
+                key,
+                WireKey::literal(),
+                false,
+                Locality::Remote,
+                None,
+                sink(&let_go),
+            )
+            .map(|declared| declared.id)
     };
     let before = router.seen(|s| s.declares);
     let first = declare("demo/qbl/1").expect("a row is free");
@@ -641,7 +649,9 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
         })
     };
     let declare = |key: &str| {
-        engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(&dropped))
+        engine
+            .declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(&dropped))
+            .map(|declared| declared.id)
     };
     let first = declare("demo/ls/1").expect("a row is free");
     until(&engine, "the router to see the Interest", || {

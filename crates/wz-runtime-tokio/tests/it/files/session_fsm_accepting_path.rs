@@ -1050,7 +1050,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     let mut expected = RxConduits::default();
     expected.seed(negotiated, 0);
     assert_eq!(
-        actions.fact_rx_sn(|slot| slot.clone()),
+        actions.rx_sn(),
         expected,
         "the RX baseline is one before initial_sn on the NEGOTIATED ring"
     );
@@ -1095,7 +1095,7 @@ async fn a_replayed_open_syn_after_established_is_not_admitted() {
             "frame {sn} is delivered; got {outcome:?}"
         );
     }
-    let rx_before = actions.fact_rx_sn(|slot| slot.clone());
+    let rx_before = actions.rx_sn();
     let lease_before = actions.fact_peer_open_lease_ms(|slot| *slot);
 
     // The same cookie, a different lease (VLE 5, where the admitted one
@@ -1120,7 +1120,7 @@ async fn a_replayed_open_syn_after_established_is_not_admitted() {
         "the already-delivered frame 1 is a duplicate and stays one; got {outcome:?}"
     );
     assert_eq!(
-        actions.fact_rx_sn(|slot| slot.clone()),
+        actions.rx_sn(),
         rx_before,
         "the replay did not move the RX baseline"
     );

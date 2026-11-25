@@ -705,7 +705,12 @@ impl RawRows {
         None
     }
 
-    /// The row of `id` and where it lies.
+    /// The row of `id` and where it lies: the place and the row [`Self::find`] would hand back for
+    /// a row that holds `id`.
+    ///
+    /// Every received sample whose key a peer named by an id looks its id up here, so the walk is
+    /// one loop of the table's layout, read once, with the compare in it: no step out of line and
+    /// no call through a predicate for each row.
     ///
     /// # Safety
     /// `shape` is a keyed kind's: every row starts with its id, a `u64`.
@@ -717,12 +722,36 @@ impl RawRows {
         id: u64,
     ) -> Option<(Place, NonNull<u8>)> {
         debug_assert!(shape.keyed, "an id is read off a keyed row alone");
-        self.find(space, shape, &mut |row: NonNull<u8>| {
-            // SAFETY: the caller's contract; the row holds an item and starts on its alignment, at
-            // least an id's.
-            let held = unsafe { row.cast::<u64>().read() };
-            held == id
-        })
+        // SAFETY: the caller's contract; a row the table holds holds an item and starts on its
+        // alignment, at least an id's.
+        let holds = |row: NonNull<u8>| unsafe { row.cast::<u64>().read() } == id;
+        if self.len == 0 {
+            return None;
+        }
+        match self.lay(space) {
+            Lay::Own { base, .. } => (0..self.len).find_map(|at| {
+                // SAFETY: `at` is below the table's length, so the row lies inside its span and
+                // holds an item.
+                let row = unsafe { own_row(base, shape, usize::from(at)) };
+                let prev = at.checked_sub(1).unwrap_or(NIL);
+                holds(row).then_some((Place { at, prev }, row))
+            }),
+            Lay::Pool(pool) => {
+                let (mut at, mut prev) = (self.first, NIL);
+                loop {
+                    let row = pool.slot(shape, at);
+                    if holds(row) {
+                        return Some((Place { at, prev }, row));
+                    }
+                    let next = pool.next(shape, at);
+                    if next == NIL {
+                        return None;
+                    }
+                    (prev, at) = (at, next);
+                }
+            }
+            Lay::Bare => None,
+        }
     }
 
     /// Take the row at `place` out of the table, the order of the rest kept, and where the walk
@@ -2871,6 +2900,56 @@ mod tests {
                 [(2, 21), (3, 30)]
             );
             assert_eq!(read(&head, &space).get_id(3), Some(&30));
+        }
+    }
+
+    /// The lookup by id finds the row and the place the walk over the table finds, in either
+    /// layout and for the first, a middle and the last row, so a row taken out by its id leaves
+    /// the rest linked in their order; an id no row holds, and a table that holds none, find
+    /// nothing. Turned red by a lookup that hands back the place without the row before it in a
+    /// pool (the rows after the one taken out are lost to the walk).
+    #[test]
+    fn a_lookup_by_id_finds_the_place_the_walk_finds_in_either_layout() {
+        let shape = <Keyed<u32> as RowKind>::SHAPE;
+        for space in [pool_of::<Keyed<u32>>(5).space(), own_of::<Keyed<u32>>(5)] {
+            let mut head = PooledRows::<Keyed<u32>, 5>::new();
+            {
+                let table = lent(&mut head, &space);
+                // SAFETY: the shape is a keyed kind's.
+                assert!(unsafe { table.raw.find_id(table.space, shape, 1) }.is_none());
+            }
+            let mut table = lent(&mut head, &space);
+            for id in [7u64, 3, 9, 5] {
+                table.push((id, id as u32 * 10)).expect("room");
+            }
+            let mut walked = Vec::new();
+            let mut at = table.raw.start(table.space);
+            while let Some((place, row)) = table.raw.step(table.space, shape, &mut at) {
+                // SAFETY: a row of a walk holds an item, which starts with its id.
+                walked.push((
+                    unsafe { row.cast::<u64>().read() },
+                    place.at,
+                    place.prev,
+                    row,
+                ));
+            }
+            for (id, at, prev, row) in walked {
+                // SAFETY: the shape is a keyed kind's.
+                let (place, found) =
+                    unsafe { table.raw.find_id(table.space, shape, id) }.expect("held");
+                assert_eq!((place.at, place.prev, found), (at, prev, row), "id {id}");
+            }
+            // SAFETY: the shape is a keyed kind's.
+            assert!(unsafe { table.raw.find_id(table.space, shape, 4) }.is_none());
+            assert_eq!(table.remove_id(9), Some(90), "a middle row");
+            assert_eq!(table.remove_id(5), Some(50), "the last row");
+            assert_eq!(table.get_id(9), None);
+            assert_eq!(
+                table.iter().map(|(id, v)| (id, *v)).collect::<Vec<_>>(),
+                [(7, 70), (3, 30)]
+            );
+            table.push((11, 110)).expect("room");
+            assert_eq!((table.get_id(11), table.get_id(3)), (Some(&110), Some(&30)));
         }
     }
 

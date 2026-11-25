@@ -54,6 +54,7 @@ fn declare(
             QueryableSink::shared(move |query, out, holder| answer(holder, query, out)),
         )
         .expect("the engine has queryables in this build")
+        .id
 }
 
 /// A queryable that answers each query with `payload`, on the query's own key.
@@ -383,6 +384,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
                 count_local,
             )
             .expect("a session with ids left declares")
+            .id
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);
@@ -732,5 +734,112 @@ fn a_get_whose_body_the_codec_refuses_asks_no_own_queryable_and_ends() {
         leg.lock().unwrap().replies.len(),
         1,
         "CONTROL: the queryable answered"
+    );
+}
+
+/// An undeclare made inside a queryable callback of the session, the session's own get handing it
+/// the query, returns at once while the subscriber's call runs on another thread, the callback
+/// still held: the thread delivers for the session, as inside any of its callbacks. Turned red by
+/// an own get that does not hand its queries out as a delivery of the session, which makes the
+/// undeclare wait for the held call (five seconds) and return with the callback let go of.
+#[cfg(all(feature = "threads", feature = "local-subscriber"))]
+#[test]
+fn an_undeclare_inside_a_queryable_callback_of_the_session_returns_at_once() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::channel;
+    use wz_capi_port::SubscriberSink;
+    use wz_session_core::publish_options::PublishOptions;
+    use wz_session_core::sink::SampleView;
+
+    /// Sets its flag when dropped: what the subscriber's callback holds.
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let dropped = Arc::new(AtomicBool::new(false));
+    let (entered, inside) = channel::<()>();
+    let (release, released) = channel::<()>();
+    let (entered, released) = (Mutex::new(entered), Mutex::new(released));
+    let guard = Dropped(dropped.clone());
+    let id = engine
+        .declare_subscriber_on_wire(
+            "demo/inside/sub",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _held = &guard;
+                let _ = entered.lock().unwrap().send(());
+                let _ = released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            }),
+        )
+        .expect("declared")
+        .id;
+    let putting = {
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
+            engine.publish_on_wire_all("demo/inside/sub", &WireKey::literal(), b"v", &opts)
+        })
+    };
+    inside
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the put calls the callback");
+
+    let undeclared: Arc<Mutex<Option<(Duration, bool)>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    let (into, seen_dropped) = (undeclared.clone(), dropped.clone());
+    declare(&engine, "demo/inside/qbl", Locality::Any, move |_, _, _| {
+        if let Some(engine) = session.upgrade() {
+            let start = Instant::now();
+            engine.undeclare_subscriber(id);
+            let at_return = seen_dropped.load(Ordering::SeqCst);
+            *into.lock().unwrap() = Some((start.elapsed(), at_return));
+        }
+    });
+    let (issued, _leg) = ask(
+        &engine,
+        "demo/inside/qbl",
+        &get_for(Locality::SessionLocal),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        issued,
+        Ok(1),
+        "CONTROL: the get asked the session's queryable"
+    );
+    let seen = undeclared.lock().unwrap().take();
+    let _ = release.send(());
+    assert_eq!(
+        putting.join().expect("the put returns"),
+        Ok(1),
+        "the put reached the subscriber once"
+    );
+
+    let (took, dropped_at_return) = seen.expect("the queryable was called inside the get");
+    assert!(
+        took < Duration::from_secs(2),
+        "the undeclare waited {took:?} inside the session's own callback"
+    );
+    assert!(
+        !dropped_at_return,
+        "the callback was still held by its call when the undeclare returned"
+    );
+    until(
+        &engine,
+        "the callback let go of once its call ended",
+        || dropped.load(Ordering::SeqCst),
     );
 }

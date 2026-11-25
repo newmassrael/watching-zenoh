@@ -32,7 +32,8 @@ fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
     });
     let id = engine
         .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)
-        .expect("the engine has liveliness");
+        .expect("the engine has liveliness")
+        .id;
     (id, heard)
 }
 
@@ -286,7 +287,8 @@ fn a_history_subscriber_undeclared_from_its_history_is_let_go_of_before_its_decl
     };
     let id = engine
         .declare_liveliness_subscriber_on_wire("demo/**", WireKey::literal(), true, sink)
-        .expect("the engine has liveliness");
+        .expect("the engine has liveliness")
+        .id;
     assert_eq!(id, me, "the callback undeclared its own subscriber");
     assert_eq!(
         called.load(Ordering::SeqCst),

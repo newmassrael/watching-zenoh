@@ -308,14 +308,15 @@ fn constant_of(encoding: EncodingRef<'_>) -> Option<&'static EncodingState> {
     if encoding.schema.is_some() || encoding.packed_id & 1 != 0 {
         return None;
     }
-    let accessor = CONSTANTS.get(usize::try_from(encoding.packed_id >> 1).ok()?)?;
-    // SAFETY: a constant's accessor hands out a `'static` view of a `'static` state.
-    unsafe { handle_ref::<z_loaned_encoding_t, EncodingState>(accessor()) }
+    STATES.get(usize::try_from(encoding.packed_id >> 1).ok()?)
 }
 
-/// Whether `state` is a well-known constant's, which no slot holds and nothing lets go.
+/// Whether `state` is a well-known constant's, which no slot holds and nothing lets go: whether it
+/// lies in the table of constants, whatever it reads.
 fn is_constant(state: &EncodingState) -> bool {
-    constant_of(state.view()).is_some_and(|constant| core::ptr::eq(constant, state))
+    STATES
+        .as_ptr_range()
+        .contains(&(state as *const EncodingState))
 }
 
 /// An encoding a program moved into a call, held for as long as its holder holds it: its
@@ -605,7 +606,10 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_str(
 
 /// Replace an encoding's schema from an explicitly-sized substring (pico
 /// `z_encoding_set_schema_from_substr`).
+///
+/// Out of line: the `_from_str` door ends in this one, and held a copy of its own.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
     encoding: *mut z_loaned_encoding_t,
     schema: *const c_char,
@@ -686,49 +690,53 @@ const fn static_view(state: &'static EncodingState) -> StaticLoanedEncoding {
     })
 }
 
-/// Emit one of pico's `ENCODING_CONSTANT_MACRO` entries
-/// (`src/api/encoding.c:27-33`): a `'static` state at the given wire id, its
-/// `'static` loaned view, and the exported accessor.
+/// Emit the well-known encodings of pico's `ENCODING_CONSTANT_MACRO` entries
+/// (`src/api/encoding.c:27-33`): one table of states and one of their `'static` loaned views, in
+/// `.rodata` at the index of their wire id, and one exported accessor per entry that hands back
+/// the address of its view. Each accessor is then an address and a return, and the test of whether
+/// a state is a constant ([`is_constant`]) is whether it lies in the table.
 ///
-/// The state and the view are function-scoped statics rather than module-level
-/// ones so the macro needs only the pair upstream's own macro needs — the
-/// exported name and the id — instead of two invented Rust identifiers per
-/// entry. A hand-maintained second name list is a transcription with no oracle,
-/// which is the failure class this crate has already paid for once.
-///
-/// The MIME string is NOT repeated here. It lives once in
-/// [`wz_codecs::encoding_ids::ENCODING_ID_TO_STR`], indexed by the same id,
-/// so `z_encoding_to_string` on a constant renders through the identical table
-/// the wire codec uses. The (name -> id) pairing below is the only transcribed
-/// fact, and it is adjudicated against upstream's COMPILED library by
+/// The (name -> id) pairing is the only transcribed fact, and it is adjudicated against upstream's
+/// COMPILED library by
 /// `tests/pico_pure_function_oracle.rs::encoding_constants_agree_with_the_real_pico_library`,
-/// which walks every accessor in both implementations and compares the rendered
-/// string. A wrong id there is a visible mismatch, not a silent one.
-macro_rules! encoding_constant {
-    ($fname:ident, $id:expr) => {
-        /// A well-known encoding constant (pico `ENCODING_CONSTANT_MACRO`).
-        ///
-        /// The returned pointer is valid for the whole program: it points at a
-        /// `'static`, so a caller may hold it past any session, and there is
-        /// nothing to release.
-        #[no_mangle]
-        pub extern "C" fn $fname() -> *const z_loaned_encoding_t {
-            static STATE: EncodingState = EncodingState::constant($id);
-            static VIEW: StaticLoanedEncoding = static_view(&STATE);
-            &VIEW.0 as *const z_loaned_encoding_t
-        }
-    };
-}
-
-/// Every well-known encoding's accessor, emitted with it, at the index of its wire id: what an
-/// encoding of no schema is read from instead of a slot of the pool of encodings
-/// ([`constant_of`]), as zenoh-pico's encoding of no schema holds no allocation.
+/// which walks every accessor in both implementations and compares the rendered string. The MIME
+/// string is not repeated here: it lives once in
+/// [`wz_codecs::encoding_ids::ENCODING_ID_TO_STR`], indexed by the same id, so
+/// `z_encoding_to_string` on a constant renders through the table the wire codec uses. The tables
+/// are as long as that one, so an entry missing here does not compile, and an entry out of its id's
+/// place is refused when the library is compiled.
 macro_rules! encoding_constants {
     ($(($fname:ident, $id:expr)),* $(,)?) => {
-        $(encoding_constant!($fname, $id);)*
+        // The tables are built in the order the entries are listed, so the listing is the ids'.
+        const _: () = {
+            let mut rest: &[usize] = &[$($id),*];
+            let mut at = 0;
+            while let [id, tail @ ..] = rest {
+                assert!(*id == at, "each well-known encoding is listed at its id");
+                rest = tail;
+                at += 1;
+            }
+        };
 
-        /// The accessors, in the order of their ids.
-        const CONSTANTS: &[extern "C" fn() -> *const z_loaned_encoding_t] = &[$($fname),*];
+        /// The state of each well-known encoding, at the index of its wire id.
+        static STATES: [EncodingState; ENCODING_ID_TO_STR.len()] =
+            [$(EncodingState::constant($id)),*];
+
+        /// The loaned view of each state of [`STATES`], at the same index.
+        static VIEWS: [StaticLoanedEncoding; ENCODING_ID_TO_STR.len()] =
+            [$(static_view(&STATES[$id])),*];
+
+        $(
+            /// A well-known encoding constant (pico `ENCODING_CONSTANT_MACRO`).
+            ///
+            /// The returned pointer is valid for the whole program: it points at a
+            /// `'static`, so a caller may hold it past any session, and there is
+            /// nothing to release.
+            #[no_mangle]
+            pub extern "C" fn $fname() -> *const z_loaned_encoding_t {
+                &VIEWS[$id].0
+            }
+        )*
     };
 }
 
@@ -1242,12 +1250,32 @@ mod tests {
     /// from the constant of its id.
     #[test]
     fn each_constant_sits_at_the_index_of_its_id() {
-        for (id, accessor) in CONSTANTS.iter().enumerate() {
+        for (id, (view, state)) in VIEWS.iter().zip(STATES.iter()).enumerate() {
+            assert!(
+                core::ptr::eq(view.0.handle.cast::<EncodingState>(), state),
+                "the view at an id is the view of the state at that id"
+            );
             // SAFETY: a `'static` view this module minted.
-            let read = unsafe { encoding_view(accessor()) }.expect("a constant is never absent");
+            let read = unsafe { encoding_view(&view.0) }.expect("a constant is never absent");
             assert_eq!(read.packed_id, (id as u32) << 1);
         }
-        assert_eq!(CONSTANTS.len(), ENCODING_ID_TO_STR.len());
+        assert_eq!(STATES.len(), ENCODING_ID_TO_STR.len());
+        assert_eq!(z_encoding_zenoh_bytes(), &VIEWS[0].0 as *const _);
+        assert_eq!(z_encoding_text_plain(), &VIEWS[4].0 as *const _);
+        assert_eq!(z_encoding_video_vp9(), &VIEWS[52].0 as *const _);
+    }
+
+    /// A state is a constant by where it lies, not by what it reads: one that reads as a well-known
+    /// encoding of no schema but lies outside the table is not one, so a drop would let it go.
+    #[test]
+    fn a_state_reading_as_a_constant_outside_the_table_is_not_one() {
+        // SAFETY: no schema is borrowed.
+        let lookalike = unsafe { EncodingState::lent(4 << 1, None) };
+        assert!(!is_constant(&lookalike));
+        assert!(is_constant(&STATES[4]));
+        assert!(is_constant(STATES.last().expect("a table of constants")));
+        let read = constant_of(lookalike.view()).expect("a constant of the id");
+        assert!(core::ptr::eq(read, &STATES[4]));
     }
 
     /// An encoding of no schema whose id the table names is its constant: it takes no slot, as

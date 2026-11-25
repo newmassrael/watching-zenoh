@@ -40,6 +40,15 @@ pub trait WordCell {
     fn fetch_add(&self, value: u64, order: Ordering) -> u64;
     /// Take `value` away and answer the word as it was before.
     fn fetch_sub(&self, value: u64, order: Ordering) -> u64;
+    /// Write `new` if the word holds `current`: `Ok` with the word as it was, or `Err` with the
+    /// word it holds and nothing written.
+    fn compare_exchange(
+        &self,
+        current: u64,
+        new: u64,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<u64, u64>;
 }
 
 impl FlagCell for AtomicBool {
@@ -102,6 +111,17 @@ impl WordCell for AtomicU64 {
     fn fetch_sub(&self, value: u64, order: Ordering) -> u64 {
         AtomicU64::fetch_sub(self, value, order)
     }
+
+    #[inline]
+    fn compare_exchange(
+        &self,
+        current: u64,
+        new: u64,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<u64, u64> {
+        AtomicU64::compare_exchange(self, current, new, success, failure)
+    }
 }
 
 impl WordCell for Cell<u64> {
@@ -132,6 +152,23 @@ impl WordCell for Cell<u64> {
         let before = self.get();
         self.set(before.wrapping_sub(value));
         before
+    }
+
+    #[inline]
+    fn compare_exchange(
+        &self,
+        current: u64,
+        new: u64,
+        _success: Ordering,
+        _failure: Ordering,
+    ) -> Result<u64, u64> {
+        let held = self.get();
+        if held == current {
+            self.set(new);
+            Ok(held)
+        } else {
+            Err(held)
+        }
     }
 }
 
@@ -172,6 +209,18 @@ mod tests {
         );
         assert_eq!(word.fetch_sub(1, Ordering::SeqCst), 0);
         assert_eq!(word.load(Ordering::SeqCst), u64::MAX, "a take wraps too");
+        assert_eq!(
+            word.compare_exchange(5, 9, Ordering::AcqRel, Ordering::Acquire),
+            Err(u64::MAX),
+            "a word that does not hold the value is not written"
+        );
+        assert_eq!(word.load(Ordering::SeqCst), u64::MAX);
+        assert_eq!(
+            word.compare_exchange(u64::MAX, 9, Ordering::AcqRel, Ordering::Acquire),
+            Ok(u64::MAX),
+            "a word that holds it is"
+        );
+        assert_eq!(word.load(Ordering::SeqCst), 9);
     }
 
     /// The cell answers what the atomic answers, so a profile that binds either sees the same

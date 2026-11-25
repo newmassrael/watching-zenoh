@@ -4744,9 +4744,8 @@ mod rx_sn_gate_tests {
     #[cfg(feature = "reassembly")]
     #[test]
     fn the_reassembling_receive_in_place_ends_the_chain_of_a_dropped_head() {
-        use wz_session_core::drive::dispatch_datagram_reassembling;
+        use wz_session_core::drive::{dispatch_datagram_reassembling, DatagramReader};
         use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-        use wz_session_core::network_message::new_record_buf;
         use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
 
         let (actions, _driver) =
@@ -4756,7 +4755,7 @@ mod rx_sn_gate_tests {
         engine.initialize().unwrap_or_else(|never| match never {});
         let mut reasm: ReassemblyDispatcher<4, 4096> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
-        let mut record = new_record_buf();
+        let mut reader = DatagramReader::new();
         // A reliable Fragment with more to come (`0x06 | R | M`) of one payload byte, and a
         // reliable Frame with no record (`0x05 | R`), each at a one-byte SN.
         let fragment = |sn: u8| vec![0x66, sn, 0x01];
@@ -4776,7 +4775,7 @@ mod rx_sn_gate_tests {
                 &unit,
                 &actions,
                 &mut engine,
-                &mut record,
+                &mut reader,
                 &mut reasm,
                 0,
                 &mut sink,

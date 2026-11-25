@@ -13,10 +13,10 @@ describe what was built.
     wz_package.py --selftest
 
 `package` (the default) builds the named artifacts for the platform with cargo, copies each into
-`DIR/lib` or `DIR/bin`, measures every file from its own bytes (`elf_facts`) and writes
-`DIR/wz-target-manifest.json`: the one file a deployment tool reads. `--verify` is the gate on it:
-it re-measures every artifact the manifest names and compares, so a manifest that no longer says
-what the files are is a finding.
+`DIR/lib` or `DIR/bin` (a release build with its debug information taken off, `strip_debug`),
+measures every file from its own bytes (`elf_facts`) and writes `DIR/wz-target-manifest.json`: the
+one file a deployment tool reads. `--verify` is the gate on it: it re-measures every artifact the
+manifest names and compares, so a manifest that no longer says what the files are is a finding.
 
 `--cargo-profile release` (the default) is the build a deployer receives: an artifact of the crates
 workspace is built with its shipping profile (`SHIP_PROFILE`, fat LTO, one codegen unit) and not
@@ -97,6 +97,15 @@ MANIFEST_NAME = "wz-target-manifest.json"
 # LTO, one codegen unit), and not `release`, that workspace's thin-LTO build of daily work. A node
 # is a package of a workspace of its own, whose `release` is already its shipping build.
 SHIP_PROFILE = "ship"
+# A release artifact is ONE build with its line tables (`ship_debug_env`), and the package carries
+# that build with its debug information taken off (`strip_debug`): the code a deployer receives is
+# the code the line tables describe, which the size ledger reads its areas from
+# (scripts/lib/size_ledger_gate.py), with no second build beside it whose code could differ (a build
+# with line tables next to one without them was measured to differ in its code). The debug
+# information is kept beside the build's output, `<file>` + `DEBUG_SUFFIX`, where a debugger finds it
+# by the build id the packaged file keeps; the package itself carries only what its manifest names.
+SHIP_DEBUG = "line-tables-only"
+DEBUG_SUFFIX = ".debug"
 # `bundled` (the libraries copied from the SDK, T5) was added within schema 1: an added key changes
 # the meaning of none, and a reader ignores a key it does not know (T7).
 MANIFEST_SCHEMA = 1
@@ -1112,6 +1121,8 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
     """
     argv = cargo_argv(platform, cross, row, cargo_profile, extra_args, node)
     env = {**os.environ, **(extra_env or {})}
+    if cargo_profile == "release":
+        env.update(ship_debug_env("release" if row.get("input") == "node" else SHIP_PROFILE))
     cwd = ROOT / "crates"
     if row.get("input") == "node":
         env = {**env, "WZ_DECLARED_RS": str(node["generated"]), **node["limits"], **node["policies"]}
@@ -1143,6 +1154,55 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
     if found is None:
         raise RuntimeError(f"cargo built nothing that is the {row['kind']} of {row['package']}")
     return found[0], found[1], {p: sorted(f) for p, f in resolved.items()}
+
+
+def ship_debug_env(cargo_profile: str) -> dict[str, str]:
+    """The variable that gives the cargo profile named `cargo_profile` its line tables
+    (`SHIP_DEBUG`) over what the profile states, as cargo reads a profile key from the
+    environment."""
+    return {f"CARGO_PROFILE_{cargo_profile.upper().replace('-', '_')}_DEBUG": SHIP_DEBUG}
+
+
+def toolchain_objcopy() -> pathlib.Path:
+    """`llvm-objcopy` of the pinned toolchain (the `llvm-tools` component rust-toolchain.toml
+    lists): it reads an ELF of any machine, so one tool strips the artifacts of every platform, and
+    it comes with the compiler that built them. A refusal naming the component when it is absent."""
+    crates = ROOT / "crates"
+    sysroot = run_text(["rustc", "--print", "sysroot"], crates)
+    version = run_text(["rustc", "-vV"], crates)
+    host = next((line.split(":", 1)[1].strip() for line in (version or "").splitlines()
+                 if line.startswith("host:")), "")
+    if sysroot is None or not host:
+        raise Refusal("rustc did not state its sysroot and host, so the toolchain's llvm-objcopy "
+                      "cannot be found")
+    tool = pathlib.Path(sysroot.strip()) / "lib" / "rustlib" / host / "bin" / "llvm-objcopy"
+    if not tool.is_file():
+        raise Refusal(f"the toolchain has no llvm-objcopy ({tool}): install its llvm-tools "
+                      "component, which rust-toolchain.toml lists")
+    return tool
+
+
+def code_moved(before: dict[str, tuple[int, str]], after: dict[str, tuple[int, str]]) -> list[str]:
+    """The executable sections two files do not hold alike (`elf_facts.code_digests` of each), by
+    name; empty when the code of both is the same at the same addresses."""
+    return sorted(name for name in set(before) | set(after) if before.get(name) != after.get(name))
+
+
+def strip_debug(built: pathlib.Path, shipped: pathlib.Path, debug: pathlib.Path | None,
+                objcopy: pathlib.Path) -> list[str]:
+    """Write `built` without its debug information to `shipped`, with `built`'s mode, and its
+    debug information alone to `debug` when one is given. Returns the executable sections
+    `shipped` does not hold as `built` does (`code_moved`): taking debug sections off moves no
+    code, and a caller refuses a file where it did, since the line tables would describe other code
+    than the file holds."""
+    if debug is not None:
+        subprocess.run([str(objcopy), "--only-keep-debug", str(built), str(debug)],
+                       capture_output=True, check=True)
+    subprocess.run([str(objcopy), "--strip-debug", str(built), str(shipped)],
+                   capture_output=True, check=True)
+    shutil.copymode(built, shipped)
+    return code_moved(elf_facts.code_digests(built.read_bytes()),
+                      elf_facts.code_digests(shipped.read_bytes()))
 
 
 def node_input(decl: dict, rows: list[dict], node_id: str | None, node_file: pathlib.Path | None = None,
@@ -1216,6 +1276,7 @@ def _package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib
     rustc, host = rustc_identity()
     cross = platform["triple"] != host
     check_toolchain_env(platform, cross)
+    objcopy = toolchain_objcopy() if cargo_profile == "release" else None
     if out.exists() and any(out.iterdir()):
         raise Refusal(f"{out} exists and is not empty; the entry does not overwrite")
     created = not out.exists()
@@ -1235,7 +1296,14 @@ def _package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib
                 raise RuntimeError(f"cargo built {built.name} for {row['id']}, the declaration says {want}")
             sub = "lib" if row["kind"] == "shared-library" else "bin"
             (out / sub).mkdir(exist_ok=True)
-            shutil.copyfile(built, out / sub / want)
+            if objcopy is None:
+                shutil.copyfile(built, out / sub / want)
+            else:
+                moved = strip_debug(built, out / sub / want, built.with_name(built.name + DEBUG_SUFFIX),
+                                    objcopy)
+                if moved:
+                    raise RuntimeError(f"taking the debug information off {built.name} changed its "
+                                       f"executable sections {', '.join(moved)}")
             # The file a tool runs or loads is the one cargo made, mode and all: an executable
             # copied without its execute bit is a package that cannot be started.
             shutil.copymode(built, out / sub / want)
@@ -2092,6 +2160,15 @@ def _selftest() -> int:
     expect("the shipping profile is one crates/Cargo.toml defines",
            re.search(rf"^\[profile\.{re.escape(SHIP_PROFILE)}\]$",
                      (ROOT / "crates" / "Cargo.toml").read_text(encoding="utf-8"), re.M) is not None)
+    expect("a release build is given its line tables by the variable of the profile it is built with",
+           ship_debug_env(SHIP_PROFILE) == {"CARGO_PROFILE_SHIP_DEBUG": SHIP_DEBUG}
+           and ship_debug_env("capi-nostd") == {"CARGO_PROFILE_CAPI_NOSTD_DEBUG": "line-tables-only"})
+    digests = {".text": (0x1000, "aa"), ".init": (0x900, "bb")}
+    expect("a strip that moved no code is no finding, and one that moved a section names it",
+           code_moved(digests, dict(digests)) == []
+           and code_moved(digests, {**digests, ".text": (0x1000, "ab")}) == [".text"]
+           and code_moved(digests, {".text": (0x1000, "aa")}) == [".init"]
+           and code_moved(digests, {**digests, ".text": (0x1010, "aa")}) == [".text"])
     expect("a native build has no SDK identity", sdk_identity(platform, False) is None)
     refuses("a cross platform that names no sdk kind", "names no sdk_kind",
             lambda: sdk_identity({"id": "x", "triple": "t-1"}, True))

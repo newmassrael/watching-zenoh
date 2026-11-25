@@ -806,6 +806,11 @@ transport-link-ws,object-pool|--test-target=it"
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
     "wz-capi-coop|hook|group-host|host_group::"
+    # The same module with the `reth/` groups beside them (`raweth`, which re-exports the
+    # joiner the pico ABI wraps the host's groups in): a `reth/` group is opened on a raw packet
+    # socket and a `udp/` group still on the host's UDP sockets. The interface named is one no
+    # host has, so the refusal is the kernel's with `CAP_NET_RAW` or without.
+    "wz-capi-coop|hook|raweth|host_group::"
     # The word of a clock the program moves, which ends a read's wait (`clock_moves_tests::`, 2,
     # compiled with `time-base`): a wait for the next dial ends at the word, and the word joins a
     # wait on links and makes none where there was none.

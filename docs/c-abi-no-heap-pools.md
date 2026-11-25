@@ -937,7 +937,7 @@ The rest, and what each form of section 9 would take:
   (`open_lent_batch` in `crates/wz-session-core/src/session_actions.rs`). A transport message sent
   while it is open (a KeepAlive, a Close: `send_control_lent`), a frame of another priority under
   `transport-qos`, and the next frame of a stream link that has not finished writing the last
-  (`TxLender::frame_prefixed`) each take a slot of their own, and under `tx-lend-only`, which the C
+  (`TxLender::seal`) each take a slot of their own, and under `tx-lend-only`, which the C
   library selects, a frame that finds none is refused and counted (`LinkDropCause::NoTxSlot`), not
   queued. zenoh-pico keeps one buffer because a transport message sends the open batch first
   (`vendor/zenoh-pico/src/transport/common/tx.c` @

@@ -192,6 +192,64 @@ fn every_kind_of_entity_holds_its_prefix_declaration_alike() {
     assert_eq!(holds(&tables), alone, "each kind let its hold go");
 }
 
+/// Each kind's declaration answers its key as the row it was put in keeps it: the row's own text,
+/// at the row's address, lent with the declaration of the entity's own key where the form states
+/// one, else with the one the key is named by.
+///
+/// # Control
+///
+/// A key named by no declaration is lent with none; a declaration that read its key off anything
+/// but the row it was put in reds the address line.
+#[test]
+fn every_kind_of_entity_answers_its_key_as_its_row_keeps_it() {
+    let mut tables = Tables::new();
+    let prefix = tables.declare_keyexpr("demo").unwrap();
+    let own = tables.declare_keyexpr("demo/s").unwrap();
+    let form = KeyForm {
+        prefix: Some(prefix.handle),
+        own: None,
+        retraction: Retraction::ById,
+    };
+    let sub = tables
+        .declare_subscriber("demo/s", Locality::Any, form.owning(Some(own.handle)), 1)
+        .unwrap();
+    let row = tables.subscribers().get(sub.handle).unwrap().key().as_str();
+    // SAFETY: the subscriber's row stands.
+    let text = unsafe { sub.key.text() };
+    assert_eq!(
+        (text, text.as_ptr()),
+        (row, row.as_ptr()),
+        "the row's own text, where the row keeps it"
+    );
+    assert_eq!(
+        sub.key.held,
+        Some(own.handle),
+        "lent with the entity's own key's declaration"
+    );
+    let qbl = tables
+        .declare_queryable("demo/q", Locality::Any, true, form, 2)
+        .unwrap();
+    assert_eq!(
+        qbl.key.held,
+        Some(prefix.handle),
+        "lent with the declaration the key is named by"
+    );
+    let token = tables.declare_token("demo/t", form).unwrap();
+    assert_eq!(token.key.held, Some(prefix.handle));
+    let live = tables
+        .declare_liveliness_subscriber("demo/l", true, form, 3)
+        .unwrap();
+    // SAFETY: the liveliness subscriber's row stands.
+    assert_eq!(unsafe { live.key.text() }, "demo/l");
+    let bare = tables
+        .declare_subscriber("other", Locality::Any, KeyForm::default(), 4)
+        .unwrap();
+    assert_eq!(
+        bare.key.held, None,
+        "CONTROL: a key named by no declaration is lent with none"
+    );
+}
+
 #[test]
 fn every_kind_of_entity_takes_its_id_from_one_space() {
     let mut tables = Tables::new();
@@ -472,6 +530,31 @@ fn a_key_expression_declared_twice_is_held_twice_and_retracted_by_its_last_holde
     assert_eq!(tables.undeclare_keyexpr(first.handle), Some(1));
     assert!(tables.keyexprs().is_empty());
     assert_eq!(tables.undeclare_keyexpr(first.handle), None);
+}
+
+/// A declaration names the count of the row its hold was taken in, a new row's and one held again
+/// alike, so a holder names its row with no second look at the table. Turned red by a count read
+/// off another row, or a hold not taken on the count named.
+#[test]
+fn a_key_expression_declaration_names_its_rows_count() {
+    let mut tables = Tables::new();
+    let first = tables.declare_keyexpr("demo/").unwrap();
+    let again = tables.declare_keyexpr("demo/").unwrap();
+    let row = tables
+        .keyexprs()
+        .get(first.handle)
+        .expect("the declared row");
+    // SAFETY: the row stands, held by both declarations, and nothing was put in the table since.
+    let (named, held) = unsafe { (first.count(), again.count()) };
+    assert!(
+        core::ptr::eq(named, row.head().count()),
+        "the new row's count"
+    );
+    assert!(
+        core::ptr::eq(held, named),
+        "the row held again names the same count"
+    );
+    assert_eq!(named.holds(), 2, "both holds taken on that count");
 }
 
 /// A hold taken for a copied holder keeps the declaration until that holder lets go too; a handle
@@ -2686,7 +2769,7 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
     let mut tables = Tables::new();
     let before = tables.next_entity_id();
     let quiet = tables
-        .declare_write_filter_as(Plane::Subscribers, "q", false, None)
+        .declare_write_filter_as(Plane::Subscribers, "q", false, None, None)
         .unwrap();
     assert_eq!(quiet.interest, None);
     assert_eq!(tables.interests().len(), 0, "no Interest held");
@@ -2709,6 +2792,85 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
         .unwrap();
     assert_eq!(unwatched.interest_final, None);
     assert_eq!(gone, [listener]);
+}
+
+/// A write filter's row holds the declaration its entity's key is named by from its declaration to
+/// its undeclaration, which hands the row's hold to the caller, whose giving it back retracts the
+/// declaration when the row held it last; a count with no room refuses the filter, keeping nothing
+/// and opening no Interest. Turned red by a row that takes no hold, an undeclaration that hands
+/// none over or lets it go itself, or a filter kept past a full count.
+#[test]
+fn a_write_filter_holds_its_keys_declaration_until_it_goes() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/pub").unwrap();
+    let holds = |tables: &Tables| {
+        tables
+            .keyexprs()
+            .get(declared.handle)
+            .map(|row| row.holds())
+    };
+    let filter = tables
+        .declare_write_filter_as(
+            Plane::Subscribers,
+            "demo/pub",
+            false,
+            None,
+            Some(declared.handle),
+        )
+        .unwrap();
+    assert_eq!(holds(&tables), Some(2), "the declarer's and the row's");
+    assert_eq!(
+        tables.write_filters().get(filter.handle).unwrap().own(),
+        Some(declared.handle)
+    );
+    assert_eq!(
+        tables.undeclare_keyexpr(declared.handle),
+        None,
+        "the row still holds it"
+    );
+    let unwatched = tables
+        .undeclare_write_filter(filter.handle, |_, _| {})
+        .unwrap();
+    assert_eq!(
+        unwatched.held,
+        Some(declared.handle),
+        "the row's hold goes to the caller"
+    );
+    assert_eq!(
+        holds(&tables),
+        Some(1),
+        "kept until the caller gives it back"
+    );
+    assert_eq!(
+        tables.undeclare_keyexpr(declared.handle),
+        Some(declared.id),
+        "the row's was the last hold"
+    );
+    assert_eq!(holds(&tables), None, "gone with its last holder");
+
+    let full = tables.declare_keyexpr("demo/full").unwrap();
+    while tables.retain_keyexpr(full.handle) {}
+    let interests = tables.interests().len();
+    assert!(matches!(
+        tables.declare_write_filter_as(
+            Plane::Subscribers,
+            "demo/full",
+            false,
+            Some(InterestName::whole("demo/full")),
+            Some(full.handle),
+        ),
+        Err(RegisterError::KeyexprHoldsFull)
+    ));
+    assert_eq!(
+        tables.interests().len(),
+        interests,
+        "no Interest was opened"
+    );
+    assert_eq!(
+        tables.keyexprs().get(full.handle).map(|row| row.holds()),
+        Some(KeyexprHolds::MAX),
+        "CONTROL: the count is full"
+    );
 }
 
 /// A listener declared on a key opens an Interest of its own on the key whole, apart from a filter
@@ -2830,6 +2992,7 @@ fn an_interest_names_its_rest_by_a_range_of_its_key() {
                     suffix: Some(suffix),
                     aggregate: true,
                 }),
+                None,
             )
             .unwrap();
         let interest = tables
@@ -2885,6 +3048,7 @@ fn an_interest_names_its_rest_by_a_range_of_its_key() {
                 suffix: None,
                 aggregate: false,
             }),
+            None,
         )
         .unwrap();
     let interest = tables
@@ -3343,6 +3507,40 @@ fn a_write_filter_row_answers_as_its_handle_does() {
     assert_eq!(peers.asked.get(), 2);
 }
 
+/// A row read by its handle names the first bytes of a key it declares, and nothing once it went
+/// or for a key it does not start; an entity's row lends the declaration of its own key.
+///
+/// # Control
+///
+/// Reading the row without checking the key starts with it reds the second assertion; a row that
+/// answers after it went reds the third; an entity row lending the declaration its key is named
+/// by in place of its own reds the last.
+#[test]
+fn a_rows_declaration_names_the_keys_it_starts_and_an_entity_lends_its_own() {
+    let mut tables = Tables::new();
+    let announced = tables.declare_keyexpr("demo/").unwrap();
+    let own = tables.declare_keyexpr("demo/x").unwrap();
+    assert_eq!(
+        tables.declared_prefix(announced.handle, "demo/x/**"),
+        Some((announced.id, "demo/".len()))
+    );
+    assert_eq!(tables.declared_prefix(announced.handle, "other/x"), None);
+    let form = KeyForm {
+        prefix: Some(announced.handle),
+        own: Some(own.handle),
+        retraction: Retraction::ById,
+    };
+    let sub = tables
+        .declare_subscriber("demo/x/**", Locality::Any, form, 1)
+        .unwrap();
+    let row = tables.subscribers().get(sub.handle).unwrap().key();
+    assert_eq!(row.as_str(), "demo/x/**");
+    assert_eq!(row.named(), Some(own.handle));
+    let gone = tables.declare_keyexpr("gone/").unwrap();
+    assert_eq!(tables.undeclare_keyexpr(gone.handle), Some(gone.id));
+    assert_eq!(tables.declared_prefix(gone.handle, "gone/x"), None);
+}
+
 /// Entity ids counted from zero: none given hands out 1 first, the last id is `u32::MAX`, and ids
 /// from 0 are ids from 1. Turned red by `EntityIds::next` answering 0 for none given.
 #[test]
@@ -3799,4 +3997,196 @@ fn a_tokens_walk_pins_each_liveliness_subscriber_it_reaches_in_turn() {
         tables.pin_next_liveliness_subscriber(&mut fan).is_none(),
         "a row undeclared between two pins begins no call"
     );
+}
+
+/// A declaration's row is counted at its own address by the generation its holder's row was taken
+/// at: one more hold there up to the count's bound, the holds given back there down to the last,
+/// which only the table lets go of; a hold at another generation is neither taken nor given back
+/// there, and the row names its own tables and no other.
+///
+/// # Control
+///
+/// A `retain` that does not stop at the bound reds the `Full` assertion; a `release_shared` that
+/// lets go of the last reds the assertion that the row stands until `undeclare_keyexpr`; a count
+/// that does not carry the generation reds the assertions on the other generation.
+#[test]
+fn a_rows_count_is_taken_at_its_address_by_its_generation_and_its_last_hold_by_the_table() {
+    let mut tables = Tables::new();
+    let other = Tables::new();
+    let declared = tables.declare_keyexpr("demo/row").unwrap();
+    let at: *const _ = tables.keyexprs().get(declared.handle).unwrap().head();
+    // SAFETY: the row stands where it was put until its last hold goes, at the end; the table's
+    // calls in between take no `&mut` of it.
+    let head = unsafe { &*at };
+    assert!(tables.is_own_row(head));
+    assert!(
+        !other.is_own_row(head),
+        "another table's row is not its own"
+    );
+    assert_eq!(
+        (head.id(), head.key_len(), head.holds()),
+        (declared.id, "demo/row".len(), 1)
+    );
+    // The same row at another generation: a declaration that left it, or one that took it since.
+    let stranger = core::num::NonZeroU32::new(declared.handle.to_bits().get() ^ 0x0001_0000)
+        .and_then(KeyexprHandle::from_bits)
+        .unwrap();
+    assert_eq!(head.count().retain(stranger), Err(RowHoldRefused::Released));
+    assert_eq!(head.count().retain(declared.handle), Ok(()));
+    assert!(!head.count().release_shared(stranger));
+    assert_eq!(head.holds(), 2);
+    while head.holds() < KeyexprHolds::MAX {
+        head.count().retain(declared.handle).unwrap();
+    }
+    assert_eq!(
+        head.count().retain(declared.handle),
+        Err(RowHoldRefused::Full)
+    );
+    assert!(
+        !tables.retain_keyexpr(declared.handle),
+        "the table's own hold meets the same bound"
+    );
+    while head.count().release_shared(declared.handle) {}
+    assert_eq!(
+        head.holds(),
+        1,
+        "the last hold is not let go of at the address"
+    );
+    assert_eq!(tables.keyexprs().len(), 1);
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
+    assert!(tables.keyexprs().is_empty());
+}
+
+/// A row a declaration was retracted from whatever held it, taken again by the next declaration,
+/// counts the new declaration's holders only: a hold of the first given back at the address lets
+/// go of nothing, and none is taken there for it, as long as the slot was taken again fewer than
+/// 65536 times since. At 65536 the generation in the count's word has come round, and the stale
+/// hold reads as the new declaration's: the bound [`KeyexprHead`] states, pinned here.
+///
+/// # Control
+///
+/// A word that does not carry the slot's generation reds the assertions on the first
+/// declaration's hold after the second declaration took its row; a generation wider or narrower
+/// than the handle's reds the last assertion.
+#[test]
+fn a_retracted_declarations_hold_spares_its_rows_next_declaration_below_65536_reuses() {
+    let mut tables = Tables::new();
+    let first = tables.declare_keyexpr("demo/row/first").unwrap();
+    let at: *const _ = tables.keyexprs().get(first.handle).unwrap().head().count();
+    // SAFETY: the table keeps its rows where they were put; the count is read while the first
+    // declaration stands and while a later one stands in the same row, never in between.
+    let head = unsafe { &*at };
+    assert_eq!(head.retain(first.handle), Ok(()));
+    assert_eq!(tables.retract_keyexpr(first.handle), Some(first.id));
+    let second = tables.declare_keyexpr("demo/row/second").unwrap();
+    let again: *const _ = tables.keyexprs().get(second.handle).unwrap().head().count();
+    assert!(
+        core::ptr::eq(at, again),
+        "the second declaration takes the first's row"
+    );
+    assert_ne!(second.handle, first.handle, "at the row's next generation");
+    assert_eq!(head.retain(second.handle), Ok(()));
+    assert!(
+        !head.release_shared(first.handle),
+        "the first declaration's hold lets go of nothing"
+    );
+    assert_eq!(
+        head.retain(first.handle),
+        Err(RowHoldRefused::Released),
+        "and takes none"
+    );
+    assert_eq!(head.holds(), 2);
+    assert_eq!(tables.retract_keyexpr(second.handle), Some(second.id));
+    // The slot taken again until its generation is the first declaration's once more.
+    let mut last = second.handle;
+    for _ in 2..=u32::from(u16::MAX) {
+        let taken = tables.declare_keyexpr("demo/row/again").unwrap();
+        last = taken.handle;
+        assert!(tables.retract_keyexpr(taken.handle).is_some());
+    }
+    assert_ne!(
+        last, first.handle,
+        "65535 reuses: the generation has not come round"
+    );
+    let round = tables.declare_keyexpr("demo/row/round").unwrap();
+    assert_eq!(
+        round.handle, first.handle,
+        "the 65536th takes the first's generation"
+    );
+    assert_eq!(head.retain(round.handle), Ok(()));
+    assert!(
+        head.release_shared(first.handle),
+        "past the bound the stale hold reads as the new declaration's"
+    );
+}
+
+/// A declaration's row keeps its key's length in the integer of its table's policy: on a bounded
+/// policy the narrowest the build's bound on a key's length fits, so the row's head is as small as
+/// its fields allow, and on the growable one `u32`, which takes every key the wire can name.
+///
+/// # Control
+///
+/// A `KeyLen` chosen apart from the bound reds the width assertion; a bounded policy that keeps
+/// the growable one's integer reds the size of its head.
+#[test]
+fn a_bounded_rows_key_length_is_as_wide_as_the_builds_bound() {
+    let width = if caps::MAX_KEYEXPR_BYTES <= usize::from(u16::MAX) {
+        2
+    } else {
+        4
+    };
+    assert_eq!(core::mem::size_of::<caps::KeyLen>(), width);
+    assert_eq!(
+        core::mem::size_of::<KeyexprHead<<Static as Storage>::KeyLen>>(),
+        (4 + 2 + width).next_multiple_of(core::mem::size_of::<usize>())
+            + core::mem::size_of::<usize>(),
+        "the count, the id and the length share the word before the tables' address"
+    );
+}
+
+/// A growable table keeps a key of any length the wire can name, past a bounded policy's
+/// narrowest integer: its rows keep the length in `u32`.
+///
+/// # Control
+///
+/// A growable policy that keeps the bounded policies' integer reds the width assertion, and one
+/// that refuses or cuts a key past `u16` reds the declaration's.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_growable_rows_key_length_takes_a_key_past_u16() {
+    assert_eq!(
+        core::mem::size_of::<<crate::bounded::Heap as Storage>::KeyLen>(),
+        4
+    );
+    type Growable = SessionTables<Calls, crate::bounded::Heap>;
+    let mut tables = Growable::new();
+    let long = "k".repeat(usize::from(u16::MAX) + 1);
+    let declared = tables
+        .declare_keyexpr(&long)
+        .expect("no bound on a growable table's key");
+    let row = tables.keyexprs().get(declared.handle).unwrap();
+    assert_eq!(row.head().key_len(), long.len());
+    assert_eq!(row.key(), long);
+}
+
+/// Rows of a growable table stay where they were put however many declarations come after them,
+/// past the build's bound: the table grows by chunks that are only ever added, with no bound but
+/// the allocator's. Turned red by a column that moves its rows to grow (the first row's address
+/// changes) or one held to the build's bound (a declaration past it refused).
+#[cfg(feature = "alloc")]
+#[test]
+fn growable_rows_stay_where_they_were_put_past_the_builds_bound() {
+    type Growable = SessionTables<Calls, crate::bounded::Heap>;
+    let mut tables = Growable::new();
+    let first = tables.declare_keyexpr("k/0").unwrap();
+    let at = |tables: &Growable| -> *const KeyexprHead<u32> {
+        tables.keyexprs().get(first.handle).unwrap().head()
+    };
+    let before = at(&tables);
+    let past = caps::MAX_DECLARED_KEYEXPRS + 2 * crate::slot_map::CHUNK_ROWS;
+    for n in 1..=past {
+        tables.declare_keyexpr(&std::format!("k/{n}")).unwrap();
+    }
+    assert_eq!(tables.keyexprs().len(), past + 1, "no declaration refused");
+    assert_eq!(at(&tables), before, "the first row is where it was put");
 }

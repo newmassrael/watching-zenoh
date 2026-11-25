@@ -1596,7 +1596,8 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
                 }
             })
         })
-        .expect("declared");
+        .expect("declared")
+        .id;
     *own.lock().unwrap() = Some(id);
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
@@ -1645,7 +1646,8 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
             ask,
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
     });
@@ -2068,7 +2070,8 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
             }),
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) > 0
     });
@@ -2138,7 +2141,8 @@ fn a_filtered_publish_is_held_back_then_sent() {
             }),
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) > 0
     });
@@ -2227,7 +2231,8 @@ fn a_listener_from_a_filter_counts_what_the_filter_counts() {
             }),
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     let (sink, told) = heard();
     engine
         .declare_filter_matching_listener(filter, sink)
@@ -2350,7 +2355,8 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
         .expect("a session with rows left declares");
     let complete_filter = engine
         .declare_write_filter(complete_plane, "demo/q", &WireKey::literal(), ask(), false)
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     let subscriber_filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
@@ -2359,7 +2365,8 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
             ask(),
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     until(&engine, "the router to see the Interests", || {
         router.seen(|s| s.interests) >= 2
     });
@@ -2438,7 +2445,8 @@ fn a_listener_declared_on_a_match_is_told_once() {
             }),
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
     });
@@ -2498,7 +2506,8 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
             }),
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     until(
         &engine,
         "the router to see the subscriber and the Interest",
