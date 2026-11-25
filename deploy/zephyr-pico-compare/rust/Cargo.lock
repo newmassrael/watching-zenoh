@@ -440,7 +440,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "heapless",
- "log",
  "portable-atomic",
  "sce-portable-bytes",
  "thiserror",
@@ -722,7 +721,6 @@ dependencies = [
  "hashbrown",
  "heapless",
  "hmac",
- "log",
  "portable-atomic",
  "sce-forge-runtime",
  "sce-portable-bytes",

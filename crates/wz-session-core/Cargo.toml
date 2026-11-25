@@ -66,7 +66,9 @@ default = [
 # its defaults) links neither the facade nor the formatting the records name, as zenoh-pico leaves
 # its log calls out unless a level is chosen when it is built. On by default, for the runtimes that
 # install a logger; a build that takes the crate without its defaults and wants the records names it.
-log = []
+# It also asks the statechart runtime for its records (`sce-rust-runtime/log`, SCE ADR 0053), so a
+# build without it links the facade from neither crate.
+log = ["dep:log", "sce-rust-runtime?/log"]
 
 # `policy-selection`: a stage after the build selects the value of a policy (a document, a config
 # door, an open's statements, a test). Without it no value but the build's default is ever reached,
@@ -1372,11 +1374,9 @@ sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", d
 # `alloc`) holds its tables in `bounded::BoundedVec` / `id_map::IdMap`'s fixed arm and
 # must not name this crate at all.
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"], optional = true }
-# The log facade the diagnostics are handed to (`diag`) where the `log` feature is on. Not
-# optional: a build that holds a session machine has it through the statechart runtime, which names
-# it unconditionally, so an optional edge would compile nothing less there; what the feature decides
-# is whether a diagnostic calls it.
-log = "0.4"
+# The log facade the diagnostics are handed to (`diag`), only where the `log` feature is on: the
+# statechart runtime names it only under its own `log` feature, which that feature asks for.
+log = { version = "0.4", optional = true }
 # R311ei — HMAC-SHA256 anti-amplification cookie primitive (the
 # signing_key module). default-features = false keeps the RustCrypto
 # stack no_std so the Accepting-side cookie path cross-compiles to the
