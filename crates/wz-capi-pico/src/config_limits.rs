@@ -112,6 +112,16 @@ pub(crate) fn state_over(text: Option<&str>, stated: &mut Stated) -> Result<(), 
     Ok(())
 }
 
+/// Whether the build takes `value` as the key's value: [`state_over`] of it over a copy of what
+/// an open composes from ([`Stated::OPENING`]), which the judgement drops, and the code of the
+/// refusal where the build refuses it. Not inlined: the copy lies in a frame of its own, so the
+/// door that records a config's values (`zp_config_insert`) keeps a frame of its own size.
+#[inline(never)]
+pub(crate) fn judged(value: &str) -> Result<(), ZResult> {
+    let mut probe = Stated::OPENING;
+    state_over(Some(value), &mut probe)
+}
+
 /// `bytes` before and after the first `separator`, which neither holds; `None` where `bytes`
 /// holds none.
 fn split_at_first(bytes: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
@@ -172,7 +182,9 @@ fn count_of(digits: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_of, names, position_named, split_at_first, state_over, trimmed, Stated};
+    use super::{
+        count_of, judged, names, position_named, split_at_first, state_over, trimmed, Stated,
+    };
     use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
     use wz_session_core::limit_binding::Quota;
     use wz_session_core::limits::SessionLimits;
@@ -199,6 +211,27 @@ mod tests {
     #[test]
     fn an_open_composes_from_the_opening_limits() {
         assert_eq!(Stated::OPENING, opening());
+    }
+
+    /// A value is judged as an open composes it over what it opens from: what the composition
+    /// refuses is refused with its code, and what it takes is taken. Turned red by a judgement
+    /// over other limits than an open's, or one that drops the composition's refusal.
+    #[test]
+    fn a_value_is_judged_as_an_open_composes_it() {
+        for text in [
+            "",
+            " , ",
+            "NO_SUCH_LIMIT=1",
+            "MAX_SUBSCRIPTIONS",
+            "MAX_PUBLISHERS=1",
+        ] {
+            assert_eq!(judged(text), state(Some(text)).map(|_| ()), "{text}");
+        }
+        assert_eq!(judged("NO_SUCH_LIMIT=1"), Err(Z_ERR_CONFIG_INVALID_VALUE));
+        if let Some(bound) = subscriptions_bound() {
+            let past = alloc::format!("MAX_SUBSCRIPTIONS={}", bound + 1);
+            assert_eq!(judged(&past), Err(Z_ERR_CONFIG_INVALID_VALUE));
+        }
     }
 
     /// A text is stated over what the statement holds, so a limit the text does not name keeps
