@@ -336,6 +336,8 @@ type DirectSite<L, C> = FaceSite<DirectLock, DirectParts<L, C>>;
 pub(super) struct FaceTx<'a, C: ClockSource + 'static> {
     face: &'a EndFlags,
     wire: Option<&'a Wire<C>>,
+    /// Whether a publish's leg through it goes to the held face alone (`CoopEngine::on_faces`).
+    alone: bool,
 }
 
 impl<C: ClockSource + 'static> Clone for FaceTx<'_, C> {
@@ -357,6 +359,14 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     #[inline(always)]
     pub(super) fn wire(&self) -> Option<&'a Wire<C>> {
         self.wire
+    }
+
+    /// Whether a publish's leg sent through this hold goes to the face whose record holds
+    /// `link`: a hold of one face for a leg of its own reaches that face alone, as each face's
+    /// leg is sent under its own hold, and an operation's hold reaches every face.
+    #[inline(always)]
+    pub(super) fn reaches<L: CoopLinks + 'static>(&self, link: &DirectWire<L, C>) -> bool {
+        !self.alone || self.holds(link)
     }
 }
 
@@ -382,6 +392,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> OnLinkHold<'_, L, C> {
         let tx = FaceTx {
             face: self.face,
             wire,
+            alone: false,
         };
         (&mut self.core.0, tx)
     }
@@ -734,6 +745,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
                 lend,
             );
             addr_of_mut!((*at).taken).write(taken);
+        }
+    }
+
+    /// The face at row `at` of the face table: the dial role's at the first, each past it in its
+    /// row of the arena. `None` past the table.
+    #[inline(always)]
+    pub(super) fn face(&self, at: usize) -> Option<&DirectFace<L, C>> {
+        match at.checked_sub(1) {
+            None => Some(&self.dial),
+            Some(row) => self.taken.get(row),
         }
     }
 
@@ -1368,23 +1389,57 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Some(f(core, tx))
     }
 
-    /// `f` on the one link's wire (`LinkTx`), held as [`Self::hold_on_link`] holds the place,
-    /// for a publish, which takes the session's lock its own way inside it (one that may be
-    /// dropped tries it). `f` is handed no wire where the place holds no link. `Some` once `f`
-    /// ran, which it always does.
+    /// A publish's leg to the faces: `leg` on each face's wire (`LinkTx`) in the order of the
+    /// face table, the face's send place held as [`Self::hold_on_link`] holds the dial role's,
+    /// and let go of before the next face's is taken, so no thread holds two faces' places and a
+    /// face that waits holds up no other. `leg` takes the session's lock its own way inside each
+    /// hold (one that may be dropped tries it) and reaches the held face alone
+    /// ([`FaceTx::reaches`]). A face whose place holds no parts is not handed to `leg`. What
+    /// the last leg that failed came to, else `Ok(0)`, as a leg's own faces answer.
     // Inlined whole: a publish's path is the one a message takes each time.
     #[inline(always)]
-    pub(super) fn on_link<U>(&self, f: impl FnOnce(LinkTx<'_, C>) -> U) -> Option<U> {
-        // SAFETY: as in `Self::hold_on_link`: `f` reaches the send part only as `LinkTx`.
-        let mut send = unsafe { self.direct.dial.site.hold_send() };
-        let wire = send
-            .as_mut()
-            .and_then(|send| send.tx())
-            .and_then(|tx| tx.as_ref());
-        Some(f(FaceTx {
-            face: &self.direct.dial.end,
-            wire,
-        }))
+    pub(super) fn on_faces(
+        &self,
+        mut leg: impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+    ) -> Result<usize, FanoutError> {
+        let mut outcome = Ok(0);
+        let mut at = 0;
+        while let Some(face) = self.direct.face(at) {
+            at += 1;
+            // SAFETY: as in `Self::hold_on_link`: `leg` reaches the send part only as `LinkTx`.
+            let Some(mut send) = (unsafe { face.site.hold_send() }) else {
+                continue;
+            };
+            let wire = send.tx().and_then(|tx| tx.as_ref());
+            let sent = leg(FaceTx {
+                face: &face.end,
+                wire,
+                alone: true,
+            });
+            if sent.is_err() {
+                outcome = sent;
+            }
+        }
+        outcome
+    }
+
+    /// How many legs a publish's walk of the faces hands out (`Self::on_faces`), and how many
+    /// faces that are up those legs reach between them.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn legs_of_a_publish(&self) -> (usize, usize) {
+        let (mut legs, mut reached) = (0, 0);
+        let _ = self.on_faces(|tx| {
+            legs += 1;
+            if let Some(core) = self.live() {
+                reached += core
+                    .0
+                    .up_wires_at()
+                    .filter(|(_, wire)| tx.reaches(wire))
+                    .count();
+            }
+            Ok(0)
+        });
+        (legs, reached)
     }
 
     /// Whether the one link's send place is free now: a try of it finds no holder.

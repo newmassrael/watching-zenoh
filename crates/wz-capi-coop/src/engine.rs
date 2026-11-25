@@ -2124,7 +2124,7 @@ impl LinkLeg<'_> {
 
 /// Send `leg` to the peer of the face whose record holds `wire`, as `how` says: through the
 /// held face's wire in `tx` where `wire` lies in the face whose place the caller holds, taken
-/// before the session's lock (`CoopEngine::on_link`), and by a try of the face's place
+/// before the session's lock (`CoopEngine::on_faces`), and by a try of the face's place
 /// otherwise ([`publish_on`]). `None` while the face's place holds no wire, or is not lent.
 #[cfg(not(wz_round))]
 #[inline(always)]
@@ -6924,13 +6924,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Some(f(&mut guard.0, core::marker::PhantomData))
     }
 
-    /// `f` on what an operation sends through (`LinkTx`), for one that takes the session's lock
-    /// its own way: nothing, where each face's record holds its link and is reached under that
-    /// lock. Always `Some`.
+    /// A publish's leg to the faces (`LinkTx`), for one that takes the session's lock its own
+    /// way: one leg through nothing, where each face's record holds its link and is reached under
+    /// that lock.
     #[cfg(wz_round)]
     #[inline(always)]
-    fn on_link<U>(&self, f: impl FnOnce(LinkTx<'_, C>) -> U) -> Option<U> {
-        Some(f(core::marker::PhantomData))
+    fn on_faces(
+        &self,
+        leg: impl FnOnce(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+    ) -> Result<usize, FanoutError> {
+        leg(core::marker::PhantomData)
     }
 
     /// The session's state for a publish's leg to its links. A publish that may not be dropped
@@ -7360,9 +7363,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !opts.allowed_destination.allows_remote() {
             return Ok(0);
         }
-        // The one link's place is taken before the session, as every send on it takes them.
-        self.on_link(|tx| self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx))
-            .unwrap_or(Ok(0))
+        // Each face's place is taken before the session, as every send on it takes them.
+        self.on_faces(|tx| self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx))
     }
 
     /// [`Self::publish_to_link`] through `tx`, what the caller holds of the one link.
@@ -7663,6 +7665,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(not(any(feature = "listen", feature = "group")))]
         let _ = skip;
         for (at, wire) in core.up_wires_at() {
+            // A publish's leg held for one face goes to that face alone.
+            #[cfg(not(wz_round))]
+            if !tx.reaches(wire) {
+                continue;
+            }
             #[cfg(any(feature = "listen", feature = "group"))]
             let dropped_on = skip.is_some_and(|dropped| self.rooms.skips(dropped, at));
             #[cfg(not(any(feature = "listen", feature = "group")))]

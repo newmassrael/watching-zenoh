@@ -890,6 +890,22 @@ fn a_hold_of_the_dial_place_reaches_the_dial_face_through_its_wire() {
     );
 }
 
+/// A publish's walk of the faces hands one leg to each face whose place holds a link, each leg
+/// reaching its own face alone: the session open on the dial role's face is handed one leg, which
+/// reaches that face. Turned red by a walk that skips the dial role's row (`DirectFaces::face`),
+/// or a leg that reaches no face (`FaceTx::reaches`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_publish_hands_each_face_a_leg_of_its_own() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.legs_of_a_publish(),
+        (1, 1),
+        "one leg, for the dial role's face, which reaches that face"
+    );
+}
+
 /// A callback of a record the read's step hands out finds the link's send place free: the step
 /// holds the link's receive part alone, so a send made there, or by another thread meanwhile,
 /// waits for no step and no callback. Turned red by a step that holds the send place while it
