@@ -343,6 +343,35 @@ impl<O: ConfinedOwner> LockKind for Confined<O> {
     one_task_holders!();
 }
 
+/// A kind whose hold of a value can be a value of its own, let go of as it drops, beside the
+/// closure [`LockKind::with`] runs the value in: what a holder that keeps the value across
+/// calls of its own takes ([`FacePlace::hold`]). A kind whose hold is a section of the whole
+/// program, entered and left around a closure, has none.
+#[cfg(feature = "runtime")]
+pub trait HoldKind: LockKind {
+    /// A hold of a value of `T`, which reaches it until it drops.
+    type Hold<'a, T>: core::ops::DerefMut<Target = T>
+    where
+        T: Send + 'static;
+
+    /// Hold the value of `mutex`, waiting for whatever holds it now, as [`LockKind::with`]
+    /// waits.
+    fn hold<T: Send + 'static>(mutex: &Self::Mutex<T>) -> Self::Hold<'_, T>;
+}
+
+#[cfg(feature = "runtime")]
+impl<O: ConfinedOwner> HoldKind for Confined<O> {
+    type Hold<'a, T>
+        = OwnerHold<'a, T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn hold<T: Send + 'static>(mutex: &Self::Mutex<T>) -> OwnerHold<'_, T> {
+        mutex.hold()
+    }
+}
+
 /// Several threads of a host, each reaching a session's values on its own: each value has its own
 /// lock ([`crate::cs::HostMutex`]), the handles on what the session's faces share are counted as
 /// an `Arc`'s are, a face's own link handles for one task and moved with the face whole, and its
@@ -475,6 +504,50 @@ impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
     }
 }
 
+/// A hold of an [`OwnerHeld`] value as a value of its own ([`OwnerHeld::hold`]): the value is
+/// reached through it until it drops, and a try of the value meanwhile finds it held, as inside
+/// [`OwnerHeld::with`].
+#[cfg(feature = "runtime")]
+pub struct OwnerHold<'a, T> {
+    value: &'a UnsafeCell<T>,
+    _inside: Inside<'a>,
+}
+
+#[cfg(feature = "runtime")]
+impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
+    /// [`Self::with`] as a value, let go of as it drops.
+    #[inline]
+    pub fn hold(&self) -> OwnerHold<'_, T> {
+        OwnerHold {
+            value: &self.value,
+            _inside: Inside::enter(&self.inside),
+        }
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl<T> core::ops::Deref for OwnerHold<'_, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        // SAFETY: as in `OwnerHeld::with`: one thread at a time reaches the value (`O`'s
+        // contract), and the hold marks it held for as long as it lives, so no other reference
+        // to it is made meanwhile (a take nested in the hold fails a debug build, a try finds it
+        // held); the borrow is the hold's own.
+        unsafe { &*self.value.get() }
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl<T> core::ops::DerefMut for OwnerHold<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `Deref`, the hold borrowed mutably, so this is the one reference.
+        unsafe { &mut *self.value.get() }
+    }
+}
+
 /// A closure inside an [`OwnerHeld`], from [`Inside::enter`] to drop, on return and on unwind
 /// alike: what a try nested in the hold of the same value finds, and what lets a debug build fail
 /// a take nested there.
@@ -584,6 +657,25 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
             "a face's place is waited on under a lock that bars it"
         );
         K::with(&self.place, |place| place.as_mut().map(f))
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: HoldKind, X: Send + 'static> FacePlace<K, X> {
+    /// [`Self::lend`] as a value: the transport, held until the hold drops, waiting for
+    /// whatever holds the face now; `None`, let go of at once, while the place holds none. A
+    /// debug build fails a wait made under a lock that bars one, as [`Self::lend`] does.
+    #[inline]
+    pub fn hold(&self) -> Option<K::Hold<'_, Option<X>>> {
+        debug_assert!(
+            !(K::WAITS && NoFaceWait::any_here()),
+            "a face's place is waited on under a lock that bars it"
+        );
+        let held = K::hold(&self.place);
+        held.is_some().then_some(held)
     }
 }
 

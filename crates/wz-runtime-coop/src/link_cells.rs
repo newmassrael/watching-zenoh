@@ -910,6 +910,18 @@ impl<X: FaceParts> FaceHeld<X> {
     pub fn lend<U: Send>(&mut self, f: impl FnOnce(&mut X) -> U + Send) -> U {
         f(&mut self.parts)
     }
+
+    /// The parts, borrowed for as long as the caller holds them, with no closure to bound what
+    /// comes in and goes out.
+    ///
+    /// # Safety
+    ///
+    /// The caller keeps what [`Self::lend`]'s `Send` bounds keep: no handle on a cell of the
+    /// parts outlives the borrow outside them, and no handle made outside them is put into them.
+    #[inline]
+    pub unsafe fn parts_mut(&mut self) -> &mut X {
+        &mut self.parts
+    }
 }
 
 #[cfg(test)]

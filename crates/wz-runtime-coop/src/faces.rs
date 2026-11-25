@@ -19,7 +19,7 @@
 //! (P3).
 
 use alloc::vec::Vec;
-use core::mem::MaybeUninit;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Deref;
 
 #[cfg(feature = "session-unicast-accept")]
@@ -38,7 +38,7 @@ use crate::session_drive::{
     LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial, SessionDatagramLink,
     SessionLinks, WaitOn,
 };
-use crate::sync::{AtSeat, FacePlace, Lend, LockKind, SeatOf};
+use crate::sync::{AtSeat, FacePlace, HoldKind, Lend, LockKind, SeatOf, SeatTaken};
 use crate::CoopLocalJoinHandle;
 use core::sync::atomic::{fence, AtomicU32, Ordering};
 
@@ -526,6 +526,76 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         fence(Ordering::SeqCst);
         if self.owed.load(Ordering::SeqCst) != 0 {
             let _ = self.place.try_lend(|held| self.pay(held));
+        }
+    }
+}
+
+impl<K: HoldKind, P: SendParts> FaceSite<K, P> {
+    /// [`Self::send`] as a value ([`SiteSend`]): through the send part this thread seated
+    /// ([`Self::lend_seating`]), else by a hold of the parts that waits for whatever holds the
+    /// place now and pays what is owed as it drops. `None` while the place holds no parts, or for
+    /// a send inside a send through the seat, which a debug build fails.
+    ///
+    /// # Safety
+    ///
+    /// What [`Self::send`]'s `Send` bounds keep is the caller's to keep while it holds the send:
+    /// no handle on a cell of the link made from the send part outlives the send, and no handle
+    /// made outside the parts is put into them.
+    pub unsafe fn hold_send(&self) -> Option<SiteSend<'_, K, P>> {
+        // SAFETY: the place's seats are made by `Self::lend_seating` alone, each over `P::Tx`.
+        let held = match unsafe { self.place.at_seat_of::<P::Tx>() } {
+            AtSeat::Taken(taken) => SendHeld::Seat(taken),
+            AtSeat::InUse => return None,
+            AtSeat::None => SendHeld::Lent(ManuallyDrop::new(self.place.hold()?)),
+        };
+        Some(SiteSend { site: self, held })
+    }
+}
+
+/// A send on a face's link held as a value ([`FaceSite::hold_send`]): the send part, reached
+/// through the seat of the holder's step this thread stands in, or through the parts, held until
+/// the send drops and then paid what was owed meanwhile, as a lend of them is.
+pub struct SiteSend<'a, K: HoldKind, P: SendParts> {
+    site: &'a FaceSite<K, P>,
+    held: SendHeld<'a, K, P>,
+}
+
+/// How a [`SiteSend`] reaches the send part.
+enum SendHeld<'a, K: HoldKind, P: SendParts> {
+    /// Through the seat of the holder's step on this thread.
+    Seat(SeatTaken<'a, P::Tx>),
+    /// Through the parts, held, and let go of in the send's drop once the debts owed are paid.
+    Lent(ManuallyDrop<K::Hold<'a, Option<FaceHeld<P>>>>),
+}
+
+impl<K: HoldKind, P: SendParts> SiteSend<'_, K, P> {
+    /// The send part; `None` only for parts the place no longer holds, which a hold never finds.
+    pub fn tx(&mut self) -> Option<&mut P::Tx> {
+        match &mut self.held {
+            SendHeld::Seat(taken) => Some(taken.tx()),
+            SendHeld::Lent(held) => {
+                let place: &mut Option<FaceHeld<P>> = held;
+                // SAFETY: what a lend's `Send` bounds keep is the holder's to keep while it holds
+                // the send (`FaceSite::hold_send`'s contract).
+                place
+                    .as_mut()
+                    .map(|parts| unsafe { parts.parts_mut() }.tx())
+            }
+        }
+    }
+}
+
+impl<K: HoldKind, P: SendParts> Drop for SiteSend<'_, K, P> {
+    fn drop(&mut self) {
+        if let SendHeld::Lent(held) = &mut self.held {
+            let place: &mut Option<FaceHeld<P>> = held;
+            if let Some(parts) = place.as_mut() {
+                self.site.pay(parts);
+            }
+            // SAFETY: the hold is let go of here alone, once, and is not reached after: the send
+            // is being dropped.
+            unsafe { ManuallyDrop::drop(held) };
+            self.site.pay_after();
         }
     }
 }
@@ -2866,6 +2936,72 @@ mod tests {
             paid.load(Ordering::SeqCst),
             2,
             "what the send found held paid as the lend let go"
+        );
+    }
+
+    /// A send held as a value reaches the parts' send part, holds the place until it drops, and
+    /// pays what was owed meanwhile as it lets go; inside the holder's seated step it takes the
+    /// seat and pays nothing; an empty place holds none. Turned red by a held send that leaves a
+    /// debt unpaid or pays it while it holds the parts (`SiteSend`'s drop), a hold that leaves
+    /// the place free, or a seated send that holds the place.
+    #[test]
+    fn a_send_held_as_a_value_pays_what_was_owed_as_it_drops() {
+        let (aborted, ended, paid) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        // SAFETY: the test keeps no handle of the parts past a send.
+        assert!(
+            unsafe { site.hold_send() }.is_none(),
+            "an empty place holds no send"
+        );
+        assert!(site.hold(paying_parts(&aborted, &ended, &paid)).is_none());
+        {
+            // SAFETY: as above.
+            let mut send = unsafe { site.hold_send() }.expect("a free place is held");
+            send.tx()
+                .expect("the held parts' send part")
+                .fetch_add(10, Ordering::SeqCst);
+            site.owe(2);
+            assert_eq!(
+                paid.load(Ordering::SeqCst),
+                10,
+                "nothing paid while the send holds the parts"
+            );
+            assert_eq!(
+                site.try_lend(|_| ()),
+                Lend::Held,
+                "the place held meanwhile"
+            );
+        }
+        assert_eq!(
+            paid.load(Ordering::SeqCst),
+            12,
+            "the debt paid as the send let go"
+        );
+        assert_eq!(
+            site.try_lend(|_| ()),
+            Lend::Lent(()),
+            "the place free again"
+        );
+        let site_ref = &site;
+        let seated = site.lend_seating(|held, seat| {
+            site_ref.owe(4);
+            held.lend(move |parts| {
+                seat.seat(&mut parts.1, || {
+                    // SAFETY: as above.
+                    let mut send = unsafe { site_ref.hold_send() }.expect("the seat is taken");
+                    send.tx().map(|tx| tx.fetch_add(100, Ordering::SeqCst))
+                })
+            })
+        });
+        assert_eq!(
+            seated,
+            Some(Some(12)),
+            "the seated send wrote the part at once"
+        );
+        assert_eq!(
+            paid.load(Ordering::SeqCst),
+            116,
+            "the debt owed inside paid once, as the holder let go"
         );
     }
 
