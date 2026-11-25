@@ -1347,6 +1347,117 @@ impl<T> Drop for LentSeq<T> {
     }
 }
 
+/// A region's description: the lines that place its tables' rows ([`SeqPlace`]) and the offsets of
+/// the tables' handles to the region's key arena, at most `MAX` of each. A constant of the
+/// region's type, joined from its tables' own descriptions (`SlotMap::places` and the like) by
+/// const fns, so one walk of it ([`place_region`](crate::key_arena::place_region)) joins every table
+/// of a session to its rows and its keys, whichever kinds the build keeps.
+///
+/// [`SlotMap::places`]: crate::slot_map::SlotMap::places
+#[derive(Clone, Copy, Debug)]
+pub struct RegionLines<const MAX: usize> {
+    seqs: [SeqPlace; MAX],
+    seq_count: usize,
+    keys: [usize; MAX],
+    key_count: usize,
+}
+
+impl<const MAX: usize> RegionLines<MAX> {
+    /// A description of no line.
+    pub const EMPTY: Self = Self {
+        seqs: [SeqPlace {
+            seq: 0,
+            rows: 0,
+            room: 0,
+        }; MAX],
+        seq_count: 0,
+        keys: [0; MAX],
+        key_count: 0,
+    };
+
+    /// This description and the line `line`. A description past `MAX` lines stops the build that
+    /// writes it.
+    pub const fn seq(mut self, line: SeqPlace) -> Self {
+        let placed = match self.seqs.split_at_mut_checked(self.seq_count) {
+            Some((_, [free, ..])) => {
+                *free = line;
+                true
+            }
+            _ => false,
+        };
+        assert!(
+            placed,
+            "a region's description holds every line of its tables"
+        );
+        self.seq_count = self.seq_count.wrapping_add(1);
+        self
+    }
+
+    /// This description and each of `lines`, in order.
+    pub const fn seqs(mut self, lines: &[SeqPlace]) -> Self {
+        let mut rest = lines;
+        while let [line, tail @ ..] = rest {
+            self = self.seq(*line);
+            rest = tail;
+        }
+        self
+    }
+
+    /// This description and a table's handle to the key arena at `at` in the region: a
+    /// [`LentKeys`](crate::key_arena::LentKeys). Past `MAX` handles it stops the build.
+    pub const fn keys_at(mut self, at: usize) -> Self {
+        let placed = match self.keys.split_at_mut_checked(self.key_count) {
+            Some((_, [free, ..])) => {
+                *free = at;
+                true
+            }
+            _ => false,
+        };
+        assert!(
+            placed,
+            "a region's description holds every key handle of its tables"
+        );
+        self.key_count = self.key_count.wrapping_add(1);
+        self
+    }
+
+    /// This description and every line of `other`, each moved `by` bytes on: the description of
+    /// a part of the region that lies `by` bytes from its start.
+    pub const fn with<const PART: usize>(mut self, other: &RegionLines<PART>, by: usize) -> Self {
+        let mut seqs = other.seq_lines();
+        while let [line, tail @ ..] = seqs {
+            self = self.seq(SeqPlace {
+                seq: line.seq.wrapping_add(by),
+                rows: line.rows.wrapping_add(by),
+                room: line.room,
+            });
+            seqs = tail;
+        }
+        let mut keys = other.key_lines();
+        while let [at, tail @ ..] = keys {
+            self = self.keys_at(at.wrapping_add(by));
+            keys = tail;
+        }
+        self
+    }
+
+    /// The lines that place the tables' rows.
+    pub const fn seq_lines(&self) -> &[SeqPlace] {
+        match self.seqs.split_at_checked(self.seq_count) {
+            Some((lines, _)) => lines,
+            None => &self.seqs,
+        }
+    }
+
+    /// Where the tables keep their handles to the key arena.
+    pub const fn key_lines(&self) -> &[usize] {
+        match self.keys.split_at_checked(self.key_count) {
+            Some((keys, _)) => keys,
+            None => &self.keys,
+        }
+    }
+}
+
 impl<T> SeqBacking<T> for LentSeq<T> {
     #[inline(always)]
     fn empty() -> Self {

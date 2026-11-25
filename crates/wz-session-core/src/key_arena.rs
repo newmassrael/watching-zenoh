@@ -55,7 +55,7 @@ use core::ptr::NonNull;
 #[cfg(debug_assertions)]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept, ZeroEmpty};
+use crate::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept, RegionLines, ZeroEmpty};
 
 /// The bytes of a block's header: its length and how many keys hold it (or, free, the next free
 /// block), each a `u32`.
@@ -617,6 +617,32 @@ impl<const BYTES: usize> KeyArena<BYTES> {
 
 // SAFETY: both fields are `MaybeUninit`, valid as any bytes; an arena not yet opened holds no key.
 unsafe impl<const BYTES: usize> ZeroEmpty for KeyArena<BYTES> {}
+
+/// Join each table of the region at `region` to its rows and to the region's key arena, as
+/// `lines` describes them: the one body that makes a zeroed region of the build's shape a session's
+/// tables, each holding no value, with no plan walked and nothing lent.
+///
+/// # Safety
+/// `lines` describes the region at `region` and its seq lines are as [`place_seqs`] requires;
+/// each of its key lines is the offset, in the region, of the [`LentKeys`] of a table that holds no
+/// key, aligned for it; `keys` is the space of an arena that outlives every table so joined.
+///
+/// [`place_seqs`]: crate::bounded::place_seqs
+pub unsafe fn place_region<const MAX: usize>(
+    region: NonNull<u8>,
+    keys: KeySpace,
+    lines: &RegionLines<MAX>,
+) {
+    // SAFETY: the caller's contract for the seq lines.
+    unsafe { crate::bounded::place_seqs(region, lines.seq_lines()) };
+    for at in lines.key_lines() {
+        let held = region.as_ptr().wrapping_add(*at).cast::<LentKeys>();
+        // SAFETY: the caller's contract: a `LentKeys` lies at `at` in the region, aligned, and holds
+        // no key a table made; it is written through the raw pointer, so no reference to the table
+        // that holds it is made.
+        unsafe { held.write(LentKeys::from(keys)) };
+    }
+}
 
 impl KeyMaker<KeyRef> for LentKeys {
     /// A key past the session's `MAX_KEYEXPR_BYTES` the arena was lent with is refused before any

@@ -2287,10 +2287,17 @@ pub(crate) struct MatchMemo<P: Storage> {
     /// How many times a slot was written. A repeated key may be answered from the slot the key
     /// before it was, but only while no slot has been written since.
     writes: u64,
-    /// The slot the last delivery was answered from, and `writes` as it was then; `None` when
-    /// that delivery was not answered from a slot at all (a key too deep to match).
-    last: Option<(usize, u64)>,
+    /// The slot the last delivery was answered from, counted from 1, and 0 when that delivery
+    /// was not answered from a slot at all (a key too deep to match): a count rather than an
+    /// `Option`, so a memory of all zero bytes remembers no delivery.
+    last_at: usize,
+    /// `writes` as it was when the slot `last_at` names answered.
+    last_writes: u64,
 }
+
+// SAFETY: its slots are a sequence of a policy whose sequences are empty at all zero bytes
+// (`ZeroSeqs`), and a memory of no write and no last answer is two zero counts.
+unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for MatchMemo<P> {}
 
 impl<P: Storage> MatchMemo<P> {
     /// A memory of `memo_slots::<P>(stated)` empty slots.
@@ -2303,8 +2310,23 @@ impl<P: Storage> MatchMemo<P> {
         Self {
             slots,
             writes: 0,
-            last: None,
+            last_at: 0,
+            last_writes: 0,
         }
+    }
+
+    /// The slot the last delivery was answered from, still as it was then.
+    fn last_answer(&self) -> Option<usize> {
+        match self.last_at.checked_sub(1) {
+            Some(at) if self.last_writes == self.writes => Some(at),
+            _ => None,
+        }
+    }
+
+    /// Remember that the slot `at` answered the delivery now.
+    fn answered_by(&mut self, at: usize) {
+        self.last_at = at.saturating_add(1);
+        self.last_writes = self.writes;
     }
 
     /// How many slots the memory holds: the count it was made with. A fixed table's is the
@@ -2454,26 +2476,24 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
         return scan_subscribers(rows, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
     if repeats_previous {
-        if let Some((at, writes)) = memo.last {
-            if writes == memo.writes {
-                if let Some(Some(slot)) = memo.slots.get(at) {
-                    if slot.epoch == epoch && slot.remote == is_remote {
-                        for position in slot.hits.iter() {
-                            if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
-                                deliver(id, sink);
-                            }
+        if let Some(at) = memo.last_answer() {
+            if let Some(Some(slot)) = memo.slots.get(at) {
+                if slot.epoch == epoch && slot.remote == is_remote {
+                    for position in slot.hits.iter() {
+                        if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
+                            deliver(id, sink);
                         }
-                        return slot.hits.len();
                     }
+                    return slot.hits.len();
                 }
             }
         }
     }
-    memo.last = None;
+    memo.last_at = 0;
     let at = memo.slot_of(key);
     if let Some(Some(slot)) = memo.slots.get(at) {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
-            memo.last = Some((at, memo.writes));
+            memo.answered_by(at);
             for position in slot.hits.iter() {
                 if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
                     deliver(id, sink);
@@ -2523,7 +2543,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     });
     // A count of writes, read only for equality with the one a remembered slot was written at.
     memo.writes = memo.writes.wrapping_add(1);
-    memo.last = Some((at, memo.writes));
+    memo.answered_by(at);
     fired
 }
 
@@ -5018,6 +5038,20 @@ mod tests {
     // Fixtures build the borrowed codec views then `.into_owned()` at the
     // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
     use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
+
+    /// A match memory of all zero bytes remembers no answer; one answered remembers its slot until
+    /// a slot is written. Turned red by `last_answer` reading a zero `last_at` as slot 0.
+    #[test]
+    fn a_match_memory_of_zero_bytes_remembers_no_answer() {
+        // SAFETY: `MatchMemo` is `ZeroEmpty`.
+        let mut memo: MatchMemo<crate::bounded::Region> = unsafe { core::mem::zeroed() };
+        assert_eq!(memo.last_answer(), None);
+        assert_eq!(memo.slot_count(), 0);
+        memo.answered_by(0);
+        assert_eq!(memo.last_answer(), Some(0));
+        memo.writes = memo.writes.wrapping_add(1);
+        assert_eq!(memo.last_answer(), None);
+    }
 
     #[test]
     fn dispatch_fires_callback_on_matching_keyexpr() {
