@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ffi::c_int;
 
-use wz_session_core::byte_cells::LentByteCells;
+use wz_session_core::byte_cells::{CellFlag, LentByteCells};
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::ws_link::{MaskKeys, KEY_LEN, MAX_HEAD_LEN};
 
@@ -61,7 +61,7 @@ type Stream<O> = <<O as WsOpen>::Dial as StreamDial>::Stream;
 /// tables and cells when it lent them, the slots its frames are encoded into, and whether its
 /// owner waits.
 struct WsShape<N: CountKind> {
-    lent: Option<LinkTables>,
+    lent: Option<LinkTables<N::Flag>>,
     cells: Option<LentByteCells<N::Flag>>,
     owner_waits: bool,
     tx_slots: usize,
@@ -91,7 +91,7 @@ impl<N: CountKind> Default for WsShape<N> {
 
 impl<N: CountKind> WsShape<N> {
     /// The buffers of one link, claimed as every link's of the stack are.
-    fn buffers(&self) -> Result<(RxBuffer, TxBuffer), LinkOpenError> {
+    fn buffers(&self) -> Result<(RxBuffer<N::Flag>, TxBuffer<N::Flag>), LinkOpenError> {
         heap_link_buffers(
             self.lent.as_ref(),
             WS_RX_CAPACITY,
@@ -107,9 +107,9 @@ impl<N: CountKind> WsShape<N> {
     fn link<P: StreamSocket + 'static>(
         &self,
         stream: P,
-        rx: RxBuffer,
+        rx: RxBuffer<N::Flag>,
         held: usize,
-        tx: TxBuffer,
+        tx: TxBuffer<N::Flag>,
         framing: WsFraming,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         if !stream_ends_fit(&stream) {
@@ -135,18 +135,18 @@ impl<N: CountKind> WsShape<N> {
 
 /// A `ws/` dial under way: its connection being made, then its request written and the
 /// server's answer read into the buffer of the link it makes.
-struct WsDialing<P> {
+struct WsDialing<P, F: CellFlag> {
     stream: P,
     at: WsLocator,
-    rx: RxBuffer,
-    tx: TxBuffer,
+    rx: RxBuffer<F>,
+    tx: TxBuffer<F>,
     key: [u8; KEY_LEN],
     keys: MaskKeys,
     /// The bytes of the answer read, once the request is written.
     filled: Option<usize>,
 }
 
-impl<P: StreamSocket> WsDialing<P> {
+impl<P: StreamSocket, F: CellFlag> WsDialing<P, F> {
     /// One step of the dial, without waiting: what followed the server's head once it upgraded
     /// the connection, `None` while it has not answered.
     fn step(&mut self) -> Option<Result<usize, LinkOpenError>> {
@@ -171,7 +171,7 @@ impl<P: StreamSocket> WsDialing<P> {
 /// A `ws/` dial ([`SessionLinks::begin_initiator`]): asked at each poll, without waiting, until
 /// the server answers its request.
 pub struct WsDial<O: WsOpen, N: CountKind = OneTask> {
-    dialing: Option<WsDialing<Stream<O>>>,
+    dialing: Option<WsDialing<Stream<O>, N::Flag>>,
     opener: O,
     shape: WsShape<N>,
 }
@@ -259,15 +259,15 @@ impl<D: From<OpenedLink<HeapLink<N>, N>>, O: WsOpen, N: CountKind> From<OpenedLi
 }
 
 /// A connection accepted and its request not yet answered.
-struct WsAccepting<P> {
+struct WsAccepting<P, F: CellFlag> {
     stream: P,
-    rx: RxBuffer,
-    tx: TxBuffer,
+    rx: RxBuffer<F>,
+    tx: TxBuffer<F>,
     filled: usize,
     since_us: u64,
 }
 
-impl<P: StreamSocket> WsAccepting<P> {
+impl<P: StreamSocket, F: CellFlag> WsAccepting<P, F> {
     /// One step of the server's handshake, without waiting: what followed the client's head
     /// once its request is read and answered, `None` while it has not all arrived.
     fn step(&mut self) -> Option<Result<usize, LinkOpenError>> {
@@ -283,7 +283,7 @@ struct WsListener<O: WsOpen, N: CountKind> {
     opener: O,
     shape: WsShape<N>,
     /// Never longer than `handshakes`, which its capacity holds, so it never grows after the open.
-    accepting: RefCell<Vec<WsAccepting<Stream<O>>>>,
+    accepting: RefCell<Vec<WsAccepting<Stream<O>, N::Flag>>>,
     handshakes: usize,
 }
 
@@ -393,14 +393,14 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> WsLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.is_none(),
-            "cells are lent after the links are made"
+            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            "cells and buffers are lent after the links are made"
         );
         WsLinks {
             links,
             opener: self.opener,
             shape: WsShape {
-                lent: self.shape.lent,
+                lent: None,
                 cells: None,
                 owner_waits: self.shape.owner_waits,
                 tx_slots: self.shape.tx_slots,
@@ -487,7 +487,7 @@ where
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         self.shape.lent = Some(tables);
         self.links.lend_buffers(tables);
     }
@@ -497,7 +497,7 @@ where
         match self.links.link_cell_bytes() {
             0 => 0,
             links => links.max(CellRc::<
-                StreamDriver<Stream<O>, RxBuffer, TxBuffer, WsFraming>,
+                StreamDriver<Stream<O>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, WsFraming>,
             >::cell_bytes()),
         }
     }

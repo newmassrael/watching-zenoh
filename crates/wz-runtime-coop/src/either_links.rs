@@ -254,7 +254,7 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         on_side!(EitherLinks, self, links => links.lend_buffers(tables))
     }
 

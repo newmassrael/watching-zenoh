@@ -1077,7 +1077,7 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     /// [`LinkOpenError::Exhausted`], never one that allocates; told before the session listens, so
     /// a listener it opens after takes them too. The default ignores them: a stack whose links
     /// bring buffers of their own (an lwIP pool, a test network) keeps them.
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         let _ = tables;
     }
 

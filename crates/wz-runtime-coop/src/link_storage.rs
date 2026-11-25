@@ -21,7 +21,7 @@ use core::cell::Cell;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec::Vec;
 
-use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
+use wz_session_core::byte_cells::{ByteBuf, CellFlag, LentByteCells};
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant, SESSION_TX_SLOTS,
 };
@@ -81,15 +81,15 @@ impl<B: AsMut<[u8]>> RxStore for B {
 /// `static z_result_t _z_unicast_handle_remaining_data(_z_transport_unicast_t *ztu, _z_transport_peer_unicast_t *peer,`)
 /// and reads every peer into the transport's one buffer otherwise. The facts about what the bytes
 /// are stay the link's (`StreamDriver`'s `held` and `spent`); only the bytes come from the pool.
-pub struct PooledRx {
-    pool: LentByteCells,
-    held: Option<ByteBuf>,
+pub struct PooledRx<F: CellFlag = Cell<bool>> {
+    pool: LentByteCells<F>,
+    held: Option<ByteBuf<F>>,
     starved: bool,
 }
 
-impl PooledRx {
+impl<F: CellFlag> PooledRx<F> {
     /// A link's place in `pool`, holding no buffer yet.
-    pub const fn of(pool: LentByteCells) -> Self {
+    pub const fn of(pool: LentByteCells<F>) -> Self {
         Self {
             pool,
             held: None,
@@ -103,7 +103,7 @@ impl PooledRx {
     }
 }
 
-impl RxStore for PooledRx {
+impl<F: CellFlag> RxStore for PooledRx<F> {
     fn capacity(&mut self) -> usize {
         self.pool.size()
     }
@@ -193,7 +193,7 @@ pub trait TxStore {
 /// The fixed-memory profile's outbound storage: a buffer lent by a table the image declares, one
 /// slot. The socket writes a frame before the session builds the next, and a session that does not
 /// batch has no frame open beside it.
-impl TxStore for ByteBuf {
+impl<F: CellFlag> TxStore for ByteBuf<F> {
     fn slots(&self) -> usize {
         1
     }
@@ -265,20 +265,20 @@ impl TxStore for HeapTx {
 /// whole, laid end to end as `HeapTx` lays them in its vector. What a link whose buffers a session's
 /// tables lend encodes its frames into ([`LinkTables`]): a batching session holds a slot open while
 /// it encodes the next message into another, so one buffer carries every slot the link lends.
-pub struct SlottedTx {
-    buf: ByteBuf,
+pub struct SlottedTx<F: CellFlag = Cell<bool>> {
+    buf: ByteBuf<F>,
     slot_len: usize,
 }
 
-impl SlottedTx {
+impl<F: CellFlag> SlottedTx<F> {
     /// The slots of `slot_len` bytes that `buf` holds whole: none with a `slot_len` of 0, which
     /// lends nothing.
-    pub fn new(buf: ByteBuf, slot_len: usize) -> Self {
+    pub fn new(buf: ByteBuf<F>, slot_len: usize) -> Self {
         Self { buf, slot_len }
     }
 }
 
-impl TxStore for SlottedTx {
+impl<F: CellFlag> TxStore for SlottedTx<F> {
     fn slots(&self) -> usize {
         self.buf.raw().1.checked_div(self.slot_len).unwrap_or(0)
     }
@@ -300,30 +300,30 @@ impl TxStore for SlottedTx {
 /// ([`PooledRx`]); in one that only dials, whose session holds its dial and the faces it
 /// attaches, a buffer of its own, with none of a pool's bookkeeping.
 #[cfg(feature = "session-unicast-accept")]
-pub type LinkRx = PooledRx;
+pub type LinkRx<F = Cell<bool>> = PooledRx<F>;
 /// A link's receive storage of its session's tables (see the twin above): a buffer of its own.
 #[cfg(not(feature = "session-unicast-accept"))]
-pub type LinkRx = ByteBuf;
+pub type LinkRx<F = Cell<bool>> = ByteBuf<F>;
 
 /// A link's outbound storage of its session's tables: one slot at a time of the pool the links
 /// share in a build that accepts links ([`LinkTx`]), a buffer of its own cut into slots in one
 /// that only dials ([`SlottedTx`]).
 #[cfg(feature = "session-unicast-accept")]
-pub type LinkTxStore = LinkTx;
+pub type LinkTxStore<F = Cell<bool>> = LinkTx<F>;
 /// A link's outbound storage of its session's tables (see the twin above): a buffer of its own.
 #[cfg(not(feature = "session-unicast-accept"))]
-pub type LinkTxStore = SlottedTx;
+pub type LinkTxStore<F = Cell<bool>> = SlottedTx<F>;
 
 /// A link's outbound storage of its session's tables: a buffer of its own, cut into slots
 /// ([`SlottedTx`]), or one slot at a time of a pool the session's links share ([`PooledTx`]).
-pub enum LinkTx {
+pub enum LinkTx<F: CellFlag = Cell<bool>> {
     /// A buffer of the link's own.
-    Own(SlottedTx),
+    Own(SlottedTx<F>),
     /// A place in the session's pool.
-    Pooled(PooledTx),
+    Pooled(PooledTx<F>),
 }
 
-impl TxStore for LinkTx {
+impl<F: CellFlag> TxStore for LinkTx<F> {
     fn slots(&self) -> usize {
         match self {
             Self::Own(store) => store.slots(),
@@ -379,23 +379,23 @@ impl TxStore for LinkTx {
 /// lent a buffer of its own lends one (`LINK_TX_SLOTS` of `wz-capi-coop`), so a link of a pool
 /// encodes and sends as it did. The link also holds its place among the session's links, which
 /// is what bounds how many links open.
-pub struct PooledTx {
-    pool: LentByteCells,
+pub struct PooledTx<F: CellFlag = Cell<bool>> {
+    pool: LentByteCells<F>,
     /// The table of the links' places, to tell whether the pool has a slot for every link.
-    links: LentByteCells,
+    links: LentByteCells<F>,
     /// This link's place, held for its life.
-    _place: ByteBuf,
-    held: core::cell::RefCell<Option<ByteBuf>>,
+    _place: ByteBuf<F>,
+    held: core::cell::RefCell<Option<ByteBuf<F>>>,
 }
 
-impl PooledTx {
+impl<F: CellFlag> PooledTx<F> {
     /// Whether the link holds a slot of the pool now.
     pub fn holds(&self) -> bool {
         self.held.borrow().is_some()
     }
 }
 
-impl TxStore for PooledTx {
+impl<F: CellFlag> TxStore for PooledTx<F> {
     fn slots(&self) -> usize {
         1
     }
@@ -443,13 +443,18 @@ impl TxStore for PooledTx {
 ///
 /// A handle, as the tables are: copies name the same buffers. The tables' memory is the session's
 /// arena, which is given back once every link of the session is gone.
-#[derive(Clone, Copy, Debug)]
-pub struct LinkTables {
-    rx: LentByteCells,
-    tx: LentByteCells,
+///
+/// `F` is the form of the flags of the links' tables, the one the session counts its links'
+/// handles by: a link's buffers then move with the link to whichever thread holds it. A group's
+/// receive buffers are flagged as cells whatever `F` is: a group is held by the one task that
+/// drives it.
+#[derive(Debug)]
+pub struct LinkTables<F: CellFlag = Cell<bool>> {
+    rx: LentByteCells<F>,
+    tx: LentByteCells<F>,
     /// The links' places when `tx` is a pool of slots the links share; `None` when `tx` holds a
     /// buffer for each link.
-    places: Option<LentByteCells>,
+    places: Option<LentByteCells<F>>,
     slot_len: usize,
     /// The receive buffers of the multicast groups the session may join, one for each, which a
     /// group claims when it is joined; `None` when the session lent none, and a group's stack
@@ -461,10 +466,20 @@ pub struct LinkTables {
     port_rx: Option<LentByteCells>,
 }
 
-impl LinkTables {
+// Not derived: a derive would ask `F: Copy`, and an atomic flag is not; the tables hold handles
+// on the flags, which are.
+impl<F: CellFlag> Clone for LinkTables<F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: CellFlag> Copy for LinkTables<F> {}
+
+impl<F: CellFlag> LinkTables<F> {
     /// The links' pool of receive buffers in `rx` and their outbound storage in `tx`, each buffer
     /// of which is cut into slots of `slot_len` bytes.
-    pub const fn new(rx: LentByteCells, tx: LentByteCells, slot_len: usize) -> Self {
+    pub const fn new(rx: LentByteCells<F>, tx: LentByteCells<F>, slot_len: usize) -> Self {
         Self {
             rx,
             tx,
@@ -477,7 +492,11 @@ impl LinkTables {
 
     /// The links' pool of receive buffers in `rx`, a pool of outbound slots in `tx`, each one
     /// slot, which the links share, and a place in `places` for each link the session may hold.
-    pub const fn pooled(rx: LentByteCells, tx: LentByteCells, places: LentByteCells) -> Self {
+    pub const fn pooled(
+        rx: LentByteCells<F>,
+        tx: LentByteCells<F>,
+        places: LentByteCells<F>,
+    ) -> Self {
         Self {
             rx,
             tx,
@@ -526,7 +545,7 @@ impl LinkTables {
     /// The receive and the outbound storage of one link ([`LinkRx`], [`LinkTxStore`]), or `None`
     /// when the tables have none left for another link.
     #[cfg(feature = "session-unicast-accept")]
-    pub fn claim(&self) -> Option<(LinkRx, LinkTxStore)> {
+    pub fn claim(&self) -> Option<(LinkRx<F>, LinkTxStore<F>)> {
         let tx = match self.places {
             Some(places) => LinkTx::Pooled(PooledTx {
                 pool: self.tx,
@@ -543,7 +562,7 @@ impl LinkTables {
     /// none left; a receive buffer claimed for a link the other table could not serve is back in
     /// its table when this returns.
     #[cfg(not(feature = "session-unicast-accept"))]
-    pub fn claim(&self) -> Option<(LinkRx, LinkTxStore)> {
+    pub fn claim(&self) -> Option<(LinkRx<F>, LinkTxStore<F>)> {
         let rx = self.rx.claim()?;
         let tx = self.tx.claim()?;
         Some((rx, SlottedTx::new(tx, self.slot_len)))
@@ -582,15 +601,15 @@ impl LinkTables {
 /// A link's receive buffer on the heap profile: allocated when the link opens, or taken from its
 /// session's pool while it holds something ([`LinkTables`]).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub enum RxBuffer {
+pub enum RxBuffer<F: CellFlag = Cell<bool>> {
     /// The link's own allocation.
     Owned(Vec<u8>),
     /// Storage of the session's tables.
-    Lent(LinkRx),
+    Lent(LinkRx<F>),
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl RxStore for RxBuffer {
+impl<F: CellFlag> RxStore for RxBuffer<F> {
     fn capacity(&mut self) -> usize {
         match self {
             Self::Owned(bytes) => bytes.len(),
@@ -618,21 +637,21 @@ impl RxStore for RxBuffer {
         }
     }
 
-    const POOLED: bool = <LinkRx as RxStore>::POOLED;
+    const POOLED: bool = <LinkRx<F> as RxStore>::POOLED;
 }
 
 /// A link's outbound storage on the heap profile: the slots it allocated when it opened
 /// ([`HeapTx`], none for a link that lends nothing), or its session's tables' ([`LinkTx`]).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub enum TxBuffer {
+pub enum TxBuffer<F: CellFlag = Cell<bool>> {
     /// The link's own allocation.
     Owned(HeapTx),
     /// Storage of the session's tables.
-    Lent(LinkTxStore),
+    Lent(LinkTxStore<F>),
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl TxStore for TxBuffer {
+impl<F: CellFlag> TxStore for TxBuffer<F> {
     fn slots(&self) -> usize {
         match self {
             Self::Owned(store) => store.slots(),
@@ -688,12 +707,12 @@ impl TxStore for TxBuffer {
 /// are full opens no link; otherwise allocated, a receive buffer of `rx` bytes and the slots
 /// [`HeapTx::for_link`] makes of `tx_slots` and `tx_len`.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub(crate) fn heap_link_buffers(
-    lent: Option<&LinkTables>,
+pub(crate) fn heap_link_buffers<F: CellFlag>(
+    lent: Option<&LinkTables<F>>,
     rx: usize,
     tx_slots: usize,
     tx_len: usize,
-) -> Result<(RxBuffer, TxBuffer), crate::session_drive::LinkOpenError> {
+) -> Result<(RxBuffer<F>, TxBuffer<F>), crate::session_drive::LinkOpenError> {
     match lent {
         Some(tables) => {
             let (rx, tx) = tables
@@ -1185,7 +1204,7 @@ mod tests {
             SESSION_TX_SLOTS + 1,
             "more when asked for more"
         );
-        let (rx, tx) = heap_link_buffers(None, 48, 0, 0).expect("allocated");
+        let (rx, tx) = heap_link_buffers::<Cell<bool>>(None, 48, 0, 0).expect("allocated");
         assert!(matches!(rx, RxBuffer::Owned(_)));
         assert_eq!((tx.slots(), tx.slot_len()), (SESSION_TX_SLOTS, 48));
     }
@@ -1208,6 +1227,38 @@ mod tests {
         assert!(
             table.claim().is_some(),
             "the buffer given back is claimed again"
+        );
+    }
+
+    /// Tables whose flags are atomics lend a link storage that moves with the link to another
+    /// thread, and what is given back there is claimed again. Turned red by a link's storage
+    /// that is of a table of cells whatever the flags of the session's tables are.
+    #[cfg(target_has_atomic = "8")]
+    #[test]
+    fn tables_of_atomic_flags_lend_storage_that_moves_to_another_thread() {
+        use core::sync::atomic::AtomicBool;
+        fn moves<T: Send>(_: &T) {}
+        let bytes = Arena::byte_cells_bytes(16, 1)
+            .and_then(|rx| Arena::byte_cells_bytes(16, 1).map(|tx| rx + tx))
+            .expect("a test's tables fit the address space");
+        let mut arena = arena_of(bytes);
+        let rx = arena
+            .lend_byte_cells_of::<AtomicBool>(16, 1)
+            .expect("the receive table");
+        let tx = arena
+            .lend_byte_cells_of::<AtomicBool>(16, 1)
+            .expect("the outbound table");
+        let tables = LinkTables::new(rx, tx, 8);
+        let (rx, tx) = tables.claim().expect("the link's storage");
+        moves(&rx);
+        moves(&tx);
+        assert!(tables.claim().is_none(), "the one link's storage is out");
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop((rx, tx)));
+        });
+        assert!(
+            tables.claim().is_some(),
+            "the storage given back on the other thread is claimed again"
         );
     }
 }

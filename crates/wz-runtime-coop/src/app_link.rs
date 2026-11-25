@@ -59,7 +59,7 @@ use wz_session_core::app_link_table::{
     SendStep, StreamRead, DATAGRAM_MAX,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
-use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
+use wz_session_core::byte_cells::{ByteBuf, CellFlag, LentByteCells};
 use wz_session_core::group_locator::{GroupLocator, UdpGroup};
 
 use crate::group_transport::{GroupRx, GroupSend, GroupTransport};
@@ -805,7 +805,7 @@ impl<N: CountKind> From<OpenedLink<HeapLink<N>, N>> for AppDial<N> {
 /// program is told to close.
 struct PendingAppLink<N: CountKind> {
     held: Option<Held>,
-    buffers: Option<(RxBuffer, TxBuffer)>,
+    buffers: Option<(RxBuffer<N::Flag>, TxBuffer<N::Flag>)>,
     to: SocketAddr,
     /// A `udp/` link once up, else a `tcp/` one.
     datagram: bool,
@@ -1242,7 +1242,7 @@ pub struct AppLinks<N: CountKind = OneTask> {
     open_bound: Option<OpenBound>,
     /// The tables of the session the links serve, when it lent some
     /// ([`SessionLinks::lend_buffers`]): every link claims its buffers there, and none allocates.
-    lent: Option<LinkTables>,
+    lent: Option<LinkTables<N::Flag>>,
     /// Whether each link is waited on by its owner ([`Self::waited_by_owner`]).
     owner_waits: OwnerWaits,
     /// The cells of the session the links serve, when it lent some
@@ -1257,10 +1257,10 @@ struct OwnerWaits(bool);
 
 impl OwnerWaits {
     /// A stream link as the links open it, set where it lies.
-    fn stream(
+    fn stream<F: CellFlag>(
         self,
-        link: &mut StreamDriver<AppStreamSocket, RxBuffer, TxBuffer>,
-    ) -> &mut StreamDriver<AppStreamSocket, RxBuffer, TxBuffer> {
+        link: &mut StreamDriver<AppStreamSocket, RxBuffer<F>, TxBuffer<F>>,
+    ) -> &mut StreamDriver<AppStreamSocket, RxBuffer<F>, TxBuffer<F>> {
         if self.0 {
             link.wait_by_owner();
         }
@@ -1268,10 +1268,10 @@ impl OwnerWaits {
     }
 
     /// A datagram link as the links open it, set where it lies.
-    fn datagram(
+    fn datagram<F: CellFlag>(
         self,
-        link: &mut UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer>,
-    ) -> &mut UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer> {
+        link: &mut UdpDriver<AppDatagramSocket, RxBuffer<F>, TxBuffer<F>>,
+    ) -> &mut UdpDriver<AppDatagramSocket, RxBuffer<F>, TxBuffer<F>> {
         if self.0 {
             link.wait_by_owner();
         }
@@ -1287,8 +1287,8 @@ impl OwnerWaits {
         cells: Option<&LentByteCells<N::Flag>>,
         socket: AppDatagramSocket,
         peer: SocketAddr,
-        rx: RxBuffer,
-        tx: TxBuffer,
+        rx: RxBuffer<N::Flag>,
+        tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(cells, datagram_ends_fit(&socket, Some(peer)))?
             .open(|place| self.datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx))))
@@ -1301,8 +1301,8 @@ impl OwnerWaits {
         self,
         cells: Option<&LentByteCells<N::Flag>>,
         stream: AppStreamSocket,
-        rx: RxBuffer,
-        tx: TxBuffer,
+        rx: RxBuffer<N::Flag>,
+        tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(cells, stream_ends_fit(&stream))?
             .open(|place| self.stream(place.write(StreamDriver::over(stream, rx, tx))))
@@ -1335,8 +1335,8 @@ impl<N: CountKind> AppLinks<N> {
     /// session is opened over them, which is when it lends them its cells.
     pub fn counted_by<M: CountKind>(self) -> AppLinks<M> {
         debug_assert!(
-            self.cells.is_none(),
-            "cells are lent after the links are made"
+            self.cells.is_none() && self.lent.is_none(),
+            "cells and buffers are lent after the links are made"
         );
         AppLinks {
             transport: self.transport,
@@ -1344,7 +1344,7 @@ impl<N: CountKind> AppLinks<N> {
             dial: self.dial,
             datagram_rx: self.datagram_rx,
             open_bound: self.open_bound,
-            lent: self.lent,
+            lent: None,
             owner_waits: self.owner_waits,
             cells: None,
         }
@@ -1499,15 +1499,17 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
     /// Every link opened from now on, and every one a listener opened after this takes, claims its
     /// buffers from `tables`, and its row of the program's transport is taken now, one for each
     /// link the tables hold.
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         self.transport.provision(tables.links());
         self.lent = Some(tables);
     }
 
     /// The larger cell of these links' two: a datagram link's and a stream link's.
     fn link_cell_bytes(&self) -> usize {
-        CellRc::<UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer>>::cell_bytes()
-            .max(CellRc::<StreamDriver<AppStreamSocket, RxBuffer, TxBuffer>>::cell_bytes())
+        CellRc::<UdpDriver<AppDatagramSocket, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes()
+            .max(CellRc::<
+            StreamDriver<AppStreamSocket, RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
+        >::cell_bytes())
     }
 
     /// Every link opened from now on, and every one a listener opened after this takes, is placed
@@ -1556,7 +1558,7 @@ struct AppDatagramListener<N: CountKind> {
     /// The receive buffer each accepted link reads into, as [`AppLinks::with_rx_capacity`] set it.
     datagram_rx: usize,
     /// The session's tables, which each accepted link claims its buffers from ([`AppLinks`]).
-    lent: Option<LinkTables>,
+    lent: Option<LinkTables<N::Flag>>,
     /// Whether each accepted link is waited on by its owner, as its links' are.
     owner_waits: OwnerWaits,
     /// The cells each accepted link is placed in, as its links' are.
@@ -1603,7 +1605,7 @@ impl<N: CountKind> LinkListener<HeapLink<N>, N> for AppDatagramListener<N> {
 struct AppLinkListener<N: CountKind> {
     listener: Box<dyn StreamListen<Stream = AppStreamSocket>>,
     /// The session's tables, which each accepted link claims its buffers from ([`AppLinks`]).
-    lent: Option<LinkTables>,
+    lent: Option<LinkTables<N::Flag>>,
     /// Whether each accepted link is waited on by its owner, as its links' are.
     owner_waits: OwnerWaits,
     /// The cells each accepted link is placed in, as its links' are.

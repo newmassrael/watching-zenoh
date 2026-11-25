@@ -389,7 +389,7 @@ struct LinkShape<N: CountKind> {
     datagram_rx: usize,
     /// The tables of the session the links serve, when it lent the stack some
     /// ([`SessionLinks::lend_buffers`]): every link claims its buffers there, and none allocates.
-    lent: Option<LinkTables>,
+    lent: Option<LinkTables<N::Flag>>,
     place: LinkPlace<N>,
 }
 
@@ -424,14 +424,14 @@ impl<N: CountKind> LinkShape<N> {
     /// ([`SessionLinks::lend_cells`]), so the shape is changed before that and has none.
     fn counted_by<M: CountKind>(self) -> LinkShape<M> {
         debug_assert!(
-            self.place.cells.is_none(),
-            "cells are lent after the links are made"
+            self.place.cells.is_none() && self.lent.is_none(),
+            "cells and buffers are lent after the links are made"
         );
         LinkShape {
             tx_slots: self.tx_slots,
             tx_capacity: self.tx_capacity,
             datagram_rx: self.datagram_rx,
-            lent: self.lent,
+            lent: None,
             place: LinkPlace {
                 owner_waits: self.place.owner_waits,
                 cells: None,
@@ -483,8 +483,8 @@ impl<N: CountKind> LinkPlace<N> {
     fn stream<S: StreamSocket + 'static>(
         &self,
         socket: S,
-        rx: RxBuffer,
-        tx: TxBuffer,
+        rx: RxBuffer<N::Flag>,
+        tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&socket))?.open(|place| {
             let link = place.write(link_over(socket, rx, tx));
@@ -505,8 +505,8 @@ impl<N: CountKind> LinkPlace<N> {
         &self,
         socket: U,
         peer: Option<SocketAddr>,
-        rx: RxBuffer,
-        tx: TxBuffer,
+        rx: RxBuffer<N::Flag>,
+        tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(self.cells.as_ref(), datagram_ends_fit(&socket, peer))?.open(|place| {
             let link = place.write(UdpDriver::with_peer(socket, peer, rx, tx));
@@ -523,7 +523,7 @@ impl<N: CountKind> LinkShape<N> {
     /// The buffers of a link that opens now, its own receive buffer `rx` bytes long: claimed from
     /// the session's tables when it lent some, and [`LinkOpenError::Exhausted`] when they have none
     /// left, so a session whose tables are full opens no link; allocated otherwise.
-    fn buffers(&self, rx: usize) -> Result<(RxBuffer, TxBuffer), LinkOpenError> {
+    fn buffers(&self, rx: usize) -> Result<(RxBuffer<N::Flag>, TxBuffer<N::Flag>), LinkOpenError> {
         heap_link_buffers(self.lent.as_ref(), rx, self.tx_slots, self.tx_capacity)
     }
 }
@@ -722,23 +722,24 @@ where
 
     /// Every link these links open from now on, dialled or taken off a port that is listened on
     /// after this, claims its buffers from `tables`.
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         self.shape.lent = Some(tables);
     }
 
     /// The largest cell any link of these takes: a datagram link, a link of a `udp/` port's
     /// peer, a plain stream's and a secure channel's.
     fn link_cell_bytes(&self) -> usize {
-        let datagram = CellRc::<UdpDriver<U, RxBuffer, TxBuffer>>::cell_bytes();
+        let datagram = CellRc::<UdpDriver<U, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes();
         #[cfg(feature = "udp-listen")]
-        let datagram =
-            datagram.max(CellRc::<UdpDriver<PortPeer<U>, RxBuffer, TxBuffer>>::cell_bytes());
+        let datagram = datagram.max(CellRc::<
+            UdpDriver<PortPeer<U>, RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
+        >::cell_bytes());
         datagram
             .max(CellRc::<
-                <D::Stream as StreamSocket>::Link<RxBuffer, TxBuffer>,
+                <D::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
             >::cell_bytes())
             .max(CellRc::<
-                <L::Stream as StreamSocket>::Link<RxBuffer, TxBuffer>,
+                <L::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
             >::cell_bytes())
     }
 
@@ -919,7 +920,7 @@ where
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
     socket: Option<P>,
-    buffers: Option<(RxBuffer, TxBuffer)>,
+    buffers: Option<(RxBuffer<N::Flag>, TxBuffer<N::Flag>)>,
     place: LinkPlace<N>,
 }
 

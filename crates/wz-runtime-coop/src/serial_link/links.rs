@@ -559,9 +559,14 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
     }
 }
 
+/// A serial link of a stack whose sessions count its handles as `N` does: its buffers are of
+/// tables flagged as `N` flags the cells it is placed in.
+type SerialDriverOf<D, N> =
+    SerialDriver<D, RxBuffer<<N as CountKind>::Flag>, TxBuffer<<N as CountKind>::Flag>>;
+
 /// `link`, its handshake made, as the session shell holds a link.
 fn opened<D: SerialDevice + 'static, N: CountKind>(
-    link: CellRc<SerialDriver<D>, N>,
+    link: CellRc<SerialDriverOf<D, N>, N>,
 ) -> OpenedLink<HeapLink<N>, N> {
     OpenedLink {
         sink: link.clone().into_sink(),
@@ -573,7 +578,7 @@ fn opened<D: SerialDevice + 'static, N: CountKind>(
 /// and cells when it lent them, the slots its frames are encoded into, and whether its owner
 /// waits.
 struct SerialShape<N: CountKind> {
-    lent: Option<LinkTables>,
+    lent: Option<LinkTables<N::Flag>>,
     cells: Option<LentByteCells<N::Flag>>,
     owner_waits: bool,
     tx_slots: usize,
@@ -609,7 +614,7 @@ impl<N: CountKind> SerialShape<N> {
         &self,
         line: Rc<D>,
         at: SerialLocator,
-    ) -> Result<CellRc<SerialDriver<D>, N>, LinkOpenError> {
+    ) -> Result<CellRc<SerialDriverOf<D, N>, N>, LinkOpenError> {
         let (rx, tx) = heap_link_buffers(
             self.lent.as_ref(),
             SERIAL_MAX_COBS_BUF,
@@ -633,7 +638,7 @@ impl<N: CountKind> SerialShape<N> {
 /// A `serial/` dial under way ([`SessionLinks::begin_initiator`]): its line open, its `INIT`
 /// written, and the peer's answer asked for at each poll, timed on the opener's clock.
 pub struct SerialDial<O: SerialOpen, N: CountKind = OneTask> {
-    link: Option<CellRc<SerialDriver<O::Device>, N>>,
+    link: Option<CellRc<SerialDriverOf<O::Device, N>, N>>,
     opener: O,
 }
 
@@ -715,7 +720,7 @@ struct SerialListener<O: SerialOpen, N: CountKind> {
     opener: O,
     at: SerialLocator,
     shape: SerialShape<N>,
-    waiting: RefCell<Option<CellRc<SerialDriver<O::Device>, N>>>,
+    waiting: RefCell<Option<CellRc<SerialDriverOf<O::Device, N>, N>>>,
     /// The line, kept between links when the locator does not release it on close.
     retained: RefCell<Option<Rc<O::Device>>>,
     /// The line of the link made last, which is live while that link holds it.
@@ -801,14 +806,14 @@ impl<S, O: SerialOpen, N: CountKind> SerialLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> SerialLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.is_none(),
-            "cells are lent after the links are made"
+            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            "cells and buffers are lent after the links are made"
         );
         SerialLinks {
             links,
             opener: self.opener,
             shape: SerialShape {
-                lent: self.shape.lent,
+                lent: None,
                 cells: None,
                 owner_waits: self.shape.owner_waits,
                 tx_slots: self.shape.tx_slots,
@@ -886,7 +891,7 @@ where
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         self.shape.lent = Some(tables);
         self.links.lend_buffers(tables);
     }
@@ -895,7 +900,7 @@ where
     fn link_cell_bytes(&self) -> usize {
         match self.links.link_cell_bytes() {
             0 => 0,
-            links => links.max(CellRc::<SerialDriver<O::Device>>::cell_bytes()),
+            links => links.max(CellRc::<SerialDriverOf<O::Device, N>>::cell_bytes()),
         }
     }
 

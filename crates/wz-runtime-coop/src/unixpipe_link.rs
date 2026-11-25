@@ -277,13 +277,13 @@ impl Reading {
 }
 
 /// The link over a pair of FIFOs, as a stack of the heap profile holds it.
-type PipeDriver<F> = StreamDriver<PipeStream<F>, RxBuffer, TxBuffer>;
+type PipeDriver<F, B> = StreamDriver<PipeStream<F>, RxBuffer<B>, TxBuffer<B>>;
 
 /// What every unixpipe link of a [`UnixpipeLinks`] is given besides its FIFOs: the session's
 /// tables and cells when it lent them, the slots its frames are encoded into, and whether its
 /// owner waits.
 struct PipeShape<N: CountKind> {
-    lent: Option<LinkTables>,
+    lent: Option<LinkTables<N::Flag>>,
     cells: Option<LentByteCells<N::Flag>>,
     owner_waits: bool,
     tx_slots: usize,
@@ -670,14 +670,14 @@ impl<S, O: FifoOpen, N: CountKind> UnixpipeLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> UnixpipeLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.is_none(),
-            "cells are lent after the links are made"
+            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            "cells and buffers are lent after the links are made"
         );
         UnixpipeLinks {
             links,
             opener: self.opener,
             shape: PipeShape {
-                lent: self.shape.lent,
+                lent: None,
                 cells: None,
                 owner_waits: self.shape.owner_waits,
                 tx_slots: self.shape.tx_slots,
@@ -734,7 +734,7 @@ where
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         self.shape.lent = Some(tables);
         self.links.lend_buffers(tables);
     }
@@ -743,7 +743,7 @@ where
     fn link_cell_bytes(&self) -> usize {
         match self.links.link_cell_bytes() {
             0 => 0,
-            links => links.max(CellRc::<PipeDriver<O::Fifo>>::cell_bytes()),
+            links => links.max(CellRc::<PipeDriver<O::Fifo, N::Flag>>::cell_bytes()),
         }
     }
 
