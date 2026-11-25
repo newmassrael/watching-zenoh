@@ -41,7 +41,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         #[cfg(all(test, feature = "std"))]
         let lookups = held.0.session.registry.lookups();
-        let sample = match held.0.session.registry.lend_push(face, record, &mut room) {
+        let push = held.0.session.registry.lend_push(face, record, &mut room);
+        #[cfg(test)]
+        let lent = matches!(push, LentPush::Sample(_));
+        let sample = match push {
             // SAFETY: what the sample borrows outlives the walk below, which holds it no longer
             // than this call: the frame is lent by the pump the read holds through it, `room`
             // stays in this frame, and the face's peer and its buffer are neither written nor let
@@ -61,14 +64,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut fan = PinnedFanOut::new(sample.keyexpr);
         let mut next = tables(&held.0.session.registry).pin_next_subscriber(&mut fan);
         drop(held);
+        #[cfg(test)]
+        if next.is_some() {
+            self.takes.pinned_samples.fetch_add(1, Ordering::Relaxed);
+            if lent {
+                self.takes.pinned_lent.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         // A callback that delivers (a put to the session's own subscribers) leaves what it would
         // hand out to the delivery after this record, so no callback runs inside another.
         self.deliveries.within(|_| {
             while let Some(call) = next.take() {
                 let call = SubscriberCall::new(call);
                 call.hand(&sample);
-                #[cfg(test)]
-                self.takes.pinned.fetch_add(1, Ordering::Relaxed);
                 if call.end() {
                     self.let_go_of_drained(|tables, cursor| {
                         tables
@@ -81,8 +89,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 });
             }
         });
-        #[cfg(test)]
-        self.takes.pinned_records.fetch_add(1, Ordering::Relaxed);
     }
 }
 
