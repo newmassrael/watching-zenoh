@@ -160,9 +160,14 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    // What the publisher holds when the stream never held a frame tells a lost slow face from a
+    // stream that kept taking what it was given.
     assert!(
         owing_since.is_some_and(|since| since.elapsed() >= STILL),
-        "the slow peer's link never held a frame its stream had not finished for {STILL:?}"
+        "the slow peer's link never held a frame its stream had not finished for {STILL:?}: \
+         {} faces up, {} links owing",
+        publisher.faces_up(),
+        publisher.links_owing()
     );
 
     let started = Instant::now();
