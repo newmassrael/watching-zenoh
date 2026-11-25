@@ -795,10 +795,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 return Ok(());
             }
             let now_us = core.now_us();
-            self.drive_link(core, slot, LinkInput::Open, now_us)?;
+            self.drive_link(&self.direct.dial, core, slot, LinkInput::Open, now_us)?;
         }
         while !self.link_is_up(slot.at) {
-            let turn = self.link_turn(slot).ok_or(OpenError::NoEndpoint)?;
+            let turn = self
+                .link_turn(&self.direct.dial, slot)
+                .ok_or(OpenError::NoEndpoint)?;
             if let Some(last) = turn.ended {
                 return Err(last);
             }
@@ -828,7 +830,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
         };
         let slot = &mut held.0;
-        let read = self.read_held(slot);
+        let read = self.read_held(&self.direct.dial, slot);
         // A close made while the read stepped the pump (a callback's) ended the link's life but
         // left the pump, which the read held: it goes now, once no step of it is under way.
         if self.closed.load(Ordering::Acquire) {
@@ -837,9 +839,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         read
     }
 
-    /// [`Self::read_direct`] with the face held.
-    fn read_held(&self, slot: &mut DirectSlot<L, C>) -> Result<(), SessionClosed> {
-        let turn = self.link_turn(slot).ok_or(SessionClosed)?;
+    /// [`Self::read_direct`] of `face`, its read slot held as `slot`.
+    fn read_held(
+        &self,
+        face: &DirectFace<L, C>,
+        slot: &mut DirectSlot<L, C>,
+    ) -> Result<(), SessionClosed> {
+        let turn = self.link_turn(face, slot).ok_or(SessionClosed)?;
         self.deliver();
         if turn.ended.is_some() {
             return Err(SessionClosed);
@@ -859,12 +865,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// session. `None` once the session closed. Out of line: the open and the read step the link
     /// through one body.
     #[inline(never)]
-    fn link_turn(&self, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
+    fn link_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
         let mut wait = self.link_wait(slot)?;
         #[cfg(test)]
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
-        let turn = self.life_turn(slot, wait)?;
+        let turn = self.life_turn(face, slot, wait)?;
         #[cfg(all(test, feature = "std"))]
         if turn.brought_up {
             self.takes.brought_up();
@@ -886,7 +892,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             {
                 slot.life_due_us = turn.now_us;
             }
-            self.pump_turn(slot, &turn);
+            self.pump_turn(face, slot, &turn);
         }
         Some(turn)
     }
@@ -918,7 +924,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// told to the life and its effects carried out, with the session's bookkeeping, when the
     /// link brings something, the life or the ledger is due, or the Router holds a chain past its
     /// deadline. `None` once the session closed.
-    fn life_turn(&self, slot: &mut DirectSlot<L, C>, wait: IdleWait) -> Option<LinkTurn> {
+    fn life_turn(
+        &self,
+        face: &DirectFace<L, C>,
+        slot: &mut DirectSlot<L, C>,
+        wait: IdleWait,
+    ) -> Option<LinkTurn> {
         let mut held = self.live()?;
         let core = &mut held.0;
         // The read's last step of the link, made with nothing of the session held, may have ended
@@ -927,7 +938,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         core.transport.links.waited(wait);
         let now_us = core.now_us();
         let now_ms = core.session_time.ms_at(now_us);
-        let input = slot.next_input(core, &self.direct.dial.end);
+        let input = slot.next_input(core, &face.end);
         let chains_due = now_ms >= slot.router.due_ms();
         // The life moves on only by what the link brings or at its own time: a link that is up
         // and brings nothing is not looked at for the rest of the bookkeeping.
@@ -946,7 +957,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let moved = if moves_link {
                 #[cfg(test)]
                 core.link_polls.set(core.link_polls.get() + 1);
-                self.drive_link(core, slot, input, now_us)
+                self.drive_link(face, core, slot, input, now_us)
             } else {
                 Ok(())
             };
@@ -1004,12 +1015,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// gone. A pump that ended has its life looked at by the next read, at once. The link's send
     /// part is not held for the step: a send a callback of a record makes inside it, or another
     /// thread makes meanwhile, holds that part itself.
-    fn pump_turn(&self, slot: &mut DirectSlot<L, C>, turn: &LinkTurn) {
+    fn pump_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>, turn: &LinkTurn) {
         let Some((ended, due_us)) = self.step_pump(slot, turn) else {
             return;
         };
         if ended {
-            self.direct.dial.end.ended.store(true, Ordering::Release);
+            face.end.ended.store(true, Ordering::Release);
             slot.life_due_us = turn.now_us;
         }
         slot.pump_due_us = due_us;
@@ -1062,6 +1073,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[inline(never)]
     fn drive_link(
         &self,
+        face: &DirectFace<L, C>,
         core: &mut Core<L, C>,
         slot: &mut DirectSlot<L, C>,
         input: LinkInput,
@@ -1100,7 +1112,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     core.transport.endpoints.dial_text(row),
                     why,
                 )));
-                slot.drop_link(&self.direct.dial.site);
+                slot.drop_link(&face.site);
                 core.transport.links.put_link(slot.at, Link::Idle);
             }
             if effects.lose() {
@@ -1118,7 +1130,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 if let Some(id) = core.transport.links.face(slot.at).map(|face| face.id) {
                     core.lose_face_link(slot.at, id);
                 }
-                slot.drop_link(&self.direct.dial.site);
+                slot.drop_link(&face.site);
                 if effects.ends_session() {
                     slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
                         "",
@@ -1135,7 +1147,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 return Err(slot.last.take().unwrap_or(OpenError::NoEndpoint));
             }
             input = if effects.begin_handshake() {
-                self.begin_handshake(core, slot)
+                self.begin_handshake(face, core, slot)
             } else if let Some(row) = effects.dial() {
                 slot.dial_row(core, row)
             } else {
@@ -1183,11 +1195,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Begin the handshake of the link the last dial made: what the life is told of it.
-    fn begin_handshake(&self, core: &mut Core<L, C>, slot: &mut DirectSlot<L, C>) -> LinkInput {
+    fn begin_handshake(
+        &self,
+        face: &DirectFace<L, C>,
+        core: &mut Core<L, C>,
+        slot: &mut DirectSlot<L, C>,
+    ) -> LinkInput {
         let Some((opened, endpoint)) = slot.opened.take() else {
             return LinkInput::HandshakeRefused(Refused::Endpoint);
         };
-        match self.place_link_session(core, slot, opened, &endpoint) {
+        match self.place_link_session(face, core, slot, opened, &endpoint) {
             Ok(()) => LinkInput::HandshakeBegun,
             Err(refused) => {
                 let why = match refused {
@@ -1207,25 +1224,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[inline(never)]
     fn place_link_session(
         &self,
+        face: &DirectFace<L, C>,
         core: &mut Core<L, C>,
         slot: &mut DirectSlot<L, C>,
         opened: OpenedLink<L::Pump, LinkCount>,
         endpoint: &DialEndpoint,
     ) -> Result<(), OpenError> {
-        slot.drop_link(&self.direct.dial.site);
-        self.direct.dial.end.ready();
+        slot.drop_link(&face.site);
+        face.end.ready();
         // SAFETY: the parts hold no handle on a cell of a link yet.
         let parts = unsafe { FaceHeld::gathered(DirectParts::none()) };
-        drop(self.direct.dial.site.hold(parts));
+        drop(face.site.hold(parts));
         let params = core.link_params()?;
         // The face's record at the slot's row names the face its link's session dispatches to.
-        let face = core
+        let face_id = core
             .transport
             .links
             .face(slot.at)
             .map(|face| face.id)
             .ok_or(OpenError::NoEndpoint)?;
-        let end = self.direct.dial.end_handle();
+        let end = face.end_handle();
         // The link's session is made under the session's lock, its pump in the slot's place, which
         // the read that makes it holds.
         let mut calls = LinkMaking {
@@ -1239,7 +1257,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 &mut calls,
                 opened,
                 OpenedAs {
-                    face,
+                    face: face_id,
                     role: SessionRole::Initiator,
                     endpoint: Some(endpoint),
                 },
@@ -1267,7 +1285,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The wire goes into its place by a try alone, under the session's lock: a send that holds
         // the place waits for that lock, so the place is never waited for here.
         let carried = OnThisThread(wire);
-        let seated = self.direct.dial.site.try_lend(|held| {
+        let seated = face.site.try_lend(|held| {
             held.lend(move |parts| {
                 parts.wire = Some(carried.get());
             })
@@ -1277,18 +1295,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         // A pump not stepped yet is due at once: the read that placed it sends its first frame.
         slot.pump_due_us = 0;
-        // SAFETY: the site lies in the engine's face, at the engine's fixed place, for the
-        // engine's life. The session's state, which holds this handle, reaches the site only while
+        // SAFETY: the site lies in its face, which stays where it lies for the engine's life: the
+        // dial role's at the engine's fixed place, each past it in its row of the session's arena
+        // (`TakenFaces`). The session's state, which holds this handle, reaches the site only while
         // the engine stands (its drop ends the links before the face goes), and the handle does
         // nothing in its own drop.
-        let wire = unsafe {
-            FaceAt::new(
-                &self.direct.dial.site,
-                self.direct.dial.end_handle(),
-                input,
-                room,
-            )
-        };
+        let wire = unsafe { FaceAt::new(&face.site, face.end_handle(), input, room) };
         core.transport.links.put_link(slot.at, Link::Wire(wire));
         Ok(())
     }
