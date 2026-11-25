@@ -11,6 +11,8 @@
 //! out under it one at a time, and [`Tickers::rearm`] puts each back after its run.
 
 use wz_capi_port::{Tick, TickerId};
+use wz_session_core::bounded::{BoundedVec, Static};
+use wz_session_core::caps::MAX_TICKERS;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -24,19 +26,20 @@ struct Entry {
     tick: Tick,
 }
 
-/// The session's periodic jobs, in a table whose rows are reserved when the session opens.
+/// The session's periodic jobs, in a table of the build's rows (`MAX_TICKERS`) that lies in the
+/// session itself: no start takes memory.
 pub(super) struct Tickers {
-    entries: Vec<Entry>,
-    /// The jobs the table holds at once, which its memory was reserved for.
+    entries: BoundedVec<Entry, MAX_TICKERS, Static>,
+    /// The jobs the table holds at once, at most the build's.
     rows: usize,
 }
 
 impl Tickers {
-    /// A table of `rows` jobs, reserved now: no start takes memory after it.
+    /// A table that holds `rows` jobs, at most the build's: no start takes memory.
     pub(super) fn reserved(rows: usize) -> Self {
         Self {
-            entries: Vec::with_capacity(rows),
-            rows,
+            entries: BoundedVec::new_static(),
+            rows: rows.min(MAX_TICKERS),
         }
     }
 
@@ -49,13 +52,14 @@ impl Tickers {
             return false;
         }
         let period_ms = period_ms.max(1);
-        self.entries.push(Entry {
-            id,
-            period_ms,
-            due_ms: now_ms.saturating_add(period_ms),
-            tick,
-        });
-        true
+        self.entries
+            .push(Entry {
+                id,
+                period_ms,
+                due_ms: now_ms.saturating_add(period_ms),
+                tick,
+            })
+            .is_ok()
     }
 
     /// Let go of job `id`; one that is not held (ended, or never started) is left alone.
@@ -167,6 +171,23 @@ mod tests {
             "the row let go of is taken again"
         );
         assert_eq!(tickers.next_due_ms(), Some(5));
+    }
+
+    /// A table asked for more rows than the build holds takes the build's and refuses the start
+    /// past them, holding nothing for it. Turned red by a start the full table could not hold that
+    /// still answers `true`.
+    #[test]
+    fn a_start_past_the_builds_rows_is_refused() {
+        let mut tickers = Tickers::reserved(MAX_TICKERS + 1);
+        for id in 0..MAX_TICKERS as u64 {
+            assert!(tickers.start(id, 10, job(), 0));
+        }
+        assert!(!tickers.start(MAX_TICKERS as u64, 5, job(), 0));
+        assert_eq!(
+            tickers.next_due_ms(),
+            Some(10),
+            "the refused job holds no row"
+        );
     }
 
     /// A table of no rows refuses every start.
