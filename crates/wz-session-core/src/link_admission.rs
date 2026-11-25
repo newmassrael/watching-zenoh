@@ -32,8 +32,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use wz_runtime_core::Runtime;
 
-#[cfg(feature = "alloc")]
-use crate::caps;
 use crate::credential_identity::zid_from_wire;
 #[cfg(feature = "alloc")]
 use crate::credential_identity::{canonical_zid, CREDENTIAL_ZID_BYTES};
@@ -252,14 +250,24 @@ const NO_ROW: u64 = 0;
 /// The links a node whose sessions hold `limits` keeps in its [`LinkBook`] at once, the rows
 /// the table reserves when it is made: the link it dials, each face `MAX_FACES` admits besides,
 /// and each link `MAX_ACCEPT_PENDING` admits in its handshake (zenoh's
-/// `transport/unicast/max_sessions` and `accept_pending`). A bound the snapshot leaves open,
-/// which a heap build's defaults do, counts as the build's value of it ([`caps`]).
+/// `transport/unicast/max_sessions` and `accept_pending`).
+///
+/// No bound when the snapshot leaves either of the two open, as a heap build's defaults do: the
+/// node then states its bounds where it holds them (the tokio runtime's accept loop holds
+/// `max_sessions` at each face it admits and `accept_pending` at each link it takes off a port,
+/// as upstream's transport manager does), and a table that read the open bound as the build's
+/// value of it would be a third bound nobody stated, under the two that were.
 #[cfg(feature = "alloc")]
-pub fn admitted_links(limits: &SessionLimits) -> usize {
-    let held = |quota: Quota, build: usize| quota.most().unwrap_or(build);
-    held(limits.max_faces(), caps::MAX_FACES)
-        .saturating_add(held(limits.max_accept_pending(), caps::MAX_ACCEPT_PENDING))
-        .saturating_add(1)
+pub fn admitted_links(limits: &SessionLimits) -> Quota {
+    match (
+        limits.max_faces().most(),
+        limits.max_accept_pending().most(),
+    ) {
+        (Some(faces), Some(pending)) => {
+            Quota::at_most(faces.saturating_add(pending).saturating_add(1))
+        }
+        _ => Quota::UNBOUNDED,
+    }
 }
 
 /// What `rival` says of the link `token`, `dialled` or not, being admitted to the node keyed
@@ -329,10 +337,15 @@ fn rival_says(
 ///
 /// # Its rows
 ///
-/// The table reserves its rows when it is made, as many as the node may hold links at once
-/// ([`admitted_links`], or the engine's own count of its links), and takes no memory after:
-/// a link is admitted, superseded and let go in rows that never move. A link opened while every
-/// row is held has none, and is refused when it asks, as a link past the node's faces is.
+/// A table made with a bound reserves its rows when it is made, as many as the node may hold
+/// links at once ([`admitted_links`], or the engine's own count of its links), and takes no
+/// memory after: a link is admitted, superseded and let go in rows that never move. A link opened
+/// while every row is held has none, and is refused when it asks, as a link past the node's faces
+/// is.
+///
+/// A table made with no bound holds a row for every link opened, as upstream's table of
+/// transports does: the node's bounds on its links are then the ones its loop holds, and the
+/// table adds none of its own.
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct LinkBook {
@@ -343,8 +356,9 @@ pub struct LinkBook {
     /// `link-tie-order`, fixed when the table is made.
     order: LinkTieOrder,
     next_token: u64,
-    /// The rows the table was made with: `links` never holds more, so it never grows.
-    rows: usize,
+    /// The rows the table was made with: `links` never holds more, so a bounded table never
+    /// grows. An unbounded one holds every link opened.
+    rows: Quota,
     links: Vec<LinkRow>,
 }
 
@@ -352,21 +366,21 @@ pub struct LinkBook {
 impl LinkBook {
     /// The table of the node `local_zid`, whose two crossing links are judged by `order`, the
     /// `link-tie-order` of the node's snapshot, with a row reserved for each of the `rows` links
-    /// the node may hold at once.
-    pub fn with_order(local_zid: &[u8], order: LinkTieOrder, rows: usize) -> Self {
+    /// the node may hold at once, or none reserved and none refused when `rows` is no bound.
+    pub fn with_order(local_zid: &[u8], order: LinkTieOrder, rows: Quota) -> Self {
         Self {
             local_zid: zid_from_wire(local_zid).unwrap_or([0; CREDENTIAL_ZID_BYTES]),
             order,
             next_token: 1,
             rows,
-            links: Vec::with_capacity(rows),
+            links: Vec::with_capacity(rows.most().unwrap_or(0)),
         }
     }
 
     /// See [`LinkAdmission::open`]. A link opened while every row is held is given a token of no
     /// row, which [`Self::reserve`] and [`Self::confirm`] refuse.
     pub fn open(&mut self, dialled: bool) -> u64 {
-        if self.links.len() >= self.rows {
+        if !self.rows.admits(self.links.len().saturating_add(1)) {
             return NO_ROW;
         }
         let token = self.next_token;
@@ -469,8 +483,8 @@ impl LinkBook {
         self.links.is_empty()
     }
 
-    /// How many links the table holds at most: the rows it was made with.
-    pub fn rows(&self) -> usize {
+    /// How many links the table holds at most: the rows it was made with, or no bound.
+    pub fn rows(&self) -> Quota {
         self.rows
     }
 }
@@ -490,8 +504,8 @@ pub struct LinkRegistry<R: Runtime> {
 impl<R: Runtime> LinkRegistry<R> {
     /// The admission of the node `local_zid`, judging crossing links by `order`, the
     /// `link-tie-order` of the node's snapshot, with a row reserved for each of the `rows` links
-    /// the node may hold at once ([`LinkBook::with_order`]).
-    pub fn with_order(local_zid: &[u8], order: LinkTieOrder, rows: usize) -> Self {
+    /// the node may hold at once, or with no bound of its own ([`LinkBook::with_order`]).
+    pub fn with_order(local_zid: &[u8], order: LinkTieOrder, rows: Quota) -> Self {
         Self {
             book: R::new_mutex(LinkBook::with_order(local_zid, order, rows)),
         }
@@ -690,7 +704,11 @@ mod book_tests {
     /// The table of the node `local_zid` under the order of the build defaults, which is what a
     /// node that selected none holds.
     fn book(local_zid: &[u8]) -> LinkBook {
-        LinkBook::with_order(local_zid, SessionPolicy::defaults().link_tie_order(), ROWS)
+        LinkBook::with_order(
+            local_zid,
+            SessionPolicy::defaults().link_tie_order(),
+            Quota::at_most(ROWS),
+        )
     }
 
     #[test]
@@ -748,7 +766,7 @@ mod book_tests {
         const LOCAL: &[u8] = &[0x01, 0x02];
         const REMOTE: &[u8] = &[0x02];
         let crossing = |order: LinkTieOrder| {
-            let mut node = LinkBook::with_order(LOCAL, order, ROWS);
+            let mut node = LinkBook::with_order(LOCAL, order, Quota::at_most(ROWS));
             let own_dial = node.open(true);
             assert!(node.reserve(own_dial, REMOTE));
             let inbound = node.open(false);
@@ -845,8 +863,12 @@ mod book_tests {
     /// `open` that gives a link past the rows a row of its own.
     #[test]
     fn a_link_past_the_rows_is_refused_and_a_row_let_go_is_taken_again() {
-        let mut node = LinkBook::with_order(&LOW, SessionPolicy::defaults().link_tie_order(), 2);
-        assert_eq!(node.rows(), 2);
+        let mut node = LinkBook::with_order(
+            &LOW,
+            SessionPolicy::defaults().link_tie_order(),
+            Quota::at_most(2),
+        );
+        assert_eq!(node.rows(), Quota::at_most(2));
         let first = node.open(false);
         let second = node.open(true);
         let past = node.open(false);
@@ -894,8 +916,9 @@ mod book_tests {
     }
 
     /// A node reserves a row for the link it dials, each face its sessions' `MAX_FACES` admits
-    /// and each handshake their `MAX_ACCEPT_PENDING` admits; a bound left open counts as the
-    /// build's value. Turned red by a count that leaves out any of the three.
+    /// and each handshake their `MAX_ACCEPT_PENDING` admits, and no bound at all when either is
+    /// left open. Turned red by a count that leaves out any of the three, or that reads a bound
+    /// left open as a number.
     #[test]
     fn a_node_reserves_its_dial_its_faces_and_its_handshakes() {
         use crate::limits::SessionLimits;
@@ -904,18 +927,65 @@ mod book_tests {
         if limits.select_max_faces(Quota::at_most(3)).is_ok()
             && limits.select_max_accept_pending(Quota::at_most(2)).is_ok()
         {
-            assert_eq!(admitted_links(&limits), 1 + 3 + 2);
+            assert_eq!(admitted_links(&limits), Quota::at_most(1 + 3 + 2));
         }
         let mut open = SessionLimits::defaults();
         if open.select_max_faces(Quota::UNBOUNDED).is_ok()
             && open.select_max_accept_pending(Quota::at_most(2)).is_ok()
         {
-            assert_eq!(admitted_links(&open), 1 + caps::MAX_FACES + 2);
+            assert_eq!(
+                admitted_links(&open),
+                Quota::UNBOUNDED,
+                "faces left open bound no links"
+            );
+        }
+        let mut open_pending = SessionLimits::defaults();
+        if open_pending.select_max_faces(Quota::at_most(3)).is_ok()
+            && open_pending
+                .select_max_accept_pending(Quota::UNBOUNDED)
+                .is_ok()
+        {
+            assert_eq!(
+                admitted_links(&open_pending),
+                Quota::UNBOUNDED,
+                "handshakes left open bound no links"
+            );
         }
         assert!(
-            admitted_links(&SessionLimits::BUILD) >= 1,
+            admitted_links(&SessionLimits::BUILD).admits(1),
             "the dial has its row whatever the faces"
         );
+    }
+
+    /// A table with no bound of its own admits a link from each of as many nodes as open one,
+    /// past the build's values of `MAX_FACES` and `MAX_ACCEPT_PENDING`, and refuses none for
+    /// want of a row. Turned red by a table that reads the bound its limits leave open as the
+    /// build's value of it: a router told to hold 20000 sessions then refused every link past
+    /// 1101 (1000 faces, 100 handshakes and its dial) as a second link, and its peers, told
+    /// their link was superseded, dialled again for ever (Layer E7s).
+    #[test]
+    fn a_table_with_no_bound_admits_past_the_builds_values() {
+        use crate::caps;
+
+        let links = caps::MAX_FACES
+            .saturating_add(caps::MAX_ACCEPT_PENDING)
+            .saturating_add(2);
+        let mut node = LinkBook::with_order(
+            &LOW,
+            SessionPolicy::defaults().link_tie_order(),
+            Quota::UNBOUNDED,
+        );
+        for at in 0..links {
+            // A second byte that is not zero: no node is `LOW`, and each is its own.
+            let zid = u32::try_from(at)
+                .expect("a few thousand links")
+                .saturating_add(0x100)
+                .to_le_bytes();
+            let link = node.open(at % 2 == 0);
+            assert!(node.reserve(link, &zid), "link {at} of {links} is admitted");
+            assert!(node.confirm(link), "link {at} of {links} is confirmed");
+        }
+        assert_eq!(node.len(), links, "every link holds a row");
     }
 
     /// An admission that refuses every link it is asked about.
