@@ -170,7 +170,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from nodrop import FOREIGN_LIMIT, MAX_RUNS, busy_seconds, cpu_list  # noqa: E402
-from parity import Lost, Process  # noqa: E402
+from parity import BALLAST_MIB, CHILD_MIB, Lost, Process  # noqa: E402
 from kit_compare import bootstrap_ratio  # noqa: E402
 
 SCHEMA = "wz-pico-perf/1"
@@ -1699,11 +1699,6 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
 
 
 # -- the selftest -------------------------------------------------------------------------------------------
-
-#: What the selftest's runner holds while it starts a program, and what that program holds of its own.
-BALLAST_MIB = 200
-CHILD_MIB = 32
-
 
 def started_peak_rss() -> tuple[Usage, int, int]:
     """A program started as a cell starts one, by a runner that holds BALLAST_MIB, which holds CHILD_MIB

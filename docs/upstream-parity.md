@@ -724,7 +724,7 @@ the other side.
 | `rtt_us` | median of 20,000 round trips of 8 B (`z_ping` / `z_pong`, after a 3 s warm-up) | lower |
 | `throughput_<n>B` | median of the subscriber's reports over a 10 s window after a 3 s warm-up (`z_pub_thr` / `z_sub_thr`), n = 8 and 1024 | higher |
 | `cpu_ns_per_msg_<n>B` | the CPU of both processes over that window (`/proc/<pid>/stat`), per message the median rate delivers in it | lower |
-| `rss_kib_<workload>` | peak resident set of the workload's two processes, summed (`getrusage` of each) | lower |
+| `rss_kib_<workload>` | peak resident set of the workload's two processes, summed: the maxrss each program's launcher (`scripts/host-bench/fork_rss.c`) reads of the program it forked, since the maxrss of a child the Python runner reaps itself is at least the runner's own resident set, which Linux keeps across the child's exec | lower |
 | `heap_peak_<workload>` | peak of the bytes held through the C allocator by each process, summed (`heap_peak.so` preloaded, in runs of their own so no time figure carries its cost) | lower |
 
 The workloads with a memory cell are `rtt`, `thr_<n>B`, `pubsub` (`z_sub` and one `z_put`, which

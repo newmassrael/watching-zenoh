@@ -592,6 +592,8 @@ parity() {
         || parity_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
     cc -O2 -shared -fPIC -o "$dir/bin/heap_peak.so" "$root/scripts/host-bench/heap_peak.c" 2>"$dir/build-heap-shim.log" \
         || parity_fail "the heap shim did not build (see $dir/build-heap-shim.log)"
+    cc -O2 -o "$dir/bin/fork_rss" "$root/scripts/host-bench/fork_rss.c" 2>"$dir/build-fork-rss.log" \
+        || parity_fail "the launcher that reads a peak resident set did not build (see $dir/build-fork-rss.log)"
     "parity_build_$family" "$dir"
     tag="host-$family-$(date -u +%Y%m%dT%H%M%S)"
     run="$out/parity-runs/$tag"
@@ -599,7 +601,8 @@ parity() {
         --boots "$boots" --sizes "$sizes" --image "$PARITY_IMAGE" --reference "$PARITY_REFERENCE" \
         --client-cpus "${PICO_CMP_CLIENT_CPUS:-4-7}" --server-cpus "${PICO_CMP_SERVER_CPUS:-8-11}" \
         --pings "${PICO_CMP_PINGS:-20000}" --warmup-s "${PICO_CMP_WARMUP_S:-3}" --window-s "${PICO_CMP_WINDOW_S:-10}" \
-        --heap-shim "$dir/bin/heap_peak.so" --size-binary "P=$PARITY_SIZE_P" --size-binary "W=$PARITY_SIZE_W"
+        --heap-shim "$dir/bin/heap_peak.so" --rss-wrapper "$dir/bin/fork_rss" \
+        --size-binary "P=$PARITY_SIZE_P" --size-binary "W=$PARITY_SIZE_W"
     rc=$?
     [ -d "$run" ] || parity_fail "the boots did not start (parity.py exit $rc)"
     {
