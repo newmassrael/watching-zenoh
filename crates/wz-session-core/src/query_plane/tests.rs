@@ -455,7 +455,7 @@ fn a_session_whose_own_queryables_answer_none_notes_no_call() {
 /// by an `arrive_own` that begins a call outside the get, or that leaves the get's call unnoted.
 #[test]
 fn a_read_that_takes_its_links_queries_notes_only_its_own_gets_calls() {
-    let plane = QueryPlane::<Local>::over(holds(2));
+    let plane = plane::<Local>(holds(2));
     let calls = Calls::default();
     plane.set_arriving(5);
     plane.arrive_own(|| calls.begin(), &Query(7));
@@ -478,7 +478,8 @@ fn a_read_that_takes_its_links_queries_notes_only_its_own_gets_calls() {
     }
     assert_eq!(calls.ended(), 1);
 
-    let linked = QueryPlane::<Linked>::over(holds(1));
+    // The local `plane` shadows the helper here.
+    let linked = self::plane::<Linked>(holds(1));
     linked.asking_locally(|| linked.arrive_own(|| calls.begin(), &Query(11)));
     assert_eq!(
         calls.begun(),
