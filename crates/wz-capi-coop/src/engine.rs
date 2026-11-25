@@ -66,7 +66,7 @@ use crate::round::RoundRows;
 use crate::round::{Round, RoundCounts};
 use crate::RowPolicy;
 use wz_runtime_coop::kept::Shared;
-#[cfg(feature = "runtime-plan")]
+#[cfg(any(feature = "runtime-plan", not(wz_round)))]
 use wz_session_core::bounded::Arena;
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
@@ -146,7 +146,7 @@ use wz_runtime_coop::transport::{
 use wz_runtime_coop::{
     ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
 };
-#[cfg(any(all(test, feature = "std"), feature = "advanced-cache"))]
+#[cfg(any(all(test, feature = "std"), feature = "advanced-cache", not(wz_round)))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
