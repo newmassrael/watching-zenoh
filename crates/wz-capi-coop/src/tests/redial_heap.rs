@@ -416,7 +416,7 @@ fn a_watch_of_face_rows_without_the_plane_is_refused_with_nothing_allocated() {
 
     let router = Router::start(CatchAll::None);
     let engine = CoopEngine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         config(&router),

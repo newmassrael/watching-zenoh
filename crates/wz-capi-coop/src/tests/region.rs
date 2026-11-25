@@ -186,9 +186,8 @@ fn a_state_refused_by_its_region_or_its_memory_reserves_nothing() {
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_reserves_one_block_of_its_region_and_its_plan() {
-    use super::{CatchAll, Engine, Router, LOOPBACK};
+    use super::{host_links, CatchAll, Engine, Router, LOOPBACK};
     use crate::arena::{HeldPlaces, OpenStorage, PlanFrom};
-    use wz_runtime_posix::links::PosixLinks;
     use wz_runtime_posix::stream::PosixTcpDial;
     use wz_runtime_posix::{PosixClock, PosixEntropy};
     use wz_session_core::bounded::ARENA_ALIGN;
@@ -197,7 +196,7 @@ fn an_open_reserves_one_block_of_its_region_and_its_plan() {
     let router = Router::start(CatchAll::None);
     let region: &'static ArenaRegion = Box::leak(Box::new(region_of(&super::config(&router))));
     let engine = Engine::open_made_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         || super::config(&router),
