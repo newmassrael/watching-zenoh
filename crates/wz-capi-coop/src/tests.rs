@@ -85,17 +85,40 @@ enum Command {
     DeclareSubscriber(wz_session_core::wire_id::EntityId, &'static str),
     /// Declare queryable `.0` on the key, complete as `.2` says. Declared only: it answers
     /// nothing, which is all a test of what matches needs. Only the builds whose tests watch or
-    /// match a peer's queryables send it.
+    /// match a peer's queryables send it: a key's matching listener, the faces' table of a listener
+    /// with local queryables, a declaration watch of the queryables.
     #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        feature = "key-matching-listener"
+        feature = "key-matching-listener",
+        all(
+            feature = "listen",
+            feature = "query",
+            feature = "queryable",
+            feature = "local-queryable"
+        ),
+        all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "query", feature = "queryable")
+        )
     ))]
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
     #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        feature = "key-matching-listener"
+        feature = "key-matching-listener",
+        all(
+            feature = "listen",
+            feature = "query",
+            feature = "queryable",
+            feature = "local-queryable"
+        ),
+        all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "query", feature = "queryable")
+        )
     ))]
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
@@ -620,9 +643,20 @@ fn run_router(
                 );
             }
             #[cfg(any(
-                feature = "query",
-                feature = "queryable",
-                feature = "key-matching-listener"
+                feature = "key-matching-listener",
+                all(
+                    feature = "listen",
+                    feature = "query",
+                    feature = "queryable",
+                    feature = "local-queryable"
+                ),
+                all(
+                    any(
+                        feature = "remote-declaration-watch",
+                        feature = "declarations-synced-event"
+                    ),
+                    any(feature = "query", feature = "queryable")
+                )
             ))]
             Ok(Command::DeclareQueryable(id, key, complete)) => {
                 let _ = actions.send_declare_queryable(
@@ -632,9 +666,20 @@ fn run_router(
                 );
             }
             #[cfg(any(
-                feature = "query",
-                feature = "queryable",
-                feature = "key-matching-listener"
+                feature = "key-matching-listener",
+                all(
+                    feature = "listen",
+                    feature = "query",
+                    feature = "queryable",
+                    feature = "local-queryable"
+                ),
+                all(
+                    any(
+                        feature = "remote-declaration-watch",
+                        feature = "declarations-synced-event"
+                    ),
+                    any(feature = "query", feature = "queryable")
+                )
             ))]
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
