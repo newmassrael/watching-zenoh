@@ -19,10 +19,11 @@
 //! and a number longer than a byte.
 //!
 //! Each entry of a chain and each slice it decodes goes to a sink (`EntrySink`) as it is decoded.
-//! A walk that lends the view keeps nothing there (`Lending`), and its reading compiles to the
-//! reader alone; the owned parse builds its record's lists there (`read_push_owned`), so the
-//! record is filled from the one decode of each entry and not from a second walk of the view. A
-//! build without an allocator has no owned parse, and links the lending reading alone.
+//! A walk that lends the record keeps there the entries its delivery reads (`PushExts`), so the
+//! delivery walks no chain again; the plain lane keeps nothing (`Lending`); the owned parse
+//! builds its record's lists there (`read_push_owned`), so the record is filled from the one
+//! decode of each entry and not from a second walk of the view. A build without an allocator has
+//! no owned parse, and links the lending reading alone.
 
 use sce_forge_runtime::codec::{Bounded, Chain, CodecError, ListView, SceCursor, Without};
 use wz_codecs::encoding::EncodingView;
@@ -45,6 +46,7 @@ use wz_codecs::push::{PushExtensionsField, PushIn, PushVariantIn};
 #[cfg(feature = "alloc")]
 use wz_codecs::zbuf_slice::ZbufSliceOwned;
 
+use super::PushExts;
 use crate::ext_admit::{ExtAdmission, ExtCarrier, NetworkEnvelope, ZenohBody};
 
 /// The Push's `N` flag: a key suffix follows the id.
@@ -115,12 +117,17 @@ pub(crate) trait EntrySink<'f> {
     fn put_marker(&mut self);
     /// The next slice of a Put whose payload is laid out as slices.
     fn slice(&mut self, slice: &ZbufSliceView<'f>) -> Result<(), CodecError>;
+    /// The next entry of a Del's chain, as the rule judges it: a chain the rule refuses is
+    /// handed over up to the entry it refuses.
+    fn del_entry(&mut self, _entry: &ExtEntryView<'f>) {}
 }
 
-/// The sink of a walk that lends the view: it keeps nothing, the view holding each list as the
-/// bytes it lies in.
+/// The sink of a reading that keeps nothing, the view holding each list as the bytes it lies in:
+/// the plain lane's.
+#[cfg(any(test, feature = "alloc"))]
 pub(crate) struct Lending;
 
+#[cfg(any(test, feature = "alloc"))]
 impl<'f> EntrySink<'f> for Lending {
     #[inline(always)]
     fn push_entry(&mut self, _entry: &ExtEntryView<'f>) -> Result<(), CodecError> {
@@ -138,6 +145,66 @@ impl<'f> EntrySink<'f> for Lending {
     #[inline(always)]
     fn slice(&mut self, _slice: &ZbufSliceView<'f>) -> Result<(), CodecError> {
         Ok(())
+    }
+}
+
+/// The sink of a walk that lends the record: of the entries it is handed, the ones the delivery
+/// of a lent Push reads, each the last of its identity, as a later entry of an identity replaces
+/// an earlier one ([`crate::ext_view::last_by_eid`]).
+impl<'f> EntrySink<'f> for PushExts<'f> {
+    #[inline(always)]
+    fn push_entry(&mut self, entry: &ExtEntryView<'f>) -> Result<(), CodecError> {
+        let eid = crate::ext_header::ext_eid(entry.header);
+        #[cfg(feature = "pubsub-qos")]
+        if eid == crate::ext_header::network_eid::QOS {
+            self.qos = Some(entry.clone());
+        }
+        #[cfg(feature = "pubsub-ts-stack")]
+        if eid == crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER) {
+            self.ts_stack = true;
+        }
+        #[cfg(not(any(feature = "pubsub-qos", feature = "pubsub-ts-stack")))]
+        let _ = eid;
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn put_entry(&mut self, entry: &ExtEntryView<'f>) -> Result<(), CodecError> {
+        self.body_entry(entry, crate::ext_header::body_eid::PUT_ATTACHMENT);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn put_marker(&mut self) {}
+
+    #[inline(always)]
+    fn slice(&mut self, _slice: &ZbufSliceView<'f>) -> Result<(), CodecError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn del_entry(&mut self, entry: &ExtEntryView<'f>) {
+        self.body_entry(entry, crate::ext_header::body_eid::DEL_ATTACHMENT);
+    }
+}
+
+impl<'f> PushExts<'f> {
+    /// The next entry of the body's chain, whose attachment is of the identity `attachment`.
+    #[inline(always)]
+    fn body_entry(&mut self, entry: &ExtEntryView<'f>, attachment: u8) {
+        let eid = crate::ext_header::ext_eid(entry.header);
+        #[cfg(feature = "pubsub-attachment")]
+        if eid == attachment {
+            self.attachment = Some(entry.clone());
+        }
+        #[cfg(feature = "pubsub-source-info")]
+        if eid == crate::ext_header::body_eid::SOURCE_INFO {
+            self.source_info = Some(entry.clone());
+        }
+        #[cfg(not(feature = "pubsub-attachment"))]
+        let _ = attachment;
+        #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
+        let _ = eid;
     }
 }
 
@@ -218,7 +285,7 @@ fn read_chain<'f, S: EntrySink<'f>>(
 /// The Push at the cursor, read into `out`, and the verdict on its chains: its own, then its
 /// body's. Each entry of a chain and each slice goes to `sink` as it is decoded. The cursor is
 /// past the record on success; on an error neither `out` nor `sink` is to be read.
-pub(super) fn read_push_view<'f, S: EntrySink<'f>>(
+pub(crate) fn read_push_view<'f, S: EntrySink<'f>>(
     cursor: &mut SceCursor<'f>,
     out: &mut PushView<'f>,
     sink: &mut S,
@@ -259,27 +326,33 @@ fn read_body<'f, S: EntrySink<'f>>(
     own: ExtAdmission,
 ) -> Result<ExtAdmission, CodecError> {
     let tag = cursor.peek_u8()? & 0x1f;
-    out.body = match tag {
-        TAG_PUT => PushViewVariant::CodecZenohMsgPut(MsgPutView::default()),
-        TAG_DEL => PushViewVariant::CodecZenohMsgDel(MsgDelView::default()),
-        // A tag no arm names: the default arm, whose body is read as a Put's. Five bits that are
-        // not an arm's are always such a tag.
-        other => PushViewVariant::Default {
-            tag: PushUnknownTag::new(other).ok_or(CodecError::UndeclaredEnumValue)?,
-            body: MsgPutView::default(),
-        },
-    };
+    // The Put reader writes every field of a Put's body, so a binding that holds a Put's arm
+    // already (a view's default does) is read into as it is.
+    if !(tag == TAG_PUT && matches!(out.body, PushViewVariant::CodecZenohMsgPut(_))) {
+        out.body = match tag {
+            TAG_PUT => PushViewVariant::CodecZenohMsgPut(MsgPutView::default()),
+            TAG_DEL => PushViewVariant::CodecZenohMsgDel(MsgDelView::default()),
+            // A tag no arm names: the default arm, whose body is read as a Put's. Five bits that
+            // are not an arm's are always such a tag.
+            other => PushViewVariant::Default {
+                tag: PushUnknownTag::new(other).ok_or(CodecError::UndeclaredEnumValue)?,
+                body: MsgPutView::default(),
+            },
+        };
+    }
     let body = match &mut out.body {
         PushViewVariant::CodecZenohMsgPut(put) | PushViewVariant::Default { body: put, .. } => {
             read_put(cursor, put, sink)?
         }
         PushViewVariant::CodecZenohMsgDel(del) => {
             MsgDelView::decode_into(cursor, del)?;
+            // The codec's Del reader decodes the chain; the one walk of it is the rule's, which
+            // hands each entry to `sink` as it judges it.
             super::judge_entries(
                 ExtCarrier::Zenoh(ZenohBody::Del),
-                del.extensions
-                    .as_ref()
-                    .map(|chain| crate::ext_view::walked(Some(chain))),
+                del.extensions.as_ref().map(|chain| {
+                    crate::ext_view::walked(Some(chain)).inspect(|entry| sink.del_entry(entry))
+                }),
             )
         }
     };
@@ -759,6 +832,115 @@ mod tests {
         }
     }
 
+    /// What a test compares of the extensions a delivery reads: the QoS entry and whether a
+    /// timestamp stack is carried, of the Push's own chain; the attachment and the source-info
+    /// entries of its body's. `None` and `false` where the build keeps none.
+    #[derive(Debug, PartialEq)]
+    struct DeliveryExts<'f> {
+        qos: Option<ExtEntryView<'f>>,
+        ts_stack: bool,
+        attachment: Option<ExtEntryView<'f>>,
+        source_info: Option<ExtEntryView<'f>>,
+    }
+
+    impl<'f> DeliveryExts<'f> {
+        /// What the reader kept in `exts` as it decoded each entry.
+        fn kept(exts: &PushExts<'f>) -> Self {
+            #[cfg(not(any(
+                feature = "pubsub-qos",
+                feature = "pubsub-ts-stack",
+                feature = "pubsub-attachment",
+                feature = "pubsub-source-info"
+            )))]
+            let _ = exts;
+            Self {
+                #[cfg(feature = "pubsub-qos")]
+                qos: exts.qos.clone(),
+                #[cfg(not(feature = "pubsub-qos"))]
+                qos: None,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: exts.ts_stack,
+                #[cfg(not(feature = "pubsub-ts-stack"))]
+                ts_stack: false,
+                #[cfg(feature = "pubsub-attachment")]
+                attachment: exts.attachment.clone(),
+                #[cfg(not(feature = "pubsub-attachment"))]
+                attachment: None,
+                #[cfg(feature = "pubsub-source-info")]
+                source_info: exts.source_info.clone(),
+                #[cfg(not(feature = "pubsub-source-info"))]
+                source_info: None,
+            }
+        }
+
+        /// What walks of `view`'s chains after the reading find: the last entry of each identity.
+        fn walked(view: &PushView<'f>) -> Self {
+            use crate::ext_header::{body_eid, network_eid};
+            use crate::ext_view::{last_by_eid_in, walked};
+            let own = || walked(view.extensions.as_ref());
+            #[cfg(feature = "pubsub-ts-stack")]
+            let ts_stack = last_by_eid_in(
+                own(),
+                crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
+            )
+            .is_some();
+            #[cfg(not(feature = "pubsub-ts-stack"))]
+            let ts_stack = false;
+            let (attachment, source_info) = match &view.body {
+                PushViewVariant::CodecZenohMsgPut(put)
+                | PushViewVariant::Default { body: put, .. } => {
+                    // The entries other than the shared-memory marker, which the reader hands
+                    // over as a place and not as an entry.
+                    let chain = match &put.extensions_has_0x12 {
+                        MsgPutExtensionsHas0x12::Has0x12 { extensions, .. } => {
+                            Some(extensions.rest())
+                        }
+                        MsgPutExtensionsHas0x12::NotHas0x12 { extensions, .. } => {
+                            extensions.as_ref().map(|chain| chain.inner())
+                        }
+                    };
+                    let body = || {
+                        crate::ext_view::walked_from(
+                            chain.map(sce_forge_runtime::codec::Entries::entries),
+                        )
+                    };
+                    (
+                        last_by_eid_in(body(), body_eid::PUT_ATTACHMENT),
+                        last_by_eid_in(body(), body_eid::SOURCE_INFO),
+                    )
+                }
+                PushViewVariant::CodecZenohMsgDel(del) => {
+                    let body = || walked(del.extensions.as_ref());
+                    (
+                        last_by_eid_in(body(), body_eid::DEL_ATTACHMENT),
+                        last_by_eid_in(body(), body_eid::SOURCE_INFO),
+                    )
+                }
+            };
+            Self {
+                qos: last_by_eid_in(own(), network_eid::QOS)
+                    .filter(|_| cfg!(feature = "pubsub-qos")),
+                ts_stack,
+                attachment: attachment.filter(|_| cfg!(feature = "pubsub-attachment")),
+                source_info: source_info.filter(|_| cfg!(feature = "pubsub-source-info")),
+            }
+        }
+    }
+
+    /// The extensions a delivery reads of the Push `bytes` begin with, as the reader kept them and
+    /// as walks of its view's chains find them; `None` for bytes the reader refuses, and for a Del
+    /// the rule refuses, whose chain is handed over only up to the entry it refuses.
+    fn delivery_exts(bytes: &[u8]) -> Option<(DeliveryExts<'_>, DeliveryExts<'_>)> {
+        let mut view = PushView::default();
+        let mut exts = PushExts::default();
+        let verdict = read_push_view(&mut SceCursor::new(bytes), &mut view, &mut exts).ok()?;
+        if verdict.refusal().is_some() && matches!(view.body, PushViewVariant::CodecZenohMsgDel(_))
+        {
+            return None;
+        }
+        Some((DeliveryExts::kept(&exts), DeliveryExts::walked(&view)))
+    }
+
     /// The reader with each sink against the codec over `bytes`: the lending reading against the
     /// codec's view, and with an allocator the owned read's record against the codec's decode at
     /// the heap's capacity; with an allocator also the owned parse against the codec's owned
@@ -767,6 +949,9 @@ mod tests {
     /// reading of each record: what each case below is held to.
     fn agree(bytes: &[u8], case: &dyn core::fmt::Debug) {
         assert_eq!(reading(bytes), through_the_codec(bytes), "{case:?}");
+        if let Some((kept, walked)) = delivery_exts(bytes) {
+            assert_eq!(kept, walked, "{case:?}");
+        }
         #[cfg(feature = "alloc")]
         {
             assert_eq!(kept(bytes), kept_through_the_codec(bytes), "{case:?}");
@@ -818,6 +1003,11 @@ mod tests {
             alloc::vec![0x1du8, 2, 0x82, 0x05],
             // A body tag no arm names, read as a Put's body.
             alloc::vec![0x1du8, 4, 0x05, 1, b'z'],
+            // The QoS twice on the Push's chain; a Put's and a Del's chains that repeat their
+            // extensions.
+            repeated_qos(),
+            repeated_put_exts(),
+            repeated_del_exts(),
             // A mandatory entry no Push declares, and the reserved encoding, on the Push's chain.
             alloc::vec![0x9du8, 1, 0x1f, 0x01, 0],
             alloc::vec![0x9du8, 1, 0x61, 0x01, 0],
@@ -825,6 +1015,77 @@ mod tests {
             alloc::vec![0x1du8, 1, 0x81, 0x1e, 0],
             alloc::vec![0x9du8, 1, 0x1f, 0x81, 0x1e, 0],
         ]
+    }
+
+    /// A Push whose own chain carries the QoS twice, `0x05` then `0x1a`, and a Put of one byte.
+    fn repeated_qos() -> alloc::vec::Vec<u8> {
+        alloc::vec![0x9du8, 1, 0xa1, 0x05, 0x21, 0x1a, 0x01, 1, b'q']
+    }
+
+    /// A Put whose chain carries the source info of the zid `[0xA0, 1]`, the attachment `f`, the
+    /// source info of the zid `[0xA0, 2]` and the attachment `l`, in that order.
+    fn repeated_put_exts() -> alloc::vec::Vec<u8> {
+        alloc::vec![
+            0x1du8, 1, 0x81, 0xc1, 5, 0x10, 0xa0, 1, 1, 1, 0xc3, 1, b'f', 0xc1, 5, 0x10, 0xa0, 2,
+            2, 2, 0x43, 1, b'l', 2, b'x', b'y'
+        ]
+    }
+
+    /// A Del whose chain carries its attachment `a`, the source info of the zid `[0xA0, 1]`, a
+    /// Put's attachment `p` and its own attachment `b`, in that order.
+    fn repeated_del_exts() -> alloc::vec::Vec<u8> {
+        alloc::vec![
+            0x1du8, 1, 0x82, 0xc2, 1, b'a', 0xc1, 5, 0x10, 0xa0, 1, 1, 1, 0xc3, 1, b'p', 0x42, 1,
+            b'b'
+        ]
+    }
+
+    /// The extensions a delivery reads are kept as the reader decodes each entry, each the last of
+    /// its identity: of two QoS entries the second, of a Put's repeated attachment and source info
+    /// the last, and of a Del's attachments its own last one and not a Put's. Turned red by a sink
+    /// that keeps the first entry of an identity, or reads a Del's attachment by the Put's
+    /// identity.
+    #[test]
+    fn the_extensions_a_delivery_reads_are_the_last_of_their_identity() {
+        use crate::ext_view::ExtEntryView as _;
+        /// What the reader kept of `bytes`, which the walks of its chains find too.
+        fn read(bytes: &[u8]) -> DeliveryExts<'_> {
+            let (kept, walked) = delivery_exts(bytes).expect("the reader reads it and admits it");
+            assert_eq!(kept, walked, "{bytes:02x?}");
+            kept
+        }
+        let qos = repeated_qos();
+        let kept = read(&qos);
+        assert_eq!(
+            kept.qos.as_ref().and_then(|e| e.zint()),
+            cfg!(feature = "pubsub-qos").then_some(0x1a),
+            "the second QoS entry"
+        );
+        let put = repeated_put_exts();
+        let kept = read(&put);
+        assert_eq!(
+            kept.attachment.as_ref().and_then(|e| e.plain_zbuf()),
+            cfg!(feature = "pubsub-attachment").then_some(&b"l"[..]),
+            "the Put's last attachment"
+        );
+        assert_eq!(
+            kept.source_info.as_ref().and_then(|e| e.plain_zbuf()),
+            cfg!(feature = "pubsub-source-info").then_some(&[0x10u8, 0xa0, 2, 2, 2][..]),
+            "the Put's last source info"
+        );
+        let del = repeated_del_exts();
+        let kept = read(&del);
+        assert_eq!(
+            kept.attachment.as_ref().and_then(|e| e.plain_zbuf()),
+            cfg!(feature = "pubsub-attachment").then_some(&b"b"[..]),
+            "the Del's own last attachment, not the Put's"
+        );
+        assert_eq!(
+            kept.source_info.as_ref().and_then(|e| e.plain_zbuf()),
+            cfg!(feature = "pubsub-source-info").then_some(&[0x10u8, 0xa0, 1, 1, 1][..]),
+            "the Del's source info"
+        );
+        assert!(!kept.ts_stack, "no record here carries a timestamp stack");
     }
 
     /// Over every shape, the reader reads what the codec reads and judges it as the rule judges
@@ -862,6 +1123,26 @@ mod tests {
         );
         #[cfg(feature = "alloc")]
         assert!(plain >= 3, "the corpus holds frames of plain Puts: {plain}");
+    }
+
+    /// A binding that held a Push read before is read into as it is, and reads each Push as a
+    /// fresh binding does: every field of a Put's body is written, so the arm it holds already is
+    /// not filled from a default first. Turned red by a Put reader that leaves a field of the body
+    /// read before.
+    #[test]
+    fn a_push_read_into_a_binding_that_held_one_reads_as_into_a_fresh_one() {
+        let all = shapes();
+        for first in &all {
+            for second in &all {
+                let mut view = PushView::default();
+                let read = read_push_view(&mut SceCursor::new(first), &mut view, &mut Lending);
+                assert!(read.is_ok(), "{first:02x?}: {read:?}");
+                let again = read_push_view(&mut SceCursor::new(second), &mut view, &mut Lending)
+                    .map(|verdict| (view.clone(), verdict));
+                let fresh = reading(second).map(|(view, _, verdict)| (view, verdict));
+                assert_eq!(again, fresh, "{first:02x?} then {second:02x?}");
+            }
+        }
     }
 
     /// Cut anywhere, a record is refused with the codec's error, and with any one byte changed to

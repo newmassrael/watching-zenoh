@@ -188,7 +188,7 @@ macro_rules! own_wire {
         feature = "alloc",
         all(
             feature = "rx-lent-control",
-            // Named by the arms of `Records::hand_out`, each of which is a kind the build reads.
+            // Named by the arms of the pull's `lend_next`, each of which is a kind the build reads.
             any(
                 feature = "codec-request",
                 all(feature = "codec-push", feature = "rx-push"),
@@ -1849,6 +1849,83 @@ pub(crate) enum RecordForm {
     LentControl,
 }
 
+/// A Push as the receive path's reader read it where its frame lies: the codec's view, and what the
+/// delivery reads of its chains, picked out as the reader decoded each entry ([`PushExts`]), so
+/// the delivery reads no chain of it again.
+// Built by the walks that lend a Push and read by the delivery of a lent Push (`pubsub`'s
+// `in_place`); a build without both reads nothing of it.
+#[cfg(feature = "codec-push")]
+#[cfg_attr(
+    not(all(
+        any(
+            all(
+                feature = "alloc",
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+            ),
+            feature = "rx-push"
+        ),
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        ),
+        feature = "storage-profile",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    )),
+    allow(dead_code)
+)]
+#[derive(Debug, Default)]
+pub(crate) struct PushRead<'f> {
+    /// The record as the codec's view: its key, its body and its chains as the bytes they occupy.
+    pub(crate) view: wz_codecs::push::PushView<'f>,
+    /// What the delivery reads of its chains.
+    pub(crate) exts: PushExts<'f>,
+}
+
+/// The extensions of a Push its delivery reads, each the LAST entry of its identity in its chain,
+/// as [`crate::ext_view::last_of_each_in`] picks it out of a walk of the chain: the QoS and
+/// whether a timestamp stack is carried, of the Push's own chain; the attachment (of the identity
+/// of the body that carries it) and the source info, of its body's. Each is kept by a build whose
+/// delivery reads it.
+#[cfg(feature = "codec-push")]
+#[cfg_attr(
+    not(all(
+        any(
+            all(
+                feature = "alloc",
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+            ),
+            feature = "rx-push"
+        ),
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        ),
+        feature = "storage-profile",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    )),
+    allow(dead_code)
+)]
+#[derive(Debug, Default)]
+pub(crate) struct PushExts<'f> {
+    /// The QoS entry of the Push's own chain.
+    #[cfg(feature = "pubsub-qos")]
+    pub(crate) qos: Option<wz_codecs::ext_entry::ExtEntryView<'f>>,
+    /// Whether the Push's own chain carries a timestamp stack.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub(crate) ts_stack: bool,
+    /// The attachment entry of the body's chain, of the Put's identity on a Put and the Del's on
+    /// a Del.
+    #[cfg(feature = "pubsub-attachment")]
+    pub(crate) attachment: Option<wz_codecs::ext_entry::ExtEntryView<'f>>,
+    /// The source-info entry of the body's chain.
+    #[cfg(feature = "pubsub-source-info")]
+    pub(crate) source_info: Option<wz_codecs::ext_entry::ExtEntryView<'f>>,
+    /// The frame the entries lie in, which a build that keeps none of them names here alone.
+    _frame: core::marker::PhantomData<&'f [u8]>,
+}
+
 /// One record the walk hands over: the one owned message in the caller's
 /// buffer, or a record read where the payload lies ([`RecordForm::Lent`],
 /// [`RecordForm::LentControl`]).
@@ -1891,9 +1968,10 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     Owned(&'r mut RecordBuf),
     /// A Push read where the payload lies, valid for the call: its view, which holds its extension
     /// chains as the bytes they occupy and not as entries, so it is a few words however long a
-    /// chain the protocol lets a peer send. A chain longer than the node stores inline is lent
-    /// like any other, on a build with no allocator too (the slot profile): the protocol bounds a
-    /// chain by nothing and upstream reads it whole, as a lent Request's is read.
+    /// chain the protocol lets a peer send, and the extensions its delivery reads, picked out as
+    /// they were decoded. A chain longer than the node stores inline is lent like any other, on a
+    /// build with no allocator too (the slot profile): the protocol bounds a chain by nothing and
+    /// upstream reads it whole, as a lent Request's is read.
     #[cfg(all(
         feature = "codec-push",
         any(
@@ -1904,7 +1982,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
             feature = "rx-push"
         )
     ))]
-    Push(&'r wz_codecs::push::PushView<'f>),
+    Push(&'r PushRead<'f>),
     /// A Request read where the payload lies, valid for the call: its view, which holds its extension
     /// chains as the bytes they occupy and not as entries (the eager record is 1.8 KB).
     #[cfg(feature = "codec-request")]
@@ -2126,8 +2204,8 @@ where
 }
 
 /// The walk of [`try_for_each_record_while`], with the consumer behind a trait object: the pull of
-/// the payload's records ([`Records`]) on the form that lends every kind, and the walk that owns
-/// or lends by kind on the others.
+/// the payload's records (`pull::hand_records`) on the form that lends every kind, and the walk
+/// that owns or lends by kind on the others.
 // One body for every consumer: generic over it, the walk and each kind's reader (and the codec's
 // decode of that kind) were compiled again for each closure, and in the crate of each generic
 // caller as well, while what differs between consumers is only the call that hands a record over.
@@ -2151,7 +2229,7 @@ fn walk_records<'f>(
         #[cfg(feature = "rx-lent-control")]
         RecordForm::LentControl => {
             record.clear();
-            hand_pulled_records(payload, each)
+            pull::hand_records(payload, each)
         }
         #[cfg(all(
             feature = "alloc",
@@ -2182,105 +2260,6 @@ fn walk_records<'f>(
         ))]
         RecordForm::Lent => walk_kept_records(payload, record, form, each),
     }
-}
-
-/// The form that lends every kind ([`RecordForm::LentControl`]): each record pulled off the
-/// payload is read and handed to `each` until it takes no more, a transport message begins, a
-/// record does not decode, or the payload ends. How far the pull read, and whether `each` ended it
-/// with records still unread.
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "rx-lent-control",
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    )
-))]
-fn hand_pulled_records<'f>(
-    payload: &'f [u8],
-    each: &mut dyn EachRecord<'f>,
-) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
-    let records = Records::new(payload);
-    let mut pull = &records;
-    while records.holds_record() {
-        match pull.next() {
-            Some(Ok(view)) => {
-                if !lend_view(view, &records, each)? {
-                    return Ok((records.consumed(), records.holds_record()));
-                }
-            }
-            Some(Err(stop)) => return Err(stop),
-            None => break,
-        }
-    }
-    Ok((records.consumed(), false))
-}
-
-/// The record `view` names, read and handed to `each` as the walk hands a record over; what
-/// `each` said of taking another.
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "rx-lent-control",
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    )
-))]
-fn lend_view<'f>(
-    view: RecordView<'_, 'f>,
-    records: &Records<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    match view {
-        #[cfg(all(feature = "codec-push", feature = "rx-push"))]
-        RecordView::Push(pulled) => lend_pulled(pulled, each),
-        #[cfg(feature = "codec-request")]
-        RecordView::Request(pulled) => lend_pulled(pulled, each),
-        #[cfg(all(feature = "codec-response", feature = "rx-response"))]
-        RecordView::Response(pulled) => lend_pulled(pulled, each),
-        #[cfg(all(feature = "codec-response-final", feature = "rx-response"))]
-        RecordView::ResponseFinal(pulled) => lend_pulled(pulled, each),
-        #[cfg(all(feature = "codec-declare", feature = "rx-control"))]
-        RecordView::Declare(pulled) => lend_pulled(pulled, each),
-        #[cfg(feature = "rx-control")]
-        RecordView::Interest(pulled) => lend_pulled(pulled, each),
-        #[cfg(all(feature = "rx-control", feature = "transport-stats", feature = "alloc"))]
-        RecordView::Oam(pulled) => lend_pulled(pulled, each),
-        RecordView::Skipped(_) => {
-            records.pass_unread()?;
-            each.take_record(WalkedRecord::Skipped)
-        }
-    }
-}
-
-/// The body of `pulled` read where the payload lies and handed to `each`. Out of line and one per
-/// kind, so the frame holds the one body only while its record is handed over.
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "rx-lent-control",
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    ),
-    any(
-        all(feature = "codec-push", feature = "rx-push"),
-        feature = "codec-request",
-        all(feature = "codec-response", feature = "rx-response"),
-        all(feature = "codec-response-final", feature = "rx-response"),
-        feature = "rx-control"
-    )
-))]
-#[inline(never)]
-fn lend_pulled<'f, B: RecordBody<'f>>(
-    pulled: Pulled<'_, 'f, B>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    let mut body = B::View::default();
-    pulled.read(&mut body)?;
-    each.take_record(B::walked(&body))
 }
 
 /// The walk of the forms that keep a record they do not lend as its owned message
@@ -2413,33 +2392,6 @@ fn walk_kept_records<'f>(
     )
 ))]
 mod pull;
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "rx-lent-control",
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    ),
-    any(
-        all(feature = "codec-push", feature = "rx-push"),
-        feature = "codec-request",
-        all(feature = "codec-response", feature = "rx-response"),
-        all(feature = "codec-response-final", feature = "rx-response"),
-        feature = "rx-control"
-    )
-))]
-use pull::{Pulled, RecordBody};
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "rx-lent-control",
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    )
-))]
-use pull::{RecordView, Records};
 
 /// The lent half of [`try_for_each_record`]: when the record at the cursor is of
 /// a kind the walk lends (`mid`), decode it where the payload lies, judge it by
@@ -2588,13 +2540,15 @@ pub(crate) mod push_read;
 #[inline(never)]
 fn read_push<'f>(
     cursor: &mut SceCursor<'f>,
-    push: &mut wz_codecs::push::PushView<'f>,
+    push: &mut PushRead<'f>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Read as its view: a few words and the bytes its chains occupy. The lent record held each
     // chain inline at the node's capacity, so it was filled from a template of that size for every
     // record and refused a chain past it, which the protocol bounds by nothing. The reader judges
-    // the chains as it reads them.
-    let admission = push_read::read_push_view(cursor, push, &mut push_read::Lending)
+    // the chains as it reads them, and keeps the entries the delivery reads as it decodes them.
+    let PushRead { view, exts } = push;
+    *exts = PushExts::default();
+    let admission = push_read::read_push_view(cursor, view, exts)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(admission)
 }
@@ -2751,7 +2705,7 @@ fn lend_push<'f>(
     cursor: &mut SceCursor<'f>,
     each: &mut dyn EachRecord<'f>,
 ) -> Result<bool, crate::parse_error::InboundParseError> {
-    let mut push = wz_codecs::push::PushView::<'f>::default();
+    let mut push = PushRead::<'f>::default();
     read_push(cursor, &mut push)?;
     each.take_record(WalkedRecord::Push(&push))
 }
@@ -3425,7 +3379,7 @@ mod chain_saturation_tests {
             let mut record = new_record_buf();
             let mut seen: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
             let result = for_each_record(&wire, &mut record, RecordForm::Lent, |one| match one {
-                WalkedRecord::Push(push) => seen.push(put_view_reading(push)),
+                WalkedRecord::Push(push) => seen.push(put_view_reading(&push.view)),
                 #[allow(unreachable_patterns)]
                 _ => panic!("only Pushes were encoded, and each is lent"),
             });
@@ -3468,7 +3422,7 @@ mod chain_saturation_tests {
         let mut seen = Vec::new();
         let result = for_each_record(&wire, &mut record, RecordForm::Lent, |one| {
             if let WalkedRecord::Push(push) = one {
-                seen.push(push.clone());
+                seen.push(push.view.clone());
             } else {
                 panic!("only Pushes were encoded, and each is lent");
             }
@@ -3490,7 +3444,7 @@ mod chain_saturation_tests {
         let mut chains: Vec<usize> = Vec::new();
         let result = for_each_record(&wire, &mut record, RecordForm::LentControl, |one| {
             if let WalkedRecord::Push(push) = one {
-                chains.push(put_view_reading(push).0.len());
+                chains.push(put_view_reading(&push.view).0.len());
             }
         });
         assert!(result.is_ok(), "{result:?}");
@@ -4294,7 +4248,7 @@ impl<'k> RecordClass<'k> {
                     feature = "rx-push"
                 )
             ))]
-            WalkedRecord::Push(push) => Some(lent_push_class(push)),
+            WalkedRecord::Push(push) => Some(lent_push_class(&push.view)),
             #[cfg(feature = "codec-request")]
             WalkedRecord::Request(request) => Some(lent_request_class(request)),
             #[cfg(all(
@@ -5227,7 +5181,7 @@ mod record_walk_tests {
         let result = for_each_record(&payload, &mut record, RecordForm::Lent, |one| match one {
             WalkedRecord::Push(push) => {
                 let (_, suffix, _) =
-                    crate::wireexpr_resolve::id_suffix_and_space_viewed(&push.keyexpr.body);
+                    crate::wireexpr_resolve::id_suffix_and_space_viewed(&push.view.keyexpr.body);
                 seen.push(('p', suffix.expect("a key").into()));
             }
             WalkedRecord::Owned(one) => match &one[0] {
@@ -5386,7 +5340,6 @@ mod record_walk_tests {
         use super::*;
         use crate::declare_build::{build_declare_final, build_declare_subscriber};
         use crate::interest_build::build_interest_subscribers;
-        use crate::network_message::pull::DeclareBody;
         use crate::parse_error::InboundParseError;
         use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
         use wz_codecs::ext_unit::ExtUnit;
@@ -5507,169 +5460,75 @@ mod record_walk_tests {
             assert_eq!(owned, lent, "the owned walk reads the same records");
         }
 
-        /// The kind of each record a pull handed out, read from its view alone.
-        fn kind(view: &RecordView<'_, '_>) -> char {
-            match view {
-                RecordView::Declare(_) => 'd',
-                RecordView::Interest(_) => 'i',
-                RecordView::ResponseFinal(_) => 'r',
-                RecordView::Skipped(_) => '-',
-                #[cfg(all(feature = "transport-stats", feature = "alloc"))]
-                RecordView::Oam(_) => '-',
-                #[cfg(all(feature = "codec-push", feature = "rx-push"))]
-                RecordView::Push(_) => panic!("this test encodes no Push"),
-                #[cfg(feature = "codec-request")]
-                RecordView::Request(_) => panic!("this test encodes no Request"),
-                #[cfg(feature = "codec-response")]
-                RecordView::Response(_) => panic!("this test encodes no Response"),
-            }
-        }
-
-        /// The id of the subscriber a pulled Declare declares, its body read when asked.
-        fn subscriber_id(pulled: &Pulled<'_, '_, DeclareBody>) -> u64 {
-            let mut declare = wz_codecs::lent::Declare::default();
-            pulled.read(&mut declare).expect("the declaration decodes");
-            match &declare.body {
-                DeclareVariant::CodecZenohDeclSubscriber(s) => s.id,
-                other => panic!("an unexpected declaration {other:?}"),
-            }
-        }
-
-        /// The records the control walk hands over are the ones pulled off the payload and read,
-        /// read alike and in the same order, and the pull stops where the walk stops: before a
-        /// transport message, having taken the bytes up to it. Turned red by a pull that reads into
-        /// the transport message, or a body read from elsewhere than where its record lies.
+        /// The pull reads each record where it lies as it reads its kind, and hands over what the
+        /// control walk hands over, in the same order; it stops before a transport message, having
+        /// read the bytes up to it, and says no record is left. Turned red by a pull that reads into
+        /// the transport message, or one that says a record is left where a transport message is.
         #[test]
-        fn the_pulled_records_are_the_ones_the_control_walk_hands_over() {
+        fn the_pull_hands_over_what_the_control_walk_does_and_stops_before_a_transport_message() {
             let records = every_kind();
             // A KeepAlive behind the records: a transport message, the batch's to read.
             let payload = [records.clone(), alloc::vec![wire_const::T_MID_KEEP_ALIVE]].concat();
-            let pulled = Records::new(&payload);
             let mut seen = Vec::new();
-            for one in &pulled {
-                let view = one.expect("every record is handed out");
-                let mut each = |walked: WalkedRecord<'_, '_>| -> Result<bool, InboundParseError> {
-                    seen.push(tag(walked));
-                    Ok(true)
-                };
-                lend_view(view, &pulled, &mut each).expect("every record decodes");
-            }
+            let mut each = |walked: WalkedRecord<'_, '_>| -> Result<bool, InboundParseError> {
+                seen.push(tag(walked));
+                Ok(true)
+            };
+            let read = pull::hand_records(&payload, &mut each);
+            assert_eq!(
+                read.ok(),
+                Some((records.len(), false)),
+                "up to the KeepAlive"
+            );
             let (walked, result) = walk(&payload, RecordForm::LentControl);
             assert!(result.is_ok());
             assert_eq!(seen, walked, "the walk hands over what the pull reads");
-            assert_eq!(pulled.consumed(), records.len(), "up to the KeepAlive");
-            assert!(!pulled.holds_record(), "which is no record of the frame");
         }
 
-        /// A pull hands out each record's kind without reading its body, and the next pull reads
-        /// the body no consumer read to learn where the following record begins. Turned red by a
-        /// pull that does not pass over an unread record (the next view would begin inside it), or
-        /// that counts a record as consumed before its end is known.
+        /// A consumer that takes no more ends the pull after the record it took: the pull says how
+        /// far it read, and that a record is left when one is, and not when a transport message
+        /// follows. Turned red by a pull that reads the next record before it asks the consumer, or
+        /// says a record is left where none is.
         #[test]
-        fn a_record_no_consumer_reads_is_passed_over_by_the_next_pull() {
-            let records = every_kind();
-            let payload = [records.clone(), alloc::vec![wire_const::T_MID_KEEP_ALIVE]].concat();
-            let pulled = Records::new(&payload);
-            let mut kinds = Vec::new();
-            for one in &pulled {
-                kinds.push(kind(&one.expect("every record is handed out")));
-                if kinds.len() == 1 {
-                    assert_eq!(
-                        pulled.consumed(),
-                        0,
-                        "the first record's end is not known yet"
-                    );
-                }
-            }
-            assert_eq!(
-                kinds,
-                vec!['d', 'i', 'r', '-', 'd'],
-                "an Oam is no consumer's"
-            );
-            assert_eq!(pulled.consumed(), records.len(), "up to the KeepAlive");
-            assert!(!pulled.holds_record());
-        }
-
-        /// A body is read where its record lies whenever its consumer asks: after the pull moved on,
-        /// and twice alike. Turned red by a body read at the pull's cursor rather than at its own
-        /// record, or by a late read that moves the pull.
-        #[test]
-        fn a_body_is_read_where_its_record_lies_whenever_its_consumer_asks() {
-            let payload = [subscriber(7), subscriber(8)].concat();
-            let pulled = Records::new(&payload);
-            let mut pull = &pulled;
-            let Some(Ok(RecordView::Declare(first))) = pull.next() else {
-                panic!("a Declare first");
+        fn a_consumer_that_takes_no_more_ends_the_pull_after_its_record() {
+            let first = subscriber(7);
+            let mut taken = Vec::new();
+            let mut once = |walked: WalkedRecord<'_, '_>| -> Result<bool, InboundParseError> {
+                taken.push(tag(walked));
+                Ok(false)
             };
-            let Some(Ok(RecordView::Declare(second))) = pull.next() else {
-                panic!("then a Declare");
-            };
-            assert_eq!(subscriber_id(&second), 8);
+            let two = [first.clone(), subscriber(8)].concat();
             assert_eq!(
-                pulled.consumed(),
-                payload.len(),
-                "the last body read ends the payload"
+                pull::hand_records(&two, &mut once).ok(),
+                Some((first.len(), true)),
+                "the second record is left"
             );
+            let behind = [first.clone(), alloc::vec![wire_const::T_MID_KEEP_ALIVE]].concat();
             assert_eq!(
-                subscriber_id(&first),
-                7,
-                "read after the pull moved past it"
+                pull::hand_records(&behind, &mut once).ok(),
+                Some((first.len(), false)),
+                "a transport message is no record"
             );
-            assert_eq!(
-                subscriber_id(&second),
-                8,
-                "and a body read twice is read alike"
-            );
-            assert_eq!(
-                pulled.consumed(),
-                payload.len(),
-                "a late read does not move the pull"
-            );
-            assert!(pull.next().is_none());
+            assert_eq!(taken, vec![('s', 7), ('s', 7)], "one record each time");
         }
 
-        /// A record that does not decode ends the pull: read by its consumer, the read is the
-        /// error; left unread, the next pull is. Turned red by a pull that reads on after it.
+        /// A record that does not decode ends the pull with its error, after the records before it
+        /// were handed over. Turned red by a pull that reads on after it.
         #[test]
-        fn a_record_that_does_not_decode_ends_the_pull_whoever_reads_it() {
+        fn a_record_that_does_not_decode_ends_the_pull_with_its_error() {
             let mut broken = subscriber(7);
             broken.push(wire_const::N_MID_DECLARE);
-
-            let pulled = Records::new(&broken);
-            let mut pull = &pulled;
-            assert!(matches!(pull.next(), Some(Ok(RecordView::Declare(_)))));
-            let Some(Ok(RecordView::Declare(cut))) = pull.next() else {
-                panic!("the cut Declare is handed out");
+            let mut seen = Vec::new();
+            let mut each = |walked: WalkedRecord<'_, '_>| -> Result<bool, InboundParseError> {
+                seen.push(tag(walked));
+                Ok(true)
             };
-            let mut declare = wz_codecs::lent::Declare::default();
-            assert!(matches!(
-                cut.read(&mut declare),
-                Err(InboundParseError::Codec(_))
-            ));
+            let read = pull::hand_records(&broken, &mut each);
             assert!(
-                pull.next().is_none(),
-                "nothing is read after a record that did not decode"
+                matches!(read, Err(InboundParseError::Codec(_))),
+                "the decode error: {read:?}"
             );
-
-            let pulled = Records::new(&broken);
-            let mut pull = &pulled;
-            assert!(matches!(pull.next(), Some(Ok(RecordView::Declare(_)))));
-            assert!(matches!(pull.next(), Some(Ok(RecordView::Declare(_)))));
-            assert!(
-                matches!(pull.next(), Some(Err(InboundParseError::Codec(_)))),
-                "the pull reads the body nobody read, and ends there"
-            );
-            assert!(pull.next().is_none());
-        }
-
-        /// A pulled record is a few words whatever its kind: its body stays where it lies until its
-        /// consumer reads it. Turned red by a view that carries a decoded body.
-        #[test]
-        fn a_pulled_record_is_a_few_words() {
-            assert!(
-                core::mem::size_of::<RecordView<'static, 'static>>()
-                    <= 4 * core::mem::size_of::<usize>()
-            );
+            assert_eq!(seen, vec![('s', 7)], "the record before it was handed over");
         }
 
         #[test]
