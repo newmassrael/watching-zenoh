@@ -112,6 +112,39 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
+    /// Hand the plain `Put`s of a frame of face `face` the copying receive read where they lie,
+    /// `puts` of `frame`, one record at a time in their order: each one's sample, over the frame,
+    /// to each subscriber its key reaches, one call at a time with the session let go of. A
+    /// session closed meanwhile hands no record after the one whose callback closed it.
+    pub(super) fn hand_plain_puts(
+        &self,
+        face: HeldFace,
+        frame: &wz_session_core::link::RxBytes,
+        puts: &[wz_session_core::plain_push::PlainPut],
+        reliable: bool,
+    ) {
+        let reliability = wz_session_core::sample::Reliability::from_reliable_bool(reliable);
+        let mut keys = wz_session_core::pubsub::PlainPutKeys::new(frame);
+        for put in puts {
+            let Some(mut held) = self.live() else {
+                return;
+            };
+            let Some(repeats) = held.0.session.registry.plain_put_key(face, &mut keys, put) else {
+                continue;
+            };
+            let sample = keys.sample(put, reliability, repeats);
+            let mut fan = PinnedFanOut::new(keys.key());
+            let reached = self.hand_row_by_row(held, &SampleRef::of(&sample), &mut fan);
+            #[cfg(test)]
+            if reached > 0 {
+                self.takes.pinned_samples.fetch_add(1, Ordering::Relaxed);
+                self.takes.pinned_lent.fetch_add(1, Ordering::Relaxed);
+            }
+            #[cfg(not(test))]
+            let _ = reached;
+        }
+    }
+
     /// A publish's leg to the session's own subscribers, when its destination admits them: each
     /// subscriber whose origin admits the session's own messages is handed it here, inside the put
     /// as zenoh-pico's does (`vendor/zenoh-pico/src/session/subscription.c` @

@@ -201,6 +201,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
                     Planes::BesideSubscribers,
                 );
             }
+            // A frame of plain Puts is the subscribers' alone, handed out one row at a time; what
+            // follows it is put off as what follows a lent Push is.
+            IterationEvent::Poll(DriverLoopOutcome::FramePlainPuts {
+                reliable,
+                payload,
+                puts,
+                ..
+            }) => {
+                if wz_session_core::driver_loop::OWNED_RECORDS {
+                    self.engine
+                        .hand_plain_puts(self.records.face, payload, puts, *reliable);
+                }
+                self.records.after_pushes = true;
+            }
             event => {
                 let Some(mut held) = self.engine.live() else {
                     return;

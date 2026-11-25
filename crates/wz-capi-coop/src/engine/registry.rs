@@ -1219,6 +1219,21 @@ impl<H: Holders> RegistryOf<H> {
             .take_record(&mut app.tables, delivery, message, reliability)
     }
 
+    /// Read the key of `put`, the next plain `Put` of the frame `keys` reads, against the aliases
+    /// of face `face`'s peer (`SubscriberPeer::plain_put_key`): whether it names the key read
+    /// before it, the key then `keys`' own; `None` for a record that is dropped. A face the
+    /// session no longer holds reads none.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn plain_put_key(
+        &mut self,
+        face: HeldFace,
+        keys: &mut wz_session_core::pubsub::PlainPutKeys<'_>,
+        put: &wz_session_core::plain_push::PlainPut,
+    ) -> Option<bool> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        face.peer.subscribers.plain_put_key(&app.tables, keys, put)
+    }
+
     /// The owned projection of the Push of face `face` that `record` lends, which the lent form
     /// does not represent (`LentPush::Owned`): the sample the copying receive delivers for it.
     /// A face the session no longer holds projects nothing.

@@ -693,6 +693,8 @@ pub struct SubInterestRefusals {
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 mod in_place;
+#[cfg(all(feature = "storage-profile", feature = "alloc", feature = "pubsub-put"))]
+pub use in_place::PlainPutKeys;
 #[cfg(all(
     feature = "storage-profile",
     any(feature = "pubsub-put", feature = "pubsub-delete")
@@ -7066,6 +7068,82 @@ mod tests {
             );
             assert_eq!(got, want, "reliable={reliable}");
         }
+    }
+
+    /// The keys of a frame's plain Puts read one record at a time, as a walk that hands each to
+    /// one subscriber at a time reads them: an alias, a record that repeats it, a literal, and
+    /// an id nobody declared, which reads nothing and leaves no key for the record after it to
+    /// repeat. The CONTROL is the reader's own flag on the repeating records. Turned red by a read
+    /// that lets a repeat rest on a dropped record, or composes a key other than the owned path's.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn the_keys_of_plain_puts_read_one_at_a_time_as_the_frame_names_them() {
+        let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8]); 5] = [
+            (7, None, b"one"),
+            (7, None, b"two"),
+            (0, Some("demo/literal"), b"three"),
+            (9, None, b"nobody declared 9"),
+            (9, None, b"nor here"),
+        ];
+        let mut batch = Vec::new();
+        for (id, suffix, payload) in puts {
+            let push = crate::lent_push::put_with_qos(
+                id,
+                suffix,
+                payload,
+                crate::sample::QosLevel::from_raw(0x05),
+            )
+            .unwrap();
+            let mut one = Vec::new();
+            push.encode(&mut sce_forge_runtime::codec::VecSink::new(&mut one))
+                .unwrap();
+            batch.extend_from_slice(&one);
+        }
+        let mut registry: SubscriberRegistry<BoxedSink> = SubscriberRegistry::new();
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "demo/alias"))),
+            Reliability::Reliable,
+        );
+        let frame = crate::link::RxBytes::from(batch);
+        let read = crate::plain_push::read_plain_puts(&frame).expect("every record is plain");
+        assert_eq!(
+            read.iter().map(|put| put.repeats_key).collect::<Vec<_>>(),
+            vec![false, true, false, false, true],
+            "CONTROL: the reader marks the records that repeat the key before them"
+        );
+        let SubscriberRegistry { table, peer } = &mut registry;
+        let mut keys = super::in_place::PlainPutKeys::new(&frame);
+        let mut got = Vec::new();
+        for put in &read {
+            let repeats = peer.plain_put_key(&*table, &mut keys, put);
+            let named = repeats.map(|repeats| {
+                let sample = keys.sample(put, Reliability::Reliable, repeats);
+                (
+                    keys.key().to_string(),
+                    crate::sink::SampleView::payload(&sample).to_vec(),
+                )
+            });
+            got.push((repeats, named));
+        }
+        assert_eq!(
+            got,
+            vec![
+                (
+                    Some(false),
+                    Some(("demo/alias".to_string(), b"one".to_vec()))
+                ),
+                (
+                    Some(true),
+                    Some(("demo/alias".to_string(), b"two".to_vec()))
+                ),
+                (
+                    Some(false),
+                    Some(("demo/literal".to_string(), b"three".to_vec()))
+                ),
+                (None, None),
+                (None, None),
+            ]
+        );
     }
 
     /// Records that repeat the key before them are delivered as the owned path delivers

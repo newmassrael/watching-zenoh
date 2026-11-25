@@ -492,74 +492,15 @@ impl<Q: Storage> SubscriberPeer<Q> {
         puts: &[crate::plain_push::PlainPut],
     ) {
         let reliability = Reliability::from_reliable_bool(reliable);
-        let spaces = self.mapping_spaces();
-        // The text of the suffix just read, which the next record of a stream repeats: its
-        // bytes are compared with the last ones instead of being checked as UTF-8 again.
-        let mut last_suffix: Option<(&[u8], &str)> = None;
-        let frame_bytes = frame.as_slice();
-        // The key of the record just delivered, kept as text. The reader says when a record
-        // names the same key as the one before it ([`PlainPut::repeats_key`]), and then that
-        // text is the key: it is not composed again, and the sample is marked as repeating so
-        // that the match against the subscribers and a sink's list of keys are not redone
-        // either. `current_is_set` is false until a record has been delivered, and after one
-        // that was dropped, so a repeat never rests on a key that was not.
-        let mut current = alloc::string::String::new();
-        let mut current_is_set = false;
+        let mut keys = PlainPutKeys::new(frame);
         for put in puts {
-            let repeats = put.repeats_key && current_is_set;
-            if !repeats {
-                current_is_set = false;
-                let suffix = match put.suffix {
-                    Some((from, to)) => {
-                        // The reader took the range from this frame; one that is not in it is
-                        // dropped, as a frame that changed under the reader is below.
-                        let Some(bytes) = frame_bytes.get(from as usize..to as usize) else {
-                            continue;
-                        };
-                        match last_suffix {
-                            Some((held, text)) if held == bytes => Some(text),
-                            _ => match core::str::from_utf8(bytes) {
-                                Ok(text) => {
-                                    last_suffix = Some((bytes, text));
-                                    Some(text)
-                                }
-                                // The reader validated it; a frame that changed under it is
-                                // dropped.
-                                Err(_) => continue,
-                            },
-                        }
-                    }
-                    None => None,
-                };
-                let mut composed = KeyexprBuf::new();
-                let keyexpr = match resolve_plain_parts_over(
-                    put.sender_mapping,
-                    put.id,
-                    suffix,
-                    spaces,
-                    subs.own_space(),
-                    &mut composed,
-                ) {
-                    Ok(Some(keyexpr)) => keyexpr,
-                    // Undeclared id or empty key; the growable backing never answers past-bound.
-                    Ok(None) | Err(KeyexprPastBound) => continue,
-                };
-                current.clear();
-                current.push_str(keyexpr);
-                current_is_set = true;
-            }
-            #[cfg(feature = "pubsub-qos")]
-            let qos = put.qos.map(QosLevel::from_raw);
-            #[cfg(not(feature = "pubsub-qos"))]
-            let qos: Option<QosLevel> = None;
-            let mut sample =
-                crate::sink::PlainSample::new(&current, frame, put.payload, reliability, qos);
-            if repeats {
-                sample = sample.repeating_the_previous_key();
-            }
+            let Some(repeats) = self.plain_put_key(&*subs, &mut keys, put) else {
+                continue;
+            };
+            let sample = keys.sample(put, reliability, repeats);
             let mut turn = FanOut::begin();
             subs.deliver_from_peer(
-                &current,
+                keys.key(),
                 self.class,
                 PeerDelivery {
                     repeats_previous: repeats,
@@ -573,6 +514,116 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
         // The frame is done with this table: a sink that gathered its samples hands over.
         subs.end_plain_frame(cx);
+    }
+
+    /// Read the key of `put`, the next plain `Put` of the frame `keys` reads, against this peer's
+    /// aliases and `subs`' own: whether it names the key of the record read before it, the key
+    /// then being [`PlainPutKeys::key`] either way; `None` for a record that is dropped (a key the
+    /// peer never declared, the empty key, a range not in the frame), as the owned path drops it.
+    /// One record's key never affects another's.
+    pub fn plain_put_key<L: LocalSubscribers>(
+        &self,
+        subs: &L,
+        keys: &mut PlainPutKeys<'_>,
+        put: &crate::plain_push::PlainPut,
+    ) -> Option<bool> {
+        // The reader says when a record names the same key as the one before it
+        // ([`PlainPut::repeats_key`](crate::plain_push::PlainPut::repeats_key)), and then the key
+        // read last is the key: it is not composed again.
+        if put.repeats_key && keys.current_is_set {
+            return Some(true);
+        }
+        keys.current_is_set = false;
+        let suffix = match put.suffix {
+            Some((from, to)) => {
+                // The reader took the range and validated its text from this frame; one that is
+                // not in it, or not text, is a frame that changed under the reader, dropped.
+                let frame = keys.frame;
+                let bytes = frame.as_slice().get(from as usize..to as usize)?;
+                match keys.last_suffix {
+                    Some((held, text)) if held == bytes => Some(text),
+                    _ => {
+                        let text = core::str::from_utf8(bytes).ok()?;
+                        keys.last_suffix = Some((bytes, text));
+                        Some(text)
+                    }
+                }
+            }
+            None => None,
+        };
+        let mut composed = KeyexprBuf::new();
+        let keyexpr = match resolve_plain_parts_over(
+            put.sender_mapping,
+            put.id,
+            suffix,
+            self.mapping_spaces(),
+            subs.own_space(),
+            &mut composed,
+        ) {
+            Ok(Some(keyexpr)) => keyexpr,
+            // Undeclared id or empty key; the growable backing never answers past-bound.
+            Ok(None) | Err(KeyexprPastBound) => return None,
+        };
+        keys.current.clear();
+        keys.current.push_str(keyexpr);
+        keys.current_is_set = true;
+        Some(false)
+    }
+}
+
+/// The keys of a frame's plain `Put`s, read one record at a time in their order against the
+/// sending peer's aliases ([`SubscriberPeer::plain_put_key`]): what the delivery of each names,
+/// whether the frame's dispatch hands the records out or a walk of one subscriber at a time does.
+/// It keeps the key of the record read last as text, which the next record of a stream repeats.
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+pub struct PlainPutKeys<'f> {
+    frame: &'f crate::link::RxBytes,
+    /// The text of the suffix just read, which the next record of a stream repeats: its bytes are
+    /// compared with the last ones instead of being checked as UTF-8 again.
+    last_suffix: Option<(&'f [u8], &'f str)>,
+    /// The key of the record read last.
+    current: alloc::string::String,
+    /// Whether `current` is the key of the record read last: not until a record's key was read,
+    /// nor after a record that was dropped, so a repeat never rests on a key that was not.
+    current_is_set: bool,
+}
+
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+impl<'f> PlainPutKeys<'f> {
+    /// The keys of the plain `Put`s of `frame`, none read yet.
+    pub fn new(frame: &'f crate::link::RxBytes) -> Self {
+        Self {
+            frame,
+            last_suffix: None,
+            current: alloc::string::String::new(),
+            current_is_set: false,
+        }
+    }
+
+    /// The key of the record read last ([`SubscriberPeer::plain_put_key`]).
+    pub fn key(&self) -> &str {
+        &self.current
+    }
+
+    /// The sample of `put`, the record whose key was read last, over the frame: marked as
+    /// repeating the key of the record before it when `repeats`, as the read of its key said.
+    pub fn sample(
+        &self,
+        put: &crate::plain_push::PlainPut,
+        reliability: Reliability,
+        repeats: bool,
+    ) -> crate::sink::PlainSample<'_> {
+        #[cfg(feature = "pubsub-qos")]
+        let qos = put.qos.map(QosLevel::from_raw);
+        #[cfg(not(feature = "pubsub-qos"))]
+        let qos: Option<QosLevel> = None;
+        let sample =
+            crate::sink::PlainSample::new(&self.current, self.frame, put.payload, reliability, qos);
+        if repeats {
+            sample.repeating_the_previous_key()
+        } else {
+            sample
+        }
     }
 }
 
