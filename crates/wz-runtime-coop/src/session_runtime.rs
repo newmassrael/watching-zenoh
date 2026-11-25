@@ -169,7 +169,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     where
         T: Send + 'static,
     {
-        f(&mut *local.borrow_mut())
+        match local.try_borrow_mut() {
+            Ok(mut value) => f(&mut value),
+            Err(_) => local_reentered(),
+        }
     }
 
     // R311ja — the MCU action handle is counted without atomics, not an `Arc`:
@@ -209,6 +212,15 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
             sink.driver()
         }
     }
+}
+
+/// A session's local value reached again from inside the access that holds it, which the contract
+/// of [`SessionRuntime::with_local`] rules out. Stopped with a message that formats nothing, so a
+/// library carries no formatting code for it, as it would for the cell's own refusal.
+#[cold]
+#[inline(never)]
+fn local_reentered() -> ! {
+    panic!("a session's local value was reached again from inside its own access")
 }
 
 /// The handle to a session, as this profile holds it: a counted handle on the bundle, or
@@ -526,5 +538,50 @@ mod cookie_nonce_draw_tests {
             "a failed refresh must CLEAR, never leave the previous handshake's \
              nonce in place for this one to re-mint",
         );
+    }
+}
+
+#[cfg(test)]
+mod local_access_tests {
+    use super::*;
+
+    /// A frozen clock, so the runtime names a type without a board.
+    #[derive(Clone, Copy)]
+    struct StoppedClock;
+
+    impl ClockSource for StoppedClock {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    type Runtime = CoopRuntime<StoppedClock>;
+
+    /// An access reaches the value, answers what its closure answers, and leaves what it wrote
+    /// for the next access.
+    #[test]
+    fn an_access_reaches_the_value_and_leaves_what_it_wrote() {
+        let local = <Runtime as SessionRuntime>::new_local(1u32);
+        let seen = <Runtime as SessionRuntime>::with_local(&local, |value| {
+            *value += 1;
+            *value
+        });
+        assert_eq!(seen, 2);
+        assert_eq!(
+            <Runtime as SessionRuntime>::with_local(&local, |value| *value),
+            2
+        );
+    }
+
+    /// An access made from inside another of the same value stops the program with this
+    /// runtime's message, which formats nothing. Turned red by an access that borrows the cell
+    /// with its own refusal, whose message is the cell's.
+    #[test]
+    #[should_panic(expected = "reached again from inside its own access")]
+    fn an_access_from_inside_another_stops() {
+        let local = <Runtime as SessionRuntime>::new_local(0u32);
+        <Runtime as SessionRuntime>::with_local(&local, |_| {
+            <Runtime as SessionRuntime>::with_local(&local, |_| {});
+        });
     }
 }
