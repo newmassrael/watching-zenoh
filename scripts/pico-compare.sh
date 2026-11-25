@@ -27,7 +27,16 @@
 #                                             each counter at two counts so that start and end cancel (subprofile
 #                                             below). Left under target/pico-compare/subprofile-runs/host-<time>/
 #                                             (report.txt, record.txt, each run's tables and the tools' files); exit
-#                                             0 when every leg of both arms was measured, 2 when one was not
+#                                             0 when every leg of both arms was measured, 2 when one was not. The wz
+#                                             arm is the library a release ships (see THE WZ ARM OF THE INSTRUCTION
+#                                             COUNTS below), PICO_CMP_STDLIB=std naming the other form
+#   scripts/pico-compare.sh opprofile [ops] [size]
+#                                             what ONE OPERATION costs in instructions, for each library, under
+#                                             callgrind at two counts so that start and end cancel: put, get with the
+#                                             queryable that answers it, declare and undeclare of a subscriber, a
+#                                             publisher and a queryable, open and close, and the paced loop alone
+#                                             (scripts/host-bench/op_probe.c; opprofile below). The wz arm as
+#                                             subprofile's. Left under target/pico-compare/opprofile-runs/host-<time>/
 #   scripts/pico-compare.sh parity <pico|c|rust> [boots] [sizes]
 #                                             the host side of the parity matrix (docs/upstream-parity.md section 5b):
 #                                             upstream's own example programs (z_put z_sub z_get z_queryable z_pub_thr
@@ -92,12 +101,12 @@
 # core: a process pinned to a single CPU measured a 2 ms scheduler tick in BOTH libraries.
 #
 # Environment: PICO_CMP_PING_CPUS / PICO_CMP_PONG_CPUS (`rtt`) and PICO_CMP_PUB_CPUS / PICO_CMP_SUB_CPUS
-# (`thr`, `nodrop`, `nodrop-c`, `profile`, `tids`, `subprofile`), each unset one from the topology,
+# (`thr`, `nodrop`, `nodrop-c`, `profile`, `tids`, `subprofile`, `opprofile`), each unset one from the topology,
 # PICO_CMP_WZ_ENV (extra `VAR=value` words put in front of every wz process,
 # for example WZ_CAPI_RX_BUSY_POLL_US=10), PICO_CMP_NO_BUILD=1 (use the libraries already built), PICO_CMP_ENGINE
 # (`tokio` or `coop`: the engine the wz library is built on, to compare the two; unset, the one the package for a
 # host ships on, which its profile configs/profiles/host-peer-ext.conf chooses). `rtt`, `thr`, `nodrop`, `profile`,
-# `tids`, `subprofile`, `perf` and `batch` build the wz library on that engine and print it with their readings; `parity`
+# `tids`, `perf` and `batch` build the wz library on that engine and print it with their readings; `parity`
 # builds each original's preset and `nodrop-c` the zenoh-c family, which have one engine each. PICO_CMP_STDLIB
 # (`std` or `nostd`, `perf` only): the standard library the wz library is built with, to compare the two;
 # unset, the one form the release ships (perf_matrix.py bench-stdlib).
@@ -141,7 +150,7 @@ case "${1:-}" in
         ping_cpus="$client_cpus"
         pong_cpus="$server_cpus"
         ;;
-    thr | nodrop | nodrop-c | profile | tids | subprofile)
+    thr | nodrop | nodrop-c | profile | tids | subprofile | opprofile)
         pin_sides PICO_CMP_PUB_CPUS PICO_CMP_SUB_CPUS
         pub_cpus="$client_cpus"
         sub_cpus="$server_cpus"
@@ -195,7 +204,7 @@ stamped_engine() {
 }
 
 if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ] && [ "${1:-}" != perf ] \
-    && [ "${1:-}" != batch ] && [ "${1:-}" != fanin ]; then
+    && [ "${1:-}" != batch ] && [ "${1:-}" != fanin ] && [ "${1:-}" != subprofile ] && [ "${1:-}" != opprofile ]; then
     resolve_wz_engine
     bash scripts/build-zenoh-pico-cli.sh >"$out/build-pico.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the pico library did not build (see $out/build-pico.log)"; exit 2; }
@@ -208,8 +217,39 @@ if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" 
     echo "$wz_engine" >"$out/wz-engine"
 fi
 case "${1:-}" in
-    rtt | thr | nodrop | profile | tids | subprofile)
+    rtt | thr | nodrop | profile | tids)
         [ -n "$wz_engine" ] || stamped_engine "$(cat "$out/wz-engine" 2>/dev/null)"
+        ;;
+esac
+
+# THE WZ ARM OF THE INSTRUCTION COUNTS (subprofile, opprofile) is the library a release ships: wz-capi-pico for
+# configs/zenoh-pico_defconfig under the limits and policies it sets, in the release's form (no_std, no heap after
+# the open) unless PICO_CMP_STDLIB names the other, built as the size gate builds that case: the same build as arm
+# W of `parity pico` (perf_matrix.py preset-arm). A count read off another form says nothing of what ships.
+# PICO_CMP_ENGINE does not apply: the defconfig states the engine. With PICO_CMP_NO_BUILD=1 the library of an
+# earlier build is read, and its record names its form.
+shipped_dir="$out/shipped"
+wz_bench_lib="$wz_lib"
+case "${1:-}" in
+    subprofile | opprofile)
+        if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ]; then
+            bash scripts/provision-kconfiglib.sh >"$out/build-kconfiglib.log" 2>&1 \
+                || { echo "pico-compare: NOT-MEASURED, kconfiglib did not install (see $out/build-kconfiglib.log)"; exit 2; }
+            bash scripts/build-zenoh-pico-cli.sh >"$out/build-pico.log" 2>&1 \
+                || { echo "pico-compare: NOT-MEASURED, the pico library did not build (see $out/build-pico.log)"; exit 2; }
+            rm -rf "$shipped_dir"
+            mkdir -p "$shipped_dir"
+            shipped_stdlib="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" bench-stdlib ${PICO_CMP_STDLIB:+"$PICO_CMP_STDLIB"})" \
+                || { echo "pico-compare: NOT-MEASURED, the standard library of the wz arm did not resolve"; exit 2; }
+            python3 -I "$root/scripts/host-bench/perf_matrix.py" preset-arm --out "$shipped_dir" --original zenoh-pico \
+                --stdlib "$shipped_stdlib" >"$shipped_dir/build.txt" \
+                || { cat "$shipped_dir/build.txt"; grep -m 5 -A 12 -E '^error' "$shipped_dir/build-wz.log"
+                     echo "pico-compare: NOT-MEASURED, the shipped wz arm did not build (see $shipped_dir/build-wz.log)"; exit 2; }
+        fi
+        [ -f "$shipped_dir/lib-W/libwz_capi_pico.so" ] && [ -f "$shipped_dir/build.txt" ] \
+            || { echo "pico-compare: NOT-MEASURED, no shipped wz arm under $shipped_dir (PICO_CMP_NO_BUILD=1 reads an earlier build)"; exit 2; }
+        wz_bench_lib="$shipped_dir/lib-W"
+        wz_engine="$(tr '\n' ' ' <"$shipped_dir/build.txt")"
         ;;
 esac
 
@@ -242,7 +282,7 @@ build_bench() {
         lib="$pico_lib"
         libname=zenohpico
     else
-        lib="$wz_lib"
+        lib="$wz_bench_lib"
         libname=wz_capi_pico
     fi
     cc -O2 "$root/scripts/host-bench/$name.c" -DZENOH_LINUX "${include[@]}" -o "$out/bin/${name}_$variant" \
@@ -293,6 +333,13 @@ case "${1:-}" in
         ;;
     nodrop-c)
         build_zenoh_c_family
+        ;;
+    opprofile)
+        for bench in op_probe count_sub; do
+            for variant in P W; do
+                build_bench "$bench" "$variant"
+            done
+        done
         ;;
     nodrop|profile|tids|subprofile)
         for bench in paced_pub count_sub; do
@@ -723,6 +770,222 @@ subprofile() {
         done
     done
     echo "pico-compare: subprofile run $run (report.txt, record.txt, the tables and tool files of each run)"
+    return "$status"
+}
+
+# ── opprofile: what one operation costs, in instructions ───────────────────────────────────────────────────
+#
+# opprofile [ops] [size]: scripts/host-bench/op_probe.c of each library does one operation [count] times spread
+# over PICO_CMP_OPPROF_SECONDS (20) under valgrind's callgrind, and again [base] times over the same seconds, so the
+# library's load, the session's open and close and what it does by the clock cancel (subprofile's two counts):
+# what the larger run executed past the smaller one, over the operations it did past the smaller, is what one
+# operation costs. The operations (op_probe.c states each): put (the publisher's), get (the querier's wait for the
+# final notification included) with the queryable that answers it counted in the same runs, declare-sub,
+# declare-pub and declare-qbl (each with its undeclare), open (a session opened and closed) and none, the paced loop
+# alone, whose cost every other operation carries and which the summary takes off ("net"). The peer of every
+# operation but get is count_sub of the same library, listening and not counted. [ops] is a comma list (all of
+# them), [size] the payload of a put and of a reply (8). The counts: PICO_CMP_OPPROF_BASE and PICO_CMP_OPPROF_COUNT
+# (2000 and 12000), PICO_CMP_OPPROF_GET_BASE and _GET_COUNT (200 and 1200), PICO_CMP_OPPROF_OPEN_BASE and
+# _OPEN_COUNT (20 and 120); the counted process connects PICO_CMP_OPPROF_LEAD_S (8) after its peer listens and
+# waits PICO_CMP_OPPROF_SETTLE_S (3) for the peer's declarations. Both arms are built as subprofile's are (the wz
+# arm in the form a release ships). Left under target/pico-compare/opprofile-runs/host-<time>/ (report.txt,
+# record.txt, per-op.tsv, each run's files); exit 0 when every operation of both arms was measured, 2 when one
+# was not.
+
+OPPROF_OPS=put,get,declare-sub,declare-pub,declare-qbl,open,none
+
+# opprofile_counts <op>: the smaller and the larger count of <op>.
+opprofile_counts() {
+    case "$1" in
+        get) echo "${PICO_CMP_OPPROF_GET_BASE:-200} ${PICO_CMP_OPPROF_GET_COUNT:-1200}" ;;
+        open) echo "${PICO_CMP_OPPROF_OPEN_BASE:-20} ${PICO_CMP_OPPROF_OPEN_COUNT:-120}" ;;
+        *) echo "${PICO_CMP_OPPROF_BASE:-2000} ${PICO_CMP_OPPROF_COUNT:-12000}" ;;
+    esac
+}
+
+# opprofile_trial <op> <variant> <count> <size> <seconds> <lead> <settle> <stem>: one run of op_probe doing <op>
+# <count> times under callgrind, and of its peer: the queryable of the same library, under callgrind too, for get;
+# count_sub, not counted, for the others. Leaves <stem>.op, <stem>.callgrind, <stem>.peer and, for get,
+# <stem>.peer.callgrind. The queryable listens the same time in both counts of an arm, so its own start and end
+# cancel as the operation's do.
+opprofile_trial() {
+    local op="$1" variant="$2" count="$3" size="$4" seconds="$5" lead="$6" settle="$7" stem="$8"
+    local port listen peer
+    listen=$((lead + settle + seconds + 15))
+    port=$((20000 + RANDOM % 20000))
+    if [ "$op" = get ]; then
+        compose "$variant" "$sub_cpus" timeout $((listen + 120)) valgrind --tool=callgrind \
+            "--callgrind-out-file=$stem.peer.callgrind" "$out/bin/op_probe_$variant" -o queryable -m peer \
+            -l "tcp/127.0.0.1:$port" -s "$size" -d "$listen"
+    else
+        compose "$variant" "$sub_cpus" timeout $((listen + 60)) "$out/bin/count_sub_$variant" -m peer \
+            -l "tcp/127.0.0.1:$port" -d "$listen"
+    fi
+    "${CMD[@]}" >"$stem.peer" 2>&1 &
+    peer=$!
+    sleep "$lead"
+    compose "$variant" "$pub_cpus" timeout $((settle + seconds + 300)) valgrind --tool=callgrind \
+        "--callgrind-out-file=$stem.callgrind" "$out/bin/op_probe_$variant" -o "$op" -m peer \
+        -e "tcp/127.0.0.1:$port" -n "$count" -t "$seconds" -w "$settle" -s "$size"
+    "${CMD[@]}" >"$stem.op" 2>&1
+    # count_sub is not counted, so it need not listen out its time; the queryable is, and does.
+    [ "$op" = get ] || kill "$peer" 2>/dev/null
+    wait "$peer" 2>/dev/null
+}
+
+# opprofile_role <op> <variant> <role> <lo stem> <hi stem> <ops> <base> <count> <run>: the line of one counted
+# process of one arm (role op: op_probe doing <op>; role peer: the queryable), its per-operation instructions
+# appended to <run>/per-op.tsv, and its top functions; returns 2 when it was not measured.
+opprofile_role() {
+    local op="$1" variant="$2" role="$3" lo="$4" hi="$5" ops="$6" base="$7" count="$8" run="$9"
+    local ir_lo ir_hi per listing
+    ir_lo="$(subprofile_ir "$lo.callgrind")"
+    ir_hi="$(subprofile_ir "$hi.callgrind")"
+    if [ -z "$ir_lo" ] || [ -z "$ir_hi" ]; then
+        echo "  op=$op arm=$variant role=$role: NOT-MEASURED, callgrind left no total (see $lo and $hi)"
+        return 2
+    fi
+    per="$(awk -v a="$ir_lo" -v b="$ir_hi" -v m="$ops" 'BEGIN { printf "%.1f", (b - a) / m }')"
+    echo "  op=$op arm=$variant role=$role: Ir n=$base $ir_lo, n=$count $ir_hi; per operation $per (over $ops)"
+    printf '%s\t%s\t%s\t%s\n' "$op" "$variant" "$role" "$per" >>"$run/per-op.tsv"
+    for listing in no yes; do
+        callgrind_annotate --threshold=100 --inclusive="$listing" "$lo.callgrind" >"$lo.inclusive-$listing.txt" 2>&1
+        callgrind_annotate --threshold=100 --inclusive="$listing" "$hi.callgrind" >"$hi.inclusive-$listing.txt" 2>&1
+    done
+    echo "  op=$op arm=$variant role=$role: top 20 functions by Ir per operation, self (inclusive=no):"
+    subprofile_table annotate "$lo.inclusive-no.txt" "$hi.inclusive-no.txt" "$ops" 20
+    return 0
+}
+
+# opprofile_arm <op> <variant> <base> <count> <run>: the lines of one operation of one arm; returns 2 when it was
+# not measured.
+opprofile_arm() {
+    local op="$1" variant="$2" base="$3" count="$4" run="$5"
+    local lo="$run/$op-$variant-$base" hi="$run/$op-$variant-$count"
+    local done_lo done_hi late_lo late_hi ans_lo ans_hi status=0
+    done_lo="$(subprofile_number "$lo.op" "done")"
+    done_hi="$(subprofile_number "$hi.op" "done")"
+    echo "  op=$op arm=$variant: n=$base: $(tail -n 1 "$lo.op" 2>/dev/null); n=$count: $(tail -n 1 "$hi.op" 2>/dev/null)"
+    if [ -z "$done_lo" ] || [ -z "$done_hi" ] || [ "$done_hi" -le "$done_lo" ]; then
+        echo "  op=$op arm=$variant: NOT-MEASURED, the larger run did not do more operations than the smaller one"
+        echo "    op_probe said: $(tail -n 2 "$hi.op" 2>/dev/null | tr '\n' '|')"
+        echo "    its peer said: $(tail -n 2 "$hi.peer" 2>/dev/null | tr '\n' '|')"
+        return 2
+    fi
+    late_lo="$(subprofile_number "$lo.op" late)"
+    late_hi="$(subprofile_number "$hi.op" late)"
+    # A late operation stretched its run past the seconds both runs were to take, and what the session does by the
+    # clock no longer cancels: the figure stands, the line says it carries that.
+    if [ "${late_lo:-0}" != 0 ] || [ "${late_hi:-0}" != 0 ]; then
+        echo "  op=$op arm=$variant: operations were late (n=$base ${late_lo:-?}, n=$count ${late_hi:-?}); the runs' times differ by that"
+    fi
+    if [ "$op" = get ] && { [ "$(subprofile_number "$lo.op" replies)" != "$done_lo" ] \
+        || [ "$(subprofile_number "$hi.op" replies)" != "$done_hi" ]; }; then
+        echo "  op=$op arm=$variant: a get finished without its reply; the costs below are over the gets done"
+    fi
+    opprofile_role "$op" "$variant" op "$lo" "$hi" $((done_hi - done_lo)) "$base" "$count" "$run" || status=2
+    if [ "$op" = get ]; then
+        ans_lo="$(subprofile_number "$lo.peer" answered)"
+        ans_hi="$(subprofile_number "$hi.peer" answered)"
+        if [ -z "$ans_lo" ] || [ -z "$ans_hi" ] || [ "$ans_hi" -le "$ans_lo" ]; then
+            echo "  op=get arm=$variant role=peer: NOT-MEASURED, the queryable did not answer more in the larger run"
+            status=2
+        else
+            opprofile_role get "$variant" peer "$lo.peer" "$hi.peer" $((ans_hi - ans_lo)) "$base" "$count" "$run" \
+                || status=2
+        fi
+    fi
+    return "$status"
+}
+
+# opprofile_summary <per-op.tsv>: each operation's instructions for P and W, W over P, and net of the paced loop
+# (the op role less none's, of the same arm; a peer role carries no loop).
+opprofile_summary() {
+    python3 -I - "$1" <<'PY'
+import sys
+
+rows = {}
+for line in open(sys.argv[1], encoding="utf-8"):
+    op, arm, role, per = line.rstrip("\n").split("\t")
+    rows[(op, role, arm)] = float(per)
+loop = {arm: rows.get(("none", "op", arm)) for arm in "PW"}
+
+
+def show(value, width):
+    return f"{value:>{width}.1f}" if value is not None else f"{'-':>{width}}"
+
+
+def ratio(a, b, width):
+    return f"{b / a:>{width}.2f}" if a and b is not None else f"{'-':>{width}}"
+
+
+print("  summary, Ir per operation (net: less the paced loop, op=none, of the same arm):")
+print(f"    {'operation':<16} {'role':<5} {'P':>12} {'W':>12} {'W/P':>7} {'P net':>12} {'W net':>12} {'W/P net':>8}")
+for op, role in sorted({(op, role) for op, role, _ in rows}):
+    if op == "none":
+        continue
+    p, w = rows.get((op, role, "P")), rows.get((op, role, "W"))
+    net = {}
+    for arm, value in (("P", p), ("W", w)):
+        net[arm] = value - loop[arm] if role == "op" and value is not None and loop[arm] is not None else value
+    print(f"    {op:<16} {role:<5} {show(p, 12)} {show(w, 12)} {ratio(p, w, 7)} {show(net['P'], 12)} "
+          f"{show(net['W'], 12)} {ratio(net['P'], net['W'], 8)}")
+PY
+}
+
+opprofile() {
+    local ops="${1:-$OPPROF_OPS}" size="${2:-8}" seconds="${PICO_CMP_OPPROF_SECONDS:-20}"
+    local lead="${PICO_CMP_OPPROF_LEAD_S:-8}" settle="${PICO_CMP_OPPROF_SETTLE_S:-3}"
+    local run op variant n base count status=0 list=()
+    for n in "$size" "$seconds" "$lead" "$settle"; do
+        [[ "$n" =~ ^[0-9]+$ ]] || { echo "pico-compare: NOT-MEASURED, $n is not a whole number"; exit 2; }
+    done
+    if ! subprofile_has callgrind; then
+        echo "pico-compare: NOT-MEASURED, valgrind or callgrind_annotate is not on PATH"
+        exit 2
+    fi
+    IFS=, read -r -a list <<<"$ops"
+    for op in "${list[@]}"; do
+        case ",$OPPROF_OPS," in
+            *",$op,"*) ;;
+            *) echo "pico-compare: NOT-MEASURED, $op is not one of $OPPROF_OPS"; exit 2 ;;
+        esac
+        read -r base count <<<"$(opprofile_counts "$op")"
+        [[ "$base" =~ ^[0-9]+$ ]] && [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -gt "$base" ] \
+            || { echo "pico-compare: NOT-MEASURED, the counts of $op ($base, $count) are not two whole numbers, the second larger"; exit 2; }
+    done
+    run="$out/opprofile-runs/host-$(date -u +%Y%m%dT%H%M%S)"
+    mkdir -p "$run"
+    : >"$run/per-op.tsv"
+    {
+        echo "tree=$(git rev-parse HEAD)"
+        echo "host=$(hostname)"
+        echo "kernel=$(uname -r)"
+        echo "cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)"
+        echo "valgrind=$(valgrind --version 2>/dev/null)"
+        echo "ops=$ops size=$size seconds=$seconds lead_s=$lead settle_s=$settle"
+        for op in "${list[@]}"; do
+            echo "counts $op=$(opprofile_counts "$op")"
+        done
+        echo "op_cpus=$pub_cpus peer_cpus=$sub_cpus wz_env=${wz_env:-none}"
+        echo "pico_lib=$pico_lib"
+        echo "wz=$wz_engine"
+    } >"$run/record.txt"
+    echo "instructions per operation, $size B, ops $ops over $seconds s a run; operation on $pub_cpus, peer on $sub_cpus; wz env: ${wz_env:-none}; wz arm: $wz_engine" \
+        | tee -a "$run/report.txt"
+    for op in "${list[@]}"; do
+        read -r base count <<<"$(opprofile_counts "$op")"
+        for variant in P W; do
+            for n in "$base" "$count"; do
+                opprofile_trial "$op" "$variant" "$n" "$size" "$seconds" "$lead" "$settle" "$run/$op-$variant-$n"
+            done
+            opprofile_arm "$op" "$variant" "$base" "$count" "$run" >"$run/arm.txt" || status=2
+            tee -a "$run/report.txt" <"$run/arm.txt"
+            rm -f "$run/arm.txt"
+        done
+    done
+    opprofile_summary "$run/per-op.tsv" | tee -a "$run/report.txt"
+    echo "pico-compare: opprofile run $run (report.txt, record.txt, per-op.tsv, each run's files)"
     return "$status"
 }
 
@@ -1241,12 +1504,13 @@ case "$mode" in
     nodrop-c) nodrop_c "$@" ;;
     profile) profile "$@" ;;
     subprofile) subprofile "$@" ;;
+    opprofile) opprofile "$@" ;;
     parity) parity "$@" ;;
     perf) perf_matrix "$@" ;;
     batch) batch_control "$@" ;;
     fanin) fanin "$@" ;;
     *)
-        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | subprofile [size] [count] [rate] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | batch [sizes,comma,separated] [count] | fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs]" >&2
+        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | subprofile [size] [count] [rate] | opprofile [ops,comma,separated] [size] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | batch [sizes,comma,separated] [count] | fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs]" >&2
         exit 2
         ;;
 esac
