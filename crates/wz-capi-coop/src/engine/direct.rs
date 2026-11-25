@@ -38,23 +38,20 @@ use super::registry::Planes;
 /// The pump of the session's one link, which the read steps itself.
 type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink, LinkCount>>;
 
-/// What the read and the link's end share of the link's session: whether its pump ended, whether
-/// the session asked it to end, and whether its parts were paid a replay the read owes the link.
-/// Read and written with loads and stores: the pump's end is read by the read that steps it, and
-/// the session asks while the read may hold the pump.
+/// What the read and the link's end share of the link's session: whether its pump ended, and
+/// whether the session asked it to end. Read and written with loads and stores: the pump's end is
+/// read by the read that steps it, and the session asks while the read may hold the pump.
 #[derive(Default)]
 pub(super) struct EndFlags {
     ended: AtomicBool,
     asked: AtomicBool,
-    replay_owed: AtomicBool,
 }
 
 impl EndFlags {
-    /// A link whose session neither ended nor was asked to, and is owed nothing.
+    /// A link whose session neither ended nor was asked to.
     fn ready(&self) {
         self.ended.store(false, Ordering::Release);
         self.asked.store(false, Ordering::Release);
-        self.replay_owed.store(false, Ordering::Release);
     }
 
     /// Whether the link's session ended, or was asked to.
@@ -77,13 +74,6 @@ impl DirectEnd {
         // through the engine's state: by the engine's drop before its fields go, and not after,
         // as an end does nothing in its own drop.
         unsafe { self.flags.as_ref() }
-    }
-}
-
-impl DirectEnd {
-    /// Mark the replay a send owed the link, for the read to carry out under the session's lock.
-    fn owe_replay(&self) {
-        self.flags().replay_owed.store(true, Ordering::Release);
     }
 }
 
@@ -341,8 +331,6 @@ pub(super) struct DirectParts<L: CoopLinks + 'static, C: ClockSource + 'static> 
     pump: MaybeUninit<DirectPump<L, C>>,
     /// What each step of the pump is handed, held exactly while the pump is written.
     records: Option<FaceRecords<C>>,
-    /// Where a debt the parts are paid is marked for the read.
-    end: DirectEnd,
 }
 
 // SAFETY: every handle on a cell of the link that the parts hold (the wire's actions, the pump's
@@ -353,13 +341,12 @@ pub(super) struct DirectParts<L: CoopLinks + 'static, C: ClockSource + 'static> 
 unsafe impl<L: CoopLinks + 'static, C: ClockSource + 'static> FaceParts for DirectParts<L, C> {}
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectParts<L, C> {
-    /// Parts of no link yet, whose debts are marked through `end`.
-    fn none(end: DirectEnd) -> Self {
+    /// Parts of no link yet.
+    fn none() -> Self {
         Self {
             wire: None,
             pump: MaybeUninit::uninit(),
             records: None,
-            end,
         }
     }
 }
@@ -389,12 +376,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> WireParts for DirectParts
         self.wire.as_ref()
     }
 
-    /// A replay owed is the session's to carry out, under its lock: marked for the read.
-    fn pay(&mut self, owed: u32) {
-        if owed & super::face_debts::REPLAY != 0 {
-            self.end.owe_replay();
-        }
-    }
+    /// The parts define no debt of their own: every send of the session reaches the wire through
+    /// the link's place, taken before the session's lock, and waits for its holder, so none is
+    /// owed.
+    fn pay(&mut self, _owed: u32) {}
 }
 
 /// A send writes the link's wire, which the read seats while it steps the pump.
@@ -429,6 +414,9 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static> {
     /// When the pump's own deadlines fall next: 0 for a pump not stepped yet, `u64::MAX` while no
     /// pump is written.
     pump_due_us: u64,
+    /// Whether the life brought the link up since the read last told it the replay's first turn
+    /// (`CoopEngine::turn_replay`).
+    brought_up: bool,
 }
 
 impl<L: CoopLinks + 'static> DirectSlot<L> {
@@ -588,6 +576,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                         last: None,
                         life_due_us: u64::MAX,
                         pump_due_us: u64::MAX,
+                        brought_up: false,
                     }))
                 },
             );
@@ -622,6 +611,8 @@ struct LinkTurn {
     now_ms: u64,
     /// When a periodic job is due by the look's reading.
     jobs_due_ms: Option<u64>,
+    /// Whether the look owes the link that is up a turn of its replay (`CoopEngine::turn_replay`).
+    replays: bool,
     /// Why the session ended at this look, when it did.
     ended: Option<OpenError>,
 }
@@ -725,6 +716,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.hand_lost_tokens();
         }
         if turn.ended.is_none() {
+            // The turn goes through the link's wire, its place taken before the session's lock as
+            // every operation's send takes it, so the look's lock is let go of first. A turn that
+            // ended the link has the life looked at by the next read, at once.
+            if turn.replays
+                && self.live_on_link(|core, tx| self.turn_replay(core, turn.now_us, tx))
+                    == Some(TurnEnd::EndsLink)
+            {
+                slot.life_due_us = turn.now_us;
+            }
             self.pump_turn(slot, &turn);
         }
         Some(turn)
@@ -756,13 +756,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let now_ms = core.session_time.ms_at(now_us);
         let input = slot.next_input(core, &self.direct.end);
         let chains_due = now_ms >= slot.router.due_ms();
-        // A replay its parts were paid while a step held them is carried out here, under the lock.
-        let replay_owed = self.direct.end.replay_owed.swap(false, Ordering::AcqRel);
         // The life moves on only by what the link brings or at its own time: a link that is up
         // and brings nothing is not looked at for the rest of the bookkeeping.
         let moves_link = input != LinkInput::Tick || now_us >= slot.life_due_us;
         let mut ended = None;
-        if moves_link || replay_owed || chains_due || core.ledger.owes(now_us, core.seen()) {
+        let mut replays = false;
+        if moves_link || chains_due || core.ledger.owes(now_us, core.seen()) {
             #[cfg(test)]
             core.services.set(core.services.get() + 1);
             if chains_due {
@@ -777,7 +776,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 Ok(())
             };
             match moved {
-                Ok(()) => self.turn_replay(core, now_us, replay_owed),
+                // A link the look brought up is owed the replay's first turn, and a paced
+                // replay the turn that may be due.
+                Ok(()) => {
+                    replays = slot.brought_up || ReplayPacing::REACHABLE;
+                    slot.brought_up = false;
+                }
                 Err(last) => {
                     // A handle reads the session closed from its row from here on, as after a
                     // close.
@@ -808,6 +812,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             now_us,
             now_ms,
             jobs_due_ms,
+            replays,
             ended,
         })
     }
@@ -961,6 +966,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             if effects.bring_up() {
                 core.bring_up(0, now_us);
+                slot.brought_up = true;
             }
             // The dial under way, if any, was taken above.
             if effects.ends_session() {
@@ -1047,7 +1053,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         slot.drop_link(&self.direct.site);
         self.direct.end.ready();
         // SAFETY: the parts hold no handle on a cell of a link yet.
-        let parts = unsafe { FaceHeld::gathered(DirectParts::none(self.direct.end_handle())) };
+        let parts = unsafe { FaceHeld::gathered(DirectParts::none()) };
         drop(self.direct.site.hold(parts));
         let params = core.link_params()?;
         let end = self.direct.end_handle();
@@ -1114,10 +1120,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Ok(())
     }
 
-    /// The next turn of the replay the link that is up owes its peer, when one is due, or, when
-    /// its parts were paid a replay a send owed them (`owed`), the replay begun again. A turn the
-    /// replay is given up on ends the link, as a build whose links are tasks ends it.
-    fn turn_replay(&self, core: &mut Core<L, C>, now_us: u64, owed: bool) {
+    /// The turn of the replay a look at the life owed the link that is up (`LinkTurn::replays`),
+    /// told through the link's wire `tx` at `now_us`: the next turn of a paced replay when one is
+    /// due, else the whole of it in one lap, which a look owes only the link it brought up. What
+    /// the turn left of the link: a turn the replay is given up on ends the link, as a build whose
+    /// links are tasks ends it.
+    fn turn_replay(&self, core: &mut Core<L, C>, now_us: u64, tx: LinkTx<'_, C>) -> TurnEnd {
         if core
             .transport
             .links
@@ -1125,18 +1133,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .and_then(|face| face.up())
             .is_none()
         {
-            return;
+            return TurnEnd::Kept;
         }
-        let end = if owed {
-            core.begin_replay(0, now_us / 1000)
-        } else if ReplayPacing::REACHABLE {
-            core.replay_turn(0, now_us / 1000)
+        let end = if ReplayPacing::REACHABLE {
+            core.replay_turn(0, now_us / 1000, tx)
         } else {
-            return;
+            core.tell_in_one_lap(0, tx)
         };
         if end == TurnEnd::EndsLink {
             core.transport.links.abort_link(0);
         }
+        end
     }
 
     /// Whether the one link is up, as the life of the face's record says.
@@ -1211,13 +1218,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if let Some(mut held) = <CoopForm as LockForm>::try_lock(&self.direct.slot) {
             held.0.let_go(&self.direct.site);
         }
-    }
-
-    /// Owe the link's parts a replay, as a send that found them held owes it: what a test of the
-    /// debt's payment owes from inside the read's step.
-    #[cfg(test)]
-    pub(crate) fn owe_link_replay(&self) {
-        self.direct.site.owe(super::face_debts::REPLAY);
     }
 
     /// Run `f` on the session's one reassembly Router with the time now on the epoch its chains

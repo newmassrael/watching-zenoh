@@ -2918,6 +2918,11 @@ type FaceLink<C, L> = <L as HeldLink<C>>::Wire;
 /// its one thread holds the link only in the read's step, which seats the link's send part for
 /// every send made inside it, so a debug build of that form fails on it; a release build owes the
 /// send's debt, as any other form does.
+#[cfg(any(
+    any(feature = "threads", feature = "listen", feature = "group"),
+    feature = "transport-stats",
+    all(test, any(feature = "std", feature = "liveliness-get"))
+))]
 #[inline(always)]
 fn found_held<U>(lent: &Lend<U>) {
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
@@ -2929,39 +2934,25 @@ fn found_held<U>(lent: &Lend<U>) {
     let _ = lent;
 }
 
-/// What a face owes the session's sends that found its link held by another holder
-/// ([`LendsSession::owe`]): bits of its parts' debts, each paid by the holder once it lets go of
-/// the link, under the session's lock, from the session's own record of what the face is owed.
-mod face_debts {
-    /// The face's replay owes its peer a turn, from where its cursor stands.
-    pub(super) const REPLAY: u32 = 1;
-}
-
-/// Send `send` over the link `wire` holds, as every send of the session on a face is made: the
-/// link's session is lent to it in place, or by a try of the place the link lies in apart from the
-/// session's state, which waits for nothing ([`LendsSession::try_session`]). `send` was made of
-/// the session's state under its lock and reads only what may be shared across threads (text and
-/// ids read off the session's rows), so it holds no handle on a cell of the link or of the
-/// session. `Some` with whether the link took it; `None` while the link holds no session, and,
-/// with `debt` owed to the face, while another holder has the link. A step of the link that
-/// answers yes or no (a batch's, or how the link names a key) is lent through it too, owing
-/// nothing.
+/// Send `send` over the link `wire` holds, where each face's record holds its link: the link's
+/// session is lent to it in place, under the session's lock with the caller
+/// ([`LendsSession::try_session`]). `send` was made of the session's state under its lock and
+/// reads only what may be shared across threads (text and ids read off the session's rows), so it
+/// holds no handle on a cell of the link or of the session. `Some` with whether the link took
+/// it; `None` while the link holds no session. A step of the link that answers yes or no (a
+/// batch's, or how the link names a key) is lent through it too.
 // Out of line and over `dyn`: one body lends a link for every send of the session.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 #[inline(never)]
 fn send_on<C: ClockSource + 'static>(
     wire: &impl LendsSession<Session = LinkSession<C>>,
-    debt: u32,
     send: &(dyn SendTo<C> + Sync),
 ) -> Option<bool> {
     let lent = wire.try_session(|session| send.send_to(&session.actions));
     found_held(&lent);
     match lent {
         Lend::Lent(took) => Some(took),
-        Lend::Held => {
-            wire.owe(debt);
-            None
-        }
-        Lend::Empty => None,
+        Lend::Held | Lend::Empty => None,
     }
 }
 
@@ -3343,7 +3334,7 @@ fn send_through<C: ClockSource + 'static>(
     _tx: LinkTx<'_, C>,
     send: &(dyn SendTo<C> + Sync),
 ) -> Option<bool> {
-    send_on(wire, 0, send)
+    send_on(wire, send)
 }
 
 /// `f` on the actions of the one link, whose record names it by `_wire`, through its wire `tx`,
@@ -3389,9 +3380,9 @@ enum LegTurn {
     Issued,
 }
 
-/// `f` on the actions of the link `wire` holds, lent as [`send_on`] lends them: what a send
-/// reads of the link before it is made (an id the link allocates). `None` while the link is not
-/// lent.
+/// `f` on the actions of the link `wire` holds, lent by a try of its session that waits for
+/// nothing ([`LendsSession::try_session`]): what a send reads of the link before it is made (an
+/// id the link allocates). `None` while the link is not lent.
 #[cfg(any(
     all(
         feature = "query",
@@ -4825,7 +4816,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let up = face
             .up()
             .is_some_and(|wire| ReplayPacing::REACHABLE && !wire.finished());
-        if up && self.replay_turn(at, now_ms) == TurnEnd::EndsLink {
+        if up && self.replay_turn(at, now_ms, core::marker::PhantomData) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
             self.run_tasks();
         }
@@ -5006,18 +4997,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// that has just come up is told (`begin_replay`), at the session's pace; the count of faces.
     /// What the application asks for when it holds that a peer lost declarations the session made.
     /// A face whose first turn the replay is given up on is not counted: its link ends, and the
-    /// next pass over the faces takes it as lost (`poll_face`).
-    fn redeclare(&mut self) -> usize {
+    /// next pass over the faces takes it as lost (`poll_face`). `tx` is what the caller holds
+    /// of the one link, taken with its place before the session's lock
+    /// (`CoopEngine::live_on_link`), through which that link is told.
+    fn redeclare(&mut self, tx: LinkTx<'_, C>) -> usize {
         let now_ms = self.clock.now_us() / 1000;
         let places = self.transport.links.places();
         (0..places)
-            .filter(|&at| self.redeclare_on(at, now_ms))
+            .filter(|&at| self.redeclare_on(at, now_ms, tx))
             .count()
     }
 
-    /// Tell the peer of the face at `at` everything the session holds again (`redeclare`):
-    /// whether it was told, which a place with no face, or a face whose link is not up, is not.
-    fn redeclare_on(&mut self, at: usize, now_ms: u64) -> bool {
+    /// Tell the peer of the face at `at` everything the session holds again (`redeclare`),
+    /// through `tx`: whether it was told, which a place with no face, or a face whose link is not
+    /// up, is not.
+    fn redeclare_on(&mut self, at: usize, now_ms: u64, tx: LinkTx<'_, C>) -> bool {
         let up = self
             .transport
             .links
@@ -5026,7 +5020,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if !up {
             return false;
         }
-        match self.begin_replay(at, now_ms) {
+        match self.begin_replay(at, now_ms, tx) {
             TurnEnd::Kept => true,
             TurnEnd::EndsLink => {
                 if let Some(wire) = self.transport.links.face(at).and_then(|face| face.up()) {
@@ -5120,9 +5114,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The link is now one the session's sends go through: what was planned over the links
         // before it no longer holds (`LinkSupervisor::generation`).
         self.transport.links.establish(at);
-        if self.begin_replay(at, now_us / 1000) == TurnEnd::EndsLink {
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        if self.begin_replay(at, now_us / 1000, core::marker::PhantomData) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
         }
+        // The one link's first turn goes through its wire, which the read takes with the link's
+        // place once the look that brought it up has let go of the session's lock
+        // (`CoopEngine::turn_replay`).
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        self.start_replay(at, now_us / 1000);
         #[cfg(feature = "connectivity")]
         if let Some(row) = told {
             self.session.report_face_row(FaceEventKind::Up, row);
@@ -9263,8 +9263,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     }
 
     fn redeclare(&self) -> Result<usize, wz_capi_port::RedeclareRefusal> {
-        let mut core = self.live().ok_or(wz_capi_port::RedeclareRefusal::Closed)?;
-        Ok(core.0.redeclare())
+        self.live_on_link(|core, tx| core.redeclare(tx))
+            .ok_or(wz_capi_port::RedeclareRefusal::Closed)
     }
 
     #[inline(never)]

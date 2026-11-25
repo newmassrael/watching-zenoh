@@ -220,15 +220,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         held_before(super::tables(&self.session.registry), None)
     }
 
-    /// Tell the peer of the face at `at` of the declaration at `place` ([`super::send_on`]):
-    /// whether the link took it, a place with nothing to send counting as taken. `None` while the
-    /// face holds no link, and while another holder has it, the turn then owed to the face.
-    fn emit(&self, at: usize, place: usize) -> Option<bool> {
+    /// Tell the peer of the face at `at` of the declaration at `place` through the link's wire
+    /// `tx` ([`super::send_through`]): whether the link took it, a place with nothing to send
+    /// counting as taken. `None` while the face holds no link, or `tx` no wire.
+    fn emit(&self, at: usize, place: usize, tx: super::LinkTx<'_, C>) -> Option<bool> {
         let wire = self.transport.links.face(at)?.link.wire()?;
         let tell = self.tell_at(place);
-        super::send_on(wire, super::face_debts::REPLAY, &|actions: &LinkActions<
-            C,
-        >| {
+        super::send_through(wire, tx, &|actions: &LinkActions<C>| {
             tell.is_none_or(|tell| tell.send(actions))
         })
     }
@@ -252,31 +250,47 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The link of the face at `at` has been established: begin to tell its peer what the session
-    /// holds, and send the first turn of it; what that turn leaves of the link. In a build that
-    /// reaches no pace the first turn is the whole of it ([`Self::tell_in_one_lap`]).
+    /// holds, and send the first turn of it through the link's wire `tx`; what that turn leaves of
+    /// the link. In a build that reaches no pace the first turn is the whole of it
+    /// ([`Self::tell_in_one_lap`]).
     /// Out of line: a link brought up and a redeclare each begin a replay.
     #[inline(never)]
-    pub(super) fn begin_replay(&mut self, at: usize, now_ms: u64) -> TurnEnd {
+    pub(super) fn begin_replay(
+        &mut self,
+        at: usize,
+        now_ms: u64,
+        tx: super::LinkTx<'_, C>,
+    ) -> TurnEnd {
         if !ReplayPacing::REACHABLE {
-            return self.tell_in_one_lap(at);
+            return self.tell_in_one_lap(at, tx);
+        }
+        self.start_replay(at, now_ms);
+        self.replay_turn(at, now_ms, tx)
+    }
+
+    /// Set the replay of the face at `at` to tell its peer, from `now_ms` on, everything the
+    /// session holds, its first turn due at once; nothing in a build that reaches no pace, whose
+    /// replay is one lap and keeps no cursor.
+    pub(super) fn start_replay(&mut self, at: usize, now_ms: u64) {
+        if !ReplayPacing::REACHABLE {
+            return;
         }
         let owed = self.sequence_len();
         if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.begin(owed, now_ms);
         }
-        self.replay_turn(at, now_ms)
     }
 
     /// Tell the peer of the face at `at` every declaration the session holds, in the replay's
-    /// order, in one lap, as upstream's reopen sends its whole cache of declarations (see the
-    /// module's note): what the lap leaves of the link, [`TurnEnd::EndsLink`] at the first send
-    /// the link refuses, as the reopen clears a transport it could not send one over. The replay
-    /// of a build that reaches no pace, which keeps no cursor: the lap ends before the session
-    /// does anything else, so nothing is owed past it, but for a lap the link was not lent for,
-    /// which stops there and is owed to the face whole, as a redeclare tells it.
-    fn tell_in_one_lap(&self, at: usize) -> TurnEnd {
+    /// order, in one lap through the link's wire `tx`, as upstream's reopen sends its whole cache
+    /// of declarations (see the module's note): what the lap leaves of the link,
+    /// [`TurnEnd::EndsLink`] at the first send the link refuses, as the reopen clears a transport
+    /// it could not send one over. The replay of a build that reaches no pace, which keeps no
+    /// cursor: the lap ends before the session does anything else, so nothing is owed past it. A
+    /// lap with no wire to tell it through stops at its first place.
+    pub(super) fn tell_in_one_lap(&self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
         for place in 0..self.sequence_len() {
-            match self.emit(at, place) {
+            match self.emit(at, place, tx) {
                 Some(true) => {}
                 Some(false) => return TurnEnd::EndsLink,
                 None => break,
@@ -285,11 +299,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         TurnEnd::Kept
     }
 
-    /// One turn of the replay of the face at `at`, if one is owed and due: the burst of the pace,
-    /// or everything when the session is not paced, from the entry the last turn stopped at. What
-    /// the turn leaves of the link: [`TurnEnd::EndsLink`] when the replay was given up on a
-    /// refused send, which the caller answers by ending the link.
-    pub(super) fn replay_turn(&mut self, at: usize, now_ms: u64) -> TurnEnd {
+    /// One turn of the replay of the face at `at` through the link's wire `tx`, if one is owed
+    /// and due: the burst of the pace, or everything when the session is not paced, from the
+    /// entry the last turn stopped at. What the turn leaves of the link: [`TurnEnd::EndsLink`]
+    /// when the replay was given up on a refused send, which the caller answers by ending the
+    /// link.
+    pub(super) fn replay_turn(
+        &mut self,
+        at: usize,
+        now_ms: u64,
+        tx: super::LinkTx<'_, C>,
+    ) -> TurnEnd {
         // A place with no face has no replay to send.
         let Some(Face { replay, .. }) = self.transport.links.face(at) else {
             return TurnEnd::Kept;
@@ -303,15 +323,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let mut told = false;
         let mut refused = false;
         for place in cursor.turn(burst) {
-            match self.emit(at, place) {
+            match self.emit(at, place, tx) {
                 Some(true) => told = true,
                 Some(false) => {
                     cursor.refused(place);
                     refused = true;
                     break;
                 }
-                // The link was not lent: the turn stops at the declaration, which is no refusal,
-                // and the rest is owed to the face.
+                // No wire to tell it through: the turn stops at the declaration, which is no
+                // refusal, and the next turn tells the rest.
                 None => {
                     cursor.refused(place);
                     break;
@@ -457,7 +477,7 @@ fn held_before(tables: &super::CoopTables, end: Option<DeclaredTable>) -> usize 
 
 /// A declaration as a link is told it, read off its row ([`Tell::of`]): its id and its key's text
 /// and wire form, borrowed from the session's tables. Its send reads nothing else of the session's
-/// state, so it is made over a link lent apart from that state ([`super::send_on`]). One value
+/// state, so it is made over a link lent apart from that state ([`super::send_through`]). One value
 /// for every kind, so a turn of the replay and a declaration announced to the faces build each
 /// kind's message here alone. A key the tables name no more is `None`, and refused.
 #[derive(Clone, Copy)]
@@ -645,7 +665,7 @@ fn tell_on<C: ClockSource + 'static>(
     _tx: super::LinkTx<'_, C>,
     retract: Retract<'_>,
 ) {
-    let _ = super::send_on(wire, 0, &|actions: &LinkActions<C>| {
+    let _ = super::send_on(wire, &|actions: &LinkActions<C>| {
         retract.tell(actions);
         true
     });

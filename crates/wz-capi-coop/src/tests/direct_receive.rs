@@ -746,25 +746,27 @@ fn an_undeclaration_inside_the_reads_step_is_told_once_through_its_seat() {
     );
 }
 
-/// A replay owed to the link's parts from inside the read's step, as a send that found them held
-/// owes it, is paid as the read lets go of them: the next read begins the replay again, and the
-/// router is told the subscriber once more. Turned red by a debt the read's let go does not pay
-/// (`DirectParts::pay`), or a payment the next read does not carry out (`turn_replay`).
+/// A redeclare a callback asks for from inside the read's step tells the router the subscriber
+/// again: the replay's lap reaches the link's wire through the seat the read stands in, with no
+/// try of the place the read holds, and nothing is left owed for a later read. Turned red by a lap
+/// handed no wire inside the step (`CoopEngine::live_on_link`), which tells nothing, or by a
+/// redeclare that counts no face.
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 #[test]
-fn a_replay_owed_inside_the_reads_step_is_paid_as_the_read_lets_go() {
+fn a_redeclare_inside_the_reads_step_is_told_through_its_seat() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let session = EngineHold::downgrade(&engine);
     let handed = Arc::new(AtomicUsize::new(0));
+    let told: Arc<Mutex<Option<Result<usize, wz_capi_port::RedeclareRefusal>>>> = Arc::default();
     let declares_before = router.seen(|s| s.declares);
     engine
         .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
-            let handed = handed.clone();
+            let (handed, told) = (handed.clone(), told.clone());
             SubscriberSink::shared(move |_: &dyn SampleView| {
                 let first = handed.fetch_add(1, Ordering::SeqCst) == 0;
                 if let (true, Some(engine)) = (first, session.upgrade()) {
-                    engine.owe_link_replay();
+                    *told.lock().unwrap() = Some(SessionEngine::redeclare(&*engine));
                 }
             })
         })
@@ -778,6 +780,11 @@ fn a_replay_owed_inside_the_reads_step_is_paid_as_the_read_lets_go() {
     until(&engine, "the subscriber told again", || {
         router.seen(|s| s.subscribers.len()) > declared.len()
     });
+    assert_eq!(
+        *told.lock().unwrap(),
+        Some(Ok(1)),
+        "the redeclare inside the step counted the one face"
+    );
     assert_eq!(
         router.seen(|s| s.subscribers.last().copied()),
         declared.last().copied(),
