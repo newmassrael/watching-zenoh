@@ -2581,13 +2581,68 @@ impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for 
     }
 }
 
+/// What the ABI's key `wire` names of `keyexpr`: the whole key under id 0 for a literal, else
+/// the declaration and the rest of the key past it. Read before a link is lent, as the ABI's key
+/// is not shared with the thread a link may be lent on.
+#[cfg(feature = "query")]
+fn abi_names<'a>(wire: &'a WireKey, keyexpr: &'a str) -> (ExprId, Option<&'a str>) {
+    if wire.is_literal() {
+        (0, Some(keyexpr))
+    } else {
+        wire.names_in(keyexpr)
+    }
+}
+
+/// `f` on the key `keyexpr` of a get as the link of `actions` names it: by the link's key-wire
+/// form, and as the ABI made it, `abi` ([`abi_names`]), for a link of the declared form.
+#[cfg(all(feature = "shared-key-ids", feature = "query"))]
+fn get_key_on_link<C: ClockSource + 'static, U>(
+    actions: &LinkActions<C>,
+    keyexpr: &str,
+    abi: (ExprId, Option<&str>),
+    f: impl FnOnce(ExprId, Option<&str>) -> U,
+) -> U {
+    match wz_capi_port::wire_on_link(actions.key_wire_on_link(keyexpr)) {
+        Some(made) if made.is_literal() => f(0, Some(keyexpr)),
+        Some(made) => {
+            let (mapping_id, suffix) = made.names_in(keyexpr);
+            f(mapping_id, suffix)
+        }
+        None => f(abi.0, abi.1),
+    }
+}
+
+/// A build without the shared key ids names a get's key on every link as the ABI made it.
+#[cfg(all(not(feature = "shared-key-ids"), feature = "query"))]
+#[inline(always)]
+fn get_key_on_link<C: ClockSource + 'static, U>(
+    _actions: &LinkActions<C>,
+    _keyexpr: &str,
+    abi: (ExprId, Option<&str>),
+    f: impl FnOnce(ExprId, Option<&str>) -> U,
+) -> U {
+    f(abi.0, abi.1)
+}
+
+/// `f` on the actions of the link `wire` holds, lent as [`send_on`] lends them: what a send
+/// reads of the link before it is made (an id the link allocates). `None` while the link is not
+/// lent.
+#[cfg(feature = "query")]
+fn lend_actions<C: ClockSource + 'static, U: Send>(
+    wire: &Wire<C>,
+    f: impl FnOnce(&LinkActions<C>) -> U + Send,
+) -> Option<U> {
+    match wire.try_session(|session| f(&session.actions)) {
+        Lend::Lent(answer) => Some(answer),
+        Lend::Held | Lend::Empty => None,
+    }
+}
+
 /// `wire` as the link of `actions` names the key `keyexpr`: the link's key-wire form decides,
-/// and the declared form keeps `wire` as the ABI made it (`shared-key-ids`). Only a get and a
-/// liveliness subscriber's Interest name their key by the ABI's form still.
-#[cfg(all(
-    feature = "shared-key-ids",
-    any(feature = "query", feature = "liveliness", feature = "liveliness-get")
-))]
+/// and the declared form keeps `wire` as the ABI made it (`shared-key-ids`). Only a liveliness
+/// subscriber's Interest names its key by the ABI's form still, beside a get
+/// (`get_key_on_link`).
+#[cfg(all(feature = "shared-key-ids", feature = "liveliness"))]
 fn on_link<'w, C: ClockSource + 'static>(
     actions: &LinkActions<C>,
     keyexpr: &str,
@@ -2620,10 +2675,7 @@ fn key_on_link<'k, C: ClockSource + 'static>(
 }
 
 /// A build without the shared key ids names every key on every link as the ABI made it.
-#[cfg(all(
-    not(feature = "shared-key-ids"),
-    any(feature = "query", feature = "liveliness", feature = "liveliness-get")
-))]
+#[cfg(all(not(feature = "shared-key-ids"), feature = "liveliness"))]
 #[inline(always)]
 fn on_link<'w, C: ClockSource + 'static>(
     _actions: &LinkActions<C>,
@@ -4388,6 +4440,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.rooms.hold(face.at(), on);
         }
         Ok(group)
+    }
+
+    /// The link of face `id` while it is up, which a send to that face's peer goes over.
+    #[cfg(feature = "query")]
+    fn up_wire(&self, id: FaceId) -> Option<&Wire<C>> {
+        self.transport
+            .links
+            .faces()
+            .find_map(|face| match &face.link {
+                Link::Up(wire) if face.id == id => Some(wire),
+                _ => None,
+            })
     }
 
     /// The place in the replay's order of the declaration `prefix` names, when the entity going is
@@ -8648,11 +8712,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             };
             asked = Some(face);
             let leg_id = self.next_local_id();
-            let Some(actions) = core.transport.up_actions(face).cloned() else {
+            // A request id the face's actions allocate, so its peer's answer names it.
+            let Some(rid) = core.up_wire(face).and_then(|link| {
+                lend_actions(link, |actions: &LinkActions<C>| {
+                    actions.alloc_next_request_id()
+                })
+            }) else {
                 continue;
             };
-            // A request id the face's actions allocate, so its peer's answer names it.
-            let rid = actions.alloc_next_request_id();
             // One Final: the face's peer's. Held before the request goes out, so no answer can
             // arrive before its entry.
             // Its deadline may come before the one the step's bookkeeping is due at.
@@ -8682,24 +8749,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     continue;
                 }
             }
-            // The link names the key as its own key-wire form says.
-            let wire = on_link(&actions, keyexpr, wire);
-            let (mapping_id, suffix) = if wire.is_literal() {
-                (0, Some(keyexpr))
-            } else {
-                wire.names_in(keyexpr)
-            };
-            // The query is written from the options where they lie, with nothing copied.
-            let sent = match wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix) {
-                Some(key) => actions
-                    .send_get_parts(wz_session_core::query_parts::GetParts {
-                        rid,
-                        key,
-                        query: opts.query_parts(),
+            // The link names the key as its own key-wire form says, and the query is written
+            // from the options where they lie, with nothing copied.
+            let (abi, query) = (abi_names(wire, keyexpr), opts.query_parts());
+            let sent = core.up_wire(face).and_then(|link| {
+                send_on(link, 0, &|actions: &LinkActions<C>| {
+                    get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
+                        wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix)
+                            .is_some_and(|key| {
+                                actions
+                                    .send_get_parts(wz_session_core::query_parts::GetParts {
+                                        rid,
+                                        key,
+                                        query,
+                                    })
+                                    .is_ok()
+                            })
                     })
-                    .is_ok(),
-                None => false,
-            };
+                })
+            }) == Some(true);
             if !sent {
                 // Nothing went out: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.session.registry.face_mut(face) {
@@ -8901,12 +8969,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             };
             asked = Some(face);
             let leg_id = self.next_local_id();
-            let Some(actions) = core.transport.up_actions(face).cloned() else {
-                continue;
-            };
             // A face whose session has no interest id left is not asked, as one that could not
             // hold the entry.
-            let Some(interest_id) = actions.alloc_next_interest_id() else {
+            let Some(interest_id) = core
+                .up_wire(face)
+                .and_then(|link| {
+                    lend_actions(link, |actions: &LinkActions<C>| {
+                        actions.alloc_next_interest_id()
+                    })
+                })
+                .flatten()
+            else {
                 continue;
             };
             let interest_id = u64::from(interest_id);
@@ -8950,16 +9023,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // Its deadline may come before the one the step's bookkeeping is due at.
             core.ledger.owe();
             // The Interest names the key as the link's own key-wire form says, as a query does.
-            let wire = on_link(&actions, keyexpr, wire);
-            let (mapping_id, suffix) = if wire.is_literal() {
-                (0, Some(keyexpr))
-            } else {
-                wire.names_in(keyexpr)
-            };
-            if actions
-                .send_interest_liveliness_get(interest_id, mapping_id, suffix)
-                .is_err()
-            {
+            let abi = abi_names(wire, keyexpr);
+            let sent = core.up_wire(face).and_then(|link| {
+                send_on(link, 0, &|actions: &LinkActions<C>| {
+                    get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
+                        actions
+                            .send_interest_liveliness_get(interest_id, mapping_id, suffix)
+                            .is_ok()
+                    })
+                })
+            }) == Some(true);
+            if !sent {
                 // Nothing went out: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.session.registry.face_mut(face) {
                     tables.gets.liveliness_gets.unregister(interest_id);
