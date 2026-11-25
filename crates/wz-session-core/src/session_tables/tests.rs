@@ -146,6 +146,52 @@ impl PeerDeclarations for Peers {
     }
 }
 
+/// Every kind of entity is admitted by the one body (`Declaring::keyed`) and holds the declaration
+/// its key is named under as every other kind does: once while it stands, and not after it goes.
+///
+/// # Control
+///
+/// A kind whose declaration skips `Declaring::hold` for its prefix, or whose undeclaration keeps
+/// the hold, reds that kind's line.
+#[test]
+fn every_kind_of_entity_holds_its_prefix_declaration_alike() {
+    let mut tables = Tables::new();
+    let prefix = tables.declare_keyexpr("demo").unwrap();
+    let holds = |tables: &Tables| tables.keyexprs().get(prefix.handle).unwrap().holds();
+    let alone = holds(&tables);
+    let form = KeyForm {
+        prefix: Some(prefix.handle),
+        own: None,
+        retraction: Retraction::ById,
+    };
+    let sub = tables
+        .declare_subscriber("demo/s", Locality::Any, form, 1)
+        .unwrap();
+    assert_eq!(holds(&tables), alone + 1, "a subscriber holds its prefix");
+    let qbl = tables
+        .declare_queryable("demo/q", Locality::Any, true, form, 2)
+        .unwrap();
+    assert_eq!(holds(&tables), alone + 2, "a queryable holds its prefix");
+    let token = tables.declare_token("demo/t", form).unwrap();
+    assert_eq!(holds(&tables), alone + 3, "a token holds its prefix");
+    let live = tables
+        .declare_liveliness_subscriber("demo/l", true, form, 3)
+        .unwrap();
+    assert_eq!(
+        holds(&tables),
+        alone + 4,
+        "a liveliness subscriber holds its prefix"
+    );
+    assert_eq!([sub.id, qbl.id, token.id, live.id], [1, 2, 3, 4]);
+    assert!(tables.undeclare_subscriber(sub.handle).is_some());
+    assert!(tables.undeclare_queryable(qbl.handle).is_some());
+    assert!(tables.undeclare_token(token.handle).is_some());
+    assert!(tables
+        .undeclare_liveliness_subscriber(live.handle)
+        .is_some());
+    assert_eq!(holds(&tables), alone, "each kind let its hold go");
+}
+
 #[test]
 fn every_kind_of_entity_takes_its_id_from_one_space() {
     let mut tables = Tables::new();
