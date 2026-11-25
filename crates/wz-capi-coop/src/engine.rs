@@ -6956,6 +6956,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         false
     }
 
+    /// Owe each of `rids` a `Final` on every face the session holds, as the dispatch of a query
+    /// owes one: how many faces owe them.
+    #[cfg(all(test, feature = "queryable"))]
+    pub(crate) fn owe_finals(&self, rids: &[wz_session_core::wire_id::RequestId]) -> usize {
+        self.core.lock().0.session.registry.owe_finals(rids)
+    }
+
     /// How often what the peers declared was searched since the open: what a test of the cost of
     /// a filtered put counts. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]

@@ -59,6 +59,46 @@ fn a_query_is_answered_and_its_final_follows_the_reply() {
     assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
 }
 
+/// The `Final`s a face owes when a run of Pushes arrives on it go out in the drain after that run,
+/// each once, in the order they were owed, and the session stepped past it sends none again. The
+/// CONTROL is the wait before the run: owed, they go out with no frame of the router's. Turned red
+/// by a drain after a run of Pushes that hands its Finals to nobody, or one that leaves them owed.
+#[cfg(feature = "std")]
+#[test]
+fn the_finals_a_face_owes_go_out_after_a_run_of_pushes_once_in_order() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let step_for = |span: Duration| {
+        let end = std::time::Instant::now() + span;
+        while std::time::Instant::now() < end {
+            let _ = SessionDrive::read(&*engine, false);
+        }
+    };
+    // What the router sends as the link comes up is read before anything is owed.
+    step_for(Duration::from_millis(400));
+    // Owed once, on the router's face as soon as the session holds it.
+    until(&engine, "the router's face to owe the Finals", || {
+        engine.owe_finals(&[3, 5]) == 1
+    });
+    step_for(Duration::from_millis(400));
+    assert!(
+        router.seen(|s| s.final_rids.is_empty()),
+        "CONTROL: owed, they wait for a frame of the router's"
+    );
+    let (alone, ..) = engine.push_dispatches();
+    router.send(Command::Push("demo/finals", b"x"));
+    until(&engine, "the Finals the run owed", || {
+        router.seen(|s| s.final_rids.len()) >= 2
+    });
+    assert!(
+        engine.push_dispatches().0 > alone,
+        "the run was a Push handed to the subscribers' plane alone"
+    );
+    router.send(Command::Push("demo/finals", b"y"));
+    step_for(Duration::from_millis(400));
+    assert_eq!(router.seen(|s| s.final_rids.clone()), vec![3, 5]);
+}
+
 /// A query the callback keeps holds its Final until the C program lets go of it, and a reply made
 /// in between goes out before the Final. The CONTROL is the wait: with the query kept, no Final
 /// reaches the router however long the session is stepped.

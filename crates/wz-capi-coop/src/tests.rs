@@ -183,6 +183,9 @@ struct Seen {
     /// `final` for a ResponseFinal.
     #[cfg(feature = "queryable")]
     answers: Vec<&'static str>,
+    /// The request id of each ResponseFinal, in the order they arrived.
+    #[cfg(feature = "queryable")]
+    final_rids: Vec<u32>,
     /// How each Response named its key on the wire: its id, the rest after it and the mapping bit
     /// (`true` is the sender's space).
     #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
@@ -500,7 +503,10 @@ fn run_router(
                             seen.reply_keys.push(reply_key_of(_response));
                         }
                         #[cfg(feature = "queryable")]
-                        NetworkMessage::ResponseFinal(_) => seen.answers.push("final"),
+                        NetworkMessage::ResponseFinal(done) => {
+                            seen.answers.push("final");
+                            seen.final_rids.push(done.request_id);
+                        }
                         #[cfg(feature = "query")]
                         NetworkMessage::Request(_) => seen.queries += 1,
                         _ => {}
@@ -569,8 +575,9 @@ fn run_router(
                     }
                 }
                 #[cfg(feature = "queryable")]
-                if record.response_final().is_some() {
+                if let Some(done) = record.response_final() {
                     seen.answers.push("final");
+                    seen.final_rids.push(done.request_id);
                 }
                 #[cfg(feature = "query")]
                 if record.request().is_some() {

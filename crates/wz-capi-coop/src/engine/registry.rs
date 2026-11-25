@@ -1109,6 +1109,27 @@ impl<H: Holders> RegistryOf<H> {
         self.counted_push(written);
     }
 
+    /// Owe each of `rids` a `Final` on every face the session holds, as the dispatch of a query
+    /// owes one: how a test sees what the drain after a run of Pushes hands out. How many faces
+    /// owe them.
+    #[cfg(all(test, feature = "queryable"))]
+    pub(super) fn owe_finals(&mut self, rids: &[wz_session_core::wire_id::RequestId]) -> usize {
+        use wz_session_core::reply_stage::FinalStaging;
+        let ids: Vec<FaceId> = self.held_ids().collect();
+        let mut owing = 0;
+        for id in ids {
+            if let Some(set) = self.held_mut(id) {
+                for &rid in rids {
+                    set.peer
+                        .finals
+                        .owe(rid, wz_session_core::sample::QosLevel::DEFAULT);
+                }
+                owing += 1;
+            }
+        }
+        owing
+    }
+
     /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
     /// under one lookup of the face: the subscribers' tables reconciled with what the application
     /// registered since, what anything staged drained through `actions`
