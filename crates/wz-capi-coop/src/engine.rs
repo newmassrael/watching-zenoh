@@ -3125,7 +3125,16 @@ impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(
+    test,
+    feature = "std",
+    any(
+        wz_round,
+        feature = "query",
+        feature = "queryable",
+        feature = "connectivity"
+    )
+))]
 mod plane_lock_tests {
     use super::{CoopLocks, Mutex};
     use core::mem::MaybeUninit;
