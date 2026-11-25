@@ -13,11 +13,28 @@
 use crate::result::{ZResult, Z_ERR_GENERIC};
 
 /// Run `body`, or answer `None` when it panicked, so that no panic unwinds into the C frame that
-/// called. A body that ran to the end answers `Some`.
+/// called. A body that ran to the end answers `Some`. The landing of a panic is [`catch_erased`],
+/// one body for every export: an export instantiates only the closure it runs, where a
+/// `catch_unwind` of its own type held a call and a catch of the payload per export.
 #[cfg(feature = "std")]
 #[inline]
 pub(crate) fn catch<R>(body: impl FnOnce() -> R) -> Option<R> {
-    std::panic::catch_unwind(core::panic::AssertUnwindSafe(body)).ok()
+    let mut body = Some(body);
+    let mut out = None;
+    catch_erased(&mut || {
+        if let Some(body) = body.take() {
+            out = Some(body());
+        }
+    });
+    out
+}
+
+/// Run `body` under `catch_unwind`; a panic's payload is dropped here. Whether it ran to the end
+/// is what its caller's result says.
+#[cfg(feature = "std")]
+#[inline(never)]
+fn catch_erased(body: &mut dyn FnMut()) {
+    let _ = std::panic::catch_unwind(core::panic::AssertUnwindSafe(body));
 }
 
 /// Run `body`. Without `std` a panic does not unwind (the module doc), so a body that returns
@@ -73,3 +90,27 @@ pub(crate) struct SendPtr(pub(crate) *mut core::ffi::c_void);
 // and non-aliased across the call/drop lifecycle; moving the opaque pointer
 // to the drive thread is what a native pico read task already does.
 unsafe impl Send for SendPtr {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A body that runs to the end is answered with its value, through the guard too. Turned red
+    /// by a catch that loses the value of a body that returned.
+    #[test]
+    fn a_body_that_returns_is_answered_with_its_value() {
+        assert_eq!(catch(|| 7u8), Some(7));
+        assert_eq!(guard_val(0u8, || 5), 5);
+        assert_eq!(guarded(|| crate::result::Z_OK), crate::result::Z_OK);
+    }
+
+    /// With `std` a panicking body is caught at the boundary: the catch answers nothing and the
+    /// guard its fallback. Turned red by a catch that lets the panic unwind past it.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_body_that_panics_answers_nothing_and_the_fallback() {
+        assert_eq!(catch(|| -> u8 { panic!("a panic at the boundary") }), None);
+        assert_eq!(guard_val(3u8, || panic!("a panic at the boundary")), 3);
+        assert_eq!(guarded(|| panic!("a panic at the boundary")), Z_ERR_GENERIC);
+    }
+}
