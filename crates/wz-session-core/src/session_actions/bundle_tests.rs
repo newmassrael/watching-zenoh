@@ -1909,23 +1909,24 @@ mod batch_budget {
     }
 }
 
-/// A link's time stamps are one row under one lock: what a door writes is what the row reads, the
-/// deadlines read the two stamps they compare in one hold, and a reopen clears all three.
+/// A link's time stamps are words of their own, read under no lock: what a door writes is what the
+/// row reads, the deadlines read the stamps they compare only while their duty is armed, a tick
+/// ends once, and a reopen clears all three.
 mod link_stamps {
     use super::{bundle, holds_in};
     use crate::session_actions::LinkStamps;
 
     /// Turned red by a door that writes another stamp than it names, or by a read of the row
-    /// that holds the lock once per stamp.
+    /// that takes a lock.
     #[test]
-    fn a_stamp_written_through_its_door_is_read_in_the_one_row() {
+    fn a_stamp_written_through_its_door_is_read_in_the_row_under_no_lock() {
         let (actions, _link) = bundle();
         actions.link.fact_established_at(|slot| *slot = Some(1));
         actions.link.fact_last_inbound_at(|slot| *slot = Some(2));
         actions.link.fact_keepalive_tick_at(|slot| *slot = Some(3));
         let mut stamps = LinkStamps::default();
         let holds = holds_in(|| stamps = actions.link.stamps());
-        assert_eq!(holds, 1, "the row is read in one hold");
+        assert_eq!(holds, 0, "the row is read under no lock");
         assert_eq!(
             stamps,
             LinkStamps {
@@ -1937,10 +1938,10 @@ mod link_stamps {
     }
 
     /// The lease deadline counts from the later of the establishment and the last receipt, and
-    /// reads the two in one hold; the other hold is the peer's lease. Turned red by a deadline
-    /// that reads each stamp in a hold of its own.
+    /// reads them under no lock; the one hold is the peer's lease. Turned red by a deadline that
+    /// takes a lock to read a stamp.
     #[test]
-    fn the_lease_deadline_reads_its_two_stamps_in_one_hold() {
+    fn the_lease_deadline_reads_its_two_stamps_under_no_lock() {
         let (actions, _link) = bundle();
         actions
             .link
@@ -1957,8 +1958,8 @@ mod link_stamps {
             "the later stamp is the baseline"
         );
         assert_eq!(
-            holds, 2,
-            "the stamps in one hold, the peer's lease in another"
+            holds, 1,
+            "the peer's lease alone: the stamps are read under no lock"
         );
     }
 
@@ -1988,8 +1989,8 @@ mod link_stamps {
             "the earlier of the expiry and the watch"
         );
         assert_eq!(
-            holds, 2,
-            "the stamps in one hold, the peer's lease in another"
+            holds, 1,
+            "the peer's lease alone: the stamps are read under no lock"
         );
     }
 
@@ -2030,17 +2031,16 @@ mod link_stamps {
             "nothing before the expiry, the expiry at it"
         );
         assert_eq!(
-            holds, 2,
-            "the stamps in one hold, the peer's lease in another"
+            holds, 1,
+            "the peer's lease alone: the stamps are read under no lock"
         );
     }
 
     /// The keepalive deadline counts from the later of the establishment and the tick's start, and
-    /// reads the two in one hold. Turned red by a deadline that reads each stamp in a hold of its
-    /// own.
+    /// reads them under no lock. Turned red by a deadline that takes a lock to read a stamp.
     #[cfg(feature = "transport-keepalive")]
     #[test]
-    fn the_keepalive_deadline_reads_its_two_stamps_in_one_hold() {
+    fn the_keepalive_deadline_reads_its_two_stamps_under_no_lock() {
         let (actions, _link) = bundle();
         actions
             .link
@@ -2059,26 +2059,98 @@ mod link_stamps {
             "the later stamp is the baseline"
         );
         assert_eq!(
-            holds, 2,
-            "the stamps in one hold, the peer's lease in another"
+            holds, 1,
+            "the peer's lease alone: the stamps are read under no lock"
         );
     }
 
-    /// Every stamp is the closed transport's: a reopen clears the three in one hold of the row.
-    /// Turned red by a reopen that leaves one of them standing.
+    /// Every stamp is the closed transport's: a reopen clears the three, and lowers the lease
+    /// duty that reads them. Turned red by a reopen that leaves one of them standing.
     #[cfg(feature = "session-reconnect")]
     #[test]
     fn a_reopen_clears_every_stamp() {
         let (actions, _link) = bundle();
-        actions.link.with_stamps(|stamps| {
-            *stamps = LinkStamps {
-                established_at: Some(1),
-                last_inbound_at: Some(2),
-                keepalive_tick_at: Some(3),
-            }
-        });
+        actions.link.fact_established_at(|slot| *slot = Some(1));
+        actions.link.fact_last_inbound_at(|slot| *slot = Some(2));
+        actions.link.fact_keepalive_tick_at(|slot| *slot = Some(3));
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
         actions.reset_for_reopen();
         assert_eq!(actions.link.stamps(), LinkStamps::default());
+        assert_eq!(
+            actions.link.stamps_while(&actions.link.lease_armed),
+            None,
+            "the duty is lowered with them"
+        );
+    }
+
+    /// A duty reads the stamps only while it is armed: lowered, it is answered with nothing,
+    /// whatever the stamps hold. Turned red by a read that does not ask the duty's flag.
+    #[test]
+    fn a_duty_reads_the_stamps_only_while_it_is_armed() {
+        let (actions, _link) = bundle();
+        actions.link.fact_established_at(|slot| *slot = Some(7));
+        let armed = &actions.link.lease_armed;
+        armed.store(false, core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(actions.link.stamps_while(armed), None, "a lowered duty");
+        armed.store(true, core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            actions
+                .link
+                .stamps_while(armed)
+                .map(|row| row.established_at),
+            Some(Some(7)),
+            "an armed one reads the row"
+        );
+    }
+
+    /// No stamp reads as none: the word that means none is never what a stamp is written as, so
+    /// the latest instant reads as one below it, and a door that writes nothing leaves the stamp.
+    /// Turned red by a stamp of the latest instant read back as none.
+    #[test]
+    fn the_latest_instant_is_still_a_stamp() {
+        let (actions, _link) = bundle();
+        actions
+            .link
+            .fact_last_inbound_at(|slot| *slot = Some(u64::MAX));
+        assert_eq!(
+            actions.link.fact_last_inbound_at(|slot| *slot),
+            Some(u64::MAX - 1)
+        );
+        actions.link.fact_last_inbound_at(|slot| *slot = Some(4));
+        assert_eq!(actions.link.fact_last_inbound_at(|slot| *slot), Some(4));
+        actions.link.fact_last_inbound_at(|slot| *slot = None);
+        assert_eq!(actions.link.fact_last_inbound_at(|slot| *slot), None);
+    }
+
+    /// A keepalive tick ends once: the judge that read it ends it, and a second judge that read the
+    /// same tick finds it ended and writes nothing. Turned red by an end that does not compare the
+    /// tick it read.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn a_keepalive_tick_ends_once() {
+        let (actions, _link) = bundle();
+        actions.link.fact_keepalive_tick_at(|slot| *slot = Some(10));
+        assert!(
+            actions.link.end_keepalive_tick(Some(10), 20),
+            "the first judge"
+        );
+        assert!(
+            !actions.link.end_keepalive_tick(Some(10), 30),
+            "the second finds it ended"
+        );
+        assert_eq!(actions.link.stamps().keepalive_tick_at, Some(20));
+        assert!(
+            actions.link.end_keepalive_tick(Some(20), 40),
+            "the tick running now ends"
+        );
+        assert!(
+            !actions.link.end_keepalive_tick(None, 50),
+            "a tick read as not yet begun does not end one that runs"
+        );
+        assert_eq!(actions.link.stamps().keepalive_tick_at, Some(40));
     }
 
     /// An established bundle whose keepalive worker runs, as the machine's `Established` entry
