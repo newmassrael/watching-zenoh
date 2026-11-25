@@ -153,7 +153,8 @@ fn hear(engine: &Engine, pattern: &str, wire: WireKey) -> Arc<Mutex<Vec<String>>
                 into.lock().unwrap().push(sample.keyexpr().to_owned());
             })
         })
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     heard
 }
 
@@ -751,7 +752,8 @@ fn tokens_by(engine: &Engine, declared: ExprId) {
     let sink = wz_capi_port::LivelinessSink::shared(|_: LivelinessSample<'_>| {});
     engine
         .declare_liveliness_subscriber_on_wire(ASKED, WireKey::aliased(declared, None), false, sink)
-        .expect("the engine has liveliness");
+        .expect("the engine has liveliness")
+        .id;
 }
 
 #[cfg(feature = "liveliness")]

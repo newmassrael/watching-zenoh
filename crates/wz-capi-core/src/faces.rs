@@ -5324,26 +5324,6 @@ impl SharedSession {
         self.lock().tables.declared_prefix(row, key)
     }
 
-    /// The key subscription `id` was declared on, a liveliness subscription's too, as its SSOT
-    /// entry keeps it, with the declaration the entry holds that the key begins with. The text is the entry's
-    /// heap buffer, which stays where it is when the entries move and goes with the entry.
-    pub fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
-        let guard = self.lock();
-        let (key, held) = guard
-            .subs
-            .iter()
-            .find(|entry| entry.id == id)
-            .map(|entry| (&entry.keyexpr, entry.held))
-            .or_else(|| {
-                guard
-                    .live_subs
-                    .iter()
-                    .find(|entry| entry.id == id)
-                    .map(|entry| (&entry.keyexpr, entry.held))
-            })?;
-        Some(lent_entry_key(&guard.tables, key, held))
-    }
-
     /// The key queryable `id` was declared on, as its SSOT entry keeps it, with the declaration
     /// the entry holds that the key begins with. The text is the entry's heap buffer, which stays
     /// where it is when the entries move and goes with the entry.
@@ -5576,6 +5556,7 @@ impl SharedSession {
             sink,
         )
         .ok()
+        .map(|declared| declared.id)
     }
 
     /// [`Self::declare_liveliness_subscriber_on_wire`] for a subscription limited to the links
@@ -5591,7 +5572,7 @@ impl SharedSession {
         options: LivelinessSubscriberOptions,
         links: LinkRestriction,
         sink: LivelinessSink,
-    ) -> Result<SubId, wz_capi_port::Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, wz_capi_port::Refusal> {
         let mut guard = self.lock();
         let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, None)) {
             Ok(admitted) => admitted,
@@ -5635,6 +5616,9 @@ impl SharedSession {
             Vec::new()
         };
         let leg = (!history.is_empty()).then(|| sink());
+        // The text is the entry's heap buffer, which stays where it is when the entries move and
+        // goes with the entry.
+        let key = lent_entry_key(&guard.tables, &keyexpr, held);
         guard.live_subs.push(LiveSubEntry {
             held,
             id,
@@ -5660,7 +5644,7 @@ impl SharedSession {
                 });
             }
         }
-        Ok(id)
+        Ok(wz_capi_port::Declared { id, key })
     }
 
     /// The legs of the liveliness subscriptions that the token on `keyexpr` is told to, one per
@@ -6497,6 +6481,7 @@ impl SharedSession {
             sink,
         )
         .ok()
+        .map(|declared| declared.id)
     }
 
     /// [`Self::declare_subscriber_on_wire`] for a subscriber limited to the links of `links`
@@ -6515,7 +6500,7 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, wz_capi_port::Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, wz_capi_port::Refusal> {
         let mut guard = self.lock();
         let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, retraction))
         {
@@ -6579,6 +6564,9 @@ impl SharedSession {
         if !links.is_restricted() {
             Self::subscribe_on_groups(&mut guard, &entry);
         }
+        // The text is the entry's heap buffer, which stays where it is when the entries move and
+        // goes with the entry.
+        let lent = lent_entry_key(&guard.tables, &entry.keyexpr, entry.held);
         guard.subs.push(entry);
         drop(guard);
         // A subscriber the session's own traffic reaches is a match for every listener
@@ -6586,7 +6574,7 @@ impl SharedSession {
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
-        Ok(id)
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     /// Record a C matching listener in the SSOT and install it on every live
@@ -10837,7 +10825,8 @@ mod face_up_order_tests {
                 None,
                 sink.clone(),
             )
-            .expect("declares");
+            .expect("declares")
+            .id;
         assert_eq!(
             (
                 declares_and_pushes_since(&near, near_before).0,
@@ -11005,7 +10994,8 @@ mod face_up_order_tests {
                 LinkRestriction::only([2]).expect("one slot"),
                 sink.clone(),
             )
-            .expect("declares");
+            .expect("declares")
+            .id;
         assert_eq!(
             (sent(&near) - near_before, sent(&far) > far_before),
             (0, true),
@@ -11531,7 +11521,8 @@ mod sink_release_tests {
             None,
             sink_dropping(&flag),
         )
-        .expect("an open session declares");
+        .expect("an open session declares")
+        .id;
         assert!(!flag.load(Ordering::SeqCst), "held while declared");
         SessionEngine::undeclare_subscriber(&shared, id);
         assert!(
@@ -11598,6 +11589,7 @@ mod sink_release_tests {
             }),
         )
         .expect("an open session declares")
+        .id
     }
 
     /// Put on `key` of `shared` and run the delivery on a thread of its own.
@@ -11735,7 +11727,8 @@ mod sink_release_tests {
                 }
             }),
         )
-        .expect("an open session declares");
+        .expect("an open session declares")
+        .id;
         let releasing = {
             let go = Arc::clone(&go);
             std::thread::spawn(move || {

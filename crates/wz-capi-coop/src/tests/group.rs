@@ -374,7 +374,8 @@ fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
                 into.lock().unwrap().push(sample.payload().to_vec());
             })
         })
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     heard
 }
 
@@ -513,7 +514,8 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
             None,
             SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     eventually("the announcement to open the first's filter", || {
         !first.write_filter_active(filter)
     });
@@ -846,7 +848,8 @@ mod alive {
         });
         let id = engine
             .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)
-            .expect("the engine has liveliness");
+            .expect("the engine has liveliness")
+            .id;
         (id, heard)
     }
 

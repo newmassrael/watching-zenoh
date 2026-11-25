@@ -8659,7 +8659,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Declined> {
+    ) -> Result<Declared<SubId>, Declined> {
         // A closed session declares nothing, and takes no id for what it does not declare. The
         // subscriber is one row of the session's tables, numbered by the id they hand out next: a
         // full table, a key the session cannot hold or no id left refuses it before anything is
@@ -8717,6 +8717,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             declared.id, id,
             "the tables number a row as they said they would"
         );
+        // The text is the row's own, which does not move while the row stands. The tables made
+        // the row above; were it gone, the entity is lent the empty key, which no record has to
+        // keep, rather than a refusal that would leave the subscriber standing.
+        let lent = {
+            let tables = tables(&core.session.registry);
+            tables
+                .subscribers()
+                .get(declared.handle)
+                .map_or(KeyView::literal(""), |row| {
+                    let key = row.key();
+                    lent_key(tables, key.as_str(), key.named().or(key.prefix()))
+                })
+        };
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce(DeclaredRow::of(declared.handle));
         // So is each group.
@@ -8746,28 +8759,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         drop(guard);
         #[cfg(feature = "local-subscriber")]
         self.deliver();
-        Ok(id)
-    }
-
-    // The text is the row's own, which does not move while the row stands.
-    #[inline(never)]
-    fn subscriber_keyexpr(&self, id: SubId) -> Option<KeyView> {
-        let core = self.live()?;
-        let tables = tables(&core.0.session.registry);
-        if let Some((_, row)) = tables.subscribers().iter().find(|(_, row)| row.id() == id) {
-            let key = row.key();
-            return Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())));
-        }
-        #[cfg(feature = "liveliness")]
-        if let Some((_, row)) = tables
-            .liveliness_subscribers()
-            .iter()
-            .find(|(_, row)| row.id() == id)
-        {
-            let key = row.key();
-            return Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())));
-        }
-        None
+        Ok(Declared { id, key: lent })
     }
 
     #[inline(never)]
@@ -9917,7 +9909,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<SubId, Declined> {
+    ) -> Result<Declared<SubId>, Declined> {
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
@@ -9976,12 +9968,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         let core = &mut guard.0;
         // A subscriber its own history's callback undeclared asks nothing: its row is gone, and so
-        // is its place in the replay's order.
-        let stands = tables(&core.session.registry)
-            .liveliness_subscribers()
-            .get(declared.handle)
-            .is_some();
-        if stands {
+        // is its place in the replay's order, and it is lent the empty key, there being no record
+        // left to lend one from. One that stands is lent the row's text, which does not move
+        // while the row stands.
+        let lent = {
+            let tables = tables(&core.session.registry);
+            tables
+                .liveliness_subscribers()
+                .get(declared.handle)
+                .map(|row| {
+                    let key = row.key();
+                    lent_key(tables, key.as_str(), key.named().or(key.prefix()))
+                })
+        };
+        if lent.is_some() {
             // Each link is asked from the row, as it stands now.
             core.announce(DeclaredRow::of(declared.handle));
             // And each group the session joined is asked, as its declarations say.
@@ -9998,7 +9998,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         drop(guard);
         self.deliver();
-        Ok(id)
+        Ok(Declared {
+            id,
+            key: lent.unwrap_or(KeyView::literal("")),
+        })
     }
 }
 

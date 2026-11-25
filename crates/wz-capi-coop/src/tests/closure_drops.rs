@@ -54,7 +54,9 @@ fn declare(
     key: &str,
     sink: SubscriberSink,
 ) -> Result<wz_capi_port::SubId, Refusal> {
-    engine.declare_subscriber_on_wire(key, WireKey::literal(), Locality::Any, None, sink)
+    engine
+        .declare_subscriber_on_wire(key, WireKey::literal(), Locality::Any, None, sink)
+        .map(|declared| declared.id)
 }
 
 /// Undeclared, a subscriber's callback is let go of once; a second undeclaration lets go of
@@ -232,7 +234,9 @@ fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
         })
     };
     let declare = |key: &str, counts: &Counts| {
-        engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(counts))
+        engine
+            .declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(counts))
+            .map(|declared| declared.id)
     };
 
     let undeclared = Counts::default();
@@ -434,6 +438,7 @@ fn a_liveliness_subscriber_undeclared_while_a_token_owes_it_a_call_is_let_go_of_
                 sink(me),
             )
             .expect("a row is free")
+            .id
     };
     let both = [declare(0), declare(1)];
     *ids.lock().unwrap() = Some(both);

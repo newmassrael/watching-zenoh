@@ -1252,6 +1252,7 @@ impl Engine {
                             timestamps,
                         ),
                     )
+                    .map(|declared| declared.id)
                     .map_err(|refused| zerror!("the engine refused a subscriber: {refused}").into())
             }
         }
@@ -1728,6 +1729,7 @@ impl Engine {
                         links,
                         tokio_engine::liveliness_sink(callback, notifier),
                     )
+                    .map(|declared| declared.id)
                     .map_err(|refused| {
                         zerror!("the engine refused a liveliness subscriber: {refused}").into()
                     })

@@ -184,7 +184,8 @@ impl NodeGroup {
         });
         let subscriber = engine
             .declare_subscriber_on_wire(&event_key, WireKey::literal(), Locality::Any, None, sink)
-            .map_err(|_| NodeGroupError::Refused("the event subscriber was refused"))?;
+            .map_err(|_| NodeGroupError::Refused("the event subscriber was refused"))?
+            .id;
 
         // The member's own record, served from its own key to whoever asks.
         let record = encode_member(&member);

@@ -433,6 +433,11 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// of the port is: [`Refusal::NoEntityId`] once the session has handed out every declaration
     /// id it can put on the wire, rather than an id a live declaration may still hold being
     /// handed out again; a full table, a key the session cannot hold, or a closed session.
+    ///
+    /// Declared, it answers its id with its key as the engine keeps it ([`Declared::key`]): its
+    /// text where the engine's record of the subscription holds it, and the declaration the
+    /// record holds that the key begins with, when it holds one; valid until the subscriber is
+    /// retracted. A liveliness subscriber's declaration answers the same.
     fn declare_subscriber_on_wire(
         &self,
         keyexpr: &str,
@@ -440,7 +445,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal>;
+    ) -> Result<Declared<SubId>, Refusal>;
 
     /// Retract subscriber `id`, a liveliness subscriber's too. Returns once the callback the
     /// declaration was given has been let go of, its drop run, as zenoh-pico's undeclare waits for
@@ -450,13 +455,6 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// another session it waits. The engine keeps this, so every ABI over it means the same.
     /// Retracting one already retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
-
-    /// The key subscriber `id` was declared on, a liveliness subscriber's too, as the engine keeps
-    /// it: its text where the engine's record of the subscription holds it, and the row of the
-    /// declaration of the subscription's own key when the record holds one. Valid until the
-    /// subscriber is retracted, the record holding both until then; `None` for an id that names no
-    /// subscriber. Every engine states it, as each keeps its subscriptions its own way.
-    fn subscriber_keyexpr(&self, id: SubId) -> Option<KeyView>;
 
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
     /// names its mapping id and its row. Refused when the session has no id left to give
@@ -751,7 +749,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<Declared<SubId>, Refusal> {
         let _ = (keyexpr, wire, history, sink);
         Err(Refusal::NotBuilt)
     }
@@ -821,7 +819,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<Declared<SubId>, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.declare_subscriber_on_wire(keyexpr, wire, allowed_origin, retraction, sink)
     }
@@ -867,7 +865,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         history: bool,
         links: LinkRestriction,
         sink: LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<Declared<SubId>, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink)
     }

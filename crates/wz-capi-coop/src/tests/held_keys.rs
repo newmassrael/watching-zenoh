@@ -185,7 +185,8 @@ fn holds_and_declarations_past_the_arena_leave_it_as_they_found_it() {
                 None,
                 sink(&dropped),
             )
-            .expect("the room given back takes the subscriber");
+            .expect("the room given back takes the subscriber")
+            .id;
         engine.undeclare_subscriber(id);
     }
     let after = engine.key_counts();
@@ -293,7 +294,8 @@ fn a_declaration_outlives_the_program_key_until_the_last_row_naming_it_goes() {
             Some(RetractionKey::declared(id, "/a")),
             sink(&dropped),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     let named_by_retraction = engine
         .declare_subscriber_on_wire(
             "demo/holds/b",
@@ -302,7 +304,8 @@ fn a_declaration_outlives_the_program_key_until_the_last_row_naming_it_goes() {
             Some(RetractionKey::declared(id, "/b")),
             sink(&dropped),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     let named_as_own = engine
         .declare_subscriber_on_wire(
             "demo/holds/o",
@@ -311,7 +314,8 @@ fn a_declaration_outlives_the_program_key_until_the_last_row_naming_it_goes() {
             None,
             sink(&dropped),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     assert_eq!(live_holds(&engine), 1, "the program's hold alone");
     program.release(&*engine);
     assert_eq!(
@@ -349,7 +353,8 @@ fn a_declaration_outlives_the_program_key_until_the_last_row_naming_it_goes() {
             None,
             sink(&dropped),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     SessionDrive::close(&*engine);
     program.release(&*engine);
     assert_eq!(live_holds(&engine), 0, "no hold is live after the close");
@@ -382,7 +387,8 @@ fn a_subscribers_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() 
             None,
             sink(&dropped),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     assert_eq!(
         live_holds(&engine),
         1,
@@ -429,7 +435,8 @@ fn a_liveliness_subscribers_row_holds_the_declaration_its_interest_names() {
             false,
             wz_capi_port::LivelinessSink::shared(|_: LivelinessSample<'_>| {}),
         )
-        .expect("the engine has liveliness");
+        .expect("the engine has liveliness")
+        .id;
     assert_eq!(
         live_holds(&engine),
         1,

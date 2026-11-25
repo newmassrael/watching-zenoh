@@ -98,7 +98,7 @@ enum Held {
 }
 
 /// A subscription of the program's: what the node holds for it, and the key it was declared on,
-/// which the program is lent back ([`SessionEngine::subscriber_keyexpr`]). The key is a buffer of
+/// which the program is lent back ([`SessionEngine::declare_subscriber_on_wire`]). The key is a buffer of
 /// its own, so it stays where it is when the map moves the entry.
 struct Subscribed {
     held: Held,
@@ -390,7 +390,7 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let deliveries = self.engine.deliveries;
@@ -403,6 +403,10 @@ impl SessionEngine for RouterState {
                 deliveries.within(|| sink.call(sample));
             }),
         );
+        // Named whole, as the node names every key: the text its record keeps, a buffer of its own
+        // that stays where it is when the map moves the entry.
+        let key: Box<str> = keyexpr.into();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.engine
             .subscriptions
             .lock()
@@ -411,44 +415,36 @@ impl SessionEngine for RouterState {
                 id,
                 Subscribed {
                     held: Held::Plain(host, release),
-                    key: keyexpr.into(),
+                    key,
                 },
             );
-        Ok(id)
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     // Returns once the callback has been let go of after its last call, unless this thread
     // delivers for the node now (`SinkRelease::wait`).
     fn undeclare_subscriber(&self, id: SubId) {
-        let held = self
+        let gone = self
             .engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id)
-            .map(|subscribed| subscribed.held);
+            .remove(&id);
+        let Some(Subscribed { held, key }) = gone else {
+            return;
+        };
         match held {
-            Some(Held::Plain(host, release)) => {
+            Held::Plain(host, release) => {
                 self.forwarder.unhost_subscriber(host);
                 release.wait();
             }
-            Some(Held::Liveliness(face, release)) => {
+            Held::Liveliness(face, release) => {
                 self.liveliness.unsubscribe(face);
                 release.wait();
             }
-            None => {}
         }
-    }
-
-    // A node names every key whole and declares none, so the key is lent as a literal, the text
-    // the node keeps for the subscription.
-    fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
-        self.engine
-            .subscriptions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
-            .map(|subscribed| wz_capi_port::KeyView::literal(&subscribed.key))
+        // The key the program was lent goes once the subscription is let go of.
+        drop(key);
     }
 
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
@@ -703,7 +699,7 @@ impl SessionEngine for RouterState {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         // The id first, so a session with none left subscribes nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let deliveries = self.engine.deliveries;
@@ -717,6 +713,10 @@ impl SessionEngine for RouterState {
                 },
             ),
         );
+        // Named whole, as the node names every key: the text its record keeps, a buffer of its own
+        // that stays where it is when the map moves the entry.
+        let key: Box<str> = keyexpr.into();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.engine
             .subscriptions
             .lock()
@@ -725,10 +725,10 @@ impl SessionEngine for RouterState {
                 id,
                 Subscribed {
                     held: Held::Liveliness(face, release),
-                    key: keyexpr.into(),
+                    key,
                 },
             );
-        Ok(id)
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     fn get_on_wire(

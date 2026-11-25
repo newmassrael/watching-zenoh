@@ -66,7 +66,8 @@ fn a_subscriber_sees_the_timestamp_as_the_sessions_policy_says() {
                     into.lock().unwrap().push(stamped);
                 })
             })
-            .expect("the session declares the subscriber");
+            .expect("the session declares the subscriber")
+            .id;
         until(&engine, "the router to see the subscriber", || {
             router.seen(|s| s.declares) >= 1
         });

@@ -1144,7 +1144,7 @@ impl KeyHold {
     }
 }
 
-/// An entity's key as its engine keeps it ([`SessionEngine::subscriber_keyexpr`]): the text, where
+/// An entity's key as its engine keeps it, as its declaration answers it ([`Declared::key`]): the text, where
 /// the engine's record of the entity holds it, and the declaration the record holds that the key
 /// begins with ([`OwnKey`]), `None` when it holds none. What an ABI lends a program asking for the
 /// entity's key, so the key it reads and the declaration it names are the session's, not a copy.

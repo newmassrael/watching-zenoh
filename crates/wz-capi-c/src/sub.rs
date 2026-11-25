@@ -573,7 +573,7 @@ pub(crate) unsafe fn declare_subscriber_delivered(
                 // A session that has handed out every entity id refuses the subscriber with the
                 // code this ABI gives a declaration whose id space is spent; the closure the
                 // session dropped has run its drop.
-                let Ok(id) = state.shared.declare_subscriber_on_links(
+                let Ok(answered) = state.shared.declare_subscriber_on_links(
                     ke,
                     WireKey::literal(),
                     allowed_origin,
@@ -583,7 +583,7 @@ pub(crate) unsafe fn declare_subscriber_delivered(
                 ) else {
                     return Z_EUNAVAILABLE;
                 };
-                subscriber_state_handle(&state.shared, id, declared)
+                subscriber_state_handle(&state.shared, answered.id, declared)
             }
             // A node hosts the subscription on its data plane, which hands it what its own
             // session publishes and what arrives from its faces, as `allowed_origin` admits.

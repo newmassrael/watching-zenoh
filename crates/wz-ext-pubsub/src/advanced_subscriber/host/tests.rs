@@ -247,17 +247,21 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         if self.ids_spent.load(Ordering::SeqCst) {
             return Err(Refusal::NoEntityId);
         }
         let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare subscriber {keyexpr}"));
+        // The script's record keeps the text in a buffer of its own, which stays where it is when
+        // the records move.
+        let key = keyexpr.to_owned();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.subscriptions
             .lock()
             .unwrap()
-            .push((id, keyexpr.to_owned(), wire, Arc::new(sink)));
-        Ok(id)
+            .push((id, key, wire, Arc::new(sink)));
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
     fn undeclare_subscriber(&self, id: SubId) {
         let known = self
@@ -276,14 +280,6 @@ impl SessionEngine for Script {
                     .map(|s| s.1.clone())
             });
         self.event(format!("retract {}", known.unwrap_or_default()));
-    }
-    fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
-        self.subscriptions
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|s| s.0 == id)
-            .map(|s| wz_capi_port::KeyView::literal(&s.1))
     }
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         Err(Refusal::NotBuilt)
@@ -377,14 +373,16 @@ impl SessionEngine for Script {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare liveliness {keyexpr}"));
+        let key = keyexpr.to_owned();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.liveliness
             .lock()
             .unwrap()
-            .push((id, keyexpr.to_owned(), history, Arc::new(sink)));
-        Ok(id)
+            .push((id, key, history, Arc::new(sink)));
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
     fn get_on_wire(
         &self,

@@ -37,7 +37,8 @@ fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<Atomic
                 into.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     (id, count)
 }
 
@@ -265,7 +266,8 @@ fn a_put_made_inside_a_callback_reaches_it_again_to_depth_three() {
                 }
             }),
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     let into = handed.clone();
     engine
         .declare_subscriber_on_wire(
@@ -277,7 +279,8 @@ fn a_put_made_inside_a_callback_reaches_it_again_to_depth_three() {
                 into.lock().unwrap().push((1, sample.payload().to_vec()));
             }),
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
 
     assert_eq!(put_own(&engine, "demo/l/deep", &[0]), Ok(2));
     assert_eq!(
@@ -366,7 +369,8 @@ fn subscribe_putting(
                     }
                 }),
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
     }
 }
 
@@ -416,7 +420,8 @@ fn an_undeclare_on_another_thread_waits_for_the_running_call() {
                 let _ = released.lock().unwrap().recv();
             }),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     let putting = {
         let engine = engine.clone();
         std::thread::spawn(move || put_own(&engine, "demo/wait/a", b"v"))
@@ -485,7 +490,8 @@ fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
                 }
             })
         })
-        .expect("declared");
+        .expect("declared")
+        .id;
     *own.lock().unwrap() = Some(id);
     let walks = || engine.takes.walks.load(Ordering::SeqCst);
     let before = walks();
@@ -548,7 +554,8 @@ fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
                     .recv_timeout(Duration::from_secs(5));
             }),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     let putting = {
         let one = one.clone();
         std::thread::spawn(move || put_own(&one, "demo/across/sub", b"v"))
@@ -577,7 +584,8 @@ fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
                 }
             }),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     let releasing = {
         let let_go = let_go.clone();
         std::thread::spawn(move || {

@@ -49,7 +49,7 @@ use crate::keyexpr::{declared_of, outbound_keyexpr, DeclaredKeyexpr, EntityKey};
 use crate::prelude::*;
 use crate::pubsub::{
     fill_subscriber_place, liveliness_sink, settle_subscriber, z_moved_closure_sample_t,
-    z_owned_closure_sample_t, z_owned_subscriber_t, CClosure, DeclaredSubscriber, SubscriberState,
+    z_owned_closure_sample_t, z_owned_subscriber_t, CClosure, SubscriberState,
     Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::refusal::{refusal_code, Door};
@@ -431,7 +431,6 @@ pub(crate) unsafe fn declare_liveliness_subscriber_in(
             .declare_liveliness_subscriber_on_wire(keyexpr, key.wire(), history, sink)
             // The session's record holds the declaration the key is announced on from here on:
             // the door's hold goes with `key`, and the key is lent from the record.
-            .map(DeclaredSubscriber::new)
             .map_err(|refused| refusal_code(refused, Door::Entity))
     });
     settle_subscriber(state, declared)

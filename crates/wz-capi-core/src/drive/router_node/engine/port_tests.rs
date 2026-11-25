@@ -427,7 +427,8 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
                         .push((sample.kind, sample.keyexpr.to_owned()));
                 }),
             )
-            .expect("a node has liveliness subscriptions");
+            .expect("a node has liveliness subscriptions")
+            .id;
         (seen, id)
     };
     // With its history: the client's interest may reach the node after the token is declared, and
@@ -592,7 +593,8 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
             None,
             wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
         )
-        .expect("a node with ids left declares");
+        .expect("a node with ids left declares")
+        .id;
     assert!(
         eventually(|| told.lock().unwrap().last() == Some(&true)),
         "the listener was not told a subscriber matched"
@@ -640,7 +642,8 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
             None,
             wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
         )
-        .expect("a node with ids left declares");
+        .expect("a node with ids left declares")
+        .id;
     assert!(eventually(|| {
         engine.matching_status(
             FilterPlane::Subscribers,
@@ -875,7 +878,8 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             None,
             sink(),
         )
-        .expect("no set is never refused, and a node has an id for a subscriber");
+        .expect("no set is never refused, and a node has an id for a subscriber")
+        .id;
     engine.undeclare_subscriber(taken);
 
     assert_eq!(
@@ -1165,7 +1169,7 @@ mod shared_memory {
                     .push((sample.payload().to_vec(), shared));
             }),
         );
-        (got, id.expect("a node with ids left declares"))
+        (got, id.expect("a node with ids left declares").id)
     }
 
     /// A chunk published through the port goes to a client that negotiated shared memory as the
@@ -1626,6 +1630,7 @@ fn subscribe_holding(node: &Arc<RouterState>, key: &str, holding: &Arc<Holding>)
             }),
         )
         .expect("an open node declares")
+        .id
 }
 
 /// Put on `key` of `node` from a thread of its own.
@@ -1733,20 +1738,19 @@ fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
     node.close();
 }
 
-/// The node lends a subscription's key back as the text it keeps for it, naming no declaration as
-/// it declares none, until the subscription is retracted.
+/// The node's declaration of a subscription answers its key as the text it keeps for it, naming no
+/// declaration as it declares none.
 ///
 /// # Control
 ///
 /// Lending the program's own buffer in place of the node's copy reds the address assertion (that
-/// buffer is let go of before the key is asked for); a view left after the retraction reds the
-/// last.
+/// buffer is let go of before the key is read).
 #[test]
 fn the_node_lends_a_subscriptions_key_as_its_own_literal_until_it_is_retracted() {
     let (router, _peer) = pair();
     let engine = router.as_engine();
     let asked = String::from("wz/port/lent/**");
-    let id = engine
+    let wz_capi_port::Declared { id, key: view } = engine
         .declare_subscriber_on_wire(
             &asked,
             WireKey::literal(),
@@ -1757,16 +1761,12 @@ fn the_node_lends_a_subscriptions_key_as_its_own_literal_until_it_is_retracted()
         .expect("a node with ids left declares");
     let asked_at = asked.as_ptr();
     drop(asked);
-    let view = engine
-        .subscriber_keyexpr(id)
-        .expect("a declared subscription lends its key");
     assert_ne!(view.start, asked_at, "the node keeps a copy of its own");
     // SAFETY: the node keeps the text until the subscription is retracted, which it is not yet.
     let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
     assert_eq!(text, b"wz/port/lent/**");
     assert_eq!(view.own, None, "the node declares no key");
     engine.undeclare_subscriber(id);
-    assert_eq!(engine.subscriber_keyexpr(id), None);
 }
 
 /// The node lends a queryable's key back as the text it keeps for it, naming no declaration as it

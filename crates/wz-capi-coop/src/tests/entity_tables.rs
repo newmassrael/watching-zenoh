@@ -75,13 +75,15 @@ fn declare_subscriber(
     key: &str,
     dropped: &Arc<AtomicUsize>,
 ) -> Result<SubId, Refusal> {
-    engine.declare_subscriber_on_wire(
-        key,
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        subscriber_sink(dropped),
-    )
+    engine
+        .declare_subscriber_on_wire(
+            key,
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            subscriber_sink(dropped),
+        )
+        .map(|declared| declared.id)
 }
 
 /// A write filter that asks for `key`, on `plane`.
@@ -645,7 +647,9 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
         })
     };
     let declare = |key: &str| {
-        engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(&dropped))
+        engine
+            .declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(&dropped))
+            .map(|declared| declared.id)
     };
     let first = declare("demo/ls/1").expect("a row is free");
     until(&engine, "the router to see the Interest", || {

@@ -1739,9 +1739,9 @@ pub(crate) struct SubscriberState {
 /// which is upstream's order; the door keeps no copy of the key.
 pub(crate) struct DeclaredSubscriber {
     id: SubId,
-    /// The session and the declaration the record holds that the key begins with, as the record
-    /// lent it ([`wz_capi_port::SessionEngine::subscriber_keyexpr`]): what the loan of the key
-    /// names, and what a key made of the loan holds.
+    /// The session and the declaration the record holds that the key begins with, as the
+    /// declaration lent it ([`wz_capi_port::Declared::key`]): what the loan of the key names, and
+    /// what a key made of the loan holds.
     record: crate::keyexpr::RecordKey,
 }
 
@@ -1756,17 +1756,14 @@ impl DeclaredSubscriber {
 }
 
 impl SubscriberState {
-    /// Point the cached loan at the key the session's record of the subscription keeps, once
-    /// declared and placed.
-    pub(crate) fn bind(&mut self) {
+    /// Point the cached loan at `lent`, the key the session's record of the subscription keeps as
+    /// its declaration answered it, once declared and placed.
+    fn bind(&mut self, lent: wz_capi_port::KeyView) {
         let Some(declared) = self.declared.as_mut() else {
             return;
         };
-        let lent = crate::session::EngineHold::as_ref(&self.shared).subscriber_keyexpr(declared.id);
-        if let Some(view) = lent {
-            declared.record = crate::keyexpr::RecordKey::lent(&self.shared, view.own);
-            self.loaned_keyexpr = crate::keyexpr::record_loan(view, &declared.record);
-        }
+        declared.record = crate::keyexpr::RecordKey::lent(&self.shared, lent.own);
+        self.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
     }
 
     /// The subscription's id, once declared.
@@ -1794,14 +1791,14 @@ pub(crate) fn fill_subscriber_place(
 /// `state` is a live subscriber [`fill_subscriber_place`] filled, whose owner holds it.
 pub(crate) unsafe fn settle_subscriber(
     state: *mut SubscriberState,
-    declared: Result<DeclaredSubscriber, ZResult>,
+    declared: Result<wz_capi_port::Declared<SubId>, ZResult>,
 ) -> Result<*mut SubscriberState, ZResult> {
     match declared {
         Ok(declared) => {
             // SAFETY: the caller's: the owner holds the state.
             unsafe {
-                (*state).declared = Some(declared);
-                (*state).bind();
+                (*state).declared = Some(DeclaredSubscriber::new(declared.id));
+                (*state).bind(declared.key);
             }
             Ok(state)
         }
@@ -3530,7 +3527,7 @@ unsafe fn declare_subscriber_in(
     ke: &str,
     options: *const crate::session::z_subscriber_options_t,
     sink: SubscriberSink,
-) -> Result<DeclaredSubscriber, ZResult> {
+) -> Result<wz_capi_port::Declared<SubId>, ZResult> {
     // pico's two keys for one subscriber, which are NOT the same one. The subscription's own
     // key gets its NON-WILD PREFIX declared, and that declaration goes on the wire FIRST
     // (`vendor/zenoh-pico/src/net/primitives.c` @
@@ -3546,13 +3543,13 @@ unsafe fn declare_subscriber_in(
     let retraction = key.retraction_naming_in(crate::write_filter::session_mode(handle));
     // A refused subscriber answers pico's code for its cause; the engine dropped the sink, so
     // the closure's drop has run.
-    let id = engine
+    let declared = engine
         .declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, sink)
         .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
     // The session's record holds the subscription's own declaration from here on
     // (`WireKey::with_own`): the door's hold goes, and the key is lent from the record.
     drop(key);
-    Ok(DeclaredSubscriber::new(id))
+    Ok(declared)
 }
 
 /// Undeclare a subscriber (pico `z_undeclare_subscriber`): drops the wz
@@ -4137,7 +4134,7 @@ mod tests {
     ///
     /// Turned red by a loan bound to a copy the door keeps (the address), a loan that names no
     /// declaration (slot 2, the wire), a copy that takes no hold of its own or gives none back (the
-    /// count), a copy made past a full count, or a record left after the retraction.
+    /// count), or a copy made past a full count.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
     #[test]
     fn a_subscribers_lent_key_is_the_sessions_record_and_a_copy_holds_its_declaration() {
@@ -4150,7 +4147,6 @@ mod tests {
         use crate::session::{
             engine_held, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
         };
-        use wz_capi_port::SessionEngine;
         use wz_session_core::session_tables::KeyexprCount;
 
         let mut session = listening_on_loopback();
@@ -4166,22 +4162,20 @@ mod tests {
         let state = fill_subscriber_place(slot, &engine);
         // SAFETY: `caller` is a live loan whose key is `key`, with no options; `state` is the place
         // filled above, which this frame holds.
-        let state = unsafe {
+        let (state, record) = unsafe {
             let declared =
                 declare_subscriber_in(handle, &engine, &caller, key, core::ptr::null(), sink);
-            settle_subscriber(state, declared)
-        }
-        .expect("declared");
+            let record = declared.as_ref().map(|declared| declared.key).ok();
+            (settle_subscriber(state, declared), record)
+        };
+        let state = state.expect("declared");
+        let record = record.expect("the declaration answers the record's key");
         let owned = z_owned_subscriber_t {
             handle: state as *mut c_void,
             _pad: [core::ptr::null_mut(); 3],
         };
         let loaned = &owned as *const z_owned_subscriber_t as *const z_loaned_subscriber_t;
         let shared = crate::session::EngineHold::as_ref(&engine);
-        // SAFETY: the subscriber is live until it is let go of below.
-        let id = unsafe { (*state).id() }.expect("declared");
-        let record =
-            SessionEngine::subscriber_keyexpr(shared, id).expect("the record keeps the key");
         let own = record.own.expect("the record holds the own declaration");
         assert_eq!(
             own.prefix_len,
@@ -4238,11 +4232,6 @@ mod tests {
         }
         // SAFETY: the subscriber made above, let go of once here.
         unsafe { free_subscriber(owned.handle) };
-        assert_eq!(
-            SessionEngine::subscriber_keyexpr(shared, id),
-            None,
-            "retracted, the record and its key are gone"
-        );
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };

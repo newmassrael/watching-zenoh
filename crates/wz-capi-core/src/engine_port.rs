@@ -359,9 +359,9 @@ impl SessionEngine for SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         let (sink, release) = crate::faces::face_sink(sink, self.deliveries());
-        let id = self.declared_on_wire(wire, |wire| {
+        let declared = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -372,16 +372,12 @@ impl SessionEngine for SharedSession {
                 sink,
             )
         })?;
-        self.keep_sink_release(id, release);
-        Ok(id)
+        self.keep_sink_release(declared.id, release);
+        Ok(declared)
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
         SharedSession::undeclare_subscriber(self, id)
-    }
-
-    fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
-        SharedSession::subscriber_keyexpr(self, id)
     }
 
     fn acquire_keyexpr(&self, keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
@@ -648,12 +644,12 @@ impl SessionEngine for SharedSession {
         wire: WireKey,
         history: bool,
         sink: wz_capi_port::LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
         let (sink, release) = crate::faces::face_liveliness_sink(sink, self.deliveries());
-        let id = self.declared_on_wire(wire, |wire| {
+        let declared = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -663,8 +659,8 @@ impl SessionEngine for SharedSession {
                 sink,
             )
         })?;
-        self.keep_sink_release(id, release);
-        Ok(id)
+        self.keep_sink_release(declared.id, release);
+        Ok(declared)
     }
 
     #[cfg(feature = "query")]
@@ -750,9 +746,9 @@ impl SessionEngine for SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         let (sink, release) = crate::faces::face_sink(sink, self.deliveries());
-        let id = self.declared_on_wire(wire, |wire| {
+        let declared = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -763,8 +759,8 @@ impl SessionEngine for SharedSession {
                 sink,
             )
         })?;
-        self.keep_sink_release(id, release);
-        Ok(id)
+        self.keep_sink_release(declared.id, release);
+        Ok(declared)
     }
 
     #[cfg(feature = "queryable")]
@@ -822,12 +818,12 @@ impl SessionEngine for SharedSession {
         history: bool,
         links: LinkRestriction,
         sink: wz_capi_port::LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
         let (sink, release) = crate::faces::face_liveliness_sink(sink, self.deliveries());
-        let id = self.declared_on_wire(wire, |wire| {
+        let declared = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -837,8 +833,8 @@ impl SessionEngine for SharedSession {
                 sink,
             )
         })?;
-        self.keep_sink_release(id, release);
-        Ok(id)
+        self.keep_sink_release(declared.id, release);
+        Ok(declared)
     }
 
     #[cfg(feature = "liveliness-get")]

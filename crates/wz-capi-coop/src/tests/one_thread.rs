@@ -133,7 +133,8 @@ where
                     into.lock().unwrap().push(read(sample));
                 }),
             )
-            .expect("the session declares the subscriber");
+            .expect("the session declares the subscriber")
+            .id;
     });
     heard
 }

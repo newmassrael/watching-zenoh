@@ -782,7 +782,8 @@ fn an_undeclare_inside_a_queryable_callback_of_the_session_returns_at_once() {
                     .recv_timeout(Duration::from_secs(5));
             }),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     let putting = {
         let engine = engine.clone();
         std::thread::spawn(move || {

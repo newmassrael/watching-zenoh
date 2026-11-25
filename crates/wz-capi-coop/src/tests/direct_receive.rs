@@ -165,7 +165,8 @@ fn a_callback_runs_with_the_session_free() {
                 }
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -204,7 +205,8 @@ fn the_second_record_of_a_frame_sees_what_the_first_callback_did() {
                 }
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     *own.lock().unwrap() = Some(id);
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
@@ -256,7 +258,8 @@ fn a_put_from_a_callback_leaves_while_the_frame_is_lent() {
                 }
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -308,7 +311,8 @@ fn a_read_from_a_callback_reads_nothing() {
                 depth.fetch_sub(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -358,7 +362,8 @@ fn a_close_from_a_callback_ends_the_read_and_lets_the_link_go_once() {
                 }
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -417,7 +422,8 @@ fn a_callback_that_closes_its_session_reads_its_key_until_it_returns() {
                 keys.lock().unwrap().push(sample.keyexpr().to_string());
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -469,7 +475,8 @@ fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
                 }
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     let own = PublishOptions::put().with_locality(Locality::SessionLocal);
     assert_eq!(
         engine.publish_on_wire_all("demo/own", &WireKey::literal(), b"v", &own),
@@ -512,7 +519,8 @@ fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
                 }
             })
         })
-        .expect("the session declares the first subscriber");
+        .expect("the session declares the first subscriber")
+        .id;
     let id = engine
         .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
             let seen = seen.clone();
@@ -520,7 +528,8 @@ fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
                 seen.lock().unwrap().push((2, true));
             })
         })
-        .expect("the session declares the second subscriber");
+        .expect("the session declares the second subscriber")
+        .id;
     *later.lock().unwrap() = Some(id);
     let own = PublishOptions::put().with_locality(Locality::SessionLocal);
     assert_eq!(
@@ -556,7 +565,8 @@ fn a_stream_of_batches_still_sends_the_keep_alive_on_time() {
                 received.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -595,7 +605,8 @@ fn mixed_batch_is_dispatched_as_before() {
                 got.lock().unwrap().push(sample.payload().to_vec());
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -631,7 +642,8 @@ fn a_steady_stream_runs_no_bookkeeping_per_batch() {
                 received.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -672,7 +684,8 @@ fn a_frame_of_n_records_is_read_in_one_take() {
                 got.lock().unwrap().push(sample.payload().to_vec());
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
