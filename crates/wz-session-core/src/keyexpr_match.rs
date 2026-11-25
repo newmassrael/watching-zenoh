@@ -811,6 +811,7 @@ mod tests {
             keyexpr_walk::keyexpr_walk(a, b, 1, wild_single, wild_double, dsl) == 1
         }
 
+        #[cfg(feature = "keyexpr-includes")]
         pub(super) fn includes(
             a: &[u8],
             b: &[u8],

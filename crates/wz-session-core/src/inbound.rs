@@ -855,14 +855,22 @@ impl<'f> Iterator for ReadEntries<'f> {
     // The slot profile keeps only the entries of an extension it reads
     // (`collect_handshake_ext_chain`), and a chain read where it lies is shown as it keeps it, so
     // the two reads of one message agree.
-    #[cfg(feature = "session-slot")]
+    // Only an Init's and an Open's chain is handed to a judgement (`ReadList`), so the filter is
+    // the slot profile's where either is compiled; a build without both walks no entry.
+    #[cfg(all(
+        feature = "session-slot",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    ))]
     fn next(&mut self) -> Option<Self::Item> {
         self.0.find(|entry| {
             crate::ext_chain::reads_received_ext(crate::ext_view::ExtEntryView::ext_id(entry))
         })
     }
 
-    #[cfg(not(feature = "session-slot"))]
+    #[cfg(not(all(
+        feature = "session-slot",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    )))]
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
     }
@@ -880,6 +888,8 @@ impl<'f> Iterator for ReadEntries<'f> {
 #[derive(Clone, Copy)]
 pub struct ReadChain<'a> {
     list: ReadList<'a>,
+    /// Read by the readers of an Init's and an Open's chain, the two that carry one.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
     answers: ChainAnswers<'a>,
 }
 
@@ -892,6 +902,7 @@ impl ReadChain<'_> {
     /// The chain of a message that hands none to the judgement.
     const EMPTY: Self = Self {
         list: ReadList::Empty(core::marker::PhantomData),
+        #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
         answers: ChainAnswers::NONE,
     };
 }
