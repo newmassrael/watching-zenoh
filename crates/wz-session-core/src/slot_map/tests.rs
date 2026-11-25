@@ -57,6 +57,31 @@ fn a_full_table_refuses_and_hands_the_value_back() {
     assert_eq!(map.len(), 2);
 }
 
+/// A row built of its parts is built only once its slot was found: a full table hands the parts
+/// back whole and never builds it; a table with room builds it once, where its handle finds it.
+/// Turned red by an `insert_with` that builds the row before it finds a slot, or hands back
+/// anything but the parts it was given.
+#[test]
+fn a_row_built_in_its_slot_is_not_built_when_the_table_is_full() {
+    let built = Cell::new(0);
+    let mut map = Map::<2>::new();
+    let make = |(a, b): (u32, u32)| {
+        built.set(built.get() + 1);
+        a + b
+    };
+    let first = map
+        .insert_with((1, 2), make)
+        .expect("a table of two takes a row");
+    assert_eq!(map.get(first), Some(&3));
+    assert_eq!(built.get(), 1);
+    map.insert_with((3, 4), make)
+        .expect("a table of two takes a second row");
+    assert!(map.is_full());
+    assert_eq!(map.insert_with((5, 6), make), Err((5, 6)));
+    assert_eq!(built.get(), 2, "a refused row is not built");
+    assert_eq!(map.len(), 2);
+}
+
 #[test]
 fn a_limit_under_the_build_bound_refuses_at_the_limit() {
     let mut map = Map::<4>::new();
