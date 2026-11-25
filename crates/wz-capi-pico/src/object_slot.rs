@@ -46,10 +46,7 @@ pub(crate) enum Kind {
     Reply = 7,
     #[cfg(feature = "queryable")]
     Query = 8,
-    // A payload takes a slot only where there are pools to take it from; without them it is
-    // boxed in the allocation its thread kept for it (`crate::bytes`).
-    #[cfg(wz_process_pools)]
-    Bytes = 9,
+    // 9 was an owned payload's, which its value holds now (`crate::bytes::ByteBuf`).
     Config = 10,
     // Without the pools a kept hello is the heap's copy (`crate::scout`).
     #[cfg(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu")))]
@@ -784,17 +781,6 @@ pub(crate) unsafe fn release_entity<T>(object: *mut T) {
 pub(crate) unsafe fn release_entity<T>(object: *mut T) {
     // SAFETY: the caller's.
     unsafe { release(object) }
-}
-
-/// Move the object at `object` out and give its place back.
-///
-/// # Safety
-/// As [`release`].
-#[cfg(wz_process_pools)]
-pub(crate) unsafe fn reclaim<T>(object: *mut T) -> T {
-    let value = object.read();
-    give_back(NonNull::new_unchecked(object.cast::<MaybeUninit<T>>()));
-    value
 }
 
 /// An object of a slot held by value, as a `Box` holds one: it reads as the object, and dropped it

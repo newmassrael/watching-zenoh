@@ -165,7 +165,7 @@ const _: () = assert!(
 ///
 /// The copied value is BORROWED, and that is what makes the copy sound. See
 /// [`crate::abi::HandleOwnership`]: the sample still owns `payload`, the C side
-/// takes a bitwise copy of the slot, and `_pad[0]` carries the tag that stops
+/// takes a bitwise copy of the slot, and its last word carries the tag that stops
 /// `z_publisher_put` / `z_bytes_drop` from freeing memory this marshal will free
 /// itself. pico solves the identical problem with the `_aliased` flag inside its
 /// arc-slice vector header; this is that flag, in the handle model.
@@ -366,18 +366,18 @@ impl SampleMarshal {
     pub(crate) fn bind(&mut self) {
         let keyexpr = self.keyexpr.as_str();
         self.loaned_keyexpr = z_loaned_keyexpr_t::borrowed(keyexpr.as_ptr(), keyexpr.len());
-        // The pico-layout slot binds here for the same reason the cached views
-        // do: it points into THIS marshal, so it can only be written once the
-        // value has stopped moving.
-        self.pico_payload = z_owned_bytes_t::borrowed(&self.payload as *const ByteBuf as *const _);
+        // The pico-layout slot is a borrowed copy of the payload's words, written with the views so
+        // that it reads the payload this marshal holds once it has stopped changing.
+        self.pico_payload = z_owned_bytes_t::borrowed(&self.payload);
         // Written whether or not there is one: a copy's views are its original's until this runs
         // (`Self::write_copy`), and the accessors read the field, not the view, for none.
-        self.loaned_attachment.handle = self
-            .attachment
-            .as_ref()
-            .map_or(core::ptr::null_mut(), |attachment| {
-                attachment as *const ByteBuf as *mut c_void
-            });
+        self.loaned_attachment = self.attachment.as_ref().map_or(
+            z_loaned_bytes_t {
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
+            },
+            z_loaned_bytes_t::borrowed,
+        );
         self.loaned_encoding.handle = self
             .encoding
             .as_ref()
@@ -1906,8 +1906,8 @@ impl_handle_ownership7!(
 /// Take a moved payload's bytes, nulling the source: `Ok(None)` for a null one.
 ///
 /// Ownership is decided by the value's own borrow tag rather than assumed. An
-/// ORDINARY owned bytes — everything a wz constructor produces — is reclaimed
-/// from its place. A BORROWED one is CLONED and its storage left alone, because
+/// ORDINARY owned bytes — everything a wz constructor produces — is taken out of
+/// the value's words. A BORROWED one is CLONED and its storage left alone, because
 /// the only way a C program obtains one is by reading `sample->payload` out of a
 /// marshal that still owns it, and that marshal frees it when the callback
 /// returns. Freeing it here is the double free this tag exists to prevent; see
@@ -1925,42 +1925,39 @@ impl_handle_ownership7!(
 pub(crate) unsafe fn take_moved_bytes(
     payload: *mut z_moved_bytes_t,
 ) -> Result<Option<ByteBuf>, NoRoom> {
-    if payload.is_null() {
+    let Some(moved) = read_moved_bytes(payload) else {
         return Ok(None);
-    }
-    let handle = (*payload)._this.handle;
-    if handle.is_null() {
-        return Ok(None);
-    }
-    let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
-    (*payload)._this = z_owned_bytes_t::null_value();
-    if borrowed {
-        (*(handle as *const ByteBuf)).try_clone().map(Some)
-    } else {
-        Ok(Some(crate::bytes::unbox_bytes(handle as *mut ByteBuf)))
+    };
+    let moved = core::mem::ManuallyDrop::new(moved);
+    match &*moved {
+        MovedBytes::Lent(buf) => buf.try_clone().map(Some),
+        // SAFETY: `moved` is never dropped, so the caller's payload read out of it is let go once,
+        // by the holder it is handed to.
+        MovedBytes::Owned(buf) => Ok(Some(core::ptr::read(&**buf))),
     }
 }
 
-/// A moved payload as a call that only reads it holds it, for the length of that call: the
-/// marshal's own payload read where it lies, or the caller's, taken out of its place.
-pub(crate) enum MovedBytes<'a> {
-    /// A BORROW of a delivered sample's payload, which its marshal holds past the call.
-    Lent(&'a ByteBuf),
+/// A moved payload as a call that only reads it holds it, for the length of that call: a copy of
+/// a delivered sample's payload, read where its marshal holds it, or the caller's, taken out of
+/// its value.
+pub(crate) enum MovedBytes {
+    /// A BORROW of a delivered sample's payload, whose marshal holds it past the call and lets it
+    /// go: never dropped here.
+    Lent(core::mem::ManuallyDrop<ByteBuf>),
     /// The caller's payload, consumed: its storage goes back when this is dropped.
     Owned(core::mem::ManuallyDrop<ByteBuf>),
 }
 
-impl core::ops::Deref for MovedBytes<'_> {
+impl core::ops::Deref for MovedBytes {
     type Target = ByteBuf;
     fn deref(&self) -> &ByteBuf {
         match self {
-            Self::Lent(buf) => buf,
-            Self::Owned(buf) => buf,
+            Self::Lent(buf) | Self::Owned(buf) => buf,
         }
     }
 }
 
-impl Drop for MovedBytes<'_> {
+impl Drop for MovedBytes {
     /// The caller's payload let go, its storage given back; a borrow is its marshal's. One body
     /// out of line: every door that reads a moved payload or attachment drops one, and the
     /// payload's drop inlined at each would hold its own copy of giving the storage back.
@@ -1982,25 +1979,21 @@ impl Drop for MovedBytes<'_> {
 /// answers.
 ///
 /// # Safety
-/// `payload` must be null or a valid `z_moved_bytes_t` whose handle is a live
-/// payload a constructor of this crate placed, or a BORROW of a live `ByteBuf`.
+/// `payload` must be null or a valid `z_moved_bytes_t` whose value is null, a payload a
+/// constructor of this crate placed, or a BORROW of a payload that outlives the call.
 #[inline(never)]
-pub(crate) unsafe fn read_moved_bytes<'a>(payload: *mut z_moved_bytes_t) -> Option<MovedBytes<'a>> {
-    if payload.is_null() {
-        return None;
-    }
-    let handle = (*payload)._this.handle;
-    if handle.is_null() {
+pub(crate) unsafe fn read_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<MovedBytes> {
+    if payload.is_null() || (*payload)._this.handle.is_null() {
         return None;
     }
     let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
-    (*payload)._this = z_owned_bytes_t::null_value();
+    let buf = core::mem::ManuallyDrop::new(crate::bytes::take_payload(core::ptr::addr_of_mut!(
+        (*payload)._this
+    )));
     Some(if borrowed {
-        MovedBytes::Lent(&*(handle as *const ByteBuf))
+        MovedBytes::Lent(buf)
     } else {
-        MovedBytes::Owned(core::mem::ManuallyDrop::new(crate::bytes::unbox_bytes(
-            handle as *mut ByteBuf,
-        )))
+        MovedBytes::Owned(buf)
     })
 }
 
@@ -2013,18 +2006,7 @@ pub(crate) unsafe fn read_moved_bytes<'a>(payload: *mut z_moved_bytes_t) -> Opti
 // has a caller.
 #[cfg(feature = "queryable")]
 pub(crate) unsafe fn drop_moved_bytes(payload: *mut z_moved_bytes_t) {
-    if payload.is_null() {
-        return;
-    }
-    let handle = (*payload)._this.handle;
-    if handle.is_null() {
-        return;
-    }
-    let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
-    (*payload)._this = z_owned_bytes_t::null_value();
-    if !borrowed {
-        drop(crate::bytes::unbox_bytes(handle as *mut ByteBuf));
-    }
+    drop(read_moved_bytes(payload));
 }
 
 /// Fold a caller's `z_publisher_put_options_t` into wz's [`PublishOptions`], or
@@ -2068,7 +2050,7 @@ unsafe fn publisher_put_options<'o, 'a>(
 /// its options moved in, each sent from where it lies and let go when the put returns.
 #[derive(Default)]
 struct PutHeld {
-    attachment: core::mem::ManuallyDrop<Option<MovedBytes<'static>>>,
+    attachment: core::mem::ManuallyDrop<Option<MovedBytes>>,
     encoding: core::mem::ManuallyDrop<Option<OwnedEncoding>>,
 }
 
@@ -2356,7 +2338,7 @@ mod put_options_tests {
         unsafe {
             let held = ByteBuf::lent(&lent_bytes);
             let mut lent = z_moved_bytes_t {
-                _this: z_owned_bytes_t::borrowed((&held as *const ByteBuf).cast()),
+                _this: z_owned_bytes_t::borrowed(&held),
             };
             match read_moved_bytes(&mut lent) {
                 Some(MovedBytes::Lent(buf)) => {
@@ -2431,7 +2413,7 @@ mod put_options_tests {
             )
             .expect("room for the record of the bytes");
             let mut lent = z_moved_bytes_t {
-                _this: z_owned_bytes_t::borrowed((&held as *const ByteBuf).cast()),
+                _this: z_owned_bytes_t::borrowed(&held),
             };
             drop(read_moved_bytes(&mut lent).expect("a borrow is read"));
             assert_eq!(
@@ -3620,7 +3602,7 @@ pub unsafe extern "C" fn z_sample_payload(
         return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
-    // The loaned bytes are the owned bytes' layout, read by their handle alone (`handle_ref`).
+    // The loaned bytes are the owned bytes' layout: the payload in their words (`bytes_ref`).
     core::ptr::from_ref(&marshal.pico_payload).cast::<z_loaned_bytes_t>()
 }
 
@@ -4033,9 +4015,10 @@ mod tests {
     unsafe extern "C" fn note_where(sample: *const z_loaned_sample_t, context: *mut c_void) {
         let found = &mut *(context as *mut Found);
         found.key = (*z_sample_keyexpr(sample))._start as usize;
-        let payload = &*((*z_sample_payload(sample)).handle as *const ByteBuf);
+        let payload = crate::bytes::bytes_ref(z_sample_payload(sample)).expect("a payload");
         found.payload = payload.as_slice().as_ptr() as usize;
-        let attachment = &*((*z_sample_attachment(sample)).handle as *const ByteBuf);
+        let attachment =
+            crate::bytes::bytes_ref(z_sample_attachment(sample)).expect("an attachment");
         found.attachment = attachment.as_slice().as_ptr() as usize;
     }
 
@@ -4354,7 +4337,7 @@ mod tests {
             "the view is the field a C program reads as sample->payload"
         );
         // SAFETY: the loaned payload of the live marshal.
-        let bytes = unsafe { handle_ref::<z_loaned_bytes_t, ByteBuf>(payload) }.expect("bound");
+        let bytes = unsafe { crate::bytes::bytes_ref(payload) }.expect("bound");
         assert_eq!(bytes.as_slice(), b"payload");
         // SAFETY: the loaned bytes have the owned bytes' layout.
         let as_owned = unsafe { &*payload.cast::<z_owned_bytes_t>() };
@@ -4389,7 +4372,7 @@ mod tests {
             assert_eq!((*second).loaned_keyexpr._start, key.as_ptr());
             assert_eq!(
                 (*second).pico_payload.handle as usize,
-                core::ptr::addr_of!((*second).payload) as usize
+                (*second).payload.as_slice().as_ptr() as usize
             );
             assert!(
                 (*second).loaned_attachment.handle.is_null(),
@@ -4499,13 +4482,13 @@ mod tests {
             );
             assert_eq!(
                 (*copy).pico_payload.handle as usize,
-                core::ptr::addr_of!((*copy).payload) as usize,
+                (*copy).payload.as_slice().as_ptr() as usize,
                 "the payload's view is bound to the copy"
             );
             let attachment = (*copy).attachment.as_ref().expect("the view carried one");
             assert_eq!(
                 (*copy).loaned_attachment.handle as usize,
-                attachment as *const ByteBuf as usize,
+                attachment.as_slice().as_ptr() as usize,
                 "the attachment's view is bound to the copy"
             );
             free_sample_marshal(owned);

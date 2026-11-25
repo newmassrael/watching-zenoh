@@ -9,16 +9,17 @@
 //!
 //! Each kind of object has a pool of its own (`crate::object_slot::Kind`): the objects behind the
 //! owned handles (on the tokio engine its sessions, publishers, subscribers, queryables,
-//! liveliness tokens, liveliness subscribers and queriers, and the samples, replies, queries,
-//! payloads and encodings a program holds), and what a program makes before any session: its
+//! liveliness tokens, liveliness subscribers and queriers, and the samples, replies, queries
+//! and encodings a program holds), and what a program makes before any session: its
 //! configs and the hellos it keeps. Beside them lie three pools of payload blocks: the bytes the
 //! owned payloads, strings and slices carry, each in a block of the smallest of the three whose
-//! blocks hold it and that has one free ([`PAYLOAD_BLOCKS`]). Every pool is one of fixed blocks,
-//! taken from its list of free blocks and given back to the pool its address lies in, by the same
-//! code for an object and for a payload's bytes. A session of the cooperative
-//! engine lies in its own arena, not here, and so do its entities, each in a place its open laid
-//! out under the session's own limit (`crate::object_slot::held_places`): a count of the pools'
-//! for an entity does not apply there.
+//! blocks hold it and that has one free ([`PAYLOAD_BLOCKS`]); an owned payload itself takes no
+//! place here, as its value holds it (`crate::bytes::ByteBuf`). Every pool is one of fixed
+//! blocks, taken from its list of free blocks and given back to the pool its address lies in, by
+//! the same code for an object and for a payload's bytes. A session of the cooperative engine
+//! lies in its own arena, not here, and so do its entities, each in a place its open laid out
+//! under the session's own limit (`crate::object_slot::held_places`): a count of the pools' for
+//! an entity does not apply there.
 //!
 //! The pools are in every library without the tokio engine, the C library's form with no heap, and
 //! in one with it that has the doors which let a program reserve them itself (`object-pool`,
@@ -35,7 +36,7 @@
 //! within the build's values (`MAX_PUBLISHERS`, `MAX_SUBSCRIPTIONS`, `MAX_QUERYABLES`,
 //! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`, and for the gets it holds pending
 //! `MAX_PENDING_QUERIES` and `MAX_PENDING_LIVELINESS_GETS`), `HELD_SAMPLES`, `HELD_REPLIES`,
-//! `HELD_QUERIES`, `HELD_PAYLOADS` and `HELD_ENCODINGS` of the values it holds, `HELD_CONFIGS`
+//! `HELD_QUERIES` and `HELD_ENCODINGS` of the values it holds, `HELD_CONFIGS`
 //! configs, `HELD_HELLOS` kept hellos, and `HELD_SMALL_PAYLOAD_BLOCKS`,
 //! `HELD_MEDIUM_PAYLOAD_BLOCKS` and `HELD_LARGE_PAYLOAD_BLOCKS` payload blocks. A program that
 //! states its own counts reserves them before its first object through the doors instead.
@@ -142,8 +143,6 @@ pub(crate) struct Counts {
     pub(crate) samples: usize,
     pub(crate) replies: usize,
     pub(crate) queries: usize,
-    /// Owned payloads: the places of their handles.
-    pub(crate) bytes: usize,
     pub(crate) configs: usize,
     /// Hellos a program keeps (`z_hello_clone`).
     pub(crate) hellos: usize,
@@ -356,7 +355,6 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
         samples: stated.samples,
         replies: stated.replies,
         queries: stated.queries,
-        bytes: stated.bytes,
         configs: stated.configs,
         hellos: if cfg!(any(feature = "scout", feature = "scout-mcu")) {
             stated.hellos
@@ -508,7 +506,6 @@ impl Plan {
         {
             plan = plan.with::<crate::query::QueryMarshal>(Kind::Query, objects.queries);
         }
-        plan = plan.with::<crate::bytes::ByteBuf>(Kind::Bytes, objects.bytes);
         plan = plan.with::<crate::config::ConfigState>(Kind::Config, objects.configs);
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
         {
@@ -1046,7 +1043,6 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         samples: caps::HELD_SAMPLES,
         replies: caps::HELD_REPLIES,
         queries: caps::HELD_QUERIES,
-        bytes: caps::HELD_PAYLOADS,
         configs: caps::HELD_CONFIGS,
         hellos: caps::HELD_HELLOS,
         // At the bound of their limits, as the entities above.
@@ -1482,7 +1478,6 @@ mod tests {
             samples: 5,
             replies: 6,
             queries: 7,
-            bytes: 8,
             configs: 9,
             hellos: 10,
             queriers: 1,
@@ -1506,10 +1501,9 @@ mod tests {
                 objects.samples,
                 objects.replies,
                 objects.queries,
-                objects.bytes,
                 objects.configs
             ),
-            (5, 6, 7, 8, 9)
+            (5, 6, 7, 9)
         );
         let scouts = cfg!(any(feature = "scout", feature = "scout-mcu"));
         assert_eq!(objects.hellos, if scouts { 10 } else { 0 });
@@ -1527,7 +1521,7 @@ mod tests {
         };
         assert_eq!(resolve(&stated, &UNBOUNDED), Err(Unplanned::Unbounded));
         let no_session = Counts {
-            bytes: 1,
+            configs: 1,
             ..counts()
         };
         let objects = resolve(&no_session, &UNBOUNDED).expect("no entity is asked for");
@@ -1543,7 +1537,7 @@ mod tests {
             ..counts()
         };
         assert_eq!(resolve(&stated, &BOUNDED), Err(Unplanned::TooLarge));
-        let plan = plan_of(&[(Kind::Bytes, usize::MAX, slot_bytes(CLASSES - 1))]);
+        let plan = plan_of(&[(Kind::Config, usize::MAX, slot_bytes(CLASSES - 1))]);
         assert_eq!(plan.bytes(), Err(Unplanned::TooLarge));
     }
 
@@ -1558,19 +1552,19 @@ mod tests {
     #[test]
     fn each_kind_has_a_pool_of_its_own_size() {
         let objects = Counts {
-            bytes: 3,
+            samples: 3,
             configs: 2,
             ..counts()
         };
-        let plan = Plan::of(&objects).expect("three payloads and two configs");
-        let bytes_size = slot_size::<crate::bytes::ByteBuf>();
+        let plan = Plan::of(&objects).expect("three samples and two configs");
+        let sample_size = slot_size::<crate::pubsub::SampleMarshal>();
         let config_size = slot_size::<crate::config::ConfigState>();
-        assert_eq!(plan.slots[Kind::Bytes as usize], 3);
-        assert_eq!(plan.sizes[Kind::Bytes as usize], bytes_size);
+        assert_eq!(plan.slots[Kind::Sample as usize], 3);
+        assert_eq!(plan.sizes[Kind::Sample as usize], sample_size);
         assert_eq!(plan.slots[Kind::Config as usize], 2);
         assert_eq!(plan.sizes[Kind::Config as usize], config_size);
         assert_eq!(plan.slots.iter().sum::<usize>(), 5);
-        assert_eq!(plan.bytes(), Ok(3 * bytes_size + 2 * config_size));
+        assert_eq!(plan.bytes(), Ok(3 * sample_size + 2 * config_size));
     }
 
     /// Two kinds whose objects share a size keep the counts stated for each: a full pool of one
@@ -1578,28 +1572,28 @@ mod tests {
     #[test]
     fn a_kind_never_takes_a_slot_of_another_kind_of_the_same_size() {
         let mut memory = Memory([0; 512]);
-        let plan = plan_of(&[(Kind::Bytes, 1, 16), (Kind::Publisher, 1, 16)]);
+        let plan = plan_of(&[(Kind::Sample, 1, 16), (Kind::Publisher, 1, 16)]);
         let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
         // SAFETY: the memory is aligned, long enough and used by nothing else.
         let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
 
-        let payload = pools.take(Kind::Bytes, 16).expect("the one payload slot");
+        let sample = pools.take(Kind::Sample, 16).expect("the one sample slot");
         assert_eq!(
-            pools.take(Kind::Bytes, 16),
+            pools.take(Kind::Sample, 16),
             None,
-            "the payload pool is full, whatever the publisher pool holds"
+            "the sample pool is full, whatever the publisher pool holds"
         );
         let publisher = pools
             .take(Kind::Publisher, 16)
             .expect("the publisher's own slot");
-        assert_ne!(payload, publisher);
+        assert_ne!(sample, publisher);
         let report = pools.report(0);
         assert_eq!((report.slots, report.in_use, report.refused), (2, 2, 1));
         assert!(pools.give_back(publisher));
-        assert_eq!(pools.take(Kind::Bytes, 16), None, "still none of its own");
-        assert!(pools.give_back(payload));
-        assert_eq!(pools.take(Kind::Bytes, 16), Some(payload));
-        assert!(pools.give_back(payload));
+        assert_eq!(pools.take(Kind::Sample, 16), None, "still none of its own");
+        assert!(pools.give_back(sample));
+        assert_eq!(pools.take(Kind::Sample, 16), Some(sample));
+        assert!(pools.give_back(sample));
         assert_eq!(pools.held(), 0);
     }
 
@@ -1612,7 +1606,7 @@ mod tests {
         let plan = plan_of(&[
             (Kind::Publisher, 2, 16),
             (Kind::Subscriber, 0, 16),
-            (Kind::Bytes, 1, 64),
+            (Kind::Sample, 1, 64),
         ]);
         let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
         // SAFETY: the memory is aligned, long enough and used by nothing else.
@@ -1621,14 +1615,11 @@ mod tests {
             let _first = pools.take(Kind::Publisher, 16).expect("a free slot");
             pools.take(Kind::Publisher, 16).expect("a free slot")
         };
-        let payload = pools.take(Kind::Bytes, 64).expect("the one payload slot");
-        assert!(
-            pools.give_back(payload),
-            "the payload's place is the pools'"
-        );
+        let sample = pools.take(Kind::Sample, 64).expect("the one sample slot");
+        assert!(pools.give_back(sample), "the sample's place is the pools'");
         assert_eq!(
-            pools.take(Kind::Bytes, 64),
-            Some(payload),
+            pools.take(Kind::Sample, 64),
+            Some(sample),
             "it went back to its own pool, past the empty one"
         );
         assert!(pools.give_back(last_publisher));
@@ -1641,7 +1632,7 @@ mod tests {
     #[test]
     fn a_full_pool_refuses_and_a_slot_given_back_is_taken_again() {
         let mut memory = Memory([0; 512]);
-        let plan = plan_of(&[(Kind::Publisher, 2, 16), (Kind::Bytes, 3, 64)]);
+        let plan = plan_of(&[(Kind::Publisher, 2, 16), (Kind::Sample, 3, 64)]);
         let bytes = plan.bytes().expect("small");
         assert_eq!(bytes, 2 * 16 + 3 * 64);
         let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
@@ -1668,7 +1659,7 @@ mod tests {
         );
 
         let large: alloc::vec::Vec<_> = (0..3)
-            .map(|_| pools.take(Kind::Bytes, 64).expect("free"))
+            .map(|_| pools.take(Kind::Sample, 64).expect("free"))
             .collect();
         for slot in large.iter().chain([first, second].iter()) {
             let at = slot.as_ptr() as usize - base.as_ptr() as usize;
@@ -1705,7 +1696,7 @@ mod tests {
     #[test]
     fn a_class_reports_the_bytes_of_slots_smaller_than_its_own() {
         let mut memory = Memory([0; 512]);
-        let plan = plan_of(&[(Kind::Bytes, 2, 48), (Kind::Publisher, 1, 64)]);
+        let plan = plan_of(&[(Kind::Sample, 2, 48), (Kind::Publisher, 1, 64)]);
         let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
         // SAFETY: the memory is aligned, long enough and used by nothing else.
         let pools = unsafe { Pools::over(base, &plan, Origin::Program) };
@@ -1723,11 +1714,11 @@ mod tests {
     #[test]
     fn a_class_past_the_counted_ones_reports_nothing_held() {
         let mut memory = Memory([0; 512]);
-        let plan = plan_of(&[(Kind::Bytes, 2, 48)]);
+        let plan = plan_of(&[(Kind::Sample, 2, 48)]);
         let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
         // SAFETY: the memory is aligned, long enough and used by nothing else.
         let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
-        assert!(pools.take(Kind::Bytes, 48).is_some());
+        assert!(pools.take(Kind::Sample, 48).is_some());
         let report = pools.report(CLASSES + 1);
         assert_eq!(
             report,
@@ -1882,11 +1873,6 @@ mod tests {
             "query",
             Kind::Query,
             core::mem::size_of::<crate::query::QueryMarshal>(),
-        );
-        row(
-            "bytes",
-            Kind::Bytes,
-            core::mem::size_of::<crate::bytes::ByteBuf>(),
         );
         row(
             "config",
@@ -2070,14 +2056,12 @@ mod tests {
                 objects.samples,
                 objects.replies,
                 objects.queries,
-                objects.bytes,
                 objects.configs
             ),
             (
                 caps::HELD_SAMPLES,
                 caps::HELD_REPLIES,
                 caps::HELD_QUERIES,
-                caps::HELD_PAYLOADS,
                 caps::HELD_CONFIGS
             )
         );
@@ -2172,7 +2156,6 @@ mod tests {
         check(Kind::Reply);
         #[cfg(feature = "queryable")]
         check(Kind::Query);
-        check(Kind::Bytes);
         check(Kind::Config);
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
         check(Kind::Hello);
@@ -2274,7 +2257,7 @@ mod tests {
         let mut memory = Memory([0; 512]);
         let mut pools = payload_pools(
             &mut memory,
-            &[(Kind::Bytes, 2, 32)],
+            &[(Kind::Sample, 2, 32)],
             [(32, 2), (64, 1), (128, 1)],
         );
         let (small, bytes) = pools.take_payload(20).expect("a small block");
@@ -2358,7 +2341,7 @@ mod tests {
     /// of its bytes, or refuses a plan of payload blocks alone.
     #[test]
     fn the_payload_pools_lie_after_the_slots() {
-        let plan = plan_of(&[(Kind::Bytes, 2, 64)]).with_payloads(&[1, 0, 0]);
+        let plan = plan_of(&[(Kind::Sample, 2, 64)]).with_payloads(&[1, 0, 0]);
         assert_eq!(
             plan.bytes(),
             Ok(2 * 64 + PAYLOAD_BLOCKS[0]),

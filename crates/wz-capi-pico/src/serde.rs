@@ -1158,7 +1158,7 @@ mod tests {
             assert_eq!(z_bytes_writer_empty(&mut writer), Z_OK);
             let loaned = &mut writer as *mut _ as *mut z_loaned_bytes_writer_t;
             let mut lent = z_moved_bytes_t {
-                _this: z_owned_bytes_t::borrowed((&held as *const ByteBuf).cast()),
+                _this: z_owned_bytes_t::borrowed(&held),
             };
             assert_eq!(z_bytes_writer_append(loaned, &mut lent), Z_OK);
             assert!(lent._this.handle.is_null(), "the borrow is spent");

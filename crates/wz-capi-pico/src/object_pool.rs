@@ -103,7 +103,9 @@ pub struct wz_ext_object_pool_counts_t {
     pub replies: usize,
     /// Owned queries, each holding its query open until it is dropped.
     pub queries: usize,
-    /// Owned payloads (`z_owned_bytes_t`).
+    /// Not read: an owned payload (`z_owned_bytes_t`) lies in its own value and takes no slot of
+    /// the pools, only a payload block for its bytes. Kept so that a program's struct keeps its
+    /// layout.
     pub bytes: usize,
     /// Configs (`z_owned_config_t`), each from `z_config_default` or `z_config_clone` to its
     /// move into an open or a scout, or its drop.
@@ -204,7 +206,6 @@ impl wz_ext_object_pool_counts_t {
             samples: self.samples,
             replies: self.replies,
             queries: self.queries,
-            bytes: self.bytes,
             configs: self.configs,
             hellos: self.hellos,
             queriers: self.queriers,
@@ -458,7 +459,8 @@ pub extern "C" fn wz_ext_object_pool_release() -> ZResult {
 mod tests {
     use super::*;
 
-    /// Each count a program states is read into the count of the same object.
+    /// Each count a program states is read into the count of the same object, and the count of
+    /// payloads, which take no slot, into none.
     #[test]
     fn every_count_the_program_states_is_read() {
         let stated = wz_ext_object_pool_counts_t {
@@ -501,7 +503,6 @@ mod tests {
                 samples: 7,
                 replies: 8,
                 queries: 9,
-                bytes: 10,
                 configs: 11,
                 hellos: 12,
                 queriers: 14,

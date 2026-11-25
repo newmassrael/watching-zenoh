@@ -2059,8 +2059,8 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  *
  * RESERVING. With nothing reserved, the first object the program makes
  * reserves the build's pools: HELD_SESSIONS sessions, each with the entities
- * its limits admit, HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES, HELD_PAYLOADS
- * and HELD_ENCODINGS of the owned values, HELD_CONFIGS configs, HELD_HELLOS
+ * its limits admit, HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES and
+ * HELD_ENCODINGS of the owned values, HELD_CONFIGS configs, HELD_HELLOS
  * kept hellos, and HELD_SMALL_PAYLOAD_BLOCKS, HELD_MEDIUM_PAYLOAD_BLOCKS and
  * HELD_LARGE_PAYLOAD_BLOCKS payload blocks. A program that states counts of
  * its own reserves them before its first object instead.
@@ -2093,7 +2093,8 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t samples;
   size_t replies;
   size_t queries;
-  size_t bytes;
+  size_t bytes; /* not read: an owned payload lies in its own value, and
+                 * only its bytes take a payload block */
   size_t configs;
   size_t hellos;
   size_t payload_bytes; /* 0; any other value is refused with Z_EINVAL */
