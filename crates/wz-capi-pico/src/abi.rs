@@ -466,10 +466,13 @@ impl TypeFacts {
 
 /// Zero the owned block at `obj` (pico `z_internal_*_null`); a null pointer is left alone.
 ///
+/// The facts come last here and in the bodies below: an export's own arguments then stay in the
+/// registers they arrived in, and the export is the facts' address and a jump.
+///
 /// # Safety
 /// `obj` is null or points at an owned block of the type `facts` describes.
 #[inline(never)]
-pub(crate) unsafe fn obj_null(facts: &TypeFacts, obj: *mut u8) {
+pub(crate) unsafe fn obj_null(obj: *mut u8, facts: &TypeFacts) {
     if !obj.is_null() {
         core::ptr::write_bytes(obj, 0, usize::from(facts.size));
     }
@@ -492,7 +495,7 @@ pub(crate) unsafe fn obj_check(obj: *const u8) -> bool {
 /// # Safety
 /// Each pointer is null or points at an owned block of the type `facts` describes.
 #[inline(never)]
-pub(crate) unsafe fn obj_move(facts: &TypeFacts, dst: *mut u8, src: *mut u8) {
+pub(crate) unsafe fn obj_move(dst: *mut u8, src: *mut u8, facts: &TypeFacts) {
     take_block(dst, src, usize::from(facts.size));
 }
 
@@ -504,7 +507,7 @@ pub(crate) unsafe fn obj_move(facts: &TypeFacts, dst: *mut u8, src: *mut u8) {
 /// `obj` is null or points at an owned block of the type `facts` describes, whose handle is null
 /// or one its `drop` takes.
 #[inline(never)]
-pub(crate) unsafe fn obj_drop(facts: &TypeFacts, obj: *mut u8) {
+pub(crate) unsafe fn obj_drop(obj: *mut u8, facts: &TypeFacts) {
     let _ = crate::ffi::guarded(|| {
         if obj.is_null() {
             return crate::result::Z_OK;
@@ -556,7 +559,7 @@ macro_rules! impl_owned_family {
         /// Zero the owned struct in place (pico `z_internal_*_null`).
         #[no_mangle]
         pub unsafe extern "C" fn $null(obj: *mut $Owned) {
-            $crate::abi::obj_null(<$Owned>::facts(), obj.cast());
+            $crate::abi::obj_null(obj.cast(), <$Owned>::facts());
         }
 
         /// `true` iff the owned struct holds a live handle
@@ -590,7 +593,7 @@ macro_rules! impl_owned_family {
         /// (pico `z_*_take`).
         #[no_mangle]
         pub unsafe extern "C" fn $take(dst: *mut $Owned, src: *mut $Moved) {
-            $crate::abi::obj_move(<$Owned>::facts(), dst.cast(), src.cast());
+            $crate::abi::obj_move(dst.cast(), src.cast(), <$Owned>::facts());
         }
     };
 }
@@ -633,7 +636,7 @@ macro_rules! impl_handle_ownership7 {
         /// handle.
         #[no_mangle]
         pub unsafe extern "C" fn $drop(obj: *mut $Moved) {
-            $crate::abi::obj_drop(<$Owned>::facts(), obj.cast());
+            $crate::abi::obj_drop(obj.cast(), <$Owned>::facts());
         }
     };
 }
@@ -685,7 +688,7 @@ macro_rules! impl_value_ownership {
             if dst.is_null() || src.is_null() {
                 return $crate::result::Z_ERR_NULL;
             }
-            $crate::abi::obj_move(<$Owned>::facts(), dst.cast(), src.cast());
+            $crate::abi::obj_move(dst.cast(), src.cast(), <$Owned>::facts());
             $crate::result::Z_OK
         }
     };
@@ -787,7 +790,7 @@ macro_rules! impl_boxed_element {
         /// Zero the owned struct in place (pico `z_internal_*_null`).
         #[no_mangle]
         pub unsafe extern "C" fn $null(obj: *mut $Owned) {
-            $crate::abi::obj_null(<$Owned>::facts(), obj.cast());
+            $crate::abi::obj_null(obj.cast(), <$Owned>::facts());
         }
 
         /// `true` iff the owned struct holds a live marshal
@@ -826,13 +829,13 @@ macro_rules! impl_boxed_element {
         /// (pico `z_*_take`).
         #[no_mangle]
         pub unsafe extern "C" fn $take(dst: *mut $Owned, src: *mut $Moved) {
-            $crate::abi::obj_move(<$Owned>::facts(), dst.cast(), src.cast());
+            $crate::abi::obj_move(dst.cast(), src.cast(), <$Owned>::facts());
         }
 
         /// Release the owned element (pico `z_*_drop`). Idempotent.
         #[no_mangle]
         pub unsafe extern "C" fn $drop(obj: *mut $Moved) {
-            $crate::abi::obj_drop(<$Owned>::facts(), obj.cast());
+            $crate::abi::obj_drop(obj.cast(), <$Owned>::facts());
         }
 
         /// Escape a borrowed marshal into an owned one
@@ -989,18 +992,18 @@ mod tests {
         let mut obj = block(handle, [1, 2, 3]);
         let at = (&mut obj as *mut z_owned_config_t).cast::<u8>();
         // SAFETY: the block's handle is a boxed word `free_counted` takes, dropped once.
-        unsafe { obj_drop(&COUNTED, at) };
+        unsafe { obj_drop(at, &COUNTED) };
         assert_eq!(FREED.load(Ordering::SeqCst), 1);
         assert_eq!(words(&obj), [0; 4]);
         // SAFETY: the block is null now, which a drop leaves alone.
-        unsafe { obj_drop(&COUNTED, at) };
+        unsafe { obj_drop(at, &COUNTED) };
         assert_eq!(
             FREED.load(Ordering::SeqCst),
             1,
             "a null block is not freed again"
         );
         // SAFETY: a null pointer is no block.
-        unsafe { obj_drop(&COUNTED, core::ptr::null_mut()) };
+        unsafe { obj_drop(core::ptr::null_mut(), &COUNTED) };
     }
 
     /// A type whose drop is a door of its own has no `drop` in its facts: the shared drop still
@@ -1010,7 +1013,7 @@ mod tests {
         static UNFREED: TypeFacts = TypeFacts::of(SIZE, None);
         let mut obj = block(0x30, [4, 5, 6]);
         // SAFETY: an owned block of `SIZE` bytes, its handle let go by no one.
-        unsafe { obj_drop(&UNFREED, (&mut obj as *mut z_owned_config_t).cast()) };
+        unsafe { obj_drop((&mut obj as *mut z_owned_config_t).cast(), &UNFREED) };
         assert_eq!(words(&obj), [0; 4]);
     }
 
@@ -1025,10 +1028,10 @@ mod tests {
         // SAFETY: `HALF` describes a block no larger than `obj`.
         unsafe {
             assert!(obj_check(at));
-            obj_null(&HALF, at);
+            obj_null(at, &HALF);
             assert!(!obj_check(at));
             assert!(!obj_check(core::ptr::null()));
-            obj_null(&HALF, core::ptr::null_mut());
+            obj_null(core::ptr::null_mut(), &HALF);
         }
         assert_eq!(
             words(&obj),
@@ -1041,9 +1044,9 @@ mod tests {
         // SAFETY: two blocks of `SIZE` bytes.
         unsafe {
             obj_move(
-                &COUNTED,
                 (&mut dst as *mut z_owned_config_t).cast(),
                 (&mut src as *mut z_owned_config_t).cast(),
+                &COUNTED,
             )
         };
         assert_eq!(words(&dst), [0x50, 1, 2, 3]);

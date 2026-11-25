@@ -857,13 +857,13 @@ unsafe fn give_back<T>(place: NonNull<MaybeUninit<T>>) {
 }
 
 /// Give back the place at `place`, laid out by `layout`: to its pool when it lies in one, else
-/// to the heap it was allocated from with `layout`. One body for every type of object, out of the
-/// line of each release, where each type held a copy of its own.
+/// to the heap it was allocated from with `layout`. Inlined into each release: few types are
+/// released through it, and a body of its own cost more than the copies it replaced.
 ///
 /// # Safety
 /// `place` holds no live value, is given back once, and lies in a pool or was allocated from the
 /// global heap with `layout`.
-#[inline(never)]
+#[inline]
 unsafe fn give_back_laid(place: NonNull<u8>, layout: core::alloc::Layout) {
     #[cfg(wz_process_pools)]
     if crate::process_pool::give_back(place) {

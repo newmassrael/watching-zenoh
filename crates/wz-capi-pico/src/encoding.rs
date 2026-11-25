@@ -606,7 +606,10 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_str(
 
 /// Replace an encoding's schema from an explicitly-sized substring (pico
 /// `z_encoding_set_schema_from_substr`).
+///
+/// Out of line: the `_from_str` door ends in this one, and held a copy of its own.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
     encoding: *mut z_loaned_encoding_t,
     schema: *const c_char,
