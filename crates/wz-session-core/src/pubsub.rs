@@ -1000,14 +1000,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
         if !is_remote {
             return Admission::Matched;
         }
-        match self
-            .key_gate
-            .admit_key_from(class, PeerOp::Publish, keyexpr)
-        {
-            Ok(Admitted::Key(key)) => Admission::Numbered(key),
-            Ok(Admitted::Unchecked) => Admission::Matched,
-            Err(_) => Admission::Refused,
-        }
+        admit_from_peer(&mut self.key_gate, keyexpr, class)
     }
 
     /// The declaration id the next subscription or aggregate reply takes, or
@@ -2248,13 +2241,30 @@ impl<Q: Storage> SubscriberPeer<Q> {
 }
 
 /// What the key gate said of a message.
-enum Admission {
+pub(crate) enum Admission {
     /// Dropped: the key is outside the closed key set.
     Refused,
     /// Not looked up: an open table, or a message of the application's own. Delivered by matching.
     Matched,
     /// A key of the closed key set, by number. Delivered by the selection of that key.
     Numbered(KeyId),
+}
+
+/// What `gate` says of a message a peer sent on `keyexpr`, the peer being the row `class` of the
+/// image's allowance: the one rule every delivery of a peer's message to the session's subscribers
+/// keeps, whichever table holds them, so that no table hands a subscriber what another drops. A
+/// refusal is counted on `gate`.
+#[inline]
+pub(crate) fn admit_from_peer(
+    gate: &mut KeyGate<'_>,
+    keyexpr: &str,
+    class: Option<ClassId>,
+) -> Admission {
+    match gate.admit_key_from(class, PeerOp::Publish, keyexpr) {
+        Ok(Admitted::Key(key)) => Admission::Numbered(key),
+        Ok(Admitted::Unchecked) => Admission::Matched,
+        Err(_) => Admission::Refused,
+    }
 }
 
 /// Deliver a peer's message on a key of the closed key set to the subscribers its selection

@@ -3410,7 +3410,7 @@ fn region_tables_of_zero_bytes_placed_by_their_description_declare_and_undeclare
 }
 
 /// Every row `fan` pins, each call ended at once: the number each row's closure was given.
-fn pinned_in_turn(tables: &LatchedTables, fan: &mut PinnedFanOut<'_>) -> Vec<u32> {
+fn pinned_in_turn(tables: &mut LatchedTables, fan: &mut PinnedFanOut<'_>) -> Vec<u32> {
     let mut seen = Vec::new();
     while let Some(call) = tables.pin_next_subscriber(fan) {
         seen.push(call.call);
@@ -3452,8 +3452,8 @@ fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
         );
     });
     assert_eq!(fanned, std::vec![1, 2, 5], "CONTROL: the fan-out's rows");
-    let mut fan = PinnedFanOut::new("a/b");
-    assert_eq!(pinned_in_turn(&tables, &mut fan), fanned);
+    let mut fan = PinnedFanOut::new("a/b", None);
+    assert_eq!(pinned_in_turn(&mut tables, &mut fan), fanned);
     assert!(
         tables.pin_next_subscriber(&mut fan).is_none(),
         "a walk that ended stays ended"
@@ -3492,9 +3492,9 @@ fn the_pinned_walk_of_the_sessions_own_message_reaches_the_rows_its_loopback_rea
     });
     assert_eq!(fanned, std::vec![1, 4, 5], "CONTROL: the loopback's rows");
     let mut fan = PinnedFanOut::local("a/b");
-    assert_eq!(pinned_in_turn(&tables, &mut fan), fanned);
+    assert_eq!(pinned_in_turn(&mut tables, &mut fan), fanned);
     assert_eq!(
-        pinned_in_turn(&tables, &mut PinnedFanOut::new("a/b")),
+        pinned_in_turn(&mut tables, &mut PinnedFanOut::new("a/b", None)),
         std::vec![1, 2, 5],
         "CONTROL: a peer's message on the same key reaches the rows that hear peers"
     );
@@ -3516,7 +3516,7 @@ fn a_row_undeclared_while_a_pinned_call_runs_is_passed_and_let_go_after() {
     let three = tables
         .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(3))
         .unwrap();
-    let mut fan = PinnedFanOut::new("k");
+    let mut fan = PinnedFanOut::new("k", None);
     let first = tables.pin_next_subscriber(&mut fan).expect("the first row");
     assert_eq!(first.call, 1);
     // Its own row undeclared under its call: kept, its callback not handed back.
@@ -3546,4 +3546,143 @@ fn a_row_undeclared_while_a_pinned_call_runs_is_passed_and_let_go_after() {
     assert!(tables.release_drained_subscriber(&mut 0).is_some());
     assert!(!tables.subscribers().holds_slot(one.handle));
     assert!(tables.subscribers().contains(three.handle));
+}
+
+/// Three subscribers that hear peers, on `a/b`, `a/*` and `a/c` (numbered 1, 2, 3), in tables
+/// whose key gate is `gate`. Of the keys of the test catalogue, `a/b` is one and `a/c` is not.
+#[cfg(feature = "key-set-closed")]
+fn gated_tables(gate: KeyGate<'static>) -> LatchedTables {
+    let mut tables = latched_tables();
+    for (n, key) in [(1, "a/b"), (2, "a/*"), (3, "a/c")] {
+        tables
+            .declare_subscriber(key, Locality::Any, KeyForm::default(), latched(n))
+            .unwrap();
+    }
+    tables.set_key_gate(gate);
+    tables
+}
+
+/// The subscribers a peer of `class` reaches with a message on `key` through the fan-out.
+#[cfg(feature = "key-set-closed")]
+fn fanned_out(tables: &mut LatchedTables, key: &str, class: Option<ClassId>) -> usize {
+    crate::pubsub::LocalSubscribers::deliver_from_peer(
+        tables,
+        key,
+        class,
+        crate::pubsub::PeerDelivery::default(),
+        |_, _| {},
+    )
+}
+
+/// A closed key set drops a peer's message on a key outside it before the fan-out reaches any
+/// subscriber, and counts it; a key of the set reaches the rows its pattern meets. Turned red by a
+/// fan-out of the session's tables that does not put the message to the key gate.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_closed_key_set_drops_a_peers_message_outside_it_from_the_fan_out() {
+    use crate::key_catalogue::tests::TABLE;
+    let mut open = gated_tables(KeyGate::open());
+    assert_eq!(
+        fanned_out(&mut open, "a/c", None),
+        2,
+        "CONTROL: an open gate admits every key"
+    );
+    let mut tables = gated_tables(KeyGate::closed(&TABLE));
+    assert_eq!(fanned_out(&mut tables, "a/b", None), 2, "a key of the set");
+    assert_eq!(fanned_out(&mut tables, "a/c", None), 0, "a key outside it");
+    assert_eq!(
+        tables.key_gate_refused(),
+        crate::key_gate::Refused {
+            total: 1,
+            outside_set: 1,
+            ..crate::key_gate::Refused::default()
+        }
+    );
+}
+
+/// A closed key set that declares its peers drops what a peer's row does not allow, and what a
+/// peer it does not declare sends, by the class the fan-out is given. Turned red by a fan-out that
+/// drops the class it is given.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_closed_key_set_drops_from_the_fan_out_what_the_peers_row_does_not_allow() {
+    use crate::key_catalogue::tests::TABLE;
+    use crate::key_gate::tests::{ALLOWANCE, PEER_A, PEER_B};
+    let mut tables = gated_tables(KeyGate::closed(&TABLE).with_allowance(&ALLOWANCE));
+    let a = ALLOWANCE.class_of(&PEER_A);
+    let b = ALLOWANCE.class_of(&PEER_B);
+    assert_eq!(
+        fanned_out(&mut tables, "a/b", a),
+        2,
+        "CONTROL: A's row allows a/b"
+    );
+    assert_eq!(fanned_out(&mut tables, "a/b", b), 0, "B's row does not");
+    assert_eq!(
+        fanned_out(&mut tables, "a/b", None),
+        0,
+        "a peer not declared"
+    );
+    assert_eq!(tables.key_gate_refused().peer_not_allowed, 1);
+    assert_eq!(tables.key_gate_refused().peer_unknown, 1);
+}
+
+/// The walk that pins one row at a time keeps the fan-out's key gate: a peer's message on a key
+/// outside a closed set reaches no row, counted once for the message however often the walk is
+/// asked, and the session's own message is not gated. Turned red by a pinned walk that does not
+/// put the message to the gate, or that asks it at each pin.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_closed_key_set_drops_a_peers_message_outside_it_from_the_pinned_walk() {
+    use crate::key_catalogue::tests::TABLE;
+    let mut open = gated_tables(KeyGate::open());
+    assert_eq!(
+        pinned_in_turn(&mut open, &mut PinnedFanOut::new("a/c", None)),
+        std::vec![2, 3],
+        "CONTROL: an open gate admits every key"
+    );
+    let mut tables = gated_tables(KeyGate::closed(&TABLE));
+    assert_eq!(
+        pinned_in_turn(&mut tables, &mut PinnedFanOut::new("a/b", None)),
+        std::vec![1, 2],
+        "a key of the set"
+    );
+    let mut fan = PinnedFanOut::new("a/c", None);
+    assert!(
+        tables.pin_next_subscriber(&mut fan).is_none(),
+        "a key outside it"
+    );
+    assert!(
+        tables.pin_next_subscriber(&mut fan).is_none(),
+        "a refused walk stays ended"
+    );
+    assert_eq!(
+        tables.key_gate_refused().outside_set,
+        1,
+        "counted once for the message"
+    );
+    assert_eq!(
+        pinned_in_turn(&mut tables, &mut PinnedFanOut::local("a/c")),
+        std::vec![2, 3],
+        "the session's own message is not gated"
+    );
+    assert_eq!(tables.key_gate_refused().total, 1);
+}
+
+/// The pinned walk asks the key gate with the class it carries: what a peer's row does not allow
+/// reaches no row. Turned red by a walk that asks the gate without the peer's class.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_closed_key_set_drops_from_the_pinned_walk_what_the_peers_row_does_not_allow() {
+    use crate::key_catalogue::tests::TABLE;
+    use crate::key_gate::tests::{ALLOWANCE, PEER_A, PEER_B};
+    let mut tables = gated_tables(KeyGate::closed(&TABLE).with_allowance(&ALLOWANCE));
+    let a = ALLOWANCE.class_of(&PEER_A);
+    let b = ALLOWANCE.class_of(&PEER_B);
+    assert_eq!(
+        pinned_in_turn(&mut tables, &mut PinnedFanOut::new("a/b", a)),
+        std::vec![1, 2],
+        "CONTROL: A's row allows a/b"
+    );
+    assert!(pinned_in_turn(&mut tables, &mut PinnedFanOut::new("a/b", b)).is_empty());
+    assert_eq!(tables.key_gate_refused().peer_not_allowed, 1);
 }

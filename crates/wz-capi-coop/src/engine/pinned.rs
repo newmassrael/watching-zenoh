@@ -61,7 +61,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(sample) = sample else {
             return;
         };
-        let mut fan = PinnedFanOut::new(sample.keyexpr);
+        let class = held.0.session.registry.peer_class(face);
+        let mut fan = PinnedFanOut::new(sample.keyexpr, class);
         let reached = self.hand_row_by_row(held, &sample, &mut fan);
         #[cfg(test)]
         if reached > 0 {
@@ -127,7 +128,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 continue;
             };
             let sample = SampleRef::of(&owned);
-            let mut fan = PinnedFanOut::new(sample.keyexpr);
+            let class = held.0.session.registry.peer_class(face);
+            let mut fan = PinnedFanOut::new(sample.keyexpr, class);
             let reached = self.hand_row_by_row(held, &sample, &mut fan);
             #[cfg(test)]
             if reached > 0 {
@@ -159,7 +161,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 continue;
             };
             let sample = keys.sample(put, reliability, repeats);
-            let mut fan = PinnedFanOut::new(keys.key());
+            let class = held.0.session.registry.peer_class(face);
+            let mut fan = PinnedFanOut::new(keys.key(), class);
             let reached = self.hand_row_by_row(held, &SampleRef::of(&sample), &mut fan);
             #[cfg(test)]
             if reached > 0 {
@@ -200,11 +203,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// call is passed, and one whose last call this was is let go of with no lock held.
     fn hand_row_by_row(
         &self,
-        held: LiveCore<'_, L, C>,
+        mut held: LiveCore<'_, L, C>,
         sample: &SampleRef<'_>,
         fan: &mut PinnedFanOut<'_>,
     ) -> usize {
-        let mut next = tables(&held.0.session.registry).pin_next_subscriber(fan);
+        let mut next = tables_mut(&mut held.0.session.registry).pin_next_subscriber(fan);
         drop(held);
         let mut reached: usize = 0;
         // A read a callback makes reads nothing, so no record is handed out inside another's call.
@@ -220,9 +223,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                             .map(|row| row.into_callback())
                     });
                 }
-                next = self
-                    .live()
-                    .and_then(|held| tables(&held.0.session.registry).pin_next_subscriber(fan));
+                next = self.live().and_then(|mut held| {
+                    tables_mut(&mut held.0.session.registry).pin_next_subscriber(fan)
+                });
             }
         });
         reached
