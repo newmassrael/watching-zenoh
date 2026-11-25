@@ -1436,7 +1436,7 @@ LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
               "storage", "scope", "binding_heap", "binding_fixed", "read", "wire",
               "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream",
-              "pico_preset", "pico_open", "open_count"}
+              "pico_preset", "pico_open", "open_count", "process_open_count"}
 # Where the machines of a limit's scope read it (deploy/wz-config.toml, "Limits"): from the
 # snapshot their creator hands them, or still from the build's value. A statement of a limit read
 # from the build would be taken and never read, so a reader of a document refuses it by name.
@@ -1470,6 +1470,12 @@ LIMIT_OPEN_KEYS = {"value", "reason"}
 # every build, a build that keeps only its defaults included, so the build's value is the bound a
 # config is held to and not the one value a session takes. Any other limit (a batch size, a
 # protocol's value) keeps the build's value alone where the build keeps only its defaults.
+# `process_open_count = true` marks a capacity of the process pools the pico ABI reserves once for
+# the whole process (the values a program holds apart from any session, `HELD_*`): the build's
+# value is the most it reserves memory for, and the config the process opens its first session
+# from states the count it reserves, up to that value, after which the pools are fixed. No
+# snapshot holds it and a document still refuses it by name, as any capacity: a document states a
+# session's or a runtime's limits, and these pools belong to neither.
 LIMIT_PRESET_ORIGINAL = "zenoh-pico"
 # A key of zenoh's configuration as a path of its members, `transport/link/tx/lease`.
 UPSTREAM_KEY_RE = re.compile(r"[a-z0-9_]+(?:/[a-z0-9_]+)*")
@@ -1586,6 +1592,23 @@ def validate_limit_opens(data: dict) -> list[str]:
             out.append(f"{where}: only a bound counts what an open reserves (`open_count`)")
         elif lim.get("storage") == "capacity":
             out.append(f"{where}: a capacity is fixed by the build, so no open counts it")
+    for lim in data["limit"]:
+        if "process_open_count" not in lim:
+            continue
+        where = f"limit `{lim.get('id', '?')}`"
+        scope = lim.get("scope")
+        widest = scope[0] if isinstance(scope, list) and scope else scope
+        if lim["process_open_count"] is not True:
+            out.append(f"{where}: `process_open_count` is `true` or absent")
+        elif lim.get("kind") != "bound":
+            out.append(f"{where}: only a bound counts what the first open reserves "
+                       f"(`process_open_count`)")
+        elif lim.get("storage") != "capacity":
+            out.append(f"{where}: a process pool's count is a capacity no snapshot holds, so a "
+                       f"limit a later stage decides is no `process_open_count`")
+        elif widest != "runtime":
+            out.append(f"{where}: a process pool belongs to no session, so its count is a "
+                       f"runtime's (`process_open_count`)")
     return out
 
 
@@ -3290,13 +3313,23 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
 def capacity_limits_rust(decl: dict) -> list[str]:
     """`CAPACITY_LIMITS`: the id of every limit that is a capacity alone (the limits `open_limits`
     leaves out), so a reader that names a limit by its id tells a limit only the build sizes from
-    one the build does not have, and refuses each by its own reason."""
-    ids = [rust_word(lim["id"]) for lim in decl["limits"] if lim["storage"] == "capacity"]
+    one the build does not have, and refuses each by its own reason; and `PROCESS_OPEN_COUNTS`,
+    those of them whose count the first open's config states (`process_open_count`)."""
+    capacities = [lim for lim in decl["limits"] if lim["storage"] == "capacity"]
+    ids = [rust_word(lim["id"]) for lim in capacities]
+    counted = [rust_word(lim["id"]) for lim in capacities
+               if lim.get("process_open_count") is True]
     return [
-        "/// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later",
-        "/// stage decides it, so neither snapshot holds it and a document that states it is refused by",
-        "/// name.",
-    ] + rust_static_array(f"pub static CAPACITY_LIMITS: [&str; {len(ids)}] =", ids)
+        "/// Every limit that is a capacity alone, by its id: the build sizes storage by it, so neither",
+        "/// snapshot holds it and a document that states it is refused by name. The build's value is",
+        "/// the storage itself, except for those in [`PROCESS_OPEN_COUNTS`], whose build value is the",
+        "/// most the process reserves.",
+    ] + rust_static_array(f"pub static CAPACITY_LIMITS: [&str; {len(ids)}] =", ids) + [
+        "",
+        "/// The capacities of the process pools whose count the config of the process's first open",
+        "/// states, each up to the build's value, after which the pools are fixed: the build's value is",
+        "/// the most the process reserves, and the first open's config the count it does reserve.",
+    ] + rust_static_array(f"pub static PROCESS_OPEN_COUNTS: [&str; {len(counted)}] =", counted)
 
 
 def first_sentence(text: str) -> str:
@@ -6208,6 +6241,24 @@ def cmd_selftest() -> int:
     expect("an open value of a runtime's limit is refused",
            any("no limit of a session" in p
                for p in open_problems({"value": 2, "reason": "r"}, scope="runtime")))
+
+    def process_count_problems(**lim: object) -> list[str]:
+        return validate_limit_opens({"limit": [{**sample["limit"][0], "storage": "capacity",
+                                                "scope": "runtime", "process_open_count": True,
+                                                **lim}]})
+
+    expect("a runtime's capacity the first open counts is held",
+           process_count_problems() == [])
+    expect("a process open count of a limit a later stage decides is refused",
+           any("a capacity no snapshot holds" in p for p in process_count_problems(storage="both")))
+    expect("a process open count of a session's limit is refused",
+           any("its count is a runtime's" in p for p in process_count_problems(scope="session")))
+    expect("a process open count that is not a bound is refused",
+           any("only a bound counts what the first open" in p
+               for p in process_count_problems(kind="parameter")))
+    expect("a process open count that is not true is refused",
+           any("`process_open_count` is `true` or absent" in p
+               for p in process_count_problems(process_open_count=False)))
     opened_limit = {**sample["limit"][0], "pico_preset": {"value": 2, "reason": "r"},
                     "pico_open": {"value": 1, "reason": "one"}}
     expect("a session opens under the open value and the Kconfig keeps the preset as its bound",
@@ -6976,6 +7027,15 @@ def cmd_selftest() -> int:
     expect("a capacity alone is named in CAPACITY_LIMITS, and a limit a later stage decides is not",
            'pub static CAPACITY_LIMITS: [&str; 1] = ["MAX_A"];' in emit_rust_limit_snapshots(cdecl)
            and "pub static CAPACITY_LIMITS: [&str; 0] = [];" in bsnap)
+    podecl = decl_of(read_decl_toml(
+        limit_text(storage='"capacity"', scope='"runtime"')
+        .replace('kind = "bound"\n', 'kind = "bound"\nprocess_open_count = true\n', 1)))
+    posnap = emit_rust_limit_snapshots(podecl)
+    expect("a capacity the first open counts is named in PROCESS_OPEN_COUNTS and stays a capacity",
+           'pub static PROCESS_OPEN_COUNTS: [&str; 1] = ["MAX_A"];' in posnap
+           and 'pub static CAPACITY_LIMITS: [&str; 1] = ["MAX_A"];' in posnap
+           and "pub static PROCESS_OPEN_COUNTS: [&str; 0] = [];"
+           in emit_rust_limit_snapshots(cdecl))
     expect("a limit read from the snapshot says so in its LimitSpec, and one read from the build",
            "    const READ_FROM_SNAPSHOT: bool = true;\n" in bsnap
            and "    const READ_FROM_SNAPSHOT: bool = false;\n"

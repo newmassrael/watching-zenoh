@@ -95,7 +95,13 @@ z_result_t wz_ext_config_document(z_loaned_config_t *config,
  * leaves out and a count past the bound answer _Z_ERR_CONFIG_INVALID_VALUE,
  * at the insert and at the open, and the config keeps its earlier value. A
  * declaration past what the session opened with is refused as one that
- * finds no memory is. */
+ * finds no memory is. Where the library has process pools, NAME may also be
+ * a held value of the process (HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES,
+ * HELD_ENCODINGS, HELD_HELLOS, HELD_SMALL_PAYLOAD_BLOCKS,
+ * HELD_MEDIUM_PAYLOAD_BLOCKS, HELD_LARGE_PAYLOAD_BLOCKS): the process's first
+ * open reserves those pools at the counts its config states, each up to the
+ * build's value, and fixes them; a later open that states more of one is
+ * refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY. */
 #define WZ_EXT_CONFIG_LIMITS_KEY ((uint8_t)0xC0)
 
 /* The limits of the process's runtime, from a zenoh JSON5 document of which
