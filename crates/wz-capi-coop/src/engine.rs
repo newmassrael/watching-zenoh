@@ -4049,6 +4049,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.session.report_face_row(FaceEventKind::Down, row);
             });
         }
+        // The one link a read steps itself has its chains in the Router beside it, which the read
+        // ends itself (`direct`): the transport holds none to end.
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         self.transport.end_peer_chains(at);
         // What a replaying listener was told of the face is read while its link is held.
         #[cfg(feature = "connectivity")]
@@ -4645,7 +4648,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(test)]
         self.links_let_go.set(self.links_let_go.get() + 1);
         // A dial under way is let go of: its connection is not made. The ports are let go of
-        // first, so no connection is taken while the faces are ended.
+        // first, so no connection is taken while the faces are ended. The one link a read steps
+        // itself holds its dial beside it, let go of with it, and no port (`direct`).
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         self.transport.links.end_dials_and_ports();
         // Each group's session is asked to stop, and its next step, taken here, tells the group it
         // leaves and lets the group's link go; its tables go with the other faces' below.
