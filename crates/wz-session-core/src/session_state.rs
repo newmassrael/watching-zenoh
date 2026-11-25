@@ -662,11 +662,13 @@ mod tests {
     fn a_state_reports_a_face_row_to_its_plane_while_it_is_watched() {
         let state = new_state::<Watched>();
         assert!(!state.faces_watched(), "nothing watches yet");
-        state
-            .watchers
-            .watch(crate::face::FaceRowSink::of_arc(alloc::sync::Arc::new(
-                |_: FaceEventKind, _: &crate::face::FaceLinkRow| {},
-            )));
+        let watched =
+            state
+                .watchers
+                .watch(crate::face::FaceRowSink::of_arc(alloc::sync::Arc::new(
+                    |_: FaceEventKind, _: &crate::face::FaceLinkRow| {},
+                )));
+        assert!(watched.is_ok(), "a plane with room takes the watch");
         assert!(state.faces_watched());
         state.report_face_row(FaceEventKind::Down, row());
         let (kind, told) = state.watchers.next_event().unwrap();
