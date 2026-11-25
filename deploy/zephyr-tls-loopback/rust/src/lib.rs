@@ -40,7 +40,7 @@ use wz::runtime_zephyr::glue::{log, log_line, yield_us};
 use wz::runtime_zephyr::net::ZephyrNetError;
 use wz::runtime_zephyr::stream::{ZephyrTcpDial, ZephyrTcpListener, ZephyrTcpSocket};
 use wz_runtime_coop::session_drive::LinkOpenError;
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 use wz_tls_mbedtls::channel::{start_on_platform_arena, IdentitySlot, Zid};
 use wz_tls_mbedtls::stream::{AcceptBudget, HandshakeBudget, TlsDial, TlsListener, TlsStream};
 
@@ -125,12 +125,8 @@ impl StreamSocket for SteppingSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        self.inner.local()
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.inner.peer()
+    fn ends(&self) -> StreamEnds<'_> {
+        self.inner.ends()
     }
 
     // The inner socket blocks, so its write returns once the stack has taken every byte.
@@ -307,7 +303,11 @@ pub extern "C" fn wz_app_main() -> i32 {
         return 1;
     }
     log(c"wz: each end names the zid of the other end's key");
-    if served.peer().ip() != LOOPBACK {
+    let peer = match served.ends() {
+        StreamEnds::Ip { peer, .. } => Some(peer),
+        _ => None,
+    };
+    if peer.map(|peer| peer.ip()) != Some(LOOPBACK) {
         log(c"wz: FAIL - the accepted stream does not know its peer's address");
         return 1;
     }

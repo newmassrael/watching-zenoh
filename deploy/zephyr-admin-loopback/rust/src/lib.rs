@@ -267,12 +267,8 @@ impl StreamSocket for SteppingSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> core::net::SocketAddr {
-        self.inner.local()
-    }
-
-    fn peer(&self) -> core::net::SocketAddr {
-        self.inner.peer()
+    fn ends(&self) -> wz_runtime_coop::stream_link::StreamEnds<'_> {
+        self.inner.ends()
     }
 
     // The inner socket blocks, so its write returns once the stack has taken every byte.

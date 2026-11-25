@@ -3117,7 +3117,14 @@ mod wake_budget_tests {
         type Link = Rc<Recording>;
         type Router = crate::reassembly_rx::CoopReassembly;
         type Sink = fn(IterationEvent<'_, '_>);
-        let bytes = router_session_task_bytes::<Stopped, Link, Router, CountedRouter, Sink>();
+        let bytes = router_session_task_bytes::<
+            Stopped,
+            Link,
+            Router,
+            CountedRouter,
+            Sink,
+            crate::sync::Shared,
+        >();
         for (cell, fits) in [(bytes, true), (bytes - 1, false)] {
             let runtime = CoopRuntime::reserved(
                 Stopped,
@@ -3255,7 +3262,14 @@ mod wake_budget_tests {
         type Link = Rc<Recording>;
         type Router = crate::reassembly_rx::CoopReassembly;
         type Sink = fn(IterationEvent<'_, '_>);
-        let task_bytes = router_session_task_bytes::<Released, Link, Router, CountedRouter, Sink>();
+        let task_bytes = router_session_task_bytes::<
+            Released,
+            Link,
+            Router,
+            CountedRouter,
+            Sink,
+            crate::sync::Shared,
+        >();
         let runtime = CoopRuntime::opening(
             Released,
             crate::RuntimeRows {
