@@ -191,16 +191,30 @@ serial = ["alloc", "session-unicast", "wz-session-core/transport-link-serial"]
 
 # WebSocket links (`ws/` locators): the locator of one, read at the socket address a TCP link is
 # reached at and written under its own scheme, and the session core's RFC 6455 pieces the link is
-# made with. The link itself is the heap profile's, as the serial
-# link is, so this takes `alloc` and the unicast session. Without it a `ws/` endpoint is a scheme
+# made with, none of which touches a heap. The link is the stream link under that framing on either
+# profile (`ws_link::WsLinks` with `alloc`, `ws_link::WsStack` with `session-slot`), so this takes
+# the unicast session and leaves the heap to the profile. Without it a `ws/` endpoint is a scheme
 # the build does not carry.
-ws = ["alloc", "session-unicast", "wz-session-core/transport-link-ws"]
+ws = ["session-unicast", "wz-session-core/transport-link-ws"]
 
 # Links over a pair of named FIFOs on this host (`unixpipe/` locators): the locator of one, read
 # and written with the session core's grammar. The link over the FIFOs is the heap profile's, so
 # this takes `alloc` and the unicast session, as the serial links do. Without it a `unixpipe/`
 # endpoint is a scheme the build does not carry.
 unixpipe = ["alloc", "session-unicast"]
+
+# Multicast groups over raw Ethernet (`reth/` endpoints, `raweth_group`): the joiner that opens
+# the device a host gives for the interface a `reth/` group names, and hands every other group to
+# the joiner it wraps. What a frame is and where it goes is the session core's raweth link
+# (`transport-link-raweth`), which reads the datagram it routes with the frame decoder
+# (`codec-frame`). The group seam is the heap profile's, so this takes `alloc` and the unicast
+# session, as `unixpipe` does. Without it a `reth/` endpoint is a scheme the build does not carry.
+raweth = [
+    "alloc",
+    "session-unicast",
+    "codec-frame",
+    "wz-session-core/transport-link-raweth",
+]
 
 # The high-water mark of the pump cells (`wz-session-core`'s `pool-monitor`).
 # Without it the table keeps no mark and is the size it was.

@@ -108,6 +108,12 @@ transport-multicast = [
     "wz-session-core/codec-frame",
     "wz-session-core/codec-close",
 ]
+# The group session counts what it sends and receives into the counters its holder attaches
+# (`MulticastSessionSeed::with_stats`, `GroupTxStage::attach_stats`): the bytes and transport
+# messages of each datagram either way, and each network message a member sent, the session core's
+# `transport-stats` counters. An MCU image builds without it, and its group passes the recorder
+# that counts nothing.
+transport-stats = ["alloc", "wz-session-core/transport-stats"]
 # Transport reassembly on the group loop: the router that stages a fragment chain
 # per member (`wz-runtime-coop`'s), and the shared ingest that feeds it.
 reassembly = [

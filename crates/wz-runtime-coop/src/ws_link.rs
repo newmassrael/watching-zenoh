@@ -16,6 +16,7 @@
 
 use core::cell::{Cell, RefCell};
 
+use wz_session_core::entropy::EntropyUnavailable;
 use wz_session_core::link::{LinkEnds, LinkKind};
 use wz_session_core::ws_link::{
     apply_mask, read_head, write_head, HeadRead, MaskKeys, CLOSE_NORMAL, MAX_CONTROL_PAYLOAD,
@@ -23,6 +24,17 @@ use wz_session_core::ws_link::{
 };
 
 use crate::stream_link::{Front, StreamEnds, StreamFraming, StreamSocket};
+
+/// What a stack's `ws/` links draw on besides their connections, on either profile: the clock an
+/// opening handshake is timed on and the entropy of a client's key and mask keys. A value the
+/// stack holds.
+pub trait WsSource {
+    /// The platform's monotonic clock, in microseconds: what a handshake is timed on.
+    fn now_us(&self) -> u64;
+
+    /// Fill `out` with entropy: a client's key and the seed of its mask keys.
+    fn fill_entropy(&self, out: &mut [u8]) -> Result<(), EntropyUnavailable>;
+}
 
 /// The largest batch a message carries: zenoh's WebSocket MTU
 /// (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `const WS_MAX_MTU: BatchSize = BatchSize::MAX;`).
@@ -346,10 +358,19 @@ impl StreamFraming for WsFraming {
     }
 }
 
+// Every build with this module has one profile or the other (`runtime` asks for one), and each
+// profile's links open with these steps.
+mod handshake;
+
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 mod links;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub use links::{WsDial, WsLinks, WsLinksDial, WsOpen, WS_RX_CAPACITY};
+
+#[cfg(feature = "session-slot")]
+mod slot;
+#[cfg(feature = "session-slot")]
+pub use slot::{WsAcceptor, WsStack};
 
 #[cfg(all(test, not(feature = "session-slot")))]
 mod tests;

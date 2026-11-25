@@ -168,6 +168,11 @@ static-link-storage = ["wz-link-lwip/static-link-storage"]
 # its TCP sources (`wz-link-lwip/tcp`); off by default, and an image without it links the UDP-only stack.
 tcp = ["wz-link-lwip/tcp"]
 
+# WebSocket links over that TCP stream (`ws/` locators): the engine's `ws_link`, whose slot-profile
+# stack (`WsStack`) frames lwIP's streams for a node of the `session-slot` profile. Off by default,
+# as `tcp` is; an image that dials or listens on `ws/` turns it on.
+ws = ["tcp", "wz-runtime-coop/ws"]
+
 # R311kx — keepalive TX emitter on the MCU session loop. Forwards to the
 # wz-session-core transport-keepalive capability (the shared
 # check_keepalive_deadline / keepalive_wake_deadline pair + the
@@ -467,6 +472,23 @@ required-features = [
     "codec-close",
     "session-slot",
     "static-link-storage",
+]
+
+# A session over `ws/` on the slot profile, on the lwIP loopback, counted by a counting allocator:
+# the dial and its handshake, the accepted session and its close cost the heap nothing, and an
+# acceptor whose handshake table is full leaves the next connection queued on the port. The pair's
+# features, the profile and the pooled connections a real node has, and the WebSocket link.
+[[test]]
+name = "session_ws_slot"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "transport-keepalive",
+    "codec-close",
+    "session-slot",
+    "static-link-storage",
+    "ws",
 ]
 
 # Fixed-memory step S9c -- the admin node of the slot profile, whole: two nodes on one

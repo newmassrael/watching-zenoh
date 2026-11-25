@@ -63,7 +63,7 @@ impl MemberTags {
             #[cfg(all(
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")
@@ -84,7 +84,7 @@ pub(crate) struct MemberDeclarations {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -96,7 +96,7 @@ pub(crate) struct MemberDeclarations {
 #[cfg(all(
     feature = "session-unicast",
     feature = "rx-lent-control",
-    not(feature = "transport-stats"),
+    any(not(feature = "transport-stats"), feature = "reassembly"),
     not(feature = "routing-namespace"),
     not(feature = "multicast-declarations"),
     not(feature = "multicast-ingress-gate")
@@ -110,7 +110,7 @@ struct MemberKeyexprs {
 #[cfg(all(
     feature = "session-unicast",
     feature = "rx-lent-control",
-    not(feature = "transport-stats"),
+    any(not(feature = "transport-stats"), feature = "reassembly"),
     not(feature = "routing-namespace"),
     not(feature = "multicast-declarations"),
     not(feature = "multicast-ingress-gate")
@@ -155,7 +155,7 @@ impl MemberKeyexprs {
 #[cfg(all(
     feature = "session-unicast",
     feature = "rx-lent-control",
-    not(feature = "transport-stats"),
+    any(not(feature = "transport-stats"), feature = "reassembly"),
     not(feature = "routing-namespace"),
     not(feature = "multicast-declarations"),
     not(feature = "multicast-ingress-gate")
@@ -168,7 +168,7 @@ impl MemberDeclarations {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -203,7 +203,7 @@ impl MemberDeclarations {
             #[cfg(all(
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")
@@ -257,7 +257,7 @@ impl MemberDeclarations {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -314,7 +314,7 @@ impl MemberDeclarations {
             #[cfg(all(
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")
@@ -337,7 +337,7 @@ impl MemberDeclarations {
         #[cfg(all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -352,7 +352,7 @@ impl MemberDeclarations {
         #[cfg(not(all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -376,7 +376,7 @@ pub(crate) enum DeclKind {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -395,7 +395,7 @@ pub(crate) struct Retraction {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -416,7 +416,7 @@ impl Retraction {
             #[cfg(all(
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")
@@ -433,7 +433,7 @@ impl Retraction {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -475,7 +475,7 @@ impl Retraction {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -550,7 +550,7 @@ mod tests {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -566,7 +566,7 @@ mod tests {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -593,7 +593,7 @@ mod tests {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -631,7 +631,7 @@ mod tests {
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")

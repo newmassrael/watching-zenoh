@@ -75,6 +75,28 @@ impl<'a> RequestWriter<'a> {
         Self { parts }
     }
 
+    /// The parts the writer writes, which the network counters read the get by.
+    pub const fn parts(&self) -> &GetParts<'a> {
+        &self.parts
+    }
+
+    /// The bytes the network counters charge the get's payload by: the payload of its value and
+    /// its attachment, each as far as the build writes it, as the owned `Request` of the same
+    /// parts carries them.
+    #[cfg(feature = "transport-stats")]
+    pub fn payload_len(&self) -> usize {
+        let [value, _, attachment] = body_extensions(&self.parts.query);
+        let value = match value {
+            Some(BodyExtension::Value { payload, .. }) => payload.len(),
+            _ => 0,
+        };
+        let attachment = match attachment {
+            Some(BodyExtension::Attachment(bytes)) => bytes.len(),
+            _ => 0,
+        };
+        value.saturating_add(attachment)
+    }
+
     /// Encode the `Request` into `sink`. `LengthOutOfRange`, before a byte is written, for what
     /// the owned builder refuses: a key suffix past the protocol's `u16` length, parameters, a
     /// value or an attachment past its `u32` length, a schema past [`SCHEMA_MAX`], and a source

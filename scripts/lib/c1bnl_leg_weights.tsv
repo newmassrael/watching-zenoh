@@ -78,7 +78,6 @@ wz-capi-c:config::tests::wz_member:::821ad718 42  # wz-capi-c --features <1> con
 wz-capi-pico:key_ids::tests:::c6f801e4 8  # wz-capi-pico --features <2> key_ids::tests::
 wz-capi-pico:config_policy::tests::the_document_door_refuses_key_ids_without_the_capability:f5c1be69 10  # wz-capi-pico --features <1> config_policy::tests::the_document_door_refuses_key_ids_without_the_capability
 wz-capi-core:*:1119f98e 35  # wz-capi-core --features <2> <whole crate>
-wz-capi-core:faces::multicast:::237d74d7 33  # wz-capi-core --features <1> faces::multicast::
 wz-capi-core:drive::router_node:::3bd2a72b 26  # wz-capi-core --features <1> drive::router_node::
 wz-capi-core:drive::router_node::engine::port_tests:::cd349f1e 36  # wz-capi-core --features <2> drive::router_node::engine::port_tests::
 wz-capi-core:drive::router_node::engine::port_tests::shared_memory:::9567c493 27  # wz-capi-core --features <3> drive::router_node::engine::port_tests::shared_memory::
@@ -93,7 +92,6 @@ wz-capi-coop:tests::group:::65bc6508 15  # wz-capi-coop --features <2> tests::gr
 wz-capi-coop:tests::group:::5925a59e 19  # wz-capi-coop --features <4> tests::group::
 wz-capi-coop:tests::group:::7d3386d5 13  # wz-capi-coop --features <3> tests::group::
 wz-capi-coop:tests::group:::fe4785fc 17  # wz-capi-coop --features <3> tests::group::
-wz-capi-coop:tests::group::congested:::df68c142 10  # wz-capi-coop --features <3> tests::group::congested::
 wz-capi-coop:host_group:::ca30cd31 14  # wz-capi-coop --features <1> host_group::
 wz-capi-coop:clock_moves_tests:::0a17fd74 11  # wz-capi-coop --features <1> clock_moves_tests::
 wz-capi-coop:engine::decl_watch:::6863d900 14  # wz-capi-coop --features <3> engine::decl_watch::

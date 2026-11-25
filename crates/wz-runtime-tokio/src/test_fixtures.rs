@@ -223,12 +223,7 @@ pub(crate) fn recording_actions_over(
     kind: wz_session_core::link::LinkKind,
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
     let driver = recording_driver_over(kind);
-    let actions = new_session_actions(
-        driver.clone(),
-        fixture_session_init_params(),
-        TokioTime::new(),
-    );
-    actions.enter_established();
+    let actions = established_actions(driver.clone(), fixture_session_init_params());
     (actions, driver)
 }
 
@@ -280,9 +275,8 @@ pub(crate) fn recording_actions() -> (Arc<SessionLinkActions>, Arc<RecordingLink
 pub(crate) fn recording_actions_with_params(
     params: SessionInitParams,
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
-    let (actions, driver) = handshaking_actions_with_params(params);
-    actions.enter_established();
-    (actions, driver)
+    let driver = recording_driver();
+    (established_actions(driver.clone(), params), driver)
 }
 
 /// [`recording_actions_with_params`] before establishment: a bundle mid-handshake, for a test
@@ -295,6 +289,20 @@ pub(crate) fn handshaking_actions_with_params(
     let driver = recording_driver();
     let actions = new_session_actions(driver.clone(), params, TokioTime::new());
     (actions, driver)
+}
+
+/// A bundle over `driver` with `params`, established ([`SessionLinkActions::enter_established`])
+/// as a session that completed its handshake stands: the one door every fixture here that sends
+/// data takes, since a session refuses a data send before establishment. A test that sets an
+/// offer the handshake settles first (QoS, lowlatency) builds its bundle and enters establishment
+/// after it instead.
+pub(crate) fn established_actions(
+    driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
+    params: SessionInitParams,
+) -> Arc<SessionLinkActions> {
+    let actions = new_session_actions(driver, params, TokioTime::new());
+    actions.enter_established();
+    actions
 }
 
 /// A4 — a bare [`RecordingLinkDriver`] handle, for tests that wire the
@@ -413,12 +421,7 @@ pub(crate) fn refusing_actions(
         offered: Mutex::new(Vec::new()),
         cause,
     });
-    let actions = new_session_actions(
-        driver.clone(),
-        fixture_session_init_params(),
-        TokioTime::new(),
-    );
-    actions.enter_established();
+    let actions = established_actions(driver.clone(), fixture_session_init_params());
     (actions, driver)
 }
 
@@ -586,12 +589,7 @@ pub(crate) fn probing_actions() -> (Arc<SessionLinkActions>, Arc<ObserverProbeLi
         room_lock: crate::sync::PlainMutex::new(()),
         room: crate::sync::PlainCondvar::new(),
     });
-    let actions = new_session_actions(
-        driver.clone(),
-        fixture_session_init_params(),
-        TokioTime::new(),
-    );
-    actions.enter_established();
+    let actions = established_actions(driver.clone(), fixture_session_init_params());
     (actions, driver)
 }
 
@@ -605,9 +603,7 @@ pub(crate) fn probing_actions() -> (Arc<SessionLinkActions>, Arc<ObserverProbeLi
 pub(crate) fn recording_actions_with_driver(
     driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
 ) -> Arc<SessionLinkActions> {
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
-    actions.enter_established();
-    actions
+    established_actions(driver, fixture_session_init_params())
 }
 
 /// R311y767 (carry N71) — refuse a forwarder that puts an ALIAS OF ITS OWN on a

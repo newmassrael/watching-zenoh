@@ -1156,7 +1156,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -1177,7 +1177,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -2607,8 +2607,9 @@ pub(crate) fn ingest_multicast_fragment_counted<
 ///
 /// A completed chain whose records do not decode is dropped after the records before
 /// it were handed over, as the frame walk drops a payload (a multicast peer has no
-/// session to tell: the datagram stays unanswered). Nothing is counted per network
-/// message (the owned messages `transport-stats` counts by are the owned form's).
+/// session to tell: the datagram stays unanswered). A build with `transport-stats` counts each
+/// record lent against the member that sent it, by the class read off the record, as the owned
+/// form counts each message of the chain.
 #[cfg(all(
     feature = "reassembly",
     feature = "storage-profile",
@@ -2617,7 +2618,6 @@ pub(crate) fn ingest_multicast_fragment_counted<
         all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2637,6 +2637,10 @@ pub(crate) fn ingest_multicast_fragment_in_place<
     fragment: GroupFragment<'_>,
     now_ms: u64,
     on_event: &mut F,
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))] counted: &mut dyn FnMut(
+        &[u8],
+        &crate::network_message::RecordClass<'_>,
+    ),
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: crate::driver_loop::EventSink + ?Sized,
@@ -2695,6 +2699,12 @@ pub(crate) fn ingest_multicast_fragment_in_place<
                 priority,
                 false,
                 &mut records,
+                #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+                &mut |record: &crate::network_message::RecordClass<'_>| {
+                    if let Some(member) = &member {
+                        counted(member.as_slice(), record);
+                    }
+                },
             );
         },
     );
@@ -2722,7 +2732,7 @@ pub(crate) fn ingest_multicast_fragment_in_place<
         all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2744,7 +2754,7 @@ pub(crate) struct MemberRecords<'s, E: ?Sized> {
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -2759,7 +2769,7 @@ pub(crate) struct MemberRecords<'s, E: ?Sized> {
         all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2786,7 +2796,7 @@ impl<'s, E: crate::driver_loop::EventSink + ?Sized> MemberRecords<'s, E> {
             feature = "codec-declare",
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2799,7 +2809,7 @@ impl<'s, E: crate::driver_loop::EventSink + ?Sized> MemberRecords<'s, E> {
                 feature = "codec-declare",
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")
@@ -2816,7 +2826,7 @@ impl<'s, E: crate::driver_loop::EventSink + ?Sized> MemberRecords<'s, E> {
         all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2844,7 +2854,7 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
             feature = "codec-declare",
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")

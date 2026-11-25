@@ -393,6 +393,56 @@ fn put(engine: &Engine, keyexpr: &str, payload: &[u8]) {
         .expect("a put the group carries");
 }
 
+/// What a member sends on the group is counted in its transport counters as its stack takes it:
+/// each datagram's bytes, its beacon and the put's frame a transport message each; and the put,
+/// one network message of the user space's puts by its payload, as it enters the group's queue. No
+/// read task runs, so everything is written on this thread, and the stack's record and the
+/// counters are read at one point.
+#[cfg(all(feature = "transport-stats", feature = "query"))]
+#[test]
+fn what_a_member_sends_on_the_group_is_counted_in_its_transport_stats() {
+    use wz_session_core::stats::{DirectionReport, StatMedium, StatMessage, StatSpace};
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let before = member.transport_stats().tx;
+    put(&member, "demo/group/sent", b"counted");
+    let sent: Vec<Vec<u8>> = network
+        .datagrams
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(from, _)| *from == 1)
+        .map(|(_, datagram)| datagram.clone())
+        .collect();
+    assert!(
+        sent.iter()
+            .any(|datagram| datagram.windows(7).any(|at| at == b"counted")),
+        "CONTROL: the put left on the group"
+    );
+    let counted = member.transport_stats().tx;
+    assert_eq!(
+        counted.bytes,
+        sent.iter().map(Vec::len).sum::<usize>(),
+        "each datagram's bytes"
+    );
+    assert_eq!(counted.t_msgs, sent.len(), "a transport message each");
+    assert_eq!(
+        counted.n_msgs_on(StatMedium::Net),
+        before.n_msgs_on(StatMedium::Net) + 1,
+        "the put, one network message"
+    );
+    let puts = |report: &DirectionReport| report.payload_of(StatMessage::Put, StatSpace::User);
+    assert_eq!(
+        (puts(&counted).msgs, puts(&counted).pl_bytes),
+        (
+            puts(&before).msgs + 1,
+            puts(&before).pl_bytes + b"counted".len()
+        ),
+        "counted by its class"
+    );
+    SessionDrive::close(&*member);
+}
+
 /// A member whose stack loses its group link lets the group go, and joins it again a redial
 /// period later with a session of its own: the stack is asked to join a second time, the members
 /// learn each other again by their JOINs, and a put crosses the group again. A member that
@@ -2076,11 +2126,45 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
+    /// What a member sends is counted with the session's transports (`transport-stats`): the
+    /// datagram's bytes once, its two transport messages (the member's beacon and its frame) and
+    /// each record of the frame once, whatever the walks its delivery took.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn what_a_member_sends_is_counted_in_the_sessions_transport_stats() {
+        use wz_session_core::stats::{DirectionReport, StatMedium};
+
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let heard = subscribe(&session, "demo/counted/**");
+        assert_eq!(
+            session.transport_stats().rx,
+            DirectionReport::default(),
+            "CONTROL: no member has sent anything"
+        );
+        let keys = ["demo/counted/a", "demo/counted/b", "demo/counted/c"];
+        let mut datagram = beacon(7);
+        datagram.extend_from_slice(&frame_of_puts(0, &keys));
+        hand_in(&network, 1, 7, &datagram);
+        eventually("the three samples", || heard.lock().unwrap().len() >= 3);
+        eventually("the three records counted", || {
+            session.transport_stats().rx.n_msgs_total() >= 3
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let rx = session.transport_stats().rx;
+        assert_eq!(rx.bytes, datagram.len(), "the datagram's bytes, once");
+        assert_eq!(rx.t_msgs, 2, "the beacon and the frame");
+        assert_eq!(rx.n_msgs_on(StatMedium::Net), 3, "each put once");
+        SessionDrive::close(&*session);
+    }
+
     /// Below the engine: the group's receive over a datagram its transport keeps. A host with room
     /// for no other stops the walk before the next message, and with room for one record stops it
     /// before the next record; each walk goes on from where the last stopped, the frame admitted
-    /// by its sequence number once, until the datagram is read whole.
-    #[cfg(not(feature = "transport-stats"))]
+    /// by its sequence number once, until the datagram is read whole. A build with the transport
+    /// counters walks it lent too, and counts each transport message and each record once, against
+    /// the member that sent it, however many walks it took.
     #[test]
     fn a_kept_group_datagram_is_read_on_from_where_the_host_stopped() {
         use core::net::SocketAddr;
@@ -2112,6 +2196,35 @@ mod in_place {
                 self.room > 0
             }
         }
+
+        /// The transport messages it was told of, and the member each lent record came from.
+        #[cfg(feature = "transport-stats")]
+        #[derive(Default)]
+        struct Counted {
+            transport: core::cell::Cell<usize>,
+            records: core::cell::RefCell<Vec<Vec<u8>>>,
+        }
+
+        #[cfg(feature = "transport-stats")]
+        impl wz_session_core::multicast_stats::MulticastStatsRecorder for Counted {
+            fn transport_message_received(&self) {
+                self.transport.set(self.transport.get() + 1);
+            }
+
+            fn network_record_received(
+                &self,
+                zid: &[u8],
+                _priority: wz_session_core::qos::Priority,
+                _class: &wz_session_core::stats::NetworkStatsClass,
+            ) {
+                self.records.borrow_mut().push(zid.to_vec());
+            }
+        }
+
+        #[cfg(feature = "transport-stats")]
+        let counted = &Counted::default();
+        #[cfg(not(feature = "transport-stats"))]
+        let counted = &();
 
         let keys = ["demo/kept/a", "demo/kept/b", "demo/kept/c"];
         let mut datagram = beacon(9);
@@ -2148,7 +2261,7 @@ mod in_place {
                     may_stop: true,
                 },
                 host,
-                &(),
+                counted,
             )
         };
         let stopped = walk(&mut host, None);
@@ -2173,6 +2286,19 @@ mod in_place {
         let stopped = walk(&mut host, stopped);
         assert_eq!(stopped, None, "read whole");
         assert_eq!(host.keys, keys);
+        #[cfg(feature = "transport-stats")]
+        {
+            assert_eq!(
+                counted.transport.get(),
+                3,
+                "the beacon, the keep-alive and the frame, the frame once over its three walks"
+            );
+            assert_eq!(
+                *counted.records.borrow(),
+                [[9u8; 4]; 3],
+                "each Put lent once, against the member that sent it"
+            );
+        }
 
         // CONTROL: a transport that keeps nothing has its datagram read whole at once.
         let (mut dispatcher, mut reasm) = group();
@@ -2180,6 +2306,8 @@ mod in_place {
             keys: Vec::new(),
             room: 0,
         };
+        #[cfg(feature = "transport-stats")]
+        let counted = &Counted::default();
         let stopped = dispatch_multicast_inbound_kept(
             &mut dispatcher,
             &mut reasm,
@@ -2194,10 +2322,15 @@ mod in_place {
                 may_stop: false,
             },
             &mut whole,
-            &(),
+            counted,
         );
         assert_eq!(stopped, None);
         assert_eq!(whole.keys, keys);
+        #[cfg(feature = "transport-stats")]
+        {
+            assert_eq!(counted.transport.get(), 3);
+            assert_eq!(counted.records.borrow().len(), 3, "each Put lent once");
+        }
     }
 }
 

@@ -18,7 +18,6 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWrite;
-use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::declare_build::build_declare_subscriber;
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link::LinkSubject;
@@ -30,8 +29,7 @@ use wz_session_core::sample::QosLevel;
 
 use super::{hold_face_link, RouterForwarder, WhatAmI, Zid};
 use crate::accept_loop::{FaceForwarder, FaceId};
-use crate::runtime_impl::TokioTime;
-use crate::session_glue::{new_session_actions, IterationEvent, SessionLinkActions};
+use crate::session_glue::{IterationEvent, SessionLinkActions};
 use crate::stream_link::{stream_outbound_channel, writer_task, StreamWriteDriver};
 use crate::writer_queue::{InlineWrite, OutboundRx, WriterHandle};
 
@@ -174,15 +172,7 @@ fn face_over(sender: &Arc<SenderWrite>, peer: Zid) -> (Arc<SessionLinkActions>, 
         LinkSubject::UNKNOWN,
         None,
     ));
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
-    actions.fact_remote_peer_zid(|s| {
-        *s = Some(
-            wz_session_core::session_zid::SessionZid::new(peer.as_slice())
-                .expect("a 1 to 16 byte zid, not all zero"),
-        )
-    });
-    actions.fact_peer_whatami(|s| *s = Some(0b10));
-    (actions, rx)
+    (super::egress_tests::established_face(driver, peer), rx)
 }
 
 /// The writer task of a face over `rx`, on `rt`, writing behind `gate`; what it writes is

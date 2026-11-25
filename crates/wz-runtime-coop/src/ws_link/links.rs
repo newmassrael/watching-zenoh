@@ -24,18 +24,15 @@ use core::cell::RefCell;
 use core::ffi::c_int;
 
 use wz_session_core::byte_cells::LentByteCells;
-use wz_session_core::entropy::EntropyUnavailable;
 use wz_session_core::group_locator::GroupLocator;
-use wz_session_core::ws_link::{
-    client_key, read_request, read_response, write_request, write_response, MaskKeys, RequestRead,
-    UpgradeRead, KEY_LEN, MASK_SEED_LEN, MAX_HEAD_LEN,
-};
+use wz_session_core::ws_link::{MaskKeys, KEY_LEN, MAX_HEAD_LEN};
 
-use super::{WsFraming, WS_MTU};
+use super::handshake::{answer_request, client_keys, read_answer, send_request, OPEN_WAIT_US};
+use super::{WsFraming, WsSource, WS_MTU};
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::HeapLink;
 use crate::link_cells::CellRc;
-use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer};
+use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
     SessionLinks, WaitOn, WsLocator,
@@ -43,35 +40,18 @@ use crate::session_drive::{
 use crate::stream_link::{stream_ends_fit, StreamDial, StreamDriver, StreamListen, StreamSocket};
 use crate::udp_link::SERVICE_WAIT_MS;
 
-/// The longest an opening handshake takes, in microseconds: the connect timeout of a zenoh-pico
-/// session, which a waiting open of a serial line is held to as well.
-const OPEN_WAIT_US: u64 = 10_000_000;
-
-/// The room an opening request or answer is written in: the longest, a request to a scoped IPv6
-/// end, is some two hundred bytes.
-const HEAD_ROOM: usize = 256;
-
-/// The bytes of the nonce a client's key is the base64 of.
-const KEY_NONCE_LEN: usize = 16;
-
 /// The receive buffer of a WebSocket link: the largest batch zenoh's link sends behind the
 /// longest header a frame has.
 pub const WS_RX_CAPACITY: usize = WS_MTU + MAX_HEAD_LEN;
 
-/// How a stack opens the TCP connections its `ws/` links run over, keeps time and draws the
-/// entropy of its clients' keys and masks: a value the stack holds.
-pub trait WsOpen {
+/// How a stack opens the TCP connections its `ws/` links run over, beside the clock and the
+/// entropy every stack's `ws/` links draw on ([`WsSource`]): a value the stack holds.
+pub trait WsOpen: WsSource {
     /// The dial of the connections.
     type Dial: StreamDial;
 
     /// The dial the stack's `ws/` links connect and listen with.
     fn stream_dial(&self) -> &Self::Dial;
-
-    /// The platform's monotonic clock, in microseconds: what a handshake is timed on.
-    fn now_us(&self) -> u64;
-
-    /// Fill `out` with entropy: a client's key and the seed of its mask keys.
-    fn fill_entropy(&self, out: &mut [u8]) -> Result<(), EntropyUnavailable>;
 }
 
 /// The stream a `ws/` link of `O` runs over.
@@ -133,41 +113,6 @@ impl WsShape {
     }
 }
 
-/// Read what `stream` has queued behind the `filled` bytes at the front of `rx` until `head`
-/// finds the head of a handshake whole in them: the bytes read so far while it has not, and once
-/// it has, what `head` made of it with what followed the head moved to the front of the buffer,
-/// and how many bytes that is. A stream that ended or failed, a buffer the head does not fit, or
-/// a head `head` refuses is `Err`.
-fn read_handshake<P: StreamSocket, A>(
-    stream: &P,
-    rx: &mut RxBuffer,
-    filled: &mut usize,
-    head: impl Fn(&[u8]) -> Option<Result<(usize, A), ()>>,
-) -> Option<Result<(A, usize), LinkOpenError>> {
-    let Some(bytes) = rx.bytes() else {
-        return Some(Err(LinkOpenError::Exhausted));
-    };
-    loop {
-        match head(bytes.get(..*filled).unwrap_or_default()) {
-            Some(Ok((head_len, answer))) => {
-                bytes.copy_within(head_len..*filled, 0);
-                return Some(Ok((answer, filled.saturating_sub(head_len))));
-            }
-            Some(Err(())) => return Some(Err(LinkOpenError::Refused)),
-            None => {}
-        }
-        let room = bytes.get_mut(*filled..).unwrap_or_default();
-        if room.is_empty() {
-            return Some(Err(LinkOpenError::Refused));
-        }
-        match stream.try_read(room) {
-            Ok(Some(0)) | Err(_) => return Some(Err(LinkOpenError::Refused)),
-            Ok(None) => return None,
-            Ok(Some(read)) => *filled = filled.saturating_add(read),
-        }
-    }
-}
-
 /// A `ws/` dial under way: its connection being made, then its request written and the
 /// server's answer read into the buffer of the link it makes.
 struct WsDialing<P> {
@@ -191,34 +136,15 @@ impl<P: StreamSocket> WsDialing<P> {
                 Err(_) => return Some(Err(LinkOpenError::Refused)),
                 Ok(true) => {}
             }
-            let mut request = [0u8; HEAD_ROOM];
-            let Some(len) = write_request(&mut request, self.at.at, &self.key) else {
-                return Some(Err(LinkOpenError::Unsupported));
-            };
-            if self
-                .stream
-                .write_all(request.get(..len).unwrap_or_default())
-                .is_err()
-            {
-                return Some(Err(LinkOpenError::Refused));
+            if let Err(refused) = send_request(&self.stream, self.at.at, &self.key) {
+                return Some(Err(refused));
             }
             self.filled = Some(0);
         }
         let mut filled = self.filled.unwrap_or(0);
-        let key = self.key;
-        let read =
-            read_handshake(
-                &self.stream,
-                &mut self.rx,
-                &mut filled,
-                |held| match read_response(held, &key) {
-                    UpgradeRead::Partial => None,
-                    UpgradeRead::Upgraded { head_len } => Some(Ok((head_len, ()))),
-                    UpgradeRead::Refused => Some(Err(())),
-                },
-            );
+        let read = read_answer(&self.stream, &mut self.rx, &mut filled, &self.key);
         self.filled = Some(filled);
-        read.map(|made| made.map(|((), held)| held))
+        read
     }
 }
 
@@ -322,25 +248,7 @@ impl<P: StreamSocket> WsAccepting<P> {
     /// One step of the server's handshake, without waiting: what followed the client's head
     /// once its request is read and answered, `None` while it has not all arrived.
     fn step(&mut self) -> Option<Result<usize, LinkOpenError>> {
-        let read =
-            read_handshake(
-                &self.stream,
-                &mut self.rx,
-                &mut self.filled,
-                |held| match read_request(held) {
-                    RequestRead::Partial => None,
-                    RequestRead::Upgrade { head_len, accept } => Some(Ok((head_len, accept))),
-                    RequestRead::Refused => Some(Err(())),
-                },
-            )?;
-        Some(read.and_then(|(accept, held)| {
-            let mut answer = [0u8; HEAD_ROOM];
-            let len = write_response(&mut answer, &accept).ok_or(LinkOpenError::Unsupported)?;
-            self.stream
-                .write_all(answer.get(..len).unwrap_or_default())
-                .map_err(|_| LinkOpenError::Refused)?;
-            Ok(held)
-        }))
+        answer_request(&self.stream, &mut self.rx, &mut self.filled)
     }
 }
 
@@ -480,17 +388,7 @@ impl<S, O: WsOpen> WsLinks<S, O> {
         {
             return Err(LinkOpenError::Unsupported);
         }
-        let mut seed = [0u8; KEY_NONCE_LEN + MASK_SEED_LEN];
-        self.opener
-            .fill_entropy(&mut seed)
-            .map_err(|_| LinkOpenError::Refused)?;
-        let (nonce, mask_seed) = seed.split_at(KEY_NONCE_LEN);
-        let (Ok(nonce), Ok(mask_seed)) = (
-            <&[u8; KEY_NONCE_LEN]>::try_from(nonce),
-            <&[u8; MASK_SEED_LEN]>::try_from(mask_seed),
-        ) else {
-            return Err(LinkOpenError::Refused);
-        };
+        let (key, keys) = client_keys(&self.opener)?;
         let (rx, tx) = self.shape.buffers()?;
         let stream = self.opener.stream_dial().dial_started(at.at)?;
         Ok(WsDial {
@@ -499,8 +397,8 @@ impl<S, O: WsOpen> WsLinks<S, O> {
                 at,
                 rx,
                 tx,
-                key: client_key(nonce),
-                keys: MaskKeys::seeded(mask_seed),
+                key,
+                keys,
                 filled: None,
             }),
             opener: self.opener.clone(),

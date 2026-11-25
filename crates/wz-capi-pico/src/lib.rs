@@ -153,20 +153,28 @@ compile_error!(
      `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
      cooperative feature"
 );
+// The cooperative engine's `reth/` groups run over the host's raw packet sockets
+// (`wz-runtime-posix`'s `raweth`), which it opens on Linux, where pico has the transport; another
+// host, and a Zephyr image, which has no raw packet socket, are refused by name rather than by the
+// missing opener of `src/coop_host.rs`.
 #[cfg(all(
     feature = "raweth-transport",
     any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
+        all(
+            any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            not(target_os = "linux")
+        ),
+        all(
+            feature = "os-zephyr",
+            not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
+        )
     )
 ))]
 compile_error!(
-    "wz-capi-pico: `raweth-transport` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `raweth-transport` on the cooperative engine opens the host's raw packet \
+     sockets, which `wz-runtime-posix` opens on Linux only, and a Zephyr image has no raw packet \
+     socket in src/coop_host.rs: drop the feature from this library, or give that file the \
+     target's sockets"
 );
 #[cfg(all(
     feature = "rx-busy-poll",
@@ -295,7 +303,6 @@ compile_error!(
     ),
     not(any(
         feature = "gossip",
-        feature = "raweth-transport",
         feature = "rx-busy-poll",
         feature = "serial-drive-own-thread",
         feature = "transport-link-quic",

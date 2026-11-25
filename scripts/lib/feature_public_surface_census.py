@@ -449,12 +449,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "the plan of a session's arena read row by row, `PlanFrom::Config` and `CoopEngine::open` "
         "with the opens beside it, the plan laid out from the config at the open, which the "
         "crate's own tests run whatever it says (`tests::arena` and every engine test) and the "
-        "pico ABI's `peer` and `config-policy` builds open through",
+        "pico ABI's `peer` and `config-policy` builds open through; `raweth` gates the "
+        "`raweth_group` re-export of the runtime's joiner of `reth/` groups, which the pico "
+        "ABI's `raweth-transport` wraps the host's groups in and the runtime's own "
+        "`raweth_group` unit tests run",
         frozenset(
             {
                 "app-transport",
                 "group-host",
                 "listen",
+                "raweth",
                 "runtime-plan",
                 "scout",
                 "scout-datagram",
@@ -881,11 +885,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `unixpipe` joins: the locator of a link over a pair of named FIFOs (`Locator::Unixpipe`,
         # `UnixpipeLocator`, `UnixpipePath`, `UNIXPIPE_PATH_LEN` in `pub mod session_drive`), selected
         # by the pico ABI's `transport-link-unixpipe`; the shape `serial`'s have.
+        # `raweth` joins: the groups over raw Ethernet (`pub mod raweth_group`: `RawEthDevice`,
+        # `RawEthOpen`, `RawEthGroup`, `RawethJoiner`), selected by the crate that joins
+        # `reth/` groups on this engine; the shape `app-link`'s site has.
         frozenset(
             {
                 "alloc",
                 "app-link",
                 "host-lock",
+                "raweth",
                 "reassembly",
                 "runtime",
                 "rx-in-place",
@@ -1067,6 +1075,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "session-slot",
                 "test-support",
                 "transport-multicast",
+                # The counters a group session counts what it sends and receives into
+                # (`MulticastPump::attach_stats`, `MulticastSessionSeed::with_stats`,
+                # `GroupTxStage::attach_stats`): methods of
+                # the group drive's types, selected by the cooperative C engine's
+                # `transport-stats`, which no MCU image selects.
+                "transport-stats",
             }
         ),
     ),
@@ -1123,9 +1137,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`serial` gates the host's ttys as serial lines (`serial`), which the cooperative engine's "
         "serial links open and this crate's own tests run; `unixpipe` gates the host's named FIFOs "
         "(`unixpipe`), which the cooperative engine's unixpipe links open and this crate's own "
-        "tests run; `ws` gates the opener of the cooperative engine's WebSocket links over the "
-        "host's TCP (`ws`), which this crate's own tests run",
-        frozenset({"host-multicast", "serial", "session-slot", "unixpipe", "ws"}),
+        "tests run; `raweth` gates the host's raw packet sockets (`raweth`), which the "
+        "cooperative engine's `reth/` groups open and this crate's own tests run; `ws` gates "
+        "the opener of the cooperative engine's WebSocket links over the host's TCP (`ws`), "
+        "which this crate's own tests run",
+        frozenset({"host-multicast", "raweth", "serial", "session-slot", "unixpipe", "ws"}),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -1497,11 +1513,14 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # not(session-slot))`, compound and nested, which the second clause reads off the sites.
     # `serial` joins with its OFF_AXIS row: its sites sit inside `pub mod session_drive`, nested,
     # which the second clause reads off the sites. `ws` and `unixpipe` join the same way.
+    # `raweth` joins with its OFF_AXIS row: its one site, `pub mod raweth_group`, is at the crate
+    # root behind `all(raweth, not(session-slot))`, the compound `app-link`'s site has.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
             "app-link",
             "host-lock",
+            "raweth",
             "reassembly",
             "runtime",
             "rx-in-place",
@@ -1562,14 +1581,18 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "session-slot",
             "test-support",
             "transport-multicast",
+            "transport-stats",
         }
     ),
     "wz-runtime-core": frozenset({"alloc"}),
     "wz-runtime-zephyr": frozenset({"session-slot"}),
     # The host profile: `session-slot` gates one crate-root `pub mod slot`, and `host-multicast`
     # three crate-root modules, the simple shape the axis names, so the row is excused only while
-    # the axis could take it for free.
-    "wz-runtime-posix": frozenset({"host-multicast", "serial", "session-slot", "unixpipe", "ws"}),
+    # the axis could take it for free. `raweth` gates one crate-root `pub mod raweth` behind
+    # `all(raweth, not(session-slot))`, the compound `wz-runtime-coop`'s `app-link` site has.
+    "wz-runtime-posix": frozenset(
+        {"host-multicast", "raweth", "serial", "session-slot", "unixpipe", "ws"}
+    ),
     # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind
     # `all(feature = .., lwip_real_build)`, a compound the derivation reads.

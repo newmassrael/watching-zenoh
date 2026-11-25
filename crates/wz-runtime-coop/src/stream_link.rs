@@ -3073,6 +3073,18 @@ mod tests {
             ))
         }
 
+        /// A session over `sink`, established as one that completed its handshake stands
+        /// (`SessionLinkActions::enter_established`): a data send before establishment is
+        /// refused before it asks the stream for room, and each case here is about that ask.
+        fn established(
+            sink: crate::link_cells::CellRc<dyn wz_session_core::link::BoxedLinkDriver>,
+            runtime: &CoopRuntime<Stopped>,
+        ) -> crate::session_runtime::SessionHandle<Stopped> {
+            let actions = new_session_actions(sink, params(), CoopTime::new(runtime));
+            actions.enter_established();
+            actions
+        }
+
         /// A droppable message on a stream that takes no more bytes waits its
         /// `wait_before_drop` for them, is dropped, closes nothing and reaches nothing; once the
         /// stream takes bytes again the next message is written.
@@ -3081,7 +3093,7 @@ mod tests {
             let runtime = CoopRuntime::new(Stopped);
             let link = link();
             let sink = link.clone().into_sink();
-            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
+            let actions = established(sink, &runtime);
             link.socket.full.set(true);
             actions
                 .send_push_literal_qos("home/drop", b"D", true, Priority::DEFAULT)
@@ -3120,7 +3132,7 @@ mod tests {
             let runtime = CoopRuntime::new(Stopped);
             let link = link();
             let sink = link.clone().into_sink();
-            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
+            let actions = established(sink, &runtime);
             link.socket.full.set(true);
             let mut push = wz_session_core::push_build::build_push_literal("home/block", b"B")
                 .expect("a literal Put encodes");
@@ -3173,6 +3185,9 @@ mod tests {
                 actions.set_qos_offer(true),
                 "the session carries a conduit for each priority"
             );
+            // Established after its offer is set, as a handshake settles the offer first: a data
+            // send before establishment is refused.
+            actions.enter_established();
             let payloads: Vec<Vec<u8>> = (0..6u8).map(|n| std::vec![0xE0 | n; 4]).collect();
             actions.batch_start().expect("a window opens");
             for (n, payload) in payloads.iter().enumerate() {
