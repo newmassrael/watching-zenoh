@@ -1157,6 +1157,8 @@ pub(crate) struct Takes {
     pub(crate) polls: core::sync::atomic::AtomicUsize,
     /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
     pub(crate) face_marks: core::sync::atomic::AtomicUsize,
+    /// The sends on a face of a plain put written from the head its publisher's plain way made.
+    pub(crate) planned: core::sync::atomic::AtomicUsize,
     /// The walks of the tables for rows whose last call ended, made only when a call said one
     /// may wait.
     pub(crate) walks: core::sync::atomic::AtomicUsize,
@@ -1616,6 +1618,9 @@ struct LinkLeg<'a> {
     kind: SampleKind,
     meta: &'a PushMetadata<'a>,
     send: wz_session_core::session_actions::SendAs,
+    /// The Put's head its publisher's plain way wrote at its declare, which a link that names the
+    /// key by that declaration is sent it from: a plain put through a write filter's alone.
+    head: Option<wz_session_core::lent_push::PutHead>,
 }
 
 /// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
@@ -5803,6 +5808,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             kind: opts.kind,
             meta,
             send,
+            head: None,
         };
         let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass);
         if stuck.is_some() {
@@ -5857,6 +5863,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             kind,
             meta,
             send,
+            head,
         } = *leg;
         let wz_session_core::session_actions::SendAs {
             reliable,
@@ -5934,16 +5941,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
             let lent = if plain {
-                actions.send_plain_put_qos(
-                    key,
-                    payload,
-                    meta.qos,
-                    wz_session_core::session_actions::SendAs {
-                        reliable,
-                        express,
-                        priority,
-                    },
-                )
+                let send = wz_session_core::session_actions::SendAs {
+                    reliable,
+                    express,
+                    priority,
+                };
+                // A link that names the key by the declaration the head was written for is sent
+                // the head, the payload's length and the payload; any other is sent the Put's parts.
+                match head.filter(|head| head.names(key.wire())) {
+                    Some(head) => {
+                        #[cfg(test)]
+                        self.takes.planned.fetch_add(1, Ordering::Relaxed);
+                        actions.send_put_with_head(key, payload, &head, send)
+                    }
+                    None => actions.send_plain_put_qos(key, payload, meta.qos, send),
+                }
             } else {
                 actions.send_publication_qos(
                     key,
@@ -6908,6 +6920,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         declared: KeyexprRef,
         payload: &[u8],
         params: &PlainPutParams,
+        head: Option<wz_session_core::lent_push::PutHead>,
     ) -> FilteredPut {
         // A put one of the session's own subscribers wants is not plain: the general publish
         // sends it and delivers it there.
@@ -6948,6 +6961,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 express: params.express,
                 priority: params.priority,
             },
+            head,
         };
         // Marked as a publish for as long as it holds the session, as the general publish is.
         let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
@@ -8980,8 +8994,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         {
             return FilteredPut::Suppressed;
         }
-        let (key, params) = match given {
-            Some(given) => given,
+        // The plain way a publisher's declare stated carries the Put's head it wrote then; a way
+        // the caller gives brings none.
+        let (key, params, head) = match given {
+            Some((key, params)) => (key, params, None),
             None => {
                 let Some(way) = row.and_then(|row| row.plain()) else {
                     return FilteredPut::NotPlain;
@@ -8994,10 +9010,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 {
                     return FilteredPut::NotPlain;
                 }
-                (way.key, way.params)
+                (way.key, way.params, way.head)
             }
         };
-        self.put_plain_in(core, keyexpr, key, payload, &params)
+        self.put_plain_in(core, keyexpr, key, payload, &params, head)
     }
 
     /// The session `engine` holds as the C handle's drive: one of the engine's holders, so the

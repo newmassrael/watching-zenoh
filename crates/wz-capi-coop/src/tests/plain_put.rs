@@ -225,3 +225,85 @@ fn a_plain_put_through_a_write_filter_marks_its_send_on_each_face() {
         "the filtered put marks its one face"
     );
 }
+
+/// How many face sends of a plain put were written from the head its publisher's plain way made.
+#[cfg(not(feature = "shared-key-ids"))]
+fn planned(engine: &Engine) -> usize {
+    engine.takes.planned.load(Ordering::SeqCst)
+}
+
+/// A put on a declared key that brings nothing of its own is written from the head its plain way
+/// made when the publisher stated it: each face send of it counts as planned, and each reaches the
+/// router. CONTROL: a way the caller gives (`put_plain_filtered`) brings no head, and a way kept on
+/// the literal key has none, and both are still sent. Turned red by a plain way that keeps no head,
+/// or by a send that writes the head for a key its link does not name by the declaration. A build
+/// with the shared key ids may name the key its own way on a link, so the plain way declines the
+/// put there and the test is not built.
+#[cfg(not(feature = "shared-key-ids"))]
+#[test]
+fn a_put_on_a_declared_key_is_written_from_its_plain_ways_head() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let hold = engine
+        .acquire_keyexpr("demo/x")
+        .expect("a session with ids left declares");
+    let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
+    let filter = filter_on(&engine, "demo/x");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) > 0
+    });
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the filter to open", || {
+        !engine.write_filter_active(filter)
+    });
+    let params = PublishOptions::put()
+        .plain_put_params()
+        .expect("a plain put");
+    engine.keep_write_filter_plain(filter, Some((params, wire.declared())));
+
+    let before = planned(&engine);
+    for _ in 0..3 {
+        assert_eq!(
+            engine.publish_filtered(filter, "demo/x", &wire, b"v", None),
+            FilteredPut::Sent(Ok(0))
+        );
+    }
+    assert_eq!(
+        planned(&engine) - before,
+        3,
+        "each put is written from its head"
+    );
+    until(&engine, "the router to receive the puts", || {
+        router.seen(|s| s.pushes) == 3
+    });
+
+    let before = planned(&engine);
+    assert_eq!(
+        engine.put_plain_filtered(filter, "demo/x", wire.declared(), b"v", &params),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        planned(&engine),
+        before,
+        "CONTROL: a way the caller gives brings no head"
+    );
+    engine.keep_write_filter_plain(
+        filter,
+        Some((
+            params,
+            wz_session_core::session_tables::KeyexprRef::by_id(0),
+        )),
+    );
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &WireKey::literal(), b"v", None),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        planned(&engine),
+        before,
+        "CONTROL: the literal key has no head"
+    );
+    until(&engine, "the router to receive every put", || {
+        router.seen(|s| s.pushes) == 5
+    });
+}
