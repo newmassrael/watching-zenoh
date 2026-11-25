@@ -149,9 +149,18 @@ pub enum ComposeError {
 /// when encoded, up to `RES_U64`, `u64::MAX >> 1`, nine bytes
 /// (`io/zenoh-transport/src/common/seq_num.rs` @
 /// `const RES_U64: TransportSn = (u64::MAX >> 1) as TransportSn;`). A code above
-/// 3 answers with the widest ring, as `mask_from_res` does.
+/// 3 answers with the widest ring, as `mask_from_res` does. Answered in a `u64` whatever word the
+/// build steps its own rings in (`sn::Sn`): a frame composed or read here may carry any ring a
+/// peer negotiates, the 64-bit one included.
 pub const fn sn_ring_max(code: u8) -> u64 {
-    crate::sn::mask_from_res(code)
+    match code {
+        // `io/zenoh-transport/src/common/seq_num.rs` @ `const RES_U16: TransportSn = (u16::MAX >> 2)`:
+        // each ring is the widest number its VLE width holds, seven bits a byte up to the ninth.
+        0 => (u8::MAX >> 1) as u64,
+        1 => (u16::MAX >> 2) as u64,
+        2 => (u32::MAX >> 4) as u64,
+        _ => u64::MAX >> 1,
+    }
 }
 
 /// What the wire stores for `sn_res`: the frame/fragment resolution in bits

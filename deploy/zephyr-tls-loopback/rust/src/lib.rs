@@ -40,7 +40,7 @@ use wz::runtime_zephyr::glue::{log, log_line, yield_us};
 use wz::runtime_zephyr::net::ZephyrNetError;
 use wz::runtime_zephyr::stream::{ZephyrTcpDial, ZephyrTcpListener, ZephyrTcpSocket};
 use wz_runtime_coop::session_drive::LinkOpenError;
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 use wz_tls_mbedtls::channel::{start_on_platform_arena, IdentitySlot, Zid};
 use wz_tls_mbedtls::stream::{AcceptBudget, HandshakeBudget, TlsDial, TlsListener, TlsStream};
 
@@ -117,16 +117,21 @@ struct SteppingSocket {
 impl StreamSocket for SteppingSocket {
     type Error = ZephyrNetError;
 
-    fn local(&self) -> SocketAddr {
-        self.inner.local()
+    type Link<
+        B: wz_runtime_coop::link_storage::RxStore + 'static,
+        X: wz_runtime_coop::link_storage::TxStore + 'static,
+    >
+        = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
+    where
+        Self: 'static;
+
+    fn ends(&self) -> StreamEnds<'_> {
+        self.inner.ends()
     }
 
-    fn peer(&self) -> SocketAddr {
-        self.inner.peer()
-    }
-
-    fn send_parts(&self, parts: &[&[u8]]) -> Result<(), ZephyrNetError> {
-        self.inner.send_parts(parts)
+    // The inner socket blocks, so its write returns once the stack has taken every byte.
+    fn write(&self, bytes: &[u8]) -> Result<usize, ZephyrNetError> {
+        self.inner.write(bytes)
     }
 
     fn wait_readable(&self, timeout_ms: c_int) {
@@ -234,7 +239,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         log(c"wz: FAIL - a plain connection to the listener was not taken");
         return 1;
     };
-    if junk.send_parts(&[&[0xde; 64]]).is_err() {
+    if junk.write_all(&[0xde; 64]).is_err() {
         log(c"wz: FAIL - the plain connection could not send");
         return 1;
     }
@@ -298,13 +303,17 @@ pub extern "C" fn wz_app_main() -> i32 {
         return 1;
     }
     log(c"wz: each end names the zid of the other end's key");
-    if served.peer().ip() != LOOPBACK {
+    let peer = match served.ends() {
+        StreamEnds::Ip { peer, .. } => Some(peer),
+        _ => None,
+    };
+    if peer.map(|peer| peer.ip()) != Some(LOOPBACK) {
         log(c"wz: FAIL - the accepted stream does not know its peer's address");
         return 1;
     }
 
     // 3. The stream carries a message each way.
-    if client.send_parts(&[b"ping"]).is_err() {
+    if client.write_all(b"ping").is_err() {
         log(c"wz: FAIL - the dial could not send");
         return 1;
     }
@@ -313,7 +322,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         log(c"wz: FAIL - the listener did not read what the dial sent");
         return 1;
     }
-    if served.send_parts(&[b"pong"]).is_err() {
+    if served.write_all(b"pong").is_err() {
         log(c"wz: FAIL - the listener could not send");
         return 1;
     }

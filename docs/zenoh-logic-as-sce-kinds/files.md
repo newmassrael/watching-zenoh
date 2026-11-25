@@ -874,6 +874,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/named_key.rs` | S2 | |
 | `crates/wz-session-core/src/namespace.rs` | S2 | |
 | `crates/wz-session-core/src/network_message.rs` | S1 | |
+| `crates/wz-session-core/src/network_message/push_read.rs` | S1 | |
 | `crates/wz-session-core/src/ntp64.rs` | S1 | |
 | `crates/wz-session-core/src/observer.rs` | S3 | |
 | `crates/wz-session-core/src/oldest_instant.rs` | S10 | |

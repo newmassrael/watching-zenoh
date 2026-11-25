@@ -39,6 +39,11 @@
 //! refuse is refused when it is made, with `Z_ERR_CONFIG_INVALID_VALUE`, and leaves the config as
 //! it was. The document is the zenoh JSON5 document the zenoh-c ABI reads, of which only the `wz`
 //! member is read here, so one document gives both ABIs the same policies.
+//!
+//! [`policy_document::resolve_document_under`]: wz_session_core::policy_document::resolve_document_under
+//! [`policy_document::resolve_under`]: wz_session_core::policy_document::resolve_under
+//! [`policy_document::Origin::Document`]: wz_session_core::policy_document::Origin::Document
+//! [`policy_document::Origin::Api`]: wz_session_core::policy_document::Origin::Api
 
 #[cfg(feature = "config-policy")]
 use core::ffi::{c_char, CStr};

@@ -2666,7 +2666,7 @@ pub struct SessionFacts {
     pub fragment_tx_budget: usize,
     /// Fixed-memory step S4 -- the sends this session refused because its link
     /// lent no slot (`tx-lend-only`): see [`TxRefusalCounts`]. A fact for
-    /// the reason [`Self::fragment_tx_budget`] is.
+    /// the reason `Self::fragment_tx_budget` is.
     #[cfg(feature = "tx-lend-only")]
     pub tx_refusals: TxRefusalCounts,
     /// How many times each action of the machine ran ([`SessionLinkActions::trace_snapshot`]);
@@ -2694,7 +2694,7 @@ pub struct SessionFacts {
     /// a value drawn once per BUNDLE would hand two handshakes on one bundle the
     /// same sixteen cookie bytes. The source is the session's one source, which
     /// the session's handshake binding holds ([`SessionActionsBinding`], as the
-    /// runtime's [`SessionRuntime::EntropyDraw`](crate::link::SessionRuntime::EntropyDraw))
+    /// runtime's [`SessionRuntime::EntropyDraw`])
     /// and hands to [`SessionLinkActions::draw_cookie_nonce`]; this bundle, which is one link's,
     /// keeps none. A source that FAILS clears the nonce, so the acceptor mints no
     /// HMAC cookie and its `cookie_valid` denies every OpenSyn; it does NOT fall
@@ -14597,7 +14597,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The one seam every network message leaves a session through.
     ///
     /// R3110 -- a message that carries a buffer of shared memory is sent inside a transaction of
-    /// this node's handoff as a sender (see [`crate::extshm::ShmTxHandoff`]): each shared-memory
+    /// this node's handoff as a sender (see `crate::extshm::ShmTxHandoff`): each shared-memory
     /// slice is counted and its chunk kept confirmed before the message is built, and what was
     /// taken is kept until the peer acknowledges it when the message left and given back when it
     /// did not. A message with no such slice, which is nearly every message, opens nothing.
@@ -15126,35 +15126,45 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<alloc::boxed::Box<dyn crate::extshm::ShmTxTransaction>> {
         use crate::network_message::NetworkMessage;
 
-        let (descriptors, extensions, route): (
-            alloc::vec::Vec<&[u8]>,
-            &[wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage>],
-            Priority,
-        ) = match msg {
-            #[cfg(feature = "codec-push")]
-            NetworkMessage::Push(push) => {
-                return self.open_shm_tx_push(push, reliable, push_priority)
-            }
-            #[cfg(feature = "codec-request")]
-            NetworkMessage::Request(request) => match &request.body {
-                crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
-                    crate::request_build::query_value_shm_descriptors(query),
-                    crate::held_list::HeldList::entries(&request.extensions).unwrap_or(&[]),
-                    crate::declare_ext_qos::read_request_qos(request).priority(),
-                ),
-                _ => return None,
-            },
-            #[cfg(feature = "codec-response")]
-            NetworkMessage::Response(response) => (
-                crate::response_build::response_shm_descriptors(response),
-                crate::held_list::HeldList::entries(&response.extensions).unwrap_or(&[]),
-                crate::declare_ext_qos::read_response_qos(response).priority(),
-            ),
-            _ => return None,
-        };
+        #[cfg(feature = "codec-push")]
+        if let NetworkMessage::Push(push) = msg {
+            return self.open_shm_tx_push(push, reliable, push_priority);
+        }
         #[cfg(not(feature = "codec-push"))]
         let _ = push_priority;
-        self.shm_tx_over(descriptors, extensions, route, reliable)
+        // A Request's and a Response's descriptors are read off the message; a build with neither
+        // routes nothing else here.
+        #[cfg(any(feature = "codec-request", feature = "codec-response"))]
+        {
+            let (descriptors, extensions, route): (
+                alloc::vec::Vec<&[u8]>,
+                &[wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage>],
+                Priority,
+            ) = match msg {
+                #[cfg(feature = "codec-request")]
+                NetworkMessage::Request(request) => match &request.body {
+                    crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
+                        crate::request_build::query_value_shm_descriptors(query),
+                        crate::held_list::HeldList::entries(&request.extensions).unwrap_or(&[]),
+                        crate::declare_ext_qos::read_request_qos(request).priority(),
+                    ),
+                    _ => return None,
+                },
+                #[cfg(feature = "codec-response")]
+                NetworkMessage::Response(response) => (
+                    crate::response_build::response_shm_descriptors(response),
+                    crate::held_list::HeldList::entries(&response.extensions).unwrap_or(&[]),
+                    crate::declare_ext_qos::read_response_qos(response).priority(),
+                ),
+                _ => return None,
+            };
+            self.shm_tx_over(descriptors, extensions, route, reliable)
+        }
+        #[cfg(not(any(feature = "codec-request", feature = "codec-response")))]
+        {
+            let _ = (msg, reliable);
+            None
+        }
     }
 
     /// [`Self::open_shm_tx`] of a Push, read off the Push itself: what a sender that holds the
@@ -18543,7 +18553,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Send a `Request(Query)` that asks nothing beyond its key, `(keyexpr_mapping_id,
-    /// keyexpr_suffix)` as the wire names it: [`Self::send_get_parts`] with every slot of the
+    /// keyexpr_suffix)` as the wire names it: `Self::send_get_parts` with every slot of the
     /// query left out. The peer routes it into its queryables, answers with `Response`s naming
     /// `rid` and ends it with a `ResponseFinal`.
     ///
@@ -18638,7 +18648,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Send the `get` `meta` describes, on the key `(keyexpr_mapping_id, keyexpr_suffix)`:
-    /// [`Self::send_get_parts`] with the description read from the metadata
+    /// `Self::send_get_parts` with the description read from the metadata
     /// ([`crate::query_parts::QueryParts::of_metadata`]). Each slot rides as the owned builder
     /// writes it, in the build that composes it: the target, the timeout and the QoS on the
     /// envelope, and the consolidation, the parameters, the value, the source info and the

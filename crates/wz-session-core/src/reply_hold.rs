@@ -11,6 +11,11 @@
 //! owned replies of one get on the heap (`reply_sink::HeapHold`), or the rows of the session's
 //! one table of held replies ([`HeldReplies`]), each row tagged with the get it belongs to, its
 //! bytes in the row, so holding a reply takes no allocation.
+//!
+//! [`ReplyHold`]: crate::reply_hold::ReplyHold
+//! [`consolidate`]: crate::reply_hold::consolidate
+//! [`flush_latest`]: crate::reply_hold::flush_latest
+//! [`HeldReplies`]: crate::reply_hold::HeldReplies
 
 use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
 use crate::caps;

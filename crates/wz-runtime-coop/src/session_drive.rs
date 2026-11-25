@@ -13,7 +13,7 @@
 //!   receive ([`UnicastRx`]), which dispatches it, stages its fragments and reports each
 //!   outcome. The pump keeps no state of the receive between two datagrams.
 //! - deadlines: the session's own timers
-//!   ([`TransportTimers`](wz_session_core::transport_timers::TransportTimers))
+//!   ([`wz_session_core::transport_timers::TransportTimers`])
 //!   say how long the link may wait and judge the handshake, lease and
 //!   keep-alive deadlines when the loop hands them the time; the loop keeps
 //!   none of its own.
@@ -3098,7 +3098,7 @@ mod wake_budget_tests {
             &local,
             PumpFields {
                 link: Rc::clone(&link),
-                actions: actions,
+                actions,
                 entropy,
                 clock,
                 config: SessionDriveConfig {
@@ -3137,7 +3137,14 @@ mod wake_budget_tests {
         type Link = Rc<Recording>;
         type Router = crate::reassembly_rx::CoopReassembly;
         type Sink = fn(IterationEvent<'_, '_>);
-        let bytes = router_session_task_bytes::<Stopped, Link, Router, CountedRouter, Sink>();
+        let bytes = router_session_task_bytes::<
+            Stopped,
+            Link,
+            Router,
+            CountedRouter,
+            Sink,
+            crate::sync::Shared,
+        >();
         for (cell, fits) in [(bytes, true), (bytes - 1, false)] {
             let runtime = CoopRuntime::reserved(
                 Stopped,
@@ -3157,7 +3164,7 @@ mod wake_budget_tests {
                 &local,
                 PumpFields {
                     link: Rc::new(Recording::default()),
-                    actions: actions,
+                    actions,
                     entropy,
                     clock,
                     config: SessionDriveConfig {
@@ -3275,7 +3282,14 @@ mod wake_budget_tests {
         type Link = Rc<Recording>;
         type Router = crate::reassembly_rx::CoopReassembly;
         type Sink = fn(IterationEvent<'_, '_>);
-        let task_bytes = router_session_task_bytes::<Released, Link, Router, CountedRouter, Sink>();
+        let task_bytes = router_session_task_bytes::<
+            Released,
+            Link,
+            Router,
+            CountedRouter,
+            Sink,
+            crate::sync::Shared,
+        >();
         let runtime = CoopRuntime::opening(
             Released,
             crate::RuntimeRows {
@@ -3295,7 +3309,7 @@ mod wake_budget_tests {
             &local,
             PumpFields {
                 link: Rc::new(Recording::default()),
-                actions: actions,
+                actions,
                 entropy,
                 clock,
                 config: SessionDriveConfig {

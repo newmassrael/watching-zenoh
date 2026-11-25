@@ -76,7 +76,7 @@ use crate::ffi::guarded;
 use crate::link_properties::pico_link_properties;
 use crate::query::PlainQueryable;
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
-use crate::session::{session_handle, z_loaned_session_t, PicoSessionHandle};
+use crate::session::{engine_held, session_handle, z_loaned_session_t, PicoSessionHandle};
 use crate::write_filter::PicoSession;
 use crate::zid::zid_hex;
 
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             // Weak, as pico's query context is: the queryable lives in the
             // session, and a strong reference would keep the session alive
             // through its own declaration.
-            session: crate::session::EngineHold::downgrade(&handle.drive.engine()),
+            session: crate::session::EngineHold::downgrade(engine_held(handle)),
             identity,
         });
         let sink = QueryableSink::shared(
@@ -279,8 +279,7 @@ impl Answerer {
         };
         // The documents describe the unicast transport: a member of a joined group is a
         // transport of its own, which the C surface lists and these documents do not.
-        let faces: Vec<FaceSnapshot> = engine
-            .face_snapshots()
+        let faces: Vec<FaceSnapshot> = SessionEngine::face_snapshots(&*engine)
             .into_iter()
             .filter(|face| !face.is_multicast)
             .collect();

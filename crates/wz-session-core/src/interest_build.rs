@@ -748,7 +748,7 @@ pub fn build_interest_final_propagated(interest_id: u64) -> InterestOwned {
 // The interest coverage tests assert against zenoh-pico DECLARE-context
 // wire bytes, so they gate on `codec-declare` even though the builders
 // themselves are codec-feature-agnostic.
-#[cfg(all(test, feature = "codec-declare"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-declare"))]
 mod tests {
     use super::*;
     use alloc::vec;

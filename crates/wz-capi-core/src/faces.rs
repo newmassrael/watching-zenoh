@@ -6333,7 +6333,7 @@ impl SharedSession {
     /// only, so it hears nothing that arrives over the others, and a link that comes up later
     /// is declared to only if its slot is named. The local plane is not a link and always
     /// holds it. A multicast group is a link no slot names, so a limited subscriber does not
-    /// join one. Refused, recording and sending nothing, by its cause ([`Self::admit_entry`]): no
+    /// join one. Refused, recording and sending nothing, by its cause (`Self::admit_entry`): no
     /// entity id left, or a declaration its key names with no room for one more holder; every
     /// `_on_links` declaration of this registry answers so.
     pub fn declare_subscriber_on_links(

@@ -185,7 +185,7 @@ fn a_filter_and_a_listener_count_the_peers_of_every_face() {
         .declare_matching_listener(
             plane,
             "demo/m/x",
-            Arc::new(move |matching| into.lock().unwrap().push(matching)),
+            wz_capi_port::MatchingSink::shared(move |matching| into.lock().unwrap().push(matching)),
             false,
         )
         .expect("a session with rows left declares");

@@ -537,7 +537,7 @@ pub const BUDGET_BITS: u32 = Budget::BITS;
 /// The Query body a Request carries: its consolidation, its parameters and its body extensions
 /// (the value, the source info, the attachment). Built inside [`RequestQueryBuilder`] for a
 /// Request, and on its own where only the body is wanted, as for a query a session answers
-/// itself ([`crate::query_options::QueryOptions::loopback_query`]).
+/// itself (`crate::query_options::QueryOptions::loopback_query`).
 #[cfg(feature = "codec-request")]
 #[derive(Default)]
 pub struct QueryBuilder {

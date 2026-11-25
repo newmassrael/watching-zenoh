@@ -3940,7 +3940,6 @@ dependencies = [
 name = "wz-capi-coop"
 version = "0.1.0"
 dependencies = [
- "log",
  "portable-atomic",
  "rcgen",
  "rustls",
@@ -4214,7 +4213,6 @@ version = "0.1.0"
 dependencies = [
  "foldhash 0.1.5",
  "hashbrown 0.15.5",
- "log",
  "wz-capi-port",
  "wz-host-sync",
  "wz-node-time",
@@ -4449,7 +4447,6 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "libc",
- "log",
  "windows-sys 0.61.2",
  "wz-runtime-coop",
  "wz-session-core",

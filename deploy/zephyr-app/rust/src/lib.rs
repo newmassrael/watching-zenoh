@@ -32,13 +32,13 @@
 
 extern crate alloc;
 
-use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 // R311y32 — the Zephyr profile seams arrive through the wz facade's
 // `platform-zephyr` gate (this deploy is the consumer that proves it), not a
 // direct wz-runtime-zephyr dep — mirroring mcu-freertos-demo's wz::runtime_freertos.
+use wz::runtime_coop::link_cells::CellRc;
 use wz::runtime_zephyr::glue::{log, log_line};
 use wz::runtime_zephyr::net::{ZephyrUdpDriver, ZephyrUdpSocket};
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy, ZephyrEpoch};
@@ -75,17 +75,17 @@ extern "C" {
 /// The e2e's two endpoints on Zephyr's net stack: the acceptor's socket link
 /// and a plain socket for the crafted peer, both on the loopback interface.
 struct ZephyrTopology {
-    driver: Rc<ZephyrUdpDriver>,
+    driver: CellRc<ZephyrUdpDriver>,
     peer: ZephyrUdpSocket,
     rx: Vec<u8>,
 }
 
 impl AcceptorTopology for ZephyrTopology {
     // One object is both faces: the session's sink and the loop's link.
-    type Link = Rc<ZephyrUdpDriver>;
+    type Link = CellRc<ZephyrUdpDriver>;
 
-    fn acceptor_sink(&self) -> Rc<dyn BoxedLinkDriver> {
-        self.driver.clone()
+    fn acceptor_sink(&self) -> CellRc<dyn BoxedLinkDriver> {
+        self.driver.clone().into_sink()
     }
 
     fn acceptor_link(&self) -> Self::Link {
@@ -129,7 +129,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         return 1;
     };
     // Built with NO peer, as an acceptor is: it learns it from the InitSyn.
-    let driver = Rc::new(ZephyrUdpDriver::acceptor(link));
+    let driver = CellRc::boxed(ZephyrUdpDriver::acceptor(link));
     let topology = ZephyrTopology {
         driver: driver.clone(),
         peer,

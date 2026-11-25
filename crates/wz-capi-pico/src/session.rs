@@ -520,7 +520,7 @@ pub(crate) fn tls_files_named(_cfg: &ConfigState) -> Vec<String> {
 // --- ABI structs (session owned = pico rc `{ void* _val; void* _cnt }`) ----
 
 /// Owned session (pico `z_owned_session_t`, 16 B rc). `_val` carries the place of our
-/// [`PicoSessionHandle`]: on the tokio engine an object of its own, on the cooperative engine a
+/// `PicoSessionHandle`: on the tokio engine an object of its own, on the cooperative engine a
 /// place in the session's arena (`crate::session_place`); `_cnt` is unused.
 #[repr(C)]
 pub struct z_owned_session_t {
@@ -2508,7 +2508,7 @@ pub unsafe extern "C" fn z_session_take(dst: *mut z_owned_session_t, src: *mut z
 }
 
 /// Drop an owned session (pico `z_session_drop`): closes (if not already) and
-/// frees the [`SessionState`].
+/// frees the `SessionState`.
 #[no_mangle]
 pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
     let _ = guarded(|| {
@@ -3266,7 +3266,7 @@ const _: () = {
 const _: () = assert!(
     core::mem::offset_of!(z_open_options_t, auto_start_admin_space)
         == if cfg!(feature = "multi-thread") {
-            2 * core::mem::size_of::<*mut c_void>()
+            core::mem::size_of::<[*mut c_void; 2]>()
         } else {
             0
         }

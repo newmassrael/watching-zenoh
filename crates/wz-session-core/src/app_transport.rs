@@ -144,7 +144,7 @@ impl AppTransport {
 
     /// Offer `offer` the bytes `link` holds for the program, in place, with no lock held: the
     /// front run of its remainder, lent until `offer` answers how many of them the program took
-    /// ([`AppLinkTable::lend_remainder`]), which then leave it. Nothing is copied. `None` when
+    /// (`AppLinkTable::lend_remainder`), which then leave it. Nothing is copied. `None` when
     /// nothing is held, or another writer is offering it now; otherwise what was taken and the
     /// length of the run offered, which a writer that was given all of it asks again for the rest.
     pub fn offer_remainder(

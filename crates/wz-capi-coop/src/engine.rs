@@ -129,7 +129,7 @@ pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::{
     ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
 };
-#[cfg(any(test, feature = "advanced-cache"))]
+#[cfg(any(all(test, feature = "std"), feature = "advanced-cache"))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
@@ -4935,7 +4935,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// How many cells of the session's table of links' halves hold a link's halves now: `None`
     /// for a session whose plan laid out no such table.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn link_halves_in_use(&self) -> Option<usize> {
         self.core
             .lock()
@@ -4969,13 +4969,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// How many places of `kind` the ABI holds now, and how many the session's arena lends at
     /// most.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
         self.core.lock().0.places.counts(kind)
     }
 
     /// Run `f` while this thread holds the session's lock, as a drop made under it would.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn under_the_lock<R>(&self, f: impl FnOnce() -> R) -> R {
         let _held = self.core.lock();
         f()
@@ -8672,7 +8672,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
 }
 
 /// The ring the session's arena laid out at its open for its advanced publishers' caches
-/// ([`CacheSpan`]), lent under a lock of its own: a cache's put and its queryable's answer take
+/// (`CacheSpan`), lent under a lock of its own: a cache's put and its queryable's answer take
 /// it, from whatever thread, and neither takes the session's lock with it.
 #[cfg(feature = "advanced-cache")]
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::CacheBytes

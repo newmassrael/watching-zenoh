@@ -1912,8 +1912,8 @@ impl SessionLimits {
             LimitValue::Integer(2),
         ));
         limits.keep(&MaxMatchingListenersHeld::preset_or_build(
-            Quota::at_most(1),
-            LimitValue::Integer(1),
+            Quota::at_most(2),
+            LimitValue::Integer(2),
         ));
         limits.keep(&MaxTransportEventsListenersHeld::preset_or_build(
             Quota::at_most(1),

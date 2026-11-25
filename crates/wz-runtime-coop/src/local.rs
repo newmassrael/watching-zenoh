@@ -100,7 +100,11 @@ impl<F: Future + 'static> LocalPlace<F> {
 
     /// Where the task's future is written: long enough and aligned for an `F`, and reached by
     /// nothing else until the task starts.
-    #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "reassembly",
+        feature = "session-unicast",
+        not(feature = "session-slot")
+    ))]
     pub(crate) fn as_mut_ptr(&mut self) -> *mut F {
         self.0.as_mut_ptr()
     }
@@ -110,7 +114,11 @@ impl<F: Future + 'static> LocalPlace<F> {
     /// # Safety
     /// A whole `F` lies at `Self::as_mut_ptr`, written since the claim, and nothing else holds
     /// it.
-    #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "reassembly",
+        feature = "session-unicast",
+        not(feature = "session-slot")
+    ))]
     pub(crate) unsafe fn start_in(self) -> CoopLocalJoinHandle<F::Output> {
         // SAFETY: the caller's contract, which is the claim's.
         let cell = unsafe { self.0.start_in() };

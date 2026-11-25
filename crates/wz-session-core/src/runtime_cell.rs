@@ -3,7 +3,7 @@
 
 //! The flags and words a session's holders write without a lock, in the form the runtime's
 //! concurrency asks for (`SessionRuntime::Flag`, `SessionRuntime::Word`): an atomic
-//! where the holders are threads, a [`Cell`] where they are one task.
+//! where the holders are threads, a `Cell` where they are one task.
 //!
 //! The methods take the atomic's ordering, so code over either form states the ordering its
 //! readers rely on once, and a cell, which has no other thread to order against, ignores it.

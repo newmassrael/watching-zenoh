@@ -2153,7 +2153,8 @@ mod tests {
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(4)
         ));
-        faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, 0));
+        // A dial under way is looked at again on the next look, its deadline being later.
+        faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, u64::MAX));
         assert!(matches!(
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(1)

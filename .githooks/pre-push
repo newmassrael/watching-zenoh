@@ -1108,6 +1108,12 @@ round_fed_gates=(
     # manifests. A text read, one `cargo metadata` and one `cargo tree`, no build.
     "host_lock_gate.py --selftest"
     "host_lock_gate.py --check"
+    # A crate a library without a logger can link reaches the `log` facade only through the
+    # session core's diagnostics, which compile to nothing without `wz-session-core/log`; the host
+    # crates exempt from it are listed, and each is held outside that library's graph. Round-fed by
+    # every crate source and manifest. A text read, one `cargo metadata` and one `cargo tree`.
+    "log_facade_gate.py --selftest"
+    "log_facade_gate.py --check"
     # The core crates of the C ABI library deny the totality lints, and a module still allowed
     # them is a row of the register in docs/c-abi-architecture.md, which only shrinks. Round-fed by
     # the four crates' sources and the register. A text read, no build.

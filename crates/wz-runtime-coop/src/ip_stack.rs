@@ -86,7 +86,7 @@ use crate::udp_link::{PortPeer, UdpPort};
 /// no secure channel, whose `L` is [`NoStream`], the `tls/` case holds nothing. `B` holds its
 /// receive buffer and `X` the memory it encodes its frames into, the image's byte tables by
 /// default. The slot profile's link, a value in a session slot; the heap profile holds each driver
-/// behind its own table instead ([`HeapLink`]).
+/// behind its own table instead (`HeapLink`).
 // On a stack with no stream the `tcp/` and `tls/` cases are values of no size that cannot be
 // made, so the enum is its `udp/` case alone; clippy weighs the variants by size and calls that a
 // large difference. Boxing the datagram case would put the one live link on a heap the slot

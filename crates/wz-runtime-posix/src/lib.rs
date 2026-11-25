@@ -112,16 +112,17 @@ pub mod net;
 /// Linux.
 #[cfg(all(feature = "raweth", not(feature = "session-slot")))]
 pub mod raweth;
-/// The host's ttys as the lines of the cooperative engine's serial links, on Linux and Android.
+// The host's ttys as the lines of the cooperative engine's serial links, on Linux and Android
+// (documented from inside, so its links resolve in the module).
 #[cfg(feature = "serial")]
 pub mod serial;
 #[cfg(feature = "session-slot")]
 pub mod slot;
 #[cfg(unix)]
 pub mod stream;
-/// The host's named FIFOs as the ends of the cooperative engine's unixpipe links, on Linux and
-/// Android.
-#[cfg(feature = "unixpipe")]
+// The host's named FIFOs as the ends of the cooperative engine's unixpipe links, on Linux and
+// Android. The heap profile's, as the engine's unixpipe links are: a slot build has none.
+#[cfg(all(feature = "unixpipe", not(feature = "session-slot")))]
 pub mod unixpipe;
 #[cfg(windows)]
 pub mod windows;

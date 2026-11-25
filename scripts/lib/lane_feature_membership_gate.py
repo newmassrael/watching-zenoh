@@ -293,6 +293,29 @@ def loop_vars(body):
     return out
 
 
+# A lane that builds what a profile ships reads the profile's cargo arguments into an array and
+# hands the array to cargo, so no list in run-ci.sh can drift from the packager's (Layer C1nh):
+#
+#     resolved="$(python3 scripts/lib/wz_config.py --resolve-features pico "$profile")"
+#     read -r -a args <<<"$resolved"
+#     cargo test -p wz-capi-pico "${args[@]}" ...
+#
+# What `--resolve-features` prints is `--no-default-features --features a,b`, never a test name,
+# so the array's expansion is cargo's options and not a filter. Only an array filled that way is
+# read so; any other array expansion is a filter this gate cannot name, and stays refused.
+RESOLVED_FEATURES = re.compile(
+    r'\b([A-Za-z_][A-Za-z0-9_]*)="\$\([^)]*--resolve-features\b')
+READ_ARRAY = re.compile(
+    r'\bread\s+-r\s+-a\s+([A-Za-z_][A-Za-z0-9_]*)\s*<<<\s*"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?')
+ARRAY_EXPANSION = re.compile(r'^\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}$')
+
+
+def cargo_arg_arrays(body):
+    """The arrays a lane fills with a profile's resolved cargo arguments (above)."""
+    resolved = set(RESOLVED_FEATURES.findall(body))
+    return frozenset(arr for arr, src in READ_ARRAY.findall(body) if src in resolved)
+
+
 def resolve_loop_var(loops, var, at):
     """The names `var` takes for an invocation at offset `at` — the nearest
     enclosing `for` block, which is the last one declaring `var` before it."""
@@ -303,11 +326,12 @@ def resolve_loop_var(loops, var, at):
     return best
 
 
-def parse_invocation(cmd, loops=None, at=0):
+def parse_invocation(cmd, loops=None, at=0, cargo_arrays=frozenset()):
     """(package, kind, [targets], filter, [skips], exact) for one cargo line.
 
     Raises Unexpressable for a filter this cannot resolve statically — a shell
-    variable no `for` block names, a glob, a command substitution.
+    variable no `for` block names, a glob, a command substitution. An array in
+    `cargo_arrays` (`cargo_arg_arrays`) is the profile's cargo options, not a filter.
     """
     # ⛔ TRUNCATE AT THE FIRST SHELL OPERATOR. The invocation is lifted out of a
     # subshell that often continues `2>&1 | tee /dev/stderr | grep -qE '...'`,
@@ -363,6 +387,8 @@ def parse_invocation(cmd, loops=None, at=0):
             skips.append(toks[i + 1].strip('"\''))
             i += 2
         elif t == "--":
+            i += 1
+        elif ARRAY_EXPANSION.match(t) and ARRAY_EXPANSION.match(t).group(1) in cargo_arrays:
             i += 1
         elif t.startswith("-"):
             i += 2 if t in ("--features", "--manifest-path", "--target", "--profile") else 1
@@ -425,7 +451,7 @@ def lane_table(run_ci=RUN_CI):
             if "--ignored" in cmd:
                 events.append((m.start(), "test", cmd))
         if events:
-            lanes[name] = (sorted(events), loop_vars(body))
+            lanes[name] = (sorted(events), loop_vars(body), cargo_arg_arrays(body))
     return lanes
 
 
@@ -493,10 +519,10 @@ def check(tests_dir=TESTS_DIR, run_ci=RUN_CI, crates=CRATES, resolver=None,
     misowned, unknown_owner, owner_rows = [], [], 0
 
     parsed = []
-    for lane, (events, loops) in lanes.items():
+    for lane, (events, loops, cargo_arrays) in lanes.items():
         for at, cmd, builds in lane_runs(events):
             try:
-                parsed.append((lane, parse_invocation(cmd, loops, at), builds))
+                parsed.append((lane, parse_invocation(cmd, loops, at, cargo_arrays), builds))
             except Unexpressable as e:
                 unexpressable.append((lane, cmd, str(e)))
 
@@ -711,11 +737,27 @@ def selftest():
             "alpha_needs_a_feature -- --ignored --exact)\n"
             "}\n"
             # The names the layers answer to on the command line.
+            # A lane that hands cargo the arguments a profile resolves to (Layer C1nh's
+            # shape): the array is cargo's options, and the test file is selected whole.
+            # Beside it an array nothing fills from a profile, which is a filter this gate
+            # cannot name and stays refused.
+            "layer_g() {\n"
+            '    if ! resolved="$(python3 scripts/lib/wz_config.py --resolve-features pico '
+            '"$profile")"; then\n'
+            "        return 1\n"
+            "    fi\n"
+            '    read -r -a args <<<"$resolved"\n'
+            '    (cd crates && cargo test -p wz-integration-tests "${args[@]}" --test alpha '
+            "alpha_is_fine -- --ignored --exact)\n"
+            '    (cd crates && cargo test -p wz-integration-tests "${other[@]}" --test beta '
+            "-- --ignored)\n"
+            "}\n"
             "run_layer A layer_a || overall=1\n"
             "run_layer C layer_c || overall=1\n"
             "run_layer D layer_d || overall=1\n"
             "run_layer E layer_e || overall=1\n"
-            "run_layer F layer_f || overall=1\n")
+            "run_layer F layer_f || overall=1\n"
+            "run_layer G layer_g || overall=1\n")
         crates = d / "crates"
         crates.mkdir()
         (crates / "lib.rs").write_text(
@@ -747,9 +789,18 @@ def selftest():
         # rewritten around its own limitation.
         shapes.append(("a `for VAR in <names>` filter is RESOLVED, not refused",
                        not any("leg" in why for _, _, why in res["unexpressable"])))
+        refused = [why for _, _, why in res["unexpressable"]]
         shapes.append(("a variable no loop declares is refused, not skipped",
-                       len(res["unexpressable"]) == 1
-                       and "undeclared" in res["unexpressable"][0][2]))
+                       len(refused) == 2
+                       and sum("undeclared" in why for why in refused) == 1))
+        # A PAIR as well: the profile's array is read as options (layer_g selects, so the
+        # selecting lanes are a, c, d, f and g), and an array nothing fills from a profile is
+        # still refused, so the first arm is not a blanket pass for every array.
+        shapes.append(("an array a profile's resolved features fill is cargo's options",
+                       res["selecting_lanes"] == 5
+                       and not any("args" in why for why in refused)))
+        shapes.append(("an array no profile fills is a filter, and refused",
+                       sum("other" in why for why in refused) == 1))
         shapes.append(("a test no lane selects is a failure",
                        [r["fn"] for r in res["unclaimed"]] == ["beta_runs_nowhere"]))
         # ⚠ THESE TWO ARE A PAIR AND NEITHER IS VALID ALONE. `needed` and
@@ -763,7 +814,7 @@ def selftest():
         shapes.append(("an absent feature with NO cfg site is silent",
                        all(v[3] != "inert" for v in res["violations"])))
         shapes.append(("a comment is not an invocation",
-                       "layer_a" in res["lanes"] and len(res["lanes"]) == 5))
+                       "layer_a" in res["lanes"] and len(res["lanes"]) == 6))
         # R2861 — the chained build attributes `needed` to `demo`, so the
         # test that needs it grades clean in layer_f. Read as ONE build, the
         # second `-p` overwrote the package and the demo build vanished.

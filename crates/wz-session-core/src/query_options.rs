@@ -56,7 +56,7 @@ use crate::sample::{CarriedEncoding, EncodingHint, EncodingRef, QosLevel, Source
 /// unifying them means deciding whether wz grows a client config plane.
 ///
 /// Gated to the union of its two consumers — the z_get accessor
-/// ([`QueryOptions::effective_timeout_ms`], `query-timeout`) and the liveliness
+/// (`QueryOptions::effective_timeout_ms`, `query-timeout`) and the liveliness
 /// accessor (`wz-runtime-tokio`'s `LivelinessGetOptions::effective_timeout_ms`,
 /// `liveliness-get`). A `query-get`-only build (both atoms off) has no reader, so
 /// an ungated const would be `-D dead-code`.
@@ -209,7 +209,7 @@ pub struct QueryOptionsOf<'a> {
     /// `QueryableRegistry::local_query`, which runs zenoh's
     /// `(queryable.complete || target != AllComplete)` on the SessionLocal
     /// queryables. Critically, the loopback reads the GATED
-    /// [`Self::effective_target`], NOT this raw `pub` field: with `query-target`
+    /// `Self::effective_target`, NOT this raw `pub` field: with `query-target`
     /// OFF the field is a bypassable pub write (R311y317), so reading it directly
     /// on the local path would re-arm the selection axis in a build that cannot
     /// emit a target. Never read `self.target` on a dispatch path; go through
@@ -267,7 +267,7 @@ pub struct QueryOptionsOf<'a> {
     /// deadline passes, delivering a synthetic `Err("Timeout")` and THEN its
     /// final, and a relay hop honours the wire ext through
     /// `read_request_timeout_ms`. Do NOT read this field directly —
-    /// [`QueryOptions::effective_timeout_ms`] is the gate; a raw read is what
+    /// `QueryOptions::effective_timeout_ms` is the gate; a raw read is what
     /// let a `query-timeout`-off build arm the deadline (R311y317).
     pub timeout_ms: u32,
     /// Request-level QoS — priority + congestion-control + express packed into
@@ -575,7 +575,7 @@ impl<'a> QueryOptionsOf<'a> {
     /// Attach a Query-body payload — the querier's VALUE (paired with the
     /// optional [`Self::with_encoding`]), stamped on the outbound Query body
     /// VALUE ext (id 0x03 ENC_ZBUF, the "Q_B / Q_E" wire slot):
-    /// [`QueryOptions::query_metadata`] collapses `payload` + `encoding` into
+    /// `QueryOptions::query_metadata` collapses `payload` + `encoding` into
     /// one value unit, which `build_request_query_with_meta` stamps onto
     /// `RequestQueryBuilder::query_value` behind the `query-value` gate. The
     /// loopback path surfaces the value too, so a SessionLocal queryable
@@ -592,7 +592,7 @@ impl<'a> QueryOptionsOf<'a> {
     /// on a `query-value`-OFF build: the field is captured but inert — the
     /// gated wire threading elides it (a no-op, bytes unchanged); the only cost
     /// is that a value-only query forfeits the runtime's `is_empty()` fast path
-    /// there (see [`QueryOptions::query_metadata`]).
+    /// there (see `QueryOptions::query_metadata`).
     pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
         self.payload = Some(Cow::Owned(payload));
         self
@@ -713,7 +713,7 @@ impl<'a> QueryOptionsOf<'a> {
     /// that is the entire effect — the same single write zenoh's builder makes
     /// (`builders/query.rs:288-300`, via `Parameters::set_reply_key_expr_any`).
     /// It is what the responder reads to stop refusing such replies, and what
-    /// [`QueryOptions::effective_accept_replies`] reads back to stop refusing
+    /// `QueryOptions::effective_accept_replies` reads back to stop refusing
     /// them locally; one value, both sides. Idempotent: a parameter list that
     /// already carries the flag is left alone, mirroring pico's `implicit_anyke
     /// = _anyke_option && !_anyke_in_parameters`
@@ -786,7 +786,7 @@ impl<'a> QueryOptionsOf<'a> {
     /// field is `pub`, and `#[non_exhaustive]` does not block assignment. That
     /// claim is why the gate sat here alone; measured, a pub-field write put
     /// the timeout ext on the wire AND armed the local deadline with the atom
-    /// off. Both consumers now read [`QueryOptions::effective_timeout_ms`],
+    /// off. Both consumers now read `QueryOptions::effective_timeout_ms`,
     /// which is the enforcement point — this setter is a convenience, not a
     /// gate.
     #[cfg_attr(not(feature = "query-timeout"), allow(unused_mut))]
@@ -973,7 +973,7 @@ impl<'a> QueryOptionsOf<'a> {
     /// It routes through [`resolved_consolidation`], the one place both readings
     /// resolve; this method's job is only to supply the two inputs. On a build
     /// with no consolidation capability there is no
-    /// [`Self::effective_consolidation`] to call (it would be dead code there),
+    /// `Self::effective_consolidation` to call (it would be dead code there),
     /// so `None` is what the caller named and the resolution's OFF arm answers.
     #[cfg(feature = "query-get")]
     pub fn resolved_consolidation(&self) -> ConsolidationMode {

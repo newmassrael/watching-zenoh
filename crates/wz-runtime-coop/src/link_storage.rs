@@ -720,7 +720,7 @@ pub(crate) const LENT_SLOTS: usize = if SESSION_TX_SLOTS > u8::BITS as usize {
 const _: () = assert!(LENT_SLOTS <= u16::BITS as usize);
 
 /// A link's [`TxStore`] and the book of which of its slots are out with the session, between a
-/// slot's grant and its send or abort. At most [`LENT_SLOTS`] are lent.
+/// slot's grant and its send or abort. At most `LENT_SLOTS` are lent.
 pub struct TxLender<T: TxStore> {
     store: T,
     /// Which slots are out, bit by slot number.

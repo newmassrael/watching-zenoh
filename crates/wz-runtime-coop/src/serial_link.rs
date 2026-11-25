@@ -3,8 +3,8 @@
 
 //! The session's link over a serial line: what a platform supplies to open one.
 //!
-//! A platform supplies a [`SerialOpen`], which opens the line a [`SerialLocator`] names at its
-//! baud rate, and the [`SerialDevice`] it yields: write without waiting, wait, read what is
+//! A platform supplies a `SerialOpen`, which opens the line a `SerialLocator` names at its
+//! baud rate, and the `SerialDevice` it yields: write without waiting, wait, read what is
 //! queued, and throw away what is queued. The framing of zenoh's serial link (COBS, the CRC32 and
 //! the header of each frame) is the session core's (`wz_session_core::serial_link`), written once
 //! for every engine; the line under it is the platform's. The link over the line, its handshake

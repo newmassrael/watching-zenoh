@@ -10,6 +10,9 @@
 //! ([`TransportTimers::fire_due`]). The loop holds no deadline and judges none, so every driver of
 //! the session (a cooperative pump, a thread of its own, an async task) keeps the same timers, in
 //! the same order, and a driver is the wait and nothing else.
+//!
+//! [`TransportTimers::next_due_ms`]: crate::transport_timers::TransportTimers::next_due_ms
+//! [`TransportTimers::fire_due`]: crate::transport_timers::TransportTimers::fire_due
 
 use wz_runtime_core::TimeSource;
 

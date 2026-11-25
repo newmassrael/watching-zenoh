@@ -13,6 +13,8 @@
 //! engine's are not, so a field that followed either could be there for one and not the other.
 //! What every engine keeps alike (the key arena, the count of the session's own requests, where the
 //! matching listeners were last read) is this crate's.
+//!
+//! [`SessionParts`]: crate::session_state::SessionParts
 
 use core::cell::Cell;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]

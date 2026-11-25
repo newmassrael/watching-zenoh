@@ -515,7 +515,7 @@ impl<'r, Row> RowAccess<'r, Row> {
 
 /// Where a row stands in the fan-out of one sample: the first row the sample is handed, or one after
 /// it. Only the dispatch that hands a sample to its rows makes one, once for each sample
-/// ([`Self::begin`]), and every delivery is handed one, so a context that gathers what it is handed
+/// (`Self::begin`), and every delivery is handed one, so a context that gathers what it is handed
 /// tells the rows of one sample from those of the next without comparing the samples, and no path
 /// can hand a row a sample without saying which.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

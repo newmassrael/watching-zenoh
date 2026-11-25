@@ -336,7 +336,7 @@ pub enum InboundFrame {
     /// to its end by its document's view, with the refusals the observer's decode answers, and
     /// refused whatever it says, so nothing of it is copied out of the unit
     /// ([`parse_inbound_consuming_into`]). The observer's read keeps the message whole
-    /// ([`Self::Join`], [`Self::Oam`]).
+    /// (`Self::Join`, [`Self::Oam`]).
     #[cfg(feature = "alloc")]
     Refused { mid: u8 },
     /// A network body on a negotiated lowlatency link, without a Frame or SN.
@@ -710,7 +710,7 @@ pub trait ExtChainRead: Copy + core::fmt::Debug {
     );
 
     /// The remote bound an Open's chain announces ([`crate::extbound::peer_remote_bound_in`]),
-    /// answered as [`Self::patch_and_region`] is.
+    /// answered as `Self::patch_and_region` is.
     #[cfg(feature = "codec-open-body")]
     fn remote_bound(self) -> Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound>;
 }
@@ -856,14 +856,22 @@ impl<'f> Iterator for ReadEntries<'f> {
     // The slot profile keeps only the entries of an extension it reads
     // (`collect_handshake_ext_chain`), and a chain read where it lies is shown as it keeps it, so
     // the two reads of one message agree.
-    #[cfg(feature = "session-slot")]
+    // Only an Init's and an Open's chain is handed to a judgement (`ReadList`), so the filter is
+    // the slot profile's where either is compiled; a build without both walks no entry.
+    #[cfg(all(
+        feature = "session-slot",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    ))]
     fn next(&mut self) -> Option<Self::Item> {
         self.0.as_mut()?.find(|entry| {
             crate::ext_chain::reads_received_ext(crate::ext_view::ExtEntryView::ext_id(entry))
         })
     }
 
-    #[cfg(not(feature = "session-slot"))]
+    #[cfg(not(all(
+        feature = "session-slot",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    )))]
     fn next(&mut self) -> Option<Self::Item> {
         self.0.as_mut()?.next()
     }
@@ -902,6 +910,8 @@ impl ReadChain<'_> {
 /// What the one walk of a handshake chain read where it lies answers for the readers every build
 /// links (`ext_chain::read_handshake_chain`), found while the walk judges the chain: of each
 /// extension the first entry, as the readers of a held chain take the first.
+// Built only by the walk of a handshake chain (`ext_chain::read_handshake_chain`), so it is
+// compiled where that walk is.
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
@@ -2627,7 +2637,12 @@ mod debug_surface_tests {
 //    Measured against the real `libzenohpico.so`: eighteen generated strings
 //    were messages wz named and pico refused, and every one of them carried a
 //    mandatory extension nothing defines. ──
-#[cfg(all(test, feature = "session-unicast", feature = "codec-frame"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "session-unicast",
+    feature = "codec-frame"
+))]
 mod mandatory_ext_tests {
     use super::*;
     use crate::ext_admit::ExtAdmission;
@@ -3171,7 +3186,7 @@ mod kind_name_tests {
 // `pub type QoS = zextz64!(0x1, true);`), matched by `iext::eid`
 // (`commons/zenoh-codec/src/transport/frame.rs` @ `ext::QoS::ID => {`). The
 // same id with the mandatory bit clear is an unknown extension there.
-#[cfg(all(test, feature = "codec-frame"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-frame"))]
 mod frame_qos_identity_tests {
     use super::*;
     use crate::ext_header::{lookalike_headers, network_eid, EXT_FLAG_Z};

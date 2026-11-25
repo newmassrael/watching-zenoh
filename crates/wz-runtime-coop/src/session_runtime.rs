@@ -34,7 +34,7 @@
 //! `!Send`; that is correct, not a limitation — the bundle lives on the
 //! drive loop's stack and is never spawned. `new_generic` wraps it in the
 //! profile [`SessionRuntime::ActionsHandle`] — a counted cell handle here
-//! ([`crate::link_cells::CellRc`]), not `Arc` — for shared read access
+//! (`link_cells::CellRc`), not `Arc` — for shared read access
 //! within that one task: the FSM action binding and the drive loop read the
 //! same bundle, but never across threads, so an atomic refcount would be
 //! pure waste *and* would wall the session off ARMv6-M (`alloc::sync::Arc`

@@ -211,8 +211,9 @@ pub(crate) fn criterion_key(
 // it references all three registries, which compile only under
 // `codec-declare`; the per-registry behavioural tests live inside
 // each `declare/*.rs` `#[cfg(test)] mod tests` and inherit the
-// module's own `codec-declare` gate.
-#[cfg(all(test, feature = "codec-declare"))]
+// module's own `codec-declare` gate. The registries they build are the heap profile's
+// (`alloc`), as are the messages they dispatch.
+#[cfg(all(test, feature = "alloc", feature = "codec-declare"))]
 mod cross_tests;
 
 // Fixed-memory step S9d -- the per-session slot profile lends its control records

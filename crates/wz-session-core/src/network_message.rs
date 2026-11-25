@@ -732,9 +732,9 @@ fn oam_view_admission(oam: &wz_codecs::lent::Oam<'_>) -> crate::ext_admit::ExtAd
 
 /// The verdict on a Push: its own chain, then the chain of the body it carries
 /// (`body`). The owned message's ([`NetworkMessage::ext_admission`]); the Push read
-/// where its frame lies keeps the same rule over the chains it walks
-/// (`push_view_admission`), so the receive path that delivers a Push without
-/// copying it refuses exactly what the one that copies it does.
+/// where its frame lies keeps the same rule over the chains it reads (`push_read`), so the
+/// receive path that delivers a Push without copying it refuses exactly what the one that
+/// copies it does.
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
     outer: Option<&[E]>,
@@ -768,7 +768,8 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
 
 /// The verdict on the chain of a Put read as its view, its shared-memory marker included at the
 /// place it stands: the rule of `judge_put_chain` over the chain walked where the frame lies. The
-/// Push and the Request read where their frame lies judge the Put they carry here.
+/// Request read where its frame lies judges the Put it carries here; the Push reader judges its
+/// Put's chain as it reads it (`push_read`), and its tests hold that verdict to this one.
 #[cfg(all(
     feature = "codec-frame",
     any(
@@ -779,14 +780,9 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
     any(
         all(feature = "codec-request", feature = "request-put-del"),
         all(
+            test,
             feature = "codec-push",
-            any(
-                all(
-                    feature = "alloc",
-                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-                ),
-                feature = "rx-push"
-            )
+            any(feature = "alloc", feature = "rx-push")
         )
     )
 ))]
@@ -806,48 +802,6 @@ fn judge_put_view(put: &wz_codecs::msg_put::MsgPutView<'_>) -> crate::ext_admit:
                 .chain(place.map(|_| crate::put_payload::marker_header()))
                 .chain(entries.skip(at).map(|e| e.header))
         }),
-    )
-}
-
-/// [`NetworkMessage::ext_admission`] for a Push read where its frame lies.
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "codec-push",
-    any(
-        all(
-            feature = "alloc",
-            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-        ),
-        feature = "rx-push"
-    ),
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    )
-))]
-fn push_view_admission(push: &wz_codecs::push::PushView<'_>) -> crate::ext_admit::ExtAdmission {
-    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
-    use crate::ext_view::walked;
-    use wz_codecs::push::PushViewVariant as B;
-    // The rule of `judge_push_chains` -- the envelope's chain, then the body's -- over chains that
-    // are walked where the frame lies and not held, as `request_view_admission` judges a Request.
-    then_judge(
-        judge_headers(
-            C::Network(N::Push),
-            push.extensions
-                .as_ref()
-                .map(|chain| walked(Some(chain)).map(|e| e.header)),
-        ),
-        || match &push.body {
-            B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => judge_put_view(put),
-            B::CodecZenohMsgDel(del) => judge_headers(
-                C::Zenoh(Z::Del),
-                del.extensions
-                    .as_ref()
-                    .map(|chain| walked(Some(chain)).map(|e| e.header)),
-            ),
-        },
     )
 }
 
@@ -1963,6 +1917,25 @@ fn admit_lent(
     }
 }
 
+/// The reader of a Push on the walks that lend one (`lend_push`).
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-push",
+    any(
+        all(
+            feature = "alloc",
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+        ),
+        feature = "rx-push"
+    ),
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+mod push_read;
+
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
@@ -1987,13 +1960,13 @@ fn lend_push<'f>(
     // Read as its view, as `lend_request` reads its record: a few words and the bytes its chains
     // occupy. The lent record holds each chain inline at the node's capacity, so it was filled from
     // a template of that size for every record and refused a chain past it, which the protocol
-    // bounds by nothing. `decode` refuses what `Push::decode` refuses otherwise, with the same
-    // error. It is decoded into the binding that lends it, at the frame's lifetime, in which a view
-    // is invariant.
+    // bounds by nothing. The reader refuses what `Push::decode` refuses, with the same error, and
+    // judges the chains as it reads them. It reads into the binding that lends it, at the frame's
+    // lifetime, in which a view is invariant.
     let mut push = wz_codecs::push::PushView::<'f>::default();
-    wz_codecs::push::PushView::decode_into(cursor, &mut push)
+    let admission = push_read::read_push_view(cursor, &mut push)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(push_view_admission(&push))?;
+    admit_lent(admission)?;
     each.take_record(WalkedRecord::Push(&push))
 }
 
@@ -2654,7 +2627,12 @@ fn decode_one_record(
 //    whichever layer enforces it; that they still pass with the seam gone is
 //    the measurement that the codec took the work over, rather than an
 //    inspection of the emit. ──
-#[cfg(all(test, feature = "codec-frame", feature = "codec-push"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "codec-push"
+))]
 mod chain_saturation_tests {
     use super::*;
 
@@ -2819,6 +2797,46 @@ mod chain_saturation_tests {
             assert_eq!(seen[1].1, expected.1, "{count} extensions");
             assert_eq!(seen[2].0.len(), depth, "the walk goes on after it");
         }
+    }
+
+    /// A walk that lends hands each Push over as the view the codec decodes it to, and goes on
+    /// where the codec's cursor goes on: a frame of Puts with and without the QoS extension, with
+    /// a suffix and in either mapping, around a Put with a chain of its own, each lent record equal
+    /// to the codec's decode of the same bytes in turn.
+    #[test]
+    fn the_lent_walk_hands_each_push_over_as_the_codec_reads_it() {
+        let ours = [0x9du8, 3, 0x21, 0x1a, 0x01, 3, b'a', b'b', b'c'];
+        let theirs = [0xddu8, 5, 0x21, 0x05, 0x01, 1, b'x'];
+        let suffixed = [0x7du8, 5, 2, b'a', b'b', 0x01, 0];
+        let declined = push_with_put_exts(2);
+        let wire = [
+            &ours[..],
+            &declined[..],
+            &theirs[..],
+            &suffixed[..],
+            &ours[..],
+        ]
+        .concat();
+        let mut expected = Vec::new();
+        let mut cursor = sce_forge_runtime::codec::SceCursor::new(&wire);
+        while cursor.remaining() > 0 {
+            expected.push(
+                wz_codecs::push::PushView::decode(&mut cursor)
+                    .expect("the codec reads each record"),
+            );
+        }
+        assert_eq!(expected.len(), 5);
+        let mut record = new_record_buf();
+        let mut seen = Vec::new();
+        let result = for_each_record(&wire, &mut record, RecordForm::Lent, |one| {
+            if let WalkedRecord::Push(push) = one {
+                seen.push(push.clone());
+            } else {
+                panic!("only Pushes were encoded, and each is lent");
+            }
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(seen, expected);
     }
 
     /// The slot profile's walk holds no owned form of a record, and lends a Push
@@ -4364,7 +4382,7 @@ fn lent_response_class<'f>(response: &wz_codecs::response::ResponseView<'f>) -> 
 // The record-at-a-time walk against the batch decode it must agree with, and
 // the one place it is meant to differ: a failure ends it AFTER the records
 // before it were handed over.
-#[cfg(all(test, feature = "codec-frame"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-frame"))]
 mod record_walk_tests {
     use super::*;
     use alloc::vec;
@@ -5110,7 +5128,7 @@ mod record_walk_tests {
     }
 }
 
-#[cfg(all(test, feature = "codec-frame"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-frame"))]
 mod best_effort_batch_tests {
     use super::*;
     use alloc::vec;
@@ -5420,7 +5438,12 @@ mod best_effort_batch_tests {
 //    encode-then-decode round trip could not reach the arm under test. These
 //    bytes are what a peer with one extension more than this revision knows
 //    about puts on the wire. ──
-#[cfg(all(test, feature = "codec-frame", feature = "codec-declare"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "codec-declare"
+))]
 mod declare_body_ext_chain_tests {
     use super::*;
 

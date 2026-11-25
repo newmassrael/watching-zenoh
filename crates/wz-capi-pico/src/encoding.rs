@@ -34,7 +34,7 @@
 //! unrepresentable when the flag is derived at pack time.
 //!
 //! A received message's encoding is not copied into a hint: its state keeps the packed word and
-//! reads the schema where the message holds it ([`EncodingState::lent`]), and a copy is made only
+//! reads the schema where the message holds it (`EncodingState::lent`), and a copy is made only
 //! where a program keeps the sample, the reply or the query.
 
 use core::ffi::{c_char, c_void, CStr};

@@ -87,7 +87,7 @@ impl<S: MulticastSocket + 'static> GroupJoiner for HostGroups<S> {
         let named_port = group.group().port();
         let given = self.port_given(group);
         let transport = join::<S>(group, given.unwrap_or(named_port), self, rx).map_err(|e| {
-            log::warn!("group {}: the host did not join it: {e}", group.group());
+            wz_session_core::diag_warn!("group {}: the host did not join it: {e}", group.group());
             LinkOpenError::Refused
         })?;
         if named_port == 0 && given.is_none() {
