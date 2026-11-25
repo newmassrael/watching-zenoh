@@ -35,8 +35,10 @@ use super::{client_config, config_zid};
 use crate::host_group::HostGroups;
 use crate::{CoopConfig, CoopEngine};
 
-/// The host's links, joining groups on the host's sockets.
-type Links = IpLinks<PosixUdpSocket, PosixTcpDial, NoDial, HostGroups<PosixUdpSocket>>;
+/// The host's links, joining groups on the host's sockets, counted as the engine counts the links
+/// it opens over (`host_links` hands them so).
+type Links =
+    IpLinks<PosixUdpSocket, PosixTcpDial, NoDial, HostGroups<PosixUdpSocket>, crate::LinkCount>;
 
 type Engine = CoopEngine<Links, PosixClock>;
 
