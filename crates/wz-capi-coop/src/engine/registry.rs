@@ -1845,9 +1845,28 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
-        #[cfg(not(wz_round))]
+        #[cfg(not(any(
+            feature = "threads",
+            feature = "listen",
+            feature = "group",
+            feature = "liveliness",
+            feature = "queryable",
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        )))]
         let delivery = RoundDelivery::new();
-        #[cfg(all(wz_round, not(feature = "queryable")))]
+        #[cfg(all(
+            any(
+                feature = "threads",
+                feature = "listen",
+                feature = "group",
+                feature = "liveliness",
+                feature = "queryable",
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            not(feature = "queryable")
+        ))]
         let delivery = RoundDelivery::new(crate::round::leaked(4));
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
