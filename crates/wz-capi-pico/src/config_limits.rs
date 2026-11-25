@@ -91,10 +91,12 @@ pub(crate) fn state_over(text: Option<&str>, limits: &SessionLimits) -> Result<S
         .map(<[u8]>::trim_ascii)
         .filter(|item| !item.is_empty())
     {
-        let mut halves = item.splitn(2, |byte| *byte == b'=');
-        let (Some(name), Some(count)) = (halves.next(), halves.next()) else {
-            return Err(Z_ERR_CONFIG_INVALID_VALUE);
-        };
+        let equals = item
+            .iter()
+            .position(|byte| *byte == b'=')
+            .ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
+        let (name, count) = item.split_at(equals);
+        let count = count.get(1..).unwrap_or_default();
         // The item is trimmed at both ends, so a name has spaces only before the `=` and a count
         // only after it.
         let count = count_of(count.trim_ascii_start()).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
