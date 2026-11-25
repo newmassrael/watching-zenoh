@@ -2704,8 +2704,8 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> Face<C, L> {
 /// What a face's link said of its peer when it came up, copied into the face's record by the one
 /// holder of the link then (`bring_up`): none of it changes while the link lives, and a read of
 /// it under the session's lock must not lend the link, which the face's own read may hold. Kept
-/// until the link is lost, so the loss is told by it, and read as standing until the step that
-/// ended the link's session is seen (`Core::end_closed_facts`).
+/// until the link is lost, so the loss is told by it, and read as standing while the link's
+/// session is (`Face::facts`).
 struct UpFacts {
     /// The zid the link's peer announced.
     peer: Option<SessionZid>,
@@ -11751,6 +11751,9 @@ mod up_facts_tests {
         row.links = links;
         UpFacts {
             peer: None,
+            whatami: None,
+            #[cfg(feature = "queryable")]
+            generation: 0,
             ended: false,
             row: Some(row),
         }
