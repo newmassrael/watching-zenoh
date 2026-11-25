@@ -116,6 +116,8 @@ mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
 mod engine;
+// How the engine's calls stand to its threads, and the locks that choice decides.
+mod form;
 #[cfg(feature = "group-host")]
 pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.

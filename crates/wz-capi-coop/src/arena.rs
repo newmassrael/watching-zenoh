@@ -141,9 +141,9 @@ use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-use crate::engine::{
-    CoopTables, FACE_SET_BYTES, REGISTRY_LEND_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES,
-};
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+use crate::engine::REGISTRY_LEND_BYTES;
+use crate::engine::{CoopTables, FACE_SET_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
@@ -458,11 +458,17 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The round's records, the callbacks they owe, its keys and the round itself: the round keeps no
-/// area, since every record is read where it lies.
-const LANE_ROWS: usize = 4;
-/// The places the session lends its registry and its reassembly Router in for a step.
-const STEP_LEND_ROWS: usize = 2;
+/// The round's records where the arena lends them, the callbacks they owe, its keys and the round
+/// itself: the round keeps no area, since every record is read where it lies, and a round of one
+/// thread keeps its records in itself.
+const LANE_ROWS: usize = 3 + (RECORD_BYTES != 0) as usize;
+/// The places the session lends its reassembly Router in for a step, and its registry where a
+/// step dispatches apart from the session's lock (a build whose links are tasks).
+const STEP_LEND_ROWS: usize = 1 + cfg!(any(
+    feature = "threads",
+    feature = "listen",
+    feature = "group"
+)) as usize;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
@@ -1723,12 +1729,15 @@ impl ArenaPlan {
             let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
             self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
         }
-        // The round's tables (`crate::round::RoundRows::lent`).
-        self.put(
-            ArenaPart::DeliveryRecords,
-            self.session.round.records,
-            RECORD_BYTES,
-        );
+        // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
+        // lends them, as a round of one thread keeps them in itself and is lent no byte of them.
+        if RECORD_BYTES != 0 {
+            self.put(
+                ArenaPart::DeliveryRecords,
+                self.session.round.records,
+                RECORD_BYTES,
+            );
+        }
         self.put(
             ArenaPart::DeliveryCallbacks,
             self.session.round.callbacks,
@@ -1747,7 +1756,9 @@ impl ArenaPlan {
             core::mem::size_of::<crate::round::Round>(),
         );
         // The places the session lends its registry and its Router in for a step, a place each
-        // (`crate::engine::StepPlaces`).
+        // (`crate::engine::StepPlaces`); a read that steps its one link itself dispatches under the
+        // session's lock and lends no registry.
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
         self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
