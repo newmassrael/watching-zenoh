@@ -3408,3 +3408,102 @@ fn region_tables_of_zero_bytes_placed_by_their_description_declare_and_undeclare
         std::alloc::dealloc(block, layout);
     }
 }
+
+/// Every row `fan` pins, each call ended at once: the number each row's closure was given.
+fn pinned_in_turn(tables: &LatchedTables, fan: &mut PinnedFanOut<'_>) -> Vec<u32> {
+    let mut seen = Vec::new();
+    while let Some(call) = tables.pin_next_subscriber(fan) {
+        seen.push(call.call);
+        assert!(
+            !ended::<CClosure<u32>>(call),
+            "a live row's call marks nothing"
+        );
+    }
+    seen
+}
+
+/// The walk that pins one row at a time reaches the rows a peer's fan-out reaches, in its order: a
+/// row whose locality hears no peer, or whose pattern does not meet the key, is passed. Turned red
+/// by a walk that skips a row, repeats one, or matches by another rule than the fan-out's.
+#[test]
+fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
+    use crate::pubsub::{LocalSubscribers, PeerDelivery};
+    let mut tables = latched_tables();
+    let mut declared = Vec::new();
+    for (n, key, origin) in [
+        (1, "a/b", Locality::Any),
+        (2, "a/*", Locality::Remote),
+        (3, "c", Locality::Any),
+        (4, "a/**", Locality::SessionLocal),
+        (5, "a/b", Locality::Any),
+    ] {
+        let row = tables
+            .declare_subscriber(key, origin, KeyForm::default(), latched(n))
+            .unwrap();
+        declared.push((row.handle, n));
+    }
+    let mut fanned = Vec::new();
+    tables.deliver_from_peer("a/b", None, PeerDelivery::default(), |id, _| {
+        fanned.extend(
+            declared
+                .iter()
+                .filter(|(handle, _)| *handle == id)
+                .map(|(_, n)| *n),
+        );
+    });
+    assert_eq!(fanned, std::vec![1, 2, 5], "CONTROL: the fan-out's rows");
+    let mut fan = PinnedFanOut::new("a/b");
+    assert_eq!(pinned_in_turn(&tables, &mut fan), fanned);
+    assert!(
+        tables.pin_next_subscriber(&mut fan).is_none(),
+        "a walk that ended stays ended"
+    );
+}
+
+/// A row undeclared while a call pinned before it runs begins no call, so the walk passes it; a
+/// row undeclared while its own call runs keeps its slot until that call ends, which says so and
+/// lets the drained walk take it. Turned red by a walk that pins a retired row, or by a pin that
+/// does not hold the row's latch up across its call.
+#[test]
+fn a_row_undeclared_while_a_pinned_call_runs_is_passed_and_let_go_after() {
+    let mut tables = latched_tables();
+    let one = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(1))
+        .unwrap();
+    let two = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(2))
+        .unwrap();
+    let three = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(3))
+        .unwrap();
+    let mut fan = PinnedFanOut::new("k");
+    let first = tables.pin_next_subscriber(&mut fan).expect("the first row");
+    assert_eq!(first.call, 1);
+    // Its own row undeclared under its call: kept, its callback not handed back.
+    assert!(tables
+        .undeclare_subscriber(one.handle)
+        .unwrap()
+        .taken
+        .is_none());
+    // The next row undeclared before the walk reaches it: no call runs, so it goes at once.
+    assert!(tables
+        .undeclare_subscriber(two.handle)
+        .unwrap()
+        .taken
+        .is_some());
+    let next = tables.pin_next_subscriber(&mut fan).expect("the row after");
+    assert_eq!(next.call, 3, "the undeclared row is passed");
+    assert!(!ended::<CClosure<u32>>(next));
+    assert!(tables.pin_next_subscriber(&mut fan).is_none());
+    assert!(
+        tables.release_drained_subscriber(&mut 0).is_none(),
+        "CONTROL: the first call still runs"
+    );
+    assert!(
+        ended::<CClosure<u32>>(first),
+        "the last call of a retired row"
+    );
+    assert!(tables.release_drained_subscriber(&mut 0).is_some());
+    assert!(!tables.subscribers().holds_slot(one.handle));
+    assert!(tables.subscribers().contains(three.handle));
+}

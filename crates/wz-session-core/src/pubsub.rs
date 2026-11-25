@@ -2553,6 +2553,36 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     fired
 }
 
+/// Whether `keyexpr`, read as `facts`, is deeper than the matcher's bound on the fixed backing: a
+/// message on it is delivered to nobody. The depth is counted only for a key the facts do not
+/// already place within the bound.
+pub(crate) fn past_matcher_depth(keyexpr: &str, facts: KeyFacts) -> bool {
+    crate::bounded::ENFORCES_CAPACITY
+        && !facts.is_key()
+        && keyexpr.split('/').count() > MAX_KEYEXPR_CHUNKS
+}
+
+/// Whether a message on `keyexpr`, read as `facts`, from a peer when `is_remote` and from the
+/// session itself otherwise, reaches the subscriber `row`: its locality admits the origin and its
+/// pattern intersects the key. The rule of every walk of the subscribers ([`scan_subscribers`]
+/// and the walk that pins one row at a time).
+pub(crate) fn row_reaches(
+    row: &RowRef<'_>,
+    keyexpr: &str,
+    facts: KeyFacts,
+    is_remote: bool,
+) -> bool {
+    let pass = if is_remote {
+        row.origin.allows_remote()
+    } else {
+        row.origin.allows_local()
+    };
+    // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
+    // applies the fixed backing's depth bound to it, the same defensive
+    // over-depth skip every scan inherits from the one seam.
+    pass && keyexpr_intersects_text_with(row.pattern, row.facts, keyexpr, facts)
+}
+
 /// The one matcher: every subscriber whose locality admits the origin and whose pattern
 /// intersects `keyexpr` is handed to `deliver`, in the table's order, and its position in the
 /// table to `hit`. Returns how many matched, or `None` for a key deeper than the matcher's bound,
@@ -2594,22 +2624,11 @@ pub(crate) fn scan_subscribers<R: SubscriberRows>(
     // it. The matcher would refuse it for every subscriber anyway; the depth
     // is counted here only for that answer, and only for a key the facts do not
     // already place within the bound.
-    if crate::bounded::ENFORCES_CAPACITY
-        && !facts.is_key()
-        && keyexpr.split('/').count() > MAX_KEYEXPR_CHUNKS
-    {
+    if past_matcher_depth(keyexpr, facts) {
         return None;
     }
     rows.each_row_mut(|position, row, id, sink| {
-        let pass = if is_remote {
-            row.origin.allows_remote()
-        } else {
-            row.origin.allows_local()
-        };
-        // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
-        // applies the fixed backing's depth bound to it, the same defensive
-        // over-depth skip every scan inherits from the one seam.
-        if pass && keyexpr_intersects_text_with(row.pattern, row.facts, keyexpr, facts) {
+        if row_reaches(&row, keyexpr, facts, is_remote) {
             // R311gb-2b — deliver via the DIP seam (borrowed view,
             // no projection step). On MCU the sink is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.

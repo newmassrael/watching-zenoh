@@ -67,7 +67,8 @@ use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
 use crate::named_key::{NamedKey, Prefix};
 use crate::pubsub::{
-    any_local_match, fire_into_memoized, scan_subscribers, MatchMemo, RowRef, SubscriberRows,
+    any_local_match, fire_into_memoized, past_matcher_depth, row_reaches, scan_subscribers,
+    MatchMemo, RowRef, SubscriberRows,
 };
 #[cfg(feature = "storage-profile")]
 use crate::query::any_local_queryable;
@@ -2941,6 +2942,44 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.subscribers.get(handle)?.callback.begin()
     }
 
+    /// The next subscriber `fan` reaches, with a call begun on its row, with the tables held: what
+    /// the call is made with once they are let go, `None` when no row at or after `fan`'s place is
+    /// reached. The rows are walked in the table's order from the place after the last one pinned,
+    /// matched by the rule every walk of the subscribers keeps (`row_reaches`), so a message is
+    /// handed to the rows a fan-out from a peer reaches, in its order, one call at a time; a row
+    /// undeclared while an earlier call ran is retired and begins no call. End each call with
+    /// [`RowCallback::end`]; when it was the last call of a row undeclared meanwhile, let the row go
+    /// with [`Self::release_drained_subscriber`].
+    pub fn pin_next_subscriber(
+        &self,
+        fan: &mut PinnedFanOut<'_>,
+    ) -> Option<<F::Subscriber as RowCallback>::Call> {
+        const {
+            assert!(row_may_lie_in::<F::Subscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
+        }
+        if fan.past_depth {
+            return None;
+        }
+        let from = fan.next;
+        let (place, call) = self
+            .subscribers
+            .live_handles()
+            .skip_while(|(place, _, _)| *place < from)
+            .find_map(|(place, _, row)| {
+                let found = RowRef {
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                };
+                if !row_reaches(&found, fan.key, fan.facts, true) {
+                    return None;
+                }
+                row.callback.begin().map(|call| (place, call))
+            })?;
+        fan.next = place.saturating_add(1);
+        Some(call)
+    }
+
     /// Let go of the subscriber `handle` named, undeclared while a call of it ran, once that call
     /// ended last: its row, to drop where no lock is held.
     pub fn release_subscriber(&mut self, handle: SubscriberHandle) -> Option<Subscriber<F, P>> {
@@ -3630,6 +3669,32 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
             for (handle, row) in self.subscribers.iter_mut() {
                 cx.end_plain_frame(handle, RowAccess::Held(&mut row.callback));
             }
+        }
+    }
+}
+
+/// A peer's message's walk of the subscribers it reaches, one row pinned at a time
+/// ([`SessionTables::pin_next_subscriber`]): the key, read once, and the place the next row is
+/// looked for from. Held by whoever delivers the message, beside the key, across the calls it makes
+/// with the tables let go, so the tables keep nothing of a delivery under way.
+pub struct PinnedFanOut<'k> {
+    key: &'k str,
+    facts: KeyFacts,
+    /// Deeper than the matcher's bound: the message reaches no row.
+    past_depth: bool,
+    /// The place the next row is looked for from: the one after the row pinned last.
+    next: usize,
+}
+
+impl<'k> PinnedFanOut<'k> {
+    /// The walk of the subscribers a peer's message on `key` reaches, from the table's first row.
+    pub fn new(key: &'k str) -> Self {
+        let facts = KeyFacts::of(key);
+        Self {
+            key,
+            facts,
+            past_depth: past_matcher_depth(key, facts),
+            next: 0,
         }
     }
 }
