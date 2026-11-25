@@ -51,30 +51,45 @@ for inlined code is the file of the inlined function, and the FILE is placed by 
 The copies of a generic go to the file that defines it, as they go to its owner in the symbol
 reading.
 
-Inlined STANDARD LIBRARY code is the exception (owner's ruling, 2026-11-25). A byte whose line
-names a file of core, alloc, std or a crate they vendor (`/rustc/<hash>/library/..`) goes to the
-file of the innermost call in its inline chain written outside the standard library: the caller.
-What `ptr::write`, `Option::map` or a slice index inlines into a wz function is that function's
-code, as in C the same work is the operators and macros of the caller's own line, which the line
-table already gives the caller. Only a standard library function's own body, a function left out
-of line, keeps its file, and is language support. The chain is read from `.debug_info`: each
-DW_TAG_inlined_subroutine's addresses (DW_AT_low_pc and DW_AT_high_pc, or DW_AT_ranges) and the
-file of its call (DW_AT_call_file, in its unit's line table), the calls of a function the linker
-discarded left out as its rows are. A call whose file the table does not name ends the walk and
-the byte keeps its file. A standard library macro expanded in wz code is not in the chain, but the
-toolchain collapses an external macro's lines to its call site, so its bytes are the caller's line
-already. `--explain` says per area how many bytes this moved into it. zenoh-pico's lines name no
-standard library file, so its inline tree is not read: its toolchain headers' inline functions stay
-`toolchain/..`.
+Inlined LANGUAGE RUNTIME code is the exception (owner's ruling, 2026-11-25), by one rule on both
+sides. A byte whose line names a file of the runtime of the language it is written in goes to the
+file of the innermost call in its inline chain written outside the runtime: the caller. Rust's
+runtime is core, alloc, std and the crates they vendor (`/rustc/<hash>/library/..`); C's is the
+toolchain's headers (`/usr/include`, a sysroot's or a cross C library's `include`, the
+compiler's own `lib/gcc/../include`), where the C library's and libgcc's inline functions are
+written. What `ptr::write`, `Option::map` or a slice index inlines into a wz function is that
+function's code, as a fortified `memcpy` inlined into a zenoh-pico function is that function's.
+Only a runtime function's own body, a function left out of line, keeps its file, and is language
+support. A runtime macro expanded in a caller is not in the chain, but the toolchain collapses an
+external macro's lines to its call site, so its bytes are the caller's line already.
+
+The chain is the byte's FRAMES, read from `.debug_info`: the function whose code holds it
+(DW_TAG_subprogram) and each call inlined into it (DW_TAG_inlined_subroutine), each by its
+addresses (DW_AT_low_pc and DW_AT_high_pc, or DW_AT_ranges), an inlined call with the file of the
+call (DW_AT_call_file) and each frame with the file its function is declared in (DW_AT_decl_file,
+through DW_AT_abstract_origin and DW_AT_specification, in the line table of the unit that states
+it, which under LTO can be another unit). The frames of a function the linker discarded are left
+out, as its rows are. The walk goes from the innermost inlined call outwards and ends at the
+function's own file; a call whose file the table does not name ends it, and the byte keeps its
+file. GCC at `-g1` writes the functions and not their inline trees, so a zenoh-pico byte of a
+toolchain header goes to the file of the function that holds it.
+
+A byte the line table names no source for, a row of line 0 or a byte no row covers, is the code
+of the innermost frame that holds it: the file its function is declared in, the compiler's own code
+in a function (drop glue, a closure's shim, a piece of a panic path) being that function's. When
+that function is the language runtime's, or no entry declares its file, the byte goes to its
+caller by the same walk, and a runtime function's own body keeps the runtime's file. Only a byte no
+function's code holds (an object built without debug information, the C runtime's start files) is
+UNATTRIBUTED: counted apart, in no area, and either library's unattributed bytes over
+`unattributed_bytes_at_most` fail, naming the bodies that hold most. LLVM gives line 0 to more
+code than GCC does, so reading it by its frame is what keeps that difference out of the comparison,
+and the limit is what keeps the rest from taking bytes out of wz's areas unseen. `--explain` says
+per area how many bytes of inlined runtime code and how many bytes of no source line it counts.
 
 The line tables are read from the build's bytes, DWARF 2 to 5, with `.debug_info` giving each
 unit's compilation directory, which a relative path is read from. A sequence that starts outside
 the library's executable sections is the table of a function the linker discarded (GNU ld writes
-its address as 0) and is left out. A row of line 0, and a byte no row covers (an object built
-without line tables, the C runtime's), is UNATTRIBUTED: counted apart, in no area, and either
-library's unattributed bytes over `unattributed_bytes_at_most` fail, naming the bodies that hold
-most. LLVM gives line 0 to more code than GCC does, so the limit is what keeps that difference from
-taking bytes out of wz's areas unseen.
+its address as 0) and is left out.
 
 wz: the owner of a file is a crate::module path, as an owner rule names it. A file in a crate's
 source tree (the directory of its library's root, found by the `Cargo.toml` above it under the
@@ -92,8 +107,8 @@ vector and string the no-heap build holds its tables in) is the counterpart of z
 
 zenoh-pico: the owner of a file is its path in the export of the submodule the reference was built
 from (`src/..`, `include/..`). A file outside the export is the C toolchain's,
-`toolchain/<its path>`: the compiler's and the C library's headers, whose inline functions (the
-fortified string functions) are language support.
+`toolchain/<its path>`: the compiler's and the C library's headers, whose inline functions are
+their callers' where they are inlined (above) and language support where they are left out of line.
 
 ## The symbol reading, beside it
 
@@ -151,8 +166,8 @@ ratio and fails: its rules give that side none of its code.
 
 `--explain` reads the same case as `--measure` (the same builds, so after a measure it builds
 nothing again) and says, for each area, what holds its bytes, and how many bytes the symbol reading
-gives it, and how many bytes of inlined standard library code it counts by their caller's file: on
-the wz side the owner modules and the source files by bytes, the bodies by their bytes
+gives it, and how many bytes of inlined language runtime code it counts by their caller's file and
+how many bytes of no source line by their frame's: on the wz side the owner modules and the source files by bytes, the bodies by their bytes
 in the area with the name each is shown by and how many other names its address carries, and the
 generic functions with more than one copy (a demangled name with every generic argument list
 removed is one function); on the zenoh-pico side the source files by bytes. The unclassified and
@@ -241,7 +256,7 @@ EXPLAIN_SYMBOLS = 40
 EXPLAIN_GENERICS = 30
 EXPLAIN_FILES = 20
 EXPLAIN_NAME_WIDTH = 140
-EXPLAIN_SCHEMA = 2
+EXPLAIN_SCHEMA = 3
 DEMANGLER = "c++filt"
 EXPLAIN_DIR = "size-ledger"
 UNCLASSIFIED_AREA = "(unclassified)"
@@ -674,8 +689,8 @@ SHF_EXECINSTR = elf_facts.SHF_EXECINSTR
 SHF_COMPRESSED = 0x800
 ELFCOMPRESS_ZLIB = 1
 # The sections the line reader reads: the tables, the units that name their directories and hold
-# the inline trees, the strings either can point into, and the address and range tables an inlined
-# call's addresses are read from.
+# the functions and their inline trees, the strings either can point into, and the address and
+# range tables a frame's addresses are read from.
 DWARF_SECTIONS = (".debug_line", ".debug_info", ".debug_abbrev", ".debug_str", ".debug_line_str",
                   ".debug_str_offsets", ".debug_addr", ".debug_ranges", ".debug_rnglists")
 DW_TAG_INLINED_SUBROUTINE = 0x1D
@@ -690,13 +705,21 @@ DW_AT_HIGH_PC = 0x12
 DW_AT_COMP_DIR = 0x1B
 DW_AT_RANGES = 0x55
 DW_AT_CALL_FILE = 0x58
+DW_AT_DECL_FILE = 0x3A
+DW_AT_ABSTRACT_ORIGIN = 0x31
+DW_AT_SPECIFICATION = 0x47
 DW_AT_STR_OFFSETS_BASE = 0x72
 DW_AT_ADDR_BASE = 0x73
 DW_AT_RNGLISTS_BASE = 0x74
-# The attributes the inline reader keeps of an entry: where its code is and the file of its call.
-_PLACE_ATTRIBUTES = frozenset((DW_AT_STMT_LIST, DW_AT_LOW_PC, DW_AT_HIGH_PC, DW_AT_RANGES,
-                               DW_AT_CALL_FILE, DW_AT_ADDR_BASE, DW_AT_RNGLISTS_BASE))
+# The attributes the frame reader keeps of an entry: where its code is, the file of its call, the
+# file its function is declared in and the entries that state what it does not.
+_FRAME_ATTRIBUTES = frozenset((DW_AT_STMT_LIST, DW_AT_LOW_PC, DW_AT_HIGH_PC, DW_AT_RANGES,
+                               DW_AT_CALL_FILE, DW_AT_ADDR_BASE, DW_AT_RNGLISTS_BASE,
+                               DW_AT_DECL_FILE, DW_AT_ABSTRACT_ORIGIN, DW_AT_SPECIFICATION))
 DW_FORM_ADDR = 0x01
+DW_FORM_REF_ADDR = 0x10
+# ref1, ref2, ref4, ref8 and ref_udata: an offset from the start of the entry's own unit.
+_UNIT_REF_FORMS = frozenset((0x11, 0x12, 0x13, 0x14, 0x15))
 DW_FORM_RNGLISTX = 0x23
 # addrx, addrx1 to addrx4: an index into the unit's table of .debug_addr.
 _ADDRX_FORMS = frozenset((0x1B, 0x29, 0x2A, 0x2B, 0x2C))
@@ -1108,12 +1131,15 @@ def line_sequences(sections: Mapping[str, bytes], little: bool) -> list[LineSequ
 @dataclass(frozen=True)
 class Span:
     """Code bytes [start, end) of one row: the source the row names, None when it names none.
-    `inlined` is the standard library file the row names for bytes `to_callers` gave to the
-    file of the call that inlined them, which is then `source`; None for bytes it left alone."""
+    `inlined` is the language runtime file the row names for bytes `to_frames` gave to the
+    file of the call that inlined them, which is then `source`; None for bytes it left alone.
+    `framed` says the row names no source for these bytes (line 0, or no row) and `source` is
+    the file of the frame that holds them (`frame_file`)."""
     start: int
     end: int
     source: str | None
     inlined: str | None = None
+    framed: bool = False
 
 
 def live_spans(sequences: Iterable[tuple[list[LineRow], int]],
@@ -1141,18 +1167,22 @@ def live_spans(sequences: Iterable[tuple[list[LineRow], int]],
     return out
 
 
-# ── the inline tree ────────────────────────────────────────────────────────────────────────────
+# ── the frames: functions and their inline trees ───────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
-class Inline:
-    """Code bytes [start, end) of one inlined call (DW_TAG_inlined_subroutine): how deep it is in
-    its function's inline tree (1 for a call inlined into the function itself) and the file of the
-    call, in its caller (DW_AT_call_file; None when the unit's line table has no such file)."""
+class Frame:
+    """Code bytes [start, end) of one frame: a function's own code (depth 0, DW_TAG_subprogram) or
+    a call inlined into it (DW_TAG_inlined_subroutine, depth 1 for a call inlined into the function
+    itself). `call` is the file of an inlined call in its caller (DW_AT_call_file; None when the
+    unit's line table has no such file, and for depth 0); `origin` the file the frame's function
+    is declared in (DW_AT_decl_file, through DW_AT_abstract_origin and DW_AT_specification when the
+    entry states none; None when no entry of the chain does)."""
     start: int
     end: int
     depth: int
     call: str | None
+    origin: str | None = None
 
 
 def _number(entry: tuple[int, object], unit: _Unit) -> int:
@@ -1265,16 +1295,59 @@ class _Places:
                 out.append((base + start, base + end))
 
 
-def inline_calls(sections: Mapping[str, bytes], little: bool, code: list[tuple[int, int]],
-                 files: Mapping[int, FileNames]) -> list[Inline]:
-    """Every inlined call of the compile units of `.debug_info` whose function has code in the
-    library (`code`, its executable sections' ranges; a function the linker discarded has its
-    address outside them, as `live_spans` reads), with the file of each call read from its unit's
-    line table (`files`, by DW_AT_stmt_list)."""
+def _references(values: Mapping[int, tuple[int, object]], unit: _Unit) -> tuple[int, ...]:
+    """The offsets in `.debug_info` of the entries an entry's DW_AT_abstract_origin and
+    DW_AT_specification name, in that order; a reference of another form (a type signature, a
+    supplementary file) names none read here."""
+    out: list[int] = []
+    for name in (DW_AT_ABSTRACT_ORIGIN, DW_AT_SPECIFICATION):
+        entry = values.get(name)
+        if entry is None:
+            continue
+        if entry[0] in _UNIT_REF_FORMS:
+            out.append(unit.at + _number(entry, unit))
+        elif entry[0] == DW_FORM_REF_ADDR:
+            out.append(_number(entry, unit))
+    return tuple(out)
+
+
+def _declared_file(declared: Mapping[int, tuple[str | None, tuple[int, ...]]], entry: int | None,
+                   known: dict[int, str | None]) -> str | None:
+    """The file the function of the subprogram entry at `entry` is declared in: its own
+    DW_AT_decl_file, else that of the entries it refers to, nearest first; None when none states
+    one. `known` keeps what was found per entry."""
+    if entry is None:
+        return None
+    if entry not in known:
+        seen: set[int] = set()
+        todo = [entry]
+        found: str | None = None
+        while todo and found is None:
+            at = todo.pop(0)
+            if at in seen or at not in declared:
+                continue
+            seen.add(at)
+            found, refers = declared[at]
+            todo += refers
+        known[entry] = found
+    return known[entry]
+
+
+def code_frames(sections: Mapping[str, bytes], little: bool, code: list[tuple[int, int]],
+                files: Mapping[int, FileNames]) -> list[Frame]:
+    """Every frame of the compile units of `.debug_info` whose function has code in the library
+    (`code`, its executable sections' ranges; a function the linker discarded has its address
+    outside them, as `live_spans` reads): each function's own and each call inlined into it, with
+    the file of each call and each declaration read from the line table of the unit that states it
+    (`files`, by DW_AT_stmt_list). A function's declaration can be in another unit (an abstract
+    instance under LTO), so the files are resolved once every unit is read."""
     info = sections.get(".debug_info", b"")
     abbrev = sections.get(".debug_abbrev", b"")
     tables: dict[int, dict[int, Abbreviation]] = {}
-    out: list[Inline] = []
+    # Each subprogram entry by its offset: its own declared file and the entries it refers to.
+    declared: dict[int, tuple[str | None, tuple[int, ...]]] = {}
+    # Each frame as read: its range, its depth, its call's file and the entry that declares it.
+    read: list[tuple[int, int, int, str | None, int | None]] = []
     for unit in _units(info, little):
         if unit.kind not in (DW_UT_COMPILE, DW_UT_PARTIAL):
             continue
@@ -1284,6 +1357,7 @@ def inline_calls(sections: Mapping[str, bytes], little: bool, code: list[tuple[i
         # Per open entry with children: its depth in an inline tree, and whether its code is live.
         open_: list[tuple[int, bool]] = []
         while cur.pos < unit.end:
+            at = cur.pos
             code_ = cur.uleb()
             if code_ == 0:
                 if open_:
@@ -1293,115 +1367,156 @@ def inline_calls(sections: Mapping[str, bytes], little: bool, code: list[tuple[i
             values: dict[int, tuple[int, object]] = {}
             for name, form, implicit in attributes:
                 value = _form_value(cur, form, unit.offsets, unit.address, sections, implicit)
-                if name in _PLACE_ATTRIBUTES:
+                if name in _FRAME_ATTRIBUTES:
                     values[name] = (form, value)
             depth, live = open_[-1] if open_ else (0, False)
             if tag in (DW_TAG_COMPILE_UNIT, DW_TAG_PARTIAL_UNIT):
                 places = _Places(sections, little, unit, values)
                 stmt = values.get(DW_AT_STMT_LIST)
-                if stmt is not None and isinstance(stmt[1], int) and stmt[1] in files:
-                    names = files[stmt[1]]
+                names = (files[stmt[1]] if stmt is not None and isinstance(stmt[1], int)
+                         and stmt[1] in files else _no_file)
                 depth, live = 0, False
-            elif tag == DW_TAG_SUBPROGRAM and places is not None:
-                depth = 0
-                live = any(lo <= start < hi for start, end in places.ranges(values) if end > start
-                           for lo, hi in code)
+            elif tag == DW_TAG_SUBPROGRAM:
+                decl = values.get(DW_AT_DECL_FILE)
+                declared[at] = (names(decl[1]) if decl is not None and isinstance(decl[1], int)
+                                else None, _references(values, unit))
+                if places is not None:
+                    depth = 0
+                    ranges = [(start, end) for start, end in places.ranges(values) if end > start]
+                    live = any(lo <= start < hi for start, _ in ranges for lo, hi in code)
+                    if live:
+                        read += [(start, end, 0, None, at) for start, end in ranges]
             elif tag == DW_TAG_INLINED_SUBROUTINE:
                 depth += 1
                 if live and places is not None:
                     call = values.get(DW_AT_CALL_FILE)
                     where = (names(call[1]) if call is not None and isinstance(call[1], int)
                              else None)
-                    out += [Inline(start, end, depth, where)
-                            for start, end in places.ranges(values) if end > start]
+                    origin = _references(values, unit)
+                    read += [(start, end, depth, where, origin[0] if origin else None)
+                             for start, end in places.ranges(values) if end > start]
             if children:
                 open_.append((depth, live))
-    return out
+    known: dict[int, str | None] = {}
+    return [Frame(start, end, depth, call, _declared_file(declared, entry, known))
+            for start, end, depth, call, entry in read]
 
 
-def inline_chains(inlines: Iterable[Inline]) -> list[tuple[int, int, tuple[str | None, ...]]]:
-    """The address ranges inlined code covers, sorted, none overlapping, each with the files of the
-    calls that inlined its bytes, the innermost call first: within one range the same calls hold
-    every byte."""
-    calls = [call for call in inlines if call.end > call.start]
+Chain = tuple[Frame, ...]
+
+
+def frame_chains(frames: Iterable[Frame]) -> list[tuple[int, int, Chain]]:
+    """The address ranges the frames cover, sorted, none overlapping, each with the frames that
+    hold its bytes, the innermost first: within one range the same frames hold every byte."""
+    held_by = [frame for frame in frames if frame.end > frame.start]
     opened: dict[int, list[int]] = {}
     closed: dict[int, list[int]] = {}
-    for n, call in enumerate(calls):
-        opened.setdefault(call.start, []).append(n)
-        closed.setdefault(call.end, []).append(n)
+    for n, frame in enumerate(held_by):
+        opened.setdefault(frame.start, []).append(n)
+        closed.setdefault(frame.end, []).append(n)
     points = sorted(set(opened) | set(closed))
     held: set[int] = set()
-    out: list[tuple[int, int, tuple[str | None, ...]]] = []
+    out: list[tuple[int, int, Chain]] = []
     for at, point in enumerate(points):
         held.difference_update(closed.get(point, ()))
         held.update(opened.get(point, ()))
         if held and at + 1 < len(points):
-            chain = tuple(calls[n].call for n in sorted(held, key=lambda n: (-calls[n].depth, n)))
+            chain = tuple(held_by[n] for n in sorted(held, key=lambda n: (-held_by[n].depth, n)))
             out.append((point, points[at + 1], chain))
     return out
 
 
-def caller_file(chain: Iterable[str | None]) -> str | None:
-    """The file of the innermost call in `chain` (innermost first) written outside the standard
-    library, or None when every call is the standard library's (the bytes are of a standard
-    library function's own body) or one call's file is unknown before such a call is reached."""
-    for call in chain:
-        if call is None:
+def frame_homes(chain: Chain) -> tuple[str | None, ...]:
+    """The files the code of a chain (innermost first) is written in, from the innermost caller
+    out: the file of each inlined call, then the file of the function the calls are inlined into."""
+    return tuple(frame.call if frame.depth else frame.origin for frame in chain)
+
+
+def caller_file(homes: Iterable[str | None]) -> str | None:
+    """The first file of `homes` (innermost first) written outside the language runtime, or None
+    when every one is the runtime's (the bytes are of a runtime function's own body) or one is
+    unknown before such a file is reached."""
+    for home in homes:
+        if home is None:
             return None
-        if not standard_library_file(call):
-            return call
+        if not language_runtime_file(home):
+            return home
     return None
 
 
-def to_callers(spans: list[Span], inlines: Iterable[Inline]) -> list[Span]:
-    """`spans` with the bytes of every standard library file inlined into code written outside it
-    given to the file of the innermost such call (`caller_file`), the line table's file kept in
-    `inlined`; the bytes of a standard library function's own body keep their file. Module doc,
-    "Who wrote a byte"."""
-    chains = inline_chains(inlines)
-    starts = [chain[0] for chain in chains]
+def frame_file(chain: Chain) -> str | None:
+    """The file of a byte the line table names no source for, held by `chain` (innermost first):
+    the file the innermost frame's function is declared in, the compiler's code in a function
+    (drop glue, a closure's shim, a panic path's piece) being that function's. A function of the
+    language runtime, and one no entry declares a file for, is its caller's (`caller_file`); a
+    runtime function's own body keeps its file. None when no file is found."""
+    origin = chain[0].origin
+    if origin is not None and not language_runtime_file(origin):
+        return origin
+    caller = caller_file(frame_homes(chain))
+    return caller if caller is not None else origin
+
+
+def _framed(start: int, stop: int, span: Span | None, chain: Chain | None) -> Span | None:
+    """Bytes [start, stop) of `span` (None where no row covers them), held by `chain`: a file
+    of the language runtime inlined into code written outside it goes to that code's file
+    (`caller_file`), and bytes of no source go to their frame's (`frame_file`)."""
+    if span is not None and span.source is not None:
+        if chain is None or not language_runtime_file(span.source):
+            return Span(start, stop, span.source)
+        caller = caller_file(frame_homes(chain))
+        return (Span(start, stop, caller, span.source) if caller is not None
+                else Span(start, stop, span.source))
+    home = frame_file(chain) if chain is not None else None
+    if home is not None:
+        return Span(start, stop, home, framed=True)
+    return None if span is None else Span(start, stop, None)
+
+
+def to_frames(spans: list[Span], frames: Iterable[Frame]) -> list[Span]:
+    """`spans` read with the frames that hold their bytes (module doc, "Who wrote a byte"): the
+    bytes of a language runtime file inlined into code written outside it go to the file of the
+    innermost such call, the line table's file kept in `inlined`; the bytes of line 0 and those
+    no row covers go to their frame's file, marked `framed`; the bytes of a runtime function's
+    own body keep their file, and bytes no frame holds keep what the line table says. `spans` are
+    sorted and none overlaps (`live_spans`)."""
+    chains = frame_chains(frames)
+    if not chains:
+        return spans
+    points = sorted({p for span in spans for p in (span.start, span.end)}
+                    | {p for start, end, _ in chains for p in (start, end)})
     out: list[Span] = []
-
-    def put(span: Span) -> None:
-        last = out[-1] if out else None
-        if (last is not None and last.end == span.start and last.source == span.source
-                and last.inlined == span.inlined):
-            out[-1] = Span(last.start, span.end, last.source, last.inlined)
-        else:
-            out.append(span)
-
-    for span in spans:
-        if span.source is None or not standard_library_file(span.source):
-            out.append(span)
+    at_span = at_chain = 0
+    for start, stop in zip(points, points[1:]):
+        while at_span < len(spans) and spans[at_span].end <= start:
+            at_span += 1
+        while at_chain < len(chains) and chains[at_chain][1] <= start:
+            at_chain += 1
+        span = (spans[at_span] if at_span < len(spans) and spans[at_span].start <= start
+                else None)
+        chain = (chains[at_chain][2] if at_chain < len(chains) and chains[at_chain][0] <= start
+                 else None)
+        piece = _framed(start, stop, span, chain)
+        if piece is None:
             continue
-        at = max(bisect.bisect_right(starts, span.start) - 1, 0)
-        pos = span.start
-        while pos < span.end:
-            while at < len(chains) and chains[at][1] <= pos:
-                at += 1
-            if at < len(chains) and chains[at][0] <= pos:
-                stop = min(chains[at][1], span.end)
-                caller = caller_file(chains[at][2])
-            else:
-                stop = min(chains[at][0], span.end) if at < len(chains) else span.end
-                caller = None
-            put(Span(pos, stop, caller, span.source) if caller is not None
-                else Span(pos, stop, span.source))
-            pos = stop
+        last = out[-1] if out else None
+        if (last is not None and last.end == piece.start and last.source == piece.source
+                and last.inlined == piece.inlined and last.framed == piece.framed):
+            out[-1] = Span(last.start, piece.end, last.source, last.inlined, last.framed)
+        else:
+            out.append(piece)
     return out
 
 
 def dwarf_spans(dwarf: Mapping[str, bytes], little: bool,
                 code: list[tuple[int, int]]) -> list[Span]:
-    """The line spans of a library's code (`live_spans`), its inlined standard library code given
-    to its callers (`to_callers`). The inline tree is read only when a span names a standard
-    library file, so a library of none (zenoh-pico) is read from its line tables alone."""
+    """The line spans of a library's code (`live_spans`) read with the frames of its functions
+    (`to_frames`): inlined language runtime code goes to its caller's file and code of no source
+    line to its frame's, on either side by the same rule."""
     tables = line_tables(dwarf, little)
     spans = live_spans([sequence for found, _ in tables.values() for sequence in found], code)
-    if not any(span.source is not None and standard_library_file(span.source) for span in spans):
-        return spans
     files = {at: names for at, (_, names) in tables.items()}
-    return to_callers(spans, inline_calls(dwarf, little, code, files))
+    return to_frames(spans, code_frames(dwarf, little, code, files))
 
 
 def _section_data(data: bytes, section: elf_facts.Section) -> bytes:
@@ -1444,6 +1559,16 @@ def read_spans(lib: pathlib.Path) -> list[Span]:
 # and one of a crate the standard library vendors.
 _STD_SOURCE = re.compile(r"(?:^/rustc/[0-9a-f]+|/lib/rustlib/src/rust)/library/(.+)$")
 _STD_VENDORED = re.compile(r"^/rust/deps/([A-Za-z0-9_.-]+?)-\d[^/]*/(.+)$")
+# A header of a C toolchain: the C library's (`/usr/include`, a sysroot's `usr/include`, a cross C
+# library's `<target triple>/include`) and the compiler's own (GCC's
+# `lib/gcc/<triple>/<version>/include`, clang's `lib/clang/<version>/include`), where libgcc's
+# and the C library's inline functions (the fortified string functions) are written.
+_C_TOOLCHAIN_HEADER = re.compile(
+    r"(?:^|/)usr/include/"
+    r"|/lib/gcc(?:-cross)?/[^/]+/[^/]+/include(?:-fixed)?/"
+    r"|/lib/clang/[^/]+/include/"
+    r"|/[A-Za-z0-9_]+(?:-[A-Za-z0-9_.]+)*"
+    r"-(?:elf|eabi|eabihf|gnu|gnueabi|gnueabihf|musl|musleabi|musleabihf)/include/")
 _MANIFEST_TABLE = re.compile(r"^\s*(\[+)\s*([^\[\]]+?)\s*\]")
 _MANIFEST_KEY = re.compile(r"""^\s*(name|path)\s*=\s*["']([^"']+)["']""")
 
@@ -1486,10 +1611,13 @@ def module_of_file(rel: str, root_file: str) -> list[str] | None:
     return parts[:-1] if parts[-1] == "mod" else parts
 
 
-def standard_library_file(path: str) -> bool:
-    """Whether `path` is a file of the standard library (core, alloc, std and the crates below
-    `library/`) or of a crate it vendors, as the toolchain's own build names it."""
-    return _STD_SOURCE.search(path) is not None or _STD_VENDORED.match(path) is not None
+def language_runtime_file(path: str) -> bool:
+    """Whether `path` is a file of a language's runtime, whose code inlined into a library is
+    the caller's (module doc, "Who wrote a byte"): of Rust's standard library (core, alloc, std
+    and the crates below `library/`) or of a crate it vendors, as the toolchain's own build names
+    it, or a header of a C toolchain."""
+    return (_STD_SOURCE.search(path) is not None or _STD_VENDORED.match(path) is not None
+            or _C_TOOLCHAIN_HEADER.search(path) is not None)
 
 
 def std_owner(path: str) -> str | None:
@@ -1778,9 +1906,12 @@ class Piece:
     source: str | None
     owner: str | None
     area: str | None
-    # Whether these are bytes of the standard library inlined here and given to the file of the
-    # call that inlined them (`to_callers`).
+    # Whether these are bytes of the language runtime inlined here and given to the file of the
+    # call that inlined them (`to_frames`).
     inlined: bool = False
+    # Whether the line table names no source for these bytes and they are given to the file of the
+    # frame that holds them (`frame_file`).
+    framed: bool = False
 
 
 def name_area(rules: Rules, body: Body, areas: list[str]) -> tuple[str | None, set[str]]:
@@ -1806,9 +1937,10 @@ def attribute(bodies: Iterable[Body], spans: list[Span],
               areas: list[str]) -> tuple[list[Piece], set[str]]:
     """Each body's bytes by the source the line table gives them (module doc, "Who wrote a byte"):
     a byte of the body's own file goes to the area a name rule gives the body when one does, every
-    other byte to the owner rule of its file's owner; a byte of line 0 or of no row is
-    unattributed. `spans` are `dwarf_spans`, so the file of inlined standard library code is
-    its caller's. Returns the pieces and the rules that placed a byte."""
+    other byte to the owner rule of its file's owner; a byte no span gives a source is
+    unattributed. `spans` are `dwarf_spans`, so the file of inlined language runtime code is
+    its caller's and the file of a byte of no source line its frame's. Returns the pieces and the
+    rules that placed a byte."""
     starts = [span.start for span in spans]
     pieces: list[Piece] = []
     used: set[str] = set()
@@ -1816,7 +1948,7 @@ def attribute(bodies: Iterable[Body], spans: list[Span],
         own = source_at(spans, starts, body.address)
         named, by_name = name_area(rules, body, areas)
         low, high = body.address, body.address + body.size
-        sizes: dict[tuple[str | None, str | None, str | None, bool], int] = {}
+        sizes: dict[tuple[str | None, str | None, str | None, bool, bool], int] = {}
         covered = 0
         at = max(bisect.bisect_right(starts, low) - 1, 0)
         while at < len(spans) and spans[at].start < high:
@@ -1828,21 +1960,23 @@ def attribute(bodies: Iterable[Body], spans: list[Span],
             covered += count
             moved = span.inlined is not None
             if span.source is None:
-                key: tuple[str | None, str | None, str | None, bool] = (None, None, None, False)
+                key: tuple[str | None, str | None, str | None, bool, bool] = (
+                    None, None, None, False, False)
             else:
                 owner = owners.get(span.source, (None, None))[0]
                 if named is not None and span.source == own:
                     used |= by_name
-                    key = (span.source, owner, named, moved)
+                    key = (span.source, owner, named, moved, span.framed)
                 else:
                     prefix = owner_rule(rules, owner) if owner is not None else None
                     if prefix is not None:
                         used.add(f"owners {prefix}")
                     key = (span.source, owner,
-                           rules.owners[prefix] if prefix is not None else None, moved)
+                           rules.owners[prefix] if prefix is not None else None, moved,
+                           span.framed)
             sizes[key] = sizes.get(key, 0) + count
         if covered < body.size:
-            unlined = (None, None, None, False)
+            unlined = (None, None, None, False, False)
             sizes[unlined] = sizes.get(unlined, 0) + body.size - covered
         pieces += [Piece(body, count, *key) for key, count in sizes.items()]
     return pieces, used
@@ -2025,7 +2159,8 @@ def unattributed_findings(side: str, tallied: Tally, limit: int | None) -> list[
     shown = "; ".join(f"{size} B {' = '.join(names)}"
                       for size, names in tallied.unattributed[:UNCLASSIFIED_NAMED])
     return [f"{side}: {tallied.unattributed_bytes} bytes of text in {len(tallied.unattributed)} "
-            f"bodies have no source line (line 0, or no row of the line table), over the {limit} "
+            f"bodies have no source line and no frame (line 0, or no row of the line table, "
+            f"outside every function's code), over the {limit} "
             f"{where} allows, so the areas no longer hold the code they are read from; the bodies "
             f"that hold most: {shown}"]
 
@@ -2095,7 +2230,8 @@ def table_lines(table: dict, wz: Tally, pico: Tally) -> list[str]:
                  f"{pico.unclassified_bytes} of zenoh-pico, at most "
                  f"{table['unclassified_bytes_at_most']} each")
     limit = table["unattributed_bytes_at_most"]
-    lines.append(f"  size-ledger:   unattributed (no source line): {wz.unattributed_bytes} "
+    lines.append(f"  size-ledger:   unattributed (no source line, no frame): "
+                 f"{wz.unattributed_bytes} "
                  f"bytes of wz, {pico.unattributed_bytes} of zenoh-pico, "
                  f"{'no limit yet' if limit is None else f'at most {limit} each'}")
     return lines
@@ -2176,20 +2312,24 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
     """What holds one side's bytes of one area: its owners (a wz module, a zenoh-pico file), its
     bodies by their bytes here, and on the wz side its source files and its generic functions with
     more than one copy; each list whole, largest first. `by_symbol` is what the symbol reading
-    gives the area, and `inlined` the bytes of standard library code inlined into the area's
-    functions that are counted in it by the file of the call (`to_callers`), in
-    `inlined_bodies` bodies."""
+    gives the area, `inlined` the bytes of language runtime code inlined into the area's
+    functions that are counted in it by the file of the call (`to_frames`), in `inlined_bodies`
+    bodies, and `framed` the bytes of no source line counted in it by the file of the frame that
+    holds them (`frame_file`), in `framed_bodies` bodies."""
     owners: dict[str, dict[int, int]] = {}
     files: dict[str, dict[int, int]] = {}
     generics: dict[str, dict[int, int]] = {}
     held: dict[int, tuple[Body, dict[str, int]]] = {}
     total = 0
     inlined: dict[int, int] = {}
+    framed: dict[int, int] = {}
     for piece in pieces:
         total += piece.size
         body = piece.body
         if piece.inlined:
             inlined[body.address] = inlined.get(body.address, 0) + piece.size
+        if piece.framed:
+            framed[body.address] = framed.get(body.address, 0) + piece.size
         label = piece_label(piece)
         name = demangled.get(body.lead.name, body.lead.name)
         for groups, key in ((owners, label), (files, piece.source or NO_LINE),
@@ -2205,6 +2345,7 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
     symbols.sort(key=lambda row: (-row["bytes"], row["name"]))
     out = {"bytes": total, "by_symbol": by_symbol, "bodies": len(symbols),
            "inlined": sum(inlined.values()), "inlined_bodies": len(inlined),
+           "framed": sum(framed.values()), "framed_bodies": len(framed),
            "owners": _ranked(owners, "owner"), "symbols": symbols}
     if side == "wz":
         out["files"] = _ranked(files, "file")
@@ -2296,9 +2437,14 @@ def explain_lines(report: dict, previous: object) -> list[str]:
             said.append(f"{label} {now['bytes']} B in {now['bodies']} bodies{symbol}{delta}")
         lines.append(f"  size-ledger explain: {area}: {', '.join(said)}")
         wz, pico = sides["wz"], sides["pico"]
-        lines.append(f"    standard library code inlined into wz functions and counted here by "
-                     f"its caller's file: {wz.get('inlined', 0)} B in "
-                     f"{wz.get('inlined_bodies', 0)} bodies")
+        lines.append(f"    language runtime code inlined into functions and counted here by "
+                     f"its caller's file: wz {wz.get('inlined', 0)} B in "
+                     f"{wz.get('inlined_bodies', 0)} bodies, zenoh-pico {pico.get('inlined', 0)} "
+                     f"B in {pico.get('inlined_bodies', 0)} bodies")
+        lines.append(f"    code of no source line counted here by the file of its frame: wz "
+                     f"{wz.get('framed', 0)} B in {wz.get('framed_bodies', 0)} bodies, "
+                     f"zenoh-pico {pico.get('framed', 0)} B in {pico.get('framed_bodies', 0)} "
+                     "bodies")
         lines += explain_table("wz modules", wz["owners"], EXPLAIN_OWNERS,
                                ("bytes", "bodies"), lambda row: row["owner"])
         lines += explain_table("wz source files", wz["files"], EXPLAIN_OWNERS,
@@ -2479,7 +2625,8 @@ def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
     wz = tally_pieces(*pieces["wz"], areas)
     pico = tally_pieces(*pieces["pico"], areas)
     print(f"  size-ledger: {case.id}: function bytes by area, each byte by the source its line "
-          f"table names (inlined standard library code by its caller's), against zenoh-pico "
+          f"table names (inlined language runtime code by its caller's, code of no line by its "
+          f"frame's), against zenoh-pico "
           f"{read.pin} as the same build ({read.toolchain}; both linked by {linker})")
     for line in table_lines(table, wz, pico):
         print(line)
@@ -3121,12 +3268,22 @@ def cmd_selftest() -> int:
     # Inlined standard library code goes to its caller's file; a library body keeps its own.
     wz_rs, ptr_rs = "/wz/crates/wz-x/src/lib.rs", "/rustc/abc/library/core/src/ptr/mod.rs"
     opt_rs = "/rustc/abc/library/core/src/option.rs"
-    expect("a standard library file is one of the toolchain's library or a crate it vendors",
-           standard_library_file(ptr_rs)
-           and standard_library_file("/x/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs")
-           and standard_library_file("/rust/deps/hashbrown-0.15.2/src/raw/mod.rs")
-           and not standard_library_file(wz_rs)
-           and not standard_library_file("/cargo/registry/src/i/heapless-0.8.0/src/vec.rs"))
+    fortified = "/usr/include/x86_64-linux-gnu/bits/string_fortified.h"
+    expect("a language runtime file is one of Rust's standard library, a crate it vendors or a C "
+           "toolchain's header, and no file of a crate or of zenoh-pico",
+           language_runtime_file(ptr_rs)
+           and language_runtime_file("/x/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs")
+           and language_runtime_file("/rust/deps/hashbrown-0.15.2/src/raw/mod.rs")
+           and language_runtime_file(fortified)
+           and language_runtime_file("/usr/lib/gcc/x86_64-linux-gnu/13/include/stddef.h")
+           and language_runtime_file("/opt/a/lib/gcc/arm-none-eabi/13.2.1/include/stdint.h")
+           and language_runtime_file("/usr/lib/arm-none-eabi/include/string.h")
+           and language_runtime_file("/sysroot/usr/include/string.h")
+           and not language_runtime_file(wz_rs)
+           and not language_runtime_file("/cargo/registry/src/i/heapless-0.8.0/src/vec.rs")
+           and not language_runtime_file("/wz/p/src/include/zenoh-pico/api/types.h")
+           and not language_runtime_file("/home/u/zenoh-pico/include/zenoh-pico/config.h")
+           and not language_runtime_file("/wz/p/src/src/api/api.c"))
 
     def q8(value: int) -> bytes:
         return struct.pack("<Q", value)
@@ -3179,31 +3336,37 @@ def cmd_selftest() -> int:
             ".debug_abbrev": abbrev4 + abbrev5, ".debug_ranges": ranges4,
             ".debug_addr": addr5, ".debug_rnglists": rnglists5}
     named = {0: "/wz/crates/wz-y/src/lib.rs", 1: wz_rs, 3: opt_rs}.get
-    calls = inline_calls(inline_tree, True, [(0x1000, 0x1200), (0x2000, 0x2100)], {0: named})
-    expect("each inlined call is read with its depth and its call's file, by high_pc, by a range "
-           "list of either version and by an address index; a discarded function's calls are none",
-           [(c.start, c.end, c.depth, c.call) for c in calls]
-           == [(0x1010, 0x1018, 1, wz_rs), (0x1018, 0x1028, 1, wz_rs), (0x1018, 0x1020, 2, opt_rs),
-               (0x1030, 0x1038, 1, wz_rs), (0x1110, 0x1120, 1, opt_rs),
-               (0x2010, 0x2018, 1, "/wz/crates/wz-y/src/lib.rs"),
-               (0x2000, 0x2004, 1, "/wz/crates/wz-y/src/lib.rs")])
+    frames = code_frames(inline_tree, True, [(0x1000, 0x1200), (0x2000, 0x2100)], {0: named})
+    wzy_rs = "/wz/crates/wz-y/src/lib.rs"
+    expect("each function and each inlined call is read with its depth and its call's file, by "
+           "high_pc, by a range list of either version and by an address index; a discarded "
+           "function's frames are none",
+           [(f.start, f.end, f.depth, f.call, f.origin) for f in frames]
+           == [(0x1000, 0x1040, 0, None, None), (0x1010, 0x1018, 1, wz_rs, None),
+               (0x1018, 0x1028, 1, wz_rs, None), (0x1018, 0x1020, 2, opt_rs, None),
+               (0x1030, 0x1038, 1, wz_rs, None), (0x1100, 0x1120, 0, None, None),
+               (0x1110, 0x1120, 1, opt_rs, None), (0x2000, 0x2100, 0, None, None),
+               (0x2010, 0x2018, 1, wzy_rs, None), (0x2000, 0x2004, 1, wzy_rs, None)])
     bare_unit = _Unit(0, 0, 4, 5, DW_UT_COMPILE, 8, 0, 0)
     expect("an index into .debug_addr or .debug_rnglists with no base named is refused",
            _raises(lambda: _Places({}, True, bare_unit, {}).address((0x1B, 0)))
            and _raises(lambda: _Places({}, True, bare_unit, {}).ranges(
                {DW_AT_RANGES: (DW_FORM_RNGLISTX, 0)})))
-    expect("the calls at an address are its chain, the innermost call first",
-           inline_chains(calls[:5])
-           == [(0x1010, 0x1018, (wz_rs,)), (0x1018, 0x1020, (opt_rs, wz_rs)),
-               (0x1020, 0x1028, (wz_rs,)), (0x1030, 0x1038, (wz_rs,)),
-               (0x1110, 0x1120, (opt_rs,))]
+    expect("the frames at an address are its chain, the innermost first, its homes the calls' "
+           "files out to the function's own",
+           [(start, end, frame_homes(chain)) for start, end, chain in frame_chains(frames[:7])]
+           == [(0x1000, 0x1010, (None,)), (0x1010, 0x1018, (wz_rs, None)),
+               (0x1018, 0x1020, (opt_rs, wz_rs, None)), (0x1020, 0x1028, (wz_rs, None)),
+               (0x1028, 0x1030, (None,)), (0x1030, 0x1038, (wz_rs, None)),
+               (0x1038, 0x1040, (None,)), (0x1100, 0x1110, (None,)),
+               (0x1110, 0x1120, (opt_rs, None))]
            and caller_file((opt_rs, wz_rs)) == wz_rs and caller_file((opt_rs,)) is None
            and caller_file((None, wz_rs)) is None and caller_file(()) is None)
-    homed = to_callers(
+    homed = to_frames(
         [Span(0x1000, 0x1010, wz_rs), Span(0x1010, 0x1018, ptr_rs), Span(0x1018, 0x1020, ptr_rs),
          Span(0x1020, 0x1028, opt_rs), Span(0x1028, 0x1030, wz_rs), Span(0x1030, 0x1040, ptr_rs),
          Span(0x1100, 0x1110, opt_rs), Span(0x1110, 0x1120, ptr_rs), Span(0x1200, 0x1208, None)],
-        calls)
+        frames[:7])
     expect("inlined standard library bytes go to the innermost caller outside it, a body of its "
            "own and its own inlines keep their file, and a span half inlined is split",
            [(s.start, s.end, s.source, s.inlined) for s in homed]
@@ -3211,7 +3374,8 @@ def cmd_selftest() -> int:
                (0x1020, 0x1028, wz_rs, opt_rs), (0x1028, 0x1030, wz_rs, None),
                (0x1030, 0x1038, wz_rs, ptr_rs), (0x1038, 0x1040, ptr_rs, None),
                (0x1100, 0x1110, opt_rs, None), (0x1110, 0x1120, ptr_rs, None),
-               (0x1200, 0x1208, None, None)])
+               (0x1200, 0x1208, None, None)]
+           and not any(s.framed for s in homed))
     line_head = (shape + b"/wz/crates/wz-x/src\x00\x00"
                  + b"lib.rs\x00" + uleb(1) + b"\x00\x00" + ptr_rs.encode() + b"\x00" + uleb(0)
                  + b"\x00\x00" + b"\x00")
@@ -3219,18 +3383,21 @@ def cmd_selftest() -> int:
                     + b"\x04\x01" + special(8, 1) + b"\x02\x08" + end_sequence)
     line_body = struct.pack("<HI", 4, len(line_head)) + line_head + line_program
     read_tree = {**inline_tree, ".debug_line": struct.pack("<I", len(line_body)) + line_body}
-    expect("a library's spans take the call's file from its unit's line table",
-           [(s.start, s.end, s.source, s.inlined)
+    expect("a library's spans take the call's file from its unit's line table, and the bytes no "
+           "row covers in a call no entry declares a function for go to the call's file",
+           [(s.start, s.end, s.source, s.inlined, s.framed)
             for s in dwarf_spans(read_tree, True, [(0x1000, 0x1200)])]
-           == [(0x1000, 0x1010, wz_rs, None), (0x1010, 0x1018, wz_rs, ptr_rs),
-               (0x1018, 0x1020, wz_rs, None)])
-    # A unit whose entries after its first the inline reader refuses (an unknown abbreviation).
+           == [(0x1000, 0x1010, wz_rs, None, False), (0x1010, 0x1018, wz_rs, ptr_rs, False),
+               (0x1018, 0x1020, wz_rs, None, False), (0x1020, 0x1028, wz_rs, None, True),
+               (0x1030, 0x1038, wz_rs, None, True)])
+    # A unit whose entries after its first the frame reader refuses (an unknown abbreviation).
     broken = {**dwarf, ".debug_info": struct.pack("<I", len(unit4) + 1) + unit4 + b"\x7f"
               + struct.pack("<I", len(unit5)) + unit5}
-    expect("a library whose lines name no standard library file is its line spans alone, its "
-           "inline tree unread",
-           _raises(lambda: inline_calls(broken, True, [(0x1000, 0x1100)], {}))
-           and dwarf_spans(broken, True, [(0x1000, 0x1100), (0x3000, 0x3100)]) == spans)
+    expect("a library whose functions cannot be read is refused, not read from its lines alone, "
+           "and one whose units hold no function is its line spans",
+           _raises(lambda: code_frames(broken, True, [(0x1000, 0x1100)], {}))
+           and _raises(lambda: dwarf_spans(broken, True, [(0x1000, 0x1100), (0x3000, 0x3100)]))
+           and dwarf_spans(dwarf, True, [(0x1000, 0x1100), (0x3000, 0x3100)]) == spans)
     irules = Rules((), {"wz_x": "x", "core": "language"}, "::")
     ibodies, _ = place_bodies([Symbol(0x1000, 0x40, "_Ra", ("wz_x::f",)),
                                Symbol(0x1100, 0x20, "_Rb", ("core::option::g",))],
@@ -3251,12 +3418,102 @@ def cmd_selftest() -> int:
         "c", "p", "cc 1", "d", ["x", "language"], {"wz": ipieces, "pico": []}, {},
         {"wz": tally(sum((list(b.names) for b in ibodies), []), irules, ["x", "language"]),
          "pico": Tally({"x": 0, "language": 0})}, {"wz": isources, "pico": {}})
+    ilines = explain_lines(ireport, None)
     expect("--explain says per area how many bytes of inlined standard library code it counts",
            ireport["areas"]["x"]["wz"]["inlined"] == 0x20
            and ireport["areas"]["x"]["wz"]["inlined_bodies"] == 1
            and ireport["areas"]["language"]["wz"]["inlined"] == 0
-           and "    standard library code inlined into wz functions and counted here by its "
-               "caller's file: 32 B in 1 bodies" in explain_lines(ireport, None))
+           and "    language runtime code inlined into functions and counted here by its caller's "
+               "file: wz 32 B in 1 bodies, zenoh-pico 0 B in 0 bodies" in ilines
+           and "    code of no source line counted here by the file of its frame: wz 0 B in 0 "
+               "bodies, zenoh-pico 0 B in 0 bodies" in ilines)
+
+    # Code of no source line by its frame, and a C toolchain header inlined by its caller.
+    api_c, helper_rs = "/wz/p/src/src/api/api.c", "/wz/crates/wz-x/src/helper.rs"
+    frame_abbrev = (
+        uleb(1) + uleb(0x11) + b"\x01" + uleb(0x10) + uleb(0x17) + uleb(0x11) + uleb(0x01)
+        + b"\x00\x00"
+        + uleb(2) + uleb(0x2E) + b"\x01" + uleb(0x11) + uleb(0x01) + uleb(0x12) + uleb(0x06)
+        + uleb(0x3A) + uleb(0x0B) + b"\x00\x00"
+        + uleb(3) + uleb(0x2E) + b"\x00" + uleb(0x3A) + uleb(0x0B) + b"\x00\x00"
+        + uleb(4) + uleb(0x2E) + b"\x00" + uleb(0x47) + uleb(0x13) + b"\x00\x00"
+        + uleb(5) + uleb(0x2E) + b"\x01" + uleb(0x11) + uleb(0x01) + uleb(0x12) + uleb(0x06)
+        + uleb(0x31) + uleb(0x13) + b"\x00\x00"
+        + uleb(6) + uleb(0x1D) + b"\x00" + uleb(0x11) + uleb(0x01) + uleb(0x12) + uleb(0x06)
+        + uleb(0x58) + uleb(0x0B) + uleb(0x31) + uleb(0x13) + b"\x00\x00"
+        + uleb(7) + uleb(0x2E) + b"\x01" + uleb(0x11) + uleb(0x01) + uleb(0x12) + uleb(0x06)
+        + uleb(0x31) + uleb(0x10) + b"\x00\x00" + b"\x00")
+    # A DWARF 4 unit's header is its length, its version, its abbreviations' offset and its
+    # address size: 11 bytes, which a unit-relative reference counts from.
+    frame_entries = bytearray(uleb(1) + u4(0) + q8(0))
+
+    def put(entry: bytes) -> int:
+        offset = 11 + len(frame_entries)
+        frame_entries.extend(entry)
+        return offset
+
+    decl_wz = put(uleb(3) + bytes([2]))
+    decl_helper = put(uleb(3) + bytes([4]))
+    decl_opt = put(uleb(3) + bytes([3]))
+    spec = put(uleb(4) + u4(decl_wz))
+    put(uleb(2) + q8(0x4000) + u4(0x20) + bytes([1])
+        + uleb(6) + q8(0x4008) + u4(8) + bytes([1]) + u4(decl_opt) + b"\x00")
+    put(uleb(5) + q8(0x4100) + u4(0x10) + u4(spec)
+        + uleb(6) + q8(0x4108) + u4(4) + bytes([2]) + u4(decl_helper) + b"\x00")
+    put(uleb(7) + q8(0x4200) + u4(0x10) + u4(spec) + b"\x00")
+    put(uleb(5) + q8(0x4300) + u4(0x10) + u4(decl_opt) + b"\x00")
+    put(uleb(2) + q8(0x4500) + u4(0x10) + bytes([1]) + b"\x00")
+    put(uleb(2) + q8(0x4600) + u4(8) + bytes([5]) + b"\x00")
+    put(b"\x00")
+    frame_unit = struct.pack("<HIB", 4, 0, 8) + bytes(frame_entries)
+    frame_tree = {".debug_info": struct.pack("<I", len(frame_unit)) + frame_unit,
+                  ".debug_abbrev": frame_abbrev}
+    frame_files = {1: api_c, 2: wz_rs, 3: opt_rs, 4: helper_rs, 5: fortified}.get
+    read_frames = code_frames(frame_tree, True, [(0x4000, 0x4700)], {0: frame_files})
+    expect("a frame's function is declared in its own file, or in the file of the entry its "
+           "abstract origin or its specification names, by a unit offset or a section offset",
+           [(f.start, f.end, f.depth, f.call, f.origin) for f in read_frames]
+           == [(0x4000, 0x4020, 0, None, api_c), (0x4008, 0x4010, 1, api_c, opt_rs),
+               (0x4100, 0x4110, 0, None, wz_rs), (0x4108, 0x410C, 1, wz_rs, helper_rs),
+               (0x4200, 0x4210, 0, None, wz_rs), (0x4300, 0x4310, 0, None, opt_rs),
+               (0x4500, 0x4510, 0, None, api_c), (0x4600, 0x4608, 0, None, fortified)])
+    by_frames = to_frames(
+        [Span(0x4000, 0x4004, api_c), Span(0x4004, 0x4008, None), Span(0x4008, 0x400C, fortified),
+         Span(0x400C, 0x4010, None), Span(0x4100, 0x4110, None), Span(0x4300, 0x4308, None),
+         Span(0x4400, 0x4404, None), Span(0x4500, 0x4510, fortified),
+         Span(0x4600, 0x4608, fortified)],
+        read_frames)
+    frame_rows = [(s.start, s.end, s.source, s.inlined, s.framed) for s in by_frames]
+    expect("a byte of no source line is its innermost frame's: the function's file, an inlined "
+           "function's own file, a runtime function inlined its caller's, a runtime body its own; "
+           "a byte no frame holds stays unattributed",
+           [row for row in frame_rows if row[3] is None and row[2] != fortified]
+           == [(0x4000, 0x4004, api_c, None, False), (0x4004, 0x4008, api_c, None, True),
+               (0x400C, 0x4020, api_c, None, True), (0x4100, 0x4108, wz_rs, None, True),
+               (0x4108, 0x410C, helper_rs, None, True), (0x410C, 0x4110, wz_rs, None, True),
+               (0x4200, 0x4210, wz_rs, None, True), (0x4300, 0x4310, opt_rs, None, True),
+               (0x4400, 0x4404, None, None, False)])
+    expect("a C toolchain header's code inlined into a zenoh-pico function is the function's, by "
+           "the inlined call's file or, with no inline tree, the function's own; a header "
+           "function's own body keeps the header",
+           [row for row in frame_rows if row[3] is not None or row[2] == fortified]
+           == [(0x4008, 0x400C, api_c, fortified, False),
+               (0x4500, 0x4510, api_c, fortified, False),
+               (0x4600, 0x4608, fortified, None, False)]
+           and len(frame_rows) == 12)
+    frules = Rules((), {"src": "x", TOOLCHAIN_OWNER: "language"}, "/")
+    fbodies, _ = place_bodies([Symbol(0x4000, 0x20, "_z_a", ("src/api/api.c",)),
+                               Symbol(0x4500, 0x10, "_z_e", ("src/api/api.c",)),
+                               Symbol(0x4600, 8, "__memcpy_chk", ())], frules, ["x", "language"])
+    fsources = pico_source_owners(by_frames, ("/wz/p/src",))
+    fpieces, fused = attribute(fbodies, by_frames, fsources, frules, ["x", "language"])
+    fread = tally_pieces(fpieces, fused, ["x", "language"])
+    fx = explain_area("pico", [p for p in fpieces if piece_area(p) == "x"], {}, None)
+    expect("zenoh-pico's inlined header code and its code of no line are its functions' area, "
+           "and --explain counts both",
+           fread.by_area == {"x": 0x30, "language": 8} and fread.unattributed_bytes == 0
+           and (fx["inlined"], fx["inlined_bodies"], fx["framed"], fx["framed_bodies"])
+           == (0x14, 2, 0x18, 1))
 
     # --explain: the names, the groups and the report.
     xrules = Rules((), {"wz_x": "x"}, "::")
