@@ -539,6 +539,84 @@ pub(crate) unsafe fn take_block(dst: *mut u8, src: *mut u8, size: usize) {
     core::ptr::write_bytes(src, 0, size);
 }
 
+// ---------------------------------------------------------------------------
+// The bodies every closure shares.
+//
+// Every owned closure is pico's three words, `{ context, call, drop }`, whatever its callback's
+// argument, and its null value is all zero bits. Null, check, take and drop read no word whose
+// type depends on the callback, so each is one body for every closure.
+// ---------------------------------------------------------------------------
+
+/// The layout every owned closure shares, held to it by `closure_shares_the_block!` where the
+/// closure is defined.
+#[repr(C)]
+pub(crate) struct ClosureBlock {
+    pub(crate) context: *mut c_void,
+    /// Read only for whether it is null: its argument differs from closure to closure.
+    pub(crate) call: *const c_void,
+    pub(crate) drop: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+impl ClosureBlock {
+    const NULL: Self = Self {
+        context: core::ptr::null_mut(),
+        call: core::ptr::null(),
+        drop: None,
+    };
+}
+
+/// The facts of every closure, which null and take read. No `drop`: what lets go of a closure's
+/// context is the program's own callback, which [`closure_drop`] calls.
+pub(crate) static CLOSURE: TypeFacts = TypeFacts::of(core::mem::size_of::<ClosureBlock>(), None);
+
+/// Whether the closure at `obj` holds a callback (pico `z_internal_closure_*_check`).
+///
+/// # Safety
+/// `obj` is null or points at an owned closure.
+#[inline(never)]
+pub(crate) unsafe fn closure_check(obj: *const u8) -> bool {
+    !obj.is_null() && !(*obj.cast::<ClosureBlock>()).call.is_null()
+}
+
+/// Drop the closure at `obj` (pico `z_closure_*_drop`): the block is left null before the
+/// program's `drop` runs with the context, so a drop the callback reaches again finds nothing to
+/// let go of. Idempotent on a null pointer or a null closure.
+///
+/// # Safety
+/// `obj` is null or points at an owned closure whose `drop`, if any, takes its context.
+#[inline(never)]
+pub(crate) unsafe fn closure_drop(obj: *mut u8) -> crate::result::ZResult {
+    crate::ffi::guarded(|| {
+        if obj.is_null() {
+            return crate::result::Z_OK;
+        }
+        let taken = core::ptr::replace(obj.cast::<ClosureBlock>(), ClosureBlock::NULL);
+        if let Some(free) = taken.drop {
+            free(taken.context);
+        }
+        crate::result::Z_OK
+    })
+}
+
+/// Hold an owned closure type to [`ClosureBlock`]'s layout when it is compiled, so the closure
+/// bodies read its words where they lie.
+macro_rules! closure_shares_the_block {
+    ($Owned:ty) => {
+        const _: () = assert!(
+            ::core::mem::size_of::<$Owned>() == ::core::mem::size_of::<$crate::abi::ClosureBlock>()
+                && ::core::mem::offset_of!($Owned, context)
+                    == ::core::mem::offset_of!($crate::abi::ClosureBlock, context)
+                && ::core::mem::offset_of!($Owned, call)
+                    == ::core::mem::offset_of!($crate::abi::ClosureBlock, call)
+                && ::core::mem::offset_of!($Owned, drop)
+                    == ::core::mem::offset_of!($crate::abi::ClosureBlock, drop),
+            "an owned closure lies as the block the closure bodies read"
+        );
+    };
+}
+
+pub(crate) use closure_shares_the_block;
+
 /// The facts of an owned type and the ownership 6-function core over them (`internal_null`,
 /// `internal_check`, `loan`, `loan_mut`, `move`, `take`), for a type whose owned and loaned
 /// forms share one layout. `$drop` is the type's facts' `drop`.
@@ -1051,6 +1129,107 @@ mod tests {
         };
         assert_eq!(words(&dst), [0x50, 1, 2, 3]);
         assert_eq!(words(&src), [0; 4]);
+    }
+
+    /// Counts the drops of a closure whose context is an `AtomicUsize`.
+    unsafe extern "C" fn count_closure_drop(context: *mut c_void) {
+        (*context.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn no_call() {}
+
+    /// A closure's drop runs the program's `drop` once with its context and leaves the three words
+    /// null, so a second drop runs nothing; check reads the callback word alone. Turned red by a
+    /// drop that leaves the block live after the callback, or a check that reads another word.
+    #[test]
+    fn closure_drop_runs_the_programs_drop_once_and_leaves_the_block_null() {
+        let drops = AtomicUsize::new(0);
+        let mut closure = ClosureBlock {
+            context: core::ptr::from_ref(&drops).cast_mut().cast(),
+            call: no_call as unsafe extern "C" fn() as *const c_void,
+            drop: Some(count_closure_drop),
+        };
+        let at = core::ptr::from_mut(&mut closure).cast::<u8>();
+        // SAFETY: a live closure whose context outlives it; a null one; a null pointer.
+        unsafe {
+            assert!(closure_check(at));
+            assert_eq!(closure_drop(at), crate::result::Z_OK);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(!closure_check(at));
+            assert_eq!(closure_drop(at), crate::result::Z_OK);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "a null closure drops nothing"
+            );
+            assert_eq!(closure_drop(core::ptr::null_mut()), crate::result::Z_OK);
+            assert!(!closure_check(core::ptr::null()));
+        }
+        assert!(closure.context.is_null() && closure.call.is_null() && closure.drop.is_none());
+    }
+
+    /// A closure with a context but no callback is not live: check reads the callback, not the
+    /// first word the owned families read.
+    #[test]
+    fn a_closure_without_a_callback_is_not_live() {
+        let closure = ClosureBlock {
+            context: 0x10 as *mut c_void,
+            call: core::ptr::null(),
+            drop: None,
+        };
+        // SAFETY: a closure block.
+        assert!(!unsafe { closure_check(core::ptr::from_ref(&closure).cast()) });
+    }
+
+    /// Through the sample closure's exports: take moves the three words and leaves the source
+    /// null, and drop runs the program's `drop` once. Turned red by a closure facts' size short of
+    /// the closure, or an export that calls another closure body.
+    #[test]
+    fn a_sample_closures_family_runs_over_the_closure_bodies() {
+        use crate::pubsub::{
+            z_closure_sample_drop, z_closure_sample_move, z_closure_sample_take,
+            z_internal_closure_sample_check, z_internal_closure_sample_null,
+            z_owned_closure_sample_t,
+        };
+        let drops = AtomicUsize::new(0);
+        let context: *mut c_void = core::ptr::from_ref(&drops).cast_mut().cast();
+        let mut src = z_owned_closure_sample_t {
+            context,
+            call: None,
+            drop: Some(count_closure_drop),
+        };
+        let mut dst = z_owned_closure_sample_t::null_value();
+        // SAFETY: two owned sample closures; the context outlives both.
+        unsafe {
+            z_closure_sample_take(&mut dst, z_closure_sample_move(&mut src));
+            assert!(src.context.is_null() && src.drop.is_none());
+            assert_eq!(dst.context, context);
+            assert!(
+                !z_internal_closure_sample_check(&dst),
+                "no callback, not live"
+            );
+            z_closure_sample_drop(z_closure_sample_move(&mut dst));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(dst.context.is_null() && dst.drop.is_none());
+            z_closure_sample_drop(z_closure_sample_move(&mut src));
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "the taken source drops nothing"
+            );
+            let mut kept = z_owned_closure_sample_t {
+                context,
+                call: None,
+                drop: Some(count_closure_drop),
+            };
+            z_internal_closure_sample_null(&mut kept);
+            assert!(kept.context.is_null() && kept.drop.is_none());
+        }
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "null forgets the closure, runs nothing"
+        );
     }
 
     /// Only bytes has a borrowed form; the types the 7-function family emits for have none, which

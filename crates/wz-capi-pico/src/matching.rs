@@ -80,6 +80,8 @@ pub struct z_owned_closure_matching_status_t {
     pub(crate) drop: z_closure_drop_callback_t,
 }
 
+crate::abi::closure_shares_the_block!(z_owned_closure_matching_status_t);
+
 /// Loaned matching-status closure, same layout.
 #[repr(C)]
 pub struct z_loaned_closure_matching_status_t {
@@ -387,9 +389,7 @@ pub unsafe extern "C" fn z_closure_matching_status(
 pub unsafe extern "C" fn z_internal_closure_matching_status_null(
     closure: *mut z_owned_closure_matching_status_t,
 ) {
-    if !closure.is_null() {
-        *closure = z_owned_closure_matching_status_t::null_value();
-    }
+    crate::abi::obj_null(closure.cast(), &crate::abi::CLOSURE);
 }
 
 /// Whether an owned matching-status closure carries a callback (pico
@@ -398,7 +398,7 @@ pub unsafe extern "C" fn z_internal_closure_matching_status_null(
 pub unsafe extern "C" fn z_internal_closure_matching_status_check(
     closure: *const z_owned_closure_matching_status_t,
 ) -> bool {
-    !closure.is_null() && (*closure).call.is_some()
+    crate::abi::closure_check(closure.cast())
 }
 
 /// Borrow an owned matching-status closure (pico
@@ -427,16 +427,11 @@ pub unsafe extern "C" fn z_closure_matching_status_take(
     closure: *mut z_owned_closure_matching_status_t,
     src: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| {
-        if closure.is_null() || src.is_null() {
-            return Z_ERR_NULL;
-        }
-        *closure = core::mem::replace(
-            &mut (*src)._this,
-            z_owned_closure_matching_status_t::null_value(),
-        );
-        Z_OK
-    })
+    if closure.is_null() || src.is_null() {
+        return Z_ERR_NULL;
+    }
+    crate::abi::obj_move(closure.cast(), src.cast(), &crate::abi::CLOSURE);
+    Z_OK
 }
 
 /// Release a matching-status closure (pico `z_closure_matching_status_drop`),
@@ -445,19 +440,7 @@ pub unsafe extern "C" fn z_closure_matching_status_take(
 pub unsafe extern "C" fn z_closure_matching_status_drop(
     closure: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| {
-        if closure.is_null() {
-            return Z_OK;
-        }
-        let taken = core::mem::replace(
-            &mut (*closure)._this,
-            z_owned_closure_matching_status_t::null_value(),
-        );
-        if let Some(dropfn) = taken.drop {
-            dropfn(taken.context);
-        }
-        Z_OK
-    })
+    crate::abi::closure_drop(closure.cast())
 }
 
 /// Invoke a matching-status closure (pico `z_closure_matching_status_call`).
