@@ -7400,7 +7400,7 @@ fn placed_hold(tables: &CoopTables, id: ExprId, handle: KeyexprHandle) -> KeyHol
     match tables.keyexprs().get(handle) {
         // SAFETY: the session's rows lie in its region, or in the span lent at its open
         // (`RowPolicy`), neither of which moves while the session's state stands.
-        Some(row) => unsafe { hold.placed_at(row.head()) },
+        Some(row) => unsafe { hold.placed_at(row.head().count()) },
         None => hold,
     }
 }

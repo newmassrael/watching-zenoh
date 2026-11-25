@@ -3414,7 +3414,7 @@ fn a_rows_count_is_taken_at_its_address_by_its_generation_and_its_last_hold_by_t
     let mut tables = Tables::new();
     let other = Tables::new();
     let declared = tables.declare_keyexpr("demo/row").unwrap();
-    let at: *const KeyexprHead = tables.keyexprs().get(declared.handle).unwrap().head();
+    let at: *const _ = tables.keyexprs().get(declared.handle).unwrap().head();
     // SAFETY: the row stands where it was put until its last hold goes, at the end; the table's
     // calls in between take no `&mut` of it.
     let head = unsafe { &*at };
@@ -3431,19 +3431,22 @@ fn a_rows_count_is_taken_at_its_address_by_its_generation_and_its_last_hold_by_t
     let stranger = core::num::NonZeroU32::new(declared.handle.to_bits().get() ^ 0x0001_0000)
         .and_then(KeyexprHandle::from_bits)
         .unwrap();
-    assert_eq!(head.retain(stranger), Err(RowHoldRefused::Released));
-    assert_eq!(head.retain(declared.handle), Ok(()));
-    assert!(!head.release_shared(stranger));
+    assert_eq!(head.count().retain(stranger), Err(RowHoldRefused::Released));
+    assert_eq!(head.count().retain(declared.handle), Ok(()));
+    assert!(!head.count().release_shared(stranger));
     assert_eq!(head.holds(), 2);
     while head.holds() < KeyexprHolds::MAX {
-        head.retain(declared.handle).unwrap();
+        head.count().retain(declared.handle).unwrap();
     }
-    assert_eq!(head.retain(declared.handle), Err(RowHoldRefused::Full));
+    assert_eq!(
+        head.count().retain(declared.handle),
+        Err(RowHoldRefused::Full)
+    );
     assert!(
         !tables.retain_keyexpr(declared.handle),
         "the table's own hold meets the same bound"
     );
-    while head.release_shared(declared.handle) {}
+    while head.count().release_shared(declared.handle) {}
     assert_eq!(
         head.holds(),
         1,
@@ -3469,20 +3472,19 @@ fn a_rows_count_is_taken_at_its_address_by_its_generation_and_its_last_hold_by_t
 fn a_retracted_declarations_hold_spares_its_rows_next_declaration_below_65536_reuses() {
     let mut tables = Tables::new();
     let first = tables.declare_keyexpr("demo/row/first").unwrap();
-    let at: *const KeyexprHead = tables.keyexprs().get(first.handle).unwrap().head();
-    // SAFETY: the table keeps its rows where they were put; the head is read while the first
+    let at: *const _ = tables.keyexprs().get(first.handle).unwrap().head().count();
+    // SAFETY: the table keeps its rows where they were put; the count is read while the first
     // declaration stands and while a later one stands in the same row, never in between.
     let head = unsafe { &*at };
     assert_eq!(head.retain(first.handle), Ok(()));
     assert_eq!(tables.retract_keyexpr(first.handle), Some(first.id));
     let second = tables.declare_keyexpr("demo/row/second").unwrap();
-    let again: *const KeyexprHead = tables.keyexprs().get(second.handle).unwrap().head();
+    let again: *const _ = tables.keyexprs().get(second.handle).unwrap().head().count();
     assert!(
         core::ptr::eq(at, again),
         "the second declaration takes the first's row"
     );
     assert_ne!(second.handle, first.handle, "at the row's next generation");
-    assert_eq!(head.id(), second.id);
     assert_eq!(head.retain(second.handle), Ok(()));
     assert!(
         !head.release_shared(first.handle),
@@ -3518,36 +3520,53 @@ fn a_retracted_declarations_hold_spares_its_rows_next_declaration_below_65536_re
     );
 }
 
-/// A declaration's row keeps its key's length in the narrowest integer the build's bound on a
-/// key's length fits, and a key longer than that integer states is refused as too long, taking no
-/// row, by a table that keeps keys of any length.
+/// A declaration's row keeps its key's length in the integer of its table's policy: on a bounded
+/// policy the narrowest the build's bound on a key's length fits, so the row's head is as small as
+/// its fields allow, and on the growable one `u32`, which takes every key the wire can name.
 ///
 /// # Control
 ///
-/// A `KeyLen` chosen apart from the bound reds the width assertion; a declaration that cuts the
-/// length to fit reds the refusal.
-#[cfg(feature = "alloc")]
+/// A `KeyLen` chosen apart from the bound reds the width assertion; a bounded policy that keeps
+/// the growable one's integer reds the size of its head.
 #[test]
-fn a_rows_key_length_is_as_wide_as_the_builds_bound_and_a_longer_key_is_refused() {
-    let fits = caps::MAX_KEYEXPR_BYTES <= usize::from(u16::MAX);
-    let width = if fits { 2 } else { 4 };
+fn a_bounded_rows_key_length_is_as_wide_as_the_builds_bound() {
+    let width = if caps::MAX_KEYEXPR_BYTES <= usize::from(u16::MAX) {
+        2
+    } else {
+        4
+    };
     assert_eq!(core::mem::size_of::<caps::KeyLen>(), width);
     assert_eq!(
-        core::mem::size_of::<KeyexprHead>(),
-        (4 + width + 2).next_multiple_of(core::mem::size_of::<usize>())
+        core::mem::size_of::<KeyexprHead<<Static as Storage>::KeyLen>>(),
+        (4 + 2 + width).next_multiple_of(core::mem::size_of::<usize>())
             + core::mem::size_of::<usize>(),
-        "the count, the length and the id share the word before the tables' address"
+        "the count, the id and the length share the word before the tables' address"
     );
-    if fits {
-        type Growable = SessionTables<Calls, crate::bounded::Heap>;
-        let mut tables = Growable::new();
-        let past = "k".repeat(usize::from(u16::MAX) + 1);
-        assert_eq!(
-            tables.declare_keyexpr(&past).err(),
-            Some(RegisterError::KeyexprTooLong)
-        );
-        assert!(tables.keyexprs().is_empty());
-    }
+}
+
+/// A growable table keeps a key of any length the wire can name, past a bounded policy's
+/// narrowest integer: its rows keep the length in `u32`.
+///
+/// # Control
+///
+/// A growable policy that keeps the bounded policies' integer reds the width assertion, and one
+/// that refuses or cuts a key past `u16` reds the declaration's.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_growable_rows_key_length_takes_a_key_past_u16() {
+    assert_eq!(
+        core::mem::size_of::<<crate::bounded::Heap as Storage>::KeyLen>(),
+        4
+    );
+    type Growable = SessionTables<Calls, crate::bounded::Heap>;
+    let mut tables = Growable::new();
+    let long = "k".repeat(usize::from(u16::MAX) + 1);
+    let declared = tables
+        .declare_keyexpr(&long)
+        .expect("no bound on a growable table's key");
+    let row = tables.keyexprs().get(declared.handle).unwrap();
+    assert_eq!(row.head().key_len(), long.len());
+    assert_eq!(row.key(), long);
 }
 
 /// Rows of a growable table stay where they were put however many declarations come after them,
@@ -3560,7 +3579,7 @@ fn growable_rows_stay_where_they_were_put_past_the_builds_bound() {
     type Growable = SessionTables<Calls, crate::bounded::Heap>;
     let mut tables = Growable::new();
     let first = tables.declare_keyexpr("k/0").unwrap();
-    let at = |tables: &Growable| -> *const KeyexprHead {
+    let at = |tables: &Growable| -> *const KeyexprHead<u32> {
         tables.keyexprs().get(first.handle).unwrap().head()
     };
     let before = at(&tables);

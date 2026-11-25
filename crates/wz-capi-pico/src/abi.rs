@@ -250,7 +250,7 @@ impl z_owned_slice_t {
 /// | slot | view (borrowed literal) | owned / entity key |
 /// |------|-------------------------|--------------------|
 /// | 0/1  | `{ start, len }` into the caller's storage | `{ start, len }` into the OWNED copy |
-/// | 2    | 0                       | the address of the declaration's row in the session's tables (`KeyexprHead`), 0 for none |
+/// | 2    | 0                       | the address of the declaration's count in the session's tables (`KeyexprCount`), 0 for none |
 /// | 3    | null                    | the `DeclaredKeyexpr` (a place of its own for an owned key, the entity's own for an entity's loan) |
 ///
 /// Slot 2 is where the declaration's count and id lie: a copy of the key takes its hold of the

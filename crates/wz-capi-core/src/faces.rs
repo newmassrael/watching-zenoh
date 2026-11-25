@@ -5254,7 +5254,7 @@ impl SharedSession {
         Some(match guard.tables.keyexprs().get(declared.handle) {
             // SAFETY: the growable table keeps its rows in chunks that are only ever added
             // (`Chunked`), so a row stays where it was put while it stands.
-            Some(row) => unsafe { hold.placed_at(row.head()) },
+            Some(row) => unsafe { hold.placed_at(row.head().count()) },
             None => hold,
         })
     }

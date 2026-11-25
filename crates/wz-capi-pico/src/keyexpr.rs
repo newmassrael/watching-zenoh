@@ -533,23 +533,15 @@ impl DeclaredKeyexpr {
     /// remainder is named by its length, read against this key's literal, which every engine
     /// call takes beside the wire key ([`WireKey::names_in`]), so naming it copies nothing.
     ///
-    /// Where the session keeps the declaration's row in place, the id and the length of the
-    /// declared key are read there, with no lock of the session.
+    /// The id and the length of the declared key are the hold's own, which no retraction
+    /// changes, so naming the key reads no row, takes no lock of the session and reads the text
+    /// for no boundary.
     pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
-        if let Some(d) = self.declared_on(shared) {
-            // SAFETY: the declaration is `shared`'s, which stands for the call, and this key holds
-            // it, so its row is where its hold names it.
-            if let Some(head) = unsafe { d.hold.head() } {
-                return match self.literal().len().checked_sub(head.key_len()) {
-                    Some(rest) => WireKey::aliased_tail(head.id(), rest).at_row(d.hold.row()),
-                    None => WireKey::literal(),
-                };
-            }
-        }
-        match self.declared_rest(shared) {
-            Some((d, rest)) => {
-                WireKey::aliased_tail(d.mapping_id(), rest.len()).at_row(d.hold.row())
-            }
+        let rest = self
+            .declared_on(shared)
+            .and_then(|d| Some((d, self.literal().len().checked_sub(d.prefix_len)?)));
+        match rest {
+            Some((d, rest)) => WireKey::aliased_tail(d.mapping_id(), rest).at_row(d.hold.row()),
             None => WireKey::literal(),
         }
     }

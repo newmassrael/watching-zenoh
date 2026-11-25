@@ -985,8 +985,9 @@ pub struct KeyHold {
     mapping_id: wz_session_core::wire_id::ExprId,
     /// The row the hold was taken in; `None` for a copy its session took no hold for.
     row: Option<wz_session_core::session_tables::KeyexprHandle>,
-    /// The address of the row's [`KeyexprHead`](wz_session_core::session_tables::KeyexprHead),
-    /// `0` where the engine named none or the hold holds nothing.
+    /// The address of the row's count of holders
+    /// ([`KeyexprCount`](wz_session_core::session_tables::KeyexprCount)), `0` where the engine
+    /// named none or the hold holds nothing.
     head: usize,
 }
 
@@ -1009,37 +1010,41 @@ impl KeyHold {
     /// lock of the session.
     ///
     /// # Safety
-    /// `head` is the head of the row this hold was taken in, and stays at its address while the
-    /// row stands and the session's tables do: the engine's table keeps its rows in place (a
+    /// `head` is the count of the head of the row this hold was taken in
+    /// ([`KeyexprHead::count`](wz_session_core::session_tables::KeyexprHead::count)), and stays
+    /// at its address while the row stands and the session's tables do: the engine's table keeps its rows in place (a
     /// region, what it was lent, or the growable policy's chunks,
     /// [`Chunked`](wz_session_core::slot_map::Chunked)).
-    pub unsafe fn placed_at(mut self, head: &wz_session_core::session_tables::KeyexprHead) -> Self {
+    pub unsafe fn placed_at(
+        mut self,
+        head: &wz_session_core::session_tables::KeyexprCount,
+    ) -> Self {
         if self.row.is_some() {
-            self.head = head as *const wz_session_core::session_tables::KeyexprHead as usize;
+            self.head = head as *const wz_session_core::session_tables::KeyexprCount as usize;
         }
         self
     }
 
-    /// The address of the row's head ([`Self::placed_at`]), `0` for none: what a lent key names
+    /// The address of the row's count ([`Self::placed_at`]), `0` for none: what a lent key names
     /// its declaration by.
     pub fn row_address(&self) -> usize {
         self.head
     }
 
-    /// The row's head, read with no lock of the session ([`Self::placed_at`]); `None` when the
-    /// engine named none.
+    /// The row's count, reached with no lock of the session ([`Self::placed_at`]); `None` when
+    /// the engine named none.
     ///
     /// # Safety
     /// The session this hold was taken of stands (the caller holds it), so its tables, and the
     /// row this hold counts, are where they were.
-    pub unsafe fn head<'a>(&self) -> Option<&'a wz_session_core::session_tables::KeyexprHead> {
+    pub unsafe fn head<'a>(&self) -> Option<&'a wz_session_core::session_tables::KeyexprCount> {
         if self.head == 0 {
             return None;
         }
         // SAFETY: a non-zero address is the head `placed_at` was given, which stays where it is
         // while the row stands, and the row stands while this hold counts it in tables the caller
         // keeps standing.
-        Some(unsafe { &*(self.head as *const wz_session_core::session_tables::KeyexprHead) })
+        Some(unsafe { &*(self.head as *const wz_session_core::session_tables::KeyexprCount) })
     }
 
     /// The declaration held.
@@ -1090,7 +1095,7 @@ impl KeyHold {
     /// One more hold of the declaration in `row` taken at the row `head` heads, as the engine's
     /// count answers it.
     fn retained_at(
-        head: &wz_session_core::session_tables::KeyexprHead,
+        head: &wz_session_core::session_tables::KeyexprCount,
         row: wz_session_core::session_tables::KeyexprHandle,
     ) -> Result<(), HoldRefused> {
         head.retain(row).map_err(Self::refused_at_row)
