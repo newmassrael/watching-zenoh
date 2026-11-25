@@ -296,10 +296,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         };
         // R231 -- the self-echo rule of `dispatch_push`, on the same fields: a
         // wire-arrived sample whose source names this session is not fired.
-        if let (Some(own), Some(info)) = (
-            naming.own_zid.as_ref().map(|zid| zid.as_slice()),
-            sample.source_info,
-        ) {
+        if let (Some(own), Some(info)) = (naming.own_zid.held(), sample.source_info) {
             let prefix = info.zid_prefix();
             if !prefix.is_empty() && prefix == own {
                 return Ok(());

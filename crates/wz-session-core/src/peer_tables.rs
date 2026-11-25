@@ -48,7 +48,6 @@
 use crate::bounded::{
     Arena, LendRefused, Lent, Profile, Region, RegionLines, Static, Storage, ZeroEmpty,
 };
-use crate::caps;
 use crate::declare::liveliness_subscriber::PeerTokens;
 use crate::declare::queryable::RemoteQueryablePeer;
 use crate::declare::subscriber::RemoteSubscriberPeer;
@@ -63,6 +62,8 @@ use core::ptr::{self, addr_of_mut};
 
 #[cfg(feature = "liveliness-token")]
 use crate::bounded::BoundedVec;
+#[cfg(feature = "liveliness-token")]
+use crate::caps;
 #[cfg(feature = "liveliness-token")]
 use crate::declare::local_token::DeclResponseItem;
 
