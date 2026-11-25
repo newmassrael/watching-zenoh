@@ -16,9 +16,22 @@ pub(crate) fn get_or_build<T>(cell: &OnceCell<T>, build: impl FnOnce() -> T) -> 
     cell.get()
 }
 
+/// [`get_or_build`] for a value whose build may fail, as one that asks the heap for room may: a
+/// build that answers `None` stores nothing, so the cell stays empty and a later ask builds again,
+/// and this answers `None`.
+pub(crate) fn try_get_or_build<T>(
+    cell: &OnceCell<T>,
+    build: impl FnOnce() -> Option<T>,
+) -> Option<&T> {
+    if cell.get().is_none() {
+        let _ = cell.set(build()?);
+    }
+    cell.get()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::get_or_build;
+    use super::{get_or_build, try_get_or_build};
     use core::cell::{Cell, OnceCell};
 
     #[test]
@@ -44,5 +57,21 @@ mod tests {
             2u32
         });
         assert_eq!(outer, Some(&1));
+    }
+
+    /// A build that fails stores nothing and is asked again by the next reader, whose build is
+    /// kept. Turned red by a body that stores a default for a failed build, or answers the failed
+    /// build's `None` for every later ask.
+    #[test]
+    fn a_failed_build_leaves_the_cell_empty_for_the_next_ask() {
+        let cell = OnceCell::new();
+        assert_eq!(try_get_or_build(&cell, || None::<u32>), None);
+        assert_eq!(cell.get(), None);
+        assert_eq!(try_get_or_build(&cell, || Some(3u32)), Some(&3));
+        assert_eq!(
+            try_get_or_build(&cell, || None),
+            Some(&3),
+            "a built value is read back without a build"
+        );
     }
 }

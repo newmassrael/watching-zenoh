@@ -429,9 +429,14 @@ impl SampleView for SampleRef<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         let (packed_id, schema) = self.encoding?;
         let hints = self.hints.as_ref()?;
-        crate::once_built::get_or_build(&hints.encoding, || crate::sample::EncodingHint {
-            packed_id,
-            schema: schema.map(<[u8]>::to_vec),
+        // A schema the heap has no room to copy leaves no hint, and a later reader asks again; the
+        // parts are read where they lie whatever the heap holds (`encoding_parts`).
+        crate::once_built::try_get_or_build(&hints.encoding, || {
+            let schema = match schema {
+                Some(schema) => Some(crate::bounded::heap_copy(schema)?),
+                None => None,
+            };
+            Some(crate::sample::EncodingHint { packed_id, schema })
         })
     }
     #[cfg(feature = "pubsub-ts-stack")]
