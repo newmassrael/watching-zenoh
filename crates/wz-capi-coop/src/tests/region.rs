@@ -156,7 +156,8 @@ fn a_state_refused_by_its_region_or_its_memory_reserves_nothing() {
 }
 
 /// What the state owns and its tasks reach by handles that count nothing (its round, the planes of
-/// its gets and its queryables, the places it lends its Router and its registry in for a step) lies
+/// its gets, its queryables and its faces' watchers, the places it lends its Router and its registry
+/// in for a step) lies
 /// in its region (`crate::engine::StatePlaces`), so the arena an open lays out holds no place of
 /// them. Turned red by a plan that still reserves one, which the open would leave unused, or by a
 /// region too small to hold the round.
@@ -173,6 +174,7 @@ fn the_states_own_values_lie_in_its_region_and_not_in_its_arena() {
         "router lend",
         "query plane",
         "get plane",
+        "face plane",
     ] {
         assert!(plan.rows().all(|row| row.part() != part), "{part}");
     }

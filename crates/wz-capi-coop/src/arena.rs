@@ -585,11 +585,11 @@ const RUNTIME_ROWS: usize = 2;
 /// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
 const ENGINE_STATE_ROWS: usize = 1;
 /// The planes the session's queryables, gets and watchers of its faces share, each where its
-/// feature is ([`ArenaPlan::holding_planes`]); the first two where the arena holds them
-/// (`runtime-plan`).
+/// feature is ([`ArenaPlan::holding_planes`]), where the arena holds them (`runtime-plan`).
 const PLANE_ROWS: usize = cfg!(feature = "runtime-plan") as usize
-    * (cfg!(feature = "queryable") as usize + cfg!(feature = "query") as usize)
-    + cfg!(feature = "connectivity") as usize;
+    * (cfg!(feature = "queryable") as usize
+        + cfg!(feature = "query") as usize
+        + cfg!(feature = "connectivity") as usize);
 /// The admission the links of a session that listens ask while their handshakes run
 /// (`ArenaPlan::holding_admission`).
 const ADMISSION_ROWS: usize = cfg!(feature = "listen") as usize;
@@ -2384,13 +2384,13 @@ impl ArenaPlan {
         &mut self,
         planes: crate::engine::SessionPlanes,
     ) -> Result<(), ArenaRefused> {
-        // Where the build fixes the session's shape these two lie in its region
+        // Where the build fixes the session's shape these lie in its region
         // (`crate::engine::StatePlaces`).
         #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
         #[cfg(all(feature = "query", feature = "runtime-plan"))]
         self.put(ArenaPart::GetPlaneState, 1, planes.gets);
-        #[cfg(feature = "connectivity")]
+        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
         let _ = planes;
         self.settled()

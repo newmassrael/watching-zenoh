@@ -4,8 +4,8 @@
 //! The values a session whose shape the build fixes owns in its state and its tasks reach by
 //! handles that count nothing, laid out as fields of the session's region
 //! (`crate::region::StateRegion`) instead of placed in its arena: the round of deliveries, the
-//! planes of its gets and its queryables, and the cells its registry and its Router are lent in for
-//! a step. Each lies in a `MaybeUninit` field, which the region's drop does not drop: the
+//! planes of its gets, its queryables and the watchers of its faces, and the cells its registry
+//! and its Router are lent in for a step. Each lies in a `MaybeUninit` field, which the region's drop does not drop: the
 //! [`Placed`] owner written there does, wherever the session holds it, so each value is let go in
 //! the order the session lets its owner go, as one the arena held was.
 
@@ -16,6 +16,8 @@ use wz_session_core::bounded::ZeroEmpty;
 use wz_session_core::placed::Placed;
 use wz_session_core::step_lend::LendCell;
 
+#[cfg(feature = "connectivity")]
+use super::FacePlane;
 #[cfg(feature = "query")]
 use super::GetPlane;
 #[cfg(feature = "queryable")]
@@ -38,6 +40,8 @@ pub(crate) struct StatePlaces {
     gets: MaybeUninit<GetPlane>,
     #[cfg(feature = "queryable")]
     queries: MaybeUninit<QueryPlane>,
+    #[cfg(feature = "connectivity")]
+    faces: MaybeUninit<FacePlane>,
 }
 
 // SAFETY: every field is a `MaybeUninit`, which holds no value at any bytes, so none at zero.
@@ -111,6 +115,20 @@ impl StatePlaces {
         // SAFETY: the caller's contract; the field is aligned for the plane and the owner's alone.
         unsafe {
             Placed::written_at(value_at(addr_of_mut!((*at.as_ptr()).queries)), |place| {
+                place.write(plane)
+            })
+        }
+    }
+
+    /// The plane of the watchers of the faces, written in its field of the places at `at`.
+    ///
+    /// # Safety
+    /// As [`Self::steps`], for the faces' field.
+    #[cfg(feature = "connectivity")]
+    pub(super) unsafe fn faces(at: NonNull<Self>, plane: FacePlane) -> Placed<FacePlane> {
+        // SAFETY: the caller's contract; the field is aligned for the plane and the owner's alone.
+        unsafe {
+            Placed::written_at(value_at(addr_of_mut!((*at.as_ptr()).faces)), |place| {
                 place.write(plane)
             })
         }

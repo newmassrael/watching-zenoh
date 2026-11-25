@@ -3129,8 +3129,8 @@ pub(crate) struct SessionPlanes {
     /// The gets' plane (`GetPlane`), in the arena where the open lays it out.
     #[cfg(all(feature = "query", feature = "runtime-plan"))]
     pub(crate) gets: usize,
-    /// The plane of the watchers of the faces (`FacePlane`).
-    #[cfg(feature = "connectivity")]
+    /// The plane of the watchers of the faces (`FacePlane`), in the arena where the open lays it out.
+    #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
     pub(crate) faces: usize,
 }
 
@@ -3141,7 +3141,7 @@ impl SessionPlanes {
         queries: core::mem::size_of::<QueryPlane>(),
         #[cfg(all(feature = "query", feature = "runtime-plan"))]
         gets: core::mem::size_of::<GetPlane>(),
-        #[cfg(feature = "connectivity")]
+        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
         faces: core::mem::size_of::<FacePlane>(),
     };
 }
@@ -4899,16 +4899,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         });
         // No watcher yet: the queue's rows are reserved now, so a program that watches after the
         // open is told its faces with nothing allocated. The plane lies in the row the plan laid
-        // out for it (`ArenaPlan::holding_planes`).
+        // out for it (`ArenaPlan::holding_planes`), or in the region where the build fixes the
+        // session's shape.
         #[cfg(feature = "connectivity")]
+        let face_plane =
+            FacePlane::with_room(face_event_rows(config.max_faces, config.groups.len()));
+        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
         let watchers = lent
             .arena
             .arena_mut()
-            .place(FacePlane::with_room(face_event_rows(
-                config.max_faces,
-                config.groups.len(),
-            )))
+            .place(face_plane)
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        // SAFETY: the region's places were placed by the open's lend and its faces' field is
+        // reached by this write alone; the block is held by `Core` after the session's state,
+        // which holds the plane's owner, and neither moves nor goes back before it.
+        #[cfg(all(feature = "connectivity", not(feature = "runtime-plan")))]
+        let watchers =
+            unsafe { StatePlaces::faces(StateRegion::places_at(lent.state.as_ptr()), face_plane) };
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
         // after its open is admitted in place. The admission lies in the row the plan laid out for
         // it (`ArenaPlan::holding_admission`); its rows are the heap's, and a heap that refuses them
