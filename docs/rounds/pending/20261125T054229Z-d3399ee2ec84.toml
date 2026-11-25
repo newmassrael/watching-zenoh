@@ -1,0 +1,29 @@
+impact = ["watching-zenoh/local-ci-gates", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Hosted CI on main had failed on every run since 2026-11-21 (run 45486715960 on df3586fd0: about 49 failed jobs). This round pays the compile-level part of that red, merged with main after the int-fix landing (51c73e89d), so the lanes it blocked can report again.
+
+Most reds were one compile failure in a feature combination no local gate builds, each turning several lanes red: test-only items gated by more than their callers (encode_ext_chain_into, ChainAnswers, ReadEntries' filter, LentByteCells, the arena's place counts, the runtime-tokio writer queue's hearing), test modules that use heap-only items in the slot profile (cfg alloc), tests and doc links that named items a refactor renamed (StreamSocket send_parts/local/peer in two Zephyr loopback deploys, acceptor_sink in zephyr-app, router_session_task_bytes' lock kind, the queryable door's engine trait), and a ring maximum that read the build's sequence-number word, a u32 where bits-64 is out, when a composed frame may carry any ring.
+
+Count guards that hosted runs never reached were read again on what their commands print: C1am zid_hex 10, C1g slot_observer_heap 7 and the lent_tests leg 41 (its substring filter takes declare, peer_tables and slot_observer), C1m mcu default 23 and the app layer 25 (the in-memory link's lent-slot test, 7ec73acff).
+
+The pico preset holds a matching listener per preset querier (2), because a session listening on both of its queriers was refused with Z_ERR_SYSTEM_OUT_OF_MEMORY on the client-only lane.
+
+Gates: nondefault_feature_legs_gate reads a leg's dep/feature through the dependency's manifest; negotiated_axis_witness_gate reads the fact_doors! form; lane_feature_membership_gate reads only arrays filled from --resolve-features as cargo options; capability_cost_gate's coop listen and advanced patterns follow the symbols the current builds link.
+
+Not paid here (carried): three size claims on i686 (id_map and peer_tables lent tables, reassembly_rx kept buffer), the remaining C1m counts, C1cs text budgets and the log:: symbols of pico-client-coop-nostd, Layer F codec-response-final floor, E7s/E7m stalls, the wz-zenoh admin get flake, Vmiri's Stacked Borrows report in the SCE runtime, and the gate-provenance leg list.
+'''
+changes = '''
+crates/wz-session-core: cfg of test-only items and test modules (ext_chain, inbound, keyexpr_match, slot_observer, publish_options, 23 test modules), module doc link references, transport_compose::sn_ring_max in u64, tests/it tx_lend_only_encode.
+crates/wz-capi-coop, wz-capi-port, wz-runtime-coop, wz-runtime-tokio, wz-capi-pico, wz-app-frame, wz-ext-pubsub: cfg, clippy and doc fixes; capi-coop group refusal before rows and a finished group's link let go; capi-pico admin_space engine type, query door by path, session_memory door test read against the preset.
+deploy/zephyr-app, zephyr-tls-loopback, zephyr-admin-loopback: the stream and acceptor traits as they are now.
+deploy/wz-config.toml (MAX_MATCHING_LISTENERS pico preset 2) and its generated limits.
+scripts/run-ci.sh count guards; scripts/lib nondefault-tests-gate.sh rows, nondefault_feature_legs_gate.py, negotiated_axis_witness_gate.py, lane_feature_membership_gate.py, capability_cost_gate.py, reduced_docs_ledger.txt; deploy/stack_call_contracts.json anchors.
+'''
+verification = '''
+Run through bx from the integration worktree (ci-int), merged with main at 51c73e89d. Passed: Layers C1ad, C1v, C1w, C1bw, C1am, C1z; wz-runtime-coop lib tests with reassembly built (--no-run); cargo doc of wz-session-core, wz-capi-core, wz-runtime-coop, wz-runtime-zephyr and wz-runtime-posix with every feature and of wz-capi-pico in both of its documentation sets, with no error; clippy -D warnings of wz-runtime-coop with unixpipe and all targets; capability_cost_gate.py --selftest (103/103). C1g's and C1m's count guards were read on what their commands print (a survey of every leg's printed count; the lent_tests leg 41, the C1m app layer 25). C1cs on the merged tree: the capic text budgets pass after the merge; the export pins and fourteen ratchet rows are moved to what it measured, the nostd row locked at WIN.
+
+Still red locally and carried: C1g (lent_control 16 against 12, and legs after it), C1m legs listed in the carry, C1cs (log:: symbols in pico-client-coop-nostd, which the session that added them repays), C1co (re-run after the preset change not finished), C1cf (timed out at 52 min on a shared host after its compile error was fixed), C1bn (re-run after the ring-maximum fix not finished), C1p32 (no 32-bit host free; three i686 size and buffer claims known red). mnemosyne-cli validate-workspace before the landing: no new T1 orphan.
+'''
+carry = '''
+i686 size claims: id_map lent table 332 vs 328 and peer_tables own spans (also on x86_64 in the Vasan kit-pico set), reassembly_rx kept buffer let go (0 vs 2); keep the claims, fix the heads or the alignment. C1m legs whose counts moved (adminspace-write 57, lifecycle verbs 38, adminspace-core 27, read+write 69, rx fragment in place 9, coop static runtime 20, ip stack links 13, posix tcp seam 24) to be pinned with their causes. C1cs capic-default and lean text over budget and log:: in pico-client-coop-nostd: symbol diff first. Layer F codec-response-final floor 7712 < 8000. E7s stall at 1101 of 2048 sessions. The next hosted run's reds.
+'''
