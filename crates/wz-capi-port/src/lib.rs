@@ -1189,7 +1189,7 @@ impl KeyView {
         let own = key
             .as_bytes()
             .starts_with(declared.as_bytes())
-            .then(|| OwnKey {
+            .then_some(OwnKey {
                 row,
                 mapping,
                 prefix_len: declared.len(),
