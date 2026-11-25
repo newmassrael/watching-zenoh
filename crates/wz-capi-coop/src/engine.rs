@@ -3435,13 +3435,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// at its first step (its link did not open); a build without `group` answers every group so.
     fn join_groups(&mut self) -> Result<(), OpenError> {
         #[cfg(feature = "group")]
-        for join in self.config.groups.clone() {
+        for (at, join) in self.config.groups.clone().into_iter().enumerate() {
+            // The open counts a task cell, a set of tables and a receive buffer for each group the
+            // task cells hold (`RuntimeTables::of`), so a group past them is refused as its spawn
+            // would be, before it takes a set: a set left beside them is a face's that
+            // `max_faces` admits, and no buffer is left for the group's datagrams.
+            if at >= caps::MAX_TASKS {
+                return Err(OpenError::NoTask(SpawnRefusal::NoTaskCell));
+            }
             let id = self.transport.links.next_face_id();
             // The tables first: the group's task dispatches to them from its first step. They are
             // the face's for as long as the session holds the group, across its joins, and answer
-            // a query whose key they cannot resolve by the session's policy. The open lent a set
-            // for each group the task cells hold, so a group past them is refused as its spawn
-            // would be: no task cell is left for it.
+            // a query whose key they cannot resolve by the session's policy.
             let Ok(held) = self.session.registry.add_face(id) else {
                 return Err(OpenError::NoTask(SpawnRefusal::NoTaskCell));
             };
