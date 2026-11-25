@@ -343,7 +343,14 @@ fn pico_group(
 /// the build's policies and the limits a session opens under ([`opening_limits`],
 /// [`PolicyStatements::compose_into`]); `Z_ERR_CONFIG_INVALID_VALUE` when the build refuses any of
 /// it. The doors check a change through this before they keep it, so they and the open cannot
-/// judge a config differently.
+/// judge a config differently. Only the policies' doors, the scout and the tests resolve a config
+/// apart from an open, which composes in place through `resolve_open`.
+#[cfg(any(
+    test,
+    feature = "config-policy",
+    feature = "scout",
+    feature = "scout-mcu"
+))]
 pub(crate) fn resolve_snapshots(
     policies: &PolicyStatements,
 ) -> Result<(SessionPolicy, SessionLimits), ZResult> {
@@ -352,9 +359,9 @@ pub(crate) fn resolve_snapshots(
     Ok((policy, limits))
 }
 
-/// [`resolve_snapshots`] over `limits` in place: the build's policies with `policies` written
-/// over them, returned, and the limits they state written over `limits`. The one composition the
-/// doors' check and the open share; on a refusal what was written is no resolution.
+/// The build's policies with `policies` written over them, returned, and the limits they state
+/// written over `limits` in place. The one composition the doors' check and the open share; on a
+/// refusal what was written is no resolution.
 #[inline]
 fn compose_snapshots(
     policies: &PolicyStatements,
@@ -367,7 +374,7 @@ fn compose_snapshots(
 
 /// The snapshots `z_open` opens `cfg` under, its limits composed over `stated`, which an open
 /// hands as [`Stated::OPENING`]: the policies its doors state over the build's, returned, and the
-/// limits they state written over `stated`, as [`resolve_snapshots`] composes both, and over them
+/// limits they state written over `stated`, as `compose_snapshots` composes both, and over them
 /// the counts its [`WZ_EXT_CONFIG_LIMITS_KEY`] states, which every build reads, the held values
 /// the process pools reserve at the first open among them; `Z_ERR_CONFIG_INVALID_VALUE` when the
 /// build refuses any of it, and then what was written is no resolution, which the caller drops.
@@ -1649,7 +1656,7 @@ struct OpenRequest {
     /// rustls configs from it, the cooperative engine the Mbed TLS channel's dial and listen.
     #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
     tls: CapiTlsConfig,
-    /// The policies the session runs under ([`resolve_snapshots`]), handed to the engine and kept
+    /// The policies the session runs under ([`resolve_open`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
     /// The session limits the session runs under, resolved with [`Self::policy`]: the engine's
