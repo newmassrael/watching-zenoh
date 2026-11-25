@@ -8,7 +8,7 @@
 //! `BCryptGenRandom` ([`WindowsEntropy`](super::WindowsEntropy)) at each dial.
 
 wz_runtime_coop::with_heap_link_seams! {
-    use wz_runtime_coop::ws_link::{WsLinks, WsOpen};
+    use wz_runtime_coop::ws_link::{WsLinks, WsOpen, WsSource};
     use wz_runtime_coop::ClockSource;
     use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 
@@ -25,7 +25,9 @@ wz_runtime_coop::with_heap_link_seams! {
         fn stream_dial(&self) -> &WindowsTcpDial {
             &WindowsTcpDial
         }
+    }
 
+    impl WsSource for WindowsWsOpen {
         fn now_us(&self) -> u64 {
             super::WindowsClock.now_us()
         }
