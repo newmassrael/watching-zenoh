@@ -2955,7 +2955,7 @@ fn as_link_admission<C: ClockSource + 'static>(
 }
 
 /// The bytes of the place of each plane a session's state owns, which its tasks and its engine
-/// reach by handles that count nothing, each where its feature is ([`ArenaPlan::holding_planes`]).
+/// reach by handles that count nothing, each where its feature is ([`ArenaPlan::lay_planes`]).
 #[derive(Clone, Copy)]
 pub(crate) struct SessionPlanes {
     /// The queryables' plane (`QueryPlane`).
@@ -2991,15 +2991,17 @@ pub(crate) fn lay_out_open(
     plan: &mut ArenaPlan,
     holds: &OpenHolds<'_>,
 ) -> Result<(), ArenaRefused> {
-    plan.holding_cells(holds.cells)?;
-    plan.holding_rooms(holds.rooms)?;
-    plan.holding(holds.held)?;
-    plan.holding_runtime(holds.runtime)?;
-    plan.holding_engine(holds.engine)?;
-    plan.holding_planes(holds.planes)?;
+    plan.lay_cells(holds.cells);
+    plan.lay_rooms(holds.rooms);
+    plan.lay_held(holds.held)?;
+    plan.lay_runtime(holds.runtime);
+    plan.lay_engine(holds.engine);
+    plan.lay_planes(holds.planes);
     #[cfg(feature = "listen")]
-    plan.holding_admission(holds.admission)?;
-    Ok(())
+    plan.lay_admission(holds.admission);
+    // Each hold keeps its refusal in the plan, the first one kept, so the plan is asked once,
+    // after them all, and answers what the first refused hold would have.
+    plan.settled()
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
@@ -4601,7 +4603,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         });
         // No watcher yet: the queue's rows are reserved now, so a program that watches after the
         // open is told its faces with nothing allocated. The plane lies in the row the plan laid
-        // out for it (`ArenaPlan::holding_planes`).
+        // out for it (`ArenaPlan::lay_planes`).
         #[cfg(feature = "connectivity")]
         let watchers = lent
             .arena
@@ -4613,7 +4615,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
         // after its open is admitted in place. The admission lies in the row the plan laid out for
-        // it (`ArenaPlan::holding_admission`); its rows are the heap's, and a heap that refuses them
+        // it (`ArenaPlan::lay_admission`); its rows are the heap's, and a heap that refuses them
         // refuses the open.
         #[cfg(feature = "listen")]
         let admission = Admission::<C>::try_with_order(&wire, policy.link_tie_order(), lent.links)

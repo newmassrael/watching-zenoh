@@ -2613,11 +2613,11 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .expect("the build's limits lay the runtime's span out");
     plan.holding_engine(64)
         .expect("the build's limits lay the engine's place out");
-    plan.holding_planes(crate::engine::SessionPlanes::OF_BUILD)
-        .expect("the build's limits lay the planes' places out");
+    plan.lay_planes(crate::engine::SessionPlanes::OF_BUILD);
     #[cfg(feature = "listen")]
-    plan.holding_admission(64)
-        .expect("the build's limits lay the admission's place out");
+    plan.lay_admission(64);
+    plan.settled()
+        .expect("the build's limits lay the planes' and the admission's places out");
     assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);
     let mut parts: Vec<&str> = plan.rows().map(|row| row.part()).collect();
     parts.sort_unstable();
