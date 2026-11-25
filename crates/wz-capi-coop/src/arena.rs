@@ -508,8 +508,9 @@ const STEP_LEND_ROWS: usize =
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The read slots and send places of the faces past the dial role's, where each face is read where
-/// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none.
-const DIRECT_FACE_ROWS: usize = !cfg!(wz_round) as usize;
+/// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none, nor
+/// does one that takes no face beside its dial role's (`TAKES_FACES`).
+const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && TAKES_FACES) as usize;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the

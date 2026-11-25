@@ -748,14 +748,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         }
     }
 
-    /// The face at row `at` of the face table: the dial role's at the first, each past it in its
-    /// row of the arena. `None` past the table.
+    /// Every face, in the order of the face table's rows: the dial role's first, then each past
+    /// it in its row of the arena.
     #[inline(always)]
-    pub(super) fn face(&self, at: usize) -> Option<&DirectFace<L, C>> {
-        match at.checked_sub(1) {
-            None => Some(&self.dial),
-            Some(row) => self.taken.get(row),
-        }
+    pub(super) fn iter(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
+        core::iter::once(&self.dial).chain(self.taken.iter())
     }
 
     /// Let go of every face's link with the faces owned whole: the engine's drop.
@@ -1403,9 +1400,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         mut leg: impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
         let mut outcome = Ok(0);
-        let mut at = 0;
-        while let Some(face) = self.direct.face(at) {
-            at += 1;
+        for face in self.direct.iter() {
             // SAFETY: as in `Self::hold_on_link`: `leg` reaches the send part only as `LinkTx`.
             let Some(mut send) = (unsafe { face.site.hold_send() }) else {
                 continue;

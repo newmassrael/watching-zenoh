@@ -2875,6 +2875,8 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
     plan.lay_planes(crate::engine::SessionPlanes::OF_BUILD);
     #[cfg(feature = "listen")]
     plan.lay_admission(64);
+    #[cfg(not(wz_round))]
+    plan.lay_direct_faces(64);
     plan.settled()
         .expect("the build's limits lay the planes' and the admission's places out");
     assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);

@@ -892,7 +892,7 @@ fn a_hold_of_the_dial_place_reaches_the_dial_face_through_its_wire() {
 
 /// A publish's walk of the faces hands one leg to each face whose place holds a link, each leg
 /// reaching its own face alone: the session open on the dial role's face is handed one leg, which
-/// reaches that face. Turned red by a walk that skips the dial role's row (`DirectFaces::face`),
+/// reaches that face. Turned red by a walk that skips the dial role's row (`DirectFaces::iter`),
 /// or a leg that reaches no face (`FaceTx::reaches`).
 #[cfg(not(wz_round))]
 #[test]
