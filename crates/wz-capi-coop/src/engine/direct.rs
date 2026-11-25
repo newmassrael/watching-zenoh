@@ -314,14 +314,8 @@ pub(super) enum DirectOwner {}
 // (`OneThread`, as `threads` is off): the program calls into the engine from one thread at a
 // time, so the place of the link's parts, reached by the read and by the calls the engine makes
 // under the session's lock, is reached by one thread at a time, and its value never moves to
-// another while a lend of it is under way. Nothing tries the place inside a hold of it: the one
-// hold that runs the session's code is the read's step, which stands in the place's seat for all
-// of it, and the handle the session's record holds (`DirectWire`) reads, lends and owes through
-// that seat first; the other holds (a pump's drop, a link's making, a debt's payment) reach
-// nothing of the session's record of the face.
-unsafe impl ConfinedOwner for DirectOwner {
-    const TRIED_INSIDE: bool = false;
-}
+// another while a lend of it is under way.
+unsafe impl ConfinedOwner for DirectOwner {}
 
 /// How the place of the one link's parts is held: by the one thread of the session's form.
 type DirectLock = wz_runtime_coop::sync::Confined<DirectOwner>;

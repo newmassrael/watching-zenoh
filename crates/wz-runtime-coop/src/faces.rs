@@ -501,11 +501,6 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
             return;
         }
         self.owed.fetch_or(bits, Ordering::SeqCst);
-        // A read of this thread seated in the place holds it, and pays as it lets go: the try is
-        // left to a thread that stands in no seat, so a kind whose try is its take never nests.
-        if self.place.seated_here() {
-            return;
-        }
         // Paid as the try lets go, or, the place held, by the holder or by the try's look after;
         // a place with no parts has no link to owe them to.
         if let Lend::Empty = self.try_lend(|_| ()) {
@@ -525,13 +520,7 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
 
     /// Pay a debt that came after the holder paid and before it let go: neither the holder, which
     /// looked before the debt, nor its debtor, whose try found the place held, would pay it.
-    #[inline]
     fn pay_after(&self) {
-        // A kind no other thread holds (`LockKind::WAITS`) owes nothing between the holder's pay
-        // and its let go: its one thread is the holder's, inside neither.
-        if !K::WAITS {
-            return;
-        }
         // Orders the holder's let go before its look, and the debtor's debt before its try: one
         // of the two sees the other's write, so a debt is never left with neither to pay it.
         fence(Ordering::SeqCst);
@@ -578,9 +567,8 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
     /// # Safety
     ///
     /// `site` lives, at the address it has now, for as long as the handle does. A read made
-    /// inside a lend of `site` reads the link as quiet: inside a read seated in the place by its
-    /// seat, elsewhere by the place found held, which a kind whose try is its take
-    /// ([`crate::sync::ConfinedOwner::TRIED_INSIDE`]) never finds, so no such read is made there.
+    /// inside a lend of `site` finds the place held, on every kind
+    /// ([`crate::sync::Confined`]'s try included), and reads the link as quiet.
     pub unsafe fn new(
         site: &FaceSite<K, P>,
         end: E,
@@ -604,13 +592,10 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
 
     /// `f` on the wire of the parts when the place lends them now, else `absent`.
     fn read<U: Send>(&self, absent: U, f: impl FnOnce(&P::Wire) -> U + Send) -> U {
-        let site = self.site();
-        // A read of this thread seated in the place holds it: tried, a kind whose try is its take
-        // would lend the parts a second time.
-        if site.place.seated_here() {
-            return absent;
-        }
-        match site.try_lend(|held| held.lend(|parts| parts.wire().map(f))) {
+        match self
+            .site()
+            .try_lend(|held| held.lend(|parts| parts.wire().map(f)))
+        {
             Lend::Lent(Some(answer)) => answer,
             Lend::Lent(None) | Lend::Empty | Lend::Held => absent,
         }
@@ -2719,12 +2704,15 @@ mod tests {
 
     /// The parts of a face's link whose send part is its wire, as a session's are where a read
     /// steps its one link itself.
+    #[cfg(feature = "host-lock")]
     struct SeatedParts(Option<ApartWire>);
 
     // SAFETY: the parts' `Rc` is reached by the thread of the test that made them alone. Nothing
     // of them is bound to a thread.
+    #[cfg(feature = "host-lock")]
     unsafe impl FaceParts for SeatedParts {}
 
+    #[cfg(feature = "host-lock")]
     impl WireParts for SeatedParts {
         type Wire = ApartWire;
 
@@ -2735,6 +2723,7 @@ mod tests {
         fn pay(&mut self, _owed: u32) {}
     }
 
+    #[cfg(feature = "host-lock")]
     impl SendParts for SeatedParts {
         type Tx = Option<ApartWire>;
 
@@ -3095,73 +3084,6 @@ mod tests {
             seated,
             Some(Lend::Lent(true)),
             "the seated step's lend reached the wire through the seat"
-        );
-    }
-
-    /// The owner of what a face's place holds in the test below, which reaches the place inside
-    /// its hold only through the handle on it, from inside the holder's seat.
-    struct SeatOwner;
-
-    // SAFETY: every value of a `Confined<SeatOwner>` kind is made and reached by the one thread of
-    // the test that made it, and the place is reached inside its hold only by the handle's reads,
-    // lends and debts made in the holder's seat, which look at the seat before they try the place.
-    unsafe impl crate::sync::ConfinedOwner for SeatOwner {
-        const TRIED_INSIDE: bool = false;
-    }
-
-    /// Where the place's try is its take (`ConfinedOwner::TRIED_INSIDE`), the handle reached
-    /// inside the holder's seated step tries nothing: its read reads the link as quiet, its lend
-    /// of the session goes through the seat, and its close is owed to the holder, told once as it
-    /// lets go. Outside the step each is lent at once. Turned red, in a debug build by the mark of
-    /// the hold, by a read or a debt that tries the place before it looks at the seat
-    /// (`FaceAt::read`, `FaceSite::owe_bits`), and by a close told inside the step.
-    #[test]
-    fn a_place_whose_try_is_its_take_is_reached_in_its_step_through_the_seat_alone() {
-        let ended = Ended::default();
-        let site = FaceSite::<crate::sync::Confined<SeatOwner>, SeatedParts>::empty();
-        let wire = ApartWire {
-            holds: true,
-            finished: false,
-            aborted: Rc::new(Cell::new(0)),
-            ended: alloc::sync::Arc::clone(&ended),
-        };
-        // SAFETY: no handle on a cell of the parts lives outside them.
-        assert!(site
-            .hold(unsafe { FaceHeld::gathered(SeatedParts(Some(wire))) })
-            .is_none());
-        let (site_ref, ended_ref) = (&site, &ended);
-        // SAFETY: the site outlives the handle, in this frame.
-        let at = unsafe { FaceAt::new(site_ref, Rc::new(HeldEnd::default()), None, None) };
-        assert!(at.holds_input(), "CONTROL: a free place is lent at once");
-        assert_eq!(at.try_session(|wire| wire.holds), Lend::Lent(true));
-        let seated = site.lend_seating(|held, seat| {
-            held.lend(move |parts| {
-                seat.seat(&mut parts.0, || {
-                    // SAFETY: the site outlives the handle, in this closure.
-                    let at =
-                        unsafe { FaceAt::new(site_ref, Rc::new(HeldEnd::default()), None, None) };
-                    at.close();
-                    (
-                        at.holds_input(),
-                        at.try_session(|wire| wire.holds),
-                        ended_ref.load(Ordering::SeqCst),
-                    )
-                })
-            })
-        });
-        assert_eq!(
-            seated,
-            Some((false, Lend::Lent(true), 0)),
-            "inside the step: read as quiet, the session lent through the seat, the close owed"
-        );
-        assert_eq!(
-            ended.load(Ordering::SeqCst),
-            1,
-            "the close owed inside the step told once, as the step let go"
-        );
-        assert!(
-            at.holds_input(),
-            "the place lent again once the step let go"
         );
     }
 
