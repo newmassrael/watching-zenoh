@@ -406,10 +406,16 @@ fn reply_key_of(
 /// (`SESSION_TX_SLOTS`).
 const ROUTER_TX_SLOTS: usize = 2;
 
+/// The host's links of the router stand-in, counted for one task: the stand-in's session runs on
+/// a runtime of its own on its own thread, whichever form the engine under test takes, so its
+/// link's parts are counted as that runtime's are and not as the engine's.
+type RouterLinks = wz_runtime_posix::links::PosixLinks<wz_runtime_coop::link_cells::OneTask>;
+
 /// The host's links the router stand-in accepts on: each lends its session [`ROUTER_TX_SLOTS`]
 /// slots of the stand-in's batch, `batch_size` bytes, in every build of the crate.
-fn router_links(batch_size: u16) -> PosixLinks {
-    host_links(LOOPBACK, PosixTcpDial).with_tx_buffers(ROUTER_TX_SLOTS, usize::from(batch_size))
+fn router_links(batch_size: u16) -> RouterLinks {
+    RouterLinks::new(LOOPBACK, PosixTcpDial)
+        .with_tx_buffers(ROUTER_TX_SLOTS, usize::from(batch_size))
 }
 
 fn run_router(
