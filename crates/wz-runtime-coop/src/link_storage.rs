@@ -1240,8 +1240,8 @@ mod tests {
         );
         assert_eq!((tx.slots(), tx.slot_len()), (2, 8));
 
-        let mut own = RxBuffer::Owned(std::vec![0u8; 4]);
-        let none = TxBuffer::Owned(HeapTx::new(0, 0));
+        let mut own = RxBuffer::<Cell<bool>>::Owned(std::vec![0u8; 4]);
+        let none = TxBuffer::<Cell<bool>>::Owned(HeapTx::new(0, 0));
         assert_eq!(own.capacity(), 4);
         own.idle();
         assert_eq!(
@@ -1297,7 +1297,7 @@ mod tests {
             refused,
             Err(crate::session_drive::LinkOpenError::Exhausted)
         ));
-        let (mut rx, tx) = heap_link_buffers(None, 48, 0, 0).expect("allocated");
+        let (mut rx, tx) = heap_link_buffers::<Cell<bool>>(None, 48, 0, 0).expect("allocated");
         assert_eq!(
             rx.bytes().map(|bytes| bytes.to_vec()),
             Some(std::vec![0u8; 48])

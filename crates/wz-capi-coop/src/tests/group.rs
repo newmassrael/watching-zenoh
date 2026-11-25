@@ -940,7 +940,7 @@ mod mapped {
 
     use super::{
         eventually, member_config, open_member, put, subscribe, until_members_know_each_other,
-        CoopConfig, Engine, Network, OpenError, GROUP,
+        CoopConfig, Engine, EngineHold, Network, OpenError, GROUP,
     };
 
     /// A member of the group, told the session's keyexprs.
@@ -2422,6 +2422,7 @@ mod in_place {
         let mut whole = Host {
             keys: Vec::new(),
             room: 0,
+            ended: Vec::new(),
         };
         #[cfg(feature = "transport-stats")]
         let counted = &Counted::default();
