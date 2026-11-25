@@ -1309,8 +1309,11 @@ pub struct SessionDriveConfig {
 /// - `on_event` — the per-iteration observer (`Poll` with the decoded
 ///   `FramePayload` batch the application dispatches, or `Lease`).
 ///
+/// [`DriverOutcome::Refused`] at once when the pump is not made
+/// ([`SessionPump::try_new`]): nothing is sent and the link is dropped.
+///
 /// Absent under `session-slot` with `reassembly`, where a pump is not built on
-/// the caller's stack with a heap table behind it: see `SessionPump::new`.
+/// the caller's stack with a heap table behind it: see `SessionPump::try_new`.
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 pub fn run_session<C, L, F>(
     runtime: &CoopRuntime<C>,
@@ -1326,14 +1329,16 @@ where
     L: SessionDatagramLink,
     F: FnMut(IterationEvent<'_, '_>),
 {
-    let mut pump = SessionPump::new(
+    let Some(mut pump) = SessionPump::try_new(
         runtime.clone(),
         link,
         actions.clone(),
         entropy,
         clock.clone(),
         config,
-    );
+    ) else {
+        return DriverOutcome::Refused;
+    };
     loop {
         // The synchronous driver owns the executor pass: nothing else is
         // driving this runtime, so spawned workers and deadline-keyed
@@ -1346,7 +1351,7 @@ where
     }
 }
 
-/// The reassembly Router a pump builds for itself when its maker hands it none (`SessionPump::new`):
+/// The reassembly Router a pump builds for itself when its maker hands it none (`SessionPump::try_new`):
 /// the generated pool's Router of growable chains, or with `rx-in-place` the session's own Router
 /// staging into the slots of a `reassembly_pool_mcu` table it owns (`ReassemblyArena`), where a
 /// fragment is read where the link holds it and copied once, into its slot.
@@ -1462,7 +1467,8 @@ impl<
     ///
     /// `rx-in-place` with `reassembly`: the session stages its fragments into a
     /// reassembly table of its OWN, allocated here once
-    /// ([`PoolStorage::owned`]); [`Self::with_reassembly_arena`] takes one the
+    /// ([`PoolStorage::try_owned`]), and the pump is `None` when the heap has no
+    /// room for it; every other build always makes one. [`Self::with_reassembly_arena`] takes one the
     /// image placed instead. Under `session-slot` that table is never the
     /// pump's own heap allocation, so with `reassembly` this constructor is absent
     /// and a pump is made by `PumpSlots::claim` (which places the table in the
@@ -1473,23 +1479,23 @@ impl<
     /// once the task that steps it exists (`pending_role`).
     #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
     #[inline(never)]
-    pub fn new(
+    pub fn try_new(
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-    ) -> Self {
+    ) -> Option<Self> {
         // The reassembly is the session's, so it is built from the session's own snapshot.
         #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
         let reasm = mcu_reassembly(&actions.params.policy);
         #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
         let reasm = in_place_reassembly(
-            ReassemblyArena::new(PoolStorage::owned()),
+            ReassemblyArena::new(PoolStorage::try_owned()?),
             &actions.params.policy,
         );
-        Self::build(
+        Some(Self::build(
             runtime,
             link,
             actions,
@@ -1500,7 +1506,7 @@ impl<
             reasm,
             #[cfg(not(feature = "reassembly"))]
             (),
-        )
+        ))
     }
 
     /// `Self::new` over a reassembly arena the caller built: the image hands
@@ -1538,7 +1544,7 @@ impl<
         K: LockKind,
     > SessionPump<C, L, D, R, K>
 {
-    /// The pump `SessionPump::new` builds, over a reassembly Router its maker built: one whose
+    /// The pump `SessionPump::try_new` builds, over a reassembly Router its maker built: one whose
     /// chains stage into buffers the session's arena lent, so the session's fragments cost the
     /// heap nothing and are bounded by the buffers' length. Never inlined, for the reason `new`
     /// is not.
@@ -1937,7 +1943,10 @@ where
     L: SessionDatagramLink,
     F: FnMut(IterationEvent<'_, '_>),
 {
-    let mut pump = SessionPump::new(runtime, link, actions, entropy, clock, config);
+    let Some(mut pump) = SessionPump::try_new(runtime, link, actions, entropy, clock, config)
+    else {
+        return DriverOutcome::Refused;
+    };
     loop {
         if let Some(outcome) = pump.step(&mut on_event) {
             return outcome;
@@ -2915,13 +2924,58 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions, entropy, clock, config);
+        let mut pump = SessionPump::try_new(runtime, link.clone(), actions, entropy, clock, config)
+            .expect("the heap has room");
         let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
         assert_eq!(
             link.dropped.get(),
             0,
             "the step took the drops off the link"
         );
+    }
+
+    /// A pump whose reassembly table the heap has no room for is not made, and the session it was
+    /// to run answers `Refused` without reading its link; with room, the same session runs.
+    /// Turned red by `try_new` making the table with `handle_alloc_error`, or by `run_session`
+    /// not answering a pump it could not make.
+    #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+    #[test]
+    fn a_session_whose_pump_the_heap_has_no_room_for_is_refused() {
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
+        let clock = CoopTime::new(&runtime);
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let link = Rc::new(Recording::default());
+        let config = || SessionDriveConfig {
+            timeouts: SessionTimeouts::from_build(),
+            role: SessionRole::Acceptor,
+            max_iters: Some(1),
+        };
+        let entropy = SessionEntropy::new(Counting(0));
+        let outcome = crate::table_tests::refused(|| {
+            run_session(
+                &runtime,
+                link.clone(),
+                &actions,
+                entropy,
+                &clock,
+                config(),
+                |_| {},
+            )
+        });
+        assert_eq!(outcome, DriverOutcome::Refused);
+        assert_eq!(link.reads.get(), 0, "a refused session reads nothing");
+        let entropy = SessionEntropy::new(Counting(0));
+        let outcome = run_session(
+            &runtime,
+            link.clone(),
+            &actions,
+            entropy,
+            &clock,
+            config(),
+            |_| {},
+        );
+        assert_eq!(outcome, DriverOutcome::IterationLimit);
     }
 
     /// What one step of an acceptor pump tells its link it may wait, after the application layer
@@ -2941,7 +2995,8 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions, entropy, clock, config);
+        let mut pump = SessionPump::try_new(runtime, link.clone(), actions, entropy, clock, config)
+            .expect("the heap has room");
         let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
         let waited = *link.budgets.borrow().last().expect("the link was serviced");
         waited
@@ -2963,7 +3018,8 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link, actions.clone(), entropy, clock, config);
+        let mut pump = SessionPump::try_new(runtime, link, actions.clone(), entropy, clock, config)
+            .expect("the heap has room");
         let mut wakes = 0;
         let _ = pump.step(&mut |event: IterationEvent<'_, '_>| {
             if matches!(event, IterationEvent::AppWake) {
@@ -2991,14 +3047,15 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(
+        let mut pump = SessionPump::try_new(
             runtime,
             link.clone(),
             actions.clone(),
             entropy,
             clock,
             config,
-        );
+        )
+        .expect("the heap has room");
         link.holding.set(true);
         actions.park_pending_batch(&[0xFF]);
         let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
@@ -3043,7 +3100,8 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions, entropy, clock, config);
+        let mut pump = SessionPump::try_new(runtime, link.clone(), actions, entropy, clock, config)
+            .expect("the heap has room");
         let mut lost = Vec::new();
         let mut record = |event: IterationEvent<'_, '_>| {
             if let IterationEvent::Poll(DriverLoopOutcome::LinkLost(cause)) = event {
@@ -3437,7 +3495,8 @@ mod wake_budget_tests {
         };
         let link = Rc::new(Recording::default());
         (
-            SessionPump::new(runtime, link, actions, entropy, clock, config),
+            SessionPump::try_new(runtime, link, actions, entropy, clock, config)
+                .expect("the heap has room"),
             now_ms,
         )
     }
@@ -3605,14 +3664,15 @@ mod wake_budget_tests {
                 role: SessionRole::Initiator,
                 max_iters: None,
             };
-            let mut pump = SessionPump::new(
+            let mut pump = SessionPump::try_new(
                 runtime,
                 Rc::clone(&link),
                 actions,
                 SessionEntropy::new(Counting(0)),
                 clock,
                 config,
-            );
+            )
+            .expect("the heap has room");
             pump.engine.process_event(E::InitAckReceived);
             pump.engine.process_event(E::OpenAckReceived);
             assert!(

@@ -2136,6 +2136,10 @@ pub enum DriverOutcome {
     /// bound runaway loops; production callers pass `None` for
     /// unlimited iteration.
     IterationLimit,
+    /// The session was never run: what its loop is made of found no room
+    /// on the heap (the cooperative pump's own reassembly table). Nothing
+    /// was sent; a caller reads it as a session that could not open.
+    Refused,
 }
 
 // A batch put back together from fragments is judged like one that arrived whole:

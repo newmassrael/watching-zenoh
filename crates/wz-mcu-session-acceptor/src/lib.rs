@@ -726,7 +726,8 @@ where
 
     // The same sequence `run_session` runs — one executor pass, then one
     // `step` — with the peer given its turn after every iteration.
-    let mut pump = SessionPump::new(
+    // A pump the heap has no room for runs no session: the acceptor is never established.
+    let Some(mut pump) = SessionPump::try_new(
         runtime.clone(),
         topology.acceptor_link(),
         actions.clone(),
@@ -737,7 +738,9 @@ where
             role: SessionRole::Acceptor,
             max_iters: Some(MAX_ITERS),
         },
-    );
+    ) else {
+        return run.report(false, 0, 0);
+    };
     loop {
         pump.runtime().run_until_idle();
         let finished = pump.step(&mut |event: IterationEvent<'_, '_>| {

@@ -33,9 +33,9 @@
 //! Host-test level: no board runs it, and the stack the lent record takes is not
 //! measured here.
 
-// Not on the slot profile WITH `reassembly`: there `SessionPump::new` does not
+// Not on the slot profile WITH `reassembly`: there `SessionPump::try_new` does not
 // exist, because the pump's staging table must lie in a cell of the pump table
-// (`PumpSlots::claim`), and this file builds its pumps with `new`. The slot profile
+// (`PumpSlots::claim`), and this file builds its pumps with `try_new`. The slot profile
 // without `reassembly` is this file's and is built and run by the C1m leg that
 // names it; clippy builds the other, which is why the gate is here and not at the
 // use. With `alloc`: the application layer here is the heap profile's
@@ -267,14 +267,15 @@ fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
     let (a_on_event, a_observer, a_told) = application(&a_actions);
     let (i_on_event, i_observer, i_told) = application(&i_actions);
     let mut acceptor = End {
-        pump: SessionPump::new(
+        pump: SessionPump::try_new(
             runtime.clone(),
             a_link,
             a_actions.clone(),
             a_entropy,
             CoopTime::new(runtime),
             config(SessionRole::Acceptor),
-        ),
+        )
+        .expect("the heap has room"),
         actions: a_actions,
         on_event: a_on_event,
         observer: a_observer,
@@ -282,14 +283,15 @@ fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
         sender: a_sender,
     };
     let mut initiator = End {
-        pump: SessionPump::new(
+        pump: SessionPump::try_new(
             runtime.clone(),
             i_link,
             i_actions.clone(),
             i_entropy,
             CoopTime::new(runtime),
             config(SessionRole::Initiator),
-        ),
+        )
+        .expect("the heap has room"),
         actions: i_actions,
         on_event: i_on_event,
         observer: i_observer,

@@ -360,14 +360,15 @@ impl Pair {
         let opened = links.open_acceptor(port).expect("bind the acceptor");
         let acceptor_actions =
             new_session_actions(opened.sink, params(0xa1), CoopTime::new(&runtime));
-        let mut acceptor = SessionPump::new(
+        let mut acceptor = SessionPump::try_new(
             runtime.clone(),
             opened.pump,
             acceptor_actions.clone(),
             wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
             CoopTime::new(&runtime),
             config(SessionRole::Acceptor),
-        );
+        )
+        .expect("the heap has room");
 
         let opened = links
             .open_initiator(Locator::udp(std::net::SocketAddr::from((
@@ -382,14 +383,15 @@ impl Pair {
                 params(0xb1),
                 CoopTime::new(&runtime),
             );
-        let mut initiator = SessionPump::new(
+        let mut initiator = SessionPump::try_new(
             runtime.clone(),
             opened.pump,
             initiator_actions.clone(),
             wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
             CoopTime::new(&runtime),
             config(SessionRole::Initiator),
-        );
+        )
+        .expect("the heap has room");
 
         // Room for the most Puts one message carries here: a reassembled one
         // fills a whole reassembly slot.
