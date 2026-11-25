@@ -6709,7 +6709,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         &self,
         core: &Core<L, C>,
         keyexpr: &str,
-        mapping_id: ExprId,
+        (mapping_id, declared_at): (ExprId, Option<KeyexprHandle>),
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
@@ -6732,8 +6732,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if !core.transport.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
-        // The key as the session's tables name it, and each link as its key-wire form says.
-        let Some(named) = tables(&core.session.registry).named_by(keyexpr, mapping_id) else {
+        // The key as the session's tables name it, read at the declaration's row where the caller
+        // kept it, and each link as its key-wire form says.
+        let Some(named) = tables(&core.session.registry).named_at(keyexpr, mapping_id, declared_at)
+        else {
             return FilteredPut::NotPlain;
         };
         // A plain put carries its QoS and nothing else of a publication's.
@@ -6763,6 +6765,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// (`GroupDeclarations::asks_for_filters`), since on it zenoh-pico sends what its filter would
     /// hold back. Without a group no write must reach anyone regardless.
     fn holds_back_in(core: &Core<L, C>, id: FilterId) -> bool {
+        !Self::filters_left_unasked(core) && Self::filter_active_in(core, id)
+    }
+
+    /// Whether the session holds a group the write filters do not ask, which is sent a write
+    /// whatever a filter says ([`Self::holds_back_in`]).
+    fn filters_left_unasked(core: &Core<L, C>) -> bool {
         #[cfg(feature = "group")]
         if core
             .transport
@@ -6770,9 +6778,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .iter()
             .any(|group| !group.declarations().asks_for_filters())
         {
-            return false;
+            return true;
         }
-        Self::filter_active_in(core, id)
+        #[cfg(not(feature = "group"))]
+        let _ = core;
+        false
     }
 
     /// How often what the peers declared was searched since the open: what a test of the cost of
@@ -7625,9 +7635,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return;
         };
-        let tables = tables(&core.0.session.registry);
-        if let Some(row) = row_of(filter).and_then(|handle| tables.write_filters().get(handle)) {
-            row.keep_plain(plain);
+        if let Some(handle) = row_of(filter) {
+            tables(&core.0.session.registry).keep_write_filter_plain(handle, plain);
         }
     }
 
@@ -8761,19 +8770,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return FilteredPut::Sent(Ok(0));
         };
         let core = &core.0;
-        if Self::holds_back_in(core, filter) {
+        let registry = &core.session.registry;
+        // The filter's row is looked up once, for its answer and for the plain way it keeps.
+        let row = row_of(filter).and_then(|handle| tables(registry).write_filters().get(handle));
+        if !Self::filters_left_unasked(core)
+            && row.is_some_and(|row| !tables(registry).write_filter_row_open(row, registry))
+        {
             return FilteredPut::Suppressed;
         }
-        let (mapping_id, params) = match given {
-            Some(given) => given,
+        let (key, params) = match given {
+            Some((mapping_id, params)) => ((mapping_id, None), params),
             None => {
-                let plain = row_of(filter).and_then(|handle| {
-                    tables(&core.session.registry)
-                        .write_filters()
-                        .get(handle)
-                        .and_then(|row| row.plain())
-                });
-                let Some((params, mapping_id)) = plain else {
+                let Some(way) = row.and_then(|row| row.plain()) else {
                     return FilteredPut::NotPlain;
                 };
                 // A link that names keys its own way is sent the general way, which names the key
@@ -8784,10 +8792,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 {
                     return FilteredPut::NotPlain;
                 }
-                (mapping_id, params)
+                ((way.mapping_id, way.declared_at), way.params)
             }
         };
-        self.put_plain_in(core, keyexpr, mapping_id, payload, &params)
+        self.put_plain_in(core, keyexpr, key, payload, &params)
     }
 
     /// The session `engine` holds as the C handle's drive: one of the engine's holders, so the

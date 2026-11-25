@@ -855,11 +855,24 @@ pub struct WriteFilterRow<Key> {
     matching: Cell<bool>,
     /// What the peers answered, with the count of [`PeerDeclarations::written`] it was read at.
     verdict: Cell<Option<(u64, bool)>>,
-    /// How a write of the filter's entity that brings nothing of its own is sent the plain way: the
-    /// facts it is sent from and the declaration that names its key, stated by that entity;
-    /// `None` sends it the general way.
+    /// How a write of the filter's entity that brings nothing of its own is sent the plain way,
+    /// stated by that entity ([`SessionTables::keep_write_filter_plain`]); `None` sends it the
+    /// general way.
     #[cfg(feature = "alloc")]
-    plain: Cell<Option<(crate::publish_options::PlainPutParams, ExprId)>>,
+    plain: Cell<Option<PlainWay>>,
+}
+
+/// How a write of a write filter's entity that brings nothing of its own is sent the plain way.
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy, Debug)]
+pub struct PlainWay {
+    /// The facts the Put is sent from.
+    pub params: crate::publish_options::PlainPutParams,
+    /// The declaration that names the entity's key, `0` for none.
+    pub mapping_id: ExprId,
+    /// The row that declaration had when the way was kept: a write reads the declared prefix
+    /// there ([`SessionTables::named_at`]) and does not search the declarations for the id.
+    pub declared_at: Option<KeyexprHandle>,
 }
 
 impl<Key: KeyBacking> WriteFilterRow<Key> {
@@ -880,14 +893,8 @@ impl<Key: KeyBacking> WriteFilterRow<Key> {
 
     /// How a write that brings nothing of its own is sent the plain way, when its entity said.
     #[cfg(feature = "alloc")]
-    pub fn plain(&self) -> Option<(crate::publish_options::PlainPutParams, ExprId)> {
+    pub fn plain(&self) -> Option<PlainWay> {
         self.plain.get()
-    }
-
-    /// Keep how a write that brings nothing of its own is sent the plain way, `None` for none.
-    #[cfg(feature = "alloc")]
-    pub fn keep_plain(&self, plain: Option<(crate::publish_options::PlainPutParams, ExprId)>) {
-        self.plain.set(plain);
     }
 
     /// Whether the session's own entities count.
@@ -1761,7 +1768,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         Some(id)
     }
 
-    /// The declaration the wire names by `id`.
+    /// The declaration the wire names by `id`: a search of the declarations, which a caller that
+    /// keeps the row it found ([`Self::named_at`]) makes once.
     pub fn keyexpr_by_id(&self, id: ExprId) -> Option<KeyexprHandle> {
         self.keyexprs
             .iter()
@@ -1885,9 +1893,24 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// the session sends it: named by that declaration while it stands and begins the key, and
     /// whole otherwise. `None` for an empty key.
     pub fn named_by<'k>(&self, key: &'k str, id: ExprId) -> Option<NamedKey<'k>> {
+        self.named_at(key, id, None)
+    }
+
+    /// [`Self::named_by`] for a caller that found the declaration `id` at row `at`: read there
+    /// while that row still holds `id`, and searched for by `id` otherwise, as by a caller that
+    /// found none. Ids are minted apart from every declared one, so the row found either way is
+    /// the same.
+    pub fn named_at<'k>(
+        &self,
+        key: &'k str,
+        id: ExprId,
+        at: Option<KeyexprHandle>,
+    ) -> Option<NamedKey<'k>> {
         let declared = MappedId::new(id).and_then(|mapped| {
-            let handle = self.keyexpr_by_id(id)?;
-            let row = self.keyexprs.get(handle)?;
+            let row = at
+                .and_then(|at| self.keyexprs.get(at))
+                .filter(|row| row.id == id)
+                .or_else(|| self.keyexprs.get(self.keyexpr_by_id(id)?))?;
             Some(Prefix::of(mapped, text(&row.key)))
         });
         NamedKey::under_or_whole(key, declared)
@@ -2469,20 +2492,56 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         peers: &impl PeerDeclarations,
     ) -> Option<bool> {
         let row = self.kept_write_filters()?.get(handle)?;
+        Some(self.write_filter_row_open(row, peers))
+    }
+
+    /// [`Self::write_filter_open`] of a filter whose row the caller holds already: a write that
+    /// reads the row for its plain way too looks it up once.
+    pub fn write_filter_row_open(
+        &self,
+        row: &WriteFilterRow<P::Key>,
+        peers: &impl PeerDeclarations,
+    ) -> bool {
         let key = text(&row.key);
         if row.count_local && self.local_declares(row.plane, key) {
-            return Some(true);
+            return true;
         }
         let written = peers.written();
-        let remote = match row.verdict.get() {
+        match row.verdict.get() {
             Some((at, verdict)) if at == written => verdict,
             _ => {
                 let verdict = peers.declares(row.plane, key);
                 row.verdict.set(Some((written, verdict)));
                 verdict
             }
+        }
+    }
+
+    /// Keep how a write of write filter `filter`'s entity that brings nothing of its own is sent
+    /// the plain way, `None` for the general way: the facts it is sent from and the declaration
+    /// `mapping_id` naming its key, with that declaration's row as it stands now. A filter the
+    /// tables do not hold keeps nothing.
+    #[cfg(feature = "alloc")]
+    pub fn keep_write_filter_plain(
+        &self,
+        filter: WriteFilterHandle,
+        plain: Option<(crate::publish_options::PlainPutParams, ExprId)>,
+    ) {
+        let Some(row) = self
+            .kept_write_filters()
+            .and_then(|filters| filters.get(filter))
+        else {
+            return;
         };
-        Some(remote)
+        row.plain.set(plain.map(|(params, mapping_id)| PlainWay {
+            params,
+            mapping_id,
+            declared_at: if mapping_id == 0 {
+                None
+            } else {
+                self.keyexpr_by_id(mapping_id)
+            },
+        }));
     }
 
     /// The callback of the matching listener `handle` names, for a caller that takes what it calls

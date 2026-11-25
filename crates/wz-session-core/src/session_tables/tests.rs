@@ -3075,3 +3075,111 @@ fn the_tables_bytes_are_the_same_in_a_const_as_at_run_time() {
     };
     assert_eq!(SessionTables::<Calls, Lent>::arena_bytes(&past), None);
 }
+
+/// A plain way kept on a write filter keeps the row of the declaration that names its key, none for
+/// a key that names no declaration, and a key named at that row is named as by the declaration's
+/// id; a row that no longer holds the id is passed over for the search by id, and a retracted
+/// declaration names nothing. Turned red by a kept way that keeps no row, and by a read at a row
+/// that holds another declaration.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_plain_way_keeps_its_declarations_row_and_a_key_is_named_there() {
+    use crate::named_key::NamedKey;
+    use crate::publish_options::PlainPutParams;
+    use crate::wire_key::{KeyText, MappedId, WireKey};
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    let other = tables.declare_keyexpr("other/").unwrap();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "demo/x", false)
+        .unwrap()
+        .handle;
+    let params = PlainPutParams {
+        destination: Locality::Any,
+        qos: None,
+        reliable: true,
+        express: false,
+        priority: crate::qos::Priority::DEFAULT,
+    };
+    let way = |tables: &Tables| {
+        tables
+            .write_filters()
+            .get(filter)
+            .and_then(|row| row.plain())
+    };
+    assert!(way(&tables).is_none(), "no way kept yet");
+    tables.keep_write_filter_plain(filter, Some((params, declared.id)));
+    let kept = way(&tables).expect("a way kept");
+    assert_eq!(kept.mapping_id, declared.id);
+    assert_eq!(kept.declared_at, Some(declared.handle));
+    tables.keep_write_filter_plain(filter, Some((params, 0)));
+    assert_eq!(way(&tables).unwrap().declared_at, None, "a whole key");
+    tables.keep_write_filter_plain(filter, Some((params, 99)));
+    assert_eq!(
+        way(&tables).unwrap().declared_at,
+        None,
+        "an id nothing declares"
+    );
+    tables.keep_write_filter_plain(filter, None);
+    assert!(way(&tables).is_none(), "the general way");
+
+    let id = MappedId::new(declared.id).unwrap();
+    let under = Some(WireKey::mapped(id, KeyText::new("y")));
+    assert_eq!(
+        tables
+            .named_at("demo/y", declared.id, Some(declared.handle))
+            .map(|named| named.wire()),
+        under
+    );
+    assert_eq!(
+        tables
+            .named_at("demo/y", declared.id, Some(other.handle))
+            .map(|named| named.wire()),
+        under,
+        "a row of another declaration is passed over"
+    );
+    assert_eq!(
+        tables
+            .named_at("demo/y", declared.id, None)
+            .map(|named| named.wire()),
+        under
+    );
+    assert_eq!(tables.retract_keyexpr(declared.handle), Some(declared.id));
+    assert_eq!(
+        tables.named_at("demo/y", declared.id, Some(declared.handle)),
+        NamedKey::literal("demo/y")
+    );
+
+    // A filter the tables no longer hold keeps nothing, and its row reads as none.
+    let _ = tables.undeclare_write_filter(filter, |_, _| {});
+    tables.keep_write_filter_plain(filter, Some((params, other.id)));
+    assert!(way(&tables).is_none());
+}
+
+/// A write filter's answer read at the row it holds is its answer read by its handle. Turned red
+/// by a row read that keeps the peers' answer apart from the handle's.
+#[test]
+fn a_write_filter_row_answers_as_its_handle_does() {
+    let mut tables = Tables::new();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let peers = Peers::default();
+    let row_open = |tables: &Tables| {
+        let row = tables.write_filters().get(filter).unwrap();
+        tables.write_filter_row_open(row, &peers)
+    };
+    assert!(!row_open(&tables));
+    assert_eq!(tables.write_filter_open(filter, &peers), Some(false));
+    assert_eq!(
+        peers.asked.get(),
+        1,
+        "the row read kept the answer the handle read"
+    );
+    peers.declares.set(true);
+    peers.written.set(1);
+    assert!(row_open(&tables));
+    assert_eq!(tables.write_filter_open(filter, &peers), Some(true));
+    assert_eq!(peers.asked.get(), 2);
+}
