@@ -3369,6 +3369,11 @@ pub struct UdpDriver {
     /// locator is the address it writes from. `None` everywhere else, where
     /// the one socket does both.
     send_socket: Option<std::sync::Arc<UdpSocket>>,
+    /// The address `send_socket` sends from, read once at the bind: a datagram the joined socket
+    /// reads from it is this member's own, come back while the loopback is on, and the link
+    /// drops it (`wz_session_core::group_locator::sent_by_own`). `None` where there is no
+    /// send socket of its own.
+    own_source: Option<SocketAddr>,
     peer: Option<SocketAddr>,
     /// Open-debt item 902 — what the send halves taken from this driver
     /// ([`Self::group_sender`]) trip when a write fails, and what
@@ -3414,6 +3419,7 @@ impl UdpDriver {
         Self {
             socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
+            own_source: None,
             peer: Some(peer),
             write_latch: Default::default(),
         }
@@ -3497,6 +3503,10 @@ impl UdpDriver {
         }
         Ok(Self {
             socket: read.socket,
+            own_source: write
+                .socket
+                .as_ref()
+                .and_then(|socket| socket.local_addr().ok()),
             send_socket: write.socket,
             peer,
             write_latch: Default::default(),
@@ -3682,6 +3692,7 @@ impl UdpDriver {
         Ok(Self {
             socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
+            own_source: None,
             peer: Some(bound.peer),
             write_latch: Default::default(),
         })
@@ -3750,6 +3761,7 @@ impl UdpDriver {
         Ok(Self {
             socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
+            own_source: None,
             peer: Some(bound.peer),
             write_latch: Default::default(),
         })
@@ -3787,6 +3799,7 @@ impl UdpDriver {
         Ok(Self {
             socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
+            own_source: None,
             peer: None,
             write_latch: Default::default(),
         })
@@ -3882,6 +3895,16 @@ impl UdpDriver {
         self.sending_socket()?.local_addr()
     }
 
+    /// Whether `frame` is one this driver's send socket sent: from its address, its port and,
+    /// for IPv6, its scope. Only a multicast link (`Self::bind_multicast_link`) has a send
+    /// socket of its own to tell.
+    fn sent_this(&self, frame: &RxFrame) -> bool {
+        matches!(
+            (self.own_source, frame.src),
+            (Some(own), Some(from)) if wz_session_core::group_locator::sent_by_own(own, from)
+        )
+    }
+
     /// R2852 — the address [`LinkDriver::send`] writes to: for a multicast
     /// driver, the group and its port. `None` for a driver with no link peer
     /// (`Self::bind_reply_unicast`).
@@ -3939,6 +3962,7 @@ impl LinkDriver for UdpDriver {
         // subsequent calls report NotConnected.
         self.socket = None;
         self.send_socket = None;
+        self.own_source = None;
         self.peer = None;
         Ok(())
     }
@@ -3955,12 +3979,20 @@ impl LinkDriver for UdpDriver {
         // Item 902 — a write the link's send half could not make is the link's
         // loss too. The latch is read FIRST (`biased`) and its error is the
         // same `Err` a failed receive is, so both reach the one arm below.
-        let received = tokio::select! {
-            biased;
-            () = self.write_latch.tripped() => {
-                Err(io::Error::other("a write on this link failed"))
+        let received = loop {
+            let received = tokio::select! {
+                biased;
+                () = self.write_latch.tripped() => {
+                    Err(io::Error::other("a write on this link failed"))
+                }
+                received = Self::receive_datagram(socket) => received,
+            };
+            // What this member's send socket sent comes back on the joined socket while the
+            // loopback is on, and is read past here, before the session reads or counts it.
+            match &received {
+                Ok(frame) if self.sent_this(frame) => {}
+                _ => break received,
             }
-            received = Self::receive_datagram(socket) => received,
         };
         match received {
             // Carry the datagram source so a multicast consumer can
@@ -4696,6 +4728,37 @@ mod udp_multicast_config_tests {
             })
             .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
         assert_eq!(egress, expected);
+    }
+
+    /// A datagram the link's own send socket sent comes back on the joined socket while the
+    /// loopback is on, and the link reads past it to another member's in the same poll. The
+    /// CONTROL is that member's datagram, taken with its source. Built over unicast loopback
+    /// sockets, which run the same `poll_event`. Turned red by a link that hands the session its
+    /// own datagram, or one that drops a member's from the same address on another port.
+    #[tokio::test]
+    async fn a_link_reads_past_what_its_own_send_socket_sent() {
+        let loopback = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let read = UdpSocket::bind(loopback).await.expect("the joined half");
+        let send = UdpSocket::bind(loopback).await.expect("the send half");
+        let member = UdpSocket::bind(loopback).await.expect("a member's socket");
+        let at = read.local_addr().expect("bound");
+        let own = send.local_addr().expect("bound");
+        send.send_to(b"own", at).await.expect("sent");
+        member.send_to(b"member", at).await.expect("sent");
+        let mut link = UdpDriver {
+            socket: Some(std::sync::Arc::new(read)),
+            send_socket: Some(std::sync::Arc::new(send)),
+            own_source: Some(own),
+            peer: Some(at),
+            write_latch: Default::default(),
+        };
+        match link.poll_event().await {
+            LinkEvent::Rx(frame) => {
+                assert_eq!(frame.src, Some(member.local_addr().expect("bound")));
+                assert_eq!(&*frame.bytes, b"member");
+            }
+            _ => panic!("the member's datagram, past the link's own"),
+        }
     }
 
     /// A link named with port 0 is given its port by the system, and the group is addressed by it:

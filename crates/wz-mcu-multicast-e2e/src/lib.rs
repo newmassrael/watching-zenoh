@@ -24,21 +24,26 @@
 //!
 //! ## The scenario (the full profile in one round trip)
 //!
-//! 1. **transport-multicast** — a crafted peer JOIN (a `zid` distinct from
-//!    ours so it is not own-zid-filtered, advertising the same `batch_size`
-//!    so [`judge_join`](wz_session_core::multicast_join::judge_join) admits it) is
-//!    injected onto the group from our own socket. Multicast loopback
-//!    delivers it back, creating the §3.2 peer entry keyed by our
-//!    `(src_addr, src_port)`.
+//! The node shares the loopback with one other member: a socket of its own on
+//! a port of its own, since one host holds one socket on a port. The member
+//! sends to the node's port and the node's group sends to the member's, so each
+//! reads what the other sent; what the node sends that comes back to its own
+//! socket is dropped by its link.
+//!
+//! 1. **transport-multicast** — the member's JOIN (a `zid` distinct from
+//!    ours, advertising the same `batch_size` so
+//!    [`judge_join`](wz_session_core::multicast_join::judge_join) admits it)
+//!    creates the §3.2 peer entry keyed by the member's `(src_addr, src_port)`.
 //! 2. **transport-fragmentation (TX)** — an oversize `z_put` queued on the
 //!    loop's `next_tx` pull-seam exceeds the (deliberately tiny, 64-byte)
 //!    `batch_size`, so the shared `multicast_tx_emit` SSOT splits it into a
-//!    `T_MID_FRAGMENT` chain that is multicast to the group.
-//! 3. **reassembly (RX) + codec-push** — the echoed fragments attribute to
-//!    the pre-admitted peer, mint consecutive SNs from the JOIN's advertised
-//!    `next_sn 0` so the per-peer SN gate admits the chain in order, and the
-//!    R311mf Fragment RX arm reassembles + re-parses them back into the SAME
-//!    single `Push` the whole-`T_MID_FRAME` path would fan.
+//!    `T_MID_FRAGMENT` chain that is multicast to the group, where the member
+//!    reads more than one fragment of it.
+//! 3. **reassembly (RX) + codec-push** — the member's own oversize Put, split
+//!    by the same SSOT at the same budget, mints consecutive SNs from its
+//!    JOIN's advertised `next_sn 0` so the per-peer SN gate admits the chain in
+//!    order, and the node's R311mf Fragment RX arm reassembles + re-parses it
+//!    back into the SAME single `Push` the whole-`T_MID_FRAME` path would fan.
 //! 4. **the graceful departure (R2375)** — the node then re-enters the loop
 //!    asking to stop, which multicasts the departing Close and takes §3.1
 //!    Running -> Stopped with the peer table cleared. The MCU profile could not
@@ -115,22 +120,26 @@ pub use wz_session_core::multicast_params::MulticastOutcome;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
-#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
-use wz_session_core::multicast_join::encode_join;
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::multicast_params::MulticastDriveConfig;
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::multicast_params::MulticastParams;
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
-use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
+use wz_session_core::multicast_tx::{multicast_put_literal, MulticastTxItem};
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+use wz_session_core::multicast_tx::{multicast_tx_emit_offer, multicast_tx_offer_put_literal};
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::network_message::NetworkMessage;
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::policy::SessionPolicy;
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::session_zid::SessionZid;
-#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::sn::{self, MulticastTxConduits};
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+use wz_session_core::wire_const::T_MID_FRAGMENT;
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::WhatAmI;
 
@@ -150,9 +159,9 @@ const MAX_PEERS: usize = 4;
 const MAX_ITERS: usize = 32;
 /// The tiny group-wide frame budget that forces the oversize Put to fragment.
 /// `judge_join` admits a peer JOIN only when its advertised `batch_size`
-/// matches the receiver's, so BOTH the self params and the crafted peer JOIN
-/// carry this value (a mismatch would silently reject the JOIN and the echoed
-/// fragments would hit an `UnknownPeer` drop).
+/// matches the receiver's, so BOTH the self params and the member's JOIN
+/// carry this value (a mismatch would silently reject the JOIN and the
+/// member's fragments would hit an `UnknownPeer` drop).
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const BATCH_SIZE: u16 = 64;
 /// The oversize payload length. 200 bytes exceeds the 64-byte batch budget
@@ -163,11 +172,11 @@ const PAYLOAD_LEN: usize = 200;
 /// The literal keyexpr the Put publishes on.
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const KEYEXPR: &str = "demo/mc";
-/// Our own zenoh id (the §3.2 self key; own-zid JOINs are beacon-filtered).
+/// Our own zenoh id (the §3.2 self key).
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const SELF_ZID: SessionZid = SessionZid::from_array([0xAA, 0xBB, 0xCC, 0xDD]);
-/// The crafted peer's zenoh id — distinct from ours so its JOIN is admitted
-/// (not own-zid-filtered), creating the peer entry the echoed fragments match.
+/// The member's zenoh id — distinct from ours so its JOIN is admitted,
+/// creating the peer entry its fragments match.
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const PEER_ZID: SessionZid = SessionZid::from_array([0x01, 0x02, 0x03, 0x04]);
 
@@ -187,17 +196,18 @@ pub struct MulticastE2eReport {
     /// group join succeeded. False on an environment with no IGMP-capable
     /// netif up (the loop is not driven; the rest of the report is inert).
     pub join_ok: bool,
-    /// The oversize Put split into >1 datagram at the 64-byte budget — proven
-    /// by a pre-loop `multicast_tx_emit` probe, so a passing `saw_push`
-    /// exercised the Fragment RX arm, not the whole-Frame arm.
+    /// The node's oversize Put left it as more than one `T_MID_FRAGMENT`
+    /// datagram at the 64-byte budget, as the member read them; the member's
+    /// chain is split at the same budget, so a passing `saw_push` exercised
+    /// the Fragment RX arm, not the whole-Frame arm.
     pub tx_fragmented: bool,
-    /// Exactly one peer (the crafted JOIN at our loopback source) is in the
-    /// §3.2 table after the run — our own beacon is zid-filtered.
+    /// Exactly one peer (the member, by its JOIN) is in the §3.2 table after
+    /// the run — our own beacon never reaches it.
     pub peer_admitted: bool,
     /// The §3.2 peer-table population after the run (1 on success).
     pub active_peers: usize,
-    /// The reassembled fragment chain surfaced as a `Push` `FramePayload` —
-    /// the codec-push + reassembly RX data-plane proof.
+    /// The member's fragment chain, reassembled by the node, surfaced as a
+    /// `Push` `FramePayload` — the codec-push + reassembly RX data-plane proof.
     pub saw_push: bool,
     /// A reassembly chain was dropped at ingest (out-of-order / capacity /
     /// `UnknownPeer`). Must be false: the in-order chain reassembles cleanly.
@@ -291,62 +301,32 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     //    fails; report join_ok=false and return — the loop has nothing to
     //    drive. On the host (routed loop netif) and on real IGMP hardware it
     //    succeeds.
-    let socket = match bind_session_multicast_rx(link, group, PORT) {
-        Ok(sock) => sock,
-        Err(_) => {
-            return MulticastE2eReport {
-                outcome: None,
-                join_ok: false,
-                tx_fragmented: false,
-                peer_admitted: false,
-                active_peers: 0,
-                saw_push: false,
-                saw_drop: false,
-                departed: false,
-            };
-        }
+    let Ok(socket) = bind_session_multicast_rx(link, group, PORT) else {
+        return MulticastE2eReport::no_join();
     };
 
-    // ── Pre-admit a peer at OUR loopback source: a JOIN with a zid distinct
-    //    from ours (so it is admitted, not own-zid-filtered) advertising
-    //    next_sn 0 on a fresh ring, and the SAME batch_size as ours (a
-    //    mismatch would fail judge_join -> the echoed fragments would hit
-    //    an UnknownPeer drop). Injected BEFORE wrapping the socket in the
-    //    driver so the loop's first poll delivers it ahead of our own beacon
-    //    echo, creating the (src_addr, src_port) entry the fragments match.
+    // ── The other member: a socket of its own on MEMBER_PORT, beside the node's,
+    //    since one host holds one socket on a port. The node's group sends there,
+    //    so the member reads what the node sent, and the member sends to the
+    //    node's port, where the node reads it. What the node sends that comes
+    //    back to its own socket is dropped by its link.
+    let Ok(mut member) = MemberSocket::bind(link, MEMBER_PORT) else {
+        let _ = link.leave_multicast_group(group);
+        return MulticastE2eReport::no_join();
+    };
     let policy = resolve_policy();
-    let mut peer = params(PEER_ZID, &policy);
-    peer.batch_size = BATCH_SIZE;
-    let peer_join = encode_join(
-        &peer,
-        &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-    );
-    let _ = socket.send_to(group, PORT, &peer_join);
-
-    let mut driver = LwipMulticastDriver::new(socket, group, PORT);
-    let mut dispatcher = MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000));
-    let runtime = CoopRuntime::new(clock_source);
-    let mut self_params = params(SELF_ZID, &policy);
-    self_params.batch_size = BATCH_SIZE;
 
     // The oversize payload: deterministic bytes, length 200 > batch_size 64.
     let payload: Vec<u8> = (0..PAYLOAD_LEN as u32)
         .map(|i| (i.wrapping_mul(13)) as u8)
         .collect();
+    member_sends(&member, group, &policy, &payload);
 
-    // Probe the TX side fragments at this budget BEFORE the loop, so a passing
-    // saw_push below is known to have exercised the Fragment RX arm (a single
-    // frame would ride the whole-Frame admit path instead).
-    let mut probe_sn = MulticastTxConduits::new(sn::mask_from_res(self_params.seq_num_res));
-    let tx_fragmented = match multicast_put_literal(KEYEXPR, &payload) {
-        Ok(item) => {
-            multicast_tx_emit(item, &mut probe_sn, &self_params)
-                .datagrams
-                .len()
-                > 1
-        }
-        Err(_) => false,
-    };
+    let mut driver = LwipMulticastDriver::new(socket, group, MEMBER_PORT);
+    let mut dispatcher = MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000));
+    let runtime = CoopRuntime::new(clock_source);
+    let mut self_params = params(SELF_ZID, &policy);
+    self_params.batch_size = BATCH_SIZE;
 
     // One queued Put on the reliable channel; the pull-seam yields it once,
     // then None (the loop keeps serving RX + the JOIN beacon).
@@ -382,6 +362,10 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     );
 
     let active_peers = dispatcher.active_peers();
+    // What the node's last step sent reaches the member's socket with the next
+    // pump of the loop netif.
+    link.poll_loopback();
+    let tx_fragmented = fragments_read(&mut member) > 1;
 
     // ── R2375 — LEAVE THE GROUP ANNOUNCED. Re-enter the SAME dispatcher asking
     //    to stop: the loop multicasts the departing Close, drives §3.1 Running
@@ -430,6 +414,84 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
         saw_drop,
         departed,
     }
+}
+
+/// The port of the e2e's other member: a socket of its own beside the node's, since one
+/// host holds one socket on a port. The node's group sends to it, so the member reads what
+/// the node sent; the member sends to `PORT`, where the node reads it.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+const MEMBER_PORT: u16 = 7448;
+/// The longest datagram the member sends or reads: a JOIN, or one of the group's batch.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+const MEMBER_DATAGRAM: usize = if JOIN_MAX_BYTES > BATCH_SIZE as usize {
+    JOIN_MAX_BYTES
+} else {
+    BATCH_SIZE as usize
+};
+/// The datagrams the member's socket queues: the node's beacons and its Put's fragments
+/// of the bounded drive, the fragments among the first.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+const MEMBER_QUEUE: usize = 16;
+/// The member's socket.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+type MemberSocket = wz::link_lwip::LwipUdpSocket<MEMBER_DATAGRAM, MEMBER_QUEUE>;
+
+impl MulticastE2eReport {
+    /// The report of a run whose sockets could not be bound or whose join failed: the loop
+    /// never ran and the rest of the report is inert.
+    #[cfg(any(feature = "heap", feature = "fixed-memory"))]
+    fn no_join() -> Self {
+        Self {
+            outcome: None,
+            join_ok: false,
+            tx_fragmented: false,
+            peer_admitted: false,
+            active_peers: 0,
+            saw_push: false,
+            saw_drop: false,
+            departed: false,
+        }
+    }
+}
+
+/// The member's half of the round trip, sent to the node's port before the node's drive:
+/// its JOIN, a zid distinct from the node's advertising `next_sn 0` on a fresh ring and the
+/// node's `batch_size` (`judge_join` admits only a match), then the oversize Put split
+/// into a fragment chain at that batch on the SN the JOIN advertised, which the node
+/// reassembles. Framed into arrays a datagram at a time, so it asks the heap for nothing
+/// on a build without one.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+fn member_sends(member: &MemberSocket, group: u32, policy: &SessionPolicy, payload: &[u8]) {
+    let mut peer = params(PEER_ZID, policy);
+    peer.batch_size = BATCH_SIZE;
+    let mut tx_sn = MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res));
+    let mut join = [0u8; JOIN_MAX_BYTES];
+    if let Ok(len) = encode_join_into_slice(&peer, &tx_sn, &mut join) {
+        let _ = member.send_to(group, PORT, &join[..len]);
+    }
+    if let Some(offer) = multicast_tx_offer_put_literal(KEYEXPR, payload) {
+        let mut scratch = [0u8; BATCH_SIZE as usize];
+        multicast_tx_emit_offer(offer, &mut tx_sn, &peer, &mut scratch, &mut |datagram| {
+            let _ = member.send_to(group, PORT, datagram);
+        });
+    }
+}
+
+/// How many of the datagrams the member read from the node are fragments: the node's Put
+/// split at the group's batch, as it left the node.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
+fn fragments_read(member: &mut MemberSocket) -> usize {
+    let mut fragments = 0;
+    while let Some(datagram) = member.try_recv() {
+        if datagram
+            .data
+            .first()
+            .is_some_and(|header| header & 0x1f == T_MID_FRAGMENT)
+        {
+            fragments += 1;
+        }
+    }
+    fragments
 }
 
 /// A multicast params fixture (the C1m `run_multicast_session` test shape): a

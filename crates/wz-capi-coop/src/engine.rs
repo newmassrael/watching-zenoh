@@ -2075,8 +2075,9 @@ struct LinkSession<C: ClockSource + 'static> {
     actions: LinkHandle<C>,
     /// The link's gates, whose admission is granted when the face is brought up (`bring_up`);
     /// until then the link gives the session nothing past its handshake, so the watchers hear the
-    /// face come up before anything its link carried.
-    #[cfg(feature = "listen")]
+    /// face come up before anything its link carried. A session of several links tells them what
+    /// each wait found in the link's stack (`input_seen`).
+    #[cfg(any(feature = "listen", feature = "group"))]
     gate: CellRc<LinkGate<C>>,
     /// The link's generation, which the queries it carries are answered under (`query`).
     #[cfg(feature = "queryable")]
@@ -2111,6 +2112,11 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
 
     fn close_reason(&self) -> Option<CloseReason> {
         self.actions.close_reason()
+    }
+
+    #[cfg(any(feature = "listen", feature = "group"))]
+    fn input_seen(&self, ready: bool) {
+        self.gate.input_seen(ready);
     }
 }
 
@@ -3229,14 +3235,15 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
             lane: unsafe { self.session.lane.share() },
             after_pushes: false,
         };
-        // The wire keeps a handle on the gates to admit the link through them.
-        #[cfg(not(feature = "listen"))]
+        // The wire keeps a handle on the gates to admit the link through them, and to tell them
+        // what each wait found in the link's stack.
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         let _ = gate;
         (
             dispatch,
             LinkSession {
                 actions,
-                #[cfg(feature = "listen")]
+                #[cfg(any(feature = "listen", feature = "group"))]
                 gate: gate.clone(),
                 #[cfg(feature = "queryable")]
                 generation,
@@ -3544,6 +3551,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn poll_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
         #[cfg(test)]
         self.link_polls.set(self.link_polls.get() + 1);
+        // Each link's stack is read at the next step, whatever a wait found there since the last
+        // move: a run of steps without a wait passes over a link no longer than this.
+        #[cfg(any(feature = "listen", feature = "group"))]
+        self.transport.links.links_moved();
         // The connections that arrived come first, so their handshakes are moved on in this pass.
         #[cfg(feature = "listen")]
         self.accept_links();

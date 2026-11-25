@@ -17,47 +17,32 @@
 //! same transitions.
 //!
 //! The run asks the heap for nothing on a build without the `heap` feature (S9e): the
-//! JOIN is written into an array, the queued `Put` is a borrowed offer framed into one
-//! lent buffer a datagram at a time, and the received records are lent where their
-//! datagram lies. It is written against the profile-agnostic seams of `wz-session-core`
-//! (`multicast_tx_emit_offer`, `IterationEvent::delivers_push`), so a build that does
-//! name `heap` runs the same code over the owned forms.
+//! member's JOIN is written into an array, its Put and the node's queued `Put` are
+//! borrowed offers each framed into one lent buffer a datagram at a time, and the
+//! received records are lent where their datagram lies. It is written against the
+//! profile-agnostic seams of `wz-session-core` (`multicast_tx_emit_offer`,
+//! `IterationEvent::delivers_push`), so a build that does name `heap` runs the same code
+//! over the owned forms.
 
 use wz::link_lwip::rx_sockets::{
     bind_session_multicast_rx_in, SessionMulticastRxPool, SESSION_MULTICAST_GROUP_DEFAULT,
 };
+use wz::link_lwip::UdpSocketPool;
 use wz::runtime_coop::RuntimeCell;
 use wz::session_lwip::multicast_drive::{LwipMulticastDriver, MulticastSession, MulticastSlots};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
-use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::MulticastParams;
-use wz_session_core::multicast_tx::{multicast_tx_emit_offer, multicast_tx_offer_put_literal};
+use wz_session_core::multicast_tx::multicast_tx_offer_put_literal;
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::sn::{self, MulticastTxConduits};
 
 use crate::{
-    params, resolve_policy, ClockSource, LwipLink, MulticastE2eReport, MulticastOutcome,
-    MulticastStage, BATCH_SIZE, KEYEXPR, MAX_ITERS, MAX_PEERS, PAYLOAD_LEN, PEER_ZID, PORT,
-    SELF_ZID,
+    fragments_read, member_sends, params, resolve_policy, ClockSource, LwipLink, MemberSocket,
+    MulticastE2eReport, MulticastOutcome, MulticastStage, BATCH_SIZE, KEYEXPR, MAX_ITERS,
+    MAX_PEERS, MEMBER_DATAGRAM, MEMBER_PORT, MEMBER_QUEUE, PAYLOAD_LEN, PORT, SELF_ZID,
 };
 
 impl MulticastE2eReport {
-    /// The report of a run whose group socket could not be bound or joined: the loop
-    /// never ran and the rest of the report is inert.
-    fn no_join() -> Self {
-        Self {
-            outcome: None,
-            join_ok: false,
-            tx_fragmented: false,
-            peer_admitted: false,
-            active_peers: 0,
-            saw_push: false,
-            saw_drop: false,
-            departed: false,
-        }
-    }
-
     /// The report of a run that joined, from what its two drives observed.
     fn joined(
         outcome: MulticastOutcome,
@@ -110,39 +95,6 @@ fn payload() -> [u8; PAYLOAD_LEN] {
     bytes
 }
 
-/// Probe that the TX side fragments `payload` at this budget BEFORE the loop, so a
-/// passing `saw_push` is known to have exercised the Fragment RX arm (a single frame
-/// would ride the whole-Frame admit path instead).
-fn tx_fragments(payload: &[u8], own: &MulticastParams) -> bool {
-    let mut probe_sn = MulticastTxConduits::new(sn::mask_from_res(own.seq_num_res));
-    let Some(offer) = multicast_tx_offer_put_literal(KEYEXPR, payload) else {
-        return false;
-    };
-    // The datagram buffer the lent form frames into: the group's batch is all it holds.
-    let mut scratch = [0u8; BATCH_SIZE as usize];
-    let mut datagrams = 0usize;
-    multicast_tx_emit_offer(offer, &mut probe_sn, own, &mut scratch, &mut |_| {
-        datagrams += 1
-    });
-    datagrams > 1
-}
-
-/// The JOIN of the pre-admitted peer, written into `buf`: a zid distinct from ours (so
-/// it is admitted, not own-zid-filtered) advertising `next_sn 0` on a fresh ring, and
-/// the SAME `batch_size` as ours (a mismatch would fail `validate_join` and the echoed
-/// fragments would hit an `UnknownPeer` drop).
-fn peer_join<'b>(buf: &'b mut [u8; JOIN_MAX_BYTES], policy: &SessionPolicy) -> &'b [u8] {
-    let mut peer = params(PEER_ZID, policy);
-    peer.batch_size = BATCH_SIZE;
-    let len = encode_join_into_slice(
-        &peer,
-        &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-        buf,
-    )
-    .expect("a JOIN fits JOIN_MAX_BYTES, which bounds every one the encoder writes");
-    &buf[..len]
-}
-
 /// This node's parameters: the fixture at the tiny batch budget, under `policy`.
 fn own_params(policy: &SessionPolicy) -> MulticastParams {
     let mut own = params(SELF_ZID, policy);
@@ -178,6 +130,8 @@ pub struct MulticastE2eStatics<C: ClockSource + 'static> {
     groups: MulticastSlots<C, MAX_PEERS, 1>,
     /// The group socket's storage: one 32 x 1536 byte cell.
     sockets: SessionMulticastRxPool<1>,
+    /// The other member's socket's storage: one cell of its few short datagrams.
+    members: UdpSocketPool<MEMBER_DATAGRAM, MEMBER_QUEUE, 1>,
 }
 
 // SAFETY: the profile's rule, stated on the type: the e2e is one loop on one core, the
@@ -191,6 +145,7 @@ impl<C: ClockSource + 'static> MulticastE2eStatics<C> {
             runtime: RuntimeCell::new(),
             groups: MulticastSlots::new(),
             sockets: SessionMulticastRxPool::new(),
+            members: UdpSocketPool::new(),
         }
     }
 }
@@ -237,18 +192,19 @@ where
         return MulticastE2eReport::no_join();
     };
 
-    // Pre-admit the peer at our loopback source, before the driver wraps the socket
-    // (see `peer_join`).
+    // The other member, on a socket of its own (see `MEMBER_PORT`), sends its JOIN and
+    // its fragmented Put to the node's port before the node's drive.
+    let Ok(mut member) = MemberSocket::bind_in(link, MEMBER_PORT, &statics.members) else {
+        let _ = link.leave_multicast_group(group);
+        return MulticastE2eReport::no_join();
+    };
     let policy = resolve_policy();
-    let mut join = [0u8; JOIN_MAX_BYTES];
-    let _ = socket.send_to(group, PORT, peer_join(&mut join, &policy));
-
     let own = own_params(&policy);
     let payload = payload();
-    let tx_fragmented = tx_fragments(&payload, &own);
+    member_sends(&member, group, &policy, &payload);
     let session = MulticastSession {
         dispatcher: MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000)),
-        driver: LwipMulticastDriver::new(socket, group, PORT),
+        driver: LwipMulticastDriver::new(socket, group, MEMBER_PORT),
         params: own,
         policy,
         tick_ms: 5,
@@ -274,6 +230,10 @@ where
         }
     };
     let active_peers = pump.dispatcher().active_peers();
+    // What the node's last step sent reaches the member's socket with the next pump of the
+    // loop netif.
+    link.poll_loopback();
+    let tx_fragmented = fragments_read(&mut member) > 1;
 
     // The departure: the SAME pump asked to stop. The stop is polled before the
     // iteration budget, so it is answered on the step it is first asked on.

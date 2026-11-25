@@ -6,6 +6,9 @@
 //! record a session is handed can take of it, and the gates that hold each link back while the
 //! round has not that room (decision Q4).
 
+#[cfg(any(feature = "listen", feature = "group"))]
+use core::cell::Cell;
+
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
@@ -401,6 +404,24 @@ pub(crate) struct RoundGate<P> {
     pump: P,
     round: PlacedRef<Round>,
     room: ReadRoom,
+    /// What the link's owner last learned of its stack: a session of several links reads only
+    /// the stacks that may hold input, where one link alone has nothing to pass over.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    stack: Cell<Stack>,
+}
+
+/// What a gate knows of its link's stack ([`RoundGate`]).
+#[cfg(any(feature = "listen", feature = "group"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stack {
+    /// No wait of the owner's looked at it: a link that waits in its own loop, read at every
+    /// step, since no wait would tell when it has input again.
+    Unwaited,
+    /// A wait found input in it, or the session's links moved since it gave nothing: read it.
+    Look,
+    /// It gave nothing when last read, or a wait found nothing in it, and the links have not
+    /// moved since: a step passes over it.
+    Quiet,
 }
 
 impl<P> RoundGate<P> {
@@ -410,7 +431,13 @@ impl<P> RoundGate<P> {
     /// Asked by the session's step alone, which holds the session's lock, and `round`'s owner
     /// outlives the gate (`Placed::share`).
     pub(crate) unsafe fn new(pump: P, round: PlacedRef<Round>, room: ReadRoom) -> Self {
-        Self { pump, round, room }
+        Self {
+            pump,
+            round,
+            room,
+            #[cfg(any(feature = "listen", feature = "group"))]
+            stack: Cell::new(Stack::Unwaited),
+        }
     }
 
     /// The link this gate stands before, as the engine admits it through the gates (`listen`).
@@ -440,6 +467,54 @@ impl<P> RoundGate<P> {
     }
 }
 
+#[cfg(any(feature = "listen", feature = "group"))]
+impl<P: SessionDatagramLink> RoundGate<P> {
+    /// What a wait over the link's input found in its stack, `ready` or not, or, `true`, that the
+    /// session's links moved (`FaceSession::input_seen`).
+    pub(crate) fn input_seen(&self, ready: bool) {
+        self.stack
+            .set(if ready { Stack::Look } else { Stack::Quiet });
+    }
+
+    /// Whether this step passes over the link's stack: nothing was there when it was last read or
+    /// waited on, and the links have not moved since. Input the link took from its stack already
+    /// is read whatever the stack held.
+    fn passes_over(&self) -> bool {
+        self.stack.get() == Stack::Quiet && !self.pump.holds_input()
+    }
+
+    /// The link gave nothing: a stack its owner waits on is passed over until a wait finds input
+    /// there or the links move. Each link of a session of several would otherwise be asked its
+    /// stack at every step, for one input on one of them.
+    fn gave_nothing(&self) {
+        if self.stack.get() == Stack::Look {
+            self.stack.set(Stack::Quiet);
+        }
+    }
+}
+
+impl<P: SessionDatagramLink> RoundGate<P> {
+    /// Lend the link's next datagram to `f`. A link that leaves it where it lies until it is next
+    /// asked to receive tells the round where it lies while it is lent, so a record of it may be
+    /// read there.
+    // Always inlined: the receive is its one caller.
+    #[inline(always)]
+    fn lend(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        if !self.pump.lends_until_next_receive() {
+            return self.pump.recv_with(f);
+        }
+        self.pump.recv_with(&mut |datagram: &[u8]| {
+            // SAFETY: a link's gate is asked by the session's step alone, under the session's
+            // lock (`Self::new`), and the link leaves the bytes where they lie until it is next
+            // asked to receive or to be serviced, which it is not while a record lies there.
+            unsafe { self.round.set_lending(Some(datagram)) };
+            f(datagram);
+            // SAFETY: as above.
+            unsafe { self.round.set_lending(None) };
+        })
+    }
+}
+
 impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
     /// A link whose datagram a record is read from is not serviced: its stack may read the next
     /// datagram into the buffer the record lies in.
@@ -463,7 +538,21 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
         if self.shut() {
             return None;
         }
-        self.pump.try_recv()
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            if self.passes_over() {
+                return None;
+            }
+            let frame = self.pump.try_recv();
+            if frame.is_none() {
+                self.gave_nothing();
+            }
+            frame
+        }
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        {
+            self.pump.try_recv()
+        }
     }
 
     /// The datagram is lent to the session's step; a link that leaves it where it lies until it
@@ -473,18 +562,21 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
         if self.shut() {
             return false;
         }
-        if !self.pump.lends_until_next_receive() {
-            return self.pump.recv_with(f);
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            if self.passes_over() {
+                return false;
+            }
+            let received = self.lend(f);
+            if !received {
+                self.gave_nothing();
+            }
+            received
         }
-        self.pump.recv_with(&mut |datagram: &[u8]| {
-            // SAFETY: a link's gate is asked by the session's step alone, under the session's
-            // lock (`Self::new`), and the link leaves the bytes where they lie until it is next
-            // asked to receive or to be serviced, which it is not while a record lies there.
-            unsafe { self.round.set_lending(Some(datagram)) };
-            f(datagram);
-            // SAFETY: as above.
-            unsafe { self.round.set_lending(None) };
-        })
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        {
+            self.lend(f)
+        }
     }
 
     /// A link that ended is told to the session after what it queued before the end was read, and
