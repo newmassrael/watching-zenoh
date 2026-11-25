@@ -4218,10 +4218,10 @@ impl<P: Storage> SubscriberPeer<P> {
     #[cfg(feature = "declare-undeclare")]
     pub fn mark_aggregate_announced(&mut self, interest_id: u64) {
         let mut rows = InterestSide::<P>::rows_mut(&mut self.interests.rows, &self.interests.keys);
-        if let Some(row) = rows
+        let aggregate = rows
             .iter_mut()
-            .find(|row| row.interest_id == interest_id && row.aggregate)
-        {
+            .find(|row| row.interest_id == interest_id && row.aggregate);
+        if let Some(row) = aggregate {
             row.announced = true;
         }
     }

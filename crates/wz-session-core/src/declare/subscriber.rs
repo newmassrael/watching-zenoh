@@ -609,7 +609,11 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     }
 
     /// The repeats lent their space, to read.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        feature = "codec-declare"
+    ))]
     fn aliases_ref<'a>(
         aliases: &'a crate::id_map::DeclaredAliases<P>,
         keys: &'a P::Keys,

@@ -1271,6 +1271,8 @@ pub struct RowSpace<K: RowKind> {
 impl<K: RowKind> RowSpace<K> {
     /// This space as one of kind `J`'s rows: the same rows where `J` lays its rows out as `K` does,
     /// and no space otherwise, so a space is never read as rows of a kind it was not lent for.
+    /// Read by the peer tables' directory, the one place spaces are handed out by kind.
+    #[cfg(feature = "peer-row-pools")]
     pub(crate) fn as_kind<J: RowKind>(&self) -> RowSpace<J> {
         let (a, b) = (K::SHAPE, J::SHAPE);
         let same = a.item_bytes == b.item_bytes
