@@ -212,6 +212,50 @@ enum AttachmentOf {
     Del,
 }
 
+#[cfg(any(
+    feature = "pubsub-put",
+    feature = "pubsub-delete",
+    feature = "query-reply"
+))]
+impl AttachmentOf {
+    /// The identity of the body's attachment extension.
+    const fn eid(self) -> u8 {
+        match self {
+            #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
+            Self::Put => crate::ext_header::body_eid::PUT_ATTACHMENT,
+            #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
+            Self::Del => crate::ext_header::body_eid::DEL_ATTACHMENT,
+        }
+    }
+}
+
+/// The attachment and the source info of a reply body's chain, each under the gate the owned path
+/// reads it under, both read in ONE walk of the chain: a chain read where its frame lies decodes
+/// every entry again at every walk. A build that reads neither walks nothing.
+#[cfg(any(
+    feature = "pubsub-put",
+    feature = "pubsub-delete",
+    feature = "query-reply"
+))]
+fn lent_chain_fields<'c, T: ExtEntryBytes<'c>>(
+    exts: impl IntoIterator<Item = T>,
+    of: AttachmentOf,
+) -> (Option<&'c [u8]>, Option<SourceInfo>) {
+    let eids = [of.eid(), crate::ext_header::body_eid::SOURCE_INFO];
+    let [attachment, source_info] = if cfg!(any(
+        feature = "pubsub-attachment",
+        feature = "reply-source-info"
+    )) {
+        crate::ext_view::last_of_each_in(exts, eids)
+    } else {
+        [None, None]
+    };
+    (
+        lent_attachment(attachment, of),
+        lent_source_info(source_info),
+    )
+}
+
 /// The attachment of a reply body's chain, under the gate the owned path reads
 /// it under (`pubsub-attachment`), at that body's own id.
 #[cfg(any(
@@ -272,9 +316,9 @@ fn encoding_parts<'r>(encoding: &wz_codecs::encoding::Encoding<'r>) -> (u32, Opt
 /// the owned path drops too (an unknown body tag, or a kind this build does not
 /// deliver), and the fallback for a Put whose payload is sliced.
 ///
-/// The Response is read as its view, and each chain is walked where it lies, once for each
-/// field that reads it (the attachment and the source info each scan it for their own
-/// extension, as they scanned the held chain): the bytes they hand out stay in the frame.
+/// The Response is read as its view, and the body's chain is walked where it lies, once for the
+/// attachment and the source info together, each read off the entry found as the held chain is
+/// read: the bytes they hand out stay in the frame.
 fn lent_body<'r, 'f>(response: &'r ResponseView<'f>) -> Result<Option<LentBody<'r, 'f>>, Fallback> {
     match &response.body {
         ResponseViewVariant::CodecZenohReply(reply) => match &reply.body {
@@ -286,12 +330,13 @@ fn lent_body<'r, 'f>(response: &'r ResponseView<'f>) -> Result<Option<LentBody<'
                     return Err(Fallback::Sliced);
                 };
                 // The whole chain of an inline Put: it carries no shared-memory marker.
-                let exts = || {
-                    crate::put_payload::view_chain(put)
-                        .map(|(rest, _)| sce_forge_runtime::codec::Entries::entries(rest))
-                        .into_iter()
-                        .flatten()
-                };
+                let (attachment, source_info) = lent_chain_fields(
+                    crate::ext_view::walked_from(
+                        crate::put_payload::view_chain(put)
+                            .map(|(rest, _)| sce_forge_runtime::codec::Entries::entries(rest)),
+                    ),
+                    AttachmentOf::Put,
+                );
                 Ok(Some(LentBody {
                     kind: ReplyKind::Put,
                     payload: payload.into_inner(),
@@ -300,21 +345,25 @@ fn lent_body<'r, 'f>(response: &'r ResponseView<'f>) -> Result<Option<LentBody<'
                     put_encoding: put.encoding.as_ref().map(encoding_parts),
                     #[cfg(not(feature = "pubsub-encoding"))]
                     put_encoding: None,
-                    attachment: lent_attachment(exts(), AttachmentOf::Put),
-                    source_info: lent_source_info(exts()),
+                    attachment,
+                    source_info,
                     timestamp: lent_timestamp(put.timestamp.as_ref()),
                 }))
             }
             #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
-            ReplyViewVariant::CodecZenohMsgDel(del) => Ok(Some(LentBody {
-                kind: ReplyKind::Del,
-                payload: &[],
-                err_encoding: None,
-                put_encoding: None,
-                attachment: lent_attachment(walked(del.extensions.as_ref()), AttachmentOf::Del),
-                source_info: lent_source_info(walked(del.extensions.as_ref())),
-                timestamp: lent_timestamp(del.timestamp.as_ref()),
-            })),
+            ReplyViewVariant::CodecZenohMsgDel(del) => {
+                let (attachment, source_info) =
+                    lent_chain_fields(walked(del.extensions.as_ref()), AttachmentOf::Del);
+                Ok(Some(LentBody {
+                    kind: ReplyKind::Del,
+                    payload: &[],
+                    err_encoding: None,
+                    put_encoding: None,
+                    attachment,
+                    source_info,
+                    timestamp: lent_timestamp(del.timestamp.as_ref()),
+                }))
+            }
             // An unknown inner body tag, or a kind this build does not deliver:
             // dropped, as the owned path drops it.
             _ => Ok(None),
@@ -479,15 +528,23 @@ fn lent_reply<'r, 'f, PS: Storage, OS: Storage>(
     let Some(body) = lent_body(response)? else {
         return Ok(None);
     };
-    // The Response's own chain is walked where it lies, once for each field that reads it.
+    // The Response's own chain is walked where it lies, once for every field that reads it.
+    use crate::ext_header::network_eid::{QOS, RESPONDER};
+    #[cfg(feature = "pubsub-ts-stack")]
+    let [responder, qos, stack] = crate::ext_view::last_of_each_in(
+        walked(response.extensions.as_ref()),
+        [
+            RESPONDER,
+            QOS,
+            crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
+        ],
+    );
+    #[cfg(not(feature = "pubsub-ts-stack"))]
+    let [responder, qos] =
+        crate::ext_view::last_of_each_in(walked(response.extensions.as_ref()), [RESPONDER, QOS]);
     // A Response the nodes record on is delivered with a stack of its own to add to.
     #[cfg(feature = "pubsub-ts-stack")]
-    if crate::ext_view::last_by_eid_in(
-        walked(response.extensions.as_ref()),
-        crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
-    )
-    .is_some()
-    {
+    if stack.is_some() {
         return Err(Fallback::Instrumented);
     }
     let (keyexpr, held) =
@@ -515,8 +572,8 @@ fn lent_reply<'r, 'f, PS: Storage, OS: Storage>(
         attachment: body.attachment,
         source_info: body.source_info,
         timestamp: body.timestamp,
-        responder: super::response_responder(walked(response.extensions.as_ref())),
-        qos: crate::sample::extract_qos_in(walked(response.extensions.as_ref())),
+        responder: super::response_responder(responder),
+        qos: crate::sample::extract_qos_in(qos),
         #[cfg(feature = "alloc")]
         timestamp_hint: OnceCell::new(),
     }))
@@ -934,5 +991,99 @@ mod tests {
         for seen in [&owned, &lent] {
             assert_eq!((seen[0].responder.clone(), seen[0].qos), (None, None));
         }
+    }
+
+    /// A reply whose body's chain carries its attachment and its source info twice each, in a
+    /// Response whose own chain carries the responder and the QoS twice each, is delivered lent
+    /// with the last entry of each, as the owned path delivers it, each chain walked once. Turned
+    /// red by a walk that keeps the first entry of an identity, or by an identity the one walk
+    /// asks for that names another extension.
+    #[cfg(all(feature = "pubsub-attachment", feature = "reply-source-info"))]
+    #[test]
+    fn a_replys_repeated_extensions_are_delivered_lent_by_their_last_entries() {
+        use crate::ext_header::network_eid::{QOS, RESPONDER};
+        use crate::wire::WireStorage;
+        use sce_forge_runtime::codec::Bounded;
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
+        use wz_codecs::ext_zint::ExtZint;
+
+        let zbuf = |header: u8, bytes: &[u8]| {
+            let value = Bounded::new(bytes)
+                .expect("a test value is within the protocol's bound")
+                .store::<WireStorage, ExtZbufValueField>()
+                .expect("the heap holds a test value");
+            ExtEntryOwned::<WireStorage> {
+                header,
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                    value_len: bytes.len() as u64,
+                    value,
+                }),
+            }
+        };
+        let z64 = |header: u8, value: u64| ExtEntryOwned::<WireStorage> {
+            header,
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
+        };
+        let source_info = |n: u8| {
+            crate::source_info_ext::encode_source_info_ext_entry::<WireStorage>(
+                &[0xA0, n],
+                u32::from(n),
+                u32::from(n),
+            )
+            .expect("a two-byte zid is a zid")
+        };
+        let attachment = |bytes: &[u8]| {
+            crate::attachment::encode_attachment_ext::<WireStorage>(
+                crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+                bytes,
+            )
+            .expect("the heap holds it")
+        };
+        let mut response = ResponseReplyBuilder::new(
+            RID,
+            crate::wire_key::WireKey::literal("demo/repeated").expect("a literal key"),
+            b"v",
+        )
+        .build()
+        .expect("build");
+        // The responder: the zid's length less one in the high nibble, the zid, the entity id.
+        response.extensions = Some(
+            crate::held_list::held(alloc::vec![
+                zbuf(RESPONDER, &[0x10, 0xCA, 0xFE, 0x03]),
+                z64(QOS, 5),
+                zbuf(RESPONDER, &[0x00, 0xAB, 0x07]),
+                z64(QOS, 2),
+            ])
+            .expect("a chain of four entries is within its bound"),
+        );
+        crate::ext_nodeid::sync_header_z(&mut response.header, true);
+        match &mut response.body {
+            crate::wire::ResponseOwnedVariant::CodecZenohReply(reply) => match &mut reply.body {
+                wz_codecs::reply::ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                    crate::put_payload::set_chain(
+                        put,
+                        [
+                            source_info(1),
+                            attachment(b"first"),
+                            source_info(2),
+                            attachment(b"last"),
+                        ],
+                    )
+                    .expect("an inline Put holds a chain of four entries");
+                }
+                _ => panic!("a reply built with a payload carries a Put"),
+            },
+            _ => panic!("a reply response carries a Reply"),
+        }
+        let (owned, lent) = both(&response);
+        assert_eq!(lent, owned, "the lent delivery is the owned one");
+        let [seen] = lent.as_slice() else {
+            panic!("one reply delivered: {lent:?}");
+        };
+        assert_eq!(seen.attachment.as_deref(), Some(&b"last"[..]));
+        assert_eq!(seen.source_info, Some(SourceInfo::new(&[0xA0, 2], 2, 2)));
+        assert_eq!(seen.responder, Some((alloc::vec![0xAB], 7)));
+        assert_eq!(seen.qos, Some(crate::sample::QosLevel::from_raw(2)));
     }
 }
