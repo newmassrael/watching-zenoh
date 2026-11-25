@@ -746,9 +746,13 @@ transport-link-ws|"
     # its members' tokens, which a member answers from the tokens its session holds. Each of the
     # four runs the module's own tests too, a JOIN asked between two beacons among them.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
-    # And with `transport-stats` (`tests::group::congested::`): what a group's queue drops for
-    # congestion is the transport's `tx.n_dropped`, as the tokio engine's group counts it.
-    "wz-capi-coop|hook|app-transport,group,transport-stats|tests::group::congested::"
+    # And with `transport-stats`: what a group's queue drops for congestion is the transport's
+    # `tx.n_dropped`, as the tokio engine's group counts it (`tests::group::congested::`), and a
+    # member's datagram is still read where it lies and its records lent, each counted once against
+    # the member (`tests::group::in_place::`), with the module's other tests, a get and its answer
+    # among them. The second row adds the members' keyexprs read member by member.
+    "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|tests::group::"
+    "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable,transport-stats|tests::group::"
     # And with the lent-only receive the C library's final build selects (the session core's
     # `rx-lent-only`): a member's datagram is read where it lies and its records lent, its
     # declarations scoped by the member and its departure's retractions lent, and no table is handed
