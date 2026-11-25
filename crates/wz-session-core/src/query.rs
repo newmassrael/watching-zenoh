@@ -2537,6 +2537,9 @@ type UnanswerableFinalHeld = crate::policy_binding::Bound<
     { <crate::policy::QueryUnanswerableFinal as crate::policy_binding::PolicyValue>::HELD },
 >;
 
+/// The requester of a face whose link proved no zid.
+const NO_REQUESTER: [u8; 16] = [0; 16];
+
 /// The side of the query plane the asking peer owns: who its link proved it to be, the answer its
 /// session gives a query it cannot resolve, the bounds its queries are held to and how many they
 /// refused, and the shared-memory receive state of their values. One per face
@@ -2545,8 +2548,9 @@ type UnanswerableFinalHeld = crate::policy_binding::Bound<
 /// each dispatch.
 pub struct QueryPeer {
     /// The zid the key of this face's link proved, when it proved one
-    /// (decision D12): handed to every matched queryable as [`QueryView::requester`].
-    requester: Option<[u8; 16]>,
+    /// (decision D12): handed to every matched queryable as [`QueryView::requester`]. All zero
+    /// bytes, which no zid is, when none was proved, so a face of zero bytes has proved none.
+    requester: [u8; 16],
     /// The most bytes of selector parameters (`QUERY_PARAMETERS_MAX_BYTES`) a query from a peer
     /// may carry for a queryable to run it: what the creator of the session resolved
     /// ([`Self::limit_query_sizes_to`]), the build's value until it does.
@@ -2584,7 +2588,7 @@ impl QueryPeer {
     /// an unresolved key. `const`, so a session slot that holds one can be a `static`.
     pub const fn new() -> Self {
         Self {
-            requester: None,
+            requester: NO_REQUESTER,
             max_parameters: crate::limit_binding::Limited::build_default(),
             max_attachment: crate::limit_binding::Limited::build_default(),
             oversize_refused: 0,
@@ -2625,8 +2629,18 @@ impl QueryPeer {
 
     /// Say which zid the key of the session's link proved, or `None` when it proved none
     /// (decision D12). The queries dispatched from now on carry it as [`QueryView::requester`].
+    /// A zid of all zero bytes is no zid, and is read back as none.
     pub fn set_requester(&mut self, requester: Option<[u8; 16]>) {
-        self.requester = requester;
+        self.requester = requester.unwrap_or(NO_REQUESTER);
+    }
+
+    /// The zid the key of this face's link proved, `None` when it proved none.
+    pub fn requester(&self) -> Option<[u8; 16]> {
+        if self.requester == NO_REQUESTER {
+            None
+        } else {
+            Some(self.requester)
+        }
     }
 
     /// State the `query-unanswerable-final` value of the session about to be dispatched, from
@@ -3593,7 +3607,7 @@ impl QueryPeer {
             cx,
             Asker {
                 remote: true,
-                requester: self.requester,
+                requester: self.requester(),
             },
             envelope,
             keyexpr,
@@ -4158,6 +4172,23 @@ pub fn response_final_for(rid: crate::wire_id::RequestId) -> ResponseFinalOwned 
 ))]
 mod tests {
     use super::*;
+
+    /// A face that proved no requester reads none, also at all zero bytes of its requester; one
+    /// proved reads it back, and a zid of zero bytes is none. Turned red by `QueryPeer::requester`
+    /// reading the zero zid as one.
+    #[test]
+    fn a_requester_of_zero_bytes_is_none() {
+        let mut peer = QueryPeer::new();
+        assert_eq!(peer.requester(), None);
+        peer.set_requester(Some([7; 16]));
+        assert_eq!(peer.requester(), Some([7; 16]));
+        peer.set_requester(Some([0; 16]));
+        assert_eq!(peer.requester(), None);
+        peer.set_requester(Some([7; 16]));
+        peer.set_requester(None);
+        assert_eq!(peer.requester(), None);
+    }
+
     // The responder stages through `StagesReplies`; the tests read the stage back through the
     // staging trait's `nth` and `drain_staged`.
     use crate::reply_stage::ReplyStaging as _;

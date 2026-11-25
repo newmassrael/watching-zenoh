@@ -508,7 +508,7 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION: two sessions of one process may carry two zids, and an echo
     /// is a sample that names the zid of the session it came back on.
     // Inline whatever the policy: sixteen bytes no table lends.
-    own_zid: Option<OwnZid>,
+    own_zid: OwnZid,
 }
 
 /// This session's own zid as the self-echo check compares it: 1 to 16 bytes inline and their
@@ -522,6 +522,21 @@ struct OwnZid {
 
 #[cfg(feature = "storage-profile")]
 impl OwnZid {
+    /// No zid: a length of none, which no zid has, so naming of all zero bytes holds none.
+    const NONE: Self = Self {
+        bytes: [0; 16],
+        len: 0,
+    };
+
+    /// The zid's bytes, `None` where none is held.
+    fn held(&self) -> Option<&[u8]> {
+        if self.len == 0 {
+            None
+        } else {
+            Some(self.as_slice())
+        }
+    }
+
     /// The zid `zid` spells, or `None` for one not 1 to 16 bytes long.
     fn of(zid: &[u8]) -> Option<Self> {
         if !(1..=16).contains(&zid.len()) {
@@ -2807,7 +2822,7 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
                 shared_key_ids: None,
-                own_zid: None,
+                own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::default(),
@@ -2841,7 +2856,7 @@ impl SubscriberPeer<crate::bounded::Static> {
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
                 shared_key_ids: None,
-                own_zid: None,
+                own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::new_static(),
@@ -3340,7 +3355,7 @@ impl<P: Storage> SubscriberPeer<P> {
         let Some(own) = OwnZid::of(zid) else {
             return false;
         };
-        self.naming.own_zid = Some(own);
+        self.naming.own_zid = own;
         true
     }
 
@@ -3350,7 +3365,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// every wire-arrived Push fires its matching subscribers.
     #[cfg(feature = "storage-profile")]
     pub fn clear_own_zid(&mut self) {
-        self.naming.own_zid = None;
+        self.naming.own_zid = OwnZid::NONE;
     }
 
     /// R231 — expose the currently-installed own zid for diagnostic
@@ -3359,7 +3374,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// `source_info.zid_prefix()`.
     #[cfg(feature = "storage-profile")]
     pub fn own_zid(&self) -> Option<&[u8]> {
-        self.naming.own_zid.as_ref().map(OwnZid::as_slice)
+        self.naming.own_zid.held()
     }
 
     /// R121d — absorb a `Declare` envelope's inner body so the
@@ -5038,6 +5053,19 @@ mod tests {
     // Fixtures build the borrowed codec views then `.into_owned()` at the
     // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
     use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
+
+    /// An own zid of all zero bytes is none, as one cleared is; one set reads back its bytes.
+    /// Turned red by `OwnZid::held` reading a length of zero as a zid.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn an_own_zid_of_zero_bytes_is_none() {
+        // SAFETY: sixteen bytes and a length, all integers.
+        let zeroed: OwnZid = unsafe { core::mem::zeroed() };
+        assert_eq!(zeroed.held(), None);
+        assert_eq!(OwnZid::NONE.held(), None);
+        let set = OwnZid::of(&[1, 2, 3]).unwrap();
+        assert_eq!(set.held(), Some(&[1_u8, 2, 3][..]));
+    }
 
     /// A match memory of all zero bytes remembers no answer; one answered remembers its slot until
     /// a slot is written. Turned red by `last_answer` reading a zero `last_at` as slot 0.
