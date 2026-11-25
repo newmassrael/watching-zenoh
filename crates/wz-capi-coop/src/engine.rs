@@ -844,7 +844,19 @@ fn lend_session(
         PlanFrom::Config => plan.count(config, resolve_limits(config))?,
     }
     lay_out_open(&mut plan, holds)?;
+    #[cfg(feature = "runtime-plan")]
     let mut arena = SessionArena::reserve(&plan, memory)?;
+    // The registry and the key arena lie in the region the build lays out, the head of the one
+    // block the open reserves, zeroed, the arena of what it sizes at run time after it: the
+    // session's tables are the region's fields, placed over their rows by one walk.
+    #[cfg(not(feature = "runtime-plan"))]
+    let (mut arena, state) = SessionArena::reserve_after::<StateRegion>(&plan, memory)?;
+    // SAFETY: the head is a zeroed `StateRegion` this open alone reaches; the arena gives the
+    // block back only after its last holder, and the region's block is dropped before the arena
+    // wherever both are held (here, being made after it, then `SessionLent` and `Core`, whose
+    // arena is their last field).
+    #[cfg(not(feature = "runtime-plan"))]
+    let state = unsafe { RegionBlock::<StateRegion>::within(state) };
     let mut lend = arena.lender();
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
     // open moves into what it makes one by one, are taken apart at once instead: a table held as
@@ -881,10 +893,6 @@ fn lend_session(
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
     #[cfg(not(feature = "runtime-plan"))]
     lend.finish().map_err(ArenaRefused::Lend)?;
-    // The registry and the key arena lie in the region the build lays out, one zeroed reservation
-    // beside the arena: the session's tables are its fields, placed over their rows by one walk.
-    #[cfg(not(feature = "runtime-plan"))]
-    let state = RegionBlock::<StateRegion>::reserve(memory)?;
     // SAFETY: the block is a zeroed `StateRegion` this open alone reaches; it neither moves nor goes
     // back before the registry's handle and every key of it are let go of, being held after them
     // by what this hands back and then by the session's state.

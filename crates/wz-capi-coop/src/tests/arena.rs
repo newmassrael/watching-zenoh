@@ -273,6 +273,12 @@ fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
     let plan = host_plan(&dialling(&probe, SessionLimits::defaults()))
         .expect("the build's limits lay an arena out");
     let bytes = plan.reserved_bytes().expect("within the address space");
+    // A session of the region's form asks for its region and its arena as one block, the arena
+    // after the region on a span's alignment.
+    #[cfg(not(feature = "runtime-plan"))]
+    let bytes = bytes
+        + wz_session_core::bounded::Arena::span(core::mem::size_of::<crate::region::StateRegion>())
+            .expect("a region within the address space");
     let refused = open_dialling(&probe, SessionLimits::defaults(), &NoMemory).err();
     assert_eq!(
         refused,
@@ -2837,16 +2843,15 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
             Refusal::TextTooLong
         )))
     );
-    // A session of the region's form reserves its region beside its arena.
-    let blocks = 1 + usize::from(cfg!(not(feature = "runtime-plan")));
+    // A session of the region's form reserves its region and its arena as one block.
     assert_eq!(
         RECORDED.reserves.load(Ordering::SeqCst),
-        blocks,
-        "one arena, and the region of a session of its form"
+        1,
+        "one block, its region's and its arena's"
     );
     assert_eq!(
         RECORDED.releases.load(Ordering::SeqCst),
-        blocks,
+        1,
         "given back once"
     );
     let reserved = RECORDED.reserved.load(Ordering::SeqCst);

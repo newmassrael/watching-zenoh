@@ -126,6 +126,8 @@ use wz_runtime_coop::RuntimePlace;
     all(feature = "liveliness", any(feature = "listen", feature = "group"))
 ))]
 use wz_session_core::bounded::Lent;
+#[cfg(not(feature = "runtime-plan"))]
+use wz_session_core::bounded::ZeroEmpty;
 use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
@@ -3336,6 +3338,7 @@ unsafe fn give_arena_back(kept: NonNull<Kept>) {
 impl SessionArena {
     /// Reserve the arena `plan` lays out from `memory`. Refused, having taken nothing, when the
     /// arena is past the address space or the memory has none to give.
+    #[cfg(any(feature = "runtime-plan", test))]
     pub(crate) fn reserve(
         plan: &ArenaPlan,
         memory: &'static dyn ArenaMemory,
@@ -3343,28 +3346,65 @@ impl SessionArena {
         Self::of_bytes(plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?, memory)
     }
 
+    /// The arena `plan` lays out and, before it, a `T` of all zero bytes, reserved from `memory`
+    /// as one block: the region the build lays a session's state out in and the arena of what the
+    /// session's open sizes at run time take one reservation, given back whole by the arena's last
+    /// holder (`Self::keep`), so the region's owner drops the `T` in place and gives back nothing.
+    /// Refused as an arena alone is, having taken nothing.
+    #[cfg(not(feature = "runtime-plan"))]
+    pub(crate) fn reserve_after<T: ZeroEmpty>(
+        plan: &ArenaPlan,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<(Self, NonNull<T>), ArenaRefused> {
+        let bytes = plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        let (arena, base) = Self::of_bytes_after(Layout::new::<T>(), bytes, memory)?;
+        Ok((arena, base.cast::<T>()))
+    }
+
     /// Reserve an arena of `bytes` from `memory`. Refused, having taken nothing, when the memory has
     /// none to give.
+    #[cfg(any(feature = "runtime-plan", test))]
     pub(crate) fn of_bytes(
         bytes: usize,
         memory: &'static dyn ArenaMemory,
     ) -> Result<Self, ArenaRefused> {
+        Self::of_bytes_after(Layout::new::<()>(), bytes, memory).map(|(arena, _)| arena)
+    }
+
+    /// An arena of `bytes` reserved from `memory` after a head of `head`'s layout, every byte of
+    /// the head zero, and where the block starts: the head's place. One body for an arena alone
+    /// (a head of no bytes) and for one beside a region. Refused, having taken nothing, when the
+    /// block is past the address space or the memory has none to give.
+    fn of_bytes_after(
+        head: Layout,
+        bytes: usize,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<(Self, NonNull<u8>), ArenaRefused> {
         // At least one span, so the memory is never asked for nothing.
-        let layout = Layout::from_size_align(bytes.max(ARENA_ALIGN), ARENA_ALIGN)
+        let (layout, offset) = Layout::from_size_align(bytes.max(ARENA_ALIGN), ARENA_ALIGN)
+            .and_then(|tail| head.extend(tail))
             .map_err(|_| ArenaRefused::TooLarge)?;
-        let base = memory
-            .reserve(layout)
-            .ok_or(ArenaRefused::NoMemory { bytes })?;
-        // SAFETY: the memory gave `layout`, aligned to `ARENA_ALIGN` and at least `bytes` long, to
-        // this arena alone, until `Drop` gives it back.
-        let arena = unsafe { Arena::over(base, bytes) };
-        Ok(Self {
-            arena,
+        let base = memory.reserve(layout).ok_or(ArenaRefused::NoMemory {
+            bytes: offset.saturating_add(bytes),
+        })?;
+        // SAFETY: the memory gave `layout` to this call alone: the head's `head.size()` bytes at
+        // its start are inside it, and its arena starts `offset` bytes in, aligned to
+        // `ARENA_ALIGN` (`Layout::extend`), at least `bytes` long, used by nothing else until the
+        // block is given back (`Drop`, or the last count of `Self::keep`).
+        let arena = unsafe {
+            base.as_ptr().write_bytes(0, head.size());
+            Arena::over(NonNull::new_unchecked(base.as_ptr().add(offset)), bytes)
+        };
+        Ok((
+            Self {
+                arena,
+                base,
+                layout,
+                memory,
+                kept: None,
+            },
             base,
-            layout,
-            memory,
-            kept: None,
-        })
+        ))
     }
 
     /// The count the arena's memory is kept by, lent from the arena on the first ask: the session
@@ -3431,8 +3471,11 @@ impl SessionArena {
     /// Whether `at` is a byte of the arena's memory.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn holds(&self, at: *const u8) -> bool {
-        let base = self.base.as_ptr() as usize;
-        (base..base + self.bytes()).contains(&(at as usize))
+        // The arena is the tail of the block, after a region's head where there is one, and its
+        // span at least `ARENA_ALIGN` long (`Self::of_bytes_after`).
+        let start =
+            self.base.as_ptr() as usize + self.layout.size() - self.bytes().max(ARENA_ALIGN);
+        (start..start + self.bytes()).contains(&(at as usize))
     }
 }
 
@@ -3884,6 +3927,78 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), all.len(), "two limits share a name");
+    }
+
+    /// What `a_region_and_its_arena_are_one_reservation_given_back_whole` reserves from: the
+    /// allocator, its reservations written over as [`Dirty`]'s are, counting what it gives and
+    /// what it is given back.
+    #[cfg(not(feature = "runtime-plan"))]
+    struct OneBlock {
+        reserves: core::sync::atomic::AtomicUsize,
+        reserved: core::sync::atomic::AtomicUsize,
+        releases: core::sync::atomic::AtomicUsize,
+        released: core::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(not(feature = "runtime-plan"))]
+    impl ArenaMemory for OneBlock {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            let base = Dirty.reserve(layout)?;
+            self.reserves
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            self.reserved
+                .fetch_add(layout.size(), core::sync::atomic::Ordering::SeqCst);
+            Some(base)
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            self.releases
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            self.released
+                .fetch_add(layout.size(), core::sync::atomic::Ordering::SeqCst);
+            // SAFETY: the caller's contract, handed on to the memory that reserved it.
+            unsafe { Dirty.release(base, layout) }
+        }
+    }
+
+    /// A region and the arena after it are one reservation from a memory whose reservations are
+    /// not zero: the region at the block's start, every byte of it zero, the arena after it of the
+    /// plan's bytes, and the block given back once, whole, when the arena is let go. Turned red by
+    /// a region reserved apart from its arena, by a head left as the memory wrote it, or by a
+    /// release of a layout other than the one reserved.
+    #[cfg(not(feature = "runtime-plan"))]
+    #[test]
+    fn a_region_and_its_arena_are_one_reservation_given_back_whole() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static BLOCK: OneBlock = OneBlock {
+            reserves: AtomicUsize::new(0),
+            reserved: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+            released: AtomicUsize::new(0),
+        };
+        /// A head of an odd length, so the arena after it starts past a pad.
+        struct Head([u8; 41]);
+        // SAFETY: a head of zero bytes is one of zeros, which holds nothing to drop.
+        unsafe impl ZeroEmpty for Head {}
+
+        let mut plan = ArenaPlan::vacant();
+        plan.holding_runtime(64).expect("the span fits");
+        let bytes = plan.reserved_bytes().expect("within the address space");
+        let (arena, head) =
+            SessionArena::reserve_after::<Head>(&plan, &BLOCK).expect("the host has it");
+        // SAFETY: the head is the block's first bytes, which nothing else reaches.
+        let zeroed = unsafe { head.as_ref() }.0.iter().all(|byte| *byte == 0);
+        assert!(zeroed, "the region is zero in every byte");
+        assert_eq!(arena.bytes(), bytes, "the arena holds the plan's bytes");
+        let reserved = BLOCK.reserved.load(Ordering::SeqCst);
+        assert!(
+            reserved >= Arena::span(core::mem::size_of::<Head>()).expect("a small span") + bytes,
+            "the arena lies after the region, aligned"
+        );
+        assert_eq!(BLOCK.reserves.load(Ordering::SeqCst), 1, "one reservation");
+        drop(arena);
+        assert_eq!(BLOCK.releases.load(Ordering::SeqCst), 1, "given back once");
+        assert_eq!(BLOCK.released.load(Ordering::SeqCst), reserved, "whole");
     }
 
     /// What the arena of `an_arena_a_runtime_is_placed_in_goes_back_after_its_last_holder` is

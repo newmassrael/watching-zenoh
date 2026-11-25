@@ -26,13 +26,16 @@ use crate::engine::{RegistryRegion, StatePlaces, REGISTRY_REGION_LINES};
 use crate::open_source::EndpointList;
 use crate::CoopConfig;
 
-/// One reservation of a `T` from an [`ArenaMemory`], every byte zero, so every field of it is
-/// empty (`ZeroEmpty`) until its owner binds it; given back when the block is let go, the `T`
-/// dropped in place first. The block holds the pointer the memory gave and never a reference to
-/// the whole `T`: what lies in it is reached by fields projected from [`Self::as_ptr`].
+/// A `T` reserved with every byte zero, so every field of it is empty (`ZeroEmpty`) until its
+/// owner binds it, and dropped in place when the block is let go: a reservation of its own from an
+/// [`ArenaMemory`] ([`Self::reserve`]), given back then too, or the head of the one block an
+/// open reserves for its arena as well ([`Self::within`]), which the arena gives back. The block
+/// holds the pointer and never a reference to the whole `T`: what lies in it is reached by fields
+/// projected from [`Self::as_ptr`].
 pub struct RegionBlock<T: ZeroEmpty> {
     at: NonNull<T>,
-    memory: &'static dyn ArenaMemory,
+    /// The memory the block gives itself back to: `None` for a block another owner gives back.
+    memory: Option<&'static dyn ArenaMemory>,
 }
 
 impl<T: ZeroEmpty> RegionBlock<T> {
@@ -53,8 +56,18 @@ impl<T: ZeroEmpty> RegionBlock<T> {
             })?;
         Ok(Self {
             at: base.cast::<T>(),
-            memory,
+            memory: Some(memory),
         })
+    }
+
+    /// The zeroed `T` at `at`, the head of a block another owner reserved and gives back
+    /// (`SessionArena::reserve_after`): the block drops the `T` in place and gives back nothing.
+    ///
+    /// # Safety
+    /// `at` is an aligned `T` of all zero bytes that nothing else reaches, and its memory stays,
+    /// unmoved, until after the block is dropped.
+    pub(crate) unsafe fn within(at: NonNull<T>) -> Self {
+        Self { at, memory: None }
     }
 
     /// Where the `T` lies, aligned and of all zero bytes until its owner writes it.
@@ -72,12 +85,14 @@ unsafe impl<T: ZeroEmpty + Sync> Sync for RegionBlock<T> {}
 impl<T: ZeroEmpty> Drop for RegionBlock<T> {
     fn drop(&mut self) {
         // SAFETY: the block holds a `T` (zero bytes are one, and every write since kept one),
-        // dropped once, here, in place; then the memory goes back with the layout it was reserved
-        // by, once, and nothing reaches it after.
+        // dropped once, here, in place; then a block reserved alone goes back with the layout it
+        // was reserved by, once, and nothing reaches it after. A block within another's
+        // reservation leaves it to that owner, which outlives it (`Self::within`).
         unsafe {
             core::ptr::drop_in_place(self.at.as_ptr());
-            self.memory
-                .release(self.at.cast::<u8>(), Layout::new::<T>());
+            if let Some(memory) = self.memory {
+                memory.release(self.at.cast::<u8>(), Layout::new::<T>());
+            }
         }
     }
 }
