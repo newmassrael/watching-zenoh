@@ -72,6 +72,19 @@ WIN fails until its row is locked, and a locked area reads WIN or fails. A row w
 is unfilled and fails with the row this run reads. An area that reads no byte on one side has no
 ratio and fails: its rules give that side none of its code.
 
+## What holds an area's bytes
+
+`--explain` reads the same case as `--measure` (the same builds, so after a measure it builds
+nothing again) and says, for each area, what holds its bytes: on the wz side the owner modules (a
+v0 owner without its last segment, the item) by bytes, the bodies by bytes with the name each is
+shown by and how many other names its address carries, and the generic functions with more than
+one copy (a demangled name with every generic argument list removed is one function); on the
+zenoh-pico side the source files by bytes. The tables print the head of each list; the whole lists
+go to `size-ledger/explain-<case>.json` under the cost gate's target directory, and the report
+it replaces is kept beside it as `explain-<case>.previous.json`, so two measurements diff. Names
+are demangled by `c++filt` (binutils, beside the `nm` this gate reads with), and shown mangled
+when it cannot.
+
 ## Where it runs
 
 Layer C1cs, as the leg after the cost gate. With `--shards N --shard K` the case is read only on
@@ -84,6 +97,8 @@ Usage:
                                read the case and grade every area against its row
     size_ledger_gate.py --measure [--shards N --shard K]
                                read the case and print the table and the rows to commit
+    size_ledger_gate.py --explain [--shards N --shard K]
+                               --measure, then what holds each area's bytes, kept as JSON
     size_ledger_gate.py --selftest
 
 Exit codes: 0 the ledger holds, 1 a finding, 2 a usage error or a host that cannot build.
@@ -98,7 +113,8 @@ import pathlib
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping
+import tempfile
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -134,6 +150,18 @@ PICO_HEADER_TREES = ("include", "src")
 # How many unclassified bodies a finding names, largest first.
 UNCLASSIFIED_NAMED = 12
 MEASURE = "python3 scripts/lib/size_ledger_gate.py --measure"
+# --explain: how many rows each of its tables prints (the JSON keeps every row), the width a name
+# is cut to there, the tool that demangles, and where the report goes under the target directory.
+EXPLAIN_OWNERS = 30
+EXPLAIN_SYMBOLS = 40
+EXPLAIN_GENERICS = 30
+EXPLAIN_FILES = 20
+EXPLAIN_NAME_WIDTH = 140
+EXPLAIN_SCHEMA = 1
+DEMANGLER = "c++filt"
+EXPLAIN_DIR = "size-ledger"
+UNCLASSIFIED_AREA = "(unclassified)"
+NO_OWNER = {"wz": "(no v0 owner)", "pico": "(no source)"}
 
 
 # ── who wrote a wz symbol: the v0 mangling ─────────────────────────────────────────────────────
@@ -599,30 +627,59 @@ class Tally:
         return sum(size for size, _ in self.unclassified)
 
 
-def tally(symbols: Iterable[Symbol], rules: Rules, areas: list[str]) -> Tally:
-    """The bytes of each area: each address one body, at its largest size, in the area most of
-    its names are placed in, a tie to the area listed first."""
-    bodies: dict[int, list[Symbol]] = {}
+@dataclass(frozen=True)
+class Body:
+    """The names of one address: one body, at its largest size, in `area` (None when no rule
+    places it), shown by `lead`, the shortest of its names that are placed in that area."""
+    address: int
+    size: int
+    names: tuple[Symbol, ...]
+    area: str | None
+    lead: Symbol
+
+
+def place_bodies(symbols: Iterable[Symbol], rules: Rules,
+                 areas: list[str]) -> tuple[list[Body], set[str]]:
+    """Each address one body, in the area most of its names are placed in, a tie to the area
+    listed first; and the rules that placed a name."""
+    by_address: dict[int, list[Symbol]] = {}
     for symbol in symbols:
-        bodies.setdefault(symbol.address, []).append(symbol)
-    result = Tally({area: 0 for area in areas})
-    for address in sorted(bodies):
-        names = bodies[address]
-        size = max(s.size for s in names)
-        result.total += size
+        by_address.setdefault(symbol.address, []).append(symbol)
+    bodies: list[Body] = []
+    used: set[str] = set()
+    for address in sorted(by_address):
+        names = tuple(sorted(by_address[address], key=lambda s: s.name))
+        placed: list[str | None] = []
         votes: dict[str, int] = {}
         for symbol in names:
-            area, used = classify(rules, symbol)
-            result.used.update(used)
+            area, rule = classify(rules, symbol)
+            used.update(rule)
+            placed.append(area)
             if area is not None:
                 votes[area] = votes.get(area, 0) + 1
-        if not votes:
-            result.unclassified.append((size, tuple(sorted({s.name for s in names}))))
-            continue
-        winner = min(votes, key=lambda a: (-votes[a], areas.index(a)))
-        result.by_area[winner] += size
+        winner = min(votes, key=lambda a: (-votes[a], areas.index(a))) if votes else None
+        lead = min(zip(names, placed),
+                   key=lambda pair: (pair[1] != winner, len(pair[0].name), pair[0].name))[0]
+        bodies.append(Body(address, max(s.size for s in names), names, winner, lead))
+    return bodies, used
+
+
+def tally_bodies(bodies: Iterable[Body], used: set[str], areas: list[str]) -> Tally:
+    result = Tally({area: 0 for area in areas}, used=set(used))
+    for body in bodies:
+        result.total += body.size
+        if body.area is None:
+            result.unclassified.append((body.size, tuple(sorted({s.name for s in body.names}))))
+        else:
+            result.by_area[body.area] += body.size
     result.unclassified.sort(key=lambda body: (-body[0], body[1]))
     return result
+
+
+def tally(symbols: Iterable[Symbol], rules: Rules, areas: list[str]) -> Tally:
+    """The bytes of each area, each address one body (`place_bodies`)."""
+    bodies, used = place_bodies(symbols, rules, areas)
+    return tally_bodies(bodies, used, areas)
 
 
 def unused_rules(table: dict, side: str, used: set[str]) -> list[str]:
@@ -821,6 +878,194 @@ def table_lines(table: dict, wz: Tally, pico: Tally) -> list[str]:
     return lines
 
 
+# ── what holds an area's bytes: --explain ──────────────────────────────────────────────────────
+
+# The disambiguator `c++filt` prints after a crate name, and the hash a legacy name ends with.
+_CRATE_HASH = re.compile(r"(?<=[A-Za-z0-9_])\[[0-9a-f]{1,16}\]")
+_LEGACY_HASH = re.compile(r"::h[0-9a-f]{16}$")
+
+
+def clean_demangled(text: str) -> str:
+    """A demangled name without the hashes that differ between builds of the same code."""
+    return _LEGACY_HASH.sub("", _CRATE_HASH.sub("", text))
+
+
+def demangle_names(names: Iterable[str],
+                   tool: str = DEMANGLER) -> tuple[dict[str, str], list[str]]:
+    """Each name -> its demangled text (`clean_demangled`), and a note when the tool could not be
+    read, in which case every name stands for itself."""
+    unique = sorted(set(names))
+    if not unique:
+        return {}, []
+    try:
+        lines = subprocess.run([tool], input="\n".join(unique) + "\n", capture_output=True,
+                               text=True, check=True).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError) as e:
+        return {n: n for n in unique}, [f"{tool} could not demangle ({e}), so names are shown "
+                                        f"mangled"]
+    if len(lines) != len(unique):
+        return {n: n for n in unique}, [f"{tool} gave {len(lines)} lines for {len(unique)} names, "
+                                        f"so names are shown mangled"]
+    return {name: clean_demangled(text) for name, text in zip(unique, lines)}, []
+
+
+def generic_key(name: str) -> str:
+    """A demangled name with every generic argument list removed (`drop_glue::<T>` and `Rc<T>`
+    become `drop_glue` and `Rc`), so the copies of one generic function share it. The brackets of
+    a qualified path (`<T as Trait>::f`, `<T>::f`) open after no name and are kept; an `->` inside
+    a removed list closes nothing."""
+    out: list[str] = []
+    depth = 0
+    i = 0
+    while i < len(name):
+        c = name[i]
+        if depth:
+            if name.startswith("->", i):
+                i += 2
+                continue
+            if c == "<":
+                depth += 1
+            elif c == ">":
+                depth -= 1
+            i += 1
+            continue
+        prev = out[-1] if out else ""
+        if c == "<" and prev and (prev.isalnum() or prev in "_:"):
+            while out and out[-1] == ":":
+                out.pop()
+            depth = 1
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def module_of(owner: str) -> str:
+    """The module of a v0 owner: the owner without its last segment, the item."""
+    return owner.rsplit("::", 1)[0] if "::" in owner else owner
+
+
+def body_owner(side: str, body: Body) -> str:
+    owners = body.lead.owners
+    if not owners:
+        return NO_OWNER[side]
+    return " + ".join(module_of(o) if side == "wz" else o for o in owners)
+
+
+def _ranked(groups: Mapping[str, list[int]], key: str) -> list[dict]:
+    rows = [{key: k, "bytes": sum(sizes), "bodies": len(sizes), "largest": max(sizes)}
+            for k, sizes in groups.items()]
+    return sorted(rows, key=lambda row: (-row["bytes"], row[key]))
+
+
+def explain_area(side: str, bodies: Iterable[Body], demangled: Mapping[str, str]) -> dict:
+    """What holds one side's bytes of one area: its owners (a wz module, a zenoh-pico file), its
+    bodies, and on the wz side its generic functions with more than one copy; each list whole,
+    largest first."""
+    owners: dict[str, list[int]] = {}
+    generics: dict[str, list[int]] = {}
+    symbols: list[dict] = []
+    total = 0
+    for body in bodies:
+        total += body.size
+        owner = body_owner(side, body)
+        name = demangled.get(body.lead.name, body.lead.name)
+        owners.setdefault(owner, []).append(body.size)
+        generics.setdefault(generic_key(name), []).append(body.size)
+        symbols.append({"bytes": body.size, "aliases": len(body.names) - 1, "owner": owner,
+                        "name": name})
+    symbols.sort(key=lambda row: (-row["bytes"], row["name"]))
+    out = {"bytes": total, "bodies": len(symbols), "owners": _ranked(owners, "owner"),
+           "symbols": symbols}
+    if side == "wz":
+        out["generics"] = [row for row in _ranked(generics, "function") if row["bodies"] > 1]
+    return out
+
+
+def explain_report(case_id: str, pin: str, toolchain: str, date: str, areas: list[str],
+                   bodies: Mapping[str, list[Body]], demangled: Mapping[str, str]) -> dict:
+    """Each area's explanation on both sides, and the unclassified bodies' when there are any."""
+    report: dict = {"schema": EXPLAIN_SCHEMA, "case": case_id, "pin": pin, "toolchain": toolchain,
+                    "date": date, "areas": {}}
+    placed: list[str | None] = list(areas)
+    if any(b.area is None for side in SIDES for b in bodies[side]):
+        placed.append(None)
+    for area in placed:
+        report["areas"][area or UNCLASSIFIED_AREA] = {
+            side: explain_area(side, [b for b in bodies[side] if b.area == area], demangled)
+            for side in SIDES}
+    return report
+
+
+def previous_bytes(previous: object, area: str, side: str) -> int | None:
+    """An area's bytes on one side in the report a run replaced, or None when it has none."""
+    try:
+        value = previous["areas"][area][side]["bytes"]
+    except (KeyError, TypeError):
+        return None
+    return value if type(value) is int else None
+
+
+def fit(text: str, width: int = EXPLAIN_NAME_WIDTH) -> str:
+    return text if len(text) <= width else text[:width - 3] + "..."
+
+
+def explain_table(title: str, rows: list[dict], shown: int, columns: tuple[str, ...],
+                  text: Callable[[dict], str]) -> list[str]:
+    if not rows:
+        return [f"    {title}: none"]
+    out = [f"    {title}, the largest {min(shown, len(rows))} of {len(rows)}:",
+           "      " + " ".join(f"{c:>8}" for c in columns)]
+    for row in rows[:shown]:
+        out.append("      " + " ".join(f"{row[c]:>8}" for c in columns) + f"  {fit(text(row))}")
+    return out
+
+
+def explain_lines(report: dict, previous: object) -> list[str]:
+    """The head of each list of `report`, each area's bytes against `previous`'s when it has
+    them."""
+    lines: list[str] = []
+    for area, sides in report["areas"].items():
+        said = []
+        for side, label in (("wz", "wz"), ("pico", "zenoh-pico")):
+            now = sides[side]
+            before = previous_bytes(previous, area, side)
+            delta = "" if before is None else f" ({now['bytes'] - before:+d} since the previous)"
+            said.append(f"{label} {now['bytes']} B in {now['bodies']} bodies{delta}")
+        lines.append(f"  size-ledger explain: {area}: {', '.join(said)}")
+        wz, pico = sides["wz"], sides["pico"]
+        lines += explain_table("wz modules", wz["owners"], EXPLAIN_OWNERS,
+                               ("bytes", "bodies"), lambda row: row["owner"])
+        lines += explain_table("wz bodies (aliases: the other names of its address)",
+                               wz["symbols"], EXPLAIN_SYMBOLS, ("bytes", "aliases"),
+                               lambda row: f"{row['name']}  [{row['owner']}]")
+        lines += explain_table("wz generic functions with more than one copy",
+                               wz["generics"], EXPLAIN_GENERICS, ("bytes", "bodies", "largest"),
+                               lambda row: row["function"])
+        lines += explain_table("zenoh-pico files", pico["owners"], EXPLAIN_FILES,
+                               ("bytes", "bodies"), lambda row: row["owner"])
+    return lines
+
+
+def explain_path(case_id: str) -> pathlib.Path:
+    return cost.TARGET / EXPLAIN_DIR / f"explain-{case_id}.json"
+
+
+def write_explain(report: dict, path: pathlib.Path) -> object:
+    """Write `report` to `path`, moving the report it replaces to `.previous.json` beside it,
+    and return that report (None when there was none or it does not read)."""
+    previous = None
+    if path.is_file():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = None
+        path.replace(path.with_suffix(".previous.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
+    return previous
+
+
 # ── reading the case ───────────────────────────────────────────────────────────────────────────
 
 
@@ -882,7 +1127,9 @@ def shard_case_ids(shards: int, shard: int) -> list[str]:
     return ids
 
 
-def cmd_run(measure_only: bool, shard: tuple[int, int] | None) -> int:
+def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
+    """`mode` is check, measure or explain; only check grades the rows."""
+    measure_only = mode != "check"
     table = load_ledger()
     blocking = rule_findings(table, pico_case_ids())
     rows_found = [] if blocking else row_population_findings(table)
@@ -926,8 +1173,10 @@ def cmd_run(measure_only: bool, shard: tuple[int, int] | None) -> int:
         return 1
     areas = area_ids(table)
     rules = {side: side_rules(table, side) for side in SIDES}
-    wz = tally(read.wz, rules["wz"], areas)
-    pico = tally(read.pico, rules["pico"], areas)
+    placed = {"wz": place_bodies(read.wz, rules["wz"], areas),
+              "pico": place_bodies(read.pico, rules["pico"], areas)}
+    wz = tally_bodies(*placed["wz"], areas)
+    pico = tally_bodies(*placed["pico"], areas)
     print(f"  size-ledger: {case.id}: function bytes by area, one count per address, against "
           f"zenoh-pico {read.pin} as the same build ({read.toolchain}; both linked by {linker})")
     for line in table_lines(table, wz, pico):
@@ -968,7 +1217,32 @@ def cmd_run(measure_only: bool, shard: tuple[int, int] | None) -> int:
     if rc == 0 and not measure_only:
         print(f"  size-ledger: {case.id}: {len(readings)} area(s) under their rows against "
               f"zenoh-pico, unclassified text within {limit} bytes on each side")
+    if mode == "explain":
+        rc = max(rc, explain_case(case.id, read, areas,
+                                  {side: bodies for side, (bodies, _) in placed.items()}, today))
     return rc
+
+
+def explain_case(case_id: str, read: CaseRead, areas: list[str],
+                 bodies: Mapping[str, list[Body]], date: str) -> int:
+    """Print what holds each area's bytes and keep the whole report as JSON (`--explain`)."""
+    demangled, notes = demangle_names(b.lead.name for b in bodies["wz"])
+    for note in notes:
+        print(f"  size-ledger: note: {note}")
+    report = explain_report(case_id, read.pin, read.toolchain, date, areas, bodies, demangled)
+    path = explain_path(case_id)
+    try:
+        previous = write_explain(report, path)
+    except OSError as e:
+        print(f"  size-ledger FAIL: the explanation could not be kept at {path}: {e}",
+              file=sys.stderr)
+        return 1
+    for line in explain_lines(report, previous):
+        print(line)
+    kept = (f", the one it replaced at {path.with_suffix('.previous.json')}"
+            if previous is not None else "")
+    print(f"  size-ledger: every row of these lists is at {path}{kept}")
+    return 0
 
 
 # ── selftest ───────────────────────────────────────────────────────────────────────────────────
@@ -1260,12 +1534,109 @@ def cmd_selftest() -> int:
                and placed("pico", "_z_arc_slice_elem_clear", "src/api/api.c",
                           "src/net/sample.c") == "language")
 
+    # --explain: the names, the groups and the report.
+    expect("a demangled name loses its crate disambiguators and its legacy hash, and keeps a slice",
+           clean_demangled("wz_session_core[30a105b5be83598f]::handshake_encode::encode")
+           == "wz_session_core::handshake_encode::encode"
+           and clean_demangled("core::ptr::drop_in_place::h0123456789abcdef")
+           == "core::ptr::drop_in_place"
+           and clean_demangled("<[f32]>::len") == "<[f32]>::len")
+    expect("every generic argument list is removed and a qualified path's brackets are kept",
+           generic_key("core::ptr::drop_glue::<wz_runtime_posix::stream::StreamReader>")
+           == "core::ptr::drop_glue"
+           and generic_key("<alloc::rc::Rc<wz::IpDriver<A, B>> as wz::Link>::keeps_input")
+           == "<alloc::rc::Rc as wz::Link>::keeps_input"
+           and generic_key("<alloc::vec::Vec<_, _>>::remove::assert_failed")
+           == "<alloc::vec::Vec>::remove::assert_failed"
+           and generic_key("<x::each<x::drive::{closure#0}>::{closure#0} as core::ops::function::"
+                           "FnOnce<()>>::call_once::{shim:vtable#0}")
+           == "<x::each::{closure#0} as core::ops::function::FnOnce>::call_once::{shim:vtable#0}"
+           and generic_key("core::ptr::drop_in_place<x::Y>") == "core::ptr::drop_in_place"
+           and generic_key("f::<fn(u8) -> u16>::g") == "f::g"
+           and generic_key("z_open") == "z_open")
+    expect("a demangler that cannot run leaves every name mangled and says so",
+           demangle_names(["_Rb", "_Ra", "_Rb"], tool="/nonexistent/wz-no-demangler")[0]
+           == {"_Ra": "_Ra", "_Rb": "_Rb"}
+           and len(demangle_names(["_Ra"], tool="/nonexistent/wz-no-demangler")[1]) == 1
+           and demangle_names([]) == ({}, []))
+    shown, shown_used = place_bodies(
+        [Symbol(0x10, 4, "z_open", ()), Symbol(0x10, 4, "z_x", ()),
+         Symbol(0x10, 4, "_R9", ("a::b",)), Symbol(0x20, 2, "memmove", ()),
+         Symbol(0x20, 2, "mm", ())], rules, ["door", "lang", "x", "y"])
+    expect("a body is shown by the shortest of its names placed in its area, with its aliases",
+           [(b.address, b.area, b.lead.name, len(b.names)) for b in shown]
+           == [(0x10, "door", "z_x", 3), (0x20, None, "mm", 2)]
+           and shown_used == {"names ^z_", "owners a::b"})
+    xrules = Rules((), {"wz_x": "x", "src": "x"}, "::")
+    xbodies, _ = place_bodies(
+        [Symbol(0x10, 40, "_Ra", ("wz_x::m::glue",)), Symbol(0x20, 24, "_Rb", ("wz_x::m::glue",)),
+         Symbol(0x30, 100, "_Rc", ("wz_x::n::big",)), Symbol(0x30, 100, "_Rd", ("wz_x::n::big2",)),
+         Symbol(0x40, 8, "_Re", ("wz_x::m::small",)), Symbol(0x50, 6, "z_open", ())],
+        xrules, ["x"])
+    xnames = {"_Ra": "wz_x::m::glue::<wz_x::A>", "_Rb": "wz_x::m::glue::<wz_x::B>",
+              "_Rc": "wz_x::n::big", "_Rd": "wz_x::n::big2", "_Re": "wz_x::m::small"}
+    xwz = explain_area("wz", [b for b in xbodies if b.area == "x"], xnames)
+    expect("the wz owners are modules, largest first, with their bodies",
+           xwz["bytes"] == 172 and xwz["bodies"] == 4
+           and [(o["owner"], o["bytes"], o["bodies"], o["largest"]) for o in xwz["owners"]]
+           == [("wz_x::n", 100, 1, 100), ("wz_x::m", 72, 3, 40)])
+    expect("the wz bodies are listed largest first by demangled name, with their aliases",
+           [(s["bytes"], s["aliases"], s["name"]) for s in xwz["symbols"]]
+           == [(100, 1, "wz_x::n::big"), (40, 0, "wz_x::m::glue::<wz_x::A>"),
+               (24, 0, "wz_x::m::glue::<wz_x::B>"), (8, 0, "wz_x::m::small")])
+    expect("the copies of one generic function are one row, and a single copy is none",
+           xwz["generics"] == [{"function": "wz_x::m::glue", "bytes": 64, "bodies": 2,
+                                "largest": 40}])
+    expect("a wz body with no v0 owner is named so",
+           explain_area("wz", [b for b in xbodies if b.area is None], xnames)["owners"][0]["owner"]
+           == NO_OWNER["wz"])
+    pbodies, _ = place_bodies(
+        [Symbol(0x10, 30, "_z_a", ("src/a.c",)), Symbol(0x20, 12, "_z_b", ("src/a.c",)),
+         Symbol(0x30, 20, "_z_c", ("src/a.c", "src/b.c"))],
+        Rules((), {"src": "x"}, "/"), ["x"])
+    xpico = explain_area("pico", pbodies, {})
+    expect("the zenoh-pico owners are files, a name several files wrote under all of them, and "
+           "no generic list",
+           [(o["owner"], o["bytes"]) for o in xpico["owners"]]
+           == [("src/a.c", 42), ("src/a.c + src/b.c", 20)] and "generics" not in xpico)
+    xreport = explain_report("c", "p", "cc 1", "2026-11-25", ["x"],
+                             {"wz": xbodies, "pico": pbodies}, xnames)
+    expect("the report explains every area, and the unclassified bodies when there are any",
+           list(xreport["areas"]) == ["x", UNCLASSIFIED_AREA]
+           and xreport["areas"][UNCLASSIFIED_AREA]["wz"]["bytes"] == 6
+           and xreport["areas"][UNCLASSIFIED_AREA]["pico"]["bytes"] == 0
+           and json.loads(json.dumps(xreport)) == xreport
+           and list(explain_report("c", "p", "cc 1", "d", ["x"], {"wz": [], "pico": pbodies},
+                                   xnames)["areas"]) == ["x"])
+    xlines = explain_lines(xreport, {"areas": {"x": {"wz": {"bytes": 200}}}})
+    expect("an area's bytes are read against the previous report's, where it has them",
+           "  size-ledger explain: x: wz 172 B in 4 bodies (-28 since the previous), "
+           "zenoh-pico 62 B in 3 bodies" in xlines
+           and not any("since the previous" in line for line in explain_lines(xreport, None))
+           and previous_bytes({"areas": {"x": {"wz": {"bytes": "200"}}}}, "x", "wz") is None)
+    expect("a table prints the head of its list and says how long the list is",
+           explain_table("t", [{"bytes": 3, "k": "a"}, {"bytes": 2, "k": "b"},
+                               {"bytes": 1, "k": "c"}], 2, ("bytes",), lambda r: r["k"])
+           == ["    t, the largest 2 of 3:", "         bytes", "             3  a",
+               "             2  b"]
+           and explain_table("t", [], 2, ("bytes",), lambda r: r["k"]) == ["    t: none"]
+           and fit("x" * 200) == "x" * (EXPLAIN_NAME_WIDTH - 3) + "...")
+    with tempfile.TemporaryDirectory() as tmp:
+        kept_at = pathlib.Path(tmp) / "explain-c.json"
+        first = write_explain({"n": 1}, kept_at)
+        second = write_explain({"n": 2}, kept_at)
+        expect("a report replaces the one before it and keeps it beside it for a diff",
+               first is None and second == {"n": 1}
+               and json.loads(kept_at.read_text(encoding="utf-8")) == {"n": 2}
+               and json.loads(kept_at.with_suffix(".previous.json").read_text(encoding="utf-8"))
+               == {"n": 1})
+
     print(f"  size-ledger selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or argv[1] not in ("--check", "--measure", "--selftest") or (
+    if len(argv) < 2 or argv[1] not in ("--check", "--measure", "--explain", "--selftest") or (
         argv[1] == "--selftest" and len(argv) != 2
     ):
         print(__doc__, file=sys.stderr)
@@ -1286,7 +1657,7 @@ def main(argv: list[str]) -> int:
             return 2
         shard = (args.shards, args.shard)
     sys.stdout.reconfigure(line_buffering=True)
-    return cmd_run(measure_only=argv[1] == "--measure", shard=shard)
+    return cmd_run(mode=argv[1][2:], shard=shard)
 
 
 if __name__ == "__main__":
