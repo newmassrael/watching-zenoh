@@ -614,6 +614,7 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     brought_up: bool,
     /// The due the face last showed outside its slot (`DirectFace::note_due`), so that only a
     /// change of it is written there.
+    #[cfg(any(feature = "listen", feature = "group"))]
     noted_us: u64,
 }
 
@@ -789,7 +790,9 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     end: EndFlags,
     /// When the face is next due (`DirectSlot::due_us`), as its read last noted it: a read of
     /// several faces waits for the earliest of them, and the session's bookkeeping counts it,
-    /// without holding the faces' slots.
+    /// without holding the faces' slots. The one face's read holds its slot across its wait and
+    /// reads the due there, so a build of that face alone keeps no copy of it.
+    #[cfg(any(feature = "listen", feature = "group"))]
     due_us: AtomicU64,
 }
 
@@ -825,18 +828,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                         life_due_us: u64::MAX,
                         pump_due_us: u64::MAX,
                         brought_up: false,
+                        #[cfg(any(feature = "listen", feature = "group"))]
                         noted_us: u64::MAX,
                     }))
                 },
             );
             addr_of_mut!((*at).site).write(FaceSite::empty());
             addr_of_mut!((*at).end).write(EndFlags::default());
+            #[cfg(any(feature = "listen", feature = "group"))]
             addr_of_mut!((*at).due_us).write(AtomicU64::new(u64::MAX));
         }
     }
 
     /// Show when the face is next due by `slot`, its read slot, held: written only when it
     /// changed, as a step of the pump moves it with nearly every record.
+    #[cfg(any(feature = "listen", feature = "group"))]
     fn note_due(&self, slot: &mut DirectSlot<L, C>) {
         let due_us = slot.due_us();
         if due_us != slot.noted_us {
@@ -1096,7 +1102,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The wait is handed back to the session by the first face's look at its life, or by the
         // read itself when no face was looked at. Each face's records are handed out with its
         // slot still held, so a callback's read finds it held.
-        let mut wait = Some(self.wait_on_faces().ok_or(SessionClosed)?);
+        let mut wait = Some(
+            self.wait_on_faces(self.faces_due_us())
+                .ok_or(SessionClosed)?,
+        );
         let mut read = Ok(());
         let mut jobs_due_ms = None;
         for face in faces() {
@@ -1142,14 +1151,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// link's input or the next deadline, then the face's turn (`Self::face_turn`). `None`
     /// once the session closed.
     fn link_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
-        let wait = self.wait_on_faces()?;
+        let wait = self.wait_on_faces(self.wait_due(slot))?;
         self.face_turn(face, slot, Some(wait))
     }
 
-    /// The wait for the input of any face or the earliest deadline, made with nothing of the
-    /// session held. `None` once the session closed.
-    fn wait_on_faces(&self) -> Option<IdleWait> {
-        let mut wait = self.link_wait()?;
+    /// When the faces are next due, for a wait made with `slot`, the read slot of the face the
+    /// read turns, held: as each face's read last noted it where a read may turn several faces,
+    /// and as `slot` holds it where the dial role's face is the only face, whose read holds that
+    /// slot across its wait.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    fn wait_due(&self, _slot: &DirectSlot<L, C>) -> u64 {
+        self.faces_due_us()
+    }
+
+    /// When the faces are next due, for a wait made with `slot`, the read slot of the face the
+    /// read turns, held: as `slot` holds it, where the dial role's face is the only face, whose
+    /// read holds that slot across its wait.
+    #[cfg(not(any(feature = "listen", feature = "group")))]
+    #[inline(always)]
+    fn wait_due(&self, slot: &DirectSlot<L, C>) -> u64 {
+        slot.due_us()
+    }
+
+    /// The wait for the input of any face or the earliest deadline `due_us`, made with nothing
+    /// of the session held. `None` once the session closed.
+    fn wait_on_faces(&self, due_us: u64) -> Option<IdleWait> {
+        let mut wait = self.link_wait(due_us)?;
         #[cfg(test)]
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
@@ -1193,12 +1220,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             self.pump_turn(face, slot, &turn);
         }
+        #[cfg(any(feature = "listen", feature = "group"))]
         face.note_due(slot);
         Some(turn)
     }
 
     /// When the earliest face is next due by its life or its pump, as each face's read last noted
     /// it (`DirectFace::note_due`).
+    #[cfg(any(feature = "listen", feature = "group"))]
     fn faces_due_us(&self) -> u64 {
         self.direct
             .iter()
@@ -1209,10 +1238,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// What a read waits for, worked out under the session's lock: nothing while a link holds
     /// input it already took from its stack, else the links' input, or the earliest of the faces'
-    /// deadlines and the session's. `None` once the session closed.
-    fn link_wait(&self) -> Option<IdleWait> {
+    /// deadline `due_us` and the session's. `None` once the session closed.
+    fn link_wait(&self, due_us: u64) -> Option<IdleWait> {
         let mut held = self.live()?;
-        held.0.link_due_us = self.faces_due_us();
+        held.0.link_due_us = due_us;
         // Input the link holds is read at once, so no deadline is gathered and the clock is not
         // read for a wait that would be none. What falls due meanwhile is served by the look at
         // the life that follows, which reads the clock whether or not the read waited.
@@ -1626,6 +1655,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // A pump not stepped yet is due at once: the read that placed it sends its first frame,
         // and the next wait, the open's too, is none.
         slot.pump_due_us = 0;
+        #[cfg(any(feature = "listen", feature = "group"))]
         face.note_due(slot);
         // SAFETY: the site lies in its face, which stays where it lies for the engine's life: the
         // dial role's at the engine's fixed place, each past it in its row of the session's arena
@@ -1841,10 +1871,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Ok(0)
     }
 
-    /// When the earliest face is next due, as the faces' reads noted it and as their slots hold
-    /// it.
-    #[cfg(all(test, feature = "std"))]
-    pub(crate) fn faces_due_noted_and_held(&self) -> (u64, u64) {
+    /// When the earliest face is next due, as a read's wait reads it and as the faces' slots
+    /// hold it.
+    #[cfg(all(test, feature = "std", any(feature = "listen", feature = "group")))]
+    pub(crate) fn faces_due_waited_and_held(&self) -> (u64, u64) {
         let held = self
             .direct
             .iter()
@@ -1854,6 +1884,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .min()
             .unwrap_or(u64::MAX);
         (self.faces_due_us(), held)
+    }
+
+    /// When the one face is next due, as a read's wait under its slot gives it the session, and
+    /// as the slot holds it.
+    #[cfg(all(test, feature = "std", not(any(feature = "listen", feature = "group"))))]
+    pub(crate) fn faces_due_waited_and_held(&self) -> (u64, u64) {
+        let held = <CoopForm as LockForm>::try_lock(&self.direct.dial.slot)
+            .expect("no read holds the one face's slot between reads");
+        let wait = self.link_wait(self.wait_due(&held.0));
+        let mut core = self.live().expect("the session is open");
+        // The wait is handed back unwaited, as a read hands back the one it made.
+        if let Some(wait) = wait {
+            core.0.transport.links.waited(wait);
+        }
+        (core.0.link_due_us, held.0.due_us())
     }
 
     /// The faces a read turns: every row of the session's face table.

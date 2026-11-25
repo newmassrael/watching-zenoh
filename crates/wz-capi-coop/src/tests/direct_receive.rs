@@ -1011,9 +1011,12 @@ fn a_read_turns_every_face_once() {
 }
 
 /// What a read waits for is the earliest due of the faces as their slots hold it: each turn of a
-/// face shows its due outside its slot, so a read of several faces need not hold them to wait.
-/// The session's link is up, so its pump is due at its keep-alive, never at no time. Turned red by
-/// a turn that leaves a moved due unnoted (`DirectFace::note_due` in `CoopEngine::face_turn`).
+/// face shows its due outside its slot, so a read of several faces need not hold them to wait,
+/// and the read of the one face, which holds its slot across the wait, reads the due there. The
+/// session's link is up, so its pump is due at its keep-alive, never at no time. Turned red by a
+/// turn that leaves a moved due unnoted (`DirectFace::note_due` in `CoopEngine::face_turn`), or a
+/// wait that hands the session another due than the one it read (`CoopEngine::wait_due`,
+/// `CoopEngine::link_wait`).
 #[cfg(not(wz_round))]
 #[test]
 fn a_read_waits_for_the_due_its_faces_hold() {
@@ -1021,8 +1024,8 @@ fn a_read_waits_for_the_due_its_faces_hold() {
     let engine = open(&router);
     for _ in 0..3 {
         let _ = SessionDrive::read(&*engine, false);
-        let (noted, held) = engine.faces_due_noted_and_held();
-        assert_eq!(noted, held, "the due noted is the due the slots hold");
+        let (waited, held) = engine.faces_due_waited_and_held();
+        assert_eq!(waited, held, "the due waited for is the due the slots hold");
         assert_ne!(held, u64::MAX, "a link that is up is due at its keep-alive");
     }
 }
