@@ -64,8 +64,6 @@ use wz_runtime_tokio::session::{
 use wz_runtime_tokio::session_glue::IterationEvent;
 use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
-use wz_runtime_tokio::session_glue::LinkKind;
-
 #[cfg(feature = "liveliness")]
 use super::LivelinessSink;
 use super::TokenId;
@@ -83,8 +81,8 @@ use wz_session_core::wire_id::EntityId;
 /// One member of a group as the transport both upstreams report it as: the session core's
 /// snapshot of a member (`FaceSnapshot::of_group_member`), which the cooperative engine's
 /// group reports too, over the one link from this node's locator on the group (`src`) to the
-/// member, labelled by [`member_link_label`]: a UDP datagram link, or a raweth one. `None` for a
-/// member whose JOIN named a role this node does not know.
+/// member, labelled as every engine labels one (`GroupMemberLink::of_group`): a UDP datagram link,
+/// or a raweth one. `None` for a member whose JOIN named a role this node does not know.
 fn member_snapshot(
     member: &MulticastMember,
     src: &str,
@@ -92,37 +90,11 @@ fn member_snapshot(
     endpoint: &str,
     is_shm: bool,
 ) -> Option<FaceSnapshot> {
-    let (dst, kind) = member_link_label(endpoint, member);
     FaceSnapshot::of_group_member(
         member,
-        GroupMemberLink {
-            src,
-            dst,
-            kind,
-            group,
-            endpoint,
-        },
+        GroupMemberLink::of_group(src, member, group, endpoint),
         is_shm,
     )
-}
-
-/// The member's end of a link over the group joined by `endpoint`, and the link's kind: a UDP
-/// group's member is its address and a UDP link; a raweth group's member is the `reth/`
-/// locator of its MAC, which the member table keys by an address of the MAC's own
-/// ([`wz_runtime_tokio::raweth_group::member_locator`]), and a link of no kind
-/// [`LinkKind`] names, so each ABI labels it by the group it was joined by.
-fn member_link_label(endpoint: &str, member: &MulticastMember) -> (String, Option<LinkKind>) {
-    #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
-    {
-        if endpoint.starts_with("reth/") {
-            let label = wz_runtime_tokio::raweth_group::member_locator(&member.locator)
-                .unwrap_or_else(|| format!("reth/{}", member.locator));
-            return (label, None);
-        }
-    }
-    #[cfg(not(all(feature = "raweth-transport", target_os = "linux")))]
-    let _ = endpoint;
-    (format!("udp/{}", member.locator), Some(LinkKind::Udp))
 }
 
 /// One joined group: its session and the wz entities each C declaration has on
@@ -1016,49 +988,4 @@ pub async fn sweep_mcast_face(session: &TokioMulticastSession, revised: &Notify)
 #[cfg(not(feature = "query"))]
 pub async fn sweep_mcast_face(_session: &TokioMulticastSession, _revised: &Notify) {
     std::future::pending::<()>().await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn member(locator: std::net::SocketAddr) -> MulticastMember {
-        MulticastMember {
-            peer: wz_runtime_tokio::multicast_glue::MulticastPeerId::from_wire(&[7; 16]),
-            whatami: None,
-            locator,
-        }
-    }
-
-    /// A UDP group's member is its address on a UDP link.
-    #[test]
-    fn a_udp_group_member_is_its_address() {
-        let addr: std::net::SocketAddr = "127.0.0.1:7447".parse().unwrap();
-        assert_eq!(
-            member_link_label("udp/224.0.0.224:7447#iface=lo", &member(addr)),
-            ("udp/127.0.0.1:7447".to_owned(), Some(LinkKind::Udp))
-        );
-    }
-
-    /// A raweth group's member is the `reth/` locator of its MAC, on a link of no kind
-    /// `LinkKind` names.
-    ///
-    /// # Control
-    ///
-    /// The same member over a UDP group reads as a UDP address, which is what every member
-    /// read as before.
-    #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
-    #[test]
-    fn a_raweth_group_member_is_its_mac() {
-        let addr =
-            wz_runtime_tokio::raweth_group::member_address([0x30, 0x03, 0x8c, 0xc8, 0, 0xa1]);
-        assert_eq!(
-            member_link_label("reth/30:03:8c:c8:00:a2#iface=lo", &member(addr)),
-            ("reth/30:03:8c:c8:00:a1".to_owned(), None)
-        );
-        assert_eq!(
-            member_link_label("udp/224.0.0.224:7447", &member(addr)).1,
-            Some(LinkKind::Udp)
-        );
-    }
 }

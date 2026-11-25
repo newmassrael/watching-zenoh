@@ -647,10 +647,6 @@ transport-link-ws|"
     # were compiled by no lane until this row -- the census reported them as
     # claimed by nothing. The filter is empty: every test of the build runs.
     "wz-capi-core|hook|access-extauth-usrpwd,interceptors|"
-    # Open-debt item 913 -- a group joined over raw Ethernet labels its member by the
-    # `reth/` locator of its MAC. `raweth-transport` is off by default, so that test was
-    # compiled by no leg. The filter is the module path, so a test added there is covered.
-    "wz-capi-core|hook|raweth-transport|faces::multicast::"
     # The router node's own face (`drive::router_node::local_face`): what a program is told of the
     # liveliness tokens of the faces a router node holds, and where its own are counted. The module
     # is built only with `router-node`, which no leg named, so its six tests were compiled by
@@ -761,9 +757,14 @@ transport-link-ws|"
     # its members' tokens, which a member answers from the tokens its session holds. Each of the
     # four runs the module's own tests too, a JOIN asked between two beacons among them.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
-    # And with `transport-stats` (`tests::group::congested::`): what a group's queue drops for
-    # congestion is the transport's `tx.n_dropped`, as the tokio engine's group counts it.
-    "wz-capi-coop|hook|app-transport,group,transport-stats|tests::group::congested::"
+    # And with `transport-stats`: what a group's queue drops for congestion is the transport's
+    # `tx.n_dropped`, as the tokio engine's group counts it (`tests::group::congested::`), and a
+    # member's datagram is still read where it lies and its records lent, each counted once against
+    # the member and in the session's `transport_stats` (`tests::group::in_place::`), with the
+    # module's other tests, a get and its answer
+    # among them. The second row adds the members' keyexprs read member by member.
+    "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|tests::group::"
+    "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable,transport-stats|tests::group::"
     # And with the lent-only receive the C library's final build selects (the session core's
     # `rx-lent-only`): a member's datagram is read where it lies and its records lent, its
     # declarations scoped by the member and its departure's retractions lent, and no table is handed
@@ -835,6 +836,9 @@ transport-link-ws|"
     # The host's named FIFOs (`unixpipe`): one listener holding a request FIFO and a dial finding
     # it, a dedicated read end reading its peer and the end of the stream, the suffix drawn.
     "wz-runtime-posix|hook|unixpipe|"
+    # The host's raw packet sockets (`raweth`): a name no interface has refused before the socket,
+    # and the open answering as the kernel answers a bare `socket(AF_PACKET)`.
+    "wz-runtime-posix|hook|raweth|"
     # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
     # own smoke test, a loopback connection that carries bytes both ways and closes. The census
     # found it claimed by nothing when the feature arrived; the filter is its module.
@@ -958,6 +962,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # full task table refuses and counts, a finished task's cell is reused, what a
     # task held is dropped once, a full timer table makes the sleep wake itself.
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast|"
+    # The WebSocket links of the slot profile (`ws` with `session-slot`, `ws_link::slot::`): a dial
+    # that waits for the upgrade, refuses a server that will not give it, and claims nothing for an
+    # end it cannot reach; an acceptor whose full handshake table leaves the next connection on the
+    # port, and lets go of a handshake that runs out of time. The slot row above with the feature.
+    "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast,ws|ws_link::slot::"
     # The links over a transport the program supplies (`app_link::`): a dial, a listener and its
     # accepted streams and sources, a datagram that goes whole or not at all, a group joined, read
     # by member and left, and a group's room answered from the table, inside the loop and out.
@@ -1330,6 +1339,20 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # sees it), and `static-link-storage` is the subject (it must not).
     "wz-link-lwip|hook|test-support|--test=link_storage_allocations"
     "wz-link-lwip|hook|static-link-storage,test-support|--test=link_storage_allocations"
+    # WebSocket links over lwIP's TCP on the slot profile (`ws`): a session over `ws/` between two
+    # nodes and an acceptor whose full handshake table leaves the next connection queued, counted by a
+    # counting allocator, so the target is its own process. The file's `required-features`, a node's
+    # real profile.
+    "wz-session-lwip|hook|\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage,\
+        transport-keepalive,\
+        ws\
+        |--test=session_ws_slot"
     # The TCP stream over lwIP's raw API (`tcp`): its connections, its listener's queue and
     # refusals, a buffer below the window. Once on each profile, as the row above: the default
     # makes a connection's state on the heap, `static-link-storage` in a cell of a pool, and
@@ -1551,6 +1574,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
     # `codec-push` the items; the row above is the slot profile, where none of this is built.
     "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
+    # And with `transport-stats`: what the pump receives and what it and the stage send are counted
+    # into the counters the holder attached, as the socket takes or hands in each datagram.
+    "wz-session-mcu|hook|codec-push,transport-multicast,transport-stats|group_drive::"
     # A node that declares liveliness tokens (`declare-token`): its tokens are declared after its
     # documents, mirrors and subscriptions, and more of them than the node declares stop it; without
     # the feature a token is refused by name. `slot_node` is built with `client-slot`.
@@ -1612,6 +1638,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # The cooperative engine's links over the program's transport (`app_link::`, `app-link`), with
     # the host's parked waits (`host-lock`), which the open bounded by the session's clock is.
     "wz-runtime-coop|hook|app-link,host-lock|app_link::"
+    # The cooperative engine's groups over raw Ethernet (`raweth`): the joiner's choice of device,
+    # a datagram framed for its entry and a frame read from a named source, and the route of a
+    # fragment a full device left (`reassembly`). The filter is the module path.
+    "wz-runtime-coop|hook|raweth,reassembly|raweth_group::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # The in-place receive that delivers only what it can lend (`rx-lent-only`, a selector): a
     # Push or a Response the lent form cannot carry is refused where it lies and counted, which the

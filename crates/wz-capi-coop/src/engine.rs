@@ -3563,13 +3563,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// at its first step (its link did not open); a build without `group` answers every group so.
     fn join_groups(&mut self) -> Result<(), OpenError> {
         #[cfg(feature = "group")]
-        for join in self.config.groups.clone() {
+        for (at, join) in self.config.groups.clone().into_iter().enumerate() {
+            // The open counts a task cell, a set of tables and a receive buffer for each group the
+            // task cells hold (`RuntimeTables::of`), so a group past them is refused as its spawn
+            // would be, before it takes a set: a set left beside them is a face's that
+            // `max_faces` admits, and no buffer is left for the group's datagrams.
+            if at >= caps::MAX_TASKS {
+                return Err(OpenError::NoTask(SpawnRefusal::NoTaskCell));
+            }
             let id = self.transport.links.next_face_id();
             // The tables first: the group's task dispatches to them from its first step. They are
             // the face's for as long as the session holds the group, across its joins, and answer
-            // a query whose key they cannot resolve by the session's policy. The open lent a set
-            // for each group the task cells hold, so a group past them is refused as its spawn
-            // would be: no task cell is left for it.
+            // a query whose key they cannot resolve by the session's policy.
             let Ok(held) = self.session.registry.add_face(id) else {
                 return Err(OpenError::NoTask(SpawnRefusal::NoTaskCell));
             };
@@ -4916,7 +4921,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// What the session's transports counted (`transport-stats`), in the report a tokio session
-    /// gives (`OpenedSession::stats`): the counters of each link that is up, summed, and in
+    /// gives (`OpenedSession::stats`): the counters of each link that is up and of each group
+    /// joined, summed, and in
     /// `tx.n_dropped`, where a link's session charges the messages it dropped for congestion,
     /// the droppable publishes this engine dropped before they reached a link (one each,
     /// whatever the number of links). A link's counters leave with it, as a tokio session's
@@ -4930,9 +4936,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
             // A group charges what its queue dropped, for want of room or past the reply limit,
             // where the tokio engine's group charges it, the transport's dropped messages; it
-            // leaves with the group's join.
+            // leaves with the group's join, as what the group received does.
             #[cfg(feature = "group")]
             for group in &core.0.transport.groups {
+                report.absorb(&group.stats_report());
                 report.tx.n_dropped = report
                     .tx
                     .n_dropped
@@ -6468,6 +6475,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn entity_ids_from(&self, next: Option<EntityId>) {
         tables_mut(&mut self.core.lock().0.session.registry).entity_ids_from(next);
+    }
+
+    /// Mint key expression ids from `next` on: how a test reaches the wrap of the id space
+    /// without spending it.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn expr_ids_from(&self, next: ExprId) {
+        tables_mut(&mut self.core.lock().0.session.registry).expr_ids_from(next);
     }
 
     /// Start the read task on the thread `spawn` makes; idempotent. A system that gives no thread

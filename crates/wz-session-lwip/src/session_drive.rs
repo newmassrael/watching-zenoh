@@ -565,6 +565,24 @@ mod tests {
         std::assert_eq!(iterations.get(), 0);
     }
 
+    /// A session over `sink` on `clock`, established as one that completed its handshake
+    /// stands (`SessionLinkActions::enter_established`), so the Push it is handed leaves: a data
+    /// send before establishment is refused.
+    #[cfg(feature = "codec-push")]
+    fn established(
+        sink: CellRc<dyn BoxedLinkDriver>,
+        clock: CoopTime<FrozenClock>,
+    ) -> SessionHandle<FrozenClock> {
+        let actions =
+            SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
+                sink,
+                test_params(),
+                clock,
+            );
+        actions.enter_established();
+        actions
+    }
+
     /// ARCHITECTURE section 9.1 on the MCU profile, the two ends joined: the real
     /// session encodes a push straight into the slot the real lwIP driver lends,
     /// and the datagram that comes out is the one the same session makes through a
@@ -591,12 +609,7 @@ mod tests {
         let push_through = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
             let runtime = CoopRuntime::new(FrozenClock);
             let clock = CoopTime::new(&runtime);
-            let actions =
-                SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
-                    driver_sink,
-                    test_params(),
-                    clock,
-                );
+            let actions = established(driver_sink, clock);
             actions
                 .send_push_literal("home/lent", payload, true)
                 .expect("push");
@@ -773,12 +786,7 @@ mod tests {
         let window = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
             let runtime = CoopRuntime::new(FrozenClock);
             let clock = CoopTime::new(&runtime);
-            let actions =
-                SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
-                    driver_sink,
-                    test_params(),
-                    clock,
-                );
+            let actions = established(driver_sink, clock);
             actions.batch_start().expect("batch_start");
             for payload in payloads {
                 actions

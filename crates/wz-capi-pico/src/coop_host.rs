@@ -83,6 +83,19 @@ mod posix_host {
         WithUnixpipe::<S>::new(links, wz_runtime_posix::unixpipe::PosixFifoOpen)
     }
 
+    /// The groups `G` joins with the `reth/` groups beside them, joined on the host's raw packet
+    /// sockets.
+    #[cfg(feature = "raweth-transport")]
+    pub(crate) type WithRaweth<G> =
+        wz_capi_coop::raweth_group::RawethJoiner<G, wz_runtime_posix::raweth::PosixRawEthOpen>;
+
+    /// `groups`, and the `reth/` groups beside them, each opened on a raw packet socket bound to
+    /// the interface its endpoint names, as pico opens its raweth transport.
+    #[cfg(feature = "raweth-transport")]
+    pub(crate) fn with_raweth<G>(groups: G) -> WithRaweth<G> {
+        WithRaweth::<G>::new(groups, wz_runtime_posix::raweth::PosixRawEthOpen)
+    }
+
     pub(crate) fn clock() -> Clock {
         wz_runtime_posix::PosixClock
     }

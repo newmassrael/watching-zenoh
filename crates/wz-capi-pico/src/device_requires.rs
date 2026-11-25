@@ -114,16 +114,13 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, Refused> {
     }
     #[cfg(feature = "peer")]
     let _ = dial_whatami;
-    // A listen endpoint that names a group is the session's one transport, and a connect locator
-    // beside it opens nothing (pico adds a peer to a unicast transport only). Each engine reads it
-    // with `is_group_endpoint`; a build with neither the tokio engine nor `peer` refused every
-    // listener above.
-    #[cfg(any(feature = "engine-tokio", feature = "peer"))]
-    let joins_a_group = listen.is_some_and(crate::session::is_group_endpoint);
-    #[cfg(not(any(feature = "engine-tokio", feature = "peer")))]
-    let joins_a_group = false;
+    // The locator pico opens its one transport on, the listen locator or else the connect one, is
+    // that transport when it names a group, and a connect locator beside a listened group opens
+    // nothing (pico adds a peer to a unicast transport only). Both engines read it with
+    // `group_endpoint`.
+    let group = crate::session::group_endpoint(listen, connect);
     #[cfg(not(feature = "multicast-transport"))]
-    if joins_a_group {
+    if group.is_some() {
         return Err((
             crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
             "the open refuses this config: a group is a transport this build does not have",
@@ -138,9 +135,9 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, Refused> {
             )),
             _ => Scouting::Off,
         };
-    let (dials, listens, groups): (Vec<&str>, Vec<&str>, Vec<&str>) = match listen {
-        Some(group) if joins_a_group => (Vec::new(), Vec::new(), vec![group]),
-        listen => (
+    let (dials, listens, groups): (Vec<&str>, Vec<&str>, Vec<&str>) = match group {
+        Some(group) => (Vec::new(), Vec::new(), vec![group]),
+        None => (
             connect.into_iter().collect(),
             listen.into_iter().collect(),
             Vec::new(),
@@ -231,8 +228,8 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
 }
 
 /// A group as the cooperative engine reads it before its host joiner is asked
-/// (`wz_session_core::group_locator::parse_group_locator`): a UDP multicast group, or a group the
-/// open cannot join.
+/// (`wz_session_core::group_locator::parse_group_locator`): a UDP multicast group, a group over
+/// raw Ethernet where the build joins one (`raweth-transport`), or a group the open cannot join.
 #[cfg(all(not(feature = "engine-tokio"), feature = "multicast-transport"))]
 fn read_group(endpoint: &str) -> Result<EndpointReading, Refused> {
     use wz_session_core::facilities::Endpoint;
@@ -242,6 +239,8 @@ fn read_group(endpoint: &str) -> Result<EndpointReading, Refused> {
             proto: Proto::Udp,
             named: false,
         })),
+        #[cfg(feature = "raweth-transport")]
+        Ok(group) if group.raweth().is_some() => Ok(Ok(Endpoint::RawEthernet)),
         _ => Err((
             crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
             "the open refuses this config: its group is not one the host joins",
@@ -345,6 +344,52 @@ mod tests {
         );
     }
 
+    /// The locator pico opens its one transport on is a group when it names one, a client's
+    /// connect locator too, and a connect locator beside a listened one is a peer of that one's
+    /// transport and no group. Turned red by a group read off the listen locator alone.
+    #[test]
+    fn the_one_transport_is_a_group_when_its_locator_names_one() {
+        use crate::session::group_endpoint;
+        let udp = "udp/224.0.0.224:7447#iface=lo";
+        let tcp = "tcp/127.0.0.1:7447";
+        assert_eq!(group_endpoint(None, Some(udp)), Some(udp));
+        assert_eq!(group_endpoint(Some(udp), Some(tcp)), Some(udp));
+        assert_eq!(group_endpoint(Some(tcp), Some(udp)), None);
+        assert_eq!(
+            group_endpoint(None, Some("udp/224.0.0.224:7447")),
+            None,
+            "a UDP locator naming no interface is pico's unicast UDP link"
+        );
+        let reth = "reth/30:03:8c:c8:00:a2#iface=lo";
+        assert_eq!(
+            group_endpoint(None, Some(reth)),
+            cfg!(all(feature = "raweth-transport", target_os = "linux")).then_some(reth)
+        );
+    }
+
+    /// A client whose connect locator names a group joins it, as pico's client opens a multicast
+    /// or raweth transport on it: the door asks for the group's membership, or for the
+    /// link-layer socket. Turned red by a connect locator read as a unicast dial.
+    #[cfg(feature = "multicast-transport")]
+    #[test]
+    fn a_client_connecting_to_a_group_requires_its_membership() {
+        let got = requirement_of(&config(&[(
+            Z_CONFIG_CONNECT_KEY,
+            "udp/224.0.0.224:7447#iface=lo",
+        )]))
+        .unwrap();
+        assert!(got.contains("\"multicast\""), "{got}");
+        #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
+        {
+            let got = requirement_of(&config(&[(
+                Z_CONFIG_CONNECT_KEY,
+                "reth/30:03:8c:c8:00:a2#iface=lo",
+            )]))
+            .unwrap();
+            assert!(got.contains("\"raw-ethernet\""), "{got}");
+        }
+    }
+
     /// The cooperative engine has no resolver: its open refuses a host name as a link it could not
     /// open, and so does the door.
     #[cfg(not(feature = "engine-tokio"))]
@@ -357,6 +402,30 @@ mod tests {
         .unwrap_err();
         assert_eq!(code, crate::result::Z_ERR_TRANSPORT_OPEN_FAILED);
         assert!(reason.contains("address"), "{reason}");
+    }
+
+    /// A listened `reth/` endpoint is a group over raw Ethernet where the build joins one, which
+    /// asks for the link-layer socket and no IP multicast; a build without the raweth transport
+    /// has no link for the scheme. Turned red by a raweth group read as a UDP one, or by a build
+    /// without the transport that takes it.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_listened_raweth_group_requires_the_raw_socket_or_is_unknown() {
+        use crate::config::Z_CONFIG_LISTEN_KEY;
+        let got = requirement_of(&config(&[(
+            Z_CONFIG_LISTEN_KEY,
+            "reth/30:03:8c:c8:00:a2#iface=lo",
+        )]));
+        if cfg!(feature = "raweth-transport") {
+            let got = got.unwrap();
+            assert!(got.contains("\"raw-ethernet\""), "{got}");
+            assert!(!got.contains("\"multicast\""), "{got}");
+        } else {
+            assert_eq!(
+                got.unwrap_err().0,
+                crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
+            );
+        }
     }
 
     /// A listen endpoint the cooperative engine reads is answered with its socket.

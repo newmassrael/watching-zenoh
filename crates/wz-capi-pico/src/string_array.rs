@@ -23,7 +23,7 @@
 use core::ffi::c_void;
 
 use crate::abi::z_loaned_string_t;
-use crate::bytes::{try_box, try_boxed_bytes, try_push, NoRoom};
+use crate::bytes::{push_within, try_box, try_boxed_bytes, try_push, NoRoom};
 use crate::prelude::*;
 use crate::result::ZResult;
 
@@ -148,7 +148,8 @@ impl StringArrayState {
             // SAFETY: an entry's view reads its own bytes, and a lent view a live string
             // (`Self::lent`).
             let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
-            try_push(
+            // The room of every entry is reserved above, so a push here grows nothing.
+            push_within(
                 &mut entries,
                 StringArrayEntry::copy_of(bytes.unwrap_or(&[]))?,
             )?;

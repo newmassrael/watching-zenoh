@@ -485,8 +485,9 @@ impl<T: TransportFaces> TransportState<T> {
 
     /// Open the link of the group `endpoint` names (`group`), read here once for every stack
     /// (`parse_group_locator`). A member's link is reported by the endpoint the group was joined
-    /// by, in a row of `MAX_GROUP_ENDPOINT_LEN` bytes: the reading refuses a longer one before the
-    /// group is joined, so no row of this engine is held on the heap.
+    /// by, in a row of `GROUP_ROW_LEN` bytes, which holds the bound of every kind the build joins:
+    /// the reading refuses an endpoint past its kind's bound before the group is joined, so no row
+    /// of this engine is held on the heap.
     #[cfg(feature = "group")]
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]

@@ -17,6 +17,7 @@ use wz_session_core::key_arena::block_bytes;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
+use wz_session_core::wire_id::ExprId;
 
 use super::entity_tables::{lowered, open_under};
 use super::{open, CatchAll, Engine, Router};
@@ -519,9 +520,10 @@ fn a_queryables_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() {
 /// A hold gives itself back by the row it was taken in, not by its id: once its declaration went,
 /// and a later declaration took the same id after the ids wrapped, giving it back lets go of
 /// nothing. The hold that outlives its declaration is a second hold of a count of one, as a holder
-/// is whose declaration another holder's going retracted. Turned red by a hold given back by its
-/// id (`KeyHold::release` or `KeyHolds::release_keyexpr` looking the id up), which retracts the
-/// new declaration.
+/// is whose declaration another holder's going retracted. The ids are minted from the last, so
+/// they wrap at the next declaration and the id comes again within as many as it is from 1.
+/// Turned red by a hold given back by its id (`KeyHold::release` or
+/// `KeyHolds::release_keyexpr` looking the id up), which retracts the new declaration.
 #[test]
 fn a_hold_whose_declaration_went_spares_the_one_that_took_its_id_again() {
     let router = Router::start(CatchAll::None);
@@ -536,9 +538,10 @@ fn a_hold_whose_declaration_went_spares_the_one_that_took_its_id_again() {
         engine.keyexpr_declarations().is_empty(),
         "CONTROL: the count of one went with the program's hold"
     );
-    // The ids are minted onward and wrap: declarations made and let go of come to the id again.
-    // The session is stepped with each, so what it sends the router is read as it goes.
-    let again = (0..=u32::from(u16::MAX))
+    // The last id, then 1 onward: declarations made and let go of come to the id again. The
+    // session is stepped with each, so what it sends the router is read as it goes.
+    engine.expr_ids_from(ExprId::MAX);
+    let again = (0..=old)
         .find_map(|_| {
             let hold = engine
                 .acquire_keyexpr("demo/held/new")

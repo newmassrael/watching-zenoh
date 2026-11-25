@@ -3935,13 +3935,6 @@ impl ResolvedGroup {
     fn link_of(endpoint: &str, policy: &SessionPolicy) -> Option<GroupLinkSpec> {
         use wz_session_core::group_locator::{parse_group_locator, GroupLocator};
 
-        #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
-        if endpoint.starts_with("reth/") {
-            return wz_runtime_tokio::raweth_link::parse_reth_locator(endpoint)
-                .map(GroupLinkSpec::RawEth)
-                .map_err(|e| log_open_failure(&format!("group {endpoint}"), &e))
-                .ok();
-        }
         match parse_group_locator(endpoint) {
             Ok(GroupLocator::Udp(group)) => Some(GroupLinkSpec::Udp {
                 group: group.group().ip(),
@@ -3951,6 +3944,15 @@ impl ResolvedGroup {
                     ..wz_runtime_tokio::McastGroupOptions::of_policy(policy)
                 },
             }),
+            #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
+            Ok(GroupLocator::RawEth(reth)) => Some(GroupLinkSpec::RawEth(reth)),
+            Ok(_) => {
+                log_open_failure(
+                    &format!("group {endpoint}"),
+                    &"a group of a kind this build does not join",
+                );
+                None
+            }
             Err(e) => {
                 log_open_failure(&format!("group {endpoint}"), &e);
                 None
@@ -6695,7 +6697,7 @@ mod multicast_face_tests {
                 panic!("a reth/ endpoint is a raw Ethernet group");
             };
             assert_eq!(reth.smac, [0x02, 0, 0, 0, 0, 0x01]);
-            assert_eq!(reth.interface, "eth9");
+            assert_eq!(reth.interface(), "eth9");
         }
         #[cfg(not(all(feature = "raweth-transport", target_os = "linux")))]
         assert!(ResolvedGroup::link_of("reth/02:00:00:00:00:01", &policy).is_none());

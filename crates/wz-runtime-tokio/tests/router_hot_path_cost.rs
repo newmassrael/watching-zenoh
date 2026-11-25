@@ -45,12 +45,11 @@ use std::time::Instant;
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
 use wz_runtime_tokio::linkstate_forward::Zid;
 use wz_runtime_tokio::router_forward::RouterForwarder;
-use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, BoxedLinkDriver, IterationEvent, LinkSendOutcome, SessionLinkActions,
+    BoxedLinkDriver, IterationEvent, LinkSendOutcome, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
-use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_runtime_tokio_test_support::{established_session_actions, fixture_session_init_params};
 use wz_session_core::declare_build::build_declare_subscriber;
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::metadata::PushMetadata;
@@ -109,12 +108,10 @@ fn zid(b: u8) -> Zid {
     Zid::from_slice(&[b, b, b, b])
 }
 
+/// A client face over `link`, whose remote peer is `peer`, established: a router holds the face
+/// of a session that completed its handshake, and a session refuses a data send before that.
 fn client_over(link: &Arc<CountingLink>, peer: Zid) -> Arc<SessionLinkActions> {
-    let actions = new_session_actions(
-        link.clone(),
-        fixture_session_init_params(),
-        TokioTime::new(),
-    );
+    let actions = established_session_actions(link.clone(), fixture_session_init_params());
     actions.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(peer.as_slice())

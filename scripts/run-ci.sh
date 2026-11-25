@@ -22556,6 +22556,14 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test "M cooperative groups on the host's sockets, one thread" 2 \
         cargo test -p wz-capi-coop --no-default-features --features std,group-host \
         --lib host_group:: -- --ignored --test-threads=1 || return 1
+    # The pico C ABI's default build on the cooperative engine joins the group a connect locator
+    # names as its one transport, as pico's client does: a client that connects to a group beside a
+    # peer that listens on it, and two clients that both connect to it, exchange puts through the
+    # exported symbols. Serial, for the group space. 2 = the file's `#[ignore]`d tests, both in the
+    # default build (the first needs `peer`, which the default selects).
+    wz_test_args wz-capi-pico connect_group_roundtrip
+    _runci_guarded_test "M a pico C ABI session joins the group its connect names" 2 \
+        cargo test -p wz-capi-pico "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     # The `scout` role of a `--sessions` driver: one process answers Scouts from a
     # `scouting.multicast` block, a second asks from inside its own session and
     # prints the Hello it hears. It needs a multicast route and nothing else.

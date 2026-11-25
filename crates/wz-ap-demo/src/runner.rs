@@ -6822,6 +6822,12 @@ async fn run_router_hat_until(
                         ..McastGroupOptions::of_policy(&params.policy)
                     },
                 ),
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("--multicast-locator {l} names no udp group"),
+                    ));
+                }
                 Err(e) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,

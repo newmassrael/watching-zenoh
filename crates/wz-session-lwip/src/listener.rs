@@ -130,11 +130,11 @@ impl Admission {
     /// The link driver of the session, made in `place`, the place it is kept: it
     /// carries its link's outbound slot, which made here and moved there would be a
     /// value in each frame it passed through.
-    pub fn driver_in(
+    pub fn driver_in<'place>(
         socket: &'static RefCell<SessionRxSocket>,
         peer: (u32, u16),
-        place: &mut core::mem::MaybeUninit<LwipUdpDriver>,
-    ) -> &mut LwipUdpDriver {
+        place: &'place mut core::mem::MaybeUninit<LwipUdpDriver>,
+    ) -> &'place mut LwipUdpDriver {
         LwipUdpDriver::new_in(place, SessionSocket::listened(socket), peer.0, peer.1)
     }
 

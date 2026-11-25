@@ -432,7 +432,9 @@ impl DeclaredKeyexpr {
     /// Another key sharing this one's literal and declaration — pico
     /// `_z_declared_keyexpr_copy`, which clones the refcount; refused, making nothing, as the
     /// literal's share is, or when the declaration's count holds as many holders as it can
-    /// ([`WireDeclaration::share`]).
+    /// ([`WireDeclaration::share`]). Out of line: the clone door and a declaration asked again
+    /// each carried its own copy of the two shares and their refusal.
+    #[inline(never)]
     pub(crate) fn share(&self) -> Result<Self, ZResult> {
         // The text is kept first: a refusal then has no hold of the declaration to let go of.
         let literal = self.literal.share()?;
@@ -2002,9 +2004,11 @@ mod tests {
 
     /// A key the program holds gives its declaration back by the row its hold was taken in, not
     /// by its id: a declaration retracted whatever held it, whose id a later declaration takes
-    /// again once the ids wrap, is not the one the program's `z_keyexpr_drop` lets go of. Turned
-    /// red by a hold given back by its id (`KeyHold::release` or the engine's `release_keyexpr`
-    /// looking the id up), which retracts the new declaration.
+    /// again once the ids wrap, is not the one the program's `z_keyexpr_drop` lets go of. The ids
+    /// are minted from the last, so they wrap at the next declaration and the id comes again
+    /// within as many as it is from 1. Turned red by a hold given back by its id
+    /// (`KeyHold::release` or the engine's `release_keyexpr` looking the id up), which retracts
+    /// the new declaration.
     #[test]
     fn dropping_a_key_spares_a_declaration_that_took_its_retracted_id_again() {
         let shared = session();
@@ -2020,9 +2024,10 @@ mod tests {
             shared.keyexpr_declarations().is_empty(),
             "CONTROL: retracted"
         );
-        // The ids are minted onward and wrap: declarations made and let go of come to the
-        // retracted id again.
-        let again = (0..=u32::from(u16::MAX))
+        // The last id, then 1 onward: declarations made and let go of come to the retracted id
+        // again.
+        shared.expr_ids_from(wz_session_core::wire_id::ExprId::MAX);
+        let again = (0..=old)
             .find_map(|_| {
                 let hold = shared
                     .acquire_keyexpr("demo/kd/new".to_owned())

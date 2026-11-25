@@ -22,6 +22,18 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
+/// A bundle over `driver` with `params`, established (`SessionLinkActions::enter_established`) as
+/// a session that completed its handshake stands, for a test whose subject is what an established
+/// session sends and not its handshake: a session refuses a data send before establishment.
+pub fn established_session_actions(
+    driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
+    params: SessionInitParams,
+) -> Arc<SessionLinkActions> {
+    let actions = new_session_actions(driver, params, TokioTime::new());
+    actions.enter_established();
+    actions
+}
+
 /// The snapshot every fixture's session is handed: the build defaults. A test that is about
 /// another value selects it in the params a fixture returns, whose queue it then rebuilds with
 /// `TxQueueConf::of_snapshot` when the value is one the queue carries.

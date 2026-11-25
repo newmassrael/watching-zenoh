@@ -18633,6 +18633,8 @@ async fn a_stable_declarations_wait_on_program_time_ends_only_when_that_time_pas
         fixture_session_init_params(),
         clock,
     );
+    // The interest is a data send, which a session lets through only once established.
+    actions.enter_established();
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(actions, observer, Arc::new(clock));
     session

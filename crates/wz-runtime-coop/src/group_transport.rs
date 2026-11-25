@@ -190,6 +190,15 @@ pub trait GroupTransport {
     fn give_back_rx(&mut self) -> Option<ByteBuf> {
         None
     }
+
+    /// The bytes of a datagram one send of this transport carries, when it carries less than a
+    /// group's batch may be (a raw Ethernet frame): the group frames its batches to it while its
+    /// JOIN still states the group's batch, as the tokio engine's group pipeline frames to its
+    /// link's budget. `None`, the provided answer, for a transport that carries whatever batch
+    /// its group runs.
+    fn frame_budget(&self) -> Option<u16> {
+        None
+    }
 }
 
 /// What a group's socket did with a datagram it was offered ([`GroupTransport::try_send_to_group`]).
@@ -329,6 +338,10 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
     #[cfg(feature = "session-unicast")]
     fn give_back_rx(&mut self) -> Option<ByteBuf> {
         (**self).give_back_rx()
+    }
+
+    fn frame_budget(&self) -> Option<u16> {
+        (**self).frame_budget()
     }
 }
 

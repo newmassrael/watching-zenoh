@@ -453,18 +453,12 @@ impl SampleMarshal {
         };
         let [payload_at, attachment_at, schema_at] = starts;
         // A part shares its block, or the one copy's at the start the copy wrote it to.
-        let kept = |bytes: &ByteBuf, start: *const u8| {
-            if bytes.holds_block() {
-                bytes.try_clone()
-            } else {
-                // SAFETY: `kept_parts` wrote the lent bytes, when there are some, at `start` of
-                // `block`.
-                unsafe { ByteBuf::part_of(block.as_ref(), start, bytes) }
-            }
-        };
-        let payload = kept(&self.payload, payload_at)?;
+        // SAFETY: `kept_parts` wrote the lent bytes of each, when there are some, at its start of
+        // `block`.
+        let payload = unsafe { self.payload.kept_in(block.as_ref(), payload_at)? };
         let attachment = match &self.attachment {
-            Some(attachment) => Some(kept(attachment, attachment_at)?),
+            // SAFETY: as the payload's.
+            Some(attachment) => Some(unsafe { attachment.kept_in(block.as_ref(), attachment_at)? }),
             None => None,
         };
         let encoding = match &self.encoding {
