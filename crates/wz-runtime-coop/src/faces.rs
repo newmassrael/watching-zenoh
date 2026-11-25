@@ -431,10 +431,9 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
     ///
     /// # Safety
     ///
-    /// `site` lives, at the address it has now, for as long as the handle does. No read of the
-    /// handle is made by a thread inside a lend of `site`: a kind whose values one owner's lock
-    /// keeps to one thread ([`crate::sync::Confined`]) lends whatever holds the place, so such a
-    /// read would reach the parts inside their own lend.
+    /// `site` lives, at the address it has now, for as long as the handle does. A read made
+    /// inside a lend of `site` finds the place held, on every kind
+    /// ([`crate::sync::Confined`]'s try included), and reads the link as quiet.
     pub unsafe fn new(
         site: &FaceSite<K, P>,
         end: E,
@@ -451,8 +450,8 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
 
     /// The site the parts lie in.
     fn site(&self) -> &FaceSite<K, P> {
-        // SAFETY: the site outlives the handle where it was when the handle was made, and is
-        // read by no thread inside its own lend (`Self::new`'s contract).
+        // SAFETY: the site outlives the handle where it was when the handle was made
+        // (`Self::new`'s contract).
         unsafe { self.site.as_ref() }
     }
 
@@ -2261,14 +2260,14 @@ mod tests {
     /// through the end it was made with, with no lend; an empty place reads as a quiet link and
     /// keeps no close owed to it. Turned red by a handle that reads its end or its waits off the
     /// parts, reads an empty place as anything but quiet, or a close owed to an empty place told
-    /// to the link held after.
+    /// to the link held after; or by a read inside the place's own lend that reaches the parts
+    /// (`OwnerHeld::try_with`), or a close made there that is not owed to that lend.
     #[test]
     fn a_link_in_a_faces_place_is_read_through_the_place() {
         let (aborted, ended) = (Rc::new(Cell::new(0)), Ended::default());
         let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
         let end = Rc::new(HeldEnd::default());
-        // SAFETY: the site outlives the handle, in this frame, and no read of the handle is made
-        // inside a lend of the site.
+        // SAFETY: the site outlives the handle, in this frame.
         let at = unsafe { FaceAt::new(&site, Rc::clone(&end), Some(WaitOn::Socket(3)), None) };
         assert!(!at.holds_input(), "an empty place reads as no input");
         assert!(!at.established(), "and as no link established");
@@ -2292,6 +2291,20 @@ mod tests {
             1,
             "a close told through a free place"
         );
+        let inside = site.lend(|_| {
+            at.close();
+            (at.holds_input(), ended.load(Ordering::SeqCst))
+        });
+        assert_eq!(
+            inside,
+            Some((false, 1)),
+            "a read inside the place's own lend reads as quiet, and its close is owed"
+        );
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            2,
+            "the close owed inside the lend told as it let go"
+        );
         assert!(!at.finished(), "CONTROL: a link whose session runs");
         end.finished.set(true);
         assert!(at.finished(), "the end read with no lend");
@@ -2313,8 +2326,7 @@ mod tests {
         let (aborted, ended) = (Rc::new(Cell::new(0)), Ended::default());
         let site = FaceSite::<crate::sync::Shared, ApartParts>::empty();
         assert!(site.hold(held_parts(&aborted, &ended)).is_none());
-        // SAFETY: the site outlives the handle, in this frame, and no read of the handle is made
-        // inside a lend of the site.
+        // SAFETY: the site outlives the handle, in this frame.
         let at = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) };
         assert!(
             at.holds_input(),
@@ -2378,8 +2390,7 @@ mod tests {
         let site = FaceSite::<crate::sync::Shared, ApartParts>::empty();
         assert!(site.hold(held_parts(&aborted, &ended)).is_none());
         let end = Rc::new(HeldEnd::default());
-        // SAFETY: the site outlives the handle, in this frame, and no read of the handle is made
-        // inside a lend of the site.
+        // SAFETY: the site outlives the handle, in this frame.
         let at = unsafe { FaceAt::new(&site, Rc::clone(&end), None, None) };
         let dial = SiteFace {
             id: 100,

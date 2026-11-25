@@ -70,7 +70,7 @@
 //! per-runtime alias surface keeps both flavours composable through a
 //! cfg switch at the consumer's import line.
 
-#[cfg(all(feature = "runtime", debug_assertions))]
+#[cfg(feature = "runtime")]
 use core::cell::Cell;
 #[cfg(not(feature = "host-lock"))]
 use core::cell::RefCell;
@@ -320,14 +320,15 @@ impl<O: ConfinedOwner> LockKind for Confined<O> {
     // No other thread reaches the value (`O`'s contract), so a lend never waits on one.
     const WAITS: bool = false;
 
-    /// No other thread reaches the value (`O`'s contract), so there is never a holder to find and
-    /// `f` always runs.
+    /// No other thread reaches the value (`O`'s contract), so the one holder a try can find is a
+    /// hold of the value the calling thread is inside: `None` there, as a lock's own try finds
+    /// it held, and `f` runs everywhere else.
     #[inline]
     fn try_with<T: Send + 'static, U>(
         mutex: &Self::Mutex<T>,
         f: impl FnOnce(&mut T) -> U,
     ) -> Option<U> {
-        Some(mutex.with(f))
+        mutex.try_with(f)
     }
 
     #[cfg(feature = "session-unicast")]
@@ -415,19 +416,20 @@ impl LockKind for ManyThreads {
 ///
 /// A value is never taken inside its own hold: the session's code does not nest one value in
 /// itself (a lock of the value would wait on itself there). A debug build checks it, and fails at
-/// the nested take instead of handing out a second `&mut`.
+/// the nested take instead of handing out a second `&mut`. A try inside the hold finds the value
+/// held ([`Self::try_with`]), in every build: a handle that reaches the value without knowing
+/// whether its thread holds it tries it, and a lock's try would find it held there too.
 #[cfg(feature = "runtime")]
 pub struct OwnerHeld<T, O: ConfinedOwner> {
     value: UnsafeCell<T>,
     /// Whether a closure is inside the value now.
-    #[cfg(debug_assertions)]
     inside: Cell<bool>,
     owner: PhantomData<fn() -> O>,
 }
 
 // SAFETY: the value is reached only inside `with`, and `O`'s `unsafe impl ConfinedOwner` states
 // that `with` is called by one thread at a time, which is what `Sync` asks of a value that is
-// `Send`. The debug build's flag is read and written inside the same calls.
+// `Send`. The flag of a hold is read and written by that one thread, inside the same calls.
 #[cfg(feature = "runtime")]
 unsafe impl<T: Send, O: ConfinedOwner> Sync for OwnerHeld<T, O> {}
 
@@ -436,7 +438,6 @@ impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
     fn new(value: T) -> Self {
         Self {
             value: UnsafeCell::new(value),
-            #[cfg(debug_assertions)]
             inside: Cell::new(false),
             owner: PhantomData,
         }
@@ -445,32 +446,44 @@ impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
     /// Run `f` on the value.
     #[inline]
     pub fn with<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
-        #[cfg(debug_assertions)]
         let _inside = Inside::enter(&self.inside);
         // SAFETY: one thread at a time calls this (`O`'s contract), and the value is not taken
         // inside its own hold (checked in a debug build), so no other reference to it lives while
         // `f` runs.
         f(unsafe { &mut *self.value.get() })
     }
+
+    /// [`Self::with`], or `None` with `f` not run when the calling thread is inside a hold of
+    /// the value now: the one holder a value no other thread reaches can have.
+    #[inline]
+    pub fn try_with<U>(&self, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        if self.inside.get() {
+            return None;
+        }
+        Some(self.with(f))
+    }
 }
 
 /// A closure inside an [`OwnerHeld`], from [`Inside::enter`] to drop, on return and on unwind
-/// alike: what lets a debug build fail a take nested in the hold of the same value.
-#[cfg(all(feature = "runtime", debug_assertions))]
+/// alike: what a try nested in the hold of the same value finds, and what lets a debug build fail
+/// a take nested there.
+#[cfg(feature = "runtime")]
 struct Inside<'a>(&'a Cell<bool>);
 
-#[cfg(all(feature = "runtime", debug_assertions))]
+#[cfg(feature = "runtime")]
 impl<'a> Inside<'a> {
     fn enter(inside: &'a Cell<bool>) -> Self {
-        assert!(
-            !inside.replace(true),
+        // Set in every build: a try inside the hold reads it (`OwnerHeld::try_with`).
+        let nested = inside.replace(true);
+        debug_assert!(
+            !nested,
             "a session's value is taken again inside its own hold"
         );
         Self(inside)
     }
 }
 
-#[cfg(all(feature = "runtime", debug_assertions))]
+#[cfg(feature = "runtime")]
 impl Drop for Inside<'_> {
     fn drop(&mut self) {
         self.0.set(false);
@@ -507,7 +520,8 @@ pub enum Lend<U> {
     Lent(U),
     /// The face holds no transport: its link is not up. Nothing ran.
     Empty,
-    /// Another thread holds the face now. Nothing ran, and nothing waited.
+    /// Another thread holds the face now, or the calling thread is inside a hold of it. Nothing
+    /// ran, and nothing waited.
     Held,
 }
 
@@ -936,7 +950,37 @@ pub(crate) mod tests {
         assert_eq!(
             Held::try_with(&value, |held| *held),
             Some(2),
-            "the nested hold left the value, and a try always runs"
+            "the nested hold left the value, and a try outside every hold of it runs"
+        );
+    }
+
+    /// A try inside the value's own hold finds it held and runs nothing, in every build, and the
+    /// value is tried again once the hold is gone, an unwound one too. Turned red by a try that
+    /// runs inside the hold, a second `&mut` of the value (`OwnerHeld::try_with`), or a hold that
+    /// leaves its mark set.
+    #[test]
+    fn a_try_inside_the_values_own_hold_finds_it_held() {
+        extern crate std;
+        let value = Held::wrap(5u8);
+        let mut ran = false;
+        assert_eq!(
+            Held::with(&value, |_| Held::try_with(&value, |_| ran = true)),
+            None
+        );
+        assert!(!ran, "nothing ran inside the hold");
+        assert_eq!(Held::try_with(&value, |held| *held), Some(5));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Held::with(&value, |held| {
+                if *held == 5 {
+                    panic!("inside the hold");
+                }
+            });
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            Held::try_with(&value, |held| *held),
+            Some(5),
+            "an unwound hold is not found"
         );
     }
 
@@ -1158,6 +1202,22 @@ mod face_place_tests {
         assert_eq!(place.hold(1), Some(8), "a second link answers the first");
         assert_eq!(place.take(), Some(1));
         assert_eq!(place.try_lend(|_| ()), Lend::Empty);
+    }
+
+    /// A try on a confined face inside the face's own lend finds it held and runs nothing, as a
+    /// handle that reaches the face from inside a read that holds it does; the lend that holds it
+    /// keeps what it wrote. Turned red by a try that lends the face it is inside
+    /// (`Confined::try_with`), a second `&mut` of the values.
+    #[test]
+    fn a_try_inside_a_confined_faces_own_lend_finds_it_held() {
+        let place = Place::empty();
+        place.hold(4);
+        let inside = place.lend(|transport| {
+            *transport += 1;
+            place.try_lend(|transport| *transport)
+        });
+        assert_eq!(inside, Some(Lend::Held));
+        assert_eq!(place.try_lend(|transport| *transport), Lend::Lent(5));
     }
 
     /// A send that does not wait finds a face another thread holds and runs nothing, and finds
