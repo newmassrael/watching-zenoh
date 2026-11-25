@@ -352,7 +352,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal> {
-        let (sink, release) = crate::faces::face_sink(sink);
+        let (sink, release) = crate::faces::face_sink(sink, self.deliveries());
         let id = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
@@ -637,7 +637,7 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        let (sink, release) = crate::faces::face_liveliness_sink(sink);
+        let (sink, release) = crate::faces::face_liveliness_sink(sink, self.deliveries());
         let id = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
@@ -678,7 +678,7 @@ impl SessionEngine for SharedSession {
             fan,
             |query_leg| {
                 let rid = query_leg
-                    .query_on_wire(keyexpr, wire, opts.clone(), crate::faces::face_reply(leg()))
+                    .query_on_wire(keyexpr, wire, opts.clone(), self.face_reply(leg()))
                     .ok()
                     .map(|handle| handle.rid());
                 issued += usize::from(rid.is_some());
@@ -714,12 +714,7 @@ impl SessionEngine for SharedSession {
             fan,
             |query_leg| {
                 let rid = query_leg
-                    .query_shm(
-                        keyexpr,
-                        opts.clone(),
-                        &value,
-                        crate::faces::face_reply(leg()),
-                    )
+                    .query_shm(keyexpr, opts.clone(), &value, self.face_reply(leg()))
                     .ok()
                     .map(|handle| handle.rid());
                 issued += usize::from(rid.is_some());
@@ -741,7 +736,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal> {
-        let (sink, release) = crate::faces::face_sink(sink);
+        let (sink, release) = crate::faces::face_sink(sink, self.deliveries());
         let id = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
@@ -816,7 +811,7 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        let (sink, release) = crate::faces::face_liveliness_sink(sink);
+        let (sink, release) = crate::faces::face_liveliness_sink(sink, self.deliveries());
         let id = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
@@ -887,7 +882,7 @@ impl SharedSession {
         if self.is_closed() {
             return Err(Refusal::Closed);
         }
-        let mut leg = || crate::faces::face_reply(leg());
+        let mut leg = || self.face_reply(leg());
         Ok(self.liveliness_get_on_links(keyexpr, timeout_ms, links, fan, &mut leg))
     }
 }
@@ -957,6 +952,7 @@ impl SharedSession {
         // latch, which is what a reply on a kept query checks first.
         let closed = self.closed_latch();
         let kept = Arc::downgrade(&self.kept_queries);
+        let deliveries = self.deliveries();
         let sink = Arc::new(sink);
         self.declare_queryable_on_links(
             keyexpr,
@@ -975,7 +971,7 @@ impl SharedSession {
                 Box::new(
                     move |query: &dyn wz_session_core::query_sink::QueryView,
                           out: &mut dyn wz_session_core::query_sink::ReplyOut| {
-                        sink.call(query, out, &holder);
+                        deliveries.within(|| sink.call(query, out, &holder));
                     },
                 ) as Box<_>
             }),

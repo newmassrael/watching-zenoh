@@ -80,6 +80,7 @@ use wz_session_core::sink::{SampleRef, SampleView};
 
 pub mod cancellation;
 pub mod decl_watch;
+mod deliveries;
 mod drive;
 mod engine;
 pub mod entity_place;
@@ -115,6 +116,7 @@ pub mod told;
 pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
+pub use deliveries::EngineDeliveries;
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{
     DeclarationReach, EngineHolder, KeyHolds, RedeclareRefusal, SessionEngine, Tickers,

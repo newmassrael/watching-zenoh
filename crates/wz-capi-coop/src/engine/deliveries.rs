@@ -31,6 +31,7 @@ use portable_atomic::AtomicUsize;
 use wz_capi_port::os;
 #[cfg(feature = "threads")]
 use wz_capi_port::sync::Lock;
+use wz_capi_port::EngineDeliveries;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -70,15 +71,18 @@ impl OneThreadDeliveries {
         f(true)
     }
 
-    /// Whether the thread delivers now: a callback of the session may run below on its stack.
-    pub(super) fn delivers_here(&self) -> bool {
-        self.delivering.load(Ordering::Relaxed)
-    }
-
     /// No list of other threads is kept, so none is ever taken.
     #[cfg(all(test, feature = "std", not(feature = "threads")))]
     pub(super) fn others_taken(&self) -> usize {
         0
+    }
+}
+
+/// Whether the one thread delivers now: a callback of the session may run below on its stack.
+#[cfg(any(not(feature = "threads"), all(test, feature = "std")))]
+impl EngineDeliveries for OneThreadDeliveries {
+    fn delivers_here(&self) -> bool {
+        self.delivering.load(Ordering::Relaxed)
     }
 }
 
@@ -164,12 +168,6 @@ impl Deliveries {
         f(true)
     }
 
-    /// Whether this thread delivers for the engine now: a callback of the session may run below
-    /// on its stack, so nothing here waits for a call to end.
-    pub(super) fn delivers_here(&self) -> bool {
-        self.delivers(os::current_word())
-    }
-
     /// Whether the thread of `word` delivers for the engine now.
     fn delivers(&self, word: usize) -> bool {
         self.owner.load(Ordering::Acquire) == word
@@ -200,6 +198,15 @@ impl Deliveries {
     #[cfg(all(test, feature = "std"))]
     pub(super) fn others_taken(&self) -> usize {
         self.others_taken.load(Ordering::Relaxed)
+    }
+}
+
+/// Whether this thread delivers for the engine now: a callback of the session may run below on its
+/// stack, so nothing here waits for a call to end.
+#[cfg(feature = "threads")]
+impl EngineDeliveries for Deliveries {
+    fn delivers_here(&self) -> bool {
+        self.delivers(os::current_word())
     }
 }
 

@@ -85,10 +85,10 @@ use wz_capi_port::os::{self, Mutex, MutexGuard};
 #[cfg(feature = "threads")]
 use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
-    BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
-    HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId, MatchingSink, PeerIdentity,
-    PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SessionKeys,
-    StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    BatchStep, CalledFromReadTask, EngineDeliveries, FanoutError, FilterId, FilterPlane,
+    FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId,
+    MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive,
+    SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;

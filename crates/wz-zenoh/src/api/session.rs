@@ -1755,7 +1755,7 @@ impl Engine {
                 tokio_engine::ask_liveliness(
                     request,
                     Box::new(move |key, _wire, timeout_ms, fan, leg| {
-                        let mut leg = || wz_capi_core::faces::face_reply(leg());
+                        let mut leg = || shared.face_reply(leg());
                         Ok(shared.liveliness_get_on_links(key, timeout_ms, links, fan, &mut leg))
                     }),
                 )

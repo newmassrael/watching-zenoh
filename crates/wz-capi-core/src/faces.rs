@@ -69,8 +69,10 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use tokio::sync::Notify;
 
 use crate::cancellation::CancellableFan;
+use crate::deliveries::Deliveries;
 #[cfg(feature = "group")]
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
+use wz_capi_port::EngineDeliveries;
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
 use wz_runtime_tokio::declaration_aggregation::DeclarationAggregation;
@@ -169,29 +171,27 @@ pub use wz_capi_port::{
 
 /// Mints one liveliness-subscriber callback per face: each face's leg keeps what it was told of
 /// itself. A port's callback ([`wz_capi_port::LivelinessSink`]) becomes one by
-/// [`face_liveliness_sink`].
+/// `face_liveliness_sink`.
 pub type LivelinessSink =
     Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
 
 /// One leg of a get, as this registry's sessions call it: dropped at the leg's end. A port's leg
-/// ([`wz_capi_port::ReplyCallback`]) becomes one by [`face_reply`].
+/// ([`wz_capi_port::ReplyCallback`]) becomes one by [`SharedSession::face_reply`].
 pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
 
-/// The port's leg `callback` as one this registry calls; its end is the port's, as it holds it.
-pub fn face_reply(callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
-    Box::new(move |reply: &dyn ReplyView| callback.call(reply))
-}
-
 /// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's, and
-/// what tells when it is let go of.
-pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> (LivelinessSink, SinkRelease) {
-    let (sink, release) = Released::new(sink);
+/// what tells when it is let go of. Each call is a delivery of the session of `deliveries`.
+#[cfg(feature = "liveliness")]
+pub(crate) fn face_liveliness_sink(
+    sink: wz_capi_port::LivelinessSink,
+    deliveries: Deliveries,
+) -> (LivelinessSink, SinkRelease) {
+    let (sink, release) = Released::new(sink, deliveries);
     let sink = Arc::new(sink);
     let factory: LivelinessSink = Arc::new(move || {
         let sink = Arc::clone(&sink);
         Box::new(move |sample: LivelinessSample<'_>| {
-            let _in_call = SampleCallGuard::enter();
-            sink.call(sample);
+            deliveries.within(|| sink.call(sample));
         })
     });
     (factory, release)
@@ -199,21 +199,24 @@ pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> (LivelinessSi
 
 /// Mints one subscriber callback per face: what this registry keeps for one C subscription, since
 /// each face's session registers a callback of its own. A port's callback
-/// ([`wz_capi_port::SubscriberSink`]) becomes one by [`face_sink`].
+/// ([`wz_capi_port::SubscriberSink`]) becomes one by `face_sink`.
 pub type SubscriberSink =
     Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
 
 /// The port's callback `sink` as a per-face factory: each face's callback calls the one sink
-/// through a shared borrow, and the sink is let go of with the last of them, after its last call;
-/// with it, what tells when that has happened ([`SinkRelease`]).
-pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> (SubscriberSink, SinkRelease) {
-    let (sink, release) = Released::new(sink);
+/// through a shared borrow, as a delivery of the session of `deliveries`, and the sink is let go
+/// of with the last of them, after its last call; with it, what tells when that has happened
+/// ([`SinkRelease`]).
+pub(crate) fn face_sink(
+    sink: wz_capi_port::SubscriberSink,
+    deliveries: Deliveries,
+) -> (SubscriberSink, SinkRelease) {
+    let (sink, release) = Released::new(sink, deliveries);
     let sink = Arc::new(sink);
     let factory: SubscriberSink = Arc::new(move || {
         let sink = Arc::clone(&sink);
         Box::new(move |sample: &dyn SampleView| {
-            let _in_call = SampleCallGuard::enter();
-            sink.call(sample);
+            deliveries.within(|| sink.call(sample));
         })
     });
     (factory, release)
@@ -227,9 +230,12 @@ struct Released<S> {
 }
 
 impl<S> Released<S> {
-    fn new(sink: S) -> (Self, SinkRelease) {
+    fn new(sink: S, deliveries: Deliveries) -> (Self, SinkRelease) {
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let release = SinkRelease(Arc::clone(&done));
+        let release = SinkRelease {
+            done: Arc::clone(&done),
+            deliveries,
+        };
         (
             Self {
                 sink: core::mem::ManuallyDrop::new(sink),
@@ -259,47 +265,23 @@ impl<S> Drop for Released<S> {
 /// What tells when a subscriber's callback has been let go of, its drop run: the engine's half of
 /// the port's contract that an undeclare returns after it
 /// ([`wz_capi_port::SessionEngine::undeclare_subscriber`]).
-pub struct SinkRelease(Arc<std::sync::atomic::AtomicBool>);
+pub struct SinkRelease {
+    done: Arc<std::sync::atomic::AtomicBool>,
+    /// The deliveries of the session the callback was declared on.
+    deliveries: Deliveries,
+}
 
 impl SinkRelease {
-    /// Wait until the callback has been let go of, unless this thread is inside a subscriber
-    /// callback: there the call that runs holds the callback, or may be what another thread's
-    /// wait waits for, and the callback is let go of as the last call ends.
+    /// Wait until the callback has been let go of, unless this thread delivers for the session
+    /// now: there the call that runs may be below on this stack, or may be waiting for this
+    /// thread, and the callback is let go of as the last call ends.
     pub fn wait(self) {
-        if SampleCallGuard::active() {
+        if self.deliveries.delivers_here() {
             return;
         }
-        while !self.0.load(std::sync::atomic::Ordering::Acquire) {
+        while !self.done.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-    }
-}
-
-thread_local! {
-    /// Depth of subscriber callback calls on THIS thread ([`SampleCallGuard`]).
-    static IN_SAMPLE_CALL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// Marks this thread inside a subscriber callback while held. A counter rather than a bool, as a
-/// callback may reach another subscriber's through the session, and the inner end must not clear
-/// the outer mark.
-struct SampleCallGuard;
-
-impl SampleCallGuard {
-    fn enter() -> Self {
-        IN_SAMPLE_CALL.with(|depth| depth.set(depth.get().saturating_add(1)));
-        Self
-    }
-
-    /// Whether this thread is inside a subscriber callback now.
-    fn active() -> bool {
-        IN_SAMPLE_CALL.with(|depth| depth.get()) > 0
-    }
-}
-
-impl Drop for SampleCallGuard {
-    fn drop(&mut self) {
-        IN_SAMPLE_CALL.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
 }
 
@@ -1616,14 +1598,17 @@ struct MatchAggregate {
     last: bool,
     /// `None` once retired by `undeclare_matching_listener`.
     sink: Option<MatchingSink>,
+    /// The deliveries of the listener's session, which each call of `sink` is one of.
+    deliveries: Deliveries,
 }
 
 impl MatchAggregate {
-    fn new(sink: MatchingSink) -> Self {
+    fn new(sink: MatchingSink, deliveries: Deliveries) -> Self {
         Self {
             faces: BTreeSet::new(),
             last: false,
             sink: Some(sink),
+            deliveries,
         }
     }
 }
@@ -1908,10 +1893,10 @@ fn querier_watching_remote(complete_required: bool, upstream_rule: bool) -> Quer
 /// so a flip delivers through `agg.sink` under the acquisition it already held.
 /// A retired listener has `None` there and delivers nothing.
 ///
-/// [`IN_MATCHING_DELIVERY`] is set around the C call because
+/// The C call is a delivery of the listener's session (the aggregate's mark) because
 /// `undeclare_matching_listener` now WAITS on this mutex to retire the sink, and
 /// a C callback that undeclares its own listener from inside the call would
-/// otherwise wait on the mutex its own frame holds. The flag lets that one case
+/// otherwise wait on the mutex its own frame holds. The mark lets that case
 /// fall back to the pre-R311y535 behaviour — release by `Arc` drop, whenever the
 /// frame unwinds — which is the only thing a caller inside its own context can
 /// safely be given.
@@ -1924,8 +1909,7 @@ fn deliver_matching_flip(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(now) = update(&mut agg) {
         if let Some(sink) = agg.sink.as_ref() {
-            let _guard = MatchingDeliveryGuard::enter();
-            sink.call(now);
+            agg.deliveries.within(|| sink.call(now));
         }
     }
     // `agg` is dropped HERE, after the C call — see the doc comment.
@@ -1946,48 +1930,29 @@ fn deliver_matching_flip(
 /// discipline is that no C code runs holding a lock it might need.
 ///
 /// `None` means there is nothing for the caller to free — either the listener
-/// was already retired, or THIS THREAD is inside a matching callback, where
-/// waiting on the mutex would be waiting on its own frame. In that one case the
-/// sink stays put and falls with the entry's last `Arc`, which is all a caller
-/// undeclaring from inside its own context can be given.
-fn retire_matching_sink(state: &StdMutex<MatchAggregate>) -> Option<MatchingSink> {
-    if MatchingDeliveryGuard::active() {
-        return None;
-    }
-    let mut agg = state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+/// was already retired, or a delivery holds the aggregate while THIS THREAD
+/// delivers for the listener's session (`deliveries`, the aggregate's own mark),
+/// where the holder may be this thread's own frame, or a call that waits for
+/// this thread. There the sink stays put and falls with the entry's last `Arc`,
+/// which is all a caller undeclaring from inside its own session's callback can be
+/// given. An aggregate no delivery holds is retired at once on any thread.
+fn retire_matching_sink(
+    state: &StdMutex<MatchAggregate>,
+    deliveries: Deliveries,
+) -> Option<MatchingSink> {
+    let mut agg = match state.try_lock() {
+        Ok(agg) => agg,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            if deliveries.delivers_here() {
+                return None;
+            }
+            state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+    };
     agg.sink.take()
-}
-
-thread_local! {
-    /// Depth of [`deliver_matching_flip`] C calls on THIS thread — see that
-    /// function's doc for why `undeclare_matching_listener` consults it.
-    static IN_MATCHING_DELIVERY: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// RAII depth counter for [`IN_MATCHING_DELIVERY`]. A counter rather than a bool
-/// because a C callback may re-enter the session and reach a SECOND delivery
-/// (a different listener's aggregate), and a bool would clear the outer frame's
-/// mark when the inner one returned.
-struct MatchingDeliveryGuard;
-
-impl MatchingDeliveryGuard {
-    fn enter() -> Self {
-        IN_MATCHING_DELIVERY.with(|d| d.set(d.get() + 1));
-        Self
-    }
-
-    /// Whether this thread is inside a C matching callback right now.
-    fn active() -> bool {
-        IN_MATCHING_DELIVERY.with(|d| d.get()) > 0
-    }
-}
-
-impl Drop for MatchingDeliveryGuard {
-    fn drop(&mut self) {
-        IN_MATCHING_DELIVERY.with(|d| d.set(d.get().saturating_sub(1)));
-    }
 }
 
 /// The per-face callback one [`MatchEntry`] installs on face `face_id`: fold
@@ -2412,6 +2377,9 @@ impl Inner {
 /// and dispatches inbound samples).
 pub struct SharedSession {
     inner: StdMutex<Inner>,
+    /// The mark of this session's deliveries, entered around every callback it mints, which its
+    /// undeclarations read so as not to wait inside one ([`wz_capi_port::EngineDeliveries`]).
+    deliveries: Deliveries,
     clock: TokioTime,
     /// This session's zid — see [`SharedSession::zid`].
     zid: [u8; 16],
@@ -3048,6 +3016,7 @@ impl SharedSession {
                 wz_session_core::link_admission::admitted_links(&session_limits),
             )),
             inner: StdMutex::new(inner),
+            deliveries: Deliveries::new(),
             clock,
             local,
             local_wake,
@@ -3328,6 +3297,18 @@ impl SharedSession {
     /// reach it for what else is session-scope (a held query, the clock).
     pub fn local_session(&self) -> &TokioSession {
         &self.local
+    }
+
+    /// The port's leg `callback` as one this registry calls, each call a delivery of this
+    /// session; its end is the port's, as it holds it.
+    pub fn face_reply(&self, callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
+        let deliveries = self.deliveries;
+        Box::new(move |reply: &dyn ReplyView| deliveries.within(|| callback.call(reply)))
+    }
+
+    /// The mark of this session's deliveries, which each callback it mints enters.
+    pub(crate) fn deliveries(&self) -> Deliveries {
+        self.deliveries
     }
 
     /// Wake the local plane's drain. Call after staging anything on it.
@@ -6613,7 +6594,7 @@ impl SharedSession {
         let (count_local, count_remote) = (locality.allows_local(), locality.allows_remote());
         // R311y535 — the sink moves INTO the aggregate, which is now its ONE
         // owner. The `MatchEntry` keeps only the shared handle.
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink, self.deliveries)));
         // Phase 1 — allocate the id, publish the SSOT entry, snapshot the faces.
         let (id, faces) = {
             let mut guard = self.lock();
@@ -7146,14 +7127,15 @@ impl SharedSession {
         // the session, and it must not do so holding an aggregate.
         //
         // The re-entrant case is the exception and is handled rather than
-        // deadlocked: when this thread is already inside a matching callback,
-        // the mutex it would wait on is the one its own frame holds. There, the
-        // sink is left in place and released by `Arc` drop when the entry falls,
-        // which is the pre-R311y535 behaviour and the only outcome available to
-        // a caller undeclaring from inside its own context.
+        // deadlocked: when this thread delivers for this session and a delivery
+        // holds the aggregate, the mutex it would wait on may be the one its own
+        // frame holds. There, the sink is left in place and released by `Arc`
+        // drop when the entry falls, which is the pre-R311y535 behaviour and the
+        // only outcome available to a caller undeclaring from inside its own
+        // session's callback.
         let retired = entry
             .as_ref()
-            .and_then(|entry| retire_matching_sink(&entry.state));
+            .and_then(|entry| retire_matching_sink(&entry.state, self.deliveries));
         drop(retired);
         drop(entry);
     }
@@ -7310,7 +7292,7 @@ impl SharedSession {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
         // The port's contract: the undeclare returns once the callback has been let go of, unless
-        // it is made from inside a subscriber callback.
+        // this thread delivers for this session.
         if let Some(released) = released {
             released.wait();
         }
@@ -8849,17 +8831,20 @@ mod matching_aggregate_tests {
         // test's alone: a real C sink never reaches back into wz state.
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let probe = weak.clone();
-            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |now| {
-                log.lock().unwrap().push(now);
-                let probe = probe
-                    .upgrade()
-                    .expect("the aggregate is alive during its own call");
-                assert!(
-                    probe.try_lock().is_err(),
-                    "the aggregate mutex was NOT held across the C call -- two \
+            StdMutex::new(MatchAggregate::new(
+                MatchingSink::shared(move |now| {
+                    log.lock().unwrap().push(now);
+                    let probe = probe
+                        .upgrade()
+                        .expect("the aggregate is alive during its own call");
+                    assert!(
+                        probe.try_lock().is_err(),
+                        "the aggregate mutex was NOT held across the C call -- two \
                      threads can then invoke one C context concurrently"
-                );
-            })))
+                    );
+                }),
+                Deliveries::new(),
+            ))
         });
 
         deliver_matching_flip(&state, |agg| agg.apply(7, true));
@@ -8878,7 +8863,7 @@ mod matching_aggregate_tests {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
         let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink, Deliveries::new())));
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
         deliver_matching_flip(&state, |agg| agg.apply(2, true));
@@ -8903,7 +8888,7 @@ mod matching_aggregate_tests {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
         let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink, Deliveries::new())));
 
         deliver_matching_flip(&state, |agg| agg.apply(3, true));
         deliver_matching_flip(&state, |agg| agg.apply(3, false));
@@ -8943,7 +8928,7 @@ mod matching_aggregate_tests {
                 inflight.fetch_sub(1, Ordering::SeqCst);
             })
         };
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink, Deliveries::new())));
 
         // Face 1 arrives and stays; then two threads race the arrival of face 2
         // against the departure of face 1. Whatever the interleaving, the
@@ -9007,24 +8992,26 @@ mod matching_aggregate_tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let observed = Arc::new(StdMutex::new(Vec::new()));
 
+        let session = Deliveries::new();
         let state = {
             let probe = DropProbe(dropped.clone());
             let log = observed.clone();
-            Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
-                move |now| {
+            Arc::new(StdMutex::new(MatchAggregate::new(
+                MatchingSink::shared(move |now| {
                     // Keep the probe owned BY the closure, exactly as a C sink owns
                     // its context, so the probe's drop is the closure's drop.
                     let _ = &probe;
                     log.lock().unwrap().push(now);
-                },
-            ))))
+                }),
+                session,
+            )))
         };
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
         assert_eq!(dropped.load(Ordering::SeqCst), 0, "not dropped while live");
 
         // The production retirement path, not a copy of it.
-        let retired = retire_matching_sink(&state);
+        let retired = retire_matching_sink(&state, session);
         assert!(retired.is_some(), "a live aggregate yields its sink");
         drop(retired);
         assert_eq!(
@@ -9042,7 +9029,7 @@ mod matching_aggregate_tests {
             "a retired listener must deliver nothing"
         );
         assert!(
-            retire_matching_sink(&state).is_none(),
+            retire_matching_sink(&state, session).is_none(),
             "retiring twice must not produce a second context to free"
         );
     }
@@ -9064,16 +9051,18 @@ mod matching_aggregate_tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = StdMutex::new(release_rx);
 
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
-            move |_now| {
+        let session = Deliveries::new();
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(
+            MatchingSink::shared(move |_now| {
                 entered_tx.send(()).expect("the test thread is waiting");
                 release_rx
                     .lock()
                     .unwrap()
                     .recv()
                     .expect("the test thread releases the sink");
-            },
-        ))));
+            }),
+            session,
+        )));
 
         let deliverer = {
             let state = state.clone();
@@ -9086,7 +9075,7 @@ mod matching_aggregate_tests {
             let state = state.clone();
             let retired = retired.clone();
             std::thread::spawn(move || {
-                let sink = retire_matching_sink(&state);
+                let sink = retire_matching_sink(&state, session);
                 retired.store(1, Ordering::SeqCst);
                 drop(sink);
             })
@@ -9118,25 +9107,29 @@ mod matching_aggregate_tests {
     ///
     /// The re-entrant case is the one where waiting is impossible: the mutex the
     /// retirement wants is the one this thread's own frame holds. Without the
-    /// [`MatchingDeliveryGuard`] check this test HANGS rather than failing, which
-    /// is why it exists as its own leg.
+    /// check of the session's deliveries in [`retire_matching_sink`] this test
+    /// HANGS rather than failing, which is why it exists as its own leg.
     #[test]
     fn a_retirement_from_inside_the_callback_does_not_deadlock() {
         let reentered = Arc::new(AtomicUsize::new(0));
+        let session = Deliveries::new();
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let weak = weak.clone();
             let reentered = reentered.clone();
-            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |_now| {
-                let state = weak.upgrade().expect("alive during its own call");
-                // The re-entrant undeclare. It must RETURN, and it must decline
-                // to take the sink rather than block on this frame's own lock.
-                assert!(
-                    retire_matching_sink(&state).is_none(),
-                    "a re-entrant retirement must decline, not take a context \
-                     the current frame is executing in"
-                );
-                reentered.fetch_add(1, Ordering::SeqCst);
-            })))
+            StdMutex::new(MatchAggregate::new(
+                MatchingSink::shared(move |_now| {
+                    let state = weak.upgrade().expect("alive during its own call");
+                    // The re-entrant undeclare. It must RETURN, and it must decline
+                    // to take the sink rather than block on this frame's own lock.
+                    assert!(
+                        retire_matching_sink(&state, session).is_none(),
+                        "a re-entrant retirement must decline, not take a context \
+                         the current frame is executing in"
+                    );
+                    reentered.fetch_add(1, Ordering::SeqCst);
+                }),
+                session,
+            ))
         });
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -9147,8 +9140,35 @@ mod matching_aggregate_tests {
         );
         // Outside the callback the ordinary path still works.
         assert!(
-            retire_matching_sink(&state).is_some(),
+            retire_matching_sink(&state, session).is_some(),
             "the sink is still there to retire once the callback has left"
+        );
+    }
+
+    /// A retirement made inside a delivery of the listener's session takes the sink of an
+    /// aggregate no delivery holds at once, and declines one a delivery holds rather than wait
+    /// for it. Turned red by a retirement that declines whenever its thread delivers, or one that
+    /// waits there (which never returns here, the holder being this thread).
+    #[test]
+    fn a_retirement_inside_a_delivery_of_the_session_takes_what_no_delivery_holds() {
+        let session = Deliveries::new();
+        let free = StdMutex::new(MatchAggregate::new(MatchingSink::shared(|_| {}), session));
+        let held = StdMutex::new(MatchAggregate::new(MatchingSink::shared(|_| {}), session));
+        let holding = held.lock().unwrap();
+        session.within(|| {
+            assert!(
+                retire_matching_sink(&free, session).is_some(),
+                "an aggregate no delivery holds is retired at once"
+            );
+            assert!(
+                retire_matching_sink(&held, session).is_none(),
+                "one a delivery holds is left to fall with its entry"
+            );
+        });
+        drop(holding);
+        assert!(
+            retire_matching_sink(&held, session).is_some(),
+            "outside the delivery, the aggregate let go of is retired"
         );
     }
 
@@ -11227,7 +11247,7 @@ mod sink_release_tests {
     #[test]
     fn a_release_is_waited_for_until_the_last_holder_lets_the_callback_go() {
         let flag = Arc::new(AtomicBool::new(false));
-        let (factory, release) = face_sink(sink_dropping(&flag));
+        let (factory, release) = face_sink(sink_dropping(&flag), Deliveries::new());
         let minted = factory();
         drop(factory);
         let holder = std::thread::spawn(move || {
@@ -11242,9 +11262,9 @@ mod sink_release_tests {
         holder.join().expect("the holder's thread");
     }
 
-    /// A wait made from inside a subscriber callback returns at once, the callback still held,
-    /// which is let go of as its last holder goes. Turned red by a callback that does not mark its
-    /// thread, or a wait that waits there (which never returns).
+    /// A wait made from inside a subscriber callback of the session returns at once, the callback
+    /// still held, which is let go of as its last holder goes. Turned red by a callback that does
+    /// not enter its session's delivery, or a wait that waits there (which never returns).
     #[test]
     fn a_release_waited_for_inside_a_subscriber_callback_returns_at_once() {
         let flag = Arc::new(AtomicBool::new(false));
@@ -11254,16 +11274,17 @@ mod sink_release_tests {
             let dropped = Dropped(Arc::clone(&flag));
             let slot = Arc::clone(&slot);
             let returned = Arc::clone(&returned);
-            face_sink(wz_capi_port::SubscriberSink::shared(
-                move |_sample: &dyn SampleView| {
+            face_sink(
+                wz_capi_port::SubscriberSink::shared(move |_sample: &dyn SampleView| {
                     let _ = &dropped;
                     let taken = slot.lock().unwrap_or_else(|held| held.into_inner()).take();
                     if let Some(release) = taken {
                         release.wait();
                         returned.store(true, Ordering::SeqCst);
                     }
-                },
-            ))
+                }),
+                Deliveries::new(),
+            )
         };
         *slot.lock().unwrap_or_else(|held| held.into_inner()) = Some(release);
         let mut minted = factory();
@@ -11310,6 +11331,231 @@ mod sink_release_tests {
         assert!(
             shared.lock().sink_releases.is_empty(),
             "the undeclare took its release"
+        );
+    }
+
+    /// A session of its own, with no face.
+    fn session(zid: u8) -> Arc<SharedSession> {
+        Arc::new(
+            SharedSession::new(
+                TokioTime::new(),
+                [zid; 16].into(),
+                SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
+        )
+    }
+
+    /// Wait for `flag`, five seconds at most.
+    fn wait_for(flag: &AtomicBool, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !flag.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// A subscriber of `shared` on `key` whose callback sets `entered` and holds its call until
+    /// `go` is set, five seconds at most, so a wait that should not happen ends rather than
+    /// hangs; `dropped` is set when the callback is let go of.
+    fn subscribe_holding(
+        shared: &SharedSession,
+        key: &str,
+        entered: &Arc<AtomicBool>,
+        go: &Arc<AtomicBool>,
+        dropped: &Arc<AtomicBool>,
+    ) -> SubId {
+        use wz_capi_port::SessionEngine;
+
+        let held = Dropped(Arc::clone(dropped));
+        let (entered, go) = (Arc::clone(entered), Arc::clone(go));
+        SessionEngine::declare_subscriber_on_wire(
+            shared,
+            key,
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            wz_capi_port::SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                let _ = &held;
+                entered.store(true, Ordering::SeqCst);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !go.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }),
+        )
+        .expect("an open session declares")
+    }
+
+    /// Put on `key` of `shared` and run the delivery on a thread of its own.
+    fn deliver_elsewhere(
+        shared: &Arc<SharedSession>,
+        key: &'static str,
+    ) -> std::thread::JoinHandle<()> {
+        let shared = Arc::clone(shared);
+        std::thread::spawn(move || {
+            shared
+                .publish_all(
+                    key,
+                    b"x",
+                    &PublishOptions::put().with_locality(Locality::Any),
+                )
+                .expect("a faceless publish is not an error");
+            shared.drain_local_plane();
+        })
+    }
+
+    /// An undeclare made inside a queryable callback of the session returns at once while the
+    /// subscriber's call runs on another thread, the callback still held: the thread delivers for
+    /// the session, as inside any of its callbacks. Turned red by a queryable callback that does not
+    /// enter its session's delivery, which makes the undeclare wait for the held call (five
+    /// seconds) and return with the callback let go of.
+    #[cfg(all(feature = "query", feature = "queryable"))]
+    #[test]
+    fn an_undeclare_inside_a_queryable_callback_of_the_session_returns_at_once() {
+        use wz_capi_port::SessionEngine;
+
+        let shared = session(0x12);
+        let (entered, go, dropped) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let id = subscribe_holding(&shared, "wz/inside/sub", &entered, &go, &dropped);
+        let delivering = deliver_elsewhere(&shared, "wz/inside/sub");
+        wait_for(&entered, "the subscriber's call");
+
+        let undeclared: Arc<StdMutex<Option<(std::time::Duration, bool)>>> = Arc::default();
+        let (weak, into, seen_dropped) = (
+            Arc::downgrade(&shared),
+            Arc::clone(&undeclared),
+            Arc::clone(&dropped),
+        );
+        SessionEngine::declare_queryable_on_wire(
+            &*shared,
+            "wz/inside/qbl",
+            WireKey::literal(),
+            false,
+            Locality::Any,
+            None,
+            wz_capi_port::QueryableSink::shared(move |_, _, _| {
+                if let Some(engine) = weak.upgrade() {
+                    let start = std::time::Instant::now();
+                    SessionEngine::undeclare_subscriber(&*engine, id);
+                    let at_return = seen_dropped.load(Ordering::SeqCst);
+                    *into.lock().unwrap_or_else(|held| held.into_inner()) =
+                        Some((start.elapsed(), at_return));
+                }
+            }),
+        )
+        .expect("an open session declares");
+        let opts = wz_session_core::query_options::QueryOptions::get()
+            .with_allowed_destination(Locality::SessionLocal);
+        SessionEngine::get_on_wire(
+            &*shared,
+            "wz/inside/qbl",
+            &WireKey::literal(),
+            &opts,
+            None,
+            &mut || wz_capi_port::ReplyCallback::shared(|_| {}),
+        )
+        .expect("an open session asks");
+        shared.drain_local_plane();
+        let seen = undeclared
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .take();
+        go.store(true, Ordering::SeqCst);
+        delivering.join().expect("the delivering thread");
+
+        let (took, dropped_at_return) = seen.expect("the queryable was called on this thread");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "the undeclare waited {took:?} inside the session's own callback"
+        );
+        assert!(
+            !dropped_at_return,
+            "the callback was still held by its call when the undeclare returned"
+        );
+        wait_for(&dropped, "the callback let go of once its call ended");
+    }
+
+    /// An undeclare made inside a callback of another session waits for the subscriber's call on
+    /// another thread to end, and returns with the callback let go of: a thread delivering for one
+    /// session is no delivery of another. Turned red by one delivery mark for every session, or
+    /// an undeclare that skips its wait inside any callback.
+    #[test]
+    fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
+        use wz_capi_port::SessionEngine;
+
+        let (one, other) = (session(0x12), session(0x13));
+        let (entered, go, dropped) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let id = subscribe_holding(&one, "wz/across/sub", &entered, &go, &dropped);
+        let delivering = deliver_elsewhere(&one, "wz/across/sub");
+        wait_for(&entered, "the subscriber's call");
+
+        let undeclared: Arc<StdMutex<Option<(bool, bool)>>> = Arc::default();
+        let (weak, into, seen_go, seen_dropped) = (
+            Arc::downgrade(&one),
+            Arc::clone(&undeclared),
+            Arc::clone(&go),
+            Arc::clone(&dropped),
+        );
+        SessionEngine::declare_subscriber_on_wire(
+            &*other,
+            "wz/across/other",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            wz_capi_port::SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                if let Some(engine) = weak.upgrade() {
+                    SessionEngine::undeclare_subscriber(&*engine, id);
+                    let at_return = (
+                        seen_go.load(Ordering::SeqCst),
+                        seen_dropped.load(Ordering::SeqCst),
+                    );
+                    *into.lock().unwrap_or_else(|held| held.into_inner()) = Some(at_return);
+                }
+            }),
+        )
+        .expect("an open session declares");
+        let releasing = {
+            let go = Arc::clone(&go);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                go.store(true, Ordering::SeqCst);
+            })
+        };
+        other
+            .publish_all(
+                "wz/across/other",
+                b"x",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("a faceless publish is not an error");
+        other.drain_local_plane();
+        releasing.join().expect("the releasing thread");
+        delivering.join().expect("the delivering thread");
+
+        let (released, dropped_at_return) = undeclared
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .take()
+            .expect("the other session's callback ran on this thread");
+        assert!(
+            released,
+            "the undeclare returned before the call it retracts was released"
+        );
+        assert!(
+            dropped_at_return,
+            "the callback was let go of when the undeclare returned"
         );
     }
 }
