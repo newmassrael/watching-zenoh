@@ -25,9 +25,10 @@
 //! lets its line go with it either way, as upstream's dialled link does when it is dropped.
 
 use alloc::boxed::Box;
-use alloc::rc::{Rc, Weak};
 use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
+use core::mem::ManuallyDrop;
+use core::ops::Deref;
 
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::group_locator::GroupLocator;
@@ -89,8 +90,13 @@ const fn payload_bound(capacity: usize) -> usize {
 /// zenoh-pico drops a frame whose CRC fails. Each frame the session hands over is stuffed into the
 /// link's wire buffer and written from it; what the line does not take at once is owed and
 /// written by the next step, and the wire buffer takes no other frame until it is.
-pub struct SerialDriver<D: SerialDevice, B: RxStore = RxBuffer, T: TxStore = TxBuffer> {
-    line: Rc<D>,
+pub struct SerialDriver<
+    D: SerialDevice,
+    B: RxStore = RxBuffer,
+    T: TxStore = TxBuffer,
+    M: CountKind = OneTask,
+> {
+    line: LineLease<D, M>,
     at: SerialLocator,
     rx: RefCell<B>,
     /// The largest batch the receive buffer holds the frame of.
@@ -113,10 +119,10 @@ pub struct SerialDriver<D: SerialDevice, B: RxStore = RxBuffer, T: TxStore = TxB
     resend_at_us: Cell<Option<u64>>,
 }
 
-impl<D: SerialDevice, B: RxStore, T: TxStore> SerialDriver<D, B, T> {
+impl<D: SerialDevice, B: RxStore, T: TxStore, M: CountKind> SerialDriver<D, B, T, M> {
     /// The link over `line`, which `at` named, receiving into `rx` and building its frames in
     /// `tx`. Its handshake is its maker's to run: a link handed to a session has made it.
-    pub fn over(line: Rc<D>, at: SerialLocator, mut rx: B, tx: T) -> Self {
+    pub fn over(line: LineLease<D, M>, at: SerialLocator, mut rx: B, tx: T) -> Self {
         let rx_bound = payload_bound(rx.capacity());
         Self {
             line,
@@ -386,8 +392,8 @@ impl<D: SerialDevice, B: RxStore, T: TxStore> SerialDriver<D, B, T> {
     }
 }
 
-impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
-    for SerialDriver<D, B, T>
+impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static, M: CountKind>
+    BoxedLinkDriver for SerialDriver<D, B, T, M>
 {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         self.send_frame(DATA_HEADER, bytes)
@@ -498,8 +504,8 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     }
 }
 
-impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static> SessionDatagramLink
-    for SerialDriver<D, B, T>
+impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static, M: CountKind>
+    SessionDatagramLink for SerialDriver<D, B, T, M>
 {
     fn service(&self) {
         if self.owes() {
@@ -561,8 +567,109 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
 
 /// A serial link of a stack whose sessions count its handles as `N` does: its buffers are of
 /// tables flagged as `N` flags the cells it is placed in.
-type SerialDriverOf<D, N> =
-    SerialDriver<D, RxBuffer<<N as CountKind>::Flag>, TxBuffer<<N as CountKind>::Flag>>;
+type SerialDriverOf<D, N> = SerialDriver<
+    D,
+    RxBuffer<<N as CountKind>::Flag>,
+    TxBuffer<<N as CountKind>::Flag>,
+    <N as CountKind>::Shared,
+>;
+
+/// What a listener keeps of its line between the links over it: the line, while the listener
+/// keeps it open and no link holds it, and whether a link holds it now. The line has one owner at
+/// a time: this home, or the one link over it ([`LineLease`]), which gives it back as it ends.
+struct LineHome<D> {
+    kept: Option<D>,
+    out: bool,
+    keep: bool,
+}
+
+impl<D> LineHome<D> {
+    /// The home of a listener's line, holding none yet: `keep` when the listener keeps its line
+    /// open between links, as a locator that does not release it on close asks.
+    fn new(keep: bool) -> Self {
+        Self {
+            kept: None,
+            out: false,
+            keep,
+        }
+    }
+
+    /// The line the listener kept, for a link to take, when no link holds the line now: `None`
+    /// while one does, `Some(None)` when the line is to be opened.
+    fn free(&mut self) -> Option<Option<D>> {
+        if self.out {
+            None
+        } else {
+            Some(self.kept.take())
+        }
+    }
+
+    /// `line` back from the link that held it: kept for the next link when the listener keeps
+    /// its line, and answered to be closed otherwise.
+    fn back(&mut self, line: D) -> Option<D> {
+        self.out = false;
+        if self.keep {
+            self.kept = Some(line);
+            None
+        } else {
+            Some(line)
+        }
+    }
+}
+
+/// The handle a listener and the link over its line share the line's home by. The link is held
+/// with its face and the listener with the session, which several threads may hold apart, so it
+/// is counted as what links share ([`CountKind::Shared`]).
+type HomeOf<D, M> = CellRc<<M as CountKind>::Local<LineHome<D>>, M>;
+
+/// A serial line, owned by the one link over it for as long as the link lives: a line a listener
+/// opened goes back to the listener's home as the link ends, which tells the listener the line is
+/// free, and a dialled line is closed with its link. No handle on the line is shared, so the link
+/// holding it is moved with its face whole.
+pub struct LineLease<D, M: CountKind = OneTask> {
+    line: ManuallyDrop<D>,
+    home: Option<HomeOf<D, M>>,
+}
+
+impl<D, M: CountKind> LineLease<D, M> {
+    /// `line`, owned by a dialled link alone and closed with it.
+    pub fn owned(line: D) -> Self {
+        Self {
+            line: ManuallyDrop::new(line),
+            home: None,
+        }
+    }
+
+    /// `line`, taken from `home` (kept there, or opened for it) by the link made over it, and
+    /// given back as that link ends.
+    fn homed(line: D, home: HomeOf<D, M>) -> Self {
+        M::with_local::<LineHome<D>, ()>(&home, |home| home.out = true);
+        Self {
+            line: ManuallyDrop::new(line),
+            home: Some(home),
+        }
+    }
+}
+
+impl<D, M: CountKind> Deref for LineLease<D, M> {
+    type Target = D;
+
+    fn deref(&self) -> &D {
+        &self.line
+    }
+}
+
+impl<D, M: CountKind> Drop for LineLease<D, M> {
+    fn drop(&mut self) {
+        // SAFETY: `drop` runs once, and nothing reads the line after it is taken here.
+        let line = unsafe { ManuallyDrop::take(&mut self.line) };
+        if let Some(home) = self.home.take() {
+            // A line the home does not keep is closed here, out of the home's hold.
+            let closed = M::with_local::<LineHome<D>, Option<D>>(&home, |home| home.back(line));
+            drop(closed);
+        }
+    }
+}
 
 /// `link`, its handshake made, as the session shell holds a link.
 fn opened<D: SerialDevice + 'static, N: CountKind>(
@@ -612,7 +719,7 @@ impl<N: CountKind> SerialShape<N> {
     /// stack are, [`LinkOpenError::Exhausted`] when the session's have none left.
     fn link<D: SerialDevice + 'static>(
         &self,
-        line: Rc<D>,
+        line: LineLease<D, N::Shared>,
         at: SerialLocator,
     ) -> Result<CellRc<SerialDriverOf<D, N>, N>, LinkOpenError> {
         let (rx, tx) = heap_link_buffers(
@@ -721,10 +828,9 @@ struct SerialListener<O: SerialOpen, N: CountKind> {
     at: SerialLocator,
     shape: SerialShape<N>,
     waiting: RefCell<Option<CellRc<SerialDriverOf<O::Device, N>, N>>>,
-    /// The line, kept between links when the locator does not release it on close.
-    retained: RefCell<Option<Rc<O::Device>>>,
-    /// The line of the link made last, which is live while that link holds it.
-    last: RefCell<Weak<O::Device>>,
+    /// Where the line is kept between links when the locator does not release it on close, and
+    /// whether a link holds it now ([`LineLease`]).
+    home: HomeOf<O::Device, N::Shared>,
 }
 
 impl<O: SerialOpen, N: CountKind> LinkListener<HeapLink<N>, N> for SerialListener<O, N>
@@ -737,20 +843,20 @@ where
 
     fn accept(&self) -> Result<Option<OpenedLink<HeapLink<N>, N>>, LinkOpenError> {
         if self.waiting.borrow().is_none() {
-            // The listener's own hold on a line it keeps is not a link.
-            let kept = self.retained.borrow().is_some();
-            if self.last.borrow().strong_count() > usize::from(kept) {
+            // Only this listener lends the line, so a line found free stays free until the lease
+            // below takes it.
+            let free = <N::Shared as CountKind>::with_local::<LineHome<O::Device>, _>(
+                &self.home,
+                LineHome::free,
+            );
+            let Some(kept) = free else {
                 return Ok(None);
-            }
-            let kept_line = self.retained.borrow().clone();
-            let line = match kept_line {
-                Some(line) => line,
-                None => Rc::new(self.opener.open(&self.at)?),
             };
-            if !self.at.options.release_on_close {
-                *self.retained.borrow_mut() = Some(Rc::clone(&line));
-            }
-            *self.last.borrow_mut() = Rc::downgrade(&line);
+            let line = match kept {
+                Some(line) => line,
+                None => self.opener.open(&self.at)?,
+            };
+            let line = LineLease::homed(line, self.home.clone());
             let link = self.shape.link(line, self.at)?;
             *self.waiting.borrow_mut() = Some(link);
         }
@@ -764,7 +870,11 @@ where
             // A line that failed is let go, kept or not, and opened again by the next call.
             Err(_) => {
                 self.waiting.borrow_mut().take();
-                self.retained.borrow_mut().take();
+                let failed = <N::Shared as CountKind>::with_local::<LineHome<O::Device>, _>(
+                    &self.home,
+                    |home| home.kept.take(),
+                );
+                drop(failed);
                 Ok(None)
             }
         }
@@ -837,7 +947,7 @@ impl<S, O: SerialOpen, N: CountKind> SerialLinks<S, O, N> {
         O: Clone,
         O::Device: 'static,
     {
-        let line = Rc::new(self.opener.open(&at)?);
+        let line = LineLease::owned(self.opener.open(&at)?);
         line.discard_queued().map_err(|_| LinkOpenError::Refused)?;
         let link = self.shape.link(line, at)?;
         if link.send_frame(SERIAL_FLAG_INIT, &[]) != LinkSendOutcome::Sent {
@@ -936,8 +1046,9 @@ where
             at,
             shape: self.shape,
             waiting: RefCell::new(None),
-            retained: RefCell::new(None),
-            last: RefCell::new(Weak::new()),
+            home: CellRc::on_heap(<N::Shared as CountKind>::new_local(LineHome::new(
+                !at.options.release_on_close,
+            ))),
         }))
     }
 
@@ -958,6 +1069,7 @@ where
 mod tests {
     use super::*;
     use alloc::collections::VecDeque;
+    use alloc::rc::Rc;
     use alloc::vec::Vec;
     use core::net::{Ipv4Addr, SocketAddr};
 
@@ -1283,6 +1395,53 @@ mod tests {
         open.peer_sends(SERIAL_FLAG_INIT, &[]);
         assert!(listener.accept().expect("an open line").is_some());
         assert_eq!(open.opens.get(), 1, "the line kept, not opened again");
+    }
+
+    /// A line that counts its closes.
+    struct Closes(Rc<Cell<usize>>);
+
+    impl Drop for Closes {
+        fn drop(&mut self) {
+            self.0.set(self.0.get().saturating_add(1));
+        }
+    }
+
+    /// A line a listener lent is free again once the link over it ends: kept in the listener's
+    /// home for the next link where the listener keeps its line, closed with the link otherwise.
+    /// A dialled line is closed with its link. Turned red by a line still lent after its link
+    /// ended, a kept line closed, or a released line kept.
+    #[test]
+    fn a_lent_line_goes_home_as_its_link_ends() {
+        let closed = Rc::new(Cell::new(0));
+        for keep in [true, false] {
+            let home: HomeOf<Closes, OneTask> =
+                CellRc::on_heap(OneTask::new_local(LineHome::new(keep)));
+            let before = closed.get();
+            let lease = LineLease::homed(Closes(closed.clone()), home.clone());
+            let lent = OneTask::with_local::<LineHome<Closes>, _>(&home, |home| home.free());
+            assert!(lent.is_none(), "a link holds the line");
+            drop(lease);
+            assert_eq!(
+                closed.get(),
+                before + usize::from(!keep),
+                "closed with its link unless kept"
+            );
+            let free = OneTask::with_local::<LineHome<Closes>, _>(&home, |home| {
+                home.free().map(|kept| kept.is_some())
+            });
+            assert_eq!(
+                free,
+                Some(keep),
+                "free, and kept when the listener keeps it"
+            );
+        }
+        let before = closed.get();
+        drop(LineLease::<Closes>::owned(Closes(closed.clone())));
+        assert_eq!(
+            closed.get(),
+            before + 1,
+            "a dialled line closes with its link"
+        );
     }
 
     #[test]
