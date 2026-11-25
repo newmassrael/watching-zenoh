@@ -45,14 +45,17 @@
 //! does (the registry is generic over the application's reply sink); it is
 //! bounded already ([`crate::caps::MAX_PENDING_QUERIES`]).
 
-use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
+use crate::bounded::{
+    Arena, LendRefused, Lent, Profile, Region, RegionLines, Static, Storage, ZeroEmpty,
+};
+use crate::caps;
 use crate::declare::liveliness_subscriber::PeerTokens;
 use crate::declare::queryable::RemoteQueryablePeer;
 use crate::declare::subscriber::RemoteSubscriberPeer;
 use crate::key_arena::{KeySpace, LentKeys};
-use crate::pubsub::SubscriberPeer;
+use crate::pubsub::{SubscriberPeer, SubscriberPeerRows};
 use crate::query::QueryPeer;
-use crate::reply_stage::{FinalStage, ReplyStage};
+use crate::reply_stage::{FinalStage, FinalStageRows, ReplyStage, ReplyStageRows};
 #[cfg(feature = "peer-row-pools")]
 use crate::row_pool::{Keyed, OwnSpans, RowLender, RowSource, RowSpace};
 use core::mem::MaybeUninit;
@@ -60,8 +63,6 @@ use core::ptr::{self, addr_of_mut};
 
 #[cfg(feature = "liveliness-token")]
 use crate::bounded::BoundedVec;
-#[cfg(feature = "liveliness-token")]
-use crate::caps;
 #[cfg(feature = "liveliness-token")]
 use crate::declare::local_token::DeclResponseItem;
 
@@ -201,6 +202,86 @@ pub struct PeerRows {
     pub reply_bytes: usize,
     /// The `Final`s owed to the peer's queries (`MAX_PENDING_FINALS`).
     pub finals: usize,
+}
+
+impl PeerRows {
+    /// The rows a region of the build's shape lays out for one peer's tables: each table's build
+    /// bound, what an open of the build's limits lends the lent policy's tables.
+    pub const REGION: Self = Self {
+        pending_declares: caps::MAX_PENDING_DECLARES,
+        replies: caps::MAX_PENDING_REPLIES,
+        reply_bytes: caps::REPLY_STAGE_BYTES,
+        finals: caps::MAX_PENDING_FINALS,
+    };
+}
+
+// SAFETY: every table of the region policy is `ZeroEmpty` (the peer's side, its remote
+// declarations, its tokens, the reply and final stages, the query side) and holds no value at all
+// zero bytes; the liveliness staging is a `LentSeq` of no rows and its refusal count is zero.
+unsafe impl ZeroEmpty for PeerTables<Region> {}
+
+/// The lines a region's description holds for one [`PeerTables`] of the region policy, at most:
+/// the side's staging, the reply stage's rows and bytes, the final stage's rows and the liveliness
+/// staging; and the key arena handles of the side's aliases and interests and of the three tables
+/// of the peer's declarations.
+pub const PEER_TABLE_LINES: usize = 5;
+
+/// The rows of a [`PeerTables`] of the region policy, which a region lays out beside the tables:
+/// each staging's rows at the build's bound ([`PeerRows::REGION`]). What the peer writes by its
+/// own choice is inline in the tables, at its bounds.
+pub struct PeerTableRows {
+    subscribers: SubscriberPeerRows,
+    replies: ReplyStageRows,
+    finals: FinalStageRows,
+    #[cfg(feature = "liveliness-token")]
+    pending_declares: [MaybeUninit<DeclResponseItem>; caps::MAX_PENDING_DECLARES],
+}
+
+// SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
+unsafe impl ZeroEmpty for PeerTableRows {}
+
+impl PeerTables<Region> {
+    /// The description of tables of the region policy at `at` in a region and their rows, a
+    /// [`PeerTableRows`], at `rows`: a line for each staging the build keeps and the tables'
+    /// handles to the region's key arena. What [`place_region`](crate::key_arena::place_region)
+    /// reads to make zeroed tables a peer's; the bounds are stated after
+    /// ([`Self::limit_to`]), zero bounds refusing everything until then.
+    pub const fn places(at: usize, rows: usize) -> RegionLines<PEER_TABLE_LINES> {
+        let lines = RegionLines::EMPTY
+            .with(
+                &SubscriberPeer::<Region>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, subscribers)),
+                    rows.wrapping_add(core::mem::offset_of!(PeerTableRows, subscribers)),
+                ),
+                0,
+            )
+            .seqs(&ReplyStage::<Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, replies)),
+                rows.wrapping_add(core::mem::offset_of!(PeerTableRows, replies)),
+            ))
+            .seq(FinalStage::<Region>::place(
+                at.wrapping_add(core::mem::offset_of!(Self, finals)),
+                rows.wrapping_add(core::mem::offset_of!(PeerTableRows, finals)),
+            ));
+        #[cfg(feature = "storage-profile")]
+        let lines = lines
+            .keys_at(RemoteSubscriberPeer::<Region>::key_line(
+                at.wrapping_add(core::mem::offset_of!(Self, remote_subscribers)),
+            ))
+            .keys_at(RemoteQueryablePeer::<Region>::key_line(
+                at.wrapping_add(core::mem::offset_of!(Self, remote_queryables)),
+            ))
+            .keys_at(PeerTokens::<Region>::key_line(
+                at.wrapping_add(core::mem::offset_of!(Self, tokens)),
+            ));
+        #[cfg(feature = "liveliness-token")]
+        let lines = lines.seq(crate::bounded::SeqPlace::of::<DeclResponseItem>(
+            at.wrapping_add(core::mem::offset_of!(Self, pending_declares)),
+            rows.wrapping_add(core::mem::offset_of!(PeerTableRows, pending_declares)),
+            caps::MAX_PENDING_DECLARES,
+        ));
+        lines
+    }
 }
 
 impl PeerTables<Lent> {
@@ -995,6 +1076,98 @@ mod lent_tests {
                 attachment: None,
                 source_info: None,
             },
+        }
+    }
+
+    /// A peer's tables of the region policy, their rows and their key arena, as a region of the
+    /// build's shape lays them out.
+    struct OnePeer {
+        tables: PeerTables<Region>,
+        rows: PeerTableRows,
+        keys: crate::key_arena::KeyArena<4096>,
+    }
+
+    // SAFETY: every field is `ZeroEmpty`.
+    unsafe impl ZeroEmpty for OnePeer {}
+
+    /// The description of a `OnePeer`.
+    const ONE_PEER: RegionLines<PEER_TABLE_LINES> = PeerTables::<Region>::places(
+        core::mem::offset_of!(OnePeer, tables),
+        core::mem::offset_of!(OnePeer, rows),
+    );
+
+    /// A peer's tables of the region policy of all zero bytes, placed by their description, hold
+    /// nothing and refuse what a bound the session states would admit until the session states
+    /// it; bound to the build's limits, each staging holds its build's bound of rows and refuses
+    /// the next. Turned red by a staging or a key handle left out of `PeerTables::places`, by a
+    /// zero bound read as other than one of nothing, or by a zero field that is not an empty one.
+    #[test]
+    fn region_peer_tables_of_zero_bytes_refuse_until_bound_then_hold_their_build_bounds() {
+        let interests = cfg!(all(
+            feature = "declare-subscriber",
+            feature = "interest-answer"
+        ));
+        let seqs = 3 + usize::from(interests) + usize::from(cfg!(feature = "liveliness-token"));
+        assert_eq!(ONE_PEER.seq_lines().len(), seqs);
+        let keys = if cfg!(feature = "storage-profile") {
+            4 + usize::from(interests)
+        } else {
+            usize::from(interests)
+        };
+        assert_eq!(ONE_PEER.key_lines().len(), keys);
+
+        let layout = std::alloc::Layout::new::<OnePeer>();
+        // SAFETY: the layout is of a type of some bytes.
+        let block = unsafe { std::alloc::alloc_zeroed(layout) };
+        let region = NonNull::new(block).expect("the test allocator answers");
+        let peer = block.cast::<OnePeer>();
+        // SAFETY: the zeroed block is a `OnePeer`, every field of which is `ZeroEmpty`; the key
+        // arena is reached by this one reference, made before any key exists and not used after
+        // `space`.
+        let space = unsafe {
+            (*core::ptr::addr_of_mut!((*peer).keys))
+                .space(SessionLimits::BUILD.max_keyexpr_bytes_held())
+        };
+        // SAFETY: the description is the region's own, its lines naming the tables' stagings and
+        // handles in it and the rows beside them, which nothing else reaches; the key arena stays
+        // in the block until it is given back below.
+        unsafe { crate::key_arena::place_region(region, space, &ONE_PEER) };
+        // SAFETY: the tables field alone, projected from the block; the rows and the key arena
+        // are reached only through the tables from here on.
+        let tables = unsafe { &mut *core::ptr::addr_of_mut!((*peer).tables) };
+        assert!(tables.replies.is_empty());
+        assert_eq!(tables.finals.owed(), 0);
+        assert_eq!(tables.queries.requester(), None);
+        assert_eq!(
+            tables.finals.has_room(),
+            core::mem::size_of::<crate::limits::MaxPendingFinalsHeld>() == 0,
+            "a zero quota the session may state admits nothing until it is stated"
+        );
+
+        tables.limit_to(&SessionLimits::BUILD);
+        let mut rid = 0;
+        for _ in 0..caps::MAX_PENDING_FINALS {
+            assert!(tables.finals.has_room());
+            rid += 1;
+            tables.finals.owe(rid, QosLevel::DEFAULT);
+        }
+        assert!(
+            !tables.finals.has_room(),
+            "the build's bound of Finals is held"
+        );
+        assert_eq!(tables.finals.take_owed().len(), caps::MAX_PENDING_FINALS);
+        assert!(tables.finals.has_room());
+        if caps::MAX_PENDING_REPLIES > 0 {
+            assert_eq!(tables.replies.stage_parts(reply(1, None, None)), Ok(()));
+            let mut drained = 0;
+            tables.replies.drain_parts(|_| drained += 1);
+            assert_eq!(drained, 1);
+        }
+        // SAFETY: the tables are dropped once, in place, while the key arena their keys lie in is
+        // still in the block; then the block goes back with its layout.
+        unsafe {
+            core::ptr::drop_in_place(core::ptr::addr_of_mut!((*peer).tables));
+            std::alloc::dealloc(block, layout);
         }
     }
 

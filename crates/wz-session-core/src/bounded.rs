@@ -221,6 +221,131 @@ unsafe impl<T> ZeroEmpty for Option<NonNull<T>> {}
 // SAFETY: a `PhantomData` is no bytes.
 unsafe impl<T: ?Sized> ZeroEmpty for PhantomData<T> {}
 
+/// A value or none, whose all zero bytes are none whatever the value's type: a flag and a place
+/// for the value. An `Option<T>` is `None` at zero bytes only where `T` has a niche the language
+/// guarantees (a reference, `NonNull`, a `NonZero` integer), so a field of a region that may hold
+/// a counted handle, a transport or a generated value is one of these instead, and the region's
+/// zeroed block holds none of them.
+pub struct ZeroOption<T> {
+    held: bool,
+    value: core::mem::MaybeUninit<T>,
+}
+
+impl<T> ZeroOption<T> {
+    /// No value, as all zero bytes are.
+    pub const NONE: Self = Self {
+        held: false,
+        value: core::mem::MaybeUninit::uninit(),
+    };
+
+    /// `value`, held.
+    pub const fn some(value: T) -> Self {
+        Self {
+            held: true,
+            value: core::mem::MaybeUninit::new(value),
+        }
+    }
+
+    /// Whether a value is held.
+    pub const fn is_some(&self) -> bool {
+        self.held
+    }
+
+    /// Whether no value is held.
+    pub const fn is_none(&self) -> bool {
+        !self.held
+    }
+
+    /// The value held, by reference.
+    pub fn as_ref(&self) -> Option<&T> {
+        if self.held {
+            // SAFETY: `held` is set only once the value is written, and cleared before it is read
+            // out, so the value is initialised.
+            Some(unsafe { self.value.assume_init_ref() })
+        } else {
+            None
+        }
+    }
+
+    /// The value held, by unique reference.
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        if self.held {
+            // SAFETY: as `as_ref`; `&mut self` makes this the only borrow of the value.
+            Some(unsafe { self.value.assume_init_mut() })
+        } else {
+            None
+        }
+    }
+
+    /// What the value held points at.
+    pub fn as_deref(&self) -> Option<&T::Target>
+    where
+        T: Deref,
+    {
+        self.as_ref().map(Deref::deref)
+    }
+
+    /// The value held, taken out, leaving none.
+    pub fn take(&mut self) -> Option<T> {
+        if self.held {
+            self.held = false;
+            // SAFETY: the value is initialised (`held` was set), and `held` is cleared first, so
+            // the value is read out once and neither read nor dropped in place again.
+            Some(unsafe { self.value.assume_init_read() })
+        } else {
+            None
+        }
+    }
+
+    /// Hold `value`, answering the value held before.
+    pub fn replace(&mut self, value: T) -> Option<T> {
+        let before = self.take();
+        self.value.write(value);
+        self.held = true;
+        before
+    }
+
+    /// Hold `value`, or none; the value held before is dropped.
+    pub fn set(&mut self, value: Option<T>) {
+        let before = match value {
+            Some(value) => self.replace(value),
+            None => self.take(),
+        };
+        drop(before);
+    }
+}
+
+impl<T> Drop for ZeroOption<T> {
+    fn drop(&mut self) {
+        drop(self.take());
+    }
+}
+
+impl<T> Default for ZeroOption<T> {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+impl<T> From<Option<T>> for ZeroOption<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::some(value),
+            None => Self::NONE,
+        }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for ZeroOption<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_ref().fmt(f)
+    }
+}
+
+// SAFETY: `false` is a valid `bool` and says no value is held; a `MaybeUninit` is valid as any
+// bytes; and dropping a value that holds none drops nothing.
+unsafe impl<T> ZeroEmpty for ZeroOption<T> {}
+
 /// A policy each of whose sequences and texts is [`ZeroEmpty`] whatever it holds: a table of it is
 /// empty at all zero bytes for every row type, which a bound on each sequence could state only by
 /// naming the row's type, a private one of the table's own.
@@ -3176,6 +3301,47 @@ mod tests {
         assert!(zeroed::<Option<NonNull<u8>>>().is_none());
         assert_eq!(zeroed::<[u16; 3]>(), [0; 3]);
         assert_eq!(zeroed::<Cell<u32>>().get(), 0);
+    }
+
+    /// A `ZeroOption` of all zero bytes holds nothing; one that holds a value lends it, gives it
+    /// up once to `take`, answers the value it held to `replace` and `set`, and drops what it holds
+    /// exactly once. Turned red by a `held` flag whose zero meant a value, or by a value dropped
+    /// twice or not at all.
+    #[test]
+    fn a_zero_option_of_zero_bytes_holds_nothing_and_drops_what_it_holds_once() {
+        let none = zeroed::<ZeroOption<std::rc::Rc<u32>>>();
+        assert!(none.is_none());
+        assert!(none.as_ref().is_none());
+        drop(none);
+
+        let counted = std::rc::Rc::new(7u32);
+        let mut place = ZeroOption::some(std::rc::Rc::clone(&counted));
+        assert!(place.is_some());
+        assert_eq!(place.as_deref(), Some(&7));
+        assert_eq!(std::rc::Rc::strong_count(&counted), 2);
+        let taken = place.take().expect("the value held");
+        assert!(place.is_none());
+        assert!(place.take().is_none(), "a value is given up once");
+        assert!(place.replace(taken).is_none());
+        let before = place.replace(std::rc::Rc::new(8));
+        assert_eq!(before.as_deref(), Some(&7));
+        drop(before);
+        assert_eq!(std::rc::Rc::strong_count(&counted), 1);
+        place.set(Some(std::rc::Rc::clone(&counted)));
+        assert_eq!(std::rc::Rc::strong_count(&counted), 2);
+        if let Some(value) = place.as_mut() {
+            *value = std::rc::Rc::new(9);
+        }
+        assert_eq!(std::rc::Rc::strong_count(&counted), 1);
+        place.set(Some(std::rc::Rc::clone(&counted)));
+        drop(place);
+        assert_eq!(
+            std::rc::Rc::strong_count(&counted),
+            1,
+            "the value held is dropped with its place"
+        );
+        assert!(ZeroOption::from(None::<u8>).is_none());
+        assert_eq!(ZeroOption::from(Some(3u8)).as_ref(), Some(&3));
     }
 
     /// A region of two tables of the lent shape and one of the static policy, with the rows of

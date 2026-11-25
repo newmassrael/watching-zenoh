@@ -436,6 +436,22 @@ impl<P: Storage> Default for RemoteQueryablePeer<P> {
     }
 }
 
+// SAFETY: of the region policy, at all zero bytes: the declared queryables are a `FixedIdMap` and
+// the repeated declarations a static sequence (both `ZeroEmpty`); the bounds are `Limited`
+// (`ZeroEmpty`), bounds of nothing until the session states them; the key arena handle is a
+// `LentKeys` of none; every count is zero and the epoch is no bytes.
+unsafe impl crate::bounded::ZeroEmpty for RemoteQueryablePeer<crate::bounded::Region> {}
+
+#[cfg(feature = "storage-profile")]
+impl RemoteQueryablePeer<crate::bounded::Region> {
+    /// Where a table of the region policy at `at` in a region keeps its handle to the region's key
+    /// arena: the line of a region's description
+    /// ([`place_region`](crate::key_arena::place_region)) that hands it the arena.
+    pub const fn key_line(at: usize) -> usize {
+        at.wrapping_add(core::mem::offset_of!(Self, keys))
+    }
+}
+
 impl RemoteQueryablePeer<Static> {
     /// A peer of the static policy that has declared nothing. `const`, so a session
     /// slot that holds one can be a `static`.

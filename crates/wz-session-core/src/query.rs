@@ -2565,8 +2565,10 @@ pub struct QueryPeer {
     /// The session's `query-unanswerable-final` value, which the session states for the face
     /// ([`Self::set_unanswerable_final`]): with `empty-final` a query whose key does not
     /// resolve is owed a Final. Held in no byte where the build's domain is one value, which is
-    /// then the value; a face no session stated one to answers by the build's default.
-    unanswerable_final: UnanswerableFinalHeld,
+    /// then the value; a face no session stated one to answers by the build's default, and so
+    /// does one of zero bytes. Held in a `ZeroOption` because the generated value's zero is not
+    /// promised to be a valid value until the generator gives its enums a stated representation.
+    unanswerable_final: crate::bounded::ZeroOption<UnanswerableFinalHeld>,
     /// transport-shm -- the receive side of shared memory for the VALUE of a
     /// query: the same state a push and a reply have (the negotiated capability,
     /// the resolver, the means of acknowledging the peer's slices, the drop
@@ -2576,6 +2578,11 @@ pub struct QueryPeer {
     #[cfg(feature = "transport-shm")]
     shm: crate::extshm::ShmReceiveState,
 }
+
+// SAFETY: no requester is all zero bytes; the size bounds are `Limited` (`ZeroEmpty`, a bound of
+// nothing until the session states them); no refusal is a zero count; the policy value is a
+// `ZeroOption` of none, read as the build's default; the shared-memory state is `ZeroEmpty`.
+unsafe impl crate::bounded::ZeroEmpty for QueryPeer {}
 
 impl Default for QueryPeer {
     fn default() -> Self {
@@ -2592,7 +2599,7 @@ impl QueryPeer {
             max_parameters: crate::limit_binding::Limited::build_default(),
             max_attachment: crate::limit_binding::Limited::build_default(),
             oversize_refused: 0,
-            unanswerable_final: UnanswerableFinalHeld::build_default(),
+            unanswerable_final: crate::bounded::ZeroOption::NONE,
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::new(),
         }
@@ -2652,15 +2659,20 @@ impl QueryPeer {
     /// registry keeps the value it holds; where the domain is one value there is nothing to state.
     pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
         if let Ok(held) = UnanswerableFinalHeld::select(value) {
-            self.unanswerable_final = held;
+            self.unanswerable_final.set(Some(held));
         }
     }
 
     /// Whether a query whose key does not resolve is owed a Final
     /// ([`Self::set_unanswerable_final`]): a constant of the build where its domain is one value.
     pub fn answers_unresolved_queries(&self) -> bool {
+        let held = self
+            .unanswerable_final
+            .as_ref()
+            .copied()
+            .unwrap_or_else(UnanswerableFinalHeld::build_default);
         matches!(
-            self.unanswerable_final.get(),
+            held.get(),
             crate::policy::QueryUnanswerableFinal::EmptyFinal
         )
     }
@@ -4187,6 +4199,41 @@ mod tests {
         peer.set_requester(Some([7; 16]));
         peer.set_requester(None);
         assert_eq!(peer.requester(), None);
+    }
+
+    /// A face of all zero bytes has proved no requester, answers an unresolved key by the build's
+    /// default, and holds its queries to a bound of nothing where the build lets a session state
+    /// one, until the session states the build's: a region's face refuses before its open binds
+    /// it. Turned red by a zero policy value read as other than the build's default, or by a zero
+    /// bound read as other than none.
+    #[test]
+    fn a_face_of_zero_bytes_answers_by_the_build_and_bounds_nothing_until_stated() {
+        use crate::limit_binding::Quota;
+        let built = QueryPeer::new();
+        // SAFETY: `QueryPeer` is `ZeroEmpty`.
+        let mut zero: QueryPeer = unsafe { core::mem::zeroed() };
+        assert_eq!(zero.requester(), None);
+        assert_eq!(zero.oversize_refusals(), 0);
+        assert_eq!(
+            zero.answers_unresolved_queries(),
+            built.answers_unresolved_queries()
+        );
+        let (parameters, attachment) = zero.query_size_bounds();
+        if core::mem::size_of::<crate::limits::QueryParametersMaxBytesHeld>() == 0 {
+            assert_eq!(parameters, built.query_size_bounds().0);
+        } else {
+            assert_eq!(parameters, Quota::at_most(0));
+        }
+        if core::mem::size_of::<crate::limits::QueryAttachmentMaxBytesHeld>() == 0 {
+            assert_eq!(attachment, built.query_size_bounds().1);
+        } else {
+            assert_eq!(attachment, Quota::at_most(0));
+        }
+        zero.limit_query_sizes_to(
+            crate::limit_binding::Limited::build_default(),
+            crate::limit_binding::Limited::build_default(),
+        );
+        assert_eq!(zero.query_size_bounds(), built.query_size_bounds());
     }
 
     // The responder stages through `StagesReplies`; the tests read the stage back through the
