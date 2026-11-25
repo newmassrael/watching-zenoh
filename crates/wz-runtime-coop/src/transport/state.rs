@@ -4,7 +4,7 @@
 //! The transport's part of a session ([`TransportState`]): its links, the ports it listens on and
 //! the groups it joined, and the reads and refusals that touch nothing else of the session. What a
 //! link coming up or going does to the session's tables, its replay and its watchers is the
-//! session's to carry out, with the values these answer ([`FaceStep`], [`DialRow`]).
+//! session's to carry out, with the values these answer ([`FaceStep`], [`DialWalk`]).
 //!
 //! The session's own records of a face and of a group are its engine's; the transport reads them
 //! through [`FaceRecord`], [`TransportSession`] and [`GroupRecord`], named together by
@@ -46,8 +46,8 @@ use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
 use crate::faces::{
-    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord,
-    IdleWait, Link, LinkSupervisor, Wire,
+    DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord, IdleWait,
+    Link, LinkSupervisor, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
@@ -57,7 +57,7 @@ use crate::locator_text::parse_listen_locator;
 use crate::locator_text::parse_locator;
 use crate::reassembly_rx::SessionReassembly;
 use crate::session_drive::{
-    spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink, PendingDial, PumpFields,
+    spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink, PumpFields,
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use crate::session_runtime::{SessionEntropy, SessionHandle};
@@ -190,15 +190,6 @@ pub struct FaceStep {
     pub effect: FaceEffect,
 }
 
-/// A dial of one of the session's endpoints, asked once as it is begun
-/// ([`TransportState::dial_row`]).
-pub enum DialRow<D, P> {
-    /// Not answered yet: the steps that follow ask it.
-    Pending(Dial<D>),
-    /// Answered at once: the link it made, or why it was refused.
-    Answered(Result<OpenedLink<P>, LinkOpenError>),
-}
-
 /// What the making of a link's session is handed beside the link ([`TransportState::make_wire`]):
 /// the parameters the session opens it with, and what it borrows of the session's driver (the set
 /// its task runs on, its source of entropy, its clock and the deadlines of its handshake).
@@ -217,22 +208,20 @@ pub struct WireMaking<'a, C: ClockSource + 'static> {
 
 /// The next step of the dial role's walk over the session's endpoints
 /// ([`TransportState::walk_dials`]): what the session carries out.
-pub enum DialWalk<D, P> {
-    /// The dial of a row is under way: the face holds it, and the walk goes on from row `next`
-    /// when it fails.
-    Dialing {
-        /// The dial under way.
-        dial: Dial<D>,
-        /// The row the walk goes on from when the dial or its handshake fails.
-        next: usize,
-    },
+pub enum DialWalk<P> {
+    /// The dial of a row is under way: the face holds it, with the time it is given up at and
+    /// the row the walk goes on from when it fails.
+    Dialing,
     /// The dial of `endpoint` answered at once: the session opens the link's session over
-    /// `answer`, and the walk goes on from row `next` when that fails for the endpoint's reason.
+    /// `answer`, given up at `deadline_us`, and the walk goes on from row `next` when that fails
+    /// for the endpoint's reason.
     Answered {
         /// The endpoint dialled.
         endpoint: DialEndpoint,
         /// The row the walk goes on from when the link's session is not opened.
         next: usize,
+        /// When the link's handshake is given up, read once the dial was asked.
+        deadline_us: u64,
         /// The link the dial made, or why the network refused it.
         answer: Result<OpenedLink<P>, LinkOpenError>,
     },
@@ -530,10 +519,15 @@ impl<T: TransportFaces> TransportState<T> {
         if !self.groups.is_empty() {
             return true;
         }
-        self.ups().next().is_some() || self.listens()
+        #[cfg(feature = "listen")]
+        if self.listens() {
+            return true;
+        }
+        self.ups().next().is_some()
     }
 
     /// Whether the session listens on any port.
+    #[cfg(feature = "listen")]
     pub fn listens(&self) -> bool {
         self.links.listens()
     }
@@ -678,25 +672,22 @@ impl<T: TransportFaces> TransportState<T> {
         why
     }
 
-    /// Let go of the link of the face at `at`, whose handshake failed for `why` and whose task
-    /// ended, the face waiting from `now_us`: the reason the face's next step (`then`) goes on
-    /// with, which names the endpoint dialled last when the face dials the next one.
+    /// Let go of the link of the face at `at`, whose handshake failed and whose task ended, the
+    /// face waiting from `now_us`: the endpoint dialled last when the face's next step (`then`)
+    /// dials the next one, which the reason for the failure names; `None` when it does not, and
+    /// the reason is that no endpoint answered.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn handshake_failed(
         &mut self,
         at: usize,
         then: &Next,
-        why: Refusal,
         now_us: u64,
-    ) -> TransportRefusal {
+    ) -> Option<DialEndpoint> {
         self.links.put_link(at, Link::Waiting { at_us: now_us });
         match then {
-            Next::DialFrom { from } => TransportRefusal::Unreachable(EndpointRefusal::new(
-                self.endpoints.dial_text(from.saturating_sub(1)),
-                why,
-            )),
-            _ => TransportRefusal::NoEndpoint,
+            Next::DialFrom { from } => Some(DialEndpoint::Listed(from.saturating_sub(1))),
+            _ => None,
         }
     }
 
@@ -776,50 +767,46 @@ impl<T: TransportFaces> TransportState<T> {
         Ok(Wire::new(session, task, link, input_wait, room_wait))
     }
 
-    /// Begin a dial of the session's endpoint at row `at` and ask it once: one the network has not
-    /// answered yet is handed back under way, and one answered at once with its answer.
-    /// [`TransportRefusal::Unreachable`] when the endpoint does not parse or the network refuses
-    /// the dial at once.
-    // Always inlined: its one caller held these values in its own frame.
-    #[inline(always)]
-    pub fn dial_row(&self, at: usize) -> Result<DialRow<DialOf<T>, PumpOf<T>>, TransportRefusal> {
-        let mut pending = self.begin_dial(self.endpoints.dial_text(at))?;
-        // A dial that answered has handed out all it held (the socket, the link's buffers, the
-        // program's link), and keeps only handles that own nothing, so it is let go of here,
-        // before its link is opened, with nothing to observe: every stack's dial takes those out
-        // as it answers (`Dialled`, `ip_stack::IpDial`, `app_link::AppDial`).
-        Ok(match pending.poll() {
-            None => DialRow::Pending(Dial::new(DialEndpoint::Listed(at), pending)),
-            Some(answer) => DialRow::Answered(answer),
-        })
-    }
-
-    /// The next step of the dial role's walk over the session's endpoints from row `from` on: a
-    /// row whose dial is refused at once is passed, its refusal kept in `last`, and the first row
-    /// whose dial is under way or answered is handed back for the session to carry out
-    /// ([`DialWalk::Ended`] when no row is left, `last` then holding the last row's reason).
+    /// The next step of the dial role's walk over the session's endpoints from row `from` on, for
+    /// the face at `at`: a row whose dial is refused at once (its endpoint does not parse, or the
+    /// network refuses it) is passed, its refusal kept in `last`; the first row whose dial is under
+    /// way is put in the face, and the first answered at once is handed back for the session to
+    /// carry out, either given up at the time `deadline_us` reads once the dial was asked
+    /// ([`LinkSupervisor::ask_dial`]). [`DialWalk::Ended`] when no row is left, `last` then
+    /// holding the last row's reason.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn walk_dials<E: From<TransportRefusal>>(
-        &self,
+        &mut self,
+        at: usize,
         from: usize,
         last: &mut E,
-    ) -> DialWalk<DialOf<T>, PumpOf<T>> {
-        for at in from..self.endpoints.dials() {
+        deadline_us: impl FnOnce() -> u64,
+    ) -> DialWalk<PumpOf<T>> {
+        for row in from..self.endpoints.dials() {
             // A resume past every row dials none, so one held at `usize::MAX` still means the
-            // rows are done; `at` is below the count of rows, so it is never held there.
-            let next = at.saturating_add(1);
-            match self.dial_row(at) {
-                Err(refused) => *last = refused.into(),
-                Ok(DialRow::Pending(dial)) => return DialWalk::Dialing { dial, next },
-                Ok(DialRow::Answered(answer)) => {
-                    return DialWalk::Answered {
-                        endpoint: DialEndpoint::Listed(at),
-                        next,
-                        answer,
-                    }
+            // rows are done; `row` is below the count of rows, so it is never held there.
+            let next = row.saturating_add(1);
+            let pending = match self.begin_dial(self.endpoints.dial_text(row)) {
+                Ok(pending) => pending,
+                Err(refused) => {
+                    *last = refused.into();
+                    continue;
                 }
-            }
+            };
+            let endpoint = DialEndpoint::Listed(row);
+            return match self
+                .links
+                .ask_dial(at, endpoint, pending, next, deadline_us)
+            {
+                None => DialWalk::Dialing,
+                Some((answer, deadline_us)) => DialWalk::Answered {
+                    endpoint: DialEndpoint::Listed(row),
+                    next,
+                    deadline_us,
+                    answer,
+                },
+            };
         }
         DialWalk::Ended
     }
