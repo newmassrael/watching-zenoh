@@ -243,7 +243,11 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         None,
         "a liveliness subscriber is one row, the session core's"
     );
-    assert_eq!(count("session tables"), Some(1));
+    // A build of the region's form holds the session's one table set in its region.
+    assert_eq!(
+        count("session tables"),
+        cfg!(feature = "runtime-plan").then_some(1)
+    );
     assert_eq!(plan.tables().keyexprs, 6);
     assert_eq!(plan.tables().key_listeners, key_listeners);
     assert_eq!(
@@ -457,6 +461,7 @@ fn a_filter_that_finds_no_id_left_gives_its_row_back() {
 
 /// The matching listeners' table at its limit refuses one more as a full table, before its Interest
 /// is asked; its sink goes with the refusal.
+#[cfg(feature = "key-matching-listener")]
 #[test]
 fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
@@ -686,9 +691,15 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
         filter(&engine, FilterPlane::Subscribers, past),
         Err(Refusal::KeyTooLong)
     );
-    let listener: MatchingSink = MatchingSink::shared(|_matching: bool| {});
+    // A listener on the key, in a build that keeps such listeners.
+    #[cfg(feature = "key-matching-listener")]
     assert_eq!(
-        engine.declare_matching_listener(FilterPlane::Subscribers, past, listener, false),
+        engine.declare_matching_listener(
+            FilterPlane::Subscribers,
+            past,
+            MatchingSink::shared(|_matching: bool| {}),
+            false
+        ),
         Err(Refusal::KeyTooLong),
         "a listener on the key is refused for its length"
     );
@@ -708,6 +719,7 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
 
 /// A matching listener's criterion holds its key in place, so a key longer than that is refused
 /// for its length before anything is taken or sent, and its sink is let go of.
+#[cfg(feature = "key-matching-listener")]
 #[test]
 fn a_listener_on_a_key_past_the_criterion_is_refused_for_its_length() {
     let router = Router::start(CatchAll::None);
@@ -760,9 +772,15 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
         declare_subscriber(&engine, "demo/k/3", &dropped),
         Err(Refusal::TableFull)
     );
-    let listener: MatchingSink = MatchingSink::shared(|_matching: bool| {});
+    // A listener on the key, in a build that keeps such listeners.
+    #[cfg(feature = "key-matching-listener")]
     assert_eq!(
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/k/3", listener, false),
+        engine.declare_matching_listener(
+            FilterPlane::Subscribers,
+            "demo/k/3",
+            MatchingSink::shared(|_matching: bool| {}),
+            false
+        ),
         Err(Refusal::TableFull),
         "a key of the bound with no room left in the arena is refused as a full table"
     );

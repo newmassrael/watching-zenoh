@@ -590,6 +590,20 @@ impl<const BYTES: usize> KeyArena<BYTES> {
     /// For as long as the space or any key made from it lives, the arena neither moves nor is given
     /// back, and is reached only through the space; no key made from a space it gave before lives.
     pub unsafe fn space(&mut self, longest: crate::limits::MaxKeyexprBytesHeld) -> KeySpace {
+        // SAFETY: the caller's contract, which is `space_of`'s.
+        unsafe { self.space_of(BYTES, longest) }
+    }
+
+    /// [`Self::space`], its keys taking at most `bytes` of the arena's blocks: what a session's
+    /// `KEY_ARENA_BYTES` states under the build's value, as an arena it lends from holds them.
+    ///
+    /// # Safety
+    /// As [`Self::space`]'s.
+    pub unsafe fn space_of(
+        &mut self,
+        bytes: usize,
+        longest: crate::limits::MaxKeyexprBytesHeld,
+    ) -> KeySpace {
         const {
             assert!(
                 BYTES <= MAX_KEY_ARENA_BYTES,
@@ -610,8 +624,9 @@ impl<const BYTES: usize> KeyArena<BYTES> {
         // SAFETY: the arena is aligned to `ARENA_ALIGN` and is the `span_bytes(BYTES)` bytes of
         // its state then its blocks (both asserted above), which are `MaybeUninit` and so valid
         // for any write; the caller's contract keeps them in place and unused by anything else
-        // while the space or a key of it lives, and `BYTES` is within what a key arena addresses.
-        unsafe { KeySpace::over(NonNull::from(self).cast::<u8>(), BYTES, longest) }
+        // while the space or a key of it lives, and the blocks given, at most `BYTES`, are within
+        // what a key arena addresses.
+        unsafe { KeySpace::over(NonNull::from(self).cast::<u8>(), bytes.min(BYTES), longest) }
     }
 }
 

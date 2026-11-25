@@ -84,8 +84,19 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
 enum Command {
     DeclareSubscriber(wz_session_core::wire_id::EntityId, &'static str),
     /// Declare queryable `.0` on the key, complete as `.2` says. Declared only: it answers
-    /// nothing, which is all a test of what matches needs.
+    /// nothing, which is all a test of what matches needs. Only the builds whose tests watch or
+    /// match a peer's queryables send it.
+    #[cfg(any(
+        feature = "query",
+        feature = "queryable",
+        feature = "key-matching-listener"
+    ))]
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
+    #[cfg(any(
+        feature = "query",
+        feature = "queryable",
+        feature = "key-matching-listener"
+    ))]
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
     /// Push `.1` samples on the key in one batch window, so that one frame carries them all; the
@@ -610,6 +621,11 @@ fn run_router(
                     wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
                 );
             }
+            #[cfg(any(
+                feature = "query",
+                feature = "queryable",
+                feature = "key-matching-listener"
+            ))]
             Ok(Command::DeclareQueryable(id, key, complete)) => {
                 let _ = actions.send_declare_queryable(
                     id,
@@ -617,6 +633,11 @@ fn run_router(
                     complete,
                 );
             }
+            #[cfg(any(
+                feature = "query",
+                feature = "queryable",
+                feature = "key-matching-listener"
+            ))]
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
             }
@@ -1150,10 +1171,14 @@ fn an_operation_lets_the_session_go_for_the_next_one_on_another_thread() {
 
 /// A read step on a session with nothing due reads the session's clock once, before its tasks ran,
 /// and wakes their timers, moves every face, sweeps the gets and looks for a due job by that one
-/// reading, none for its tasks apart from it; its wait,
-/// with no deadline to work out, reads it not at all. The session's lock is taken twice: for the
-/// wait and for the step. The counts are the same in every build: the sweep of the gets, each
-/// face and the look for a due job share the step's reading and its take.
+/// reading, none for its tasks apart from it; its wait, with no deadline to work out, reads it not
+/// at all. A read that steps its one link itself keeps that link's deadlines (its keep-alive, its
+/// lease) with the session's, which a build whose links are tasks leaves to the tasks' timers: its
+/// wait has that deadline to work out, and reads the clock once for it. The session's lock is
+/// taken twice: for the wait and for the step. The counts are otherwise the same in every build:
+/// the sweep of the gets, each face and the look for a due job share the step's reading and its
+/// take. Turned red by a step that reads the clock again for its link, or a wait that reads it
+/// with nothing to bound.
 #[test]
 fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_step() {
     let router = Router::start(CatchAll::None);
@@ -1167,7 +1192,16 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
         engine.takes.core.load(Ordering::SeqCst),
     );
     let _ = SessionDrive::read(&*engine, false);
-    assert_eq!(engine.clock_reads() - reads, 1, "one reading for the step");
+    let wait_reads = usize::from(cfg!(not(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group"
+    ))));
+    assert_eq!(
+        engine.clock_reads() - reads,
+        1 + wait_reads,
+        "one reading for the step, and one for a wait bounded by the link's own deadlines"
+    );
     assert_eq!(
         engine.task_clock_reads() - task_reads,
         0,
@@ -1487,10 +1521,11 @@ fn the_samples_of_one_batch_are_handed_in_the_read_that_hands_the_first() {
 }
 
 /// A session whose links are all up and settled moves them on no more while nothing that moves
-/// them comes: the reads that hand samples look at no face's value. Once the link's task ends, a
-/// step moves them and finds the link lost, which ends a session that redials none. Turned red by
-/// a step that moves settled links at each receive (`Core::move_links` calling `poll_links`
-/// whatever it finds), or a settled session that misses its link's end.
+/// them comes: the reads that hand samples look at no face's value. Once the link's session ends,
+/// a step moves them and finds the link lost, which ends a session that redials none. Turned red
+/// by a step that moves settled links at each receive (`Core::move_links` calling `poll_links`
+/// whatever it finds, or a read that steps its one link itself and looks at the link's life with
+/// nothing come and nothing due), or a settled session that misses its link's end.
 #[test]
 fn settled_links_are_moved_only_once_a_link_ends() {
     const SAMPLES: u8 = 4;
@@ -2019,8 +2054,11 @@ fn a_listener_from_a_filter_counts_what_the_filter_counts() {
 /// A build without a querier or a queryable holds no table of the queryables a peer declares, so a
 /// matching listener and a write filter on that plane are refused (a listener with
 /// `Refusal::NotBuilt`, a filter with none) and the listener's sink goes with the refusal. The CONTROL is a listener on the
-/// subscribers' plane, which every build holds.
-#[cfg(not(any(feature = "query", feature = "queryable")))]
+/// subscribers' plane, which every build that keeps listeners on a key holds.
+#[cfg(all(
+    not(any(feature = "query", feature = "queryable")),
+    feature = "key-matching-listener"
+))]
 #[test]
 fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
     let router = Router::start(CatchAll::None);
@@ -2175,6 +2213,7 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
 /// is declared, as zenoh-pico tells a listener added to a filter that is open. The watch reports
 /// the match as it registers; a second report of it would take the first back, and the listener
 /// would never hear that it matches. The CONTROL is the write filter, open before the listener.
+#[cfg(feature = "key-matching-listener")]
 #[test]
 fn a_listener_declared_on_a_match_is_told_once() {
     let router = Router::start(CatchAll::None);

@@ -22,7 +22,7 @@ use wz_session_core::key_arena::{place_region, KeyArena, KeySpace};
 use wz_session_core::limits::SessionLimits;
 
 use crate::arena::{ArenaMemory, ArenaRefused, ArenaRegion};
-use crate::engine::{RegistryRegion, REGISTRY_REGION_LINES};
+use crate::engine::{RegistryRegion, StatePlaces, REGISTRY_REGION_LINES};
 use crate::open_source::EndpointList;
 use crate::CoopConfig;
 
@@ -140,10 +140,13 @@ pub const STATE_REGION_LINES: usize = REGISTRY_REGION_LINES;
 /// drops it first.
 pub struct StateRegion {
     registry: RegistryRegion,
+    /// The values the state owns and its tasks reach by handles: its round, its planes and its
+    /// step places, written by the open (`StatePlaces`), none of them laid out over rows here.
+    places: StatePlaces,
     keys: KeyArena<{ caps::KEY_ARENA_BYTES }>,
 }
 
-// SAFETY: the registry's region and the key arena are `ZeroEmpty`.
+// SAFETY: the registry's region, the places and the key arena are `ZeroEmpty`.
 unsafe impl ZeroEmpty for StateRegion {}
 
 impl StateRegion {
@@ -170,7 +173,8 @@ impl StateRegion {
     }
 
     /// Place each table of the zeroed region at `region` over its rows and hand it the key arena,
-    /// its keys at most `limits` long, and hand back the key arena: the parts of the registry whose
+    /// its keys at most `limits` long and together at most the bytes `limits` state (a lowered
+    /// `KEY_ARENA_BYTES` holds the arena as an arena it lends from is held), and hand back the key arena: the parts of the registry whose
     /// empty value is not zero bytes written first, each bound one of nothing until the registry
     /// is bound (`RegistryRegion::bind`).
     ///
@@ -184,7 +188,10 @@ impl StateRegion {
         let at = region.as_ptr();
         // SAFETY: the key arena field alone, reached by this one reference before any key exists
         // and not after `space`; it stays in the region for as long as the tables do.
-        let keys = unsafe { (*addr_of_mut!((*at).keys)).space(limits.max_keyexpr_bytes_held()) };
+        let keys = unsafe {
+            (*addr_of_mut!((*at).keys))
+                .space_of(limits.key_arena_bytes(), limits.max_keyexpr_bytes_held())
+        };
         // SAFETY: the description is this type's own: its lines name the tables' sequences and key
         // handles in the region, each holding no value, and the rows beside them, which only those
         // tables reach; the caller's contract keeps the region in place.
@@ -200,6 +207,15 @@ impl StateRegion {
         // SAFETY: the caller's contract: a field of a region that lies at a pointer that is not
         // null is not null either.
         unsafe { NonNull::new_unchecked(addr_of_mut!((*region.as_ptr()).registry)) }
+    }
+
+    /// Where the places of the state's own values in the region at `region` lie.
+    ///
+    /// # Safety
+    /// `region` points at a `StateRegion`.
+    pub(crate) unsafe fn places_at(region: NonNull<Self>) -> NonNull<StatePlaces> {
+        // SAFETY: as `registry_at`.
+        unsafe { NonNull::new_unchecked(addr_of_mut!((*region.as_ptr()).places)) }
     }
 }
 

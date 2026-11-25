@@ -255,6 +255,68 @@ fn a_round_placed_in_an_arena_is_built_there_whole() {
     );
 }
 
+/// The tables of a round placed over a region's rows take the rows the counts state, at most the
+/// build's bound of each, and lie in those rows: records only where the form lends them, keys of as
+/// many of the longest as the form holds. Turned red by a table placed over more rows than the
+/// region keeps (`table_in`), or keys sized by the other form's count.
+#[test]
+fn a_rounds_tables_placed_in_a_region_take_its_rows_at_most() {
+    fn check<C: RoundCalls>() {
+        let mut places = std::boxed::Box::new(MaybeUninit::<RoundRowPlaces<C>>::uninit());
+        let at = NonNull::from(&mut *places).cast::<RoundRowPlaces<C>>();
+        let start = at.as_ptr() as usize;
+        let size = core::mem::size_of::<RoundRowPlaces<C>>();
+        let past = RoundRowCounts {
+            records: caps::DELIVERY_LANE_EVENTS + 5,
+            callbacks: caps::DELIVERY_LANE_CALLBACKS + 5,
+            longest_key: caps::MAX_KEYEXPR_BYTES,
+        };
+        // SAFETY: the rows are this frame's box, holding no value, reached by the tables alone,
+        // which are dropped before it.
+        let rows = unsafe { RoundRows::<C>::placed_in(at, past) };
+        let records = if <C::Form as RecordForm>::LENT {
+            caps::DELIVERY_LANE_EVENTS
+        } else {
+            ONE_THREAD_RECORDS
+        };
+        assert_eq!(rows.records.free_slots(), records);
+        assert_eq!(
+            rows.callbacks.free_slots(),
+            caps::DELIVERY_LANE_CALLBACKS,
+            "held to the build's bound"
+        );
+        assert_eq!(
+            rows.keys.free_slots(),
+            caps::MAX_KEYEXPR_BYTES * <C::Form as RecordForm>::KEYS,
+            "the form's keys, no more"
+        );
+        for table in [
+            rows.callbacks.as_ptr() as usize,
+            rows.keys.as_ptr() as usize,
+        ] {
+            assert!(
+                (start..start + size).contains(&table),
+                "the rows are the region's"
+            );
+        }
+        drop(rows);
+        let fewer = RoundRowCounts {
+            records: 1,
+            callbacks: 2,
+            longest_key: 3,
+        };
+        // SAFETY: as above; the tables before are gone.
+        let rows = unsafe { RoundRows::<C>::placed_in(at, fewer) };
+        assert_eq!(rows.callbacks.free_slots(), 2);
+        assert_eq!(rows.keys.free_slots(), 3 * <C::Form as RecordForm>::KEYS);
+        assert_eq!(rows.longest_key, 3);
+        drop(rows);
+        drop(places);
+    }
+    check::<Kept>();
+    check::<KeptSingle>();
+}
+
 /// A sample on `key` with no payload.
 struct Sample(&'static str);
 

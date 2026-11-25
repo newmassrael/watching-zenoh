@@ -85,6 +85,8 @@ impl LinkEnd for DirectEnd {
 pub(crate) struct FaceRecords<C: ClockSource + 'static> {
     pub(super) face: HeldFace,
     pub(super) actions: LinkHandle<C>,
+    /// The link the records are read from, which keeps where the datagram it lends lies.
+    pub(super) link: CellRc<LinkGate<C>>,
     #[cfg(feature = "queryable")]
     pub(super) plane: PlacedRef<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
@@ -178,6 +180,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
             let Some(mut held) = self.engine.live() else {
                 return;
             };
+            // The round reads the record's parts where the link lends them, so it is told where
+            // that is for the length of the record's dispatch, as a gate of a build whose links
+            // are tasks tells it for the length of the datagram's.
+            // SAFETY: the session's lock is held (`held`).
+            unsafe { self.records.link.lend_to(&self.records.lane) };
             let registry = &mut held.0.session.registry;
             if push {
                 registry.dispatch_push(self.records.face, event);
@@ -185,6 +192,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
             } else {
                 self.records.dispatch(registry, event);
             }
+            // SAFETY: as above.
+            unsafe { self.records.lane.set_lending(None) };
         }
         self.engine.deliver();
     }
@@ -248,7 +257,8 @@ pub(super) struct DirectSlot<L: SessionLinks + 'static, C: ClockSource + 'static
     records: Option<FaceRecords<C>>,
     /// When the life is next to be looked at, on the session's clock in microseconds.
     life_due_us: u64,
-    /// When the pump's own deadlines fall next; 0 for a pump not stepped yet.
+    /// When the pump's own deadlines fall next: 0 for a pump not stepped yet, `u64::MAX` while no
+    /// pump is written.
     pump_due_us: u64,
 }
 
@@ -276,7 +286,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, 
             .is_some_and(|life| matches!(life.phase(), LinkPhase::Up))
     }
 
-    /// Drop the pump, when one is written.
+    /// Drop the pump, when one is written: its deadlines go with it.
     fn drop_pump(&mut self) {
         if self.records.take().is_some() {
             // SAFETY: the records are held exactly while the pump is written in its place
@@ -284,6 +294,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, 
             // is held, which every step holds.
             unsafe { self.pump.assume_init_drop() };
         }
+        // A deadline of the pump left behind would have each read's wait end at once while no
+        // pump is stepped to move it on.
+        self.pump_due_us = u64::MAX;
     }
 
     /// Let go of the link: its life is closed, the dial and the link it made are let go of, and
@@ -448,7 +461,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             self.drive_link(core, slot, LinkInput::Open, now_us)?;
         }
         while !slot.is_up() {
-            let Some(wait) = self.link_wait(slot) else {
+            let Some(mut wait) = self.link_wait(slot) else {
                 return Err(OpenError::NoEndpoint);
             };
             wait.wait(self.rooms.waits(), sleep_ms);
@@ -488,7 +501,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// [`Self::read_direct`] with the face held.
     fn read_held(&self, slot: &mut DirectSlot<L, C>) -> Result<(), SessionClosed> {
-        let wait = self.link_wait(slot).ok_or(SessionClosed)?;
+        let mut wait = self.link_wait(slot).ok_or(SessionClosed)?;
         #[cfg(test)]
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
@@ -537,19 +550,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let now_ms = core.session_time.ms_at(now_us);
         let input = slot.next_input(core, &self.direct.end);
         let chains_due = now_ms >= slot.router.due_ms();
+        // The life moves on only by what the link brings or at its own time: a link that is up
+        // and brings nothing is not looked at for the rest of the bookkeeping.
+        let moves_link = input != LinkInput::Tick || now_us >= slot.life_due_us;
         let mut ended = None;
-        if input != LinkInput::Tick
-            || now_us >= slot.life_due_us
-            || chains_due
-            || core.ledger.owes(now_us, core.seen())
-        {
+        if moves_link || chains_due || core.ledger.owes(now_us, core.seen()) {
             #[cfg(test)]
             core.services.set(core.services.get() + 1);
             if chains_due {
                 slot.router.sweep(now_ms);
             }
             core.sweep_gets(now_us);
-            match self.drive_link(core, slot, input, now_us) {
+            let moved = if moves_link {
+                #[cfg(test)]
+                core.link_polls.set(core.link_polls.get() + 1);
+                self.drive_link(core, slot, input, now_us)
+            } else {
+                Ok(())
+            };
+            match moved {
                 Ok(()) => self.turn_replay(core, now_us),
                 Err(last) => {
                     // A handle reads the session closed from its row from here on, as after a
@@ -572,6 +591,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core.link_due_us = slot.life_due_us.min(slot.pump_due_us);
             core.settle_ledger();
         }
+        // What the records of a round a delivery handed out still hold (the counts of the key
+        // arena, the rejoined buffer kept for them) is let go of before the link is read, as a
+        // gate of a build whose links are tasks lets it go before each receive: a key the peer
+        // undeclared goes back with no record after it, and the chain a fragment read now starts
+        // finds its buffer free.
+        // SAFETY: the session's lock is held (`held`), and no borrow of the round's table.
+        unsafe { self.samples.settle() };
         let jobs_due_ms = core.jobs_due_at(now_us);
         Some(LinkTurn {
             now_us,
@@ -638,7 +664,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         input: LinkInput,
         now_us: u64,
     ) -> Result<(), OpenError> {
-        let mut input = input;
+        let (mut input, mut now_us) = (input, now_us);
         loop {
             let Some(life) = slot.life() else {
                 return Ok(());
@@ -652,11 +678,35 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .links
                     .put_link(0, Link::Waiting { at_us: u64::MAX });
             }
+            // A dial the life gave up on before the network answered it is its endpoint's refusal
+            // for want of an answer in time, as a build whose links are tasks names it.
+            if effects.dial().is_some() || effects.backs_off() || effects.ends_session() {
+                if let Some(dial) = slot.dial.take() {
+                    let endpoint = dial.into_endpoint();
+                    slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
+                        core.transport.endpoint_text(Some(&endpoint)),
+                        Refusal::NoAnswerInTime,
+                    )));
+                }
+            }
             if effects.end_handshake() {
+                // Why the handshake ended is read off its link before the link goes, and names
+                // the endpoint the link was dialled to: the one before the next to dial.
+                let row = match core.transport.links.face(0).map(|face| &face.link) {
+                    Some(Link::Opening { next, .. }) => next.saturating_sub(1),
+                    _ => 0,
+                };
+                let why = core.transport.end_handshake(0);
+                slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
+                    core.transport.endpoints.dial_text(row),
+                    why,
+                )));
                 slot.drop_pump();
+                // The life keeps when the link is dialled again: a time left on the face would
+                // end each read's wait at once.
                 core.transport
                     .links
-                    .put_link(0, Link::Waiting { at_us: now_us });
+                    .put_link(0, Link::Waiting { at_us: u64::MAX });
             }
             if effects.lose() {
                 // The lost peer's chains end with its link: the next link's fragments would be
@@ -670,8 +720,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 if let Some(zid) = peer {
                     let _ended = slot.router.abort_peer(zid.as_slice());
                 }
-                core.lose_face_link(0, DIAL_FACE, now_us);
+                // The face waits with no time of its own, as after a handshake that ended.
+                core.lose_face_link(0, DIAL_FACE, u64::MAX);
                 slot.drop_pump();
+                if effects.ends_session() {
+                    slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
+                        "",
+                        Refusal::LinkLost,
+                    )));
+                }
             }
             if effects.bring_up() {
                 core.bring_up(0, now_us);
@@ -687,6 +744,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             } else {
                 return Ok(());
             };
+            // What the dial or the handshake came to is told at the time read after it: a host
+            // may take a while to refuse a dial, and a wait to dial again counted from before the
+            // dial would be over by then, so that each read would dial again at once.
+            now_us = core.now_us();
         }
     }
 
@@ -729,6 +790,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let params = core.link_params()?;
         let mut calls = LinkMaking {
             session: &mut core.session,
+            #[cfg(feature = "shared-key-ids")]
             limits: resolve_limits(&core.config),
         };
         let placed = core
