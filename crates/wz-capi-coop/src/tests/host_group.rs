@@ -11,6 +11,7 @@ use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::tests::host_links;
 use crate::EngineHold;
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
 #[cfg(feature = "threads")]
@@ -18,7 +19,6 @@ use wz_capi_port::SessionDrive;
 use wz_capi_port::{PeerLists, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
 use wz_runtime_coop::stream_link::NoDial;
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
@@ -70,7 +70,7 @@ fn open_member(member: u8, endpoint: &str, policy: SessionPolicy) -> EngineHold<
         }],
         ..client_config()
     };
-    let links = PosixLinks::new([0, 0, 0, 0], PosixTcpDial)
+    let links = host_links([0, 0, 0, 0], PosixTcpDial)
         .waited_by_owner()
         .with_groups(HostGroups::<PosixUdpSocket>::of_policy(&policy));
     Engine::open_with_policy(links, PosixClock, PosixEntropy, config, policy)

@@ -16,7 +16,7 @@ use wz_session_core::app_transport::{
 };
 
 use super::client_config;
-use crate::app_link::AppLinks;
+use crate::tests::app_links;
 use crate::{CoopConfig, CoopEngine};
 
 /// The program's table of links, behind a lock of the test's own.
@@ -56,7 +56,7 @@ fn a_listener_at_the_builds_limits_opens_over_the_programs_transport() {
         Box::new(Table(Mutex::new(AppLinkTable::new()))),
         Box::new(Taking),
     ));
-    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
+    let links = app_links(SessionTransport::new(transport, &config.limits));
     if let Err(refused) = CoopEngine::open(links, PosixClock, PosixEntropy, config) {
         panic!("a listener at the build's limits is refused: {refused:?}");
     }

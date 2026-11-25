@@ -1679,9 +1679,10 @@ type LinkActions<C> = SessionLinkActions<LinkRuntime<C>, CoopTime<C>>;
 /// The handle on the actions of one link's session.
 type LinkHandle<C> = SessionHandle<C, dyn wz_session_core::link::BoxedLinkDriver, SessionLock>;
 
-/// What a link's session is lent its values in: the value alone, with no lock of its own. Named so
-/// that a runtime of another lock type fails the build here; its leading `_` keeps it out of the
-/// dead-code lint.
+/// What a link's session is lent its values in, where one thread steps the session: the value
+/// alone, with no lock of its own. Named so that a runtime of another lock type fails the build
+/// here; its leading `_` keeps it out of the dead-code lint.
+#[cfg(not(feature = "threads"))]
 fn _a_link_session_lends_its_values_unlocked<C: ClockSource>(
     held: <SessionLock as wz_runtime_coop::sync::LockKind>::Mutex<u8>,
     _runtime: core::marker::PhantomData<LinkRuntime<C>>,
@@ -2072,7 +2073,7 @@ impl SessionParts for CoopSession {
 /// declarations to that link's peer stands (`replay`).
 struct Face<C: ClockSource + 'static, L: CoopLinks> {
     id: FaceId,
-    link: Link<LinkSession<C>, L::Dial, FaceEnd>,
+    link: Link<LinkSession<C>, L::Dial, FaceEnd, LinkCount>,
     replay: Replay,
     /// What the connectivity listeners whose history is being replayed were told of the face, and
     /// the tomb of a row of it that went (`told`).
@@ -2080,7 +2081,7 @@ struct Face<C: ClockSource + 'static, L: CoopLinks> {
     told: FaceTold,
 }
 
-impl<C: ClockSource + 'static, L: CoopLinks> FaceRecord for Face<C, L> {
+impl<C: ClockSource + 'static, L: CoopLinks> FaceRecord<LinkCount> for Face<C, L> {
     type Session = LinkSession<C>;
     type Pump = L::Pump;
     type Dial = L::Dial;
@@ -2090,11 +2091,11 @@ impl<C: ClockSource + 'static, L: CoopLinks> FaceRecord for Face<C, L> {
         self.id
     }
 
-    fn link(&self) -> &Link<LinkSession<C>, L::Dial, FaceEnd> {
+    fn link(&self) -> &Link<LinkSession<C>, L::Dial, FaceEnd, LinkCount> {
         &self.link
     }
 
-    fn link_mut(&mut self) -> &mut Link<LinkSession<C>, L::Dial, FaceEnd> {
+    fn link_mut(&mut self) -> &mut Link<LinkSession<C>, L::Dial, FaceEnd, LinkCount> {
         &mut self.link
     }
 }
@@ -2108,7 +2109,7 @@ struct LinkSession<C: ClockSource + 'static> {
     /// face come up before anything its link carried. A session of several links tells them what
     /// each wait found in the link's stack (`input_seen`).
     #[cfg(any(feature = "listen", feature = "group"))]
-    gate: CellRc<LinkGate<C>>,
+    gate: CellRc<LinkGate<C>, LinkCount>,
     /// The link's generation, which the queries it carries are answered under (`query`).
     #[cfg(feature = "queryable")]
     generation: u64,
@@ -2163,7 +2164,7 @@ impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<
 
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd>;
+type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
 
 /// How the session of a face's link ends: with its task, or, where the read steps the one link
 /// itself, as the read's last step of it said (`direct`).
@@ -2945,14 +2946,15 @@ trait LinkGates {
 
 impl<C: ClockSource + 'static> LinkGates for C {
     #[cfg(feature = "listen")]
-    type Gate = RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink>, C, SessionLock>>;
+    type Gate =
+        RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink, LinkCount>, C, SessionLock>>;
     #[cfg(all(not(feature = "listen"), any(feature = "threads", feature = "group")))]
-    type Gate = RoundGate<CellRc<dyn SessionDatagramLink>>;
+    type Gate = RoundGate<CellRc<dyn SessionDatagramLink, LinkCount>>;
     // The read steps the one link itself and hands each record out as it is read, so nothing
     // holds the link back from its session; the read tells the round where the datagram it lends
     // lies, which the round reads each record's parts in (`direct`).
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-    type Gate = LendingLink<CellRc<dyn SessionDatagramLink>>;
+    type Gate = LendingLink<CellRc<dyn SessionDatagramLink, LinkCount>>;
 }
 
 /// The gates of a link of a session on the clock `C` ([`LinkGates`]).
@@ -3068,7 +3070,7 @@ pub(crate) fn lay_out_open(
 pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     router_session_task_bytes::<
         C,
-        CellRc<dyn SessionDatagramLink>,
+        CellRc<dyn SessionDatagramLink, LinkCount>,
         RouterLend<SessionReassembly, RouterPlace>,
         RouterLend<SessionReassembly, RouterPlace>,
         FaceDispatch<C>,
@@ -3266,14 +3268,22 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
     }
 
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-    fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, _actions: &LinkHandle<C>) -> LinkGate<C> {
+    fn gate(
+        &self,
+        pump: CellRc<dyn SessionDatagramLink, LinkCount>,
+        _actions: &LinkHandle<C>,
+    ) -> LinkGate<C> {
         // Each record is handed out as it is read, so nothing holds the link back; where the
         // datagram it lends lies is kept for the read to tell the round.
         LendingLink::new(pump)
     }
 
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-    fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, actions: &LinkHandle<C>) -> LinkGate<C> {
+    fn gate(
+        &self,
+        pump: CellRc<dyn SessionDatagramLink, LinkCount>,
+        actions: &LinkHandle<C>,
+    ) -> LinkGate<C> {
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it:
         // the link gives the session nothing between its handshake and the face table's decision
@@ -3309,7 +3319,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         &self,
         face: FaceId,
         actions: LinkHandle<C>,
-        gate: &CellRc<LinkGate<C>>,
+        gate: &CellRc<LinkGate<C>, LinkCount>,
     ) -> (Self::Dispatch, LinkSession<C>) {
         #[cfg(feature = "queryable")]
         let generation = self.session.plane.next_generation();
@@ -3385,7 +3395,7 @@ enum DialStart<P> {
         /// When the handshake is given up.
         deadline_us: u64,
         /// The link the dial made, or why the network refused it.
-        answer: Result<OpenedLink<P>, LinkOpenError>,
+        answer: Result<OpenedLink<P, LinkCount>, LinkOpenError>,
     },
 }
 
@@ -3411,7 +3421,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn open_wire(
         &mut self,
         face: FaceId,
-        opened: OpenedLink<L::Pump>,
+        opened: OpenedLink<L::Pump, LinkCount>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
     ) -> Result<Wire<C>, OpenError> {
@@ -3431,7 +3441,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn start_wire(
         &mut self,
         face: FaceId,
-        opened: OpenedLink<L::Pump>,
+        opened: OpenedLink<L::Pump, LinkCount>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
     ) -> Result<Wire<C>, OpenError> {
@@ -3837,7 +3847,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         at: usize,
         step: FaceStep,
-        answer: &mut DialAnswer<L::Pump>,
+        answer: &mut DialAnswer<L::Pump, LinkCount>,
         redial_ms: Option<u64>,
         now_us: u64,
     ) -> Result<(), OpenError> {
@@ -9424,9 +9434,11 @@ pub trait ComposedLinks {
     type WithGroups<J>;
 }
 
-impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G> {
-    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G>;
-    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J>;
+impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind> ComposedLinks
+    for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N>
+{
+    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G, N>;
+    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J, N>;
 }
 
 #[cfg(feature = "queryable")]

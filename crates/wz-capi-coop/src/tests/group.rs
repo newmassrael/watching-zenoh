@@ -28,7 +28,7 @@ use super::client_config;
 use super::group_stack::{
     member_config, open_member, profile, source, Engine, MemberStack, Network, Table, GROUP,
 };
-use crate::app_link::AppLinks;
+use crate::tests::{app_links, AppLinks};
 use crate::EngineHold;
 use crate::{CoopConfig, CoopEngine, OpenError};
 
@@ -347,7 +347,7 @@ fn a_late_answer_refused_a_task_dials_no_further_endpoint() {
         }),
     ));
     *own.lock().unwrap() = Arc::downgrade(&transport);
-    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
+    let links = app_links(SessionTransport::new(transport, &config.limits));
     let opened = Engine::open(links, PosixClock, PosixEntropy, config);
     assert_eq!(
         opened.err(),
@@ -1113,7 +1113,7 @@ mod congested {
             ..member_config(1, GROUP)
         };
         let engine = Engine::open(
-            AppLinks::new(SessionTransport::new(
+            app_links(SessionTransport::new(
                 Arc::clone(&transport),
                 &config.limits,
             )),
@@ -1433,7 +1433,7 @@ mod cut {
                 ..member_config(member, GROUP)
             };
             let engine = Engine::open(
-                AppLinks::new(SessionTransport::new(
+                app_links(SessionTransport::new(
                     Arc::clone(&transport),
                     &config.limits,
                 )),
@@ -1671,7 +1671,7 @@ mod woken {
             Box::new(AlonePort(Arc::clone(&stack))),
         ));
         let engine = CoopEngine::open(
-            AppLinks::new(SessionTransport::new(
+            app_links(SessionTransport::new(
                 Arc::clone(&transport),
                 &config.limits,
             )),

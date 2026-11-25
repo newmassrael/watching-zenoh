@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::tests::{host_links, PosixLinks};
 use wz_capi_port::{PeerLists, SessionDrive};
 use wz_runtime_coop::ClockSource;
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 
@@ -41,7 +41,7 @@ fn open_on<C: ClockSource + Clone>(
     clock: C,
 ) -> EngineHold<CoopEngine<PosixLinks, C>> {
     CoopEngine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         clock,
         PosixEntropy,
         CoopConfig {

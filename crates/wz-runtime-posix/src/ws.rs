@@ -38,7 +38,7 @@ wz_runtime_coop::with_heap_link_seams! {
     /// The links of a stack `S` with WebSocket links over the host's TCP connections beside them:
     /// what a cooperative engine on this host dials and listens on `ws/` locators with
     /// (`PosixWsLinks::<S>::new(links, PosixWsOpen, handshakes)`).
-    pub type PosixWsLinks<S> = WsLinks<S, PosixWsOpen>;
+    pub type PosixWsLinks<S, N = wz_runtime_coop::link_cells::OneTask> = WsLinks<S, PosixWsOpen, N>;
 }
 
 wz_runtime_coop::with_heap_link_seams! {

@@ -11,18 +11,26 @@
 //! and what a program with an allocator (the pico C ABI over the cooperative engine) gives the
 //! session shell.
 
+use wz_runtime_coop::group_transport::NoGroups;
+use wz_runtime_coop::link_cells::OneTask;
+use wz_runtime_coop::stream_link::NoDial;
+
 use crate::net::PosixUdpSocket;
 use crate::stream::PosixTcpDial;
 
 /// The host's sockets as the session shell's links, on the heap profile, made with
 /// `PosixLinks::new(local, PosixTcpDial)`.
-pub type PosixLinks = wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial>;
+pub type PosixLinks<N = OneTask> =
+    wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial, NoDial, NoGroups, N>;
 
 /// [`PosixLinks`] in a build that links no datagram link: `tcp/` as there, every `udp/` dial and
 /// listener refused as unsupported, and no link over a [`PosixUdpSocket`] made.
-pub type PosixStreamLinks = wz_runtime_coop::ip_stack::IpLinks<
+pub type PosixStreamLinks<N = OneTask> = wz_runtime_coop::ip_stack::IpLinks<
     wz_runtime_coop::udp_link::NoDatagramOf<PosixUdpSocket>,
     PosixTcpDial,
+    NoDial,
+    NoGroups,
+    N,
 >;
 
 #[cfg(test)]

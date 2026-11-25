@@ -14,10 +14,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::tests::{host_links, PosixLinks};
+use crate::LinkCount;
 use wz_capi_port::SessionDrive;
+use wz_runtime_coop::link_cells::CountKind;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::session_drive::{LinkOpenError, Locator, OpenedLink, SessionLinks};
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::policy::SessionPolicy;
@@ -96,27 +98,30 @@ struct Refusals {
     dials: Arc<AtomicUsize>,
 }
 
-impl SessionLinks for Refusals {
-    type Pump = <PosixLinks as SessionLinks>::Pump;
+impl SessionLinks<LinkCount> for Refusals {
+    type Pump = <PosixLinks as SessionLinks<LinkCount>>::Pump;
 
-    type Dial = <PosixLinks as SessionLinks>::Dial;
+    type Dial = <PosixLinks as SessionLinks<LinkCount>>::Dial;
 
-    type Waits = <PosixLinks as SessionLinks>::Waits;
+    type Waits = <PosixLinks as SessionLinks<LinkCount>>::Waits;
 
     fn waits(&self) -> Self::Waits {
         self.inner.waits()
     }
 
-    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump, LinkCount>, LinkOpenError> {
         self.inner.open_acceptor(port)
     }
 
     // The session's tables reach the links it dials through, as they reach the host's links.
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<<LinkCount as CountKind>::Flag>) {
         self.inner.lend_buffers(tables);
     }
 
-    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_initiator(
+        &self,
+        to: Locator,
+    ) -> Result<OpenedLink<Self::Pump, LinkCount>, LinkOpenError> {
         if !self.refusing.load(Ordering::SeqCst) {
             return self.inner.open_initiator(to);
         }
@@ -134,7 +139,7 @@ fn a_session_that_dials_its_lost_link_again_allocates_nothing() {
     let refusing = Arc::new(AtomicBool::new(false));
     let dials = Arc::new(AtomicUsize::new(0));
     let links = Refusals {
-        inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         refusing: refusing.clone(),
         dials: dials.clone(),
     };
@@ -198,7 +203,7 @@ fn a_loss_counted(watching: Watching) -> (u64, usize) {
     let router = Router::start(CatchAll::None);
     let refusing = Arc::new(AtomicBool::new(false));
     let links = Refusals {
-        inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         refusing: refusing.clone(),
         dials: Arc::new(AtomicUsize::new(0)),
     };
@@ -304,7 +309,7 @@ fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_not
 
     let router = Router::start(CatchAll::None);
     let engine = CoopEngine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         config(&router),
@@ -443,7 +448,7 @@ const THREE: &[&str] = &["tcp/127.0.0.1:1", "tcp/127.0.0.1:2", "tcp/127.0.0.1:3"
 /// Links whose every dial is refused at once.
 fn refusing() -> Refusals {
     Refusals {
-        inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         refusing: Arc::new(AtomicBool::new(true)),
         dials: Arc::new(AtomicUsize::new(0)),
     }

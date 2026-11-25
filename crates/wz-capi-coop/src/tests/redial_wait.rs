@@ -15,11 +15,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::tests::{host_links, PosixLinks};
+use crate::LinkCount;
 use wz_capi_port::{PeerLists, SessionDrive};
+use wz_runtime_coop::link_cells::CountKind;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::session_drive::{LinkOpenError, Locator, OpenedLink, SessionLinks};
 use wz_runtime_coop::ClockSource;
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::PosixEntropy;
 
@@ -51,27 +53,30 @@ struct SlowRefusals {
     dials: Arc<AtomicUsize>,
 }
 
-impl SessionLinks for SlowRefusals {
-    type Pump = <PosixLinks as SessionLinks>::Pump;
+impl SessionLinks<LinkCount> for SlowRefusals {
+    type Pump = <PosixLinks as SessionLinks<LinkCount>>::Pump;
 
-    type Dial = <PosixLinks as SessionLinks>::Dial;
+    type Dial = <PosixLinks as SessionLinks<LinkCount>>::Dial;
 
-    type Waits = <PosixLinks as SessionLinks>::Waits;
+    type Waits = <PosixLinks as SessionLinks<LinkCount>>::Waits;
 
     fn waits(&self) -> Self::Waits {
         self.inner.waits()
     }
 
-    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump, LinkCount>, LinkOpenError> {
         self.inner.open_acceptor(port)
     }
 
     // The session's tables reach the links it dials through, as they reach the host's links.
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<<LinkCount as CountKind>::Flag>) {
         self.inner.lend_buffers(tables);
     }
 
-    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_initiator(
+        &self,
+        to: Locator,
+    ) -> Result<OpenedLink<Self::Pump, LinkCount>, LinkOpenError> {
         if !self.refusing.load(Ordering::SeqCst) {
             return self.inner.open_initiator(to);
         }
@@ -92,7 +97,7 @@ fn a_dial_slower_than_the_redial_wait_is_still_followed_by_the_wait() {
     let refusing = Arc::new(AtomicBool::new(false));
     let dials = Arc::new(AtomicUsize::new(0));
     let links = SlowRefusals {
-        inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         clock: now_us.clone(),
         refusing: refusing.clone(),
         dials: dials.clone(),

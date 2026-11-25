@@ -8,8 +8,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::tests::host_links;
 use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::locality::Locality;
@@ -33,7 +33,7 @@ fn opened_under(router: &Router, opt_in: EntityTimestampOptIn) -> Option<EngineH
     policy.select_entity_timestamp_opt_in(opt_in).ok()?;
     Some(
         Engine::open_with_policy(
-            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             PosixClock,
             PosixEntropy,
             config(router),

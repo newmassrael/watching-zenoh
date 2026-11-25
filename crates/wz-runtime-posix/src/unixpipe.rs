@@ -271,8 +271,8 @@ wz_runtime_coop::with_heap_link_seams! {
     /// The links of a stack `S` with links over the host's named FIFOs beside them: what a
     /// cooperative engine on this host dials and listens on `unixpipe/` locators with
     /// (`PosixUnixpipeLinks::<S>::new(links, PosixFifoOpen)`).
-    pub type PosixUnixpipeLinks<S> =
-        wz_runtime_coop::unixpipe_link::UnixpipeLinks<S, PosixFifoOpen>;
+    pub type PosixUnixpipeLinks<S, N = wz_runtime_coop::link_cells::OneTask> =
+        wz_runtime_coop::unixpipe_link::UnixpipeLinks<S, PosixFifoOpen, N>;
 }
 
 #[cfg(test)]

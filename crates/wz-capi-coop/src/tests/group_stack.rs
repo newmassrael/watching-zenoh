@@ -21,7 +21,7 @@ use wz_session_core::wire_const::T_MID_JOIN;
 use wz_session_core::WhatAmI;
 
 use super::{client_config, config_zid};
-use crate::app_link::AppLinks;
+use crate::tests::{app_links, AppLinks};
 use crate::EngineHold;
 use crate::{CoopConfig, CoopEngine, OpenError};
 
@@ -220,6 +220,6 @@ pub(super) fn open_member(
         }),
     ));
     *own.lock().unwrap() = Arc::downgrade(&transport);
-    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
+    let links = app_links(SessionTransport::new(transport, &config.limits));
     Engine::open(links, PosixClock, PosixEntropy, config)
 }

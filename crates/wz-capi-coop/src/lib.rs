@@ -118,6 +118,27 @@ pub mod arena;
 mod engine;
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
+
+/// How the handles on the parts of one link of the engine's sessions are counted: what a stack
+/// the engine opens its links over is counted by (`counted_by`) before it is handed to the open.
+/// One task's count where one thread steps the session, or where the build has no host lock to
+/// give each value a lock of its own; one face's where several threads drive the session's faces,
+/// each face's link handles moved between threads with the face whole.
+#[cfg(all(
+    feature = "threads",
+    any(feature = "std", feature = "host-sys"),
+    target_has_atomic = "8",
+    target_has_atomic = "64"
+))]
+pub type LinkCount = wz_runtime_coop::link_cells::OneFace;
+/// How the handles on the parts of one link of the engine's sessions are counted: one task's.
+#[cfg(not(all(
+    feature = "threads",
+    any(feature = "std", feature = "host-sys"),
+    target_has_atomic = "8",
+    target_has_atomic = "64"
+)))]
+pub type LinkCount = wz_runtime_coop::link_cells::OneTask;
 #[cfg(feature = "group-host")]
 pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.

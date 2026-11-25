@@ -41,7 +41,13 @@ use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, TlsDial};
 
 const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
-type Links = IpLinks<PosixUdpSocket, PosixTcpDial, TlsDial<PosixTcpDial>>;
+type Links = IpLinks<
+    PosixUdpSocket,
+    PosixTcpDial,
+    TlsDial<PosixTcpDial>,
+    wz_runtime_coop::group_transport::NoGroups,
+    wz_capi_coop::LinkCount,
+>;
 type Engine = CoopEngine<Links, PosixClock>;
 
 fn clock_ms() -> u64 {
@@ -87,6 +93,7 @@ fn base_config() -> CoopConfig {
 fn open(dial: TlsDial<PosixTcpDial>, config: CoopConfig) -> Result<EngineHold<Engine>, OpenError> {
     Engine::open(
         IpLinks::new(LOOPBACK, PosixTcpDial)
+            .counted_by::<wz_capi_coop::LinkCount>()
             .with_tls(dial)
             .waited_by_owner(),
         PosixClock,

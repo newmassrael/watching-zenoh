@@ -16,7 +16,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// close, where one left queued would wait for a handshake that never starts.
     pub(super) fn accept_face(
         &mut self,
-        opened: OpenedLink<L::Pump>,
+        opened: OpenedLink<L::Pump, LinkCount>,
         endpoint: Option<DialEndpoint>,
     ) {
         let pending = self
@@ -72,7 +72,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// under way or a handshake. It is told the session's declarations at the session's pace, as
     /// every face is. A place the table has no room at, which the callers refuse before they make
     /// the face, lets the face go with its tables.
-    fn push_face(&mut self, held: HeldFace, link: Link<LinkSession<C>, L::Dial>) {
+    fn push_face(
+        &mut self,
+        held: HeldFace,
+        link: Link<LinkSession<C>, L::Dial, FaceEnd, LinkCount>,
+    ) {
         let face = Face {
             id: held.id(),
             link,

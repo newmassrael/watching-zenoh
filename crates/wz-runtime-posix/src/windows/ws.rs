@@ -40,7 +40,8 @@ wz_runtime_coop::with_heap_link_seams! {
     /// The links of a stack `S` with WebSocket links over Winsock's TCP connections beside them:
     /// what a cooperative engine on this host dials and listens on `ws/` locators with
     /// (`WindowsWsLinks::<S>::new(links, WindowsWsOpen, handshakes)`).
-    pub type WindowsWsLinks<S> = WsLinks<S, WindowsWsOpen>;
+    pub type WindowsWsLinks<S, N = wz_runtime_coop::link_cells::OneTask> =
+        WsLinks<S, WindowsWsOpen, N>;
 }
 
 wz_runtime_coop::with_heap_link_seams! {
