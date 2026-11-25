@@ -317,9 +317,9 @@ pub(super) type DirectWire<L, C> = FaceAt<DirectLock, DirectParts<L, C>, DirectE
 /// The place of the one link's parts.
 type DirectSite<L, C> = FaceSite<DirectLock, DirectParts<L, C>>;
 
-/// An operation run with the one link's wire, inside the link's place (`CoopEngine::in_place`),
-/// borrowing what it captures for `'f`.
-type OnLink<'f, C> = dyn FnMut(LinkTx<'_, C>) + 'f;
+/// An operation run on the session's state with the one link's wire, under the session's lock
+/// taken inside the link's place (`CoopEngine::in_place`), borrowing what it captures for `'f`.
+type OnLink<'f, L, C> = dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>) + 'f;
 
 /// The parts of the one link's session, held in the face's place apart from the session's state:
 /// the link's wire, which a send writes, the pump, written while `records` is held, and what each
@@ -1171,9 +1171,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> Option<U> {
         let mut f = Some(f);
         let mut answer = None;
-        self.in_place(&mut |tx| {
+        self.in_place(&mut |core, tx| {
             if let Some(f) = f.take() {
-                answer = self.live().map(|mut guard| f(&mut guard.0, tx));
+                answer = Some(f(core, tx));
             }
         });
         answer
@@ -1198,17 +1198,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         f.map(|f| f(None))
     }
 
-    /// [`Self::live_on_link`] over `f` by reference, which it calls once.
-    // Out of line and over `dyn`: one body takes the place for every operation but a publish.
+    /// [`Self::live_on_link`] over `f` by reference, which it calls once, with the session's
+    /// lock taken inside the place; not at all once the session is closed.
+    // Out of line and over `dyn`: one body takes the place and the session's lock, and lets them
+    // go, for every operation but a publish.
     #[inline(never)]
-    fn in_place(&self, f: &mut OnLink<'_, C>) {
-        let carried = OnThisThread(&mut *f);
+    fn in_place(&self, f: &mut OnLink<'_, L, C>) {
+        let carried = OnThisThread((self, &mut *f));
         let lent = self.direct.site.send(move |tx| {
-            let f = carried.get();
-            f(tx.as_ref());
+            let (engine, f) = carried.get();
+            if let Some(mut guard) = engine.live() {
+                f(&mut guard.0, tx.as_ref());
+            }
         });
         if lent.is_none() {
-            f(None);
+            if let Some(mut guard) = self.live() {
+                f(&mut guard.0, None);
+            }
         }
     }
 
