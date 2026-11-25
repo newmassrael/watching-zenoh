@@ -432,7 +432,9 @@ impl DeclaredKeyexpr {
     /// Another key sharing this one's literal and declaration — pico
     /// `_z_declared_keyexpr_copy`, which clones the refcount; refused, making nothing, as the
     /// literal's share is, or when the declaration's count holds as many holders as it can
-    /// ([`WireDeclaration::share`]).
+    /// ([`WireDeclaration::share`]). Out of line: the clone door and a declaration asked again
+    /// each carried its own copy of the two shares and their refusal.
+    #[inline(never)]
     pub(crate) fn share(&self) -> Result<Self, ZResult> {
         // The text is kept first: a refusal then has no hold of the declaration to let go of.
         let literal = self.literal.share()?;
