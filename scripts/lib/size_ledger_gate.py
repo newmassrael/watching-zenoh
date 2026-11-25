@@ -23,17 +23,18 @@ One case of capability_cost_gate.py, the one the ledger names (`case`, the relea
 zenoh-pico reference, built by that gate's own functions (`build`, `pico_reference_build`,
 `pico_reference_tree`) in its environment (`build_env`): the same commands, the same target
 directory and the same reference directory, so in Layer C1cs, after the cost gate built the case,
-neither is built a second time. A library that holds a build path, or that another linker wrote,
-is no figure here, as it is no figure there.
+neither is built a second time. A library that holds a build path, that another linker wrote, or
+whose strip moved its code (below) is no figure here, as it is no figure there.
 
-The areas are read from a TWIN of each: the same build with its line tables (`case_build` with
-`line_tables`, and the reference with `LINE_TABLES_CFLAGS` added to its C flags, each in a
-directory of its own), the one build this gate adds. Debug information is not supposed to move
-code generation, and that is not taken on trust: every executable section of each twin (its name,
-its address and a digest of its bytes) is compared with the library the figures are read from, and
-a twin that differs fails ("debug info moved codegen"), since its line tables would describe other
-code than the measured one. The comparison reads two files that are there already, so it runs in
-every mode.
+Each is ONE build with its line tables, as the shipping entry builds a release
+(`wz_package.ship_debug_env`; the reference with GCC's level 1, `LINE_TABLES_CFLAGS` of
+`reference_build`). The cost gate measures that build with its debug information taken off
+(`wz_package.strip_debug`), the file a deployer receives, and this gate reads the areas from the
+line tables of the same build, so they describe the code measured and no other: a second build with
+line tables beside one without them was measured to differ in its executable sections. Taking debug
+sections off moves no code, and that is not taken on trust: the cost gate holds every executable
+section of the stripped file (its name, its address and a digest of its bytes) to the build's
+(`link_findings`).
 
 What is code is what it was: the text symbols with a size (`nm --defined-only -S`, kinds t, T, w
 and W). LLVM merges identical functions into aliases of one body, and the linker keeps every name
@@ -50,7 +51,7 @@ for inlined code is the file of the inlined function, and the FILE is placed by 
 The copies of a generic go to the file that defines it, as they go to its owner in the symbol
 reading.
 
-The line tables are read from the twin's bytes, DWARF 2 to 5, with `.debug_info` giving each
+The line tables are read from the build's bytes, DWARF 2 to 5, with `.debug_info` giving each
 unit's compilation directory, which a relative path is read from. A sequence that starts outside
 the library's executable sections is the table of a function the linker discarded (GNU ld writes
 its address as 0) and is left out. A row of line 0, and a byte no row covers (an object built
@@ -143,11 +144,10 @@ mangled when it cannot.
 
 ## Where it runs
 
-Layer C1cs, as the leg after the cost gate; of what it reads, it builds only the twins with line
-tables. With `--shards N --shard K` the case is read only on the shard the cost gate deals it to,
-and every shard checks the ledger itself, which needs no build. Layer C0 runs `--selftest`, which
-holds the readers, the rules and the ratchet on synthetic input and the committed ledger to its
-own rules.
+Layer C1cs, as the leg after the cost gate, whose builds it reads; it builds nothing of its own.
+With `--shards N --shard K` the case is read only on the shard the cost gate deals it to, and every
+shard checks the ledger itself, which needs no build. Layer C0 runs `--selftest`, which holds the
+readers, the rules and the ratchet on synthetic input and the committed ledger to its own rules.
 
 Usage:
     size_ledger_gate.py --check [--shards N --shard K]
@@ -166,7 +166,6 @@ from __future__ import annotations
 import argparse
 import bisect
 import datetime
-import hashlib
 import json
 import pathlib
 import posixpath
@@ -650,7 +649,7 @@ def pico_symbols(listing: str, definitions: Mapping[str, set[str]],
 
 # ── the line tables of a library: which source each byte of code came from ───────────────────
 
-SHF_EXECINSTR = 0x4
+SHF_EXECINSTR = elf_facts.SHF_EXECINSTR
 SHF_COMPRESSED = 0x800
 ELFCOMPRESS_ZLIB = 1
 # The sections the line reader reads: the tables, the units that name their directories, and the
@@ -1073,26 +1072,6 @@ def read_spans(lib: pathlib.Path) -> list[Span]:
         raise DwarfError(f"{lib} has no .debug_line: its line tables were not written or were "
                          f"stripped, so no byte of it names its source")
     return live_spans(line_sequences(dwarf, data[5] == 1), code_ranges(sections))
-
-
-def code_digest(lib: pathlib.Path) -> dict[str, tuple[int, str]]:
-    """Each executable section of a library: its address and the SHA-256 of its bytes."""
-    data = lib.read_bytes()
-    return {s.name: (s.addr, hashlib.sha256(elf_facts.section_bytes(data, s)).hexdigest())
-            for s in elf_facts.sections(data) if s.flags & SHF_EXECINSTR}
-
-
-def codegen_findings(subject: str, measured: Mapping[str, tuple[int, str]],
-                     twin: Mapping[str, tuple[int, str]], where: str) -> list[str]:
-    """The finding for a twin with line tables whose code is not the measured library's."""
-    differ = sorted(name for name in set(measured) | set(twin)
-                    if measured.get(name) != twin.get(name))
-    if measured and not differ:
-        return []
-    named = ", ".join(differ) if differ else "none, the measured library has no executable section"
-    return [f"{subject}: debug info moved codegen: the build with line tables ({where}) differs "
-            f"from the measured one in its executable sections ({named}), so its line tables "
-            f"describe other code and no area is read from them"]
 
 
 # ── who wrote a source file ────────────────────────────────────────────────────────────────────
@@ -1974,15 +1953,16 @@ def write_explain(report: dict, path: pathlib.Path) -> object:
 
 @dataclass(frozen=True)
 class CaseRead:
-    # The symbols of each side's twin with line tables, whose code is its library's.
+    # The symbols of each side's build, whose file without debug information the cost gate
+    # measured.
     wz: list[Symbol]
     pico: list[Symbol]
     unread: list[str]
     pin: str
     toolchain: str
-    # The line spans of each side's twin (`read_spans`).
+    # The line spans of each side's build (`read_spans`).
     spans: Mapping[str, list[Span]]
-    # The directory of the zenoh-pico export as the twin's line tables and as this host write it.
+    # The directory of the zenoh-pico export as the build's line tables and as this host write it.
     pico_export: tuple[str, ...]
 
 
@@ -2003,30 +1983,24 @@ def object_symbols(objects_dir: pathlib.Path) -> dict[str, set[str]]:
 def read_case(case: cost.Case, env: Mapping[str, str],
               prefixes: build_normalization.Prefixes) -> tuple[CaseRead | None, list[str]]:
     """Build the case and its zenoh-pico reference as Layer C1cs does (both are the cost gate's
-    builds, so a run after it builds nothing again) and their twins with line tables, hold each
-    twin's code to its library's, and read the twins' symbols and line spans; or say why a figure
-    read from them would be none."""
+    builds, so a run after it builds nothing again) and read the symbols and the line spans of
+    each build, whose file without debug information is the one the cost gate measured; or say
+    why a figure read from them would be none."""
     got = cost.build(case, env, prefixes)
     asked = wz_config.pico_reference(wz_config.load_decl(), cost.case_features(case))
     link, cflags = cost.reference_build(got.link_args)
     ref = cost.pico_reference_build(asked, env, prefixes, link, cflags)
-    plain_work, _, _ = cost.pico_reference_tree(asked, env, link, cflags)
-    twin = cost.case_build(case, env, line_tables=True)
-    subprocess.run(list(twin.cmd), cwd=cost.CRATES, env=dict(twin.env), check=True)
-    work, _, _ = cost.pico_reference_tree(asked, env, link, cflags + cost.LINE_TABLES_CFLAGS)
+    work, _, _ = cost.pico_reference_tree(asked, env, link, cflags)
+    wz_lib = cost.case_build(case, env).lib
     reference = f"{case.id} (its zenoh-pico reference)"
     findings = (cost.purity_findings(case.id, got.leaked) + cost.link_findings(case.id, got)
                 + cost.purity_findings(reference, ref.leaked) + cost.link_findings(reference, ref))
-    findings += codegen_findings(case.id, code_digest(cost.case_build(case, env).lib),
-                                 code_digest(twin.lib), str(twin.lib))
-    findings += codegen_findings(reference, code_digest(plain_work / PICO_LIBRARY),
-                                 code_digest(work / PICO_LIBRARY), str(work / PICO_LIBRARY))
     built = object_symbols(work / PICO_TARGET_OBJECTS)
     if not built:
         findings.append(f"{reference}: no object file under {work / PICO_TARGET_OBJECTS}, so no "
                         f"zenoh-pico symbol has a source")
     spans: dict[str, list[Span]] = {}
-    for side, subject, lib in (("wz", case.id, twin.lib), ("pico", reference, work / PICO_LIBRARY)):
+    for side, subject, lib in (("wz", case.id, wz_lib), ("pico", reference, work / PICO_LIBRARY)):
         try:
             spans[side] = read_spans(lib)
         except (DwarfError, elf_facts.ElfError) as e:
@@ -2035,7 +2009,7 @@ def read_case(case: cost.Case, env: Mapping[str, str],
         return None, findings
     compiled = {rel for files in built.values() for rel in files if rel.endswith(".c")}
     definitions = pico_definitions(work / "src", compiled)
-    wz, unread = wz_symbols(nm_text(twin.lib))
+    wz, unread = wz_symbols(nm_text(wz_lib))
     pico = pico_symbols(nm_text(work / PICO_LIBRARY), definitions, built)
     export = str(work / "src")
     return CaseRead(wz, pico, unread, ref.pin, ref.toolchain, spans,
@@ -2091,6 +2065,7 @@ def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
     try:
         env, prefixes = cost.build_env()
         linker = cost.gnu_ld_version(env)
+        cost.strip_tool()
     except (ValueError, RuntimeError) as e:
         print(f"  size-ledger: {e}", file=sys.stderr)
         return 2
@@ -2642,13 +2617,6 @@ def cmd_selftest() -> int:
                         elf_facts.Section(".rodata", 1, 0, 0x40, 0, 2, 0x2000),
                         elf_facts.Section(".init", 1, 0, 0, 0, SHF_EXECINSTR | 2, 0x900)])
            == [(0x1000, 0x1040)])
-    measured = {".text": (0x1000, "aa"), ".init": (0x900, "bb")}
-    moved = codegen_findings("c", measured, {".text": (0x1000, "ab"), ".init": (0x900, "bb")}, "t")
-    expect("a twin whose code differs from the measured library's is refused, naming the section",
-           codegen_findings("c", measured, dict(measured), "t") == []
-           and len(moved) == 1 and "debug info moved codegen" in moved[0] and ".text" in moved[0]
-           and ".init" not in moved[0].split("(")[2]
-           and len(codegen_findings("c", {}, {}, "t")) == 1)
 
     # Who wrote a source file.
     expect("a manifest names its library's crate and root file, an array of tables none",

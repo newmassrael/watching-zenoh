@@ -164,6 +164,7 @@ import build_normalization  # noqa: E402  (the one rule that keeps paths and tim
 import elf_facts  # noqa: E402  (the one reader of an ELF's version needs)
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 import pico_windows_package  # noqa: E402  (the Windows lane, whose cases share the ceiling table)
+import wz_package  # noqa: E402  (the shipping entry: how a release file is made from its build)
 from pico_host_ceiling import (  # noqa: E402  (the one rule of the ceiling table's rows)
     DEBT_PLACEHOLDER, HOST_CEILING, HOST_CEILING_SCHEMA, RATIO_TOLERANCE, ceil_ratio,
     ceiling_reading, ceiling_row, ceiling_rows, format_row, grade_ceiling, load_ceiling,
@@ -237,18 +238,21 @@ DISCARD_UNWIND_LINK = f"-Wl,-T,{DISCARD_UNWIND_SCRIPT}"
 # The C compiler's like of `-C force-unwind-tables=no`: code with no unwind tables, the
 # asynchronous ones GCC writes by default on x86_64 included.
 NO_UNWIND_CFLAGS = ("-fno-asynchronous-unwind-tables", "-fno-unwind-tables")
-# The line tables the size ledger reads its areas from (`size_ledger_gate.py`): a case and its
-# zenoh-pico reference built again with them, so each byte of code names the source it came from,
-# inlined code included. No loaded section holds them, and the ledger refuses a twin whose
-# executable sections differ from the library measured here, so every figure of this gate is still
-# read from the build without them. rustc keeps line tables only, and keeps them at the link (a
-# profile without debug information has cargo strip it by default). The C compiler writes GCC's
-# level 1 (clang's line tables only), without its command line in the producer string, where the
-# prefix maps would put the host's paths. The twin has a target directory of its own, so it does
-# not overwrite the library this gate measured and neither build undoes the other.
-LINE_TABLES_RUSTFLAGS = ["-C", "debuginfo=line-tables-only", "-C", "strip=none"]
+# Every library this gate builds is ONE build with its line tables, the shipping entry's
+# (`wz_package.ship_debug_env`), and every figure is read from that build with its debug
+# information taken off (`wz_package.strip_debug`), the file a deployer receives, written apart
+# under `SHIPPED_TARGET` so the build cargo left keeps its line tables for the size ledger
+# (`size_ledger_gate.py`), which reads its areas from them. A second build with line tables beside
+# one without them is not the same code (measured: its executable sections differed), so the line
+# tables of any other build would describe other code than the one measured. The zenoh-pico
+# reference is built so too (`reference_build`): GCC's level 1 (clang's line tables only), without
+# its command line in the producer string, where the prefix maps would put the host's paths, and
+# the same strip. Taking debug sections off moves no code, and that is not taken on trust: a file
+# whose executable sections are not its build's is refused (`link_findings`).
 LINE_TABLES_CFLAGS = ("-g1", "-gno-record-gcc-switches")
-LINE_TABLES_TARGET = TARGET / "line-tables"
+SHIPPED_TARGET = TARGET / "shipped"
+# The reference's file without its debug information, under its build directory.
+SHIPPED_PICO = pathlib.Path("shipped") / "libzenohpico.so"
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
@@ -1672,6 +1676,9 @@ class Measured:
     relr_need: bool = False
     # Whether the library holds unwind tables (an `.eh_frame` or `.eh_frame_hdr` section).
     eh_frame: bool = False
+    # The executable sections the file measured does not hold as its build does
+    # (`wz_package.strip_debug`).
+    code_moved: tuple[str, ...] = ()
 
 
 # The conformance digest as the library stores it: a C string, so the NUL is part of the match and
@@ -2046,6 +2053,10 @@ def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
     """What is wrong with how a library was linked, against the linker arguments it was linked
     with; empty when it was linked as asked."""
     findings: list[str] = []
+    if lib.code_moved:
+        findings.append(f"{subject}: taking its debug information off changed its executable "
+                        f"sections ({', '.join(lib.code_moved)}), so the file measured is not the "
+                        f"build its line tables describe")
     if GNU_LD in lib.link_args and lib.linker and not lib.linker.startswith(NO_LINKER_NAMED):
         findings.append(f"{subject}: linked with `{GNU_LD}` and its .comment names {lib.linker}: "
                         f"another linker than GNU ld wrote it, so the two arms of the ratio are "
@@ -2155,36 +2166,48 @@ def inherits_from(profile: str, base: str, profiles: Mapping[str, Mapping[str, s
 
 
 def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
-               cfg: set[str] | None = None, *, line_tables: bool = False) -> CaseBuild:
-    """The build of `case` in `env` (the gate's, `build_env`). A case that names configuration
-    files is built for the host's own target, `triple` (this host's when not given), whose
-    `rustc --print cfg` lines are `cfg` (rustc's when not given), so their flags reach the
-    library's crates and not the build scripts. With `line_tables`, the same build with its line
-    tables, after every other flag, in their own target directory (`LINE_TABLES_TARGET`)."""
-    target = LINE_TABLES_TARGET if line_tables else TARGET
+               cfg: set[str] | None = None) -> CaseBuild:
+    """The build of `case` in `env` (the gate's, `build_env`), with its line tables as the
+    shipping entry builds a release (`wz_package.ship_debug_env` of the case's profile). A case
+    that names configuration files is built for the host's own target, `triple` (this host's when
+    not given), whose `rustc --print cfg` lines are `cfg` (rustc's when not given), so their flags
+    reach the library's crates and not the build scripts."""
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
-           "--target-dir", str(target)]
-    lib_dir = target / case.profile
+           "--target-dir", str(TARGET)]
+    lib_dir = TARGET / case.profile
     flags = list(GATE_RUSTFLAGS)
     if case.cargo_configs:
         triple = triple or host_triple()
         flags += case_config_flags(case, triple, target_cfg(triple) if cfg is None else cfg)
         cmd += ["--target", triple]
-        lib_dir = target / triple / case.profile
-    if line_tables:
-        flags += LINE_TABLES_RUSTFLAGS
+        lib_dir = TARGET / triple / case.profile
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
             cmd += ["--features", case.features]
-    return CaseBuild(tuple(cmd), with_rustflags(env, flags), lib_dir / case.lib,
-                     tuple(link_args(flags)))
+    return CaseBuild(tuple(cmd), {**with_rustflags(env, flags),
+                                  **wz_package.ship_debug_env(case.profile)},
+                     lib_dir / case.lib, tuple(link_args(flags)))
+
+
+def strip_tool() -> pathlib.Path:
+    """The tool the shipping entry takes debug information off with
+    (`wz_package.toolchain_objcopy`), or a RuntimeError saying why this host has none."""
+    try:
+        return wz_package.toolchain_objcopy()
+    except wz_package.Refusal as e:
+        raise RuntimeError(str(e)) from e
 
 
 def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
+    """Build `case` (`case_build`) and measure the build without its debug information, the file
+    a deployer receives, written to `SHIPPED_TARGET`/<case>/; cargo's own file keeps its line
+    tables."""
     plan = case_build(case, env)
     subprocess.run(list(plan.cmd), cwd=CRATES, env=dict(plan.env), check=True)
-    lib = plan.lib
+    lib = SHIPPED_TARGET / case.id / plan.lib.name
+    lib.parent.mkdir(parents=True, exist_ok=True)
+    moved = wz_package.strip_debug(plan.lib, lib, None, strip_tool())
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     text = int(size_out.splitlines()[1].split()[0])
     names = subprocess.run(
@@ -2210,7 +2233,7 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
                     needed=needed, linker=linker_of(lib), link_args=plan.link_args,
                     relr=any("(RELR)" in line for line in dynamic_section),
                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
-                    eh_frame=has_unwind_tables(data))
+                    eh_frame=has_unwind_tables(data), code_moved=tuple(moved))
 
 
 @dataclass(frozen=True)
@@ -2233,6 +2256,8 @@ class Reference:
     eh_frame: bool = False
     # The C compiler flags it was built with beyond the rule's (`reference_build`).
     cflags: tuple[str, ...] = ()
+    # What `Measured` holds of the strip.
+    code_moved: tuple[str, ...] = ()
 
 
 def case_features(case: Case) -> set[str]:
@@ -2279,9 +2304,10 @@ def reference_build(link_args: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[
     was linked with `link_args`, so a choice of the build moves both sides of the ratio alike:
     the linker (`GNU_LD`) and packed relocations as they are, and for a library whose unwind tables are discarded, C
     compiled without unwind tables (`NO_UNWIND_CFLAGS`) and linked with the same script, for
-    what the C runtime's own objects still bring."""
+    what the C runtime's own objects still bring. Its line tables are always asked
+    (`LINE_TABLES_CFLAGS`), as its case's are."""
     link: list[str] = []
-    cflags: list[str] = []
+    cflags: list[str] = list(LINE_TABLES_CFLAGS)
     for arg in link_args:
         if arg in (GNU_LD, PACKED_RELOCS_LINK):
             if arg not in link:
@@ -2338,10 +2364,14 @@ def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
                          link: tuple[str, ...] = (),
                          cflags: tuple[str, ...] = ()) -> Reference:
     """zenoh-pico built with `asked` set, compiled with `cflags` and linked with `link` under
-    `env` ([`pico_reference_tree`]), measured, and searched for the build path prefixes `env`
+    `env` ([`pico_reference_tree`]), measured without its debug information (`SHIPPED_PICO` in
+    its directory, as a case is in `build`), and searched for the build path prefixes `env`
     maps."""
     work, pin, toolchain = pico_reference_tree(asked, env, link, cflags)
-    lib = work / "build" / "lib" / "libzenohpico.so"
+    lib = work / SHIPPED_PICO
+    lib.parent.mkdir(exist_ok=True)
+    moved = wz_package.strip_debug(work / "build" / "lib" / "libzenohpico.so", lib, None,
+                                   strip_tool())
     dynamic_section = subprocess.run(
         ["readelf", "-d", str(lib)], capture_output=True, text=True, check=True
     ).stdout.splitlines()
@@ -2354,7 +2384,7 @@ def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
                      linker=linker_of(lib), link_args=link,
                      relr=any("(RELR)" in line for line in dynamic_section),
                      relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
-                     eh_frame=has_unwind_tables(data), cflags=cflags)
+                     eh_frame=has_unwind_tables(data), cflags=cflags, code_moved=tuple(moved))
 
 
 def report_reference(case: Case, got: Measured, env: Mapping[str, str],
@@ -2454,6 +2484,7 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
         return 2
     try:
         linker = gnu_ld_version(env)
+        strip_tool()
     except RuntimeError as e:
         print(f"  capability-cost: {e}", file=sys.stderr)
         return 2
@@ -2704,7 +2735,8 @@ def cmd_selftest() -> int:
            and plain.cmd[-3:] == ("--no-default-features", "--features", "a,b")
            and "--target" not in plain.cmd and plain.lib == TARGET / SHIP_PROFILE / "libt.so"
            and plain.link_args == (GNU_LD,)
-           and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS)})
+           and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS),
+                             **wz_package.ship_debug_env(SHIP_PROFILE)})
     expect("a case of the crate's default features names none",
            "--features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd
            and "--no-default-features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd)
@@ -2718,19 +2750,17 @@ def cmd_selftest() -> int:
            in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
            and discards_unwind_tables(bare_build.link_args)
            and PACKED_RELOCS_LINK in bare_build.link_args)
-    lines_build = case_build(by_case["pico-client-coop-nostd"], {}, "x86_64-unknown-linux-gnu",
-                             linux_gnu, line_tables=True)
-    lines_flags = lines_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
-    bare_flags = bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
-    expect("a case with line tables is its own build with their flags last, in its own directory",
-           lines_flags == bare_flags + LINE_TABLES_RUSTFLAGS
-           and lines_build.cmd[lines_build.cmd.index("--target-dir") + 1] == str(LINE_TABLES_TARGET)
-           and [a for a in lines_build.cmd if a != str(LINE_TABLES_TARGET)]
-           == [a for a in bare_build.cmd if a != str(TARGET)]
-           and lines_build.lib
-           == LINE_TABLES_TARGET / "x86_64-unknown-linux-gnu" / "capi-nostd" / "libwz_capi_pico.so"
-           and lines_build.link_args == bare_build.link_args
-           and LINE_TABLES_TARGET != TARGET)
+    expect("a case is built with its line tables by its own profile's variable, and no flag",
+           bare_build.env["CARGO_PROFILE_CAPI_NOSTD_DEBUG"] == wz_package.SHIP_DEBUG
+           and plain.env["CARGO_PROFILE_SHIP_DEBUG"] == wz_package.SHIP_DEBUG
+           and not any("debuginfo" in f or "strip" in f for f in
+                       bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")))
+    expect("a file whose strip moved its code is a finding naming the section, on either side",
+           len(found := link_findings("t", Measured(900, [], 3, code_moved=(".text",)))) == 1
+           and ".text" in found[0]
+           and len(link_findings("t", Reference(text=1, pin="p", toolchain="cc", refused=(),
+                                                code_moved=(".init",)))) == 1
+           and link_findings("t", Measured(900, [], 3)) == [])
     expect("the GNU ld line of the C compiler's linker version is read, and none is None",
            gnu_ld_line("collect2 version 13\nGNU ld (GNU Binutils for Ubuntu) 2.38\nCopyright\n")
            == "GNU ld (GNU Binutils for Ubuntu) 2.38"
@@ -2745,12 +2775,13 @@ def cmd_selftest() -> int:
            and link_findings("t", Measured(900, [], 3, linker="mold 2.30.0")) == [])
     absolute = f"-Wl,-T,{CRATES / DISCARD_UNWIND_SCRIPT}"
     expect("a reference is built as its case: packed as it is, without tables where it has none",
-           reference_build(()) == ((), ())
-           and reference_build((PACKED_RELOCS_LINK, "-Wl,-x")) == ((PACKED_RELOCS_LINK,), ())
+           reference_build(()) == ((), LINE_TABLES_CFLAGS)
+           and reference_build((PACKED_RELOCS_LINK, "-Wl,-x"))
+           == ((PACKED_RELOCS_LINK,), LINE_TABLES_CFLAGS)
            and reference_build((PACKED_RELOCS_LINK, DISCARD_UNWIND_LINK))
-           == ((PACKED_RELOCS_LINK, absolute), NO_UNWIND_CFLAGS)
+           == ((PACKED_RELOCS_LINK, absolute), LINE_TABLES_CFLAGS + NO_UNWIND_CFLAGS)
            and reference_build((GNU_LD, PACKED_RELOCS_LINK, GNU_LD))
-           == ((GNU_LD, PACKED_RELOCS_LINK), ()))
+           == ((GNU_LD, PACKED_RELOCS_LINK), LINE_TABLES_CFLAGS))
     expect("the discard is read by its path from crates/ and by its absolute path alike",
            discards_unwind_tables((DISCARD_UNWIND_LINK,)) and discards_unwind_tables((absolute,))
            and not discards_unwind_tables(("-Wl,-T,other.ld", PACKED_RELOCS_LINK)))

@@ -169,9 +169,9 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
 1. **Ledger gate (P9).** `scripts/lib/size_ledger_gate.py`: area classification of both
    libraries, a ratio ratchet per area in `deploy/size_ledger.json`, run in Layer C1cs beside the
    total. Each byte of a function goes to the source file its line table names (the innermost
-   location, so a helper fat LTO inlined into a door stays in the helper's area), read from a twin
-   of each library built with line tables whose executable sections are held to the measured
-   library's byte for byte; that file's crate::module (wz) or export path (zenoh-pico) is placed by
+   location, so a helper fat LTO inlined into a door stays in the helper's area), read from the
+   library's one build, which carries its line tables and is measured and shipped with its debug
+   information taken off (its executable sections held to the build's byte for byte); that file's crate::module (wz) or export path (zenoh-pico) is placed by
    the owner rules, and bytes of no source line are counted apart under a limit of their own. The
    section 1 table was read the earlier way, a whole body to the area of its symbol, which put
    inlined helpers in their caller's area. Its `--explain` says what holds an area's bytes (wz

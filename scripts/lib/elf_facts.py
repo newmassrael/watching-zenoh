@@ -28,6 +28,7 @@ the gates that use this module is driven by a file whose defect is known.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
 import sys
@@ -41,6 +42,8 @@ SHT_DYNSYM = 11
 SHT_RELA = 4
 SHT_REL = 9
 SHN_UNDEF = 0
+SHF_ALLOC = 0x2
+SHF_EXECINSTR = 0x4
 
 DT_NULL, DT_NEEDED, DT_SONAME, DT_RPATH, DT_RUNPATH = 0, 1, 14, 15, 29
 
@@ -147,6 +150,14 @@ def sections(data: bytes) -> list[Section]:
 
 def section_bytes(data: bytes, section: Section) -> bytes:
     return _span(data, section.offset, section.size, f"section {section.name}")
+
+
+def code_digests(data: bytes) -> dict[str, tuple[int, str]]:
+    """Each executable section (SHF_EXECINSTR) by name: its address and the SHA-256 of its bytes.
+    Two files whose digests are equal hold the same code at the same places, whatever else differs
+    (the debug information one carries and the other does not)."""
+    return {s.name: (s.addr, hashlib.sha256(section_bytes(data, s)).hexdigest())
+            for s in sections(data) if s.flags & SHF_EXECINSTR}
 
 
 def notes(data: bytes) -> list[Note]:
@@ -657,6 +668,18 @@ def _selftest() -> int:
                imported_symbols(with_syms) == ["getifaddrs", "socket"])
     expect("a file with no dynamic symbol table imports nothing",
            imported_symbols(build_test_elf(needed=["libc.so.6"])) == [])
+    code = bytearray(build_elf([(".text", SHT_PROGBITS, b"\x90" * 8, None),
+                                (".data", SHT_PROGBITS, b"\x01", None)], machine=62))
+    shoff = struct.unpack_from("<Q", code, 0x28)[0]
+    # sh_flags of section 1 (.text): the header after the null one, 8 bytes in.
+    struct.pack_into("<Q", code, shoff + 64 + 8, SHF_ALLOC | SHF_EXECINSTR)
+    expect("the executable sections are digested by name and address, the others are not",
+           code_digests(bytes(code)) == {".text": (0, hashlib.sha256(b"\x90" * 8).hexdigest())})
+    changed = bytearray(code)
+    changed[64] ^= 0xFF  # the first byte of .text, the first section after the 64-byte header
+    expect("a changed byte of code changes the digest, and a file with no code has none",
+           code_digests(bytes(changed))[".text"] != code_digests(bytes(code))[".text"]
+           and code_digests(build_test_elf(needed=["libc.so.6"])) == {})
     print("elf-facts: selftest OK")
     return 0
 

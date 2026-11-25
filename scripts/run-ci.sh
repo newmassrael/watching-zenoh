@@ -13036,9 +13036,10 @@ layer_c1cf_reduced_features() {
 # the release case the cost gate just built, and its zenoh-pico reference, by AREA, and holds each
 # area's ratio under its row of `deploy/size_ledger.json`, so a change that grows one area is
 # refused there and not only in the total. Each byte goes to the source file the line table names
-# for it, inlined code included, so it builds one thing the first leg did not: a twin of the case
-# and of its reference with line tables, in a target and a reference directory of their own, whose
-# executable sections it holds to the measured libraries' byte for byte. It reads its case only on
+# for it, inlined code included, read from the first leg's own builds: every case and reference is
+# built once with its line tables and measured with its debug information taken off, the file that
+# ships, whose executable sections the first leg holds to the build's. It builds nothing the first
+# leg did not (the same commands, target directory and reference directory), reads its case only on
 # the shard the first leg deals that case to, and checks the ledger itself on every shard. The two
 # legs are independent: a red case of the first does not hide the ledger's verdict.
 layer_c1cs_capability_cost() {
