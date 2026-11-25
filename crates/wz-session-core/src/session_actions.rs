@@ -967,6 +967,11 @@ impl<R: SessionRuntime> OutOfBand<R> {
         R::with_local(&self.state, take)
     }
 
+    /// Whether any request is staged, read and left for the drive loop to take.
+    fn staged(&self) -> bool {
+        R::with_local(&self.state, |s| s.any())
+    }
+
     /// Resolves once any request is staged — the branch a parked drive loop
     /// selects on so a request reaches it without waiting for the link.
     /// Taking the request stays the loop's job; this only says there is one.
@@ -12412,6 +12417,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.core
             .out_of_band
             .take(|s| core::mem::replace(&mut s.tx_congested, false))
+    }
+
+    /// Whether this link's drive loop owes the session something asked of it from outside the
+    /// loop, which `crate::drive::check_out_of_band` raises: a request staged on the session, or
+    /// the transport deleted on another link and not yet taken by this one. Read only, so a
+    /// driver that services the session only when something is due can ask it at every input.
+    pub fn out_of_band_owed(&self) -> bool {
+        if self.core.out_of_band.staged() {
+            return true;
+        }
+        #[cfg(feature = "transport-multilink")]
+        if self.transport_deleted()
+            && !R::with_mutex_mut(&self.link.transport_deletion_taken, |taken| *taken)
+        {
+            return true;
+        }
+        false
     }
 
     /// R311kc — initiator-side InitAck params admission, the dispatcher

@@ -122,6 +122,8 @@ pub mod region;
 /// The storage policy of the session's tables, named once so every table of the engine and the
 /// rows each is given agree on it.
 pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
+// How the engine's calls stand to its threads, and the locks that choice decides.
+mod form;
 #[cfg(feature = "group-host")]
 pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.

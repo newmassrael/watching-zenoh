@@ -7,13 +7,13 @@
 //! `static inline void _z_session_mutex_unlock(_z_session_t *zn) { _ZP_UNUSED(zn); }`).
 //!
 //! Every call of such a build comes from one thread at a time: its rows count their calls for that
-//! thread alone (`CoopForm`), and it starts no read task. So the lock keeps no other thread out and
-//! calls nothing of the host. It says whether the state is held, which a droppable publish asks
-//! ([`OneThreadLock::try_lock`]); a take while it is held waits as a held lock does, which on the
-//! one thread is for good, as the take of a host's lock on the thread that holds it is. The flag is
-//! read and written with loads and stores, no read-modify-write. A debug build fails a take while
-//! it is held, and takes it with a swap, so a second thread that enters beside the first against
-//! the build's contract fails there too.
+//! thread alone (`crate::form::CoopForm`), and it starts no read task. So the lock keeps no other
+//! thread out and calls nothing of the host. It says whether the state is held, which a droppable
+//! publish asks ([`OneThreadLock::try_lock`]); a take while it is held waits as a held lock does,
+//! which on the one thread is for good, as the take of a host's lock on the thread that holds it
+//! is. The flag is read and written with loads and stores, no read-modify-write. A debug build
+//! fails a take while it is held, and takes it with a swap, so a second thread that enters beside
+//! the first against the build's contract fails there too.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
