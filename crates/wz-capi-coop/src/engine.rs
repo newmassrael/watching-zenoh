@@ -250,8 +250,8 @@ pub use reach::RowClaim;
 mod ledger;
 use ledger::{Due, Ledger, Seen};
 
-// A build whose session holds one face and no read task beside the program's calls: the read
-// steps the one link's session itself (`direct`).
+// A build with no read task beside the program's calls and no group: the read steps each face's
+// link session itself (`direct`).
 #[cfg(not(wz_round))]
 mod direct;
 // The delivery of a lent Push such a read makes, one subscriber at a time (`pinned`).
@@ -6632,8 +6632,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// Run `f` on the session's local set under the session's lock, for a test that spawns a
     /// task of the session's: the runtime is confined to that lock (`confine_tasks`), so the set
-    /// is used under it and a handle of it taken out is used only once the engine has gone.
-    #[cfg(all(test, feature = "listen"))]
+    /// is used under it and a handle of it taken out is used only once the engine has gone. A
+    /// session whose read steps each face where it lies runs no link as a task.
+    #[cfg(all(test, feature = "listen", wz_round))]
     pub(crate) fn with_local_set<R>(&self, f: impl FnOnce(&CoopLocalSet<C>) -> R) -> R {
         f(&self.core.lock().0.local)
     }

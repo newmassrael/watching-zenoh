@@ -5,17 +5,14 @@
 //! the work form that steps the faces as tasks of one set, as the cfg `wz_round` every use reads:
 //! a feature leaves this list once its faces are read where they lie.
 //!
-//! A build whose read runs beside the program's calls (`threads`, `listen`, `group`) queues each
-//! record's callbacks in the round; the read that hands each record out as it is read (`direct`)
-//! hands out every sample, token, query, reply and declaration watch's event itself, and puts
-//! nothing in the round: its text keeps none of what hands a round out.
+//! A build whose read runs beside the program's calls (`threads`) or that joins a group (`group`)
+//! queues each record's callbacks in the round; the read that hands each record out as it is read
+//! (`direct`), the faces a session listening takes among them, hands out every sample, token,
+//! query, reply and declaration watch's event itself, and puts nothing in the round: its text keeps
+//! none of what hands a round out.
 
 /// The features whose builds keep the round, as cargo names them to a build script.
-const KEEP_THE_ROUND: &[&str] = &[
-    "CARGO_FEATURE_THREADS",
-    "CARGO_FEATURE_LISTEN",
-    "CARGO_FEATURE_GROUP",
-];
+const KEEP_THE_ROUND: &[&str] = &["CARGO_FEATURE_THREADS", "CARGO_FEATURE_GROUP"];
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(wz_round)");

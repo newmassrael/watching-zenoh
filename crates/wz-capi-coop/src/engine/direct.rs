@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The read of a session that holds one face and runs no read task beside the program's calls (a
-//! build with none of `threads`, `listen` and `group`): the read steps the one link's session
-//! itself, and hands each record out as it is read.
+//! The read of a session that runs no read task beside the program's calls and joins no group (a
+//! build with neither `threads` nor `group`): the read steps each face's link session itself,
+//! the dial role's and, with `listen`, each a port gave or an attach dialled, and hands each
+//! record out as it is read. A connection a port holds is taken by the read with no face's slot
+//! held, and its face's place is taken before the session's lock (`CoopEngine::accept_links`).
 //!
 //! The link's session lies in the engine's face ([`DirectFace`]), apart from the session's state,
 //! in two parts as a send and a receive use it: the receive (the pump, what its steps are handed,
@@ -667,6 +669,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
         self.opened = None;
         self.drop_pump();
     }
+
+    /// Let go of all the face's link held, its wire in `site` too, as a face taken beside the dial
+    /// role's goes with its link: the row is the next taken face's as the open made it.
+    #[cfg(feature = "listen")]
+    fn clear(&mut self, site: &DirectSite<L, C>) {
+        self.let_go();
+        drop(site.take());
+        self.last = None;
+        self.brought_up = false;
+        self.life_due_us = u64::MAX;
+    }
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> Drop for DirectSlot<L, C> {
@@ -696,9 +709,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
         }
     }
 
-    /// What the link brings to its life at this look: a handshake completed, a pump that ended or
-    /// was asked to, a dial the network answered, or only the time.
-    fn next_input(&mut self, core: &Core<L, C>, end: &EndFlags) -> LinkInput {
+    /// What the link brings to its life at this look, at `now_us`: a handshake completed, a pump
+    /// that ended or was asked to, a dial the network answered, or only the time. With `listen`
+    /// the dial role's face reads the node its link reached too (`Self::read_node`), and a dial an
+    /// attach left in the face's record is taken into the slot first (`Self::take_owed_dial`).
+    fn next_input(&mut self, core: &mut Core<L, C>, end: &EndFlags, now_us: u64) -> LinkInput {
         // The face's record holds the link exactly while its parts hold the pump.
         let linked = core
             .transport
@@ -706,28 +721,93 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
             .face(self.at())
             .filter(|face| face.link.wire().is_some());
         if let Some(face) = linked {
-            let established = matches!(face.life.phase(), LinkPhase::Handshaking { .. })
+            let phase = face.life.phase();
+            let established = matches!(phase, LinkPhase::Handshaking { .. })
                 && face.link.wire().is_some_and(|wire| wire.established());
             if established {
                 return LinkInput::Established;
             }
-            return if end.over() {
+            let input = if end.over() {
                 LinkInput::Ended
             } else {
                 LinkInput::Tick
             };
+            // A handshake is over once its link ended or its deadline passed.
+            #[cfg(feature = "listen")]
+            {
+                let over = match phase {
+                    LinkPhase::Handshaking { deadline_us, .. } => {
+                        input == LinkInput::Ended || now_us >= deadline_us
+                    }
+                    _ => false,
+                };
+                return self.read_node(core, input, over);
+            }
+            #[cfg(not(feature = "listen"))]
+            return input;
         }
+        #[cfg(not(feature = "listen"))]
+        let _ = now_us;
+        #[cfg(feature = "listen")]
+        self.take_owed_dial(core);
         let Some(answer) = self
             .dial
             .as_mut()
             .and_then(|dial| dial.answer::<L::Pump, LinkCount>())
         else {
+            #[cfg(feature = "listen")]
+            return self.read_node(core, LinkInput::Tick, false);
+            #[cfg(not(feature = "listen"))]
             return LinkInput::Tick;
         };
         let Some(dial) = self.dial.take() else {
             return LinkInput::Tick;
         };
         self.answered(core, dial.into_endpoint(), answer)
+    }
+
+    /// What the node the dial role's face reached makes of `input`, read off its link (`over` once
+    /// its handshake is over): a handshake over at a node another face holds stands the face by
+    /// for it, and a face that stands by dials again once no face holds the node, as the round's
+    /// read of a face reads it (`LinkSupervisor::read_dial_node`). A taken face's input is as it
+    /// came.
+    #[cfg(feature = "listen")]
+    fn read_node(&self, core: &mut Core<L, C>, input: LinkInput, over: bool) -> LinkInput {
+        let at = self.at();
+        let Some((id, phase)) = core
+            .transport
+            .links
+            .face(at)
+            .map(|face| (face.id, face.life.phase()))
+        else {
+            return input;
+        };
+        core.transport
+            .links
+            .read_dial_node(at, id, phase, input, over)
+    }
+
+    /// Take into the slot the dial an attach left in the face's record
+    /// (`CoopEngine::attach_face`), which holds the session's lock and not the face's place: a
+    /// change of the face's site it owes the face's read, which looks at the life in this turn.
+    #[cfg(feature = "listen")]
+    fn take_owed_dial(&mut self, core: &mut Core<L, C>) {
+        let at = self.at();
+        let owed = core
+            .transport
+            .links
+            .face(at)
+            .is_some_and(|face| matches!(face.link, Link::Dialing(_)));
+        if !owed {
+            return;
+        }
+        let Some(face) = core.transport.links.face_mut(at) else {
+            return;
+        };
+        if let Link::Dialing(dial) = core::mem::replace(&mut face.link, Link::Idle) {
+            self.dial = Some(dial);
+            self.life_due_us = 0;
+        }
     }
 
     /// Dial the session's endpoint at `row`, as the life asked: what the dial came to at once.
@@ -948,6 +1028,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         }
     }
 
+    /// The face of the face table's row `at`: the dial role's at the first, each past it in its
+    /// row of the arena; `None` past the rows the open made.
+    #[cfg(feature = "listen")]
+    fn face_at(&self, at: usize) -> Option<&DirectFace<L, C>> {
+        match at.checked_sub(1) {
+            None => Some(&self.dial),
+            Some(row) => self.taken.get(row),
+        }
+    }
+
     /// Let go of every face's link with the faces owned whole: the engine's drop.
     pub(super) fn let_go_owned(&mut self) {
         self.dial.let_go_owned();
@@ -977,6 +1067,10 @@ struct LinkTurn {
     brought_up: bool,
     /// Why the session ended at this look, when it did.
     ended: Option<OpenError>,
+    /// Whether a port is to be asked for a connection once the faces were turned
+    /// (`CoopEngine::accept_links`).
+    #[cfg(feature = "listen")]
+    accepts: bool,
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
@@ -1104,6 +1198,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         );
         let mut read = Ok(());
         let mut jobs_due_ms = None;
+        #[cfg(feature = "listen")]
+        let mut accepts = false;
         for face in faces() {
             let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
                 continue;
@@ -1118,11 +1214,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 break;
             }
             jobs_due_ms = turn.jobs_due_ms;
+            #[cfg(feature = "listen")]
+            {
+                accepts |= turn.accepts;
+            }
         }
         if let Some(wait) = wait {
             if let Some(mut held) = self.live() {
                 held.0.transport.links.waited(wait);
             }
+        }
+        // Taken with no face's slot held: each connection's face is made in its row's place,
+        // which is taken before the session's lock as every read of a face takes them.
+        #[cfg(feature = "listen")]
+        if accepts && read.is_ok() {
+            self.accept_links();
         }
         if read.is_ok() {
             if let Some(started_ms) = jobs_due_ms {
@@ -1280,7 +1386,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         let now_us = core.now_us();
         let now_ms = core.session_time.ms_at(now_us);
-        let input = slot.next_input(core, &face.end);
+        let input = slot.next_input(core, &face.end, now_us);
         let chains_due = now_ms >= slot.router.due_ms();
         // The life moves on only by what the link brings or at its own time: a link that is up
         // and brings nothing is not looked at for the rest of the bookkeeping.
@@ -1358,6 +1464,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(all(test, feature = "std"))]
             brought_up,
             ended,
+            #[cfg(feature = "listen")]
+            accepts: core.transport.links.ports_to_ask(),
         })
     }
 
@@ -1499,6 +1607,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // The dial under way, if any, was taken above.
             if effects.ends_session() {
                 return Err(slot.last.take().unwrap_or(OpenError::NoEndpoint));
+            }
+            // A face taken beside the dial role's goes with its link: what its place held first,
+            // then its record and its tables.
+            #[cfg(feature = "listen")]
+            if effects.removes() {
+                slot.clear(&face.site);
+                core.remove_face(slot.at());
+                return Ok(());
             }
             input = if effects.begin_handshake() {
                 self.begin_handshake(face, core, slot)
@@ -1691,6 +1807,85 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             core.transport.links.abort_link(at);
         }
         end
+    }
+
+    /// Take the connections that wait on the ports the session listens on, each as a face of its
+    /// own: a free row of the face table under the session's lock (`Core::take_face`), then the
+    /// link's session made in that row's place (`Self::take_link`). Called with no face's slot
+    /// held. A connection the session takes no face for is closed unread.
+    #[cfg(feature = "listen")]
+    fn accept_links(&self) {
+        let mut port = 0;
+        loop {
+            let (opened, endpoint, at) = {
+                let Some(mut held) = self.live() else {
+                    return;
+                };
+                let core = &mut held.0;
+                let Some((opened, endpoint)) = core.transport.next_accepted(&mut port) else {
+                    return;
+                };
+                let Some(at) = core.take_face() else {
+                    continue;
+                };
+                (opened, endpoint, at)
+            };
+            self.take_link(at, opened, endpoint);
+        }
+    }
+
+    /// Make the session of `opened`, a link taken on a port for `endpoint`, in the place of the
+    /// face the face table gave the row `at`, in the acceptor's role: the face's place taken first,
+    /// then the session's lock, and the face's life begun as a taken link's, its handshake run by
+    /// the face's read from here on and given up at its deadline. A row with no place, a place
+    /// held, and a link whose session is not made take the face out again, the link closed unread.
+    #[cfg(feature = "listen")]
+    fn take_link(
+        &self,
+        at: usize,
+        opened: OpenedLink<L::Pump, LinkCount>,
+        endpoint: Option<DialEndpoint>,
+    ) {
+        let Some(face) = self.direct.face_at(at) else {
+            self.drop_taken(at);
+            return;
+        };
+        let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
+            self.drop_taken(at);
+            return;
+        };
+        let slot = &mut held.0;
+        let Some(mut live) = self.live() else {
+            return;
+        };
+        let core = &mut live.0;
+        let placed = self.place_link_session(
+            face,
+            core,
+            slot,
+            opened,
+            SessionRole::Acceptor,
+            endpoint.as_ref(),
+        );
+        if placed.is_err() {
+            core.remove_face(at);
+            return;
+        }
+        let now_us = core.now_us();
+        if let Some(record) = core.transport.links.face_mut(at) {
+            // A taken link's handshake asks for nothing of the session.
+            let _ = record.life.input(LinkInput::Taken, now_us);
+            slot.life_due_us = record.life.wake_at(now_us).unwrap_or(u64::MAX);
+        }
+        face.note_due(slot);
+    }
+
+    /// Take out the face at `at` the face table gave a connection whose place was not reached.
+    #[cfg(feature = "listen")]
+    fn drop_taken(&self, at: usize) {
+        if let Some(mut live) = self.live() {
+            live.0.remove_face(at);
+        }
     }
 
     /// Whether the link of the face at `at` is up, as the life of the face's record says.

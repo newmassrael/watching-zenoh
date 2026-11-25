@@ -7,6 +7,10 @@
 
 use super::*;
 use wz_runtime_coop::faces::Dial;
+// The work form's engine names these for every build; a read that steps each face where it lies
+// names them here.
+#[cfg(not(wz_round))]
+use wz_session_core::link_life::{LinkInput, LinkPhase};
 use wz_session_core::locator_directory::LocatorText;
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
@@ -14,20 +18,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// arrives when the session holds as many faces as `max_faces`, or has as many handshakes
     /// under way as `accept_pending`, is closed unread: its peer learns the node is full from the
     /// close, where one left queued would wait for a handshake that never starts.
+    #[cfg(wz_round)]
     pub(super) fn accept_face(
         &mut self,
         opened: OpenedLink<L::Pump, LinkCount>,
         endpoint: Option<DialEndpoint>,
     ) {
-        let pending = self
-            .transport
-            .links
-            .faces()
-            .filter(|face| {
-                face.id != DIAL_FACE && matches!(face.life.phase(), LinkPhase::Handshaking { .. })
-            })
-            .count();
-        if pending >= self.config.accept_pending || self.faces_full() {
+        if !self.takes_a_face() {
             return;
         }
         let id = self.transport.links.next_face_id();
@@ -52,6 +49,38 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 let _ = face.life.input(LinkInput::Taken, now_us);
             }
         }
+    }
+
+    /// Give a link taken off a port a face of its own whose link the read that took it makes in
+    /// the face's place itself (`CoopEngine::accept_links`): the face's tables and its record,
+    /// with no link yet, at a free row of the face table, whose place is handed back. `None`, the
+    /// link closed unread as a build whose links are tasks closes it, when the session holds as
+    /// many faces as `max_faces` admits, as many handshakes as `accept_pending`, or no set of
+    /// tables or place left.
+    #[cfg(not(wz_round))]
+    pub(super) fn take_face(&mut self) -> Option<usize> {
+        if !self.takes_a_face() {
+            return None;
+        }
+        let id = self.transport.links.next_face_id();
+        let held = self.session.registry.add_face(id).ok()?;
+        self.transport.links.advance_face_id();
+        let at = held.at();
+        self.push_face(held, Link::Idle, 0).then_some(at)
+    }
+
+    /// Whether a link taken off a port may take a face now: fewer handshakes of taken links under
+    /// way than `accept_pending`, and room for a face beside the dial role's (`Self::faces_full`).
+    fn takes_a_face(&mut self) -> bool {
+        let pending = self
+            .transport
+            .links
+            .faces()
+            .filter(|face| {
+                face.id != DIAL_FACE && matches!(face.life.phase(), LinkPhase::Handshaking { .. })
+            })
+            .count();
+        pending < self.config.accept_pending && !self.faces_full()
     }
 
     /// Whether the table holds as many faces as `max_faces` admits beside the dial role's, a place
