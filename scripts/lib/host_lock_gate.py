@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""A crate the cooperative C ABI links holds the host's lock (`wz-host-sync`), never `std`'s.
+"""R4636 (no register item) -- a crate the cooperative C ABI links holds the host's lock
+(`wz-host-sync`), never `std`'s.
 
 ## Why
 
