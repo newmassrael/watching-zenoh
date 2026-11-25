@@ -275,7 +275,7 @@ mod tests {
 
     /// An engine counted by its holders, as the cooperative engine is.
     fn engine() -> Shared<u32> {
-        Shared::boxed(0)
+        Shared::try_boxed(0).expect("the heap has room for the engine")
     }
 
     fn put(engine: &Shared<u32>) -> Option<ReachEngine<u32>> {
@@ -424,7 +424,9 @@ mod tests {
     fn a_fan_attached_by_its_engines_row_is_cancelled_only_while_the_engine_is_open() {
         use wz_capi_port::cancellation::CancellableFan;
         let _serial = SERIAL.lock().unwrap_or_else(|held| held.into_inner());
-        let engine = Shared::boxed(Cancels::default());
+        let Ok(engine) = Shared::try_boxed(Cancels::default()) else {
+            panic!("the heap has room for the engine");
+        };
         let claim = RowClaim::take().expect("a vacant row");
         // SAFETY: the engine is cleared out of its row before it goes, below.
         let reach = unsafe { claim.fill(Shared::as_ptr(&engine)) };
