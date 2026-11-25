@@ -2107,9 +2107,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     _admission: Placed<Admission<C>>,
     /// The region the session's registry and its key arena lie in (`crate::region`): after the
     /// session's state, whose handle of the registry drops it in place, and every table that keeps
-    /// a key in it.
+    /// a key in it. Held for its owner's drop alone: the session reaches the region through those
+    /// handles.
     #[cfg(not(feature = "runtime-plan"))]
-    state: RegionBlock<StateRegion>,
+    _state: RegionBlock<StateRegion>,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -5071,7 +5072,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "listen")]
             _admission: admission,
             #[cfg(not(feature = "runtime-plan"))]
-            state: lent.state,
+            _state: lent.state,
             arena: lent.arena,
         };
         let apart = LentApart {

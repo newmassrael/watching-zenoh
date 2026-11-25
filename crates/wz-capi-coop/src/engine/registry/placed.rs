@@ -213,7 +213,7 @@ impl RegistryRegion {
     /// `at` points at a `RegistryRegion` that [`Self::write_parts`] wrote and the region's walk
     /// then placed, that nothing else reaches, and that neither moves nor is given back before the
     /// handle is dropped.
-    pub(crate) unsafe fn bind(
+    pub(in crate::engine) unsafe fn bind(
         at: NonNull<Self>,
         limits: &SessionLimits,
         tables: &TableRows,

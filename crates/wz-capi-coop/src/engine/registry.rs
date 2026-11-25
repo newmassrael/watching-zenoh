@@ -245,7 +245,11 @@ fn names_face(holder: FaceId) -> bool {
     holder < NAMES_NO_FACE
 }
 
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 mod adding;
 mod held;
 use held::Holders;
