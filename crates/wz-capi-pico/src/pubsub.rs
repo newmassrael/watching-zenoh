@@ -2340,7 +2340,7 @@ mod put_options_tests {
             let mut lent = z_moved_bytes_t {
                 _this: z_owned_bytes_t::borrowed(&held),
             };
-            match read_moved_bytes(&mut lent) {
+            match read_moved_bytes(&mut lent).as_ref() {
                 Some(MovedBytes::Lent(buf)) => {
                     assert_eq!(buf.as_slice().as_ptr(), lent_bytes.as_ptr(), "not copied");
                 }
