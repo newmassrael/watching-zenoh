@@ -785,7 +785,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "engine's C ABI turns on). `host-sync` is the one this crate's tests do not turn on: its "
         "one public item is `advanced_cache`, the module `std` gates, behind a cfg of either, and "
         "what it changes is the lock beneath it, the host's own calls in place of `std`'s, for the "
-        "C library's `os-posix` form, which selects it where `advanced` builds the plane; the "
+        "C library's `os-host` form, which selects it where `advanced` builds the plane; the "
         "note rustc gives for a compound cfg names no feature, so the axis has nothing of it to "
         "probe",
         frozenset(
@@ -817,7 +817,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`host-sync` is the one the crate's tests do not turn on: its one public item is "
         "`timestamp_source`, the module `std` gates, behind a cfg of either, and what it changes "
         "is the wall clock and the lock beneath it, the host's own calls in place of `std`'s, for "
-        "the C library's `os-posix` form, which selects it where a capability brings this crate "
+        "the C library's `os-host` form, which selects it where a capability brings this crate "
         "in; the note rustc gives for a compound cfg names no feature, so the axis has nothing of "
         "it to probe",
         frozenset(

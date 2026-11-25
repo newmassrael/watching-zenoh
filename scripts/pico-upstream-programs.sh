@@ -4,8 +4,8 @@
 #
 # zenoh-pico's own API tests and example programs against the pico C ABI library without `std`,
 # on this Linux host: the run the Platform workflow's `pico-upstream-windows` job makes of the
-# release DLL, made here of the same profile's POSIX library (`os-posix`, the `capi-nostd`
-# profile), so a red of that job can be read on a developer's machine first.
+# release DLL, made here of the same profile's POSIX library (`wz-capi-pico-lib` over `os-host`,
+# the `capi-nostd` profile), so a red of that job can be read on a developer's machine first.
 #
 #   scripts/pico-upstream-programs.sh [<profile>] [-- <runner options>]
 #

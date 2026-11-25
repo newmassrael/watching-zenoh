@@ -10,7 +10,7 @@ own surface and to the lanes it cites.
 ## What it holds
 
 The owner's release criteria of 2026-11-23 for the Windows DLL (no_std, no heap after open,
-os-windows, the one library of the package profile host-peer-ext) ask for a run of every zenoh-pico
+os-host, the one library of the package profile host-peer-ext) ask for a run of every zenoh-pico
 feature on that DLL and production evidence for every door zenoh-pico does not have.
 `docs/release-proof-pico-windows.md` is the ledger of that evidence: for every public function,
 build switch, example and test of zenoh-pico at the pin, and every `wz_ext_*` door, the lanes that
