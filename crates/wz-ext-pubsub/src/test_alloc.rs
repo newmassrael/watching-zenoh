@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The lib test binary's allocator, which counts the allocations each thread makes, so a test can
-//! read what one call of the code under test takes of the heap. Each lib test runs on a thread of
-//! its own and reads its own thread's count, so what the tests beside it allocate never reaches it.
+//! read what one call of the code under test takes of the heap, and refuses on a thread that asks
+//! every allocation of one layout ([`refusing`]), as a heap with no room for it would. Each lib
+//! test runs on a thread of its own and reads its own thread's count, so what the tests beside it
+//! allocate never reaches it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -13,13 +15,19 @@ struct CountingAllocator;
 
 thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    /// The layout every allocation of which this thread is refused, while it refuses one.
+    static REFUSED: Cell<Option<Layout>> = const { Cell::new(None) };
 }
 
-// SAFETY: every call forwards to `System` unchanged; the only addition is a bump of a thread-local
-// cell without a destructor, which neither allocates nor unwinds.
+// SAFETY: every call forwards to `System` unchanged, or is a refusal (null), which hands out no
+// memory; the only addition is reading and bumping thread-local cells without a destructor, which
+// neither allocates nor unwinds.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        if REFUSED.try_with(Cell::get).ok().flatten() == Some(layout) {
+            return core::ptr::null_mut();
+        }
         // SAFETY: the caller's contract, forwarded.
         unsafe { System.alloc(layout) }
     }
@@ -48,4 +56,13 @@ static COUNTING: CountingAllocator = CountingAllocator;
 /// How many allocations the current thread has made.
 pub(crate) fn allocations() -> usize {
     ALLOCATIONS.with(Cell::get)
+}
+
+/// `run`'s answer, every allocation of `layout` the calling thread asks for while it runs
+/// refused, and every other made: what a call does when the heap has no room for that one block.
+pub(crate) fn refusing<R>(layout: Layout, run: impl FnOnce() -> R) -> R {
+    REFUSED.with(|refused| refused.set(Some(layout)));
+    let answer = run();
+    REFUSED.with(|refused| refused.set(None));
+    answer
 }

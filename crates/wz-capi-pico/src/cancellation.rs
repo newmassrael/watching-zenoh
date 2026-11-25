@@ -7,15 +7,15 @@
 //! arm's host surface (mutex, condvar, task), which a build without `multi-thread` does not
 //! have. The token does not depend on the arm.
 
-use alloc::sync::Arc;
 use core::ffi::c_void;
 
-use crate::prelude::Box;
-use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
+use wz_capi_port::lodge::Strong;
+
+use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 
 /// The shared state behind a `z_owned_cancellation_token_t`.
 ///
-/// Behind an `Arc`, which is what makes upstream's semantics
+/// Shared by counts ([`Strong`]), which is what makes upstream's semantics
 /// reproducible: pico's token is a REFCOUNTED value (`_Z_OWNED_TYPE_RC`), so a
 /// clone and its original name the SAME cancellation state and cancelling
 /// either cancels both. A plain copy of a bool would give each holder its own
@@ -35,8 +35,9 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 /// callbacks to be dropped, which pico's `_z_cancellation_token_cancel` does
 /// (`_z_sync_group_wait` after running the handlers). A get's registration is its fan, which
 /// lies in the get's place and is linked into the token's list there, and a registration is
-/// still refused once a cancel has started. The token a program creates is shared by its handles
-/// and is the one allocation the plane keeps.
+/// still refused once a cancel has started. The token a program creates is shared by its handles,
+/// in a place of the process's table of tokens in a kernel's build, so the plane asks no heap
+/// there; a token with no place left is refused as pico refuses one its heap cannot hold.
 pub(crate) use wz_capi_port::cancellation::CancellationToken;
 
 /// Consume a MOVED cancellation token, yielding the state it named.
@@ -47,7 +48,7 @@ pub(crate) use wz_capi_port::cancellation::CancellationToken;
 /// is an ownership transfer, not a borrow: a caller that hands over a token must
 /// not be left holding a live handle, and a callee that merely READ the pointer
 /// would leak one per get. This takes the handle and nulls the caller's owned
-/// struct, exactly as [`z_cancellation_token_drop`] does, and returns the `Arc`
+/// struct, exactly as [`z_cancellation_token_drop`] does, and returns the count
 /// so the caller keeps the state alive for as long as the get needs it.
 ///
 /// # Safety
@@ -55,7 +56,7 @@ pub(crate) use wz_capi_port::cancellation::CancellationToken;
 #[cfg(feature = "query")]
 pub(crate) unsafe fn take_moved_cancellation_token(
     moved: *mut z_moved_cancellation_token_t,
-) -> Option<Arc<CancellationToken>> {
+) -> Option<Strong<CancellationToken>> {
     if moved.is_null() {
         return None;
     }
@@ -64,12 +65,13 @@ pub(crate) unsafe fn take_moved_cancellation_token(
     if handle.is_null() {
         return None;
     }
-    Some(*Box::from_raw(handle as *mut Arc<CancellationToken>))
+    // SAFETY: the caller's: a live handle is a count `Strong::into_raw` gave up, taken once here.
+    Some(unsafe { Strong::from_raw(handle) })
 }
 
 /// pico `z_owned_cancellation_token_t` — `{ _z_cancellation_token_rc_t _rc }`,
 /// 16 B MEASURED on a 64-bit host: the rc's value pointer and its count pointer, two
-/// words on any host. Slot 0 carries this crate's `Arc` handle; slot 1 is the
+/// words on any host. Slot 0 carries a count of this crate's token; slot 1 is the
 /// refcount word upstream keeps there and wz leaves zero.
 #[repr(C)]
 pub struct z_owned_cancellation_token_t {
@@ -106,17 +108,27 @@ impl z_owned_cancellation_token_t {
     }
 }
 
-/// The `Arc` behind a token handle, or `None` on a null / spent one.
+/// The count a token handle holds, or `None` on a null / spent one.
 ///
 /// # Safety
 /// `ptr` must be null or a token this crate produced.
-unsafe fn token_ref<'a>(
-    ptr: *const z_loaned_cancellation_token_t,
-) -> Option<&'a Arc<CancellationToken>> {
+unsafe fn token_raw(ptr: *const z_loaned_cancellation_token_t) -> Option<*mut c_void> {
     if ptr.is_null() || (*ptr).handle.is_null() {
         return None;
     }
-    Some(&*((*ptr).handle as *const Arc<CancellationToken>))
+    Some((*ptr).handle)
+}
+
+/// The token behind a token handle, or `None` on a null / spent one.
+///
+/// # Safety
+/// `ptr` must be null or a token this crate produced, held for `'a`.
+unsafe fn token_ref<'a>(
+    ptr: *const z_loaned_cancellation_token_t,
+) -> Option<&'a CancellationToken> {
+    let raw = token_raw(ptr)?;
+    // SAFETY: the caller's: the handle holds a count of the token.
+    Some(unsafe { Strong::<CancellationToken>::value_of(raw) })
 }
 
 /// Build a fresh, uncancelled token (pico `z_cancellation_token_new`).
@@ -131,12 +143,19 @@ pub unsafe extern "C" fn z_cancellation_token_new(
         if token.is_null() {
             return Z_ERR_NULL;
         }
-        let arc = CancellationToken::new();
-        *token = z_owned_cancellation_token_t {
-            handle: Box::into_raw(Box::new(arc)) as *mut c_void,
-            _cnt: core::ptr::null_mut(),
-        };
-        Z_OK
+        match CancellationToken::new() {
+            Ok(shared) => {
+                *token = z_owned_cancellation_token_t {
+                    handle: Strong::into_raw(shared),
+                    _cnt: core::ptr::null_mut(),
+                };
+                Z_OK
+            }
+            Err(_) => {
+                *token = z_owned_cancellation_token_t::null_value();
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
+            }
+        }
     })
 }
 
@@ -166,8 +185,8 @@ pub unsafe extern "C" fn z_cancellation_token_cancel(
     token: *mut z_loaned_cancellation_token_t,
 ) -> ZResult {
     crate::ffi::guarded(|| match token_ref(token as *const _) {
-        Some(arc) => {
-            arc.cancel();
+        Some(shared) => {
+            shared.cancel();
             Z_OK
         }
         None => Z_ERR_NULL,
@@ -184,7 +203,7 @@ pub unsafe extern "C" fn z_cancellation_token_is_cancelled(
     token: *const z_loaned_cancellation_token_t,
 ) -> bool {
     crate::ffi::guard_val(false, || match token_ref(token) {
-        Some(arc) => arc.is_cancelled(),
+        Some(shared) => shared.is_cancelled(),
         None => false,
     })
 }
@@ -204,10 +223,14 @@ pub unsafe extern "C" fn z_cancellation_token_clone(
             return Z_ERR_NULL;
         }
         *dst = z_owned_cancellation_token_t::null_value();
-        match token_ref(src) {
-            Some(arc) => {
+        match token_raw(src) {
+            Some(raw) => {
+                // SAFETY: the handle's count, read and left held: `src` still owns it.
+                let held = core::mem::ManuallyDrop::new(unsafe {
+                    Strong::<CancellationToken>::from_raw(raw)
+                });
                 *dst = z_owned_cancellation_token_t {
-                    handle: Box::into_raw(Box::new(Arc::clone(arc))) as *mut c_void,
+                    handle: Strong::into_raw((*held).clone()),
                     _cnt: core::ptr::null_mut(),
                 };
                 Z_OK
@@ -219,7 +242,7 @@ pub unsafe extern "C" fn z_cancellation_token_clone(
 
 /// Release a token handle (pico `z_cancellation_token_drop`).
 ///
-/// Drops THIS handle's `Arc`; the state survives while any clone holds one.
+/// Lets go of THIS handle's count; the state survives while any clone holds one.
 ///
 /// # Safety
 /// `token` must be null or a valid moved token this crate produced.
@@ -232,7 +255,8 @@ pub unsafe extern "C" fn z_cancellation_token_drop(token: *mut z_moved_cancellat
         let handle = (*token)._this.handle;
         (*token)._this = z_owned_cancellation_token_t::null_value();
         if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut Arc<CancellationToken>));
+            // SAFETY: the caller's: a live handle is a count, let go of once here.
+            drop(unsafe { Strong::<CancellationToken>::from_raw(handle) });
         }
         Z_OK
     });
@@ -313,4 +337,54 @@ pub unsafe extern "C" fn z_internal_cancellation_token_check(
     token: *const z_owned_cancellation_token_t,
 ) -> bool {
     crate::ffi::guard_val(false, || !token.is_null() && !(*token).handle.is_null())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A token and its clone are counts of one state: cancelling through the clone is seen through
+    /// the original, and the clone asks the heap for nothing; a full heap refuses a new token with
+    /// `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, its handle left null, where it would end the program.
+    ///
+    /// # Control
+    ///
+    /// The first token is made with room on the heap. A clone that boxes its count reds the clone
+    /// under the refusing heap; a `new` that does not answer a refused box ends the test binary.
+    #[test]
+    fn a_token_and_its_clone_share_one_state_and_a_full_heap_refuses_a_new_one() {
+        let mut token = z_owned_cancellation_token_t::null_value();
+        // SAFETY: a local handle.
+        let made = unsafe { z_cancellation_token_new(&mut token) };
+        assert_eq!(made, Z_OK, "CONTROL: a token is made with room on the heap");
+        let mut copy = z_owned_cancellation_token_t::null_value();
+        // SAFETY: a live token and a local handle.
+        let cloned = crate::test_heap::refused(|| unsafe {
+            z_cancellation_token_clone(&mut copy, z_cancellation_token_loan(&token))
+        });
+        assert_eq!(cloned, Z_OK, "a clone asks the heap for nothing");
+        // SAFETY: the clone is live.
+        let cancelled =
+            unsafe { z_cancellation_token_cancel(z_cancellation_token_loan_mut(&mut copy)) };
+        assert_eq!(cancelled, Z_OK);
+        // SAFETY: the original is live.
+        let seen = unsafe { z_cancellation_token_is_cancelled(z_cancellation_token_loan(&token)) };
+        assert!(seen, "the clone and the original are one state");
+
+        let mut spare = z_owned_cancellation_token_t::null_value();
+        // SAFETY: a local handle.
+        let refused = crate::test_heap::refused(|| unsafe { z_cancellation_token_new(&mut spare) });
+        assert_eq!(refused, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert!(
+            spare.handle.is_null(),
+            "a refused token leaves its handle null"
+        );
+
+        // SAFETY: both handles are live, each let go of once.
+        unsafe {
+            z_cancellation_token_drop(z_cancellation_token_move(&mut copy));
+            z_cancellation_token_drop(z_cancellation_token_move(&mut token));
+        }
+        assert!(token.handle.is_null() && copy.handle.is_null());
+    }
 }
