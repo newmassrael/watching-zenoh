@@ -209,6 +209,39 @@ mod watched {
         );
     }
 
+    /// More declarations than the watches' room holds (the events of one message, two), carried by
+    /// one frame, are each told once, in order, none lost: the read hands the room out after each
+    /// message of a copied frame, and a lent record is one message already. Turned red by a frame
+    /// whose Declares are all dispatched before the room is handed out, which tells the third as a
+    /// loss.
+    #[test]
+    fn a_frame_of_more_declarations_than_the_room_is_told_whole() {
+        const DECLARED: [(wz_session_core::wire_id::EntityId, &str); 3] =
+            [(1, "demo/w/a"), (2, "demo/w/b"), (3, "demo/w/c")];
+        let router = Router::start(CatchAll::None);
+        let engine = open(&router);
+        let log = Log::new();
+        watch(&engine, DeclPlane::Subscribers, &log);
+        router.send(Command::DeclareSubscriberBatch(&DECLARED));
+        let last = Seen::Declared(3, "demo/w/c".to_owned());
+        until(&engine, "the router's declarations", || log.has(&last));
+        settle(&engine);
+        let events = log.events();
+        assert!(
+            !events.iter().any(|seen| matches!(seen, Seen::Lost(_))),
+            "none lost: {events:?}"
+        );
+        let told: Vec<Seen> = events
+            .into_iter()
+            .filter(|seen| matches!(seen, Seen::Declared(..)))
+            .collect();
+        let declared: Vec<Seen> = DECLARED
+            .iter()
+            .map(|&(id, key)| Seen::Declared(u64::from(id), key.to_owned()))
+            .collect();
+        assert_eq!(told, declared, "each declaration once, in order");
+    }
+
     /// A watch of queryables is told the router's queryable live, with the router as its peer; a
     /// second watch declared after is told it first, from what the router holds; both are told the
     /// next one and its retraction; a watch of subscribers is told none of it.

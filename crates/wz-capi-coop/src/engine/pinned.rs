@@ -100,6 +100,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let Some(mut held) = self.live() else {
                 return;
             };
+            // A Declare is told to the declaration watches by itself, and what it told is handed
+            // out before the next message fills their room (`COPIED_TAKES`); the frame's other
+            // planes take the rest of it below.
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            if let wz_session_core::network_message::NetworkMessage::Declare(_) = message {
+                held.0
+                    .session
+                    .registry
+                    .dispatch_declare_message(face, message, || records.actions.peer_session_zid());
+                drop(held);
+                self.deliver();
+                let Some(again) = self.live() else {
+                    return;
+                };
+                held = again;
+            }
             // A peer's reply is the get's it answers, handed to its callback as a lent one is
             // (`replies`); the subscribers' side has nothing to take of it.
             #[cfg(feature = "query")]

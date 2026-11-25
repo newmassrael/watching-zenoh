@@ -462,6 +462,20 @@ const READ_TAKES: TakenAhead = TakenAhead {
             feature = "group"
         ))
     )),
+    declares: false,
+};
+
+/// What the read takes of a copied frame's records itself, ahead of the frame's other planes
+/// (`Planes::BesideSubscribers`): what it takes of a lent record, and, with the declaration
+/// watches, every Declare, dispatched one message at a time (`RegistryOf::dispatch_declare_message`)
+/// so the watches' room is handed out before the next message fills it.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+const COPIED_TAKES: TakenAhead = TakenAhead {
+    declares: cfg!(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )),
+    ..READ_TAKES
 };
 
 /// The planes of the application layer a dispatch of a face's event reaches.
@@ -1090,7 +1104,7 @@ impl<H: Holders> RegistryOf<H> {
                     &mut set.gets,
                     event,
                     &others,
-                    READ_TAKES,
+                    COPIED_TAKES,
                 ),
             }
         }
@@ -1173,6 +1187,43 @@ impl<H: Holders> RegistryOf<H> {
         peer: impl FnOnce() -> Option<wz_session_core::session_zid::SessionZid>,
     ) {
         self.decl_watches.hear_link(peer);
+    }
+
+    /// Tell the declaration watches what the one `Declare` `message` of a copied frame of face
+    /// `face` declares, as that face's peer `peer` reads (`DeclWatches::hear_link`), and that its
+    /// peer ended its initial declarations if the message ends them: the frame's own dispatch
+    /// leaves its Declares to this (`COPIED_TAKES`). A face the session no longer holds tells
+    /// nothing.
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn dispatch_declare_message(
+        &mut self,
+        face: HeldFace,
+        message: &wz_session_core::network_message::NetworkMessage,
+        peer: impl FnOnce() -> Option<wz_session_core::session_zid::SessionZid>,
+    ) {
+        #[cfg(feature = "declarations-synced-event")]
+        let was_final = self.declarations_final(face);
+        self.decl_watches.hear_link(peer);
+        if let Some(Split {
+            app,
+            face: set,
+            others,
+            ..
+        }) = self.split(self.place(face))
+        {
+            app.dispatch_declare_message(&mut set.peer, &set.gets, message, &others);
+        }
+        #[cfg(feature = "declarations-synced-event")]
+        if !was_final && self.declarations_final(face) {
+            self.decl_watches.heard_synced();
+        }
+        self.decl_watches.heard_all();
     }
 
     /// Stage for the peer of face `id` what the application did to its subscriptions since the

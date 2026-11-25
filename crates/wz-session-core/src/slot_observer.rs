@@ -404,6 +404,27 @@ pub struct TakenAhead {
     /// subscribers by the caller (`PeerTokens::take_token_view`): the plane keeps only the marks
     /// that end the subscribers' histories.
     pub tokens: bool,
+    /// Every `Declare` of an owned frame, dispatched to the planes that tell what a peer declares
+    /// one message at a time by the caller (`SlotObserverOf::dispatch_declare_message`), so a
+    /// room the caller hands out after each message holds no more than one message makes.
+    pub declares: bool,
+}
+
+/// Whether `event` is a frame of owned records, whose Declares a caller may take one message at a
+/// time (`TakenAhead::declares`); a record lent where its frame lies is one message already.
+fn owned_frame(event: IterationEvent<'_, '_>) -> bool {
+    #[cfg(feature = "alloc")]
+    {
+        matches!(
+            event,
+            IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload { .. })
+        )
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = event;
+        false
+    }
 }
 
 /// [`TakenAhead`] with what the entry point itself says of the answers to the pending gets and
@@ -1463,6 +1484,77 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
     }
 
+    /// The planes that tell what a peer declares (its subscribers, its queryables and its tokens),
+    /// for the one owned `Declare` `message` of a frame whose dispatch leaves them its Declares
+    /// (`TakenAhead::declares`): as [`Self::dispatch_event_among`] tells them each of the frame's,
+    /// against the same id spaces and matching verdicts, so a caller can hand out what one message
+    /// told before the next is dispatched. A message that is no `Declare` tells nothing.
+    #[cfg(feature = "alloc")]
+    #[inline(never)]
+    pub fn dispatch_declare_message<Q: RequesterTables, O: OtherPeers, T: Storage>(
+        &mut self,
+        peers: &mut PeerTables<T>,
+        requesters: &Q,
+        message: &crate::network_message::NetworkMessage,
+        others: &O,
+    ) {
+        let messages = core::slice::from_ref(message);
+        #[cfg(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        ))]
+        let peer_table = peers
+            .subscribers
+            .mapping_spaces_over(self.tables.own_space());
+        #[cfg(feature = "declare-subscriber")]
+        {
+            let subscribers = &self.tables;
+            self.remote_subscribers.dispatch_messages_with_local(
+                &mut peers.remote_subscribers,
+                messages,
+                peer_table,
+                &|c| {
+                    crate::declare::holds_watches::<M>()
+                        && ((c.locality.allows_local()
+                            && subscribers.has_local_matching(c.keyexpr.as_str()))
+                            || others.subscribes(c))
+                },
+            );
+        }
+        #[cfg(all(feature = "declare-queryable", feature = "query-queryable"))]
+        {
+            let queryables = self.tables.queryables();
+            self.remote_queryables.dispatch_messages_with_local(
+                &mut peers.remote_queryables,
+                messages,
+                peer_table,
+                &|c| {
+                    crate::declare::holds_watches::<M>()
+                        && ((c.locality.allows_local()
+                            && queryables.is_some_and(|queryables| {
+                                queryables
+                                    .has_local_queryable(c.keyexpr.as_str(), c.complete_required)
+                            }))
+                            || others.answers(c))
+                },
+            );
+        }
+        #[cfg(all(feature = "declare-queryable", not(feature = "query-queryable")))]
+        self.remote_queryables.dispatch_messages_with_local(
+            &mut peers.remote_queryables,
+            messages,
+            peer_table,
+            &|c| crate::declare::holds_watches::<M>() && others.answers(c),
+        );
+        #[cfg(all(feature = "liveliness-token", feature = "liveliness-get"))]
+        self.liveliness
+            .dispatch_messages_unclaimed(messages, peer_table, &|id| requesters.claims(id));
+        #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
+        self.liveliness.dispatch_messages(messages, peer_table);
+        let _ = (&peers, requesters, messages, others);
+    }
+
     /// The planes after the subscribers' side of an event, the pending gets and snapshots told
     /// its answers and the queryables its queries unless the caller took them (`taken`). Inlined into each of the three calls above, so each keeps the one
     /// frame the planes' temporaries lie in.
@@ -1565,8 +1657,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             .mapping_spaces_over(self.tables.own_space());
         // R311y788 -- the remote-subscriber fan carries the session-local half of
         // the matching verdict, read from the sibling subscriber table.
+        // A caller that dispatches each Declare of an owned frame itself
+        // (`TakenAhead::declares`) leaves the frame's to the planes below it alone.
+        let declares = !(taken.ahead.declares && owned_frame(event));
         #[cfg(feature = "declare-subscriber")]
-        {
+        if declares {
             let subscribers = &self.tables;
             self.remote_subscribers.dispatch_iteration_event_with_local(
                 &mut peers.remote_subscribers,
@@ -1581,7 +1676,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             );
         }
         #[cfg(all(feature = "declare-queryable", feature = "query-queryable"))]
-        {
+        if declares {
             let queryables = self.tables.queryables();
             self.remote_queryables.dispatch_iteration_event_with_local(
                 &mut peers.remote_queryables,
@@ -1599,20 +1694,33 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             );
         }
         #[cfg(all(feature = "declare-queryable", not(feature = "query-queryable")))]
-        self.remote_queryables.dispatch_iteration_event_with_local(
-            &mut peers.remote_queryables,
-            event,
-            peer_table,
-            &|c| crate::declare::holds_watches::<M>() && others.answers(c),
-        );
+        if declares {
+            self.remote_queryables.dispatch_iteration_event_with_local(
+                &mut peers.remote_queryables,
+                event,
+                peer_table,
+                &|c| crate::declare::holds_watches::<M>() && others.answers(c),
+            );
+        }
         // A `Declare(DeclToken)` whose outer `interest_id` names a pending
         // liveliness GET belongs to that GET and to no observer plane (zenoh
         // answers the query and returns first): the claim is per id.
         #[cfg(all(feature = "liveliness-token", feature = "liveliness-get"))]
-        self.liveliness
-            .dispatch_iteration_event_unclaimed(event, peer_table, &|id| requesters.claims(id));
+        if declares {
+            self.liveliness
+                .dispatch_iteration_event_unclaimed(event, peer_table, &|id| requesters.claims(id));
+        }
         #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
-        self.liveliness.dispatch_iteration_event(event, peer_table);
+        if declares {
+            self.liveliness.dispatch_iteration_event(event, peer_table);
+        }
+        // Read only by the declaration planes, which a build with none of them lacks.
+        #[cfg(not(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )))]
+        let _ = declares;
         // R283 -- stage an interest-response for each inbound non-final liveliness
         // Interest, whole chains or none, into THIS session's staging. A build that answers no
         // peer's Interest (`interest-answer` off) stages none, as the subscriber plane does
@@ -2663,6 +2771,7 @@ mod tests {
                     TakenAhead {
                         queries: taken,
                         tokens: false,
+                        declares: false,
                     },
                 )
             });
@@ -2713,6 +2822,7 @@ mod tests {
                     TakenAhead {
                         queries: taken,
                         tokens: false,
+                        declares: false,
                     },
                 )
             });
@@ -2929,6 +3039,7 @@ mod tests {
                     TakenAhead {
                         queries: false,
                         tokens: taken,
+                        declares: false,
                     },
                 )
             });
@@ -2989,6 +3100,56 @@ mod tests {
             vec!["ours/x".to_string()],
             "the declare-subscriber plane resolved id 7 in OUR space"
         );
+    }
+
+    /// A dispatch whose caller takes the frame's Declares one message at a time
+    /// (`TakenAhead::declares`) tells the declaration planes none of them, and the caller's
+    /// dispatch of the one `Declare` tells it as the frame's would have. The CONTROL is the same
+    /// frame with nothing taken, which tells it in the frame's pass. Turned red by a frame pass that
+    /// tells a Declare its caller took, which a watch would be told twice, or a message dispatch
+    /// that tells nothing.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn a_caller_that_takes_the_declares_tells_each_once_by_its_message() {
+        for taken in [false, true] {
+            let mut f = fixture(true);
+            let outcome = own_alias_frame();
+            crate::driver_loop::deliver_frame(&outcome, |event| {
+                f.observer.dispatch_event_beside_subscribers(
+                    &mut (),
+                    &mut f.peers,
+                    &mut f.requesters,
+                    event,
+                    &NoOtherPeers,
+                    TakenAhead {
+                        declares: taken,
+                        ..TakenAhead::default()
+                    },
+                )
+            });
+            let told: Vec<String> = if taken {
+                Vec::new()
+            } else {
+                vec!["ours/x".to_string()]
+            };
+            assert_eq!(*f.declared.lock().unwrap(), told, "the frame's pass");
+            if taken {
+                let declare = NetworkMessage::Declare(Box::new(
+                    fx::declare_envelope_decl_subscriber(fx::decl_subscriber_nonlocal(1, 7, None)),
+                ));
+                f.observer.dispatch_declare_message(
+                    &mut f.peers,
+                    &f.requesters,
+                    &declare,
+                    &NoOtherPeers,
+                );
+                assert_eq!(
+                    *f.declared.lock().unwrap(),
+                    vec!["ours/x".to_string()],
+                    "the message's dispatch tells it once"
+                );
+            }
+        }
     }
 
     /// The anti-vacuity twin: the same frame against a session with no own space

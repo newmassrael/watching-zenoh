@@ -151,6 +151,13 @@ enum Command {
         &'static [u8],
         &'static [u8],
     ),
+    /// Declare each subscriber `.0` names, id and key, in one batch window, so that one frame
+    /// carries them all.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    DeclareSubscriberBatch(&'static [(wz_session_core::wire_id::EntityId, &'static str)]),
     /// Send the final of the initial declarations, as a peer does once it has declared what it
     /// held when the link came up.
     #[cfg(any(
@@ -715,6 +722,20 @@ fn run_router(
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
+            }
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            Ok(Command::DeclareSubscriberBatch(declared)) => {
+                let _ = actions.batch_start();
+                for &(id, key) in declared {
+                    let _ = actions.send_declare_subscriber(
+                        id,
+                        wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                    );
+                }
+                let _ = actions.batch_stop();
             }
             Ok(Command::PushBatch(key, count)) => {
                 let _ = actions.batch_start();
