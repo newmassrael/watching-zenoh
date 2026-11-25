@@ -46,11 +46,38 @@ impl Stated {
     }
 }
 
-/// `stated` with each count `text` states selected over it, or `Z_ERR_CONFIG_INVALID_VALUE` and
-/// `stated` as it was: for an item that is not `NAME=count`, a name that is no limit of a
-/// session nor a held value of the process pools (any other runtime limit included), a limit no
-/// machine reads from the snapshot, a count the build's domain leaves out, and a count past the
-/// build's value, the bound the build reserves.
+impl Stated {
+    /// `self` with the count of the limit `name` at `count`; `false`, and `self` as it was,
+    /// for a name that is no limit of a session nor a held value of the process pools, a limit
+    /// no machine reads from the snapshot, a count the build's domain leaves out, and a count past
+    /// the build's value, the bound the build reserves.
+    fn select(&mut self, name: &str, count: usize) -> bool {
+        #[cfg(wz_process_pools)]
+        {
+            if let Some(admitted) = self.held.select(name, count) {
+                return admitted;
+            }
+        }
+        let Some(entry) = SESSION_LIMITS.iter().find(|entry| entry.id() == name) else {
+            return false;
+        };
+        if let LimitValue::Integer(bound) = entry.value_in(&SessionLimits::BUILD) {
+            if count > bound {
+                return false;
+            }
+        }
+        matches!(
+            entry.select(&mut self.limits, LimitValue::Integer(count)),
+            Some(Ok(()))
+        )
+    }
+}
+
+/// `stated` with each count `text` states selected over it ([`Stated::select`]), or
+/// `Z_ERR_CONFIG_INVALID_VALUE` and `stated` as it was for an item that is not `NAME=count` or
+/// one the build refuses. One body for every door that reads the key: `zp_config_insert`
+/// judges a value with it as the open composes it.
+#[inline(never)]
 pub(crate) fn state_over(text: &str, stated: &mut Stated) -> Result<(), ZResult> {
     let mut next = *stated;
     for item in text
@@ -59,32 +86,12 @@ pub(crate) fn state_over(text: &str, stated: &mut Stated) -> Result<(), ZResult>
         .filter(|item| !item.is_empty())
     {
         let (name, count) = item.split_once('=').ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        let name = name.trim_ascii();
         let count = count
             .trim_ascii()
             .parse::<usize>()
             .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
-        #[cfg(wz_process_pools)]
-        {
-            if let Some(admitted) = next.held.select(name, count) {
-                if !admitted {
-                    return Err(Z_ERR_CONFIG_INVALID_VALUE);
-                }
-                continue;
-            }
-        }
-        let entry = SESSION_LIMITS
-            .iter()
-            .find(|entry| entry.id() == name)
-            .ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        if let LimitValue::Integer(bound) = entry.value_in(&SessionLimits::BUILD) {
-            if count > bound {
-                return Err(Z_ERR_CONFIG_INVALID_VALUE);
-            }
-        }
-        match entry.select(&mut next.limits, LimitValue::Integer(count)) {
-            Some(Ok(())) => {}
-            Some(Err(_)) | None => return Err(Z_ERR_CONFIG_INVALID_VALUE),
+        if !next.select(name.trim_ascii(), count) {
+            return Err(Z_ERR_CONFIG_INVALID_VALUE);
         }
     }
     *stated = next;

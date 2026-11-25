@@ -226,72 +226,85 @@ impl Counts {
     }
 }
 
-/// The counts of the values a program holds apart from any session, each a `HELD_*` limit the
-/// first open's config may state (`crate::config_limits`): the build's value where it states
-/// none, and the most a statement may ask, the build reserving memory for no more. The configs'
-/// count is not among them: the first config is made before any open states anything.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Held {
-    samples: usize,
-    replies: usize,
-    queries: usize,
-    encodings: usize,
-    hellos: usize,
-    /// Small, middle and largest, as [`Counts::payload_blocks`].
-    payload_blocks: [usize; PAYLOAD_CLASSES],
+/// A value a program holds apart from any session: the `HELD_*` limit the first open's config
+/// states its count by, as its declaration spells it (`crate::config_limits`), and the build's
+/// value of it, the most a statement may ask, the build reserving memory for no more.
+#[derive(Clone, Copy, Debug)]
+struct HeldRow {
+    id: &'static str,
+    build: usize,
 }
+
+/// How many values a program holds apart from any session.
+const HELD: usize = 8;
+
+/// Every value a program holds apart from any session, in the order of [`Held`]'s counts: one
+/// table a statement's name is found in and its count bounded by, so the doors that read one
+/// walk it once rather than branch on each name. The configs' count is not among them: the
+/// first config is made before any open states anything.
+const HELD_ROWS: [HeldRow; HELD] = [
+    HeldRow {
+        id: "HELD_SAMPLES",
+        build: caps::HELD_SAMPLES,
+    },
+    HeldRow {
+        id: "HELD_REPLIES",
+        build: caps::HELD_REPLIES,
+    },
+    HeldRow {
+        id: "HELD_QUERIES",
+        build: caps::HELD_QUERIES,
+    },
+    HeldRow {
+        id: "HELD_ENCODINGS",
+        build: caps::HELD_ENCODINGS,
+    },
+    HeldRow {
+        id: "HELD_HELLOS",
+        build: caps::HELD_HELLOS,
+    },
+    HeldRow {
+        id: "HELD_SMALL_PAYLOAD_BLOCKS",
+        build: caps::HELD_SMALL_PAYLOAD_BLOCKS,
+    },
+    HeldRow {
+        id: "HELD_MEDIUM_PAYLOAD_BLOCKS",
+        build: caps::HELD_MEDIUM_PAYLOAD_BLOCKS,
+    },
+    HeldRow {
+        id: "HELD_LARGE_PAYLOAD_BLOCKS",
+        build: caps::HELD_LARGE_PAYLOAD_BLOCKS,
+    },
+];
+
+/// The counts of the values a program holds apart from any session, one for each row of
+/// [`HELD_ROWS`] and in its order: samples, replies, queries, encodings, hellos, and the small,
+/// middle and largest payload blocks, as [`Counts::payload_blocks`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Held([usize; HELD]);
 
 impl Held {
     /// The build's values.
-    pub(crate) const BUILD: Self = Self {
-        samples: caps::HELD_SAMPLES,
-        replies: caps::HELD_REPLIES,
-        queries: caps::HELD_QUERIES,
-        encodings: caps::HELD_ENCODINGS,
-        hellos: caps::HELD_HELLOS,
-        payload_blocks: [
-            caps::HELD_SMALL_PAYLOAD_BLOCKS,
-            caps::HELD_MEDIUM_PAYLOAD_BLOCKS,
-            caps::HELD_LARGE_PAYLOAD_BLOCKS,
-        ],
+    pub(crate) const BUILD: Self = {
+        let mut counts = [0; HELD];
+        let mut rows: &[HeldRow] = &HELD_ROWS;
+        let mut at: usize = 0;
+        while let [row, rest @ ..] = rows {
+            put(&mut counts, at, row.build);
+            at = at.saturating_add(1);
+            rows = rest;
+        }
+        Self(counts)
     };
-
-    /// Each limit's id as its declaration spells it, the one a config states it by.
-    #[cfg(test)]
-    pub(crate) const IDS: [&'static str; 8] = [
-        "HELD_SAMPLES",
-        "HELD_REPLIES",
-        "HELD_QUERIES",
-        "HELD_ENCODINGS",
-        "HELD_HELLOS",
-        "HELD_SMALL_PAYLOAD_BLOCKS",
-        "HELD_MEDIUM_PAYLOAD_BLOCKS",
-        "HELD_LARGE_PAYLOAD_BLOCKS",
-    ];
-
-    /// The count of the limit `id`, or `None` when `id` names none of these.
-    fn count_mut(&mut self, id: &str) -> Option<&mut usize> {
-        let [small, middle, largest] = &mut self.payload_blocks;
-        Some(match id {
-            "HELD_SAMPLES" => &mut self.samples,
-            "HELD_REPLIES" => &mut self.replies,
-            "HELD_QUERIES" => &mut self.queries,
-            "HELD_ENCODINGS" => &mut self.encodings,
-            "HELD_HELLOS" => &mut self.hellos,
-            "HELD_SMALL_PAYLOAD_BLOCKS" => small,
-            "HELD_MEDIUM_PAYLOAD_BLOCKS" => middle,
-            "HELD_LARGE_PAYLOAD_BLOCKS" => largest,
-            _ => return None,
-        })
-    }
 
     /// Set the count of the limit `id` to `count`: `None` when `id` names none of these,
     /// `Some(false)` with nothing set for a count past the build's value of it.
     pub(crate) fn select(&mut self, id: &str, count: usize) -> Option<bool> {
-        let mut build = Self::BUILD;
-        let bound = *build.count_mut(id)?;
-        let held = self.count_mut(id)?;
-        if count > bound {
+        let (row, held) = HELD_ROWS
+            .iter()
+            .zip(self.0.iter_mut())
+            .find(|(row, _)| row.id == id)?;
+        if count > row.build {
             return Some(false);
         }
         *held = count;
@@ -1275,6 +1288,7 @@ const fn built_counts() -> Result<Counts, Unplanned> {
 /// sessions, each holding as many of each entity as `limits` admit within the build's value of
 /// the limit, and the held values. Refused only by counts past the address space.
 const fn counts_of(limits: &SessionLimits, held: &Held) -> Result<Counts, Unplanned> {
+    let Held([samples, replies, queries, encodings, hellos, small, middle, largest]) = *held;
     let bounds = Bounds {
         subscribers: each::<{ caps::MAX_SUBSCRIPTIONS }>(limits.max_subscriptions()),
         queryables: each::<{ caps::MAX_QUERYABLES }>(limits.max_queryables()),
@@ -1316,16 +1330,16 @@ const fn counts_of(limits: &SessionLimits, held: &Held) -> Result<Counts, Unplan
         queryables: 0,
         liveliness_tokens: 0,
         liveliness_subscribers: 0,
-        samples: held.samples,
-        replies: held.replies,
-        queries: held.queries,
+        samples,
+        replies,
+        queries,
         configs: caps::HELD_CONFIGS,
-        hellos: held.hellos,
+        hellos,
         // At the bound of their limits, as the entities above.
         queriers: 0,
         keyexprs: 0,
-        payload_blocks: held.payload_blocks,
-        encodings: held.encodings,
+        payload_blocks: [small, middle, largest],
+        encodings,
         gets: 0,
         liveliness_gets: 0,
         matching_listeners: 0,
@@ -3009,7 +3023,8 @@ mod tests {
         assert!(reserved.stage(Stage::Open).is_some());
         let built = test_counts().expect("the test's counts make pools");
         let mut more = Held::BUILD;
-        more.samples = built.samples.saturating_add(1);
+        let Held([samples, ..]) = &mut more;
+        *samples = built.samples.saturating_add(1);
         let asked = opened_with(&more);
         assert!(!reserved.at_open(&asked, &asked));
         assert!(!reserved.fixed, "a refused open fixes nothing");
@@ -3052,15 +3067,13 @@ mod tests {
     /// count held to no bound, or an id the declaration does not spell.
     #[test]
     fn a_held_count_is_stated_up_to_the_builds_value() {
-        for id in Held::IDS {
+        for HeldRow { id, build: bound } in HELD_ROWS {
             assert!(
                 wz_session_core::limits::CAPACITY_LIMITS.contains(&id),
                 "{id}"
             );
             let mut held = Held::BUILD;
             assert_eq!(held.select(id, 0), Some(true), "{id}");
-            let mut build = Held::BUILD;
-            let bound = *build.count_mut(id).expect("an id of a held value");
             let mut past = Held::BUILD;
             assert_eq!(past.select(id, bound + 1), Some(false), "{id}");
             assert_eq!(past, Held::BUILD, "{id}: nothing set");
@@ -3071,19 +3084,57 @@ mod tests {
         assert_eq!(held, Held::BUILD);
     }
 
+    /// The build's held values are the rows', and each row's count reaches the count of its own
+    /// object and no other's. Turned red by a reading of [`Held`] out of the rows' order.
+    #[test]
+    fn each_held_row_counts_its_own_object() {
+        for (row, count) in HELD_ROWS.iter().zip(Held::BUILD.0) {
+            assert_eq!(count, row.build, "{}", row.id);
+        }
+        let of = |objects: &Counts, id: &str| match id {
+            "HELD_SAMPLES" => objects.samples,
+            "HELD_REPLIES" => objects.replies,
+            "HELD_QUERIES" => objects.queries,
+            "HELD_ENCODINGS" => objects.encodings,
+            "HELD_HELLOS" => objects.hellos,
+            "HELD_SMALL_PAYLOAD_BLOCKS" => objects.payload_blocks[0],
+            "HELD_MEDIUM_PAYLOAD_BLOCKS" => objects.payload_blocks[1],
+            "HELD_LARGE_PAYLOAD_BLOCKS" => objects.payload_blocks[2],
+            other => panic!("{other} is no held value"),
+        };
+        let kept =
+            |id: &str| id != "HELD_HELLOS" || cfg!(any(feature = "scout", feature = "scout-mcu"));
+        for (at, row) in HELD_ROWS.iter().enumerate() {
+            let mut held = Held([0; HELD]);
+            held.0[at] = 1;
+            let objects = counts_of(&session_limits(), &held).expect("the counts make pools");
+            for other in HELD_ROWS {
+                let expected = usize::from(other.id == row.id && kept(other.id));
+                assert_eq!(
+                    of(&objects, other.id),
+                    expected,
+                    "{} stated, {}",
+                    row.id,
+                    other.id
+                );
+            }
+        }
+    }
+
     /// The held values are the capacities the declaration classes as counts the first open
     /// states, each once and no other: the configs' count, made before any open, is not among
     /// them. Turned red by an id dropped from either list, or added to one alone.
     #[test]
     fn the_held_values_are_the_declarations_process_open_counts() {
         let open_counts = &wz_session_core::limits::PROCESS_OPEN_COUNTS;
-        assert_eq!(Held::IDS.len(), open_counts.len());
-        for id in Held::IDS {
+        let ids = HELD_ROWS.map(|row| row.id);
+        assert_eq!(ids.len(), open_counts.len());
+        for id in ids {
             let found = open_counts.iter().filter(|&&open| open == id).count();
             assert_eq!(found, 1, "{id} among the process open counts");
         }
         for id in open_counts {
-            let found = Held::IDS.iter().filter(|&&held| held == *id).count();
+            let found = ids.iter().filter(|&&held| held == *id).count();
             assert_eq!(found, 1, "{id} among the held values");
         }
     }
