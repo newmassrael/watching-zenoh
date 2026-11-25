@@ -231,6 +231,12 @@ mod pinned;
     not(any(feature = "threads", feature = "listen", feature = "group"))
 ))]
 mod replies;
+// The delivery of a peer's query such a read makes, one queryable at a time (`queries`).
+#[cfg(all(
+    feature = "queryable",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+mod queries;
 
 mod registry;
 pub(crate) use registry::FACE_SET_BYTES;
@@ -1213,6 +1219,13 @@ pub(crate) struct Takes {
         not(any(feature = "threads", feature = "listen", feature = "group"))
     ))]
     pub(crate) pinned_replies: core::sync::atomic::AtomicUsize,
+    /// The peers' queries the read handed to a queryable itself (`queries`), one for each
+    /// queryable a query reached.
+    #[cfg(all(
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) pinned_queries: core::sync::atomic::AtomicUsize,
     /// The holds of key expression declarations the session handed out (declared or retained)
     /// less those given back, counted whether the session is open or closed: a hold given back to
     /// a closed session is still one given back, and one never given back stays counted.
@@ -5518,6 +5531,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ))]
     pub(crate) fn replies_handed_by_the_read(&self) -> usize {
         self.takes.pinned_replies.load(Ordering::Relaxed)
+    }
+
+    /// How many calls of the session's queryables the read made itself for the peers' queries, one
+    /// for each queryable a query reached, with nothing of them held in the round (`queries`).
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) fn queries_handed_by_the_read(&self) -> usize {
+        self.takes.pinned_queries.load(Ordering::Relaxed)
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open

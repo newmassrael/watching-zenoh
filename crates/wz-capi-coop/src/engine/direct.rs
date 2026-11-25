@@ -140,12 +140,40 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
         registry.hear_decl_link(|| actions.peer_session_zid());
         registry.dispatch_event_to(face, event, planes);
         registry.flush_pending_replies(face, actions);
-        for (rid, qos) in registry.take_pending_final_rids(face) {
-            if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
-                actions.send_response_final(rid, qos);
-            }
+        self.owe_finals(registry);
+    }
+
+    /// Owe the `Final`s the dispatch of the face's records staged
+    /// (`Registry::take_pending_final_rids`), each as `Self::owe_final` owes it.
+    #[cfg(feature = "queryable")]
+    pub(super) fn owe_finals(&self, registry: &mut Registry) {
+        for (rid, qos) in registry.take_pending_final_rids(self.face) {
+            self.owe_final(rid, qos);
         }
     }
+
+    /// The query `rid` of the face's link owes its `Final`, of `qos`: sent now when nothing
+    /// holds it, and otherwise once the last callback or kept query holding it lets go.
+    #[cfg(feature = "queryable")]
+    pub(super) fn owe_final(&self, rid: wz_session_core::wire_id::RequestId, qos: QosLevel) {
+        if self
+            .plane
+            .with_holds(|holds| holds.owe(self.generation, rid, qos))
+        {
+            self.actions.send_response_final(rid, qos);
+        }
+    }
+
+    /// Keep the key form of each query `event` carries by an id of the shared dictionary, so a
+    /// reply on its key mirrors it.
+    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    pub(super) fn note_requests(&self, event: &IterationEvent<'_, '_>) {
+        self.actions.note_requests(event);
+    }
+
+    /// A build without the shared key ids keeps no key form of a query.
+    #[cfg(all(feature = "queryable", not(feature = "shared-key-ids")))]
+    pub(super) fn note_requests(&self, _event: &IterationEvent<'_, '_>) {}
 
     /// [`Self::dispatch`], the round told already.
     #[cfg(not(feature = "queryable"))]
@@ -211,6 +239,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
             #[cfg(feature = "query")]
             IterationEvent::InPlace(ref record) if record.response().is_some() => {
                 self.engine.hand_lent_reply(self.records.face, record);
+            }
+            // Handed to each queryable it reaches with the session let go of (`queries`), none of it
+            // into the round; a Request the lent form does not represent is dispatched as every
+            // record is.
+            #[cfg(feature = "queryable")]
+            IterationEvent::InPlace(ref record) if record.request().is_some() => {
+                if let Some(mut held) = self.engine.hand_lent_query(self.records, record, &event) {
+                    self.records
+                        .dispatch(&mut held.0.session.registry, event, Planes::All);
+                }
             }
             // An alive token answering a pending liveliness get is handed to it as a reply is;
             // any other declaration of an interest is dispatched as every record is.

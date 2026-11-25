@@ -77,6 +77,72 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
     );
 }
 
+/// A peer's query is handed to each queryable it reaches by the read itself, one call at a time in
+/// the table's order with the session free, nothing of it held in the round, and its Final follows
+/// the replies. Turned red by a query offered to the round (the read counts none), handed while the
+/// read holds the session, or a Final sent before a reply.
+#[cfg(all(
+    feature = "queryable",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_query_is_handed_to_its_queryables_by_the_read_with_the_session_free() {
+    use wz_capi_port::QueryableSink;
+    use wz_session_core::query_sink::{QueryView as _, ReplyOut as _};
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let seen: Arc<Mutex<Vec<(u8, bool)>>> = Arc::default();
+    // Two keys, so neither declaration stands for the other.
+    for (which, key) in [(1u8, "demo/h/**"), (2, "demo/h/a")] {
+        let seen = seen.clone();
+        let session = EngineHold::downgrade(&engine);
+        engine
+            .declare_queryable_on_wire(
+                key,
+                WireKey::literal(),
+                false,
+                Locality::Remote,
+                None,
+                QueryableSink::shared(move |query, out, _holder| {
+                    let free = session
+                        .upgrade()
+                        .is_some_and(|engine| engine.session_is_free());
+                    seen.lock().unwrap().push((which, free));
+                    out.reply_keyed(query.keyexpr(), b"r")
+                        .expect("a reply on the query's own key");
+                }),
+            )
+            .expect("the engine has queryables in this build");
+    }
+    until(&engine, "the router to see the queryables", || {
+        router.seen(|s| s.declares) >= 2
+    });
+    assert_eq!(
+        engine.queries_handed_by_the_read(),
+        0,
+        "CONTROL: nothing is handed before the query"
+    );
+    router.send(Command::Query(3, "demo/h/a"));
+    until(&engine, "the replies and the final", || {
+        router.seen(|s| s.answers.len()) >= 3
+    });
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, true), (2, true)],
+        "each queryable in its order, the session free"
+    );
+    assert_eq!(
+        router.seen(|s| s.answers.clone()),
+        vec!["reply", "reply", "final"]
+    );
+    assert_eq!(
+        engine.queries_handed_by_the_read(),
+        2,
+        "the query was held in the round"
+    );
+}
+
 /// Each sample of one frame is handed to its callback with the session's state free: a callback
 /// that takes the session (a put, a declaration) never waits on the read that called it. Turned
 /// red by a read that hands a record out while it holds the session.

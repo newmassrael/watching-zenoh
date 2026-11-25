@@ -23,6 +23,10 @@
 //! the key and the parameters and hands the key to each reply, so a keep takes no memory of the
 //! session but the row and copies nothing onto the heap.
 //!
+//! A session whose read steps its one link itself holds nothing of a peer's query it reads where
+//! the frame lies: the read hands it to each queryable it reaches, one call at a time with the
+//! session let go of, before the next record (`queries`).
+//!
 //! The session's own get is the exception to the round (`local-queryable`): the queryables it
 //! matched are noted by the plane and the get hands each of them its own view ([`OwnGet`]) once
 //! the session's lock is let go, inside the call. Nothing of the query is copied: a queryable

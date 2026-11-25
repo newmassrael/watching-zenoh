@@ -1390,6 +1390,34 @@ impl<H: Holders> RegistryOf<H> {
             .claim_token_view(declare, spaces, room)
     }
 
+    /// The query the Request `record` of face `face` lends, read for a walk that hands it to each
+    /// queryable it reaches with the session let go of (`queries`), its key copied into `room`
+    /// (`QueryPeer::pin_request_in_place`). `None`, with what the Request owes staged in the
+    /// face's Finals, for one no queryable is handed, and for a face the session no longer holds;
+    /// refused for a Request the lent form does not represent, which the caller dispatches.
+    #[cfg(all(
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn pin_lent_query<'q, 'f: 'q>(
+        &mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'q, 'f>,
+        room: &'q mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+    ) -> Result<
+        Option<wz_session_core::query::pinned::PinnedQuery<'q>>,
+        wz_session_core::driver_loop::OwedToProjection,
+    > {
+        let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) else {
+            return Ok(None);
+        };
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.peer
+            .queries
+            .pin_request_in_place(record, spaces, room, &mut face.peer.finals)
+    }
+
     /// Hand the alive token at `keyexpr` to the pending liveliness get `interest_id` of face
     /// `face` (`Self::claim_token`), as the face's dispatch hands it. A face the session no longer
     /// holds hands it to none.
