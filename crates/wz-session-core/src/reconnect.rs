@@ -1199,8 +1199,6 @@ mod reconnect_locator_tests {
             proto: Proto::Tcp,
             addr: "1.2.3.4:7447".parse::<SocketAddr>().unwrap(),
             socket: None,
-            mcast_ttl: None,
-            mcast_join: alloc::vec::Vec::new(),
             retry: None,
             tls: None,
             qos: None,

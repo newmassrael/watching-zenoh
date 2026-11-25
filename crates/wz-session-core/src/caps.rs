@@ -612,6 +612,12 @@ pub const MAX_LOCATOR_LEN: usize = generated::MAX_LOCATOR_LEN;
 /// row.
 pub const MAX_GROUP_ENDPOINT_LEN: usize = generated::MAX_GROUP_ENDPOINT_LEN;
 
+/// The longest raweth group endpoint, its mapping table and whitelist included, a session joins
+/// by. The rows a raweth endpoint is read into (its mapping entries, a mapping key, its
+/// whitelist and its interface name) are sized from it, so a table that fits the endpoint fits
+/// them; a longer endpoint is refused when it is joined. Read only by the raweth transport.
+pub const MAX_RAWETH_ENDPOINT_LEN: usize = generated::MAX_RAWETH_ENDPOINT_LEN;
+
 /// The members a session holds of each multicast group it joined: the rows a connectivity reader
 /// reads a member's transport from, with nothing allocated, and the group session's member table.
 /// A JOIN from one more is not admitted while every row is held.

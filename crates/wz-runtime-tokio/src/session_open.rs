@@ -3294,9 +3294,7 @@ pub fn locator_scheme(locator: &AnyLocator) -> &'static str {
 pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTargetError> {
     // A name is resolved HERE so the loop never blocks on a resolver; the
     // reconstruction keeps the scheme and the socket options (`#iface=`,
-    // `#bind=`, `#dscp=`), and cannot keep
-    // the multicast tail because `Named` does not carry one (a DNS-named
-    // endpoint is not a multicast group).
+    // `#bind=`, `#dscp=`).
     let locator = match plan_endpoint(target).map_err(DialTargetError::Malformed)? {
         AnyLocator::Named {
             proto,
@@ -3317,8 +3315,6 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
                 proto,
                 addr: addrs[0],
                 socket,
-                mcast_ttl: None,
-                mcast_join: Vec::new(),
                 // R2496 — the resolved form keeps the endpoint's retry tail.
                 // The reconstruction already keeps the scheme and the bind for
                 // this reason; dropping the retry span here would mean a NAMED
