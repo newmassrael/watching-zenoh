@@ -105,13 +105,22 @@ use wz_session_core::WhatAmI;
 /// opens its raweth transport, a multicast session over raw Ethernet
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
+///
+/// Read as bytes: every separator and prefix is ASCII, which no other character's UTF-8 encoding
+/// holds, so a byte search finds the places a character search would, and the library carries no
+/// character searcher.
 pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
-    let (locator, metadata) = endpoint.split_once('#').unwrap_or((endpoint, ""));
+    let mut halves = endpoint.as_bytes().splitn(2, |&byte| byte == b'#');
+    let locator = halves.next().unwrap_or_default();
+    let metadata = halves.next().unwrap_or_default();
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
-    if locator.starts_with("reth/") {
+    if locator.starts_with(b"reth/") {
         return true;
     }
-    locator.starts_with("udp/") && metadata.split(';').any(|pair| pair.starts_with("iface="))
+    locator.starts_with(b"udp/")
+        && metadata
+            .split(|&byte| byte == b';')
+            .any(|pair| pair.starts_with(b"iface="))
 }
 
 /// The endpoint of the group a session joins as its one transport, read once for both engines: the
