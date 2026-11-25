@@ -844,9 +844,13 @@ impl DeclWatches {
         if table.room.len != 0 {
             return true;
         }
-        table
+        // Read into a value before the guard goes: the walk's iterator borrows the table, and a
+        // tail expression's temporaries outlive the guard.
+        let owed = table
             .watches()
-            .any(|watch| watch.catching_up || watch.lost != 0)
+            .any(|watch| watch.catching_up || watch.lost != 0);
+        drop(table);
+        owed
     }
 
     /// The next call a watch is owed, its event copied into `told` for the caller to hand with no
