@@ -17403,7 +17403,21 @@ layer_c1st_abi_stamp() {
     # what the runs asked of the operating system to the manifest's own `requires` (every run asks
     # for it) and `may_require` (no run asks outside it), with nothing unclassified.
     [ "$rc" -eq 0 ] && { python3 scripts/lib/facility_trace.py --selftest || rc=1; }
-    [ "$rc" -eq 0 ] && { python3 scripts/lib/facility_trace.py --judge "$work/a" || rc=1; }
+    # The package above is the defconfigs', whose libraries leave off the doors the drivers state a
+    # configuration's requirement through, so its runs are held to the build's bound alone. The
+    # same libraries built with those doors (`device-requires`, `config-verdict`) are packaged
+    # beside it and every run of a driver is judged there too, against its configuration's
+    # requirement, the denied runs among them. Each judgement is a verdict on its own runs, so a
+    # finding of one does not keep the other's runs from being read.
+    local judged=0
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/facility_trace.py --judge "$work/a" || judged=1; }
+    local doors=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc
+        --artifact capi-pico --artifact capi-c --artifact ap-demo
+        --capability device-requires --capability config-verdict)
+    [ "$rc" -eq 0 ] && { "${doors[@]}" --out "$work/d" || rc=1; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/d" || rc=1; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/facility_trace.py --judge-doors "$work/d" || judged=1; }
+    [ "$judged" -eq 0 ] || rc=1
     # A registered node declaration as the input (5b): the node's file says which declaration it was
     # built from, the manifest repeats it, and verifying resolves the declaration again.
     local declared_node_cmd=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc

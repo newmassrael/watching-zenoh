@@ -6,7 +6,7 @@
 describe what was built.
 
     wz_package.py --platform ID --artifact ID... --out DIR [--cargo-profile release|debug]
-                  [--profile ID] [--node ID | --node-file PATH]
+                  [--profile ID] [--capability ID...] [--node ID | --node-file PATH]
     wz_package.py --verify DIR
     wz_package.py --sdk-bundle-check ID
     wz_package.py --write-fixtures | --check-fixtures | --record-measured DIR
@@ -62,6 +62,16 @@ declaration itself (`node/<id>.toml`, the manifest's `inputs`), and `--verify` r
 bytes and holds the node file to it with no tree consulted: a node is identified by the digest of what
 it was built from, so a file built from another declaration is a finding. The artifact row states the
 operating systems its port exists for (`os`), and a platform outside them is refused by name.
+
+## A capability turned on over the build
+
+`--capability ID` turns one capability on over the build each library is resolved to (its ABI's
+defconfig, or the profile), in the library of each ABI it reaches and no other, as a line
+`CONFIG_<symbol>=y` merged last would; an executable is built as before. The features of each
+library record it, as they record every build. It is how a package carries a door its defconfig
+leaves off for a judge that holds runs to that door (Layer C1st), while the package a deployer
+receives and the size ledgers stay the defconfig's. A capability the declaration does not have, or
+one that reaches none of the libraries named, is refused.
 
 ## What it does not do
 
@@ -539,7 +549,21 @@ def profile_cargo_args(decl: dict, row: dict, view: dict) -> list[str]:
     return wz_config.cargo_args(decl, row["abi"], set(view["capabilities"])).split()
 
 
-def artifact_build(decl: dict, row: dict, profile_id: str | None) -> tuple[list[str], dict[str, str]] | None:
+def check_capabilities(decl: dict, rows: list[dict], capabilities: list[str]) -> None:
+    """Refuse a capability to turn on that the declaration does not have, or that reaches none of
+    the libraries named: a package asked for a door it would not carry is not built."""
+    abis = {row["abi"] for row in rows if row["kind"] == "shared-library" and row.get("abi") in wz_config.ABIS}
+    for cid in capabilities:
+        cap = decl["caps"].get(cid)
+        if cap is None:
+            raise Refusal(f"`{cid}` is no capability of the declaration")
+        if not abis & set(cap["abis"]):
+            raise Refusal(f"capability `{cid}` reaches the ABIs {sorted(cap['abis'])}, and no library "
+                          f"named is built through one of them")
+
+
+def artifact_build(decl: dict, row: dict, profile_id: str | None,
+                   capabilities: list[str] | None = None) -> tuple[list[str], dict[str, str]] | None:
     """The cargo arguments and the environment a library artifact is built with: the registered
     profile's, or with none its ABI's original defconfig, both from the one resolver
     (`wz_config.build_of`), so a package ships the limits and policies of the build it names and
@@ -548,8 +572,11 @@ def artifact_build(decl: dict, row: dict, profile_id: str | None) -> tuple[list[
     if row["kind"] != "shared-library" or row.get("abi") not in wz_config.ABIS:
         return None
     presets = [PROFILES_DIR / f"{profile_id}.conf"] if profile_id is not None else []
+    # Turned on in the library of each ABI the capability reaches and no other: a door of one ABI
+    # that selects a shared capability would otherwise change the other library's build too.
+    mine = [cid for cid in capabilities or [] if row["abi"] in decl["caps"][cid]["abis"]]
     try:
-        args, env = wz_config.build_of(decl, row["abi"], presets)
+        args, env = wz_config.build_of(decl, row["abi"], presets, mine)
     except wz_config.PresetError as err:
         raise Refusal(f"the build of {row['id']} does not resolve: {err}") from err
     return args, dict(line.partition("=")[::2] for line in env)
@@ -1251,18 +1278,19 @@ def node_input(decl: dict, rows: list[dict], node_id: str | None, node_file: pat
 
 def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.Path, cargo_profile: str,
             profile_id: str | None = None, node_id: str | None = None,
-            node_file: pathlib.Path | None = None) -> int:
+            node_file: pathlib.Path | None = None, capabilities: list[str] | None = None) -> int:
     """Build, describe and verify; a declaration given as a file is generated into a directory of
     the build's own, which is gone when the build is."""
     with tempfile.TemporaryDirectory(prefix="wz-package-node-") as work:
         return _package(decl, platform_id, artifact_ids, out, cargo_profile, profile_id, node_id, node_file,
-                        pathlib.Path(work))
+                        pathlib.Path(work), capabilities or [])
 
 
 def _package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.Path, cargo_profile: str,
              profile_id: str | None, node_id: str | None, node_file: pathlib.Path | None,
-             work: pathlib.Path) -> int:
+             work: pathlib.Path, capabilities: list[str]) -> int:
     platform, rows = preflight(decl, platform_id, artifact_ids)
+    check_capabilities(decl, rows, capabilities)
     node = node_input(decl, rows, node_id, node_file, work)
     declarations = {node["declaration_sha256"]: node} if node else {}
     view = None
@@ -1272,7 +1300,7 @@ def _package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib
         for row in rows:
             profile_cargo_args(decl, row, view)
     # Every library's build, resolved before anything is built or created.
-    builds = {row["id"]: artifact_build(decl, row, profile_id) for row in rows}
+    builds = {row["id"]: artifact_build(decl, row, profile_id, capabilities) for row in rows}
     rustc, host = rustc_identity()
     cross = platform["triple"] != host
     check_toolchain_env(platform, cross)
@@ -2035,6 +2063,12 @@ def _selftest() -> int:
            pico_args[:2] == ["--no-default-features", "--features"] and "query" in pico_args[2].split(","))
     refuses("a profile on an executable", "an executable has no such mapping",
             lambda: profile_cargo_args(decl, demo, view))
+    c_row = next(a for a in decl["artifacts"] if a["id"] == "capi-c")
+    refuses("a capability the declaration does not have", "no capability of the declaration",
+            lambda: check_capabilities(decl, [pico, c_row], ["no-such-capability"]))
+    refuses("a capability no library named is built through", "no library named",
+            lambda: check_capabilities(decl, [pico, demo], ["config-verdict"]))
+    check_capabilities(decl, [pico, c_row, demo], ["device-requires", "config-verdict"])
     wanted = sorted(wz_config.features_for(decl, "pico", {"query"}))
     on_view = artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, wanted)
     expect("a library built with what the profile asks has no profile finding",
@@ -2086,6 +2120,20 @@ def _selftest() -> int:
         expect("a resolved profile builds the libraries it can",
                profile_cargo_args(decl, next(a for a in decl["artifacts"] if a["id"] == "capi-c"), real)[0]
                == "--no-default-features")
+
+        def built_features(build: tuple[list[str], dict[str, str]] | None) -> set[str]:
+            args = build[0] if build else []
+            return set(args[args.index("--features") + 1].split(",")) if "--features" in args else set()
+
+        doors = ["device-requires", "config-verdict"]
+        pico_plain, c_plain = artifact_build(decl, pico, None), artifact_build(decl, c_row, None)
+        pico_doors, c_doors = artifact_build(decl, pico, None, doors), artifact_build(decl, c_row, None, doors)
+        expect("a capability turned on reaches the library of its ABI and no other",
+               "device-requires" in built_features(pico_doors) - built_features(pico_plain)
+               and built_features(c_doors) - built_features(c_plain) == {"config-verdict"}
+               and built_features(pico_plain) <= built_features(pico_doors))
+        expect("an executable is built as its package states whatever is turned on",
+               artifact_build(decl, demo, None, doors) is None)
     else:
         print("wz-package selftest: the real-profile arms SKIP, kconfiglib is absent "
               "(scripts/provision-kconfiglib.sh)")
@@ -2552,6 +2600,7 @@ def main(argv: list[str]) -> int:
     platform_id = out = profile_id = node_id = None
     node_file: pathlib.Path | None = None
     artifact_ids: list[str] = []
+    capabilities: list[str] = []
     cargo_profile = "release"
     it = iter(argv)
     for arg in it:
@@ -2565,6 +2614,8 @@ def main(argv: list[str]) -> int:
             cargo_profile = next(it, "")
         elif arg == "--profile":
             profile_id = next(it, None)
+        elif arg == "--capability":
+            capabilities.append(next(it, ""))
         elif arg == "--node":
             node_id = next(it, None)
         elif arg == "--node-file":
@@ -2577,7 +2628,7 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         return package(decl, platform_id, artifact_ids, pathlib.Path(out), cargo_profile, profile_id, node_id,
-                       node_file)
+                       node_file, capabilities)
     except Refusal as err:
         print(f"wz-package: REFUSED -- {err}", file=sys.stderr)
         return 2
