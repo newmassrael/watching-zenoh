@@ -3516,6 +3516,8 @@ pub(crate) mod redial_heap;
 mod redial_wait;
 mod replay;
 mod round;
+// The cells a link's task takes: a build whose read steps its one link itself runs none.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",

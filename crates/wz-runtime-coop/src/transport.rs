@@ -13,7 +13,6 @@ use alloc::vec::Vec;
 use wz_session_core::bounded::push_text;
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
-use wz_session_core::driver_loop::EventSink;
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
 use wz_session_core::group_locator::GroupLocatorError;
 use wz_session_core::link::BoxedLinkDriver;
@@ -35,7 +34,10 @@ use crate::ClockSource;
 #[cfg(feature = "reassembly")]
 mod state;
 #[cfg(feature = "reassembly")]
-pub use state::{DialRow, DialWalk, FaceStep, TransportFaces, TransportState, WireMaking};
+pub use state::{
+    DialRow, DialWalk, FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, TransportFaces,
+    TransportRouter, TransportState, WireMaking,
+};
 
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
 /// given, and why.
@@ -186,8 +188,9 @@ pub trait TransportSession<C: ClockSource + 'static, K: LockKind = crate::sync::
 pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared> {
     /// The gates the session puts a link's pump behind, placed in the link's cell of its table.
     type Gate: SessionDatagramLink + 'static;
-    /// What a link's task hands what its session reads to.
-    type Dispatch: EventSink + 'static;
+    /// What a link's task hands what its session reads to, or, for a link whose session its
+    /// owner steps itself, what the owner hands each step of it (`TransportState::place_wire`).
+    type Dispatch;
     /// The session's half of a link, as its face keeps it.
     type Session;
 

@@ -391,3 +391,50 @@ fn a_steady_stream_runs_no_bookkeeping_per_batch() {
         "the bookkeeping ran during a stream that changed nothing it follows"
     );
 }
+
+/// The records of one frame are read in one take of the link's input, each handed out as it is
+/// read, and no pass of a task runs for them: the read steps the link itself. Turned red by a read
+/// that stops the walk of a frame at each record and reads the rest of it again at a later take,
+/// or that runs the session's tasks to read it.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[test]
+fn a_frame_of_n_records_is_read_in_one_take() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let got: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let got = got.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                got.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    let (reads, passes) = (
+        engine.takes.pump_reads.load(Ordering::SeqCst),
+        engine.task_clock_reads(),
+    );
+    router.send(Command::PushBatch("demo/in", COUNT));
+    until(&engine, "the batch", || {
+        got.lock().unwrap().len() >= usize::from(COUNT)
+    });
+    assert_eq!(
+        *got.lock().unwrap(),
+        (0..COUNT).map(|index| vec![index]).collect::<Vec<_>>(),
+        "CONTROL: each record of the frame was handed out once, in order"
+    );
+    assert_eq!(
+        engine.takes.pump_reads.load(Ordering::SeqCst) - reads,
+        1,
+        "the frame was read in more than one take"
+    );
+    assert_eq!(
+        engine.task_clock_reads(),
+        passes,
+        "a pass of the session's tasks ran for the frame"
+    );
+}
