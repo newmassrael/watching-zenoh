@@ -213,6 +213,8 @@ mod tests {
         for text in [
             "MAX_SUBSCRIPTION=1",
             "MAX_SUBSCRIPTIONSS=1",
+            "MAX_SUBSCRIPTIONS==1",
+            "=1",
             "NO_SUCH_LIMIT=1",
             "HELD_SESSIONS=1",
             "HELD_CONFIGS=1",
