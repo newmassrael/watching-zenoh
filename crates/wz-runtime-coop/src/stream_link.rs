@@ -832,6 +832,9 @@ pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFramin
     /// Whether the session asked, while a batch is lent, to keep it
     /// ([`SessionDatagramLink::keep`]): it then stays at the front, lent again by the next receive.
     keeping: Cell<bool>,
+    /// The batches the copying receive let go of for want of heap room, until the loop takes them.
+    #[cfg(feature = "alloc")]
+    rx_drops: crate::link_storage::RxDrops,
     /// The memory the session encodes its frames into, and which of it is out.
     tx: TxLender<T>,
     /// Why the link is gone, once it is.
@@ -891,6 +894,8 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
             #[cfg(test)]
             moved: Cell::new(0),
             keeping: Cell::new(false),
+            #[cfg(feature = "alloc")]
+            rx_drops: crate::link_storage::RxDrops::new(),
             tx: TxLender::new(tx),
             lost: Cell::new(None),
             error: Cell::new(None),
@@ -1469,7 +1474,12 @@ where
     // The batch the lending receive hands over, copied out.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        crate::link_storage::copied_receive(self)
+        crate::link_storage::copied_receive(self, &self.rx_drops)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn take_rx_dropped(&self) -> usize {
+        self.rx_drops.take()
     }
 
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {

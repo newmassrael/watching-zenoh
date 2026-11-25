@@ -339,7 +339,9 @@ pub enum StatDrop {
     /// charged on a write the link driver refuses — an oversize datagram past
     /// the link MTU, or a write onto a closed writer channel, both reported
     /// through [`LinkSendOutcome`](crate::link::LinkSendOutcome) — a reason
-    /// upstream does not have. The module docs carry the full note.
+    /// upstream does not have. The module docs carry the full note. On the
+    /// receive side it is charged for a datagram a link let go of before the
+    /// session read it, having no heap room to copy it into.
     Transport,
     /// The downsampling interceptor rate-limited the message
     /// (upstream `ReasonLabel::Downsampling`).

@@ -171,6 +171,15 @@ pub trait SessionDatagramLink {
         None
     }
 
+    /// How many inbound datagrams the link let go of since it was last asked, before the session
+    /// read them: a copying receive that finds no heap room for the copy drops the datagram, as a
+    /// socket drops one it has no buffer for (`link_storage::copied_receive`). The loop asks after
+    /// each receive and charges them to the session's receive drops. The provided form drops
+    /// none, which is right for a link that lends or moves what it received and copies nothing.
+    fn take_rx_dropped(&self) -> usize {
+        0
+    }
+
     /// Whether the link holds input it has already taken from its stack: a whole batch read
     /// together with the one before it, a datagram read while the loop waited. The next step
     /// reads it, and a wait on the stack would not see it (`input_wait`, the heap profile's).
@@ -442,6 +451,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
         (**self).lost()
     }
 
+    fn take_rx_dropped(&self) -> usize {
+        (**self).take_rx_dropped()
+    }
+
     fn holds_input(&self) -> bool {
         (**self).holds_input()
     }
@@ -513,6 +526,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for crate::link_cells:
 
     fn lost(&self) -> Option<LostCause> {
         (**self).lost()
+    }
+
+    fn take_rx_dropped(&self) -> usize {
+        (**self).take_rx_dropped()
     }
 
     fn holds_input(&self) -> bool {
@@ -1782,7 +1799,14 @@ impl<
         // One unit of input at most a step. Nothing left to read and the link is gone (a stream
         // whose peer closed it): the session is told, after everything queued before the end has
         // been read. The next step finds the engine final.
-        if !self.take_input(now_ms, on_event) {
+        let took = self.take_input(now_ms, on_event);
+        // What the link let go of before the session could read it is charged before the link
+        // is judged gone, so the drops of its last receives are counted with the session's.
+        let dropped = self.link.take_rx_dropped();
+        if dropped != 0 {
+            wz_session_core::drive::note_rx_dropped(&self.actions, dropped);
+        }
+        if !took {
             if let Some(cause) = self.link.lost() {
                 let outcome = wz_session_core::drive::dispatch_link_lost(&mut self.engine, cause);
                 on_event.event(IterationEvent::Poll(&outcome));
@@ -2401,12 +2425,26 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
         self.0.lost()
     }
 
+    fn take_rx_dropped(&self) -> usize {
+        self.0.take_rx_dropped()
+    }
+
     fn holds_input(&self) -> bool {
         self.0.holds_input()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        self.0.waits_for_buffer()
+    }
+
     fn owes_write(&self) -> bool {
         self.0.owes_write()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        self.0.write_owed_now()
     }
 
     fn takes_input(&self) -> bool {
@@ -2419,6 +2457,10 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
 
     fn keep(&self) {
         self.0.keep()
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.0.lends_until_next_receive()
     }
 }
 
@@ -2780,6 +2822,8 @@ mod wake_budget_tests {
         holding: core::cell::Cell<bool>,
         /// How many times the link was asked for a datagram.
         reads: core::cell::Cell<u32>,
+        /// The datagrams the link let go of that its loop has not taken yet.
+        dropped: core::cell::Cell<usize>,
     }
 
     impl SessionDatagramLink for Recording {
@@ -2799,6 +2843,9 @@ mod wake_budget_tests {
         }
         fn takes_input(&self) -> bool {
             !self.holding.get()
+        }
+        fn take_rx_dropped(&self) -> usize {
+            self.dropped.replace(0)
         }
     }
 
@@ -2848,6 +2895,33 @@ mod wake_budget_tests {
                 .into(),
             region: None,
         }
+    }
+
+    /// The datagrams a link let go of before the session read them are taken off it by the next
+    /// step, through the handle the pump holds it by, and charged to the session. Turned red by a
+    /// step that does not ask (`take_rx_dropped` left out of `SessionPump::step`), or by the `Rc`
+    /// handle not passing the question on.
+    #[test]
+    fn a_step_takes_the_datagrams_its_link_dropped() {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
+        let link = Rc::new(Recording::default());
+        link.dropped.set(2);
+        let config = SessionDriveConfig {
+            timeouts: SessionTimeouts::from_build(),
+            role: SessionRole::Acceptor,
+            max_iters: None,
+        };
+        let mut pump = SessionPump::new(runtime, link.clone(), actions, entropy, clock, config);
+        let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
+        assert_eq!(
+            link.dropped.get(),
+            0,
+            "the step took the drops off the link"
+        );
     }
 
     /// What one step of an acceptor pump tells its link it may wait, after the application layer

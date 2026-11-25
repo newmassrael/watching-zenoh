@@ -20,6 +20,8 @@ use wz_runtime_coop::session_drive::{self as coop_drive, SessionDatagramLink};
 pub use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole};
 // What the drive functions below name. `run_session` is absent under
 // `session-slot` with `reassembly`, and with it every one of these.
+#[cfg(feature = "alloc")]
+use wz_runtime_coop::link_storage::{copied_receive, RxDrops};
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
@@ -56,6 +58,10 @@ pub struct LwipSessionLink<L: Deref<Target = LwipLink>> {
     /// session's pump does. Held for that drop and never read.
     #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
     _lane: Option<crate::listener::LaneGuard>,
+    /// The datagrams the copying receive let go of for want of heap room, until the loop takes
+    /// them.
+    #[cfg(feature = "alloc")]
+    rx_drops: RxDrops,
 }
 
 impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
@@ -67,6 +73,8 @@ impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
             driver,
             #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
             _lane: None,
+            #[cfg(feature = "alloc")]
+            rx_drops: RxDrops::new(),
         }
     }
 
@@ -84,6 +92,8 @@ impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
             link,
             driver,
             _lane: Some(lane),
+            #[cfg(feature = "alloc")]
+            rx_drops: RxDrops::new(),
         }
     }
 }
@@ -97,13 +107,19 @@ impl<L: Deref<Target = LwipLink>> SessionDatagramLink for LwipSessionLink<L> {
         self.link.check_timeouts();
     }
 
-    // The copying receive is the heap profile's: its frame is an owned `RxFrame`.
-    // The driver hands over its peer's datagrams only (and binds an acceptor at
-    // its first `InitSyn`), so every reply goes to the peer.
+    // The copying receive is the heap profile's: its frame is an owned `RxFrame`,
+    // copied from where the lending receive below holds the datagram, and a
+    // datagram the heap has no room for is dropped and counted. The driver hands
+    // over its peer's datagrams only (and binds an acceptor at its first
+    // `InitSyn`), so every reply goes to the peer.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        let dg = self.driver.try_recv()?;
-        Some(RxFrame::new(dg.data.as_slice().to_vec()))
+        copied_receive(self, &self.rx_drops)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn take_rx_dropped(&self) -> usize {
+        self.rx_drops.take()
     }
 
     // The datagram is lent where the session socket's receive queue holds it:

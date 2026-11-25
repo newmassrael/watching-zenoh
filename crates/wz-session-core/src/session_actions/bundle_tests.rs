@@ -249,6 +249,20 @@ fn bundle() -> (
     (actions, link)
 }
 
+/// A datagram the link let go of before the session read it is charged to the session's receive
+/// drops, once for each, and to nothing it sends. Turned red by `drive::note_rx_dropped`
+/// charging no counter, or the transmit side's.
+#[cfg(feature = "transport-stats")]
+#[test]
+fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
+    let (actions, _link) = bundle();
+    crate::drive::note_rx_dropped(&actions, 2);
+    crate::drive::note_rx_dropped(&actions, 1);
+    let report = actions.stats_report();
+    assert_eq!(report.rx.n_dropped, 3, "each dropped datagram is counted");
+    assert_eq!(report.tx.n_dropped, 0, "nothing sent was dropped");
+}
+
 /// The halves a holder writes where it keeps them are the halves the bundle is made of: the link's
 /// half holds the sink handed and the kernel the parameters. A holder that refuses has its refusal
 /// answered and lets go of what it was handed, the sink's handle with it. Turned red by a bundle

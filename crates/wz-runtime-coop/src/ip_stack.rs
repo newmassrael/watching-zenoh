@@ -303,6 +303,10 @@ where
         either!(self, link => link.lost())
     }
 
+    fn take_rx_dropped(&self) -> usize {
+        either!(self, link => link.take_rx_dropped())
+    }
+
     fn holds_input(&self) -> bool {
         either!(self, link => link.holds_input())
     }

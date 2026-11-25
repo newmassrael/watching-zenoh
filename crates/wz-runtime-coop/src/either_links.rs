@@ -115,6 +115,10 @@ impl<P: SessionDatagramLink, Q: SessionDatagramLink> SessionDatagramLink for Eit
         on_side!(EitherPump, self, link => link.lost())
     }
 
+    fn take_rx_dropped(&self) -> usize {
+        on_side!(EitherPump, self, link => link.take_rx_dropped())
+    }
+
     fn holds_input(&self) -> bool {
         on_side!(EitherPump, self, link => link.holds_input())
     }
@@ -343,6 +347,22 @@ mod tests {
         fn holds_input(&self) -> bool {
             self.0 == LEFT
         }
+        fn take_rx_dropped(&self) -> usize {
+            usize::from(self.0)
+        }
+    }
+
+    /// What a link dropped is asked of the side that holds it, and of the link a shared handle
+    /// names. Turned red by a pump or a handle that answers it itself (the trait's provided form)
+    /// instead of passing the question on.
+    #[test]
+    fn a_pump_answers_what_the_link_of_its_side_dropped() {
+        let left: EitherPump<Tagged, Tagged> = EitherPump::Left(Tagged(LEFT));
+        let right: EitherPump<Tagged, Tagged> = EitherPump::Right(Tagged(RIGHT));
+        assert_eq!(left.take_rx_dropped(), usize::from(LEFT));
+        assert_eq!(right.take_rx_dropped(), usize::from(RIGHT));
+        let shared: SharedPump = CellRc::boxed(Tagged(LEFT)).into_link();
+        assert_eq!(shared.take_rx_dropped(), usize::from(LEFT));
     }
 
     fn opened<P>(pump: P) -> OpenedLink<P> {

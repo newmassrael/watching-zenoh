@@ -93,6 +93,11 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static, K: LockKind> SessionDatag
         self.pump.lost()
     }
 
+    // What the link dropped was dropped whatever the gate holds back: it is counted as it is.
+    fn take_rx_dropped(&self) -> usize {
+        self.pump.take_rx_dropped()
+    }
+
     fn holds_input(&self) -> bool {
         self.pump.holds_input()
     }
@@ -299,5 +304,34 @@ mod tests {
             made.is_some_and(|gate| gate.admitted.get()),
             "CONTROL: the gate made is admitted"
         );
+    }
+
+    /// A gate answers what its link dropped by asking the link. Turned red by a gate that answers
+    /// it itself (the trait's provided form) instead of passing the question on.
+    #[test]
+    fn a_gate_answers_what_its_link_dropped() {
+        struct Dropping(Cell<usize>);
+
+        impl SessionDatagramLink for Dropping {
+            fn service(&self) {}
+
+            fn try_recv(&self) -> Option<RxFrame> {
+                None
+            }
+
+            fn take_rx_dropped(&self) -> usize {
+                self.0.replace(0)
+            }
+        }
+
+        let runtime = CoopRuntime::new(Frozen);
+        let OpenedLink { sink, .. } = MemoryLinks::new(MemoryNetwork::new(), ACCEPTOR)
+            .open_acceptor(7447)
+            .expect("bind the acceptor's end");
+        let acceptor =
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
+        let gate = AdmissionGate::new(Dropping(Cell::new(2)), acceptor);
+        assert_eq!(gate.take_rx_dropped(), 2, "the link's drops");
+        assert_eq!(gate.take_rx_dropped(), 0, "a take empties the count");
     }
 }
