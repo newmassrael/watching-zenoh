@@ -139,6 +139,9 @@ pub struct HighWater {
     mark: u32,
 }
 
+// SAFETY: a mark is a `u32` or nothing, and zero is the mark that has seen nothing.
+unsafe impl crate::bounded::ZeroEmpty for HighWater {}
+
 impl HighWater {
     /// A mark that has seen nothing.
     pub const fn new() -> Self {

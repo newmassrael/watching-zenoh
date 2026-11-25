@@ -380,6 +380,22 @@ impl<O> HeldReplies<O, Lent> {
     }
 }
 
+// SAFETY: its rows are a sequence of a policy whose sequences are empty at all zero bytes
+// (`ZeroSeqs`), and a hold that refused nothing is a zero count.
+unsafe impl<O, P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for HeldReplies<O, P> {}
+
+impl<O> HeldReplies<O, crate::bounded::Region> {
+    /// The line of a region's description ([`place_seqs`](crate::bounded::place_seqs)) that places
+    /// this hold's rows: the hold at `at` in the region, its `MAX_PENDING_REPLIES` rows at `rows`.
+    pub const fn place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
+        crate::bounded::SeqPlace::of::<HeldReply<O, crate::bounded::Region>>(
+            at.wrapping_add(core::mem::offset_of!(Self, rows)),
+            rows,
+            caps::MAX_PENDING_REPLIES,
+        )
+    }
+}
+
 impl<O: Copy + Eq, P: Storage> HeldReplies<O, P> {
     /// How many replies were not held for want of room.
     pub fn refused(&self) -> u32 {

@@ -59,18 +59,28 @@ impl PeerOp {
 }
 
 /// A peer the image declares: its row in the zid table.
+// The row's index plus one, so a session's tables that hold `Option<ClassId>` are `None` at all
+// zero bytes, the niche of a transparent `NonZeroU16` being guaranteed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ClassId(u16);
+#[repr(transparent)]
+pub struct ClassId(core::num::NonZeroU16);
 
 impl ClassId {
-    /// The class at `index` of the zid table.
-    pub const fn new(index: u16) -> Self {
-        Self(index)
+    /// The class at `index` of the zid table, `None` for `u16::MAX`, the one index no class names.
+    pub const fn new(index: u16) -> Option<Self> {
+        match index.checked_add(1) {
+            Some(row) => match core::num::NonZeroU16::new(row) {
+                Some(row) => Some(Self(row)),
+                None => None,
+            },
+            None => None,
+        }
     }
 
     /// The class's row in the zid table.
     pub const fn index(self) -> usize {
-        self.0 as usize
+        // At least 1, so the subtraction stays in range.
+        self.0.get().wrapping_sub(1) as usize
     }
 }
 
@@ -173,7 +183,7 @@ impl<'a> PeerAllowance<'a> {
     pub fn class_of(&self, zid: &[u8]) -> Option<ClassId> {
         let target: &[u8; 16] = zid.try_into().ok()?;
         let at = self.zids.binary_search(target).ok()?;
-        Some(ClassId::new(u16::try_from(at).ok()?))
+        ClassId::new(u16::try_from(at).ok()?)
     }
 
     /// Whether the peer of `class` may do `op` on `key`: one bit. `false` for a class, a key or an
@@ -222,6 +232,19 @@ pub(crate) mod tests {
     // Ten keys: a row is two bytes. Peer A may use keys 0, 3 and 9; peer B may use key 1.
     const BITS: [u8; 4] = [0b0000_1001, 0b0000_0010, 0b0000_0010, 0b0000_0000];
 
+    /// A class names its row whatever the row, but the last index, and no class is all zero bytes.
+    /// Turned red by a `ClassId` whose zero is a class.
+    #[test]
+    fn a_class_of_zero_bytes_is_none_and_names_its_row() {
+        // SAFETY: an `Option` of a transparent `NonZeroU16` is `None` at zero bytes.
+        let zeroed: Option<ClassId> = unsafe { core::mem::zeroed() };
+        assert_eq!(zeroed, None);
+        assert_eq!(ClassId::new(0).map(ClassId::index), Some(0));
+        assert_eq!(ClassId::new(7).map(ClassId::index), Some(7));
+        assert_eq!(ClassId::new(u16::MAX), None);
+        assert!(ClassId::new(0) < ClassId::new(1));
+    }
+
     /// The two-peer table of these tests, for the tests of what is built on an allowance.
     pub(crate) const TABLE: PeerAllowance<'static> = match PeerAllowance::try_new(&ZIDS, 10, &BITS)
     {
@@ -231,8 +254,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_peer_is_found_by_its_zid_and_only_by_all_of_it() {
-        assert_eq!(TABLE.class_of(&A), Some(ClassId::new(0)));
-        assert_eq!(TABLE.class_of(&B), Some(ClassId::new(1)));
+        assert_eq!(TABLE.class_of(&A), ClassId::new(0));
+        assert_eq!(TABLE.class_of(&B), ClassId::new(1));
         assert_eq!(TABLE.class_of(&[3; 16]), None);
         assert_eq!(TABLE.class_of(&[1; 15]), None);
         assert_eq!(TABLE.class_of(&[1; 17]), None);
@@ -242,8 +265,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_bit_is_what_the_row_says_and_nothing_else_is_allowed() {
-        let a = ClassId::new(0);
-        let b = ClassId::new(1);
+        let a = ClassId::new(0).unwrap();
+        let b = ClassId::new(1).unwrap();
         let allowed = |class, key| TABLE.allows(class, PeerOp::Publish, KeyId::new(key));
         let rows = |class| -> [bool; 10] { core::array::from_fn(|k| allowed(class, k as u16)) };
         let yes = true;
@@ -261,7 +284,7 @@ pub(crate) mod tests {
         // Outside the table: a key past the last, a class past the last.
         assert!(!allowed(a, 10));
         assert!(!allowed(a, 200));
-        assert!(!allowed(ClassId::new(2), 0));
+        assert!(!allowed(ClassId::new(2).unwrap(), 0));
     }
 
     #[test]
@@ -289,6 +312,6 @@ pub(crate) mod tests {
         let none = PeerAllowance::try_new(&[], 10, &[]).expect("no peers");
         assert_eq!(none.class_of(&A), None);
         let empty = PeerAllowance::try_new(&ZIDS, 0, &[]).expect("no keys");
-        assert!(!empty.allows(ClassId::new(0), PeerOp::Publish, KeyId::new(0)));
+        assert!(!empty.allows(ClassId::new(0).unwrap(), PeerOp::Publish, KeyId::new(0)));
     }
 }

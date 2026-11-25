@@ -3196,3 +3196,125 @@ fn a_write_filter_row_answers_as_its_handle_does() {
     assert_eq!(tables.write_filter_open(filter, &peers), Some(true));
     assert_eq!(peers.asked.get(), 2);
 }
+
+/// Entity ids counted from zero: none given hands out 1 first, the last id is `u32::MAX`, and ids
+/// from 0 are ids from 1. Turned red by `EntityIds::next` answering 0 for none given.
+#[test]
+fn entity_ids_of_zero_hand_out_one_first_and_end_at_the_last() {
+    let mut ids = EntityIds::default();
+    assert_eq!(ids.next(), Some(1));
+    assert_eq!(ids.take(), Some(1));
+    assert_eq!(ids.take(), Some(2));
+    let mut last = EntityIds::from_next(Some(u32::MAX));
+    assert_eq!(last.take(), Some(u32::MAX));
+    assert_eq!(last.take(), None);
+    assert_eq!(EntityIds::from_next(None).next(), None);
+    assert_eq!(EntityIds::from_next(Some(0)).next(), Some(1));
+    assert_eq!(EntityIds::from_next(Some(7)).next(), Some(7));
+}
+
+/// Plane bounds of zero bytes bind no plane; bounds from rows bind each plane to its own count.
+/// Turned red by `of_filter` reading a bound uninverted.
+#[test]
+fn plane_bounds_of_zero_bind_nothing_and_bounds_of_rows_bind_each_plane() {
+    let unbound = PlaneBounds::UNBOUND;
+    assert_eq!(unbound.of_filter(Plane::Subscribers, false), usize::MAX);
+    assert_eq!(unbound.of_filter(Plane::Subscribers, true), usize::MAX);
+    let rows = TableRows {
+        publishers: 3,
+        queriers: 2,
+        key_listeners: 1,
+        ..small_rows()
+    };
+    let bound = PlaneBounds::of(&rows);
+    assert_eq!(bound.of_filter(Plane::Subscribers, false), 3);
+    assert_eq!(
+        bound.of_filter(
+            Plane::Queryables {
+                complete_required: false
+            },
+            false
+        ),
+        2
+    );
+    assert_eq!(bound.of_filter(Plane::Subscribers, true), 1);
+}
+
+/// A session's tables of the region policy, their rows and their key arena, as a region of the
+/// build's shape lays them out.
+struct OneSession {
+    tables: SessionTables<Calls, Region>,
+    rows: SessionRows<Calls>,
+    keys: crate::key_arena::KeyArena<4096>,
+}
+
+// SAFETY: every field is `ZeroEmpty`.
+unsafe impl ZeroEmpty for OneSession {}
+
+/// The description of a `OneSession`.
+const ONE_SESSION: RegionLines<SESSION_TABLE_LINES> = SessionTables::<Calls, Region>::places(
+    core::mem::offset_of!(OneSession, tables),
+    core::mem::offset_of!(OneSession, rows),
+);
+
+/// Tables of the region policy of all zero bytes are empty and refuse nothing they are asked to
+/// read; placed by their description, each holds its build's bound of rows and keeps its keys in
+/// the region's key arena. Turned red by a table left out of `SessionTables::places`, by the key
+/// handle's line left out, or by a zero field that is not an empty one.
+#[test]
+fn region_tables_of_zero_bytes_placed_by_their_description_declare_and_undeclare() {
+    let layout = std::alloc::Layout::new::<OneSession>();
+    // SAFETY: the layout is of a type of some bytes.
+    let block = unsafe { std::alloc::alloc_zeroed(layout) };
+    let region = NonNull::new(block).expect("the test allocator answers");
+    let session = block.cast::<OneSession>();
+    // SAFETY: the zeroed block is a `OneSession`, every field of which is `ZeroEmpty`; the key arena
+    // is reached by this one reference, made before any key exists and not used after `space`.
+    let space = unsafe {
+        (*core::ptr::addr_of_mut!((*session).keys))
+            .space(SessionLimits::defaults().max_keyexpr_bytes_held())
+    };
+    // SAFETY: the description is the region's own, its lines naming the tables' columns and handle
+    // in it and the rows beside them, which nothing else reaches; the key arena stays in the block
+    // until it is given back below.
+    unsafe { crate::key_arena::place_region(region, space, &ONE_SESSION) };
+    // SAFETY: the tables field alone, projected from the block; the rows and the key arena are
+    // reached only through the tables from here on.
+    let tables = unsafe { &mut *core::ptr::addr_of_mut!((*session).tables) };
+    assert!(tables.subscribers().is_empty());
+    assert_eq!(tables.next_entity_id(), Some(1));
+    assert_eq!(tables.subscribers().capacity(), caps::MAX_SUBSCRIPTIONS);
+    let first = tables
+        .declare_subscriber("a/b", Locality::Any, KeyForm::default(), 1)
+        .unwrap();
+    assert_eq!(tables.subscribers().get(first.handle).unwrap().id(), 1);
+    assert_eq!(
+        tables
+            .subscribers()
+            .get(first.handle)
+            .unwrap()
+            .key()
+            .as_str(),
+        "a/b"
+    );
+    for n in 1..caps::MAX_SUBSCRIPTIONS {
+        let key = std::format!("a/{n}");
+        tables
+            .declare_subscriber(&key, Locality::Any, KeyForm::default(), 2)
+            .unwrap();
+    }
+    let refused = tables
+        .declare_subscriber("a/full", Locality::Any, KeyForm::default(), 3)
+        .unwrap_err();
+    assert_eq!(refused.why, RegisterError::TableFull);
+    let undeclared = tables.undeclare_subscriber(first.handle).unwrap();
+    assert_eq!(undeclared.taken.unwrap(), 1);
+    let declared = tables.declare_keyexpr("k/one").unwrap();
+    assert_eq!(declared.id, 1, "a zero expression id mints 1 first");
+    // SAFETY: the tables are dropped once, in place, while the key arena their keys lie in is still
+    // in the block; then the block goes back with its layout.
+    unsafe {
+        core::ptr::drop_in_place(core::ptr::addr_of_mut!((*session).tables));
+        std::alloc::dealloc(block, layout);
+    }
+}

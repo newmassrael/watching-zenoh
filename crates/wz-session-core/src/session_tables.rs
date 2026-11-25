@@ -57,12 +57,12 @@ use core::cell::Cell;
 use core::fmt;
 
 use crate::bounded::{
-    Arena, CapacityFull, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
-    TableLender,
+    Arena, CapacityFull, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Region,
+    RegionLines, Storage, TableLender, ZeroEmpty,
 };
 use crate::caps;
 use crate::declare_form::RetractionKey;
-use crate::key_arena::{KeySpace, LentKeys};
+use crate::key_arena::{KeyRef, KeySpace, LentKeys};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
 use crate::named_key::{NamedKey, Prefix};
@@ -77,7 +77,7 @@ use crate::query::{fire_queryables, QueryableRef, QueryableRows};
 use crate::registry_error::RegisterError;
 use crate::row_callback::RowCallback;
 use crate::sink::RowAccess;
-use crate::slot_map::{Handle, Removal, SlotMap, Slots};
+use crate::slot_map::{Handle, Removal, SlotMap, SlotRows, Slots};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 use crate::wire_key::MappedId;
 
@@ -274,7 +274,7 @@ pub trait RowCallbacks {
 /// names it [`Absent`]: the table is a value of no size and nothing to drop, every read of it finds
 /// nothing and every declaration on it is refused, each answered where the compiler sees it, so
 /// the code that would walk, lend or drop the table is not in the build.
-pub trait Presence {
+pub trait Presence: sealed::Presence {
     /// The table of a kind whose table is `T`.
     type Table<T>;
 
@@ -341,6 +341,16 @@ impl<K, T, const N: usize> LentTable for SlotMap<K, T, N, Lent> {
     }
 }
 
+mod sealed {
+    /// The two answers to whether a kind is kept, and no other: what lets tables of the region
+    /// policy, and their rows, state that they are empty at all zero bytes whichever a build
+    /// gives, a kept table being its own table and an absent one no bytes.
+    pub trait Presence {}
+
+    impl Presence for super::Present {}
+    impl Presence for super::Absent {}
+}
+
 /// A kind the tables keep: its table is the table itself.
 #[derive(Debug)]
 pub enum Present {}
@@ -401,6 +411,9 @@ impl<T> Default for AbsentTable<T> {
         Self::new()
     }
 }
+
+// SAFETY: an absent table is a `PhantomData`, no bytes.
+unsafe impl<T> ZeroEmpty for AbsentTable<T> {}
 
 impl<T> fmt::Debug for AbsentTable<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1130,36 +1143,70 @@ impl TableRows {
 /// The most write filters of each owner the tables hold, in the one table lent for all: a
 /// publisher's are held to `MAX_PUBLISHERS`, a querier's to `MAX_QUERIERS` and a key listener's
 /// to the key listeners' rows.
+// Each bound is kept inverted, as `slot_map`'s limit is, so tables of all zero bytes are bound by
+// nothing but each table's own rows until the session's open holds them to its limits.
 #[derive(Clone, Copy, Debug)]
 struct PlaneBounds {
-    publishers: usize,
-    queriers: usize,
-    listeners: usize,
+    inverted_publishers: usize,
+    inverted_queriers: usize,
+    inverted_listeners: usize,
 }
 
 impl PlaneBounds {
     /// No bound but the table's own.
     const UNBOUND: Self = Self {
-        publishers: usize::MAX,
-        queriers: usize::MAX,
-        listeners: usize::MAX,
+        inverted_publishers: 0,
+        inverted_queriers: 0,
+        inverted_listeners: 0,
     };
 
     /// The bounds `rows` gives.
     fn of(rows: &TableRows) -> Self {
         Self {
-            publishers: rows.publishers,
-            queriers: rows.queriers,
-            listeners: rows.key_listeners,
+            inverted_publishers: !rows.publishers,
+            inverted_queriers: !rows.queriers,
+            inverted_listeners: !rows.key_listeners,
         }
     }
 
     /// The bound of a filter of `plane`'s kind, or of a key listener's.
     fn of_filter(self, plane: Plane, for_listener: bool) -> usize {
         match plane {
-            _ if for_listener => self.listeners,
-            Plane::Subscribers => self.publishers,
-            Plane::Queryables { .. } => self.queriers,
+            _ if for_listener => !self.inverted_listeners,
+            Plane::Subscribers => !self.inverted_publishers,
+            Plane::Queryables { .. } => !self.inverted_queriers,
+        }
+    }
+}
+
+/// The entity ids a session's tables handed out, counted, so tables of all zero bytes have handed
+/// out none and hand out 1 first, and every id is spent once `EntityId::MAX` of them were.
+#[derive(Clone, Copy, Debug, Default)]
+struct EntityIds {
+    given: EntityId,
+}
+
+impl EntityIds {
+    /// The id the next declaration takes, `None` once every one has been handed out.
+    const fn next(self) -> Option<EntityId> {
+        self.given.checked_add(1)
+    }
+
+    /// The next id, now handed out.
+    fn take(&mut self) -> Option<EntityId> {
+        let id = self.next()?;
+        self.given = id;
+        Some(id)
+    }
+
+    /// Ids handed out from `next` on, or none with `None`. No session hands out 0, so ids from 0
+    /// are ids from 1.
+    const fn from_next(next: Option<EntityId>) -> Self {
+        Self {
+            given: match next {
+                Some(next) => next.saturating_sub(1),
+                None => EntityId::MAX,
+            },
         }
     }
 }
@@ -1275,8 +1322,10 @@ pub struct GetBegun {
 /// The session's one table set. See the module.
 pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     keys: P::Keys,
-    /// The next entity id, `None` once every one has been handed out.
-    next_entity: Option<EntityId>,
+    /// The entity ids handed out.
+    next_entity: EntityIds,
+    /// The next key expression id to try: 0 is tried as 1, so tables of all zero bytes mint 1
+    /// first.
     next_expr: ExprId,
     next_request: RequestId,
     /// Moves after every subscriber declared or undeclared ([`crate::pubsub::LocalSubscribers::epoch`]).
@@ -1504,7 +1553,7 @@ fn release_drained<K, R: Entity, P: Storage, const N: usize>(
 struct Declaring<'a, P: Storage> {
     keys: &'a P::Keys,
     keyexprs: &'a mut Keyexprs<P>,
-    next_entity: &'a mut Option<EntityId>,
+    next_entity: &'a mut EntityIds,
 }
 
 impl<P: Storage> Declaring<'_, P> {
@@ -1574,9 +1623,7 @@ impl<P: Storage> Declaring<'_, P> {
 
     /// The next entity id.
     fn mint(&mut self) -> Result<EntityId, RegisterError> {
-        let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
-        *self.next_entity = id.checked_add(1);
-        Ok(id)
+        self.next_entity.take().ok_or(RegisterError::IdsExhausted)
     }
 
     /// Hold the declaration `prefix` names once more.
@@ -1631,7 +1678,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn new() -> Self {
         Self {
             keys: Default::default(),
-            next_entity: Some(1),
+            next_entity: EntityIds::default(),
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
@@ -1864,20 +1911,19 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     // Out of line, as the engine's own taking of an id is: measured smaller apart.
     #[inline(never)]
     pub fn take_entity_id(&mut self) -> Option<EntityId> {
-        let id = self.next_entity?;
-        self.next_entity = id.checked_add(1);
-        Some(id)
+        self.next_entity.take()
     }
 
     /// The entity id the next declaration takes, `None` once every one has been handed out.
     pub fn next_entity_id(&self) -> Option<EntityId> {
-        self.next_entity
+        self.next_entity.next()
     }
 
     /// Hand out entity ids from `next` on, or none with `None`: for a host that carries a
-    /// session's numbering over, and for a test that reaches the end of the space.
+    /// session's numbering over, and for a test that reaches the end of the space. No id is 0, so
+    /// ids from 0 are ids from 1.
     pub fn entity_ids_from(&mut self, next: Option<EntityId>) {
-        self.next_entity = next;
+        self.next_entity = EntityIds::from_next(next);
     }
 
     /// Mint key expression ids from `next` on, past the last to 1 as every mint goes on: for a
@@ -2158,8 +2204,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             suffix,
         } = kept_name(key, name).ok_or(RegisterError::KeyexprTooLong)?;
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
-        let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
-        self.next_entity = id.checked_add(1);
+        let id = self.next_entity.take().ok_or(RegisterError::IdsExhausted)?;
         let handle = interests
             .insert(InterestRow {
                 id,
@@ -3197,7 +3242,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
         let mut lend = TableLender::new(arena);
         let tables = Self {
             keys: LentKeys::from(keys),
-            next_entity: Some(1),
+            next_entity: EntityIds::default(),
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
@@ -3273,6 +3318,119 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             rest = tail;
         }
         sum
+    }
+}
+
+// SAFETY: the key arena handle is `LentKeys`, whose zero is no arena; the ids are counts of ids
+// handed out, a zero expression id is minted as 1, the request id and the epoch are counts; the
+// match memory and the held replies are `ZeroEmpty` of this policy; every table is a `SlotMap` of
+// this policy (`ZeroEmpty`) or, absent, no bytes (`Presence` is sealed to the two); the plane
+// bounds of zero are none. Nothing drops a value, every sequence holding none.
+unsafe impl<F: RowCallbacks> ZeroEmpty for SessionTables<F, Region> {}
+
+/// The lines a region's description holds for one [`SessionTables`] of the region policy, at most:
+/// two for each of its nine tables, one for its held replies; and its one key arena handle.
+pub const SESSION_TABLE_LINES: usize = 19;
+
+/// The rows of a [`SessionTables`] of the region policy, which a region lays out beside the tables:
+/// each table's [`SlotRows`] at the build's bound of it, none of a kind the build keeps none of.
+pub struct SessionRows<F: RowCallbacks> {
+    keyexprs: SlotRows<KeyexprRow<KeyRef>, { caps::MAX_DECLARED_KEYEXPRS }>,
+    subscribers: SlotRows<Subscriber<F, Region>, { caps::MAX_SUBSCRIPTIONS }>,
+    queryables: <F::QueryablePresence as Presence>::Table<
+        SlotRows<Queryable<F, Region>, { caps::MAX_QUERYABLES }>,
+    >,
+    tokens: <F::LivelinessPresence as Presence>::Table<
+        SlotRows<TokenRow<KeyRef>, { caps::MAX_LOCAL_TOKENS }>,
+    >,
+    liveliness_subscribers: <F::LivelinessPresence as Presence>::Table<
+        SlotRows<LivelinessSubscriber<F, Region>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
+    >,
+    interests: <F::FilterPresence as Presence>::Table<SlotRows<InterestRow<KeyRef>, INTEREST_ROWS>>,
+    write_filters:
+        <F::FilterPresence as Presence>::Table<SlotRows<WriteFilterRow<KeyRef>, FILTER_ROWS>>,
+    matching: <F::FilterPresence as Presence>::Table<
+        SlotRows<Matching<F>, { caps::MAX_MATCHING_LISTENERS }>,
+    >,
+    pending_gets: <F::GetPresence as Presence>::Table<
+        SlotRows<PendingGet<F, Region>, { caps::MAX_PENDING_QUERIES }>,
+    >,
+    #[cfg(feature = "storage-profile")]
+    held: [core::mem::MaybeUninit<crate::reply_hold::HeldReply<PendingGetHandle, Region>>;
+        caps::MAX_PENDING_REPLIES],
+}
+
+// SAFETY: each table's rows are `SlotRows` (`ZeroEmpty`) or, of a kind not kept, no bytes
+// (`Presence` is sealed to the two); the held replies' rows are `MaybeUninit`.
+unsafe impl<F: RowCallbacks> ZeroEmpty for SessionRows<F> {}
+
+impl<F: RowCallbacks> SessionTables<F, Region> {
+    /// The description of tables of the region policy at `at` in a region and their rows, a
+    /// [`SessionRows`], at `rows`: a line for each column of each table the build keeps, one for
+    /// the held replies, and the tables' handle to the region's key arena. What
+    /// [`place_region`](crate::key_arena::place_region) reads to make zeroed tables a session's.
+    pub const fn places(at: usize, rows: usize) -> RegionLines<SESSION_TABLE_LINES> {
+        let mut lines = RegionLines::EMPTY
+            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
+            .seqs(&<Keyexprs<Region>>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, keyexprs)),
+                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, keyexprs)),
+            ))
+            .seqs(&<Subscribers<F, Region>>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, subscribers)),
+                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, subscribers)),
+            ));
+        if <F::QueryablePresence as Presence>::KEPT {
+            lines = lines.seqs(&<Queryables<F, Region>>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, queryables)),
+                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, queryables)),
+            ));
+        }
+        if <F::LivelinessPresence as Presence>::KEPT {
+            lines = lines
+                .seqs(&<Tokens<Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, tokens)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, tokens)),
+                ))
+                .seqs(&<LivelinessSubscribers<F, Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, liveliness_subscribers)),
+                    rows.wrapping_add(core::mem::offset_of!(
+                        SessionRows<F>,
+                        liveliness_subscribers
+                    )),
+                ));
+        }
+        if <F::FilterPresence as Presence>::KEPT {
+            lines = lines
+                .seqs(&<Interests<Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, interests)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, interests)),
+                ))
+                .seqs(&<WriteFilters<Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, write_filters)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, write_filters)),
+                ))
+                .seqs(&<MatchingListeners<F, Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, matching)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, matching)),
+                ));
+        }
+        if <F::GetPresence as Presence>::KEPT {
+            lines = lines.seqs(&<PendingGets<F, Region>>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, pending_gets)),
+                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, pending_gets)),
+            ));
+        }
+        #[cfg(feature = "storage-profile")]
+        {
+            lines = lines.seq(
+                crate::reply_hold::HeldReplies::<PendingGetHandle, Region>::place(
+                    at.wrapping_add(core::mem::offset_of!(Self, held)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, held)),
+                ),
+            );
+        }
+        lines
     }
 }
 
@@ -3370,6 +3528,7 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
 
     fn next_subscription_id(&self) -> u64 {
         self.next_entity
+            .next()
             .map_or(u64::from(u32::MAX).saturating_add(1), u64::from)
     }
 
@@ -3393,7 +3552,7 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
     }
 
     fn next_entity_id(&self) -> Option<u32> {
-        self.next_entity
+        self.next_entity.next()
     }
 
     fn consume_entity_id(&mut self) {

@@ -508,7 +508,7 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION: two sessions of one process may carry two zids, and an echo
     /// is a sample that names the zid of the session it came back on.
     // Inline whatever the policy: sixteen bytes no table lends.
-    own_zid: Option<OwnZid>,
+    own_zid: OwnZid,
 }
 
 /// This session's own zid as the self-echo check compares it: 1 to 16 bytes inline and their
@@ -522,6 +522,21 @@ struct OwnZid {
 
 #[cfg(feature = "storage-profile")]
 impl OwnZid {
+    /// No zid: a length of none, which no zid has, so naming of all zero bytes holds none.
+    const NONE: Self = Self {
+        bytes: [0; 16],
+        len: 0,
+    };
+
+    /// The zid's bytes, `None` where none is held.
+    fn held(&self) -> Option<&[u8]> {
+        if self.len == 0 {
+            None
+        } else {
+            Some(self.as_slice())
+        }
+    }
+
     /// The zid `zid` spells, or `None` for one not 1 to 16 bytes long.
     fn of(zid: &[u8]) -> Option<Self> {
         if !(1..=16).contains(&zid.len()) {
@@ -2292,11 +2307,17 @@ const _: () = assert!(
 /// fixed table with none holds nothing at all.
 pub(crate) struct MatchMemo<P: Storage> {
     slots: BoundedVec<Option<MemoSlot<P>>, { caps::MATCH_MEMO_FIXED_SLOTS }, P>,
-    /// The slot the last delivery was answered from or written to, `None` when it was neither
-    /// (a key too deep to match, or too long to keep). Only a delivery writes a slot, and it names
-    /// that slot here, so the slot named still holds what the last delivery was answered with.
-    last: Option<usize>,
+    /// The slot the last delivery was answered from or written to, counted from 1, and 0 when it
+    /// was neither (a key too deep to match, or too long to keep): a count rather than an
+    /// `Option`, so a memory of all zero bytes remembers no delivery. Only a delivery writes a
+    /// slot, and it names that slot here, so the slot named still holds what the last delivery was
+    /// answered with.
+    last_at: usize,
 }
+
+// SAFETY: its slots are a sequence of a policy whose sequences are empty at all zero bytes
+// (`ZeroSeqs`), and a memory of no last answer is a zero count.
+unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for MatchMemo<P> {}
 
 impl<P: Storage> MatchMemo<P> {
     /// A memory of `memo_slots::<P>(stated)` empty slots.
@@ -2306,7 +2327,17 @@ impl<P: Storage> MatchMemo<P> {
             // A fixed table's capacity is its slot count, so this never refuses.
             let _ = slots.push(None);
         }
-        Self { slots, last: None }
+        Self { slots, last_at: 0 }
+    }
+
+    /// The slot the last delivery was answered from or written to.
+    fn last_answer(&self) -> Option<usize> {
+        self.last_at.checked_sub(1)
+    }
+
+    /// Remember that the slot `at` answered the delivery now.
+    fn answered_by(&mut self, at: usize) {
+        self.last_at = at.saturating_add(1);
     }
 
     /// How many slots the memory holds: the count it was made with. A fixed table's is the
@@ -2457,7 +2488,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     if memo.slot_count() == 0 {
         return scan_subscribers(rows, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
-    let last = memo.last.filter(|&at| {
+    let last = memo.last_answer().filter(|&at| {
         memo.slots
             .get(at)
             .and_then(Option::as_ref)
@@ -2468,7 +2499,8 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     let at = last.unwrap_or_else(|| memo.slot_of(key));
     if let Some(Some(slot)) = memo.slots.get(at) {
         if last.is_some() || (slot.answers(epoch, is_remote) && slot.key == key) {
-            memo.last = Some(at);
+            // The field, not `answered_by`: `slot` still borrows the slots.
+            memo.last_at = at + 1;
             for position in slot.hits.iter() {
                 if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
                     deliver(id, sink);
@@ -2477,7 +2509,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
             return slot.hits.len();
         }
     }
-    memo.last = None;
+    memo.last_at = 0;
     // Not remembered at this epoch: match it with the scan, noting each hit. A key
     // that cannot be matched at all (deeper than the bound) delivers to nobody and is not
     // remembered.
@@ -2517,7 +2549,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
         key: text,
         hits,
     });
-    memo.last = Some(at);
+    memo.answered_by(at);
     fired
 }
 
@@ -2788,7 +2820,7 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
                 shared_key_ids: None,
-                own_zid: None,
+                own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::default(),
@@ -2822,7 +2854,7 @@ impl SubscriberPeer<crate::bounded::Static> {
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
                 shared_key_ids: None,
-                own_zid: None,
+                own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::new_static(),
@@ -3321,7 +3353,7 @@ impl<P: Storage> SubscriberPeer<P> {
         let Some(own) = OwnZid::of(zid) else {
             return false;
         };
-        self.naming.own_zid = Some(own);
+        self.naming.own_zid = own;
         true
     }
 
@@ -3331,7 +3363,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// every wire-arrived Push fires its matching subscribers.
     #[cfg(feature = "storage-profile")]
     pub fn clear_own_zid(&mut self) {
-        self.naming.own_zid = None;
+        self.naming.own_zid = OwnZid::NONE;
     }
 
     /// R231 — expose the currently-installed own zid for diagnostic
@@ -3340,7 +3372,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// `source_info.zid_prefix()`.
     #[cfg(feature = "storage-profile")]
     pub fn own_zid(&self) -> Option<&[u8]> {
-        self.naming.own_zid.as_ref().map(OwnZid::as_slice)
+        self.naming.own_zid.held()
     }
 
     /// R121d — absorb a `Declare` envelope's inner body so the
@@ -5019,6 +5051,33 @@ mod tests {
     // Fixtures build the borrowed codec views then `.into_owned()` at the
     // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
     use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
+
+    /// An own zid of all zero bytes is none, as one cleared is; one set reads back its bytes.
+    /// Turned red by `OwnZid::held` reading a length of zero as a zid.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn an_own_zid_of_zero_bytes_is_none() {
+        // SAFETY: sixteen bytes and a length, all integers.
+        let zeroed: OwnZid = unsafe { core::mem::zeroed() };
+        assert_eq!(zeroed.held(), None);
+        assert_eq!(OwnZid::NONE.held(), None);
+        let set = OwnZid::of(&[1, 2, 3]).unwrap();
+        assert_eq!(set.held(), Some(&[1_u8, 2, 3][..]));
+    }
+
+    /// A match memory of all zero bytes remembers no answer; one answered remembers its slot until
+    /// it forgets it. Turned red by `last_answer` reading a zero `last_at` as slot 0.
+    #[test]
+    fn a_match_memory_of_zero_bytes_remembers_no_answer() {
+        // SAFETY: `MatchMemo` is `ZeroEmpty`.
+        let mut memo: MatchMemo<crate::bounded::Region> = unsafe { core::mem::zeroed() };
+        assert_eq!(memo.last_answer(), None);
+        assert_eq!(memo.slot_count(), 0);
+        memo.answered_by(0);
+        assert_eq!(memo.last_answer(), Some(0));
+        memo.last_at = 0;
+        assert_eq!(memo.last_answer(), None);
+    }
 
     #[test]
     fn dispatch_fires_callback_on_matching_keyexpr() {

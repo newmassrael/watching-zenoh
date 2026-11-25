@@ -38,7 +38,9 @@
 use super::decl_watch::WatchObserver;
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
+use wz_session_core::bounded::{Arena, BoundedVec, LendRefused};
+
+use crate::RowPolicy;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 #[cfg(feature = "multicast-declarations")]
@@ -98,13 +100,13 @@ pub(super) const DIAL_FACE: FaceId = 1 << 62;
 /// The tokens a face that went still owes the liveliness subscribers, held apart from the set it
 /// gave back, their rows in the session's pool (`Registry::owed`).
 #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>;
+type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<RowPolicy>;
 
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
 #[cfg(feature = "query")]
-pub(super) type Gets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
+pub(super) type Gets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, RowPolicy>;
 /// A session that asks no query has no pending get on any face: its requester side is none, and
 /// the observer's fan and drains keep no path for gets.
 #[cfg(not(feature = "query"))]
@@ -112,7 +114,7 @@ pub(super) type Gets = NoRequesters;
 
 /// What a face's peer writes and is owed. The rows are lent from the session's arena at its open,
 /// one set for each face the session may hold at once (`crate::arena::FacePeers`).
-pub(super) type Peer = PeerTables<Lent>;
+pub(super) type Peer = PeerTables<RowPolicy>;
 
 /// What the session holds for one face: what its peer wrote and what the session asked of it.
 ///
@@ -389,7 +391,7 @@ impl MatchingSink for NoWatch {
 
 /// What the application registered on the session: its tables' rows lent from the session's
 /// arena at its open, each as many as the limit the open resolved.
-pub(super) type App = SlotObserverOf<CoopSinks, Lent, NoWatch>;
+pub(super) type App = SlotObserverOf<CoopSinks, RowPolicy, NoWatch>;
 
 /// What a write filter's verdict and a matching listener's are read off: every face's peer's
 /// declarations, each search of them counted for the tests ([`RegistryOf::peers_declare`]).
@@ -453,7 +455,7 @@ pub(super) struct RegistryOf<H: Holders> {
     /// and always held by it, then the faces to come. A face past them is refused
     /// (`FacesFull`), so the session's memory is the arena alone. A set no face holds is kept,
     /// emptied, for the next face.
-    sets: ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, Lent>>,
+    sets: ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>>,
     /// The face that holds each set, by the set's place among `sets`, [`NO_FACE`] for a set no
     /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds
     /// the first. The place is the face's in every table of the session (its link's, its room's).
@@ -467,7 +469,7 @@ pub(super) struct RegistryOf<H: Holders> {
     /// of one face, whose one face never goes. A session of no face besides the dial role's (a
     /// build without `listen` and `group`) removes none, and keeps no table of them.
     #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-    owed: BoundedVec<OwedTokens, { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS }, Lent>,
+    owed: BoundedVec<OwedTokens, { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS }, RowPolicy>,
     /// The aliases one face's peer may hold (`MAX_PEER_KEYEXPR_ALIASES`), which a set a group's face
     /// held, at the group's own quota (`Self::hold_member_aliases`), is held to again when it is
     /// given back for the next face.
@@ -1319,7 +1321,7 @@ fn reconcile_face(app: &App, face: &mut FaceTables) {
 /// hands it, and hand it back: a set is never a value of its own in this frame. `None` when
 /// `sets` holds every row it was lent.
 fn push_rowless<'s>(
-    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
+    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     keys: KeySpace,
     pools: &mut PeerPools,
     limits: &SessionLimits,
@@ -1334,7 +1336,7 @@ fn push_rowless<'s>(
 /// face's own spans, taking them here would leave the one face that comes none. `None` when
 /// `sets` holds every row it was lent.
 fn push_unpeered<'s>(
-    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
+    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     keys: KeySpace,
     limits: &SessionLimits,
 ) -> Option<&'s mut FaceTables> {
@@ -1356,7 +1358,7 @@ fn push_unpeered<'s>(
 /// would carry the set's writing and lending twice.
 #[inline(never)]
 fn lend_set(
-    sets: &mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
+    sets: &mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     arena: &mut Arena,
     keys: KeySpace,
     pools: &mut PeerPools,
@@ -1400,7 +1402,7 @@ impl<H: Holders> Drop for RegistryOf<H> {
 #[inline(never)]
 unsafe fn let_go(
     app: &mut ManuallyDrop<App>,
-    sets: &mut ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, Lent>>,
+    sets: &mut ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>>,
 ) {
     // SAFETY: the caller's contract.
     unsafe {
@@ -2121,7 +2123,7 @@ mod tests {
             &AllocatorMemory,
         )
         .expect("the host has the memory");
-        let mut sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent> = sets_arena
+        let mut sets: BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy> = sets_arena
             .arena_mut()
             .lend(1)
             .expect("the arena has a row for the set");
@@ -2616,7 +2618,7 @@ mod tests {
         }
         std::println!(
             "  a lent table's header: {} B; a key arena's handle: {} B",
-            size_of::<BoundedVec<u8, 1, Lent>>(),
+            size_of::<BoundedVec<u8, 1, RowPolicy>>(),
             size_of::<LentKeys>()
         );
         let printed: usize = tables.iter().map(|(_, bytes)| bytes).sum();

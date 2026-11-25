@@ -687,7 +687,7 @@ mod tests {
                 r.peer.set_class(class);
             }
         };
-        let declared = Some(ClassId::new(0));
+        let declared = ClassId::new(0);
         let (lent, owned, _) = put_on("a", |push| both_ways(push, "a/**", prepared(declared)));
         assert_eq!(owned.len(), 1, "the key its row allows is delivered");
         assert_eq!(lent, owned);

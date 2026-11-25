@@ -16,7 +16,9 @@ use super::{Others, NO_FACE};
 #[cfg(any(feature = "listen", feature = "group", test))]
 use crate::arena::MAX_FACE_SETS;
 #[cfg(any(feature = "listen", feature = "group", test))]
-use wz_session_core::bounded::{BoundedVec, Lent};
+use wz_session_core::bounded::BoundedVec;
+
+use crate::RowPolicy;
 #[cfg(any(not(any(feature = "listen", feature = "group")), test))]
 use wz_session_core::slot_observer::NoOtherPeers;
 
@@ -51,7 +53,7 @@ pub(in crate::engine) trait Holders: Sized {
 /// lent, lent from the arena with them (`crate::arena::ArenaPart::HeldFaces`), so a face coming
 /// or going writes its set's row and moves none.
 #[cfg(any(feature = "listen", feature = "group", test))]
-pub(in crate::engine) struct ManyHolders(BoundedVec<FaceId, MAX_FACE_SETS, Lent>);
+pub(in crate::engine) struct ManyHolders(BoundedVec<FaceId, MAX_FACE_SETS, RowPolicy>);
 
 #[cfg(any(feature = "listen", feature = "group", test))]
 impl Holders for ManyHolders {
@@ -61,7 +63,7 @@ impl Holders for ManyHolders {
         Self: 'a;
 
     fn lent(arena: &mut Arena, sets: usize) -> Result<Self, LendRefused> {
-        let mut rows: BoundedVec<FaceId, MAX_FACE_SETS, Lent> = arena.lend(sets)?;
+        let mut rows: BoundedVec<FaceId, MAX_FACE_SETS, RowPolicy> = arena.lend(sets)?;
         let faces = core::iter::once(DIAL_FACE).chain(core::iter::repeat(NO_FACE));
         for holder in faces.take(sets) {
             rows.push(holder).map_err(|_| LendRefused::OverCeiling {
