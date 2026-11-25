@@ -747,7 +747,14 @@ twelve at about 3 percent a side, and the host's spread is not known before the 
 run uses the kit's number and the next is set from its intervals. A timed workload counts only when its
 pinned CPUs were used by nothing else (`nodrop.py`'s rule, at most 10 percent foreign) and is run again
 up to six times; a functional one that did not deliver, up to three. A workload a boot lost is left out
-of that boot's figures and counted in the report. A size figure names its host (section 2).
+of that boot's figures and counted in the report. A throughput window short of the subscriber's reports
+is lost with the publisher's reports beside them where the publisher prints its rate (zenoh-pico's
+`z_pub_thr` does), so a pair whose subscriber stopped receiving while its publisher went on putting is
+told from a busy host. The pico reference does that under the flood: in the 12-boot run of 2026-11-25
+its subscriber reported for 0.4 s at 8 B and then nothing, in every boot, while its publisher went on
+at the rate of puts that reach no link; at 1 KiB it held for seconds and then did the same in 7 of 12
+boots. That is the reference failing the workload, and the free-running cell of that family stays
+ungraded for it; the no-drop rate (section 2, `pico-compare.sh nodrop`) is the throughput that grades it. A size figure names its host (section 2).
 
 **What a run is not.** One host, loopback, peer mode; the C families measure the library under
 upstream's programs, the Rust family the whole program. Arm W of the Rust family carries what the
