@@ -911,6 +911,11 @@ pub struct ExecutorState {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     next_set: Mutex<Cell<u32>>,
     refused: Mutex<Cell<Refusals>>,
+    /// One past the last of the cells the table was made with that a claim ever took. A claim
+    /// takes the first free cell, so the cells past it were never taken and nothing wakes them:
+    /// a pass looks at none of them. Only ever raised, so a cell freed below it is looked at
+    /// still, and a waker kept of a task gone finds its cell within it.
+    claimed: Mutex<Cell<usize>>,
     /// The most cells the table has held at once: zero-sized unless the build keeps the mark
     /// (`pool-monitor`), so the state is the size it was.
     #[cfg(feature = "session-slot")]
@@ -1047,6 +1052,7 @@ impl ExecutorState {
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             next_set: Mutex::new(Cell::new(1)),
             refused: Mutex::new(Cell::new(Refusals::default())),
+            claimed: Mutex::new(Cell::new(0)),
             #[cfg(feature = "session-slot")]
             high: Mutex::new(Cell::new(wz_session_core::pool_gauge::HighWater::new())),
             #[cfg(feature = "host-lock")]
@@ -1349,7 +1355,15 @@ impl ExecutorState {
         // The search is one section: it takes the first free cell it finds, which no other context
         // may take between its look and its claim.
         let found = if fits {
-            crate::cs::with(|cs| fixed.iter().find_map(|cell| Self::take_free(cell, set, cs)))
+            crate::cs::with(|cs| {
+                let (at, taken) = fixed
+                    .iter()
+                    .enumerate()
+                    .find_map(|(at, cell)| Some((at, Self::take_free(cell, set, cs)?)))?;
+                let claimed = self.claimed.borrow(cs);
+                claimed.set(claimed.get().max(at.saturating_add(1)));
+                Some(taken)
+            })
         } else {
             None
         };
@@ -1552,9 +1566,20 @@ impl ExecutorState {
         // section.
         let mut owed: Option<(&'static TaskCell, Left)> = None;
         // Every cell in the table's order, then the end of the table, whose section settles the
-        // cell polled last and after which the pass returns.
+        // cell polled last and after which the pass returns. The cells the table was made with
+        // past the last one a claim took are passed over to those it took memory for; the mark is
+        // read again where the pass reaches it, so a task a poll of this pass spawned is looked at
+        // in this pass, as it was when the pass looked at every cell.
+        let made = self.fixed_cells().len();
+        let mut claimed = 0usize;
         let mut index = 0usize;
         loop {
+            if index == claimed {
+                claimed = self.section(|cs| self.claimed.borrow(cs).get());
+                if index == claimed {
+                    index = made;
+                }
+            }
             let next = self.cell_at(index);
             // Below the count of cells the table holds, so the next place does not wrap.
             index = index.wrapping_add(1);
@@ -2374,5 +2399,83 @@ mod tests {
             "the aborted one is swept"
         );
         assert!(cells[0].with_meta(|meta| meta.state == State::Live));
+    }
+
+    /// A claim marks the table up to the cell it takes, and a cell freed leaves the mark where it
+    /// was: a pass looks at the cells up to the mark, polls a task spawned again in a freed cell
+    /// below it, and one a poll of the pass spawned at the cell past it in the same pass.
+    ///
+    /// # Control
+    ///
+    /// A claim that left the mark where it was reds the first marks and every poll after them; a
+    /// pass that read the mark once, at its start, reds the polls of the spawned task.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_pass_looks_at_the_cells_up_to_the_last_one_a_claim_took() {
+        static POLLS: [core::sync::atomic::AtomicU32; 3] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; 3];
+        static STATE: core::sync::atomic::AtomicPtr<ExecutorState> =
+            core::sync::atomic::AtomicPtr::new(ptr::null_mut());
+        struct Counted(usize);
+        impl Future for Counted {
+            type Output = ();
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                POLLS[self.0].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+                Poll::Pending
+            }
+        }
+        /// Spawns the task counted at 2 the first time it is polled, from inside the pass.
+        struct Spawner(bool);
+        impl Future for Spawner {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                POLLS[1].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+                if !self.0 {
+                    self.0 = true;
+                    // SAFETY: the test stores the state before any pass and keeps it to its end.
+                    let state = unsafe { &*STATE.load(core::sync::atomic::Ordering::Acquire) };
+                    assert!(state.spawn(Counted(2), 0).is_ok(), "a free cell for it");
+                }
+                Poll::Pending
+            }
+        }
+        let polls = || {
+            POLLS
+                .iter()
+                .map(|polls| polls.load(core::sync::atomic::Ordering::SeqCst))
+                .collect::<Vec<u32>>()
+        };
+        let state = ExecutorState::reserved(4, 64);
+        STATE.store(
+            ptr::from_ref(&state).cast_mut(),
+            core::sync::atomic::Ordering::Release,
+        );
+        let claimed = || crate::cs::with(|cs| state.claimed.borrow(cs).get());
+        assert_eq!(claimed(), 0, "no cell was claimed");
+        let first = state
+            .spawn(Counted(0), 0)
+            .map_err(|refused| refused.why)
+            .expect("a cell");
+        assert_eq!(claimed(), 1, "the first cell is claimed");
+        state.run_until_idle();
+        assert_eq!(polls(), [1, 0, 0], "a task is ready when it is spawned");
+        first.cancel.store(true, Ordering::Release);
+        state.run_until_idle();
+        ExecutorState::release(first);
+        assert_eq!(claimed(), 1, "a cell freed leaves the mark");
+        let again = state
+            .spawn(Spawner(false), 0)
+            .map_err(|refused| refused.why)
+            .expect("the freed cell");
+        assert!(ptr::eq(again, first), "the first cell, again");
+        assert_eq!(claimed(), 1, "the mark stays at the cell taken again");
+        state.run_until_idle();
+        assert_eq!(
+            polls(),
+            [1, 1, 1],
+            "the task its poll spawned at the cell past the mark ran in the same pass"
+        );
+        assert_eq!(claimed(), 2, "that claim moved the mark on");
+        STATE.store(ptr::null_mut(), core::sync::atomic::Ordering::Release);
     }
 }
