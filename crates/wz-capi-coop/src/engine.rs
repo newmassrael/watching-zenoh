@@ -239,7 +239,7 @@ use reach::ReachEngine;
 pub use reach::RowClaim;
 
 mod ledger;
-use ledger::{Ledger, Seen};
+use ledger::{Due, Ledger, Seen};
 
 // A build whose session holds one face and no read task beside the program's calls: the read
 // steps the one link's session itself (`direct`).
@@ -4144,13 +4144,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// and the gets' deadlines, and owed at once while the links are not settled or a liveliness
     /// snapshot is pending, each of which a step moves on by what it reads.
     fn settle_ledger(&mut self) {
+        // Each table keeps its own earliest deadline, so this reads one value of each face.
         #[cfg(feature = "query")]
-        let gets_due_us = self
-            .session
-            .next_get_deadline_ms()
-            .map_or(u64::MAX, |due_ms| due_ms.saturating_mul(1000));
-        #[cfg(not(feature = "query"))]
-        let gets_due_us = u64::MAX;
+        let gets_due_ms = self.session.next_get_deadline_ms().unwrap_or(u64::MAX);
         // A snapshot's replies end it as they come, and the table of ended ones is drained by
         // the sweep, which a pending snapshot so owes at every step.
         #[cfg(all(feature = "query", feature = "liveliness-get"))]
@@ -4181,7 +4177,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             false,
         );
         let seen = self.seen();
-        self.ledger.settle(links_due_us.min(gets_due_us), seen);
+        self.ledger.settle(
+            Due {
+                links_us: links_due_us,
+                #[cfg(feature = "query")]
+                gets_ms: gets_due_ms,
+            },
+            seen,
+        );
         if unsettled || snapshots {
             self.ledger.owe();
         }
@@ -4929,17 +4932,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
     fn idle_wait(&mut self) -> IdleWait {
         // What is due other than input, the earliest of it in milliseconds of the session's clock:
-        // a get whose deadline comes first is swept when it is due, not up to a whole wait late,
-        // and so is the next turn of a replay a link owes its peer, a periodic job the program
-        // started, and a group's session when it is next due with nothing arriving (its beacon,
-        // its sweep, what the session pushed onto it, its join again). A group that took a
-        // datagram is stepped again at once, its task taking one a step, so its own time is not
-        // asked.
+        // a get whose deadline comes first is swept when it is due, not up to a whole wait late
+        // (its deadline as the ledger keeps it, which every leg held lowers, so no table is
+        // walked here), and so is the next turn of a replay a link owes its peer, a periodic job
+        // the program started, and a group's session when it is next due with nothing arriving
+        // (its beacon, its sweep, what the session pushed onto it, its join again). A group that
+        // took a datagram is stepped again at once, its task taking one a step, so its own time is
+        // not asked.
         #[cfg(feature = "group")]
         let group_took = self.transport.group_took_input();
         let due_ms = [
             #[cfg(feature = "query")]
-            self.session.next_get_deadline_ms(),
+            self.ledger.gets_due_ms(),
             self.transport
                 .links
                 .faces()
@@ -6024,6 +6028,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn services(&self) -> usize {
         self.core.lock().0.services.get()
+    }
+
+    /// The most a read waits now for the earliest deadline of the session's gets, in whole
+    /// milliseconds, as the ledger keeps it for the read ([`Core::idle_wait`]); `None` when no get
+    /// is due by time. Under the lock, uncounted as a reading of the session's clock.
+    #[cfg(all(test, feature = "std", feature = "query"))]
+    pub(crate) fn get_wait_ms(&self) -> Option<u32> {
+        let held = self.core.lock();
+        let core = &held.0;
+        core.ledger
+            .gets_due_ms()
+            .map(|due_ms| Core::<L, C>::wait_until(u32::MAX, due_ms, core.clock.now_us()))
     }
 
     /// Run `f` on the session's one reassembly Router with the time now on the epoch its chains
@@ -7486,16 +7502,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Hold one leg of a get pending under `entry`: the leg's callback minted in a row of the
-    /// plane's, and its sink registered with the deadline and the accepted key the get states.
-    /// Out of line where a get issues more than one kind of leg (to groups, or to the session
-    /// itself, besides its links), so those legs are held by one body and not by a copy each; a
-    /// build whose get asks its links alone has one caller, which keeps it inline.
+    /// plane's, and its sink registered with the deadline and the accepted key the get states,
+    /// that deadline owed in `ledger` with it, so a read waits no longer and the step's
+    /// bookkeeping sweeps the leg when it is due. Out of line where a get issues more than one
+    /// kind of leg (to groups, or to the session itself, besides its links), so those legs are
+    /// held by one body and not by a copy each; a build whose get asks its links alone has one
+    /// caller, which keeps it inline.
     #[cfg(feature = "query")]
     #[cfg_attr(any(feature = "group", feature = "local-queryable"), inline(never))]
     fn hold_leg(
         &self,
         now_us: u64,
         registry: &mut Registry,
+        ledger: &mut Ledger,
         ask: &mut LegAsk<'_, '_>,
         entry: LegEntry,
     ) -> LegHeld {
@@ -7535,7 +7554,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 .register_sink(rid, finals, deadline_ms, accept, sink)
         });
         match registered {
-            Some(Ok(_)) => LegHeld::Held,
+            Some(Ok(_)) => {
+                ledger.owe_leg_due(deadline_ms);
+                LegHeld::Held
+            }
             Some(Err(RegisterError::TableFull)) => LegHeld::Refused { table_full: true },
             Some(Err(_)) | None => LegHeld::Refused { table_full: false },
         }
@@ -9403,11 +9425,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             let rid = actions.alloc_next_request_id();
             // One Final: the face's peer's. Held before the request goes out, so no answer can
             // arrive before its entry.
-            // Its deadline may come before the one the step's bookkeeping is due at.
-            core.ledger.owe();
             match self.hold_leg(
                 core.clock.now_us(),
                 &mut core.session.registry,
+                &mut core.ledger,
                 &mut ask,
                 LegEntry {
                     face,
@@ -9508,11 +9529,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // A request id the group allocates, so a member's answer names it on this face.
             let rid = group.alloc_request_id();
             // Held before the query is queued, as a link's leg is before it is sent.
-            // Its deadline may come before the one the step's bookkeeping is due at.
-            core.ledger.owe();
             match self.hold_leg(
                 core.clock.now_us(),
                 &mut core.session.registry,
+                &mut core.ledger,
                 &mut ask,
                 LegEntry {
                     face,
@@ -9566,11 +9586,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             };
             let core = &mut guard.0;
             let rid = own.rid();
-            // Its deadline may come before the one the step's bookkeeping is due at.
-            core.ledger.owe();
             match self.hold_leg(
                 core.clock.now_us(),
                 &mut core.session.registry,
+                &mut core.ledger,
                 &mut ask,
                 LegEntry {
                     face: LOCAL_FACE,
@@ -9695,7 +9714,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 self.end_leg_now(leg_id);
                 continue;
             }
-            // Its deadline may come before the one the step's bookkeeping is due at.
+            // Its deadline bounds a read's wait as a query leg's does, and a pending snapshot owes
+            // the bookkeeping at every step, which drains the gets it ends (`Core::settle_ledger`).
+            core.ledger.owe_leg_due(deadline_ms);
             core.ledger.owe();
             // The Interest names the key as the link's own key-wire form says, as a query does.
             let wire = on_link(&actions, keyexpr, wire);
