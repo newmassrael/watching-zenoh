@@ -1003,7 +1003,8 @@ mod tests {
     /// does when the message is only borrowed for its call over `LENT_CHAINS` buffers, so keeping
     /// refuses no fragment that borrowing took. The CONTROL is the kept message over
     /// `LENT_CHAINS` buffers, where that chain is refused; and the kept buffer is the table's again
-    /// once it drops.
+    /// once it drops, while the two open chains still hold theirs, which the Router gives back when
+    /// it drops.
     #[test]
     fn a_kept_message_refuses_no_chain_that_starts_before_it_is_let_go() {
         use core::ptr::NonNull;
@@ -1014,15 +1015,28 @@ mod tests {
         #[repr(C, align(16))]
         struct Memory([u8; 256]);
 
+        /// What `run` leaves: the Router is handed back with the table rather than dropped
+        /// inside it, so what is read of the table afterwards is read with chains A and B still
+        /// open, each holding its buffer for as long as the Router lives.
+        struct Ran {
+            /// Chain B's outcome.
+            started: IngestOutcome,
+            /// The rejoined message C, when it was kept.
+            kept: Option<KeptBytes>,
+            /// The buffers lent once B started.
+            lent: usize,
+            /// The table the chains claimed their buffers from.
+            cells: LentByteCells,
+            /// The Router, chains A and B open in it.
+            router: SessionReassembly,
+        }
+
         /// Chain A best-effort and chain C reliable open, C completes, kept or borrowed, and chain
-        /// B reliable starts: B's outcome, the kept message, and the buffers lent after it.
-        fn run(
-            memory: &mut Memory,
-            buffers: usize,
-            keep: bool,
-        ) -> (IngestOutcome, Option<KeptBytes>, usize, LentByteCells) {
+        /// B reliable starts.
+        fn run(memory: &mut Memory, buffers: usize, keep: bool) -> Ran {
             // SAFETY: the memory is aligned as an arena's spans start, 256 bytes long, used by
-            // nothing else, and the caller's, which outlives the table and every buffer of it.
+            // nothing else, and the caller's, which outlives the table, the Router and every
+            // buffer of the table.
             let mut arena = unsafe { Arena::over(NonNull::from(memory).cast::<u8>(), 256) };
             let cells = arena
                 .lend_byte_cells(16, buffers)
@@ -1056,18 +1070,30 @@ mod tests {
             assert_eq!(completed, IngestOutcome::Reassembled);
             let started = router.ingest(frag(12, 1, b"b"), MASK, 0, |_| {});
             let lent = cells.in_use();
-            (started, kept, lent, cells)
+            Ran {
+                started,
+                kept,
+                lent,
+                cells,
+                router,
+            }
         }
 
         let mut memory = [Memory([0; 256]), Memory([0; 256]), Memory([0; 256])];
         let [first, second, third] = &mut memory;
-        let (borrowed, _, lent, _) = run(first, LENT_CHAINS, false);
+        let borrowed = run(first, LENT_CHAINS, false);
         assert_eq!(
-            (borrowed, lent),
+            (borrowed.started, borrowed.lent),
             (IngestOutcome::Begun, 2),
             "borrowed for its call, the message's buffer served the next chain"
         );
-        let (started, kept, lent, cells) = run(second, SESSION_CHAIN_BUFFERS, true);
+        let Ran {
+            started,
+            kept,
+            lent,
+            cells,
+            router,
+        } = run(second, SESSION_CHAIN_BUFFERS, true);
         let kept = kept.expect("a lent staging keeps a completed chain");
         assert_eq!(kept.as_slice(), b"c-end");
         assert_eq!(
@@ -1081,10 +1107,16 @@ mod tests {
             2,
             "let go of, the kept buffer is the table's again"
         );
-        let (refused, kept, _, _) = run(third, LENT_CHAINS, true);
-        assert!(kept.is_some());
+        drop(router);
         assert_eq!(
-            refused,
+            cells.in_use(),
+            0,
+            "dropped, the Router gives the buffers of its open chains back"
+        );
+        let refused = run(third, LENT_CHAINS, true);
+        assert!(refused.kept.is_some());
+        assert_eq!(
+            refused.started,
             IngestOutcome::Refused(RefuseReason::PoolExhausted),
             "CONTROL: with no buffer for the kept message, the next chain finds none"
         );
