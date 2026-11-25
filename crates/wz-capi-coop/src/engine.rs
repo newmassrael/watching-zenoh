@@ -1945,6 +1945,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// How often the links were moved on ([`Self::poll_links`]), which the tests count.
     #[cfg(test)]
     link_polls: core::cell::Cell<usize>,
+    /// How often the session's links were let go of ([`Self::end_links`]), which the tests count:
+    /// once by the close, whatever calls it and from where.
+    #[cfg(test)]
+    links_let_go: core::cell::Cell<usize>,
     /// How many steps in a row read a group's datagram and moved nothing, up to
     /// the deploy `GROUP_READS_PER_MOVE` limit (`CoopEngine::step`).
     #[cfg(feature = "group")]
@@ -4332,6 +4336,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// End every face's link, whatever it is doing, telling an established peer so. The dial
     /// role's face stays, with no link and no redial; the others go.
     fn end_links(&mut self) {
+        #[cfg(test)]
+        self.links_let_go.set(self.links_let_go.get() + 1);
         // A dial under way is let go of: its connection is not made. The ports are let go of
         // first, so no connection is taken while the faces are ended.
         self.transport.links.end_dials_and_ports();
@@ -4706,6 +4712,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             clock_reads: core::cell::Cell::new(0),
             #[cfg(test)]
             link_polls: core::cell::Cell::new(0),
+            #[cfg(test)]
+            links_let_go: core::cell::Cell::new(0),
             #[cfg(feature = "group")]
             group_reads: 0,
             #[cfg(test)]
@@ -5180,6 +5188,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Whether the session's state could be taken now: what a callback of a test asks to tell
+    /// that its read handed it out with the session free.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn session_is_free(&self) -> bool {
+        self.core.try_lock().is_some()
+    }
+
+    /// How often the session's links were let go of since the open ([`Core::end_links`]).
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn links_let_go(&self) -> usize {
+        self.core.lock().0.links_let_go.get()
     }
 
     /// How many rounds of deliveries were handed out since the open: what a test of the cost of
