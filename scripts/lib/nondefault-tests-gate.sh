@@ -563,6 +563,13 @@ transport-link-unixpipe,transport-link-ws|"
     # module beside `std`'s for its own tests (`os::sys::tests::`), a spawned thread's identity and
     # end, the condition variable's wake and the mutex's try.
     "wz-capi-port|hook|os-sys|os::sys::tests::"
+    # The host's locks themselves with `std` (`wz-host-sync`'s `std`): the typed forms are
+    # `std`'s where `std`'s lock lies in its own bytes and the in-place ones elsewhere, and either
+    # way a lock whose holder panicked reads as poisoned (`tests::` and `in_place::tests::`, the
+    # two poisoning tests only this feature compiles). The whole crate: the census refused the
+    # tree with "wz-host-sync has 2 test(s) only a feature build reaches ... leaving 2 claimed by
+    # NOTHING", the feature being new and no row naming it.
+    "wz-host-sync|hook|std|"
     # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
     # a build made as the reference is compiles none of.
     "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload|"
