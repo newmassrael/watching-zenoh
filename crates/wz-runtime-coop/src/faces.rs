@@ -302,7 +302,7 @@ impl EndpointTexts {
 
     /// Write the text of the next endpoint of `role`, in the order the session dials them or
     /// listens on them: its place, which a dial names it by ([`DialEndpoint::Listed`]) or a port
-    /// by ([`DialEndpoint::Port`]).
+    /// by (`DialEndpoint::Port`, with `listen`).
     #[inline(never)]
     pub fn write(&mut self, role: EndpointRole, text: &str) -> Result<usize, EndpointTextRefused> {
         let rows = match role {
@@ -364,14 +364,18 @@ impl EndpointTexts {
 
 /// Which endpoint a dial reaches: one of the session's own to dial, by its row; one of those it
 /// listens on, by its row, for a link taken off that port; or one named by whoever asked for the
-/// dial after the open, its text held by the dial alone. None allocates.
+/// dial after the open, its text held by the dial alone. None allocates. A build without
+/// `listen` takes no port and dials no face beside the dial role's, so its endpoint is a row
+/// alone: every dial, link and refusal that carries one moves a word, not a text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialEndpoint {
     /// The endpoint to dial in this row of the session's texts.
     Listed(usize),
     /// The endpoint to listen on in this row of the session's texts.
+    #[cfg(feature = "listen")]
     Port(usize),
     /// An endpoint named apart from the session's texts.
+    #[cfg(feature = "listen")]
     Named(LocatorText),
 }
 
@@ -380,7 +384,9 @@ impl DialEndpoint {
     pub fn text<'a>(&'a self, texts: &'a EndpointTexts) -> &'a str {
         match self {
             DialEndpoint::Listed(at) => texts.dial_text(*at),
+            #[cfg(feature = "listen")]
             DialEndpoint::Port(at) => texts.listen_text(*at),
+            #[cfg(feature = "listen")]
             DialEndpoint::Named(text) => text,
         }
     }
@@ -1928,7 +1934,10 @@ mod tests {
     /// none, and a face past the table is left as it is.
     #[test]
     fn an_ended_dial_hands_over_its_endpoint_and_its_face_waits() {
+        #[cfg(feature = "listen")]
         let named = DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"));
+        #[cfg(not(feature = "listen"))]
+        let named = DialEndpoint::Listed(3);
         let mut faces = supervisor(dialing(named.clone(), None, 1, 50), 2);
         assert_eq!(faces.end_dial(0, 7), Some(named));
         assert!(matches!(dial(&faces).link, Link::Waiting { at_us: 7 }));
@@ -2120,17 +2129,33 @@ mod tests {
             "",
             "past the dial rows"
         );
-        assert_eq!(DialEndpoint::Port(0).text(&texts), "tcp/0.0.0.0:7447");
+        #[cfg(feature = "listen")]
+        {
+            assert_eq!(DialEndpoint::Port(0).text(&texts), "tcp/0.0.0.0:7447");
+            assert_eq!(
+                DialEndpoint::Port(1).text(&texts),
+                "",
+                "past the listen rows"
+            );
+            assert_eq!(
+                DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"))
+                    .text(&texts),
+                "tcp/1.2.3.4:1"
+            );
+        }
+    }
+
+    /// A build that takes no port and dials no face beside the dial role's names an endpoint by
+    /// its row alone, so a dial, a link and the endpoint a dial hands over carry a word and no
+    /// text. Turned red by a variant that holds a text left in that build.
+    #[cfg(not(feature = "listen"))]
+    #[test]
+    fn an_endpoint_of_a_build_that_only_dials_is_a_row() {
         assert_eq!(
-            DialEndpoint::Port(1).text(&texts),
-            "",
-            "past the listen rows"
+            core::mem::size_of::<DialEndpoint>(),
+            core::mem::size_of::<usize>()
         );
-        assert_eq!(
-            DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"))
-                .text(&texts),
-            "tcp/1.2.3.4:1"
-        );
+        assert!(core::mem::size_of::<Option<DialEndpoint>>() <= 2 * core::mem::size_of::<usize>());
     }
 
     /// A text is written in the next row and answered with its place; one longer than a row is

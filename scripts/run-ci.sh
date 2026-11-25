@@ -15132,7 +15132,7 @@ layer_c1n_mcu_session_acceptor() {
     # on them, a face taken beside the dial role's and the node it holds. Those tests are
     # `cfg(feature = "listen")` in `faces` and `face_life`, and no other leg names the runtime's
     # `listen`, so without these they ran nowhere. Counted from the source, not printed: 32 in
-    # `faces::` (25 without `listen`), 11 in `face_life::` (12 without it).
+    # `faces::` (26 without `listen`), 11 in `face_life::` (12 without it).
     _runci_guarded_test "C1n coop listening faces" 32 \
         cargo test -p wz-runtime-coop --features alloc,wz-session-core/alloc,session-unicast,listen \
         --lib faces:: --quiet || return 1
