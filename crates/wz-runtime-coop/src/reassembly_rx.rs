@@ -525,7 +525,7 @@ mod in_place_tests {
 
     use crate::reassembly_pool_mcu::{ReassemblyPoolMcu, SlotState};
 
-    const MASK: u64 = wz_session_core::sn::mask_from_res(0x02);
+    const MASK: wz_session_core::sn::Sn = wz_session_core::sn::mask_from_res(0x02);
 
     fn frag<'a>(peer: &'a [u8], sn: u64, more: bool, payload: &'a [u8]) -> Fragment<'a> {
         Fragment {
@@ -771,7 +771,7 @@ mod tests {
     const ZID: &[u8] = &[0x11; 16];
 
     /// The default-resolution (0x02, 28-bit) ring the tests compare at.
-    const MASK: u64 = wz_session_core::sn::mask_from_res(0x02);
+    const MASK: wz_session_core::sn::Sn = wz_session_core::sn::mask_from_res(0x02);
 
     fn frag<'a>(sn: u64, more: u8, payload: &'a [u8]) -> Fragment<'a> {
         Fragment {

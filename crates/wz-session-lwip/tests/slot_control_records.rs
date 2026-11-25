@@ -457,20 +457,20 @@ fn read(
 
 /// The initiator's next reliable transmit SN.
 fn next_sn(initiator: &End) -> u64 {
-    initiator.actions.next_outbound_frame_sn(
+    wz_session_core::sn::to_wire(initiator.actions.next_outbound_frame_sn(
         wz_session_core::qos::Priority::DEFAULT,
         true,
         initiator.actions.negotiated_sn_mask(),
-    )
+    ))
 }
 
 /// The initiator's next best-effort transmit SN.
 fn next_best_effort_sn(initiator: &End) -> u64 {
-    initiator.actions.next_outbound_frame_sn(
+    wz_session_core::sn::to_wire(initiator.actions.next_outbound_frame_sn(
         wz_session_core::qos::Priority::DEFAULT,
         false,
         initiator.actions.negotiated_sn_mask(),
-    )
+    ))
 }
 
 /// [`frame_wire`] on the best-effort channel: the same Frame with its `R` flag clear.

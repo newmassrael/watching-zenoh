@@ -516,11 +516,11 @@ impl Pair {
 
     /// The initiator's next reliable transmit SN.
     fn next_sn(&self) -> u64 {
-        self.initiator.next_outbound_frame_sn(
+        wz_session_core::sn::to_wire(self.initiator.next_outbound_frame_sn(
             Priority::DEFAULT,
             true,
             self.initiator.negotiated_sn_mask(),
-        )
+        ))
     }
 
     /// Send `wire` from the initiator's socket and run the ONE acceptor
@@ -1125,7 +1125,7 @@ mod fragments {
             body,
             true,
             chunk + HEAD_BUDGET,
-            base,
+            wz_session_core::sn::from_wire(base),
             pair.initiator.negotiated_sn_mask(),
             None,
         );

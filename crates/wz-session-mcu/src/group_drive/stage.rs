@@ -964,7 +964,9 @@ impl GroupTxStage {
             sn,
             ..
         } = taken.record;
-        writer.on_wire.written(priority, reliable, sn);
+        writer
+            .on_wire
+            .written(priority, reliable, sn::from_wire(sn));
         drop(writer);
         self.finish(taken);
         false
