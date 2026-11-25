@@ -623,6 +623,8 @@ mod tests {
                 params(),
                 clock,
             );
+        // The reply leaves as a data send, which a session lets through only once established.
+        actions.enter_established();
 
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let mut on_event = dispatch_to(observer.clone(), actions.clone());

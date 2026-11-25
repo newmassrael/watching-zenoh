@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use wz_runtime_tokio::reassembly::TokioReassembly;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_glue::new_session_actions;
-use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_runtime_tokio_test_support::{established_session_actions, fixture_session_init_params};
 use wz_session_core::drive::report_outcome_reassembling;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, RxBytes};
@@ -116,7 +116,7 @@ fn batch() -> Vec<u8> {
     let mut params = fixture_session_init_params();
     params.initial_sn = 7;
     params.batch_size = u16::MAX;
-    let actions = new_session_actions(link.clone(), params, TokioTime::new());
+    let actions = established_session_actions(link.clone(), params);
     actions
         .send_push_literal(KEY, &PAYLOAD, true)
         .expect("the push is sent");
