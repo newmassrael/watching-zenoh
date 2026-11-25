@@ -284,7 +284,7 @@ fn note_rx_transport_message<R: SessionRuntime, T: TimeSource>(actions: &Session
 /// reports itself lost: such a build has no `LinkEvent` (its `Rx` arm holds an
 /// owned frame), and a stream link can still be closed under it.
 pub fn dispatch_link_lost<R: SessionRuntime, T: TimeSource>(
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     cause: crate::link::LostCause,
 ) -> DriverLoopOutcome {
     engine.process_event(crate::session_fsm_unicast::SessionFsmUnicastEvent::LinkLost);
@@ -300,7 +300,7 @@ pub fn dispatch_link_lost<R: SessionRuntime, T: TimeSource>(
 pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
     event: LinkEvent,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> DriverLoopOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     match event {
@@ -407,7 +407,7 @@ fn is_lean_network_unit(bytes: &[u8]) -> bool {
 fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
     unit: &crate::link::RxBytes,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> DriverLoopOutcome {
     dispatch_unit_in(unit.as_slice(), Some(unit), actions, engine)
 }
@@ -436,7 +436,7 @@ fn dispatch_unit_borrowed<R: SessionRuntime, T: TimeSource>(
     bytes: &[u8],
     consumed: &mut usize,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> DriverLoopOutcome {
     dispatch_unit_in(bytes, consumed, actions, engine)
 }
@@ -467,7 +467,7 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "alloc")] shared: Option<&crate::link::RxBytes>,
     #[cfg(not(feature = "alloc"))] consumed_out: &mut usize,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> DriverLoopOutcome {
     #[cfg(all(feature = "alloc", feature = "transport-lowlatency"))]
     if let Some(outcome) = dispatch_lean_unit(bytes, shared, actions, engine) {
@@ -506,7 +506,7 @@ fn read_unit_in<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "alloc")] shared: Option<&crate::link::RxBytes>,
     #[cfg(not(feature = "alloc"))] consumed_out: &mut usize,
     actions: &SessionLinkActions<R, T>,
-    engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &SessionEngine<R, T>,
 ) -> (
     DriverLoopOutcome,
     Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
@@ -537,7 +537,7 @@ fn dispatch_lean_unit<R: SessionRuntime, T: TimeSource>(
     bytes: &[u8],
     shared: Option<&crate::link::RxBytes>,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> Option<DriverLoopOutcome> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // transport-lowlatency — lean rx: once this session negotiated
@@ -708,7 +708,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
     frame: &mut InboundFrame,
     to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     actions: &SessionLinkActions<R, T>,
-    engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &SessionEngine<R, T>,
 ) -> DriverLoopOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // The message is read in the slot the caller decoded it into: taking it by value, or a
@@ -927,7 +927,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     chain: C,
     to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     actions: &SessionLinkActions<R, T>,
-    engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &SessionEngine<R, T>,
 ) -> DriverLoopOutcome {
     // Every event this function hands the engine is a handshake's or an accepting side's; a build
     // with neither body nor the accepting role names none.
@@ -1571,7 +1571,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
 #[cfg(feature = "alloc")]
 pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> Option<DriverLoopOutcome> {
     let residue = actions.take_pending_batch()?;
     Some(dispatch_unit(&residue, actions, engine))
@@ -1586,7 +1586,7 @@ pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn dispatch_parked_in_place<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> Option<DriverLoopOutcome> {
     #[cfg(feature = "transport-compression")]
     {
@@ -1616,7 +1616,7 @@ fn judge_handshake_step<R: SessionRuntime, T: TimeSource>(
     message: crate::handshake_stray::HandshakeMessage,
     to_engine: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     actions: &SessionLinkActions<R, T>,
-    engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &SessionEngine<R, T>,
 ) -> Option<DriverLoopOutcome> {
     use crate::handshake_stray::{established_drops_silently, judge, StrayVerdict};
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
@@ -1739,7 +1739,7 @@ fn admit_head_in_place<
 >(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     priority: crate::qos::Priority,
     reliable: bool,
     sn: u64,
@@ -1983,7 +1983,7 @@ pub fn dispatch_datagram<
 >(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut F,
 ) -> DatagramPath {
@@ -2092,7 +2092,7 @@ fn dispatch_datagram_unit<
     resume: Option<usize>,
     kept: bool,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut F,
 ) -> (DatagramPath, usize, bool) {
@@ -2139,7 +2139,7 @@ fn fragment_handed_up<
 >(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     on_event: &mut F,
 ) -> (DatagramPath, usize, bool) {
     #[cfg(feature = "alloc")]
@@ -2171,7 +2171,7 @@ fn dispatch_copied_of<
     unit: &[u8],
     reason: CopyReason,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     on_event: &mut F,
 ) -> (DatagramPath, usize, bool) {
     let (path, used) = dispatch_copied(unit, reason, actions, engine, on_event);
@@ -2225,7 +2225,7 @@ pub fn dispatch_datagram_reassembling<
 >(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     now_ms: u64,
@@ -2276,7 +2276,7 @@ fn dispatch_datagram_reassembling_unit<
     unit: &[u8],
     resume: Option<usize>,
     kept: bool,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
     rejoin: &mut Rejoin<'_, R, T, SLOTS, CAP, S, P>,
     on_event: &mut F,
@@ -2369,7 +2369,7 @@ fn dispatch_copied<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Even
     unit: &[u8],
     reason: CopyReason,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     on_event: &mut F,
 ) -> (DatagramPath, usize) {
     #[cfg(all(feature = "alloc", feature = "transport-compression"))]
@@ -2409,7 +2409,7 @@ fn dispatch_copied<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Even
 fn inflated_batch_outcome<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> DriverLoopOutcome {
     let frame = crate::link::RxFrame::new(alloc::vec::Vec::from(unit));
     dispatch_link_event(LinkEvent::Rx(frame), actions, engine)
@@ -2427,7 +2427,7 @@ fn refused_data_unit<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     reason: CopyReason,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> Option<DriverLoopOutcome> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     let outcome = match reason {
@@ -2474,7 +2474,7 @@ fn refused_data_unit<R: SessionRuntime, T: TimeSource>(
 fn dispatch_control_in_place<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> (DriverLoopOutcome, usize) {
     let (outcome, decided, used) = read_control_in_place(unit, actions, engine);
     if let Some(event) = decided {
@@ -2493,7 +2493,7 @@ fn dispatch_control_in_place<R: SessionRuntime, T: TimeSource>(
 fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-    engine: &Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &SessionEngine<R, T>,
 ) -> (
     DriverLoopOutcome,
     Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
@@ -2597,7 +2597,7 @@ fn account_bytes_in_place<R: SessionRuntime, T: TimeSource>(
 fn lean_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::EventSink + ?Sized>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut F,
 ) -> DatagramPath {
@@ -2663,7 +2663,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Event
     head: crate::inbound::FrameHead<crate::inbound::InPlaceExtChain>,
     read: FrameRead,
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut F,
 ) -> (HeadAdmission, usize, bool) {
@@ -3095,7 +3095,7 @@ fn fragment_in_place<
     unit: &[u8],
     head: crate::inbound::FragmentHead<crate::inbound::InPlaceExtChain>,
     payload_at: usize,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
     rejoin: &mut Rejoin<'_, R, T, SLOTS, CAP, S, P>,
     on_event: &mut F,
@@ -3337,7 +3337,7 @@ fn in_place_unit<R: SessionRuntime, T: TimeSource>(
 /// [`LeaseCheckOutcome::NotMonitored`] and raises nothing.
 pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     now_ms: u64,
 ) -> LeaseCheckOutcome {
     // R311kx — deadline arithmetic shared with the loop wake computation
@@ -3355,7 +3355,7 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
 /// exists, for a driver that read the deadlines to know whether to wake.
 pub(crate) fn judge_lease<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
     now_ms: u64,
     deadlines: LeaseDeadlines,
 ) -> LeaseCheckOutcome {
@@ -3410,7 +3410,7 @@ pub(crate) fn judge_lease<R: SessionRuntime, T: TimeSource>(
 #[cfg(feature = "session-close-ingress")]
 pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> bool {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     if actions.take_requested_close() {
@@ -3437,7 +3437,7 @@ pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
 /// Returns whether an event was raised.
 pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
-    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    engine: &mut SessionEngine<R, T>,
 ) -> bool {
     #[cfg(feature = "session-close-ingress")]
     if check_requested_close(actions, engine) {
@@ -4139,6 +4139,13 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
 /// for a syntax problem. The alias lets any driver on any profile store the
 /// engine with the dep graph unchanged, which is what the MCU
 /// `SessionPump` does.
+///
+/// It is also the one name the transport gives its session machine: every function of the receive
+/// takes the machine as this type, and reaches it by the calls a step of any form answers
+/// (`process_event`, `get_current_state`, `is_in_final_state`, `initialize`). A form of the
+/// machine the generator writes as a step over the same actions trait
+/// ([`SessionFsmUnicastActions`], which [`SessionActionsBinding`] implements) replaces this
+/// definition and the two constructors below, and nothing else.
 pub type SessionEngine<R, T> = Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>;
 
 /// Build a session [`Engine`] over the generated engine-free
