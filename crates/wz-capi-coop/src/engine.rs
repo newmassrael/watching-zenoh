@@ -5391,6 +5391,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         f(&mut core.0.transport.router, now_ms)
     }
 
+    /// Where the dial role's link stands, as the life of its face's record says: what a test of
+    /// the redials reads. Read under the lock, uncounted as a take.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn dial_phase(&self) -> Option<wz_session_core::link_life::LinkPhase> {
+        self.core
+            .lock()
+            .0
+            .transport
+            .links
+            .face(0)
+            .map(|face| face.life.phase())
+    }
+
     /// How many subscribers the session core's table holds, each one row: what a test of a
     /// subscriber's ends reads. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]

@@ -20,6 +20,7 @@ use wz_runtime_coop::session_drive::{LinkOpenError, Locator, OpenedLink, Session
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
+use wz_session_core::link_life::LinkPhase;
 use wz_session_core::policy::SessionPolicy;
 
 use super::{client_config, config, CatchAll, Command, Router, LOOPBACK};
@@ -175,6 +176,16 @@ fn a_session_that_dials_its_lost_link_again_allocates_nothing() {
     assert_eq!(
         allocations, 0,
         "a dial again of a lost link takes no memory of the heap"
+    );
+    // Each refusal ends a walk over the endpoints, and the life of a link that was up waits
+    // `redial_ms` to walk them again; a life that ended the session would dial no more.
+    assert!(
+        matches!(
+            engine.dial_phase(),
+            Some(LinkPhase::Backoff { .. } | LinkPhase::Dialing { .. })
+        ),
+        "the face's life walks its endpoints again: {:?}",
+        engine.dial_phase()
     );
 }
 
