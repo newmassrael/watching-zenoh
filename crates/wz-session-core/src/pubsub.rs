@@ -2257,6 +2257,14 @@ struct MemoSlot<P: Storage> {
     hits: BoundedVec<u16, { caps::MAX_SUBSCRIPTIONS }, P>,
 }
 
+impl<P: Storage> MemoSlot<P> {
+    /// Whether the slot's answer holds for a delivery at `epoch` that arrived from the wire
+    /// (`remote`) or not.
+    fn answers(&self, epoch: u64, remote: bool) -> bool {
+        self.epoch == epoch && self.remote == remote
+    }
+}
+
 // A slot keeps a position in 16 bits. A table of a build that enforces capacity holds at most
 // `MAX_SUBSCRIPTIONS` rows, so where it has slots every position it can hold fits one, and no key
 // it matches is left out of the cache for the position of a match (`fire_into_memoized`).
@@ -2284,12 +2292,10 @@ const _: () = assert!(
 /// fixed table with none holds nothing at all.
 pub(crate) struct MatchMemo<P: Storage> {
     slots: BoundedVec<Option<MemoSlot<P>>, { caps::MATCH_MEMO_FIXED_SLOTS }, P>,
-    /// How many times a slot was written. A repeated key may be answered from the slot the key
-    /// before it was, but only while no slot has been written since.
-    writes: u64,
-    /// The slot the last delivery was answered from, and `writes` as it was then; `None` when
-    /// that delivery was not answered from a slot at all (a key too deep to match).
-    last: Option<(usize, u64)>,
+    /// The slot the last delivery was answered from or written to, `None` when it was neither
+    /// (a key too deep to match, or too long to keep). Only a delivery writes a slot, and it names
+    /// that slot here, so the slot named still holds what the last delivery was answered with.
+    last: Option<usize>,
 }
 
 impl<P: Storage> MatchMemo<P> {
@@ -2300,11 +2306,7 @@ impl<P: Storage> MatchMemo<P> {
             // A fixed table's capacity is its slot count, so this never refuses.
             let _ = slots.push(None);
         }
-        Self {
-            slots,
-            writes: 0,
-            last: None,
-        }
+        Self { slots, last: None }
     }
 
     /// How many slots the memory holds: the count it was made with. A fixed table's is the
@@ -2316,6 +2318,8 @@ impl<P: Storage> MatchMemo<P> {
     /// The slot `key` maps to: a hash of its bytes (FNV-1a, which is a handful of
     /// instructions per byte and has no setup), folded to the table's size.
     fn slot_of(&self, key: &str) -> usize {
+        #[cfg(test)]
+        MEMO_HASHES.with(|hashes| hashes.set(hashes.get() + 1));
         let mut hash: u32 = 0x811c_9dc5;
         for byte in key.as_bytes() {
             hash ^= u32::from(*byte);
@@ -2435,11 +2439,11 @@ pub(crate) fn any_local_match<R: SubscriberRows>(rows: &R, key: &str) -> bool {
 /// The subscribers fired and the order they fire in are the scan's: the matched positions
 /// are kept ascending, which is the table's order.
 ///
-/// `repeats_previous` is the caller's word that `key` is the key of the delivery just before this
-/// one (the next record of a frame naming the same key). Then, when that delivery was answered
-/// from a slot and no slot has been written nor the table changed since, this one is answered
-/// from the same slot without hashing the key or comparing it again; anything else is looked up
-/// as usual.
+/// The slot the delivery before this one was answered from is tried first, so a stream of one key
+/// is answered without hashing the key: there the key is compared with the slot's, which a slot
+/// holds only when the key hashes to it. `repeats_previous` is the caller's word that `key` is
+/// the key of the delivery just before this one (the next record of a frame naming the same key);
+/// then the key is not compared either. Anything else is looked up by its hash.
 pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     rows: &mut R,
     memo: &mut MatchMemo<P>,
@@ -2453,27 +2457,18 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     if memo.slot_count() == 0 {
         return scan_subscribers(rows, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
-    if repeats_previous {
-        if let Some((at, writes)) = memo.last {
-            if writes == memo.writes {
-                if let Some(Some(slot)) = memo.slots.get(at) {
-                    if slot.epoch == epoch && slot.remote == is_remote {
-                        for position in slot.hits.iter() {
-                            if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
-                                deliver(id, sink);
-                            }
-                        }
-                        return slot.hits.len();
-                    }
-                }
-            }
-        }
-    }
-    memo.last = None;
-    let at = memo.slot_of(key);
+    let last = memo.last.filter(|&at| {
+        memo.slots
+            .get(at)
+            .and_then(Option::as_ref)
+            .is_some_and(|slot| {
+                slot.answers(epoch, is_remote) && (repeats_previous || slot.key == key)
+            })
+    });
+    let at = last.unwrap_or_else(|| memo.slot_of(key));
     if let Some(Some(slot)) = memo.slots.get(at) {
-        if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
-            memo.last = Some((at, memo.writes));
+        if last.is_some() || (slot.answers(epoch, is_remote) && slot.key == key) {
+            memo.last = Some(at);
             for position in slot.hits.iter() {
                 if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
                     deliver(id, sink);
@@ -2482,6 +2477,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
             return slot.hits.len();
         }
     }
+    memo.last = None;
     // Not remembered at this epoch: match it with the scan, noting each hit. A key
     // that cannot be matched at all (deeper than the bound) delivers to nobody and is not
     // remembered.
@@ -2521,9 +2517,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
         key: text,
         hits,
     });
-    // A count of writes, read only for equality with the one a remembered slot was written at.
-    memo.writes = memo.writes.wrapping_add(1);
-    memo.last = Some((at, memo.writes));
+    memo.last = Some(at);
     fired
 }
 
@@ -2737,6 +2731,13 @@ pub fn sample_of_push(
 #[cfg(test)]
 std::thread_local! {
     pub(crate) static MATCH_SCANS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+// How many times the receive match cache hashed a key on this thread (`MatchMemo::slot_of`): a
+// key answered from the slot the delivery before was answered from is not hashed.
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static MEMO_HASHES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 impl<C, P: Storage> SubscriberTable<C, P> {
@@ -9666,6 +9667,58 @@ mod match_memo_position_tests {
             10,
             "every message is delivered"
         );
+    }
+
+    /// A stream of one key is answered from the slot the message before it was, without hashing
+    /// the key again, though no caller says the key repeats; a different key is not answered from
+    /// that slot, and a registration between two messages is seen by the second.
+    #[test]
+    fn a_stream_of_one_key_is_answered_without_hashing_it_again() {
+        let hashes = || MEMO_HASHES.with(|count| count.get());
+        let scans = || MATCH_SCANS.with(|count| count.get());
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let mut table: SubscriberTable<Count, Heap> = SubscriberTable::default();
+        table
+            // A literal key: a build without the wildcard features matches a pattern only as text.
+            .register_sink("a/x", Locality::Any, Count(delivered.clone()))
+            .expect("a heap table grows");
+        table.limit_memo_to(1);
+        let sample = |keyexpr: &'static str| BorrowedSample {
+            keyexpr,
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+
+        let (hashed, scanned) = (hashes(), scans());
+        for _ in 0..5 {
+            assert_eq!(table.dispatch_borrowed(&sample("a/x"), true), 1);
+        }
+        assert_eq!(
+            hashes() - hashed,
+            1,
+            "the key is hashed for its first message alone"
+        );
+        assert_eq!(scans() - scanned, 1, "and matched for it alone");
+
+        assert_eq!(
+            table.dispatch_borrowed(&sample("a/y"), true),
+            0,
+            "another key is not answered from the slot the stream left"
+        );
+        assert_eq!(delivered.load(Ordering::Relaxed), 5);
+
+        table
+            .register_sink("a/x", Locality::Any, Count(delivered.clone()))
+            .expect("a heap table grows");
+        let scanned = scans();
+        assert_eq!(table.dispatch_borrowed(&sample("a/x"), true), 2);
+        assert_eq!(
+            scans() - scanned,
+            1,
+            "a registration is seen by the next message"
+        );
+        assert_eq!(delivered.load(Ordering::Relaxed), 7);
     }
 }
 
