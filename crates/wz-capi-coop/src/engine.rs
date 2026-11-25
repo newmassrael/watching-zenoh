@@ -2135,7 +2135,7 @@ fn publish_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
     how: FaceSend,
 ) -> Option<LegSent> {
     if tx.holds(wire) {
-        tx.wire().map(|held| leg.send_to(&held.actions, how))
+        tx.wire_of(wire).map(|held| leg.send_to(&held.actions, how))
     } else {
         publish_on(wire, leg, how)
     }
@@ -2966,10 +2966,11 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> HeldLink<C> for L {
 /// The link a face of a session over `L` holds (`HeldLink`).
 type FaceLink<C, L> = <L as HeldLink<C>>::Wire;
 
-/// A lend of a face's link that found it held. Never so where the read steps the faces itself on
-/// the session's one thread: an operation holds one face's place and tries every other's, which
-/// nothing else on the thread holds then, so a debug build of that form fails on it; a release
-/// build owes the send's debt, as any other form does.
+/// A lend of a face's link that found it held. Never so where the read steps the faces itself: an
+/// operation holds the place of every face that holds a link before the session's lock
+/// (`CoopEngine::live_on_link`) and tries only a place that held none when it walked the faces,
+/// which nothing holds then, so a debug build of that form fails on it; a release build owes the
+/// send's debt, as any other form does.
 #[inline(always)]
 fn found_held<U>(lent: &Lend<U>) {
     #[cfg(not(wz_round))]
@@ -3365,7 +3366,7 @@ fn send_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
     send: &(dyn SendTo<C> + Sync),
 ) -> Option<bool> {
     if tx.holds(wire) {
-        tx.wire().map(|held| send.send_to(&held.actions))
+        tx.wire_of(wire).map(|held| send.send_to(&held.actions))
     } else {
         send_on(wire, send)
     }
@@ -3392,7 +3393,7 @@ fn lend_through<L: CoopLinks + 'static, C: ClockSource + 'static, U: Send>(
     f: impl FnOnce(&LinkActions<C>) -> U + Send,
 ) -> Option<U> {
     if tx.holds(wire) {
-        tx.wire().map(|held| f(&*held.actions))
+        tx.wire_of(wire).map(|held| f(&*held.actions))
     } else {
         lend_actions(wire, f)
     }
@@ -5093,7 +5094,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // The face whose place the caller holds is settled through the wire it holds.
             #[cfg(not(wz_round))]
             if tx.holds(wire) {
-                if let Some(link) = tx.wire() {
+                if let Some(link) = tx.wire_of(wire) {
                     settle(&*link.actions);
                 }
                 continue;

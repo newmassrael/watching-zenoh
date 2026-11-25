@@ -874,19 +874,40 @@ fn a_redeclare_inside_the_reads_step_is_told() {
     );
 }
 
-/// An operation that holds the dial role's send place reaches the dial role's face through the
-/// wire it holds, and reaches no other face by it: each face's record names its face by the flags
-/// its link's end shares with the read. Turned red by a hold that names another face's flags
-/// (`OnLinkHold::face`), or a `FaceTx::holds` that compares anything but those flags.
+/// An operation reaches each face that is up through the wire its hold of that face's place
+/// holds, and none by a try: each face's record names its face by the flags its link's end shares
+/// with the read. Turned red by a hold that names another face's flags (`HeldSend::face`), a
+/// `FaceTx::held_of` that compares anything but those flags, or a walk that holds no place
+/// (`CoopEngine::hold_faces_from`).
 #[cfg(not(wz_round))]
 #[test]
-fn a_hold_of_the_dial_place_reaches_the_dial_face_through_its_wire() {
+fn an_operation_reaches_each_face_through_the_wire_it_holds() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     assert_eq!(
-        engine.faces_reached_by_the_dial_hold(),
+        engine.faces_reached_by_an_operation(),
         (1, 0),
         "the one face that is up is the dial role's, reached through the held wire"
+    );
+}
+
+/// Inside an operation, the place of every face that holds a link is held, so a send to any
+/// face under the session's lock is made through a held wire and never finds a place another
+/// holder has. Turned red by a walk that takes the session's lock before the faces' places, or
+/// that skips a face whose place holds a link (`CoopEngine::hold_faces_from`).
+#[cfg(not(wz_round))]
+#[test]
+fn an_operation_holds_the_place_of_every_face_with_a_link() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.places_held_by_an_operation(),
+        (1, 0),
+        "the dial role's place, which holds the link, is held by the operation"
+    );
+    assert!(
+        engine.send_place_is_free(),
+        "the operation let go of the place it held"
     );
 }
 

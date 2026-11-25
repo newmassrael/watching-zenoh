@@ -386,6 +386,15 @@ read slot  ->  send place  ->  session (Core)  ->  a row's latch
   the record's callbacks are called.
 - No thread holds two faces' read slots. A publish that reaches several faces takes their send
   places one at a time, each let go before the next is taken.
+- Every other operation that sends (a declaration, an undeclaration, a get, a reply) holds the
+  send place of every face whose place holds a link, in the order of the face table, and then the
+  session's lock, as the writer of a big-reader lock takes every reader's lock in one order: what
+  it tells any face under the session's lock is written through a place it holds, so nothing is
+  left owed to a face whose place another holder had, and no retraction has to be kept for later.
+  The places are taken in one order and a publish holds one at a time, so no two holders wait on
+  each other. A place that held no link when the faces were walked is not held and is reached by
+  a try, which nothing else holds in a build of one thread. With `threads` the walk holds a place
+  whether or not it holds a link (step 4), so a link seated after the walk is held too.
 - A callback is called with no lock held but the read slot of the face its record came from.
 
 ### 8.5 A callback that calls the session

@@ -25,11 +25,11 @@
 use super::*;
 
 use core::marker::PhantomData;
-use core::mem::{ManuallyDrop, MaybeUninit};
+use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::AtomicBool;
 
-use wz_runtime_coop::faces::{Dial, FaceAt, FaceSite, LinkEnd, SendParts, SiteSend, WireParts};
+use wz_runtime_coop::faces::{Dial, FaceAt, FaceSite, LinkEnd, SendParts, WireParts};
 use wz_runtime_coop::link_cells::{FaceHeld, FaceParts};
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::sync::ConfinedOwner;
@@ -328,14 +328,21 @@ pub(super) type DirectWire<L, C> = FaceAt<DirectLock, DirectParts<L, C>, DirectE
 /// The place of the one link's send part.
 type DirectSite<L, C> = FaceSite<DirectLock, DirectParts<L, C>>;
 
-/// What an operation holds of one face's send place, taken before the session's lock
-/// (`CoopEngine::hold_on_link`): the face, named by the flags its link's end shares with the
-/// read, and the face's wire while the place holds one. A send to that face writes the wire; a
-/// send to any other face is lent that face's link by a try of its place, which waits for
-/// nothing under the session's lock (`super::send_through`).
-pub(super) struct FaceTx<'a, C: ClockSource + 'static> {
+/// One face's send place an operation holds, taken before the session's lock: the face, named
+/// by the flags its link's end shares with the read, the face's wire while the place holds one,
+/// and the place held before it, so the places an operation holds are one chain on its stack.
+pub(super) struct HeldSend<'a, C: ClockSource + 'static> {
     face: &'a EndFlags,
     wire: Option<&'a Wire<C>>,
+    before: Option<&'a HeldSend<'a, C>>,
+}
+
+/// What an operation holds of the faces' send places, taken before the session's lock
+/// (`CoopEngine::live_on_link`, `CoopEngine::on_faces`): a send to a held face writes the
+/// wire its hold holds; a send to any other face is lent that face's link by a try of its place,
+/// which waits for nothing under the session's lock (`super::send_through`).
+pub(super) struct FaceTx<'a, C: ClockSource + 'static> {
+    held: Option<&'a HeldSend<'a, C>>,
     /// Whether a publish's leg through it goes to the held face alone (`CoopEngine::on_faces`).
     alone: bool,
 }
@@ -349,16 +356,30 @@ impl<C: ClockSource + 'static> Clone for FaceTx<'_, C> {
 impl<C: ClockSource + 'static> Copy for FaceTx<'_, C> {}
 
 impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
-    /// Whether `link`, a face's record of its link, lies in the face whose place is held.
-    #[inline(always)]
-    pub(super) fn holds<L: CoopLinks + 'static>(&self, link: &DirectWire<L, C>) -> bool {
-        link.end().is_of(self.face)
+    /// The hold of the face whose record holds `link`, when its place is held.
+    #[inline]
+    fn held_of<L: CoopLinks + 'static>(
+        &self,
+        link: &DirectWire<L, C>,
+    ) -> Option<&'a HeldSend<'a, C>> {
+        core::iter::successors(self.held, |held| held.before)
+            .find(|held| link.end().is_of(held.face))
     }
 
-    /// The held face's wire; `None` while its place holds no link.
-    #[inline(always)]
-    pub(super) fn wire(&self) -> Option<&'a Wire<C>> {
-        self.wire
+    /// Whether `link`, a face's record of its link, lies in a face whose place is held.
+    #[inline]
+    pub(super) fn holds<L: CoopLinks + 'static>(&self, link: &DirectWire<L, C>) -> bool {
+        self.held_of(link).is_some()
+    }
+
+    /// The wire of the face whose record holds `link`, through its held place; `None` while
+    /// that place is not held or holds no link.
+    #[inline]
+    pub(super) fn wire_of<L: CoopLinks + 'static>(
+        &self,
+        link: &DirectWire<L, C>,
+    ) -> Option<&'a Wire<C>> {
+        self.held_of(link).and_then(|held| held.wire)
     }
 
     /// Whether a publish's leg sent through this hold goes to the face whose record holds
@@ -367,47 +388,6 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     #[inline(always)]
     pub(super) fn reaches<L: CoopLinks + 'static>(&self, link: &DirectWire<L, C>) -> bool {
         !self.alone || self.holds(link)
-    }
-}
-
-/// The session's state an operation holds, with the one link's place held before it
-/// (`CoopEngine::hold_on_link`): let go of in the reverse order, the session's lock first.
-pub(super) struct OnLinkHold<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
-    /// The face whose place is held.
-    face: &'a EndFlags,
-    core: ManuallyDrop<LiveCore<'a, L, C>>,
-    place: ManuallyDrop<Option<SiteSend<'a, DirectLock, DirectParts<L, C>>>>,
-}
-
-impl<L: CoopLinks + 'static, C: ClockSource + 'static> OnLinkHold<'_, L, C> {
-    /// The session's state, and the link's wire it sends through: none where the place holds no
-    /// link.
-    #[inline(always)]
-    pub(super) fn parts(&mut self) -> (&mut Core<L, C>, LinkTx<'_, C>) {
-        let wire = self
-            .place
-            .as_mut()
-            .and_then(|send| send.tx())
-            .and_then(|tx| tx.as_ref());
-        let tx = FaceTx {
-            face: self.face,
-            wire,
-            alone: false,
-        };
-        (&mut self.core.0, tx)
-    }
-}
-
-impl<L: CoopLinks + 'static, C: ClockSource + 'static> Drop for OnLinkHold<'_, L, C> {
-    // Out of line: every operation but a publish lets go of the session and the place through it.
-    #[inline(never)]
-    fn drop(&mut self) {
-        // SAFETY: each field is dropped here alone, once, and not reached after; the session's
-        // lock goes before the place it was taken inside.
-        unsafe {
-            ManuallyDrop::drop(&mut self.core);
-            ManuallyDrop::drop(&mut self.place);
-        }
     }
 }
 
@@ -1352,42 +1332,69 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .is_some_and(|face| face.life.phase() == LinkPhase::Up)
     }
 
-    /// The session's state for an operation that sends on the one link, held with the link's send
-    /// place: the place first, by a hold that waits for another send that holds it now (never for
-    /// a read's step, which does not hold it), then the session's lock. A send under both neither
-    /// waits nor is owed, and the session's lock is never held while the place is waited for.
-    /// Where the place holds no link, the session's lock alone is taken and the hold hands no wire
-    /// ([`OnLinkHold::parts`]). `None` once the session is closed.
-    // Out of line: one body takes the place and the session's lock for every operation but a
-    // publish.
-    #[inline(never)]
-    pub(super) fn hold_on_link(&self) -> Option<OnLinkHold<'_, L, C>> {
-        // SAFETY: an operation reaches the link's send part only as `LinkTx`, a shared borrow of
-        // the hold that ends before it, and what it sends is made of the session's state: no
-        // handle on a cell of the link leaves the parts and none comes into them.
-        let place = unsafe { self.direct.dial.site.hold_send() };
-        let core = self.live()?;
-        Some(OnLinkHold {
-            face: &self.direct.dial.end,
-            core: ManuallyDrop::new(core),
-            place: ManuallyDrop::new(place),
-        })
-    }
-
-    /// `f` on the session's state and the one link's wire, held as [`Self::hold_on_link`]
-    /// holds them. `None` once the session is closed.
+    /// `f` on the session's state, with every face's send place held before the session's lock,
+    /// in the order of the face table, each by a hold that waits for another send that holds it
+    /// now (never for a read's step, which does not hold it): a send to any face under both
+    /// neither waits nor is owed, and the session's lock is never held while a place is waited
+    /// for. Faces are taken in one order by every operation, and a publish holds one at a time
+    /// (`Self::on_faces`), so no two holders wait on each other. A place that holds no link is
+    /// not held, and its face is reached by a try, as no send is owed a face with no link. `None`
+    /// once the session is closed.
     #[inline(always)]
     pub(super) fn live_on_link<U>(
         &self,
         f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
     ) -> Option<U> {
-        let mut held = self.hold_on_link()?;
-        let (core, tx) = held.parts();
-        Some(f(core, tx))
+        let mut f = Some(f);
+        let mut answer = None;
+        self.hold_faces_from(self.direct.iter(), None, &mut |core, tx| {
+            if let Some(f) = f.take() {
+                answer = Some(f(core, tx));
+            }
+        });
+        answer
+    }
+
+    /// Hold the send place of each face `faces` has left, after those `before` holds, then the
+    /// session's lock, and run `f` under them: the session's lock is let go of first, then each
+    /// place in the reverse of the order it was taken. Each place's hold lies in this frame, so
+    /// holding every face takes no storage but the stack.
+    // Out of line: every operation but a publish holds the faces through this one body.
+    #[inline(never)]
+    fn hold_faces_from<'f>(
+        &'f self,
+        mut faces: impl Iterator<Item = &'f DirectFace<L, C>>,
+        before: Option<&HeldSend<'_, C>>,
+        f: &mut dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>),
+    ) {
+        let Some(face) = faces.next() else {
+            if let Some(mut core) = self.live() {
+                f(
+                    &mut core.0,
+                    FaceTx {
+                        held: before,
+                        alone: false,
+                    },
+                );
+            }
+            return;
+        };
+        // SAFETY: an operation reaches the link's send part only as `LinkTx`, a shared borrow of
+        // the hold that ends before it, and what it sends is made of the session's state: no
+        // handle on a cell of the link leaves the parts and none comes into them.
+        let Some(mut send) = (unsafe { face.site.hold_send() }) else {
+            return self.hold_faces_from(faces, before, f);
+        };
+        let held = HeldSend {
+            face: &face.end,
+            wire: send.tx().and_then(|tx| tx.as_ref()),
+            before,
+        };
+        self.hold_faces_from(faces, Some(&held), f);
     }
 
     /// A publish's leg to the faces: `leg` on each face's wire (`LinkTx`) in the order of the
-    /// face table, the face's send place held as [`Self::hold_on_link`] holds the dial role's,
+    /// face table, the face's send place held as [`Self::live_on_link`] holds each,
     /// and let go of before the next face's is taken, so no thread holds two faces' places and a
     /// face that waits holds up no other. `leg` takes the session's lock its own way inside each
     /// hold (one that may be dropped tries it) and reaches the held face alone
@@ -1401,14 +1408,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> Result<usize, FanoutError> {
         let mut outcome = Ok(0);
         for face in self.direct.iter() {
-            // SAFETY: as in `Self::hold_on_link`: `leg` reaches the send part only as `LinkTx`.
+            // SAFETY: as in `Self::hold_faces_from`: `leg` reaches the send part only as
+            // `LinkTx`.
             let Some(mut send) = (unsafe { face.site.hold_send() }) else {
                 continue;
             };
-            let wire = send.tx().and_then(|tx| tx.as_ref());
-            let sent = leg(FaceTx {
+            let held = HeldSend {
                 face: &face.end,
-                wire,
+                wire: send.tx().and_then(|tx| tx.as_ref()),
+                before: None,
+            };
+            let sent = leg(FaceTx {
+                held: Some(&held),
                 alone: true,
             });
             if sent.is_err() {
@@ -1443,16 +1454,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         !matches!(self.direct.dial.site.try_lend(|_| ()), Lend::Held)
     }
 
-    /// How many faces that are up an operation holding the dial role's send place reaches
-    /// through the wire it holds, and how many by a try of their own place.
+    /// How many faces that are up an operation reaches through the wire its hold of their place
+    /// holds, and how many by a try of their own place.
     #[cfg(all(test, feature = "std"))]
-    pub(crate) fn faces_reached_by_the_dial_hold(&self) -> (usize, usize) {
+    pub(crate) fn faces_reached_by_an_operation(&self) -> (usize, usize) {
         self.live_on_link(|core, tx| {
             core.up_wires_at().fold((0, 0), |(held, tried), (_, wire)| {
-                if tx.holds(wire) {
+                if tx.wire_of(wire).is_some() {
                     (held + 1, tried)
                 } else {
                     (held, tried + 1)
+                }
+            })
+        })
+        .unwrap_or((0, 0))
+    }
+
+    /// Inside an operation, how many faces whose place holds a link a try of their place finds
+    /// held, and how many it finds free.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn places_held_by_an_operation(&self) -> (usize, usize) {
+        self.live_on_link(|_, _| {
+            self.direct.iter().fold((0, 0), |(held, free), face| {
+                match face.site.try_lend(|_| ()) {
+                    Lend::Held => (held + 1, free),
+                    Lend::Lent(()) => (held, free + 1),
+                    Lend::Empty => (held, free),
                 }
             })
         })
