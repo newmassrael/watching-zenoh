@@ -160,6 +160,32 @@ mod tests {
         ));
     }
 
+    /// The host's groups with the `reth/` groups of its raw packet sockets beside them, as an ABI
+    /// whose build joins `reth/` groups composes the two.
+    #[cfg(all(feature = "raweth", target_os = "linux"))]
+    fn with_raweth() -> impl GroupJoiner {
+        crate::raweth_group::RawethJoiner::new(groups(), wz_runtime_posix::raweth::PosixRawEthOpen)
+    }
+
+    /// A `reth/` group reaches the raw packet sockets and a `udp/` group the host's UDP sockets.
+    /// The `reth/` interface is a name the request holds and no host has, so the kernel refuses
+    /// its open with `CAP_NET_RAW` or without, where the UDP joiner would answer `Unsupported`;
+    /// the `udp/` group's keys make no socket, a refusal only the host's UDP joiner gives, where
+    /// a composition that wraps no host groups would answer `Unsupported`.
+    #[cfg(all(feature = "raweth", target_os = "linux"))]
+    #[test]
+    fn a_reth_group_reaches_the_raw_sockets_and_a_udp_group_the_hosts() {
+        let joiner = with_raweth();
+        assert!(matches!(
+            joiner.join(&read("reth/02:00:00:00:00:01#iface=wzabsentif0"), None),
+            Err(LinkOpenError::Refused)
+        ));
+        assert!(matches!(
+            joiner.join(&read("udp/239.255.77.12:0#iface=::1"), None),
+            Err(LinkOpenError::Refused)
+        ));
+    }
+
     /// The session's `multicast-loopback` reaches the sockets it joins with, each value the
     /// build lets a session select as the host's same value, and its
     /// `multicast-link-requires-iface` as it holds it.

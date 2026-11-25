@@ -421,6 +421,8 @@ pub struct z_owned_closure_reply_t {
     pub(crate) drop: z_closure_drop_callback_t,
 }
 
+crate::abi::closure_shares_the_block!(z_owned_closure_reply_t);
+
 /// Loaned reply closure (pico `z_loaned_closure_reply_t`), same layout.
 #[repr(C)]
 pub struct z_loaned_closure_reply_t {
@@ -600,9 +602,7 @@ pub unsafe extern "C" fn z_closure_reply_call(
 /// Zero an owned reply closure (pico `z_internal_closure_reply_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_closure_reply_null(closure: *mut z_owned_closure_reply_t) {
-    if !closure.is_null() {
-        *closure = z_owned_closure_reply_t::null_value();
-    }
+    crate::abi::obj_null(closure.cast(), &crate::abi::CLOSURE);
 }
 
 /// `true` iff the closure holds a callback (pico
@@ -611,7 +611,7 @@ pub unsafe extern "C" fn z_internal_closure_reply_null(closure: *mut z_owned_clo
 pub unsafe extern "C" fn z_internal_closure_reply_check(
     closure: *const z_owned_closure_reply_t,
 ) -> bool {
-    guard_val(false, || !closure.is_null() && (*closure).call.is_some())
+    crate::abi::closure_check(closure.cast())
 }
 
 /// Borrow an owned reply closure (pico `z_closure_reply_loan`).
@@ -637,30 +637,14 @@ pub unsafe extern "C" fn z_closure_reply_take(
     dst: *mut z_owned_closure_reply_t,
     src: *mut z_moved_closure_reply_t,
 ) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst).context = (*src)._this.context;
-    (*dst).call = (*src)._this.call;
-    (*dst).drop = (*src)._this.drop;
-    (*src)._this = z_owned_closure_reply_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), &crate::abi::CLOSURE);
 }
 
 /// Drop an owned reply closure that was never handed to a get (pico
 /// `z_closure_reply_drop`): run the C `drop(context)` and null the struct.
 #[no_mangle]
 pub unsafe extern "C" fn z_closure_reply_drop(closure: *mut z_moved_closure_reply_t) {
-    let _ = guarded(|| {
-        if closure.is_null() {
-            return Z_OK;
-        }
-        let owned = &mut (*closure)._this;
-        if let Some(dropfn) = owned.drop {
-            dropfn(owned.context);
-        }
-        *owned = z_owned_closure_reply_t::null_value();
-        Z_OK
-    });
+    crate::abi::closure_drop(closure.cast());
 }
 
 // --- get options -----------------------------------------------------------
@@ -1997,13 +1981,21 @@ pub unsafe extern "C" fn z_reply_err_take(
     dst: *mut z_owned_reply_err_t,
     src: *mut z_moved_reply_err_t,
 ) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst).handle = (*src)._this.handle;
-    (*dst)._pad = (*src)._this._pad;
-    (*src)._this = z_owned_reply_err_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), <z_owned_reply_err_t>::facts());
 }
+
+/// Give an error reply's marshal back to the place it lies in.
+///
+/// # Safety
+/// `handle` is the handle of an owned reply error, given up by its owner.
+unsafe fn release_reply_err(handle: *mut c_void) {
+    crate::object_slot::release(handle as *mut ReplyMarshal);
+}
+
+crate::abi::impl_type_facts!(
+    z_owned_reply_err_t,
+    Some(release_reply_err as unsafe fn(*mut c_void))
+);
 
 /// Release an owned reply error (pico `z_reply_err_drop`).
 ///
@@ -2011,17 +2003,7 @@ pub unsafe extern "C" fn z_reply_err_take(
 /// `err` must be null or a valid moved reply error this crate produced.
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_err_drop(err: *mut z_moved_reply_err_t) {
-    let _ = crate::ffi::guarded(|| {
-        if err.is_null() {
-            return Z_OK;
-        }
-        let handle = (*err)._this.handle;
-        (*err)._this = z_owned_reply_err_t::null_value();
-        if !handle.is_null() {
-            crate::object_slot::release(handle as *mut ReplyMarshal);
-        }
-        Z_OK
-    });
+    crate::abi::obj_drop(err.cast(), <z_owned_reply_err_t>::facts());
 }
 
 /// Escape a borrowed reply error into an owned one (pico
@@ -2048,9 +2030,7 @@ pub unsafe extern "C" fn z_reply_err_take_from_loaned(
 /// `err` must be null or valid and writable.
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_reply_err_null(err: *mut z_owned_reply_err_t) {
-    if !err.is_null() {
-        *err = z_owned_reply_err_t::null_value();
-    }
+    crate::abi::obj_null(err.cast(), <z_owned_reply_err_t>::facts());
 }
 
 /// `true` iff the owned reply error holds a live value (pico
@@ -2060,7 +2040,7 @@ pub unsafe extern "C" fn z_internal_reply_err_null(err: *mut z_owned_reply_err_t
 /// `err` must be null or a valid owned reply error.
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_reply_err_check(err: *const z_owned_reply_err_t) -> bool {
-    guard_val(false, || !err.is_null() && !(*err).handle.is_null())
+    crate::abi::obj_check(err.cast())
 }
 
 /// Deep-copy a reply into an owned one (pico `z_reply_clone`).

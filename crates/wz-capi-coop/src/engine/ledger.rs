@@ -7,10 +7,9 @@
 //! deadline and the counts as the last service left them, so a step that finds neither passed nor
 //! moved runs none of it, at the cost of one comparison of each.
 //!
-//! It keeps the earliest deadline of the session's pending gets apart as well, which a read's wait
-//! is bounded by (`Core::idle_wait`): each leg held lowers it (`Ledger::owe_leg_due`), and each
-//! service settles it from the tables, so no read walks them. A get that ended before its deadline
-//! leaves the value early, which costs one wake that finds nothing and settles it again.
+//! The gets' deadlines are the index the registry keeps (`RegistryOf::dues`), which a read's wait
+//! reads; the ledger is only due by them: each leg held lowers its due time
+//! (`Ledger::owe_leg_due`), and each service settles it from the index.
 
 /// The counts of the changes the bookkeeping follows, kept where the changes are made: the moves
 /// of the faces' table and the writes of the faces' declaration tables.
@@ -26,7 +25,7 @@ pub(super) struct Due {
     /// When the links are next due, in microseconds of the session's clock; `u64::MAX` when never.
     pub(super) links_us: u64,
     /// The earliest deadline of a pending get, in milliseconds of the session's clock, as the
-    /// tables keep it; `u64::MAX` when none has one.
+    /// index of the gets' deadlines answers it; `u64::MAX` when none has one.
     #[cfg(feature = "query")]
     pub(super) gets_ms: u64,
 }
@@ -36,10 +35,6 @@ pub(super) struct Ledger {
     /// The earliest instant, in microseconds of the session's clock, at which something of the
     /// bookkeeping falls due by time; `u64::MAX` when nothing does.
     next_due_us: u64,
-    /// The earliest deadline of a pending get, in milliseconds of the session's clock; `u64::MAX`
-    /// when none has one. Never later than the earliest the tables hold.
-    #[cfg(feature = "query")]
-    gets_due_ms: u64,
     /// The counts as the last service left them.
     seen: Seen,
     /// Owed whatever the time and the counts: something that no deadline or count says came,
@@ -52,8 +47,6 @@ impl Ledger {
     pub(super) const fn new() -> Self {
         Self {
             next_due_us: u64::MAX,
-            #[cfg(feature = "query")]
-            gets_due_ms: u64::MAX,
             seen: Seen {
                 moves: 0,
                 written: 0,
@@ -74,39 +67,20 @@ impl Ledger {
         self.owed = true;
     }
 
-    /// A leg of a get was held, with its deadline at `deadline_ms` when it has one: a read waits
-    /// no longer than that, and the bookkeeping that sweeps the get falls due by then. Every leg
-    /// held passes here, so a deadline the tables hold is never past the one the ledger keeps.
+    /// A leg of a get was held, with its deadline at `deadline_ms` when it has one: the
+    /// bookkeeping that sweeps the get falls due by then, never later than it was.
     #[cfg(feature = "query")]
     #[inline]
     pub(super) fn owe_leg_due(&mut self, deadline_ms: Option<u64>) {
         if let Some(due_ms) = deadline_ms {
-            self.lower(due_ms);
+            self.next_due_us = self.next_due_us.min(due_ms.saturating_mul(1000));
         }
-    }
-
-    /// Bring the gets' earliest deadline, and the bookkeeping's due time with it, down to
-    /// `due_ms`, milliseconds of the session's clock; never up.
-    #[cfg(feature = "query")]
-    #[inline]
-    fn lower(&mut self, due_ms: u64) {
-        self.gets_due_ms = self.gets_due_ms.min(due_ms);
-        self.next_due_us = self.next_due_us.min(due_ms.saturating_mul(1000));
-    }
-
-    /// The earliest deadline of a pending get, in milliseconds of the session's clock; `None`
-    /// when none has one.
-    #[cfg(feature = "query")]
-    #[inline]
-    pub(super) fn gets_due_ms(&self) -> Option<u64> {
-        (self.gets_due_ms != u64::MAX).then_some(self.gets_due_ms)
     }
 
     /// A service ran, leaving the bookkeeping due by `due` and the counts at `seen`.
     pub(super) fn settle(&mut self, due: Due, seen: Seen) {
         #[cfg(feature = "query")]
         {
-            self.gets_due_ms = due.gets_ms;
             self.next_due_us = due.links_us.min(due.gets_ms.saturating_mul(1000));
         }
         #[cfg(not(feature = "query"))]
@@ -214,38 +188,32 @@ mod tests {
         assert!(!ledger.owes(0, SEEN), "a settled ledger is still owed");
     }
 
-    /// A leg held with a deadline bounds the gets' earliest deadline and the bookkeeping's due
-    /// time by it at once, before any service; a later deadline or a leg with none moves neither.
-    /// Turned red by a leg that leaves the ledger as the last service settled it, or by a
-    /// lowering that raises what an earlier leg lowered.
+    /// A leg held with a deadline makes the bookkeeping due by it at once, before any service; a
+    /// later deadline or a leg with none moves it not. Turned red by a leg that leaves the ledger
+    /// as the last service settled it, or by a lowering that raises what an earlier leg lowered.
     #[cfg(feature = "query")]
     #[test]
-    fn a_held_leg_lowers_the_gets_due_time_and_never_raises_it() {
+    fn a_held_leg_lowers_the_due_time_and_never_raises_it() {
         let mut ledger = Ledger::new();
         ledger.settle(links(u64::MAX), SEEN);
-        assert_eq!(ledger.gets_due_ms(), None, "CONTROL: no get pending");
+        assert!(!ledger.owes(u64::MAX - 1, SEEN), "CONTROL: nothing is due");
         ledger.owe_leg_due(Some(5));
-        assert_eq!(ledger.gets_due_ms(), Some(5));
         assert!(!ledger.owes(4_999, SEEN), "owed before the leg's deadline");
         assert!(ledger.owes(5_000, SEEN), "not owed at the leg's deadline");
         ledger.owe_leg_due(Some(9));
-        assert_eq!(ledger.gets_due_ms(), Some(5), "a later deadline raised it");
+        assert!(ledger.owes(5_000, SEEN), "a later deadline raised it");
         ledger.owe_leg_due(None);
-        assert_eq!(
-            ledger.gets_due_ms(),
-            Some(5),
-            "a leg with no deadline moved it"
-        );
+        assert!(ledger.owes(5_000, SEEN), "a leg with no deadline raised it");
         assert!(!ledger.owes(4_999, SEEN));
     }
 
-    /// A service settles the gets' earliest deadline to what the tables hold, so a get that ended
-    /// before its deadline bounds nothing after it; the bookkeeping is due at the earlier of the
-    /// links' time and that deadline. Turned red by a settling that keeps the lowered deadline,
-    /// or that reads the links' time alone.
+    /// A service settles the due time to what the index of the gets' deadlines holds, so a get
+    /// that ended before its deadline makes nothing due after it; the bookkeeping is due at the
+    /// earlier of the links' time and that deadline. Turned red by a settling that keeps the
+    /// lowered deadline, or that reads the links' time alone.
     #[cfg(feature = "query")]
     #[test]
-    fn a_service_settles_the_gets_due_time_from_the_tables() {
+    fn a_service_settles_the_due_time_from_the_gets() {
         let mut ledger = Ledger::new();
         ledger.owe_leg_due(Some(5));
         ledger.settle(
@@ -255,12 +223,7 @@ mod tests {
             },
             SEEN,
         );
-        assert_eq!(
-            ledger.gets_due_ms(),
-            Some(40),
-            "the ended get still bounds it"
-        );
-        assert!(!ledger.owes(39_999, SEEN));
+        assert!(!ledger.owes(39_999, SEEN), "the ended get still bounds it");
         assert!(ledger.owes(40_000, SEEN), "the get left is not due");
         ledger.settle(
             Due {
@@ -274,7 +237,6 @@ mod tests {
             "the links' earlier time was missed"
         );
         ledger.settle(links(u64::MAX), SEEN);
-        assert_eq!(ledger.gets_due_ms(), None, "no get is left");
-        assert!(!ledger.owes(u64::MAX - 1, SEEN));
+        assert!(!ledger.owes(u64::MAX - 1, SEEN), "no get is left");
     }
 }

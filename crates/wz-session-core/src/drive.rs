@@ -3390,6 +3390,10 @@ fn in_place_unit<R: SessionRuntime, T: TimeSource>(
 /// at Established entry (session-fsm §2.5). Both `None` -> `NoBaseline` (no
 /// FSM mutation).
 ///
+/// The window counts from the end of the millisecond the baseline stamp names, not from the
+/// stamp itself: the lease never expires before it has wholly passed since the last receipt,
+/// and expires at most a millisecond after (see `lease_deadlines`).
+///
 /// `now_ms` is parameterised for test determinism; production callers pass
 /// `clock.now_monotonic_ms()` (the same epoch `SessionLinkActions::clock`
 /// carries). `params.lease_ms` is milliseconds by contract (R311ku —
@@ -3953,8 +3957,9 @@ fn max_stamp(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 }
 
 /// R311kx — absolute lease-expiry deadline (ms, the shared monotonic
-/// epoch): `max(established_at, last_inbound_at) +
-/// adopted_lease_ms`, or `None` pre-Established (no baseline). The wake
+/// epoch): `max(established_at, last_inbound_at) + 1 +
+/// adopted_lease_ms`, the window counted from the end of the stamp's
+/// millisecond, or `None` pre-Established (no baseline). The wake
 /// twin of [`check_lease_deadline`] — both drive loops arm their sleep /
 /// busy-poll compare on this value and the comparator re-derives the same
 /// deadline at fire time, so the two cannot disagree.
@@ -3987,7 +3992,8 @@ pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
 /// The wake ([`lease_wake_deadline`]) and the judgement ([`judge_lease`]) read the same value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LeaseDeadlines {
-    /// The later of the establishment and the last receipt, plus the adopted lease.
+    /// The end of the millisecond of the later of the establishment and the last receipt, plus
+    /// the adopted lease.
     expiry: u64,
     /// When the watch of the peer's initial declarations ends, while it runs.
     #[cfg(feature = "alloc")]
@@ -4020,7 +4026,13 @@ pub(crate) fn lease_deadlines<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<LeaseDeadlines> {
     let stamps = actions.link.stamps_while(&actions.link.lease_armed)?;
+    // A stamp is a reading, which names the millisecond that has begun, and the receipt may have
+    // come anywhere in it: counted from the stamp itself, the lease would expire up to a
+    // millisecond before it has passed. It is counted from the end of that millisecond here, where
+    // the deadline is read, and not where the stamp is written: the stamp stays the reading, which
+    // the keep-alive and the declaration watch count from too, and a receipt costs no more.
     let expiry = max_stamp(stamps.established_at, stamps.last_inbound_at)?
+        .saturating_add(1)
         .saturating_add(actions.adopted_lease_ms());
     Some(LeaseDeadlines {
         expiry,

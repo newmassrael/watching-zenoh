@@ -100,7 +100,8 @@ impl TransportTimers {
     /// The first instant, in the session's monotonic milliseconds, at which one of its timers
     /// falls due: the handshake deadline of the state the machine is in, the lease's, the
     /// keep-alive's and the application layer's. `None` when none is armed. A state the timers
-    /// see for the first time has its handshake deadline armed from `now_ms`.
+    /// see for the first time has its handshake deadline armed from the end of the millisecond
+    /// `now_ms` names.
     pub fn next_due_ms<R: SessionRuntime, T: TimeSource>(
         &mut self,
         engine: &SessionEngine<R, T>,

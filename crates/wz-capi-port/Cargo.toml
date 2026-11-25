@@ -39,34 +39,37 @@ crate-type = ["rlib"]
 # critical section an MCU image links (src/sync.rs), and the token waits for the MCU host layer.
 # The lock and the condition variable are `wz-host-sync`'s typed forms in its `std` build: `std`'s
 # where they lie in their own bytes, the in-place ones where `std`'s would box a pthread object the
-# first time each is taken (macOS), so taking one takes no memory on any host (src/os.rs).
+# first time each is taken (macOS), so taking one takes no memory on any host (src/os.rs). The
+# threads are `wz-host-sync`'s in every host build, as without `std`.
 default = ["std"]
-std = ["dep:wz-host-sync", "wz-host-sync/std"]
+std = ["dep:wz-host-sync", "wz-host-sync/std", "wz-node-time?/std"]
 # A publish that takes a buffer of shared memory some owner of a segment holds
 # (`Engine::publish_shm_on_wire_all`): the buffer's type is the session core's, behind its own
 # feature. An engine that has no shared memory answers the method with the bytes.
 transport-shm = ["wz-session-core/transport-shm"]
 # The four instruments of the observation plane, which the doors of every C ABI act on
 # (`observation`): wz's own, so each is off by default as the reference builds are. They are the
-# node's and not a session's, so the cooperative engine hosts the same four. They need the host
-# (`std`) for their process-wide state; the clock and the ring are `wz-node-time`'s and the
-# supervisor and the snapshot are `wz-session-core`'s.
-clock-source = ["std", "dep:wz-node-time", "wz-node-time/clock-source"]
-event-ring = ["std", "dep:wz-node-time", "wz-node-time/event-ring"]
-supervision = ["std", "wz-session-core/supervision"]
-resource-snapshot = ["std", "wz-session-core/resource-snapshot"]
+# node's and not a session's, so the cooperative engine hosts the same four. They need a host's
+# lock and clock for their process-wide state, `std`'s build of `wz-host-sync` or its own calls'
+# (`os-sys`), and a build with neither is refused by name (src/lib.rs); the clock and the ring are
+# `wz-node-time`'s and the supervisor and the snapshot are `wz-session-core`'s.
+clock-source = ["dep:wz-node-time", "wz-node-time/clock-source"]
+event-ring = ["dep:wz-node-time", "wz-node-time/event-ring"]
+supervision = ["wz-session-core/supervision"]
+resource-snapshot = ["wz-session-core/resource-snapshot"]
 # The key ids every node of a deployment shares (`SessionEngine::key_wire_by_form`): the engine
 # that holds a dictionary answers how a key goes on the wire under the session's key-wire form.
 # The dictionary and the rule are session-core's; an engine that holds none answers nothing.
 shared-key-ids = ["wz-session-core/shared-key-ids"]
 # A time base the program supplies (`time_base`): the time base of `wz-node-time` made from the C
 # calls a door of either C ABI is handed. wz's own, so off by default as the reference builds are.
-time-base = ["std", "dep:wz-node-time", "wz-node-time/time-base"]
+# A host's, as the observation plane is.
+time-base = ["dep:wz-node-time", "wz-node-time/time-base"]
 # The port's `os` and its lock made of the host's own calls (`wz-host-sync`: pthreads, or Win32's
 # slim lock) in place of `std`'s and of the critical section an image links, for a host library
 # built without `std`, which runs threads and must export nothing but its C ABI. Beside `std` it
-# changes nothing: `std` answers the same names.
-os-sys = ["dep:wz-host-sync"]
+# changes nothing: a `std` build answers the same names with the same calls.
+os-sys = ["dep:wz-host-sync", "wz-node-time?/host-sync"]
 
 [dependencies]
 # The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does
@@ -86,9 +89,9 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 ] }
 # The node's clock registry and event ring, which the observation plane's doors act on, and the
 # time base a program supplies. Optional: only `clock-source`, `event-ring` and `time-base` name it.
-wz-node-time = { path = "../wz-node-time", optional = true }
-# The host's lock and condition variable, with `std` and without, and its threads without `std`
-# (`os-sys`).
+# Without its default features: this crate's `std` or `os-sys` names its lock and clock.
+wz-node-time = { path = "../wz-node-time", optional = true, default-features = false }
+# The host's lock and condition variable and its threads, with `std` and without (`os-sys`).
 wz-host-sync = { path = "../wz-host-sync", optional = true }
 
 [lints]

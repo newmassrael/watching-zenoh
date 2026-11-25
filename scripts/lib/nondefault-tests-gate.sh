@@ -787,6 +787,11 @@ transport-link-ws|"
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
     "wz-capi-coop|hook|group-host|host_group::"
+    # The same module with the `reth/` groups beside them (`raweth`, which re-exports the
+    # joiner the pico ABI wraps the host's groups in): a `reth/` group is opened on a raw packet
+    # socket and a `udp/` group still on the host's UDP sockets. The interface named is one no
+    # host has, so the refusal is the kernel's with `CAP_NET_RAW` or without.
+    "wz-capi-coop|hook|raweth|host_group::"
     # The word of a clock the program moves, which ends a read's wait (`clock_moves_tests::`, 2,
     # compiled with `time-base`): a wait for the next dial ends at the word, and the word joins a
     # wait on links and makes none where there was none.
@@ -1668,6 +1673,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # dictionary and a parsed document; the filter is the module path. Its reply-frame tests also
     # need `codec-response` and its registry tests `pubsub-put`, so the leg builds both.
     "wz-session-core|hook|shared-key-ids,codec-response,pubsub-put|shared_key_ids::"
+    # A reply whose key a deployment's shared ids name (`lent_response`'s mirrored key): written by
+    # the direct writer as the codec's owned reply names it. Its test is built with
+    # `shared-key-ids`; the filter is the module path.
+    "wz-session-core|hook|shared-key-ids,codec-response|lent_response::"
     # The unicast receive's per-path counts (`rx-in-place`, which the cooperative runtime forwards):
     # a receive built in place starts with none, and each path is counted under its own name. The
     # filter is the module path. The module is built with `storage-profile` and `session-unicast`.

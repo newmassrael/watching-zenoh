@@ -240,6 +240,20 @@ pub unsafe extern "C" fn z_cancellation_token_clone(
     })
 }
 
+/// Let go of one token handle's count.
+///
+/// # Safety
+/// `handle` is a live count `Strong::into_raw` gave up, given up by its owner.
+unsafe fn release_token(handle: *mut c_void) {
+    // SAFETY: the caller's: a live handle is a count, let go of once here.
+    drop(unsafe { Strong::<CancellationToken>::from_raw(handle) });
+}
+
+crate::abi::impl_type_facts!(
+    z_owned_cancellation_token_t,
+    Some(release_token as unsafe fn(*mut c_void))
+);
+
 /// Release a token handle (pico `z_cancellation_token_drop`).
 ///
 /// Lets go of THIS handle's count; the state survives while any clone holds one.
@@ -248,18 +262,7 @@ pub unsafe extern "C" fn z_cancellation_token_clone(
 /// `token` must be null or a valid moved token this crate produced.
 #[no_mangle]
 pub unsafe extern "C" fn z_cancellation_token_drop(token: *mut z_moved_cancellation_token_t) {
-    let _ = crate::ffi::guarded(|| {
-        if token.is_null() {
-            return Z_OK;
-        }
-        let handle = (*token)._this.handle;
-        (*token)._this = z_owned_cancellation_token_t::null_value();
-        if !handle.is_null() {
-            // SAFETY: the caller's: a live handle is a count, let go of once here.
-            drop(unsafe { Strong::<CancellationToken>::from_raw(handle) });
-        }
-        Z_OK
-    });
+    crate::abi::obj_drop(token.cast(), <z_owned_cancellation_token_t>::facts());
 }
 
 /// Borrow a token (pico `z_cancellation_token_loan`) — offset-0 identity.
@@ -304,14 +307,11 @@ pub unsafe extern "C" fn z_cancellation_token_take(
     dst: *mut z_owned_cancellation_token_t,
     src: *mut z_moved_cancellation_token_t,
 ) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    *dst = z_owned_cancellation_token_t {
-        handle: (*src)._this.handle,
-        _cnt: (*src)._this._cnt,
-    };
-    (*src)._this = z_owned_cancellation_token_t::null_value();
+    crate::abi::obj_move(
+        dst.cast(),
+        src.cast(),
+        <z_owned_cancellation_token_t>::facts(),
+    );
 }
 
 /// Zero an owned token (pico `z_internal_cancellation_token_null`).
@@ -322,9 +322,7 @@ pub unsafe extern "C" fn z_cancellation_token_take(
 pub unsafe extern "C" fn z_internal_cancellation_token_null(
     token: *mut z_owned_cancellation_token_t,
 ) {
-    if !token.is_null() {
-        *token = z_owned_cancellation_token_t::null_value();
-    }
+    crate::abi::obj_null(token.cast(), <z_owned_cancellation_token_t>::facts());
 }
 
 /// `true` iff the owned token holds a live state (pico
@@ -336,7 +334,7 @@ pub unsafe extern "C" fn z_internal_cancellation_token_null(
 pub unsafe extern "C" fn z_internal_cancellation_token_check(
     token: *const z_owned_cancellation_token_t,
 ) -> bool {
-    crate::ffi::guard_val(false, || !token.is_null() && !(*token).handle.is_null())
+    crate::abi::obj_check(token.cast())
 }
 
 #[cfg(test)]

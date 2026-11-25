@@ -15,7 +15,8 @@
 //! stamps no data until it has said so; a program that reads the clock is given its time whatever
 //! its standing.
 
-use std::ffi::c_void;
+use alloc::boxed::Box;
+use core::ffi::c_void;
 
 use wz_node_time::clock_registry::{SourceId, GLOBAL};
 use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
@@ -114,7 +115,7 @@ pub fn report(event: u8) -> Result<(), Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicU64, Ordering};
 
     /// A clock the test drives through its context: `*context` is the seconds it reads, and 0 is a
     /// clock that is not set.
@@ -164,7 +165,7 @@ mod tests {
     fn a_callback_naming_a_nanosecond_past_the_second_has_not_read_a_time() {
         let source = CallbackEpoch {
             read: reads_a_bad_nanosecond,
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
         };
         assert_eq!(source.try_since_epoch(), Err(EpochUnavailable));
     }

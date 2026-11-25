@@ -314,9 +314,13 @@ fn r77_expired_drives_established_to_closing() {
     );
 }
 
-// ── Scenario 4: boundary — now = stamp + lease (exactly) → Expired
-//                because the comparator is `>=` (a stamp older than
-//                or equal to the deadline triggers expiry).
+// ── Scenario 4: boundary — the first reading at which the whole lease
+//                has passed → Expired, the one before → WithinLease;
+//                the comparator is `>=`. A stamp is a millisecond
+//                reading, and the receipt may have come anywhere in that
+//                millisecond, so the lease counts from its end: the
+//                boundary is stamp + 1 + lease, the first reading no
+//                receipt the stamp stands for is a lease or less before.
 #[test]
 fn r77_expired_at_exact_lease_boundary() {
     let (actions, mut engine) = fresh_setup();
@@ -326,7 +330,14 @@ fn r77_expired_at_exact_lease_boundary() {
         .link
         .fact_last_inbound_at(|slot| *slot = Some(stamp));
 
-    let now = stamp + 10_000;
+    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 10_000);
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::WithinLease,
+        "a reading of stamp + lease can be less than a lease after a receipt late in the \
+         stamp's millisecond"
+    );
+    let now = stamp + 1 + 10_000;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
     assert_eq!(
         outcome,
@@ -350,9 +361,10 @@ fn r311kv_shorter_peer_lease_governs_deadline() {
     // Peer advertised 2s in its OPEN; local window is the fixture 10s.
     actions.fact_peer_open_lease_ms(|slot| *slot = Some(2_000));
 
-    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 1_999);
-    assert_eq!(outcome, LeaseCheckOutcome::WithinLease, "inside 2s window");
+    // The window counts from the end of the stamp's millisecond (Scenario 4).
     let outcome = check_lease_deadline(&actions, &mut engine, stamp + 2_000);
+    assert_eq!(outcome, LeaseCheckOutcome::WithinLease, "inside 2s window");
+    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 1 + 2_000);
     assert_eq!(
         outcome,
         LeaseCheckOutcome::Expired,
@@ -374,7 +386,8 @@ fn r311kv_local_cap_bounds_longer_peer_lease() {
         .fact_last_inbound_at(|slot| *slot = Some(stamp));
     actions.fact_peer_open_lease_ms(|slot| *slot = Some(60_000));
 
-    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 10_000);
+    // The window counts from the end of the stamp's millisecond (Scenario 4).
+    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 1 + 10_000);
     assert_eq!(
         outcome,
         LeaseCheckOutcome::Expired,

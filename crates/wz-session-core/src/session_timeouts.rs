@@ -214,6 +214,10 @@ impl HandshakeDeadlineTracker {
     /// `Opening` and `Accepting` bounds keep their original armed-at instant
     /// across the child transitions. A state with no deadline disarms the tracker so
     /// a later re-entry re-arms from its own entry instant.
+    ///
+    /// A bound is counted from the end of the millisecond `now_ms` names, so the deadline never
+    /// falls before its window has passed since the state was entered, and falls at most a
+    /// millisecond after.
     pub fn poll(
         &mut self,
         state: SessionFsmUnicastState,
@@ -224,8 +228,13 @@ impl HandshakeDeadlineTracker {
                 let armed_at = match self.armed {
                     Some((key, at)) if key == hd.arming_key => at,
                     _ => {
-                        self.armed = Some((hd.arming_key, now_ms));
-                        now_ms
+                        // A reading names the millisecond that has begun, and the state may have
+                        // been entered anywhere in it: counted from the reading itself, the
+                        // bound falls up to a millisecond before its window has passed, which
+                        // the deadlines compared against later readings cannot make up.
+                        let from = now_ms.saturating_add(1);
+                        self.armed = Some((hd.arming_key, from));
+                        from
                     }
                 };
                 Some((armed_at.saturating_add(hd.deadline_ms), hd.event))
@@ -319,11 +328,11 @@ mod tests {
         let mut tr = HandshakeDeadlineTracker::new(t);
         assert_eq!(
             tr.poll(S::SentInitSyn, 1_000),
-            Some((4_000, E::InitAckTimeout))
+            Some((4_001, E::InitAckTimeout))
         );
         assert_eq!(
             tr.poll(S::GotInitAck, 2_500),
-            Some((4_000, E::OpenAckTimeout))
+            Some((4_001, E::OpenAckTimeout))
         );
     }
 
@@ -357,20 +366,20 @@ mod tests {
     #[test]
     fn tracker_per_phase_rearms_on_key_change() {
         let mut tr = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
-        // LinkOpening armed at t=1000 -> 1000 + 5000.
+        // LinkOpening entered in the millisecond 1000 -> from its end, 1001 + 5000.
         assert_eq!(
             tr.poll(S::LinkOpening, 1_000),
-            Some((6_000, E::LinkOpenTimeout))
+            Some((6_001, E::LinkOpenTimeout))
         );
         // Re-poll same state at a later now does NOT re-arm (stamp kept).
         assert_eq!(
             tr.poll(S::LinkOpening, 4_999),
-            Some((6_000, E::LinkOpenTimeout))
+            Some((6_001, E::LinkOpenTimeout))
         );
-        // Advancing to SentInitSyn re-arms from the new now (2000 + 10000).
+        // Advancing to SentInitSyn re-arms from the new now (2001 + 10000).
         assert_eq!(
             tr.poll(S::SentInitSyn, 2_000),
-            Some((12_000, E::InitAckTimeout))
+            Some((12_001, E::InitAckTimeout))
         );
     }
 
@@ -378,32 +387,63 @@ mod tests {
     #[test]
     fn tracker_accepting_children_keep_one_stamp() {
         let mut tr = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
-        // Armed on first Accepting child at t=1000 -> 1000 + 1000.
+        // Armed on first Accepting child in the millisecond 1000 -> 1001 + 1000.
         assert_eq!(
             tr.poll(S::AwaitingInitSyn, 1_000),
-            Some((2_000, E::AcceptingInactivityTimeout))
+            Some((2_001, E::AcceptingInactivityTimeout))
         );
         // Children advance, now=1500/1800 — the whole-handshake bound keeps
-        // its original armed_at (1000), so the deadline stays 2000 (NOT
-        // re-armed to 2500/2800).
+        // its original armed_at (1001), so the deadline stays 2001 (NOT
+        // re-armed to 2501/2801).
         assert_eq!(
             tr.poll(S::SentInitAck, 1_500),
-            Some((2_000, E::AcceptingInactivityTimeout))
+            Some((2_001, E::AcceptingInactivityTimeout))
         );
         assert_eq!(
             tr.poll(S::SentOpenAck, 1_800),
-            Some((2_000, E::AcceptingInactivityTimeout))
+            Some((2_001, E::AcceptingInactivityTimeout))
         );
     }
 
     #[test]
     fn tracker_disarms_on_no_deadline_state_then_rearms_fresh() {
         let mut tr = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
-        assert_eq!(tr.poll(S::Closing, 1_000), Some((1_100, E::ClosingTimeout)));
+        assert_eq!(tr.poll(S::Closing, 1_000), Some((1_101, E::ClosingTimeout)));
         // Established has no host handshake deadline -> disarm.
         assert_eq!(tr.poll(S::Established, 2_000), None);
         // Re-entering a handshake state re-arms from the new now, not the
         // pre-disarm stamp.
-        assert_eq!(tr.poll(S::Closing, 5_000), Some((5_100, E::ClosingTimeout)));
+        assert_eq!(tr.poll(S::Closing, 5_000), Some((5_101, E::ClosingTimeout)));
+    }
+
+    /// A state entered anywhere in the millisecond a reading names has a deadline its whole
+    /// window after the latest instant of that millisecond: the first reading at which the
+    /// deadline has come is one at which the window has passed whenever in the millisecond the
+    /// state was entered. Turned red by a tracker that counts the bound from the reading itself,
+    /// whose deadline comes up to a millisecond before the window has passed.
+    #[test]
+    fn a_handshake_deadline_never_comes_before_its_window_has_passed() {
+        let t = SessionTimeouts::spec_defaults();
+        let entered_ms = 7_000;
+        // In microseconds: the latest instant the reading `entered_ms` can stand for.
+        let latest_entry_us = entered_ms * 1_000 + 999;
+        for state in [S::LinkOpening, S::SentInitSyn, S::Closing] {
+            let mut tr = HandshakeDeadlineTracker::new(t);
+            let window_ms = handshake_deadline_for(state, &t)
+                .expect("a handshake deadline")
+                .deadline_ms;
+            let (deadline_ms, _) = tr.poll(state, entered_ms).expect("armed");
+            // The earliest instant a reading of `deadline_ms` can be made at is its start.
+            assert!(
+                deadline_ms * 1_000 >= latest_entry_us + window_ms * 1_000,
+                "{state:?}: the deadline {deadline_ms} comes before {window_ms} ms have passed \
+                 since an entry late in the millisecond {entered_ms}"
+            );
+            assert_eq!(
+                deadline_ms,
+                entered_ms + window_ms + 1,
+                "{state:?}: and no more than a millisecond after the window"
+            );
+        }
     }
 }

@@ -114,6 +114,10 @@ transport-multicast = [
 # `transport-stats` counters. An MCU image builds without it, and its group passes the recorder
 # that counts nothing.
 transport-stats = ["alloc", "wz-session-core/transport-stats"]
+# The group session spaces each transport message it receives on the meter its holder attaches
+# (`MulticastSessionSeed::with_meter`), at the seam its counters count it, for the node's resource
+# snapshot. Without it no meter is held and the receive counts as it did.
+resource-snapshot = ["alloc", "wz-session-core/resource-snapshot"]
 # Transport reassembly on the group loop: the router that stages a fragment chain
 # per member (`wz-runtime-coop`'s), and the shared ingest that feeds it.
 reassembly = [

@@ -54,11 +54,12 @@ host-sync = ["dep:wz-host-sync"]
 time-hlc = ["wz-session-core/clock-quality"]
 # The node's event log (the observation plane's ring of fixed-size records): one event ring the
 # node writes events into, stamped with the node clock, sized by `EVENT_RING_SLOTS` and
-# `EVENT_RECORD_ARGS`.
-event-ring = ["std"]
+# `EVENT_RECORD_ARGS`. The ring is written under the host's lock: `std` or `host-sync` (src/lib.rs
+# refuses a build with neither).
+event-ring = []
 # A clock the application registered, which can be held over and can run free once the host's bound
 # on holdover has passed (the two states `clock-source` adds to the standing).
-clock-source = ["std", "time-hlc", "wz-session-core/clock-source"]
+clock-source = ["time-hlc", "wz-session-core/clock-source"]
 # The clock the interceptions of a timestamp stack are recorded with (`NodeHlc::interception_timestamp`),
 # which a node has whether or not its role stamps data. Off, nothing is held for it.
 pubsub-ts-stack = ["time-hlc", "wz-session-core/pubsub-ts-stack"]
@@ -70,7 +71,8 @@ pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
 # The time base a program supplies (`time_base`): the clock a session's timers read and wait on in
 # place of the system's monotonic clock, for a program that runs the session on a time of its own
 # (a simulation, paused or faster or slower than the wall clock). Off, the module is not built.
-time-base = ["std"]
+# Its pool is the host's lock's, as the event ring's is.
+time-base = []
 
 [dependencies]
 # The timestamp type, the NTP64 word, the epoch port and (with `codec-push`) the Push the forward

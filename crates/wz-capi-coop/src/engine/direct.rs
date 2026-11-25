@@ -1410,8 +1410,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     core.transport.endpoints.dial_text(row),
                     why,
                 )));
-                slot.drop_link(&face.site);
+                // The record lets go of the link while the place still holds its parts, so what
+                // the link's session counted is read through the place as it goes.
                 core.transport.links.put_link(slot.at(), Link::Idle);
+                slot.drop_link(&face.site);
             }
             if effects.lose() {
                 // The lost peer's chains end with its link: the next link's fragments would be

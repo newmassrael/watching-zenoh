@@ -36,6 +36,7 @@ use wz_node_time::time_base::TimeBaseHold;
 use crate::abi::z_loaned_config_t;
 use crate::config::ConfigState;
 use crate::ffi::{guard_val, guarded};
+use crate::prelude::Box;
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 
 /// The program's read of its time: nanoseconds since an epoch of its choosing.
@@ -294,7 +295,7 @@ pub(crate) fn open_bound(clock: &SessionClock) -> Option<wz_capi_coop::app_link:
         return None;
     };
     let time = time_base.time();
-    Some(std::sync::Arc::new(
+    Some(alloc::sync::Arc::new(
         move |ms: u64| -> wz_capi_coop::app_link::BoundSleep {
             let deadline_ns = time.now_ns().saturating_add(ms.saturating_mul(1_000_000));
             Box::pin(time.sleep_until(deadline_ns))
@@ -307,7 +308,7 @@ pub(crate) fn open_bound(clock: &SessionClock) -> Option<wz_capi_coop::app_link:
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn clock_moves(
     clock: &SessionClock,
-) -> Option<std::sync::Arc<dyn wz_capi_coop::ClockMoves>> {
+) -> Option<alloc::sync::Arc<dyn wz_capi_coop::ClockMoves>> {
     match clock {
         SessionClock::Host(_) => None,
         SessionClock::Program(time_base) => Some(alloc::sync::Arc::new(TimeBaseMoves {

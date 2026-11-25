@@ -2528,6 +2528,10 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// Apart from the session's being closed, which a step that loses the dial role's link says
     /// too, so the close that follows such a step still lets them go, and once.
     released: bool,
+    /// What the joins of the groups had received when they were replaced by a join again or let go
+    /// of at the close (`resource-snapshot`), so the session's reading never falls when one ends.
+    #[cfg(all(feature = "resource-snapshot", feature = "group"))]
+    retired_groups: wz_session_core::resource_snapshot::BuildReceiveLedger,
     /// The links as the last move left them, when it left them settled ([`Self::move_links`]).
     #[cfg(wz_round)]
     links_settled: Option<LinksSettled>,
@@ -2894,6 +2898,11 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
     #[cfg(all(any(feature = "listen", feature = "group"), wz_round))]
     fn input_seen(&self, ready: bool) {
         self.gate.input_seen(ready);
+    }
+
+    #[cfg(feature = "resource-snapshot")]
+    fn message_reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
+        self.actions.message_reading()
     }
 }
 
@@ -4755,7 +4764,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// and the gets' deadlines, and owed at once while the links are not settled or a liveliness
     /// snapshot is pending, each of which a step moves on by what it reads.
     fn settle_ledger(&mut self) {
-        // Each table keeps its own earliest deadline, so this reads one value of each face.
+        // Read at the root of the index of the gets' deadlines, with no walk of the faces.
         #[cfg(feature = "query")]
         let gets_due_ms = self.session.next_get_deadline_ms().unwrap_or(u64::MAX);
         // A snapshot's replies end it as they come, and the table of ended ones is drained by
@@ -5481,6 +5490,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                             // ended.
                             #[cfg(feature = "connectivity")]
                             face.keep_tombs_of(ended);
+                            #[cfg(feature = "resource-snapshot")]
+                            self.retired_groups.retire(&ended.message_reading());
                             *ended = face;
                         }
                     }
@@ -5681,17 +5692,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn idle_wait(&mut self) -> IdleWait {
         // What is due other than input, the earliest of it in milliseconds of the session's clock:
         // a get whose deadline comes first is swept when it is due, not up to a whole wait late
-        // (its deadline as the ledger keeps it, which every leg held lowers, so no table is
-        // walked here), and so is the next turn of a replay a link owes its peer, a periodic job
-        // the program started, and a group's session when it is next due with nothing arriving
-        // (its beacon, its sweep, what the session pushed onto it, its join again). A group that
-        // took a datagram is stepped again at once, its task taking one a step, so its own time is
-        // not asked.
+        // (read at the root of the index of the gets' deadlines, so no table is walked and a get
+        // that ended bounds the wait no longer), and so is the next turn of a replay a link owes
+        // its peer, a periodic job the program started, and a group's session when it is next due
+        // with nothing arriving (its beacon, its sweep, what the session pushed onto it, its join
+        // again). A group that took a datagram is stepped again at once, its task taking one a
+        // step, so its own time is not asked.
         #[cfg(feature = "group")]
         let group_took = self.transport.group_took_input();
         let due_ms = [
             #[cfg(feature = "query")]
-            self.ledger.gets_due_ms(),
+            self.session.next_get_deadline_ms(),
             self.transport
                 .links
                 .faces()
@@ -5812,6 +5823,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "group")]
         if self.transport.stop_groups() {
             self.run_tasks();
+            #[cfg(feature = "resource-snapshot")]
+            for group in &self.transport.groups {
+                self.retired_groups.retire(&group.message_reading());
+            }
             self.transport.groups.clear();
         }
         self.transport.links.end_faces(|face| face.replay.discard());
@@ -6227,6 +6242,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             config,
             policy,
             released: false,
+            #[cfg(all(feature = "resource-snapshot", feature = "group"))]
+            retired_groups: wz_session_core::resource_snapshot::BuildReceiveLedger::new(),
             #[cfg(wz_round)]
             links_settled: None,
             #[cfg(not(wz_round))]
@@ -6812,14 +6829,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The most a read waits now for the earliest deadline of the session's gets, in whole
-    /// milliseconds, as the ledger keeps it for the read ([`Core::idle_wait`]); `None` when no get
-    /// is due by time. Under the lock, uncounted as a reading of the session's clock.
+    /// milliseconds, as the index of their deadlines answers the read ([`Core::idle_wait`]); `None`
+    /// when no get is due by time. Under the lock, uncounted as a reading of the session's clock.
     #[cfg(all(test, feature = "std", feature = "query"))]
     pub(crate) fn get_wait_ms(&self) -> Option<u32> {
-        let held = self.core.lock();
-        let core = &held.0;
-        core.ledger
-            .gets_due_ms()
+        let mut held = self.core.lock();
+        let core = &mut held.0;
+        core.session
+            .next_get_deadline_ms()
             .map(|due_ms| Core::<L, C>::wait_until(u32::MAX, due_ms, core.clock.now_us()))
     }
 
@@ -7145,6 +7162,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .n_dropped
             .saturating_add(usize::try_from(unsent).unwrap_or(usize::MAX));
         report
+    }
+
+    /// What the receive paths of the session's links and groups counted (`resource-snapshot`),
+    /// those up and those let go of (`LinkSupervisor::message_reading`, `Core::retired_groups`),
+    /// as one reading that only grows. Read under the session's lock, the one a link or a join is
+    /// let go of under, so one that goes meanwhile is counted once; a closed session reads what
+    /// its links and groups had counted when they ended.
+    #[cfg(feature = "resource-snapshot")]
+    pub fn message_reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
+        let held = self.core.lock();
+        #[cfg(feature = "group")]
+        {
+            let groups = held.0.transport.groups.iter();
+            let mut total = held
+                .0
+                .retired_groups
+                .total(groups.map(|group| group.message_reading()));
+            total.merge(&held.0.transport.links.message_reading());
+            total
+        }
+        #[cfg(not(feature = "group"))]
+        {
+            held.0.transport.links.message_reading()
+        }
     }
 
     /// Run the periodic jobs that are due, with no lock held: what a job does (a beacon is a
@@ -8239,7 +8280,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             get::LegHold::new(leg_id, self.gets),
         );
         let accept = ReplyAcceptance::for_query(ask.keyexpr, ask.opts.effective_accept_replies());
-        let registered = registry.gets_mut(face).map(|gets| {
+        // Through the registry's writer of the gets, which lowers the index of their deadlines.
+        let registered = registry.write_gets(face, |gets| {
             gets.replies
                 .register_sink(rid, finals, deadline_ms, accept, sink)
         });
@@ -8603,19 +8645,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         {
             let now_ms = now_us / 1000;
             let registry = &mut self.session.registry;
+            // The tables a get is due in, as the index of the gets' deadlines names them; a
+            // liveliness snapshot that expired ends the same way.
+            registry.sweep_due_gets(now_ms);
+            // A snapshot's terminated ids, by its DeclFinal or by the sweep, are staged for a
+            // reconnect cache this engine does not keep (it declares again from its own entries),
+            // so they are drained and dropped: staged ones would pile up. The drain makes a buffer
+            // of the table's whole ceiling, so a table with none staged is not drained.
+            #[cfg(feature = "liveliness-get")]
             for gets in registry.all_gets_mut() {
-                // A get's deadline is the earliest the sweep could end one at.
-                if now_ms >= gets.replies.due_ms() {
-                    gets.replies.sweep_timed_out(now_ms);
-                }
-                // A liveliness snapshot that expired ends the same way. Its terminated ids are
-                // staged for a reconnect cache this engine does not keep (it declares again from
-                // its own entries), so they are drained and dropped: staged ones would pile up.
-                // A table with no get pending and none ended has nothing to sweep or drain, and the
-                // drain makes a buffer of the table's whole ceiling: neither is done at every step.
-                #[cfg(feature = "liveliness-get")]
-                if !gets.liveliness_gets.is_empty() || gets.liveliness_gets.has_finalized() {
-                    gets.liveliness_gets.sweep_timed_out(now_ms);
+                if gets.liveliness_gets.has_finalized() {
                     drop(gets.liveliness_gets.take_finalized());
                 }
             }
@@ -9141,6 +9180,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
 
     fn session_zid(&self) -> SessionZid {
         self.zid
+    }
+
+    #[cfg(feature = "resource-snapshot")]
+    fn message_reading(&self) -> Option<wz_session_core::resource_snapshot::BuildMessageReading> {
+        Some(CoopEngine::message_reading(self))
     }
 
     fn now_ms(&self) -> u64 {
@@ -10441,14 +10485,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
                 // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
                 // answer can arrive before its entry.
+                // Through the registry's writer of the gets, which lowers the index of their deadlines.
                 let registered = core
                     .session
                     .registry
-                    .face_mut(face)
-                    .map(|tables| {
-                        tables
-                            .gets
-                            .liveliness_gets
+                    .write_gets(face, |gets| {
+                        gets.liveliness_gets
                             .register(interest_id, deadline_ms, leg_sink)
                     })
                     .is_some_and(|registered| matches!(registered, Ok(true)));
