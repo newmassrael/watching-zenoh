@@ -6780,23 +6780,22 @@ async fn run_router_hat_until(
     // `locator-iface` atom is about honouring a locator's `#iface=<name>` tail, so
     // a multicast honour reachable only through a Rust parameter would leave the
     // atom's actual semantic unclosed. `--multicast-locator
-    // udp/224.0.0.225:7452#iface=eth0` runs through the SAME
-    // `wz_session_core::locator` parser every unicast locator uses (re-exported at
-    // `wz-runtime-tokio/src/lib.rs:183`), so the tail is parsed in exactly one
-    // place. This also retires the "a configurable group is a later concern" note
-    // above. The SCOUTING group (`ScoutSocketArgs::socket`) stays unnarrowed on purpose —
+    // udp/224.0.0.225:7452#iface=eth0` runs through the SAME group endpoint
+    // reader every engine opens a group from (`group_locator`, re-exported by
+    // `wz-runtime-tokio`), so the tail is parsed in exactly one place. This also
+    // retires the "a configurable group is a later concern" note above. The SCOUTING group (`ScoutSocketArgs::socket`) stays unnarrowed on purpose —
     // scouting is a discovery beacon that should reach every interface a peer might
     // answer on, and zenoh likewise scopes `UDP_MULTICAST_IFACE` to a group
     // locator, not to the scout default.
     #[cfg(feature = "router-multicast-faces")]
     // R311y832 — the tuple's third slot became the WHOLE group config, not just
     // `iface`: `#ttl=` and `#join=` ride the same locator and the same
-    // `parse_locator` call, so honouring them here is what makes them reachable
+    // reading of it, so honouring them here is what makes them reachable
     // from an operator's `--multicast-locator` rather than only from a struct
     // literal in a test.
     let (mcast_group, mcast_port, mcast_opts) = {
         use std::net::{IpAddr, Ipv4Addr};
-        use wz::runtime_tokio::locator::{parse_locator, Proto};
+        use wz::runtime_tokio::group_locator::{parse_group_locator, GroupLocator};
         use wz::runtime_tokio::McastGroupOptions;
         // The demo's default data-plane router multicast group. Distinct port from
         // scouting (7446/7447) + the loopback e2e tests (7449/7450/7451).
@@ -6812,41 +6811,21 @@ async fn run_router_hat_until(
             // that meant to pin its group to one interface and silently got the
             // default multicast route would egress somewhere it did not ask for.
             // Same posture as R311y452's `--downsample-link-protocol`.
-            Some(l) => match parse_locator(l) {
-                Ok(p) if p.proto != Proto::Udp => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "--multicast-locator must be a udp/ locator (a multicast group \
-                             rides UDP); got {:?} in {l}",
-                            p.proto
-                        ),
-                    ));
-                }
-                // R2584 — either family. An IPv6 group used to be refused here
-                // because the socket constructor was typed `Ipv4Addr`; that type was
-                // the base, and with it gone the refusal had no reason left.
-                Ok(p) => (
-                    p.addr.ip(),
-                    p.addr.port(),
-                    // R2791 — `p.socket` carries every socket key the locator
-                    // named, and this literal used to read ONE of them. `bind`
-                    // and `dscp` were parsed, dropped here, and the multicast
-                    // sockets then had no field to receive them from.
+            // R2584 — either family. The group carries every socket key the
+            // endpoint named, `bind` and `dscp` among them.
+            Some(l) => match parse_group_locator(l) {
+                Ok(GroupLocator::Udp(group)) => (
+                    group.group().ip(),
+                    group.group().port(),
                     McastGroupOptions {
-                        iface: p.socket.as_ref().and_then(|s| s.iface.clone()),
-                        ttl: p.mcast_ttl,
-                        joins: p.mcast_join,
-                        bind: p.socket.as_ref().and_then(|s| s.bind.clone()),
-                        dscp: p.socket.as_ref().and_then(|s| s.dscp),
-                        loopback: params.policy.multicast_loopback(),
-                        link_requires_iface: params.policy.multicast_link_requires_iface(),
+                        keys: Some(group),
+                        ..McastGroupOptions::of_policy(&params.policy)
                     },
                 ),
                 Err(e) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("--multicast-locator {l} did not parse: {e:?}"),
+                        format!("--multicast-locator {l} names no group a router joins: {e}"),
                     ));
                 }
             },
@@ -6939,7 +6918,7 @@ async fn run_router_hat_until(
         // the group was joined on, from the same `#iface=` the socket was bound with.
         #[cfg(feature = "access-acl-multicast")]
         forwarder.set_mcast_group_link(wz::runtime_tokio::link_interfaces::multicast_link_subject(
-            mcast_opts.iface.as_deref(),
+            mcast_opts.as_socket_config().iface,
         ));
         // The demo's router holds no shared memory of its own session, so its group is a plain
         // one: a chunk goes to it as its bytes.
