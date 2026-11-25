@@ -590,6 +590,25 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
+    /// The face's row in the session's table of faces. The face table's first, a constant, where
+    /// the dial role's face is the only face: every look of the face's life and link up in the
+    /// table is then made at a place the build knows.
+    #[inline(always)]
+    fn at(&self) -> usize {
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            self.at
+        }
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        {
+            debug_assert_eq!(
+                self.at, 0,
+                "the dial role's face lies at the table's first row"
+            );
+            0
+        }
+    }
+
     /// When the face is next due by its life or its pump, on the session's clock in microseconds.
     fn due_us(&self) -> u64 {
         self.life_due_us.min(self.pump_due_us)
@@ -639,7 +658,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
         let linked = core
             .transport
             .links
-            .face(self.at)
+            .face(self.at())
             .filter(|face| face.link.wire().is_some());
         if let Some(face) = linked {
             let established = matches!(face.life.phase(), LinkPhase::Handshaking { .. })
@@ -938,7 +957,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let now_us = core.now_us();
             self.drive_link(&self.direct.dial, core, slot, LinkInput::Open, now_us)?;
         }
-        while !self.link_is_up(slot.at) {
+        while !self.link_is_up(slot.at()) {
             let turn = self
                 .link_turn(&self.direct.dial, slot)
                 .ok_or(OpenError::NoEndpoint)?;
@@ -1117,7 +1136,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // The turn goes through the link's wire, its place taken before the session's lock as
             // every operation's send takes it, so the look's lock is let go of first. A turn that
             // ended the link has the life looked at by the next read, at once.
-            let at = slot.at;
+            let at = slot.at();
             if turn.replays
                 && self.live_on_link(|core, tx| self.turn_replay(core, at, turn.now_us, tx))
                     == Some(TurnEnd::EndsLink)
@@ -1235,7 +1254,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             slot.life_due_us = core
                 .transport
                 .links
-                .face(slot.at)
+                .face(slot.at())
                 .and_then(|face| face.life.wake_at(now_us))
                 .unwrap_or(u64::MAX);
             face.note_due(slot);
@@ -1328,7 +1347,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> Result<(), OpenError> {
         let (mut input, mut now_us) = (input, now_us);
         loop {
-            let Some(record) = core.transport.links.face_mut(slot.at) else {
+            let Some(record) = core.transport.links.face_mut(slot.at()) else {
                 return Ok(());
             };
             let was = record.life.phase();
@@ -1354,13 +1373,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     LinkPhase::Handshaking { row, .. } => row,
                     _ => 0,
                 };
-                let why = core.transport.end_handshake(slot.at);
+                let why = core.transport.end_handshake(slot.at());
                 slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
                     core.transport.endpoints.dial_text(row),
                     why,
                 )));
                 slot.drop_link(&face.site);
-                core.transport.links.put_link(slot.at, Link::Idle);
+                core.transport.links.put_link(slot.at(), Link::Idle);
             }
             if effects.lose() {
                 // The lost peer's chains end with its link: the next link's fragments would be
@@ -1368,14 +1387,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let peer = core
                     .transport
                     .links
-                    .face(slot.at)
+                    .face(slot.at())
                     .and_then(|face| face.facts.as_ref())
                     .and_then(|facts| facts.peer);
                 if let Some(zid) = peer {
                     let _ended = slot.router.abort_peer(zid.as_slice());
                 }
-                if let Some(id) = core.transport.links.face(slot.at).map(|face| face.id) {
-                    core.lose_face_link(slot.at, id);
+                if let Some(id) = core.transport.links.face(slot.at()).map(|face| face.id) {
+                    core.lose_face_link(slot.at(), id);
                 }
                 slot.drop_link(&face.site);
                 if effects.ends_session() {
@@ -1386,7 +1405,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
             }
             if effects.bring_up() {
-                core.bring_up(slot.at, now_us);
+                core.bring_up(slot.at(), now_us);
                 slot.brought_up = true;
             }
             // The dial under way, if any, was taken above.
@@ -1495,7 +1514,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let face_id = core
             .transport
             .links
-            .face(slot.at)
+            .face(slot.at())
             .map(|face| face.id)
             .ok_or(OpenError::NoEndpoint)?;
         let end = face.end_handle();
@@ -1558,7 +1577,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // the engine stands (its drop ends the links before the face goes), and the handle does
         // nothing in its own drop.
         let wire = unsafe { FaceAt::new(&face.site, face.end_handle(), input, room) };
-        core.transport.links.put_link(slot.at, Link::Wire(wire));
+        core.transport.links.put_link(slot.at(), Link::Wire(wire));
         Ok(())
     }
 
