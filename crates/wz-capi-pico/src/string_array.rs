@@ -106,11 +106,8 @@ enum Items {
     Owned(Vec<Box<StringArrayEntry>>),
     /// Views of strings another object owns, read in place for as long as the lender keeps them
     /// (`StringArrayState::lent`): a scouted Hello's locators, handed to a scout's callback with
-    /// no copy.
-    #[cfg_attr(
-        not(any(feature = "scout", feature = "scout-mcu", test)),
-        allow(dead_code)
-    )]
+    /// no copy. Only scouting lends them, so a build without it reads no array of this kind.
+    #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
     Lent {
         views: *const z_loaned_string_t,
         len: usize,
@@ -182,13 +179,21 @@ impl StringArrayState {
     }
 
     /// Whether the strings are another object's (`Self::lent`).
+    #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
     fn is_lent(&self) -> bool {
         matches!(self.items, Items::Lent { .. })
+    }
+
+    /// Whether the strings are another object's: never, in a build that does not scout.
+    #[cfg(not(any(feature = "scout", feature = "scout-mcu", test)))]
+    fn is_lent(&self) -> bool {
+        false
     }
 
     pub(crate) fn len(&self) -> usize {
         match &self.items {
             Items::Owned(entries) => entries.len(),
+            #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
             Items::Lent { len, .. } => *len,
         }
     }
@@ -197,7 +202,18 @@ impl StringArrayState {
         match &self.items {
             Items::Owned(entries) => entries.get(k).map(|entry| &entry.view),
             // SAFETY: `k` is within the views, which outlive the array (`Self::lent`).
+            #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
             Items::Lent { views, len } => (k < *len).then(|| unsafe { &*views.add(k) }),
+        }
+    }
+
+    /// The strings the array owns, which a push adds to; `None` for an array that lends another
+    /// object's.
+    fn owned_mut(&mut self) -> Option<&mut Vec<Box<StringArrayEntry>>> {
+        match &mut self.items {
+            Items::Owned(entries) => Some(entries),
+            #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
+            Items::Lent { .. } => None,
         }
     }
 }
@@ -465,7 +481,7 @@ unsafe fn string_array_push(
     };
     let len = state.len();
     // A lent array's strings are its lender's: nothing is added to them.
-    let Items::Owned(entries) = &mut state.items else {
+    let Some(entries) = state.owned_mut() else {
         return len;
     };
     let Some(view) = value.as_ref() else {
