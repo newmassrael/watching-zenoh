@@ -229,9 +229,11 @@ fn held_plan(
 ) -> Result<ArenaPlan, ArenaRefused> {
     let mut plan = ArenaPlan::vacant();
     plan.count(config, &config.limits)?;
+    let links = PosixLinks::new(super::LOOPBACK, PosixTcpDial);
     crate::engine::lay_out_open(
         &mut plan,
-        crate::engine::link_cells::<PosixClock>(&PosixLinks::new(super::LOOPBACK, PosixTcpDial)),
+        crate::engine::link_cells::<PosixClock>(&links),
+        crate::engine::link_rooms_bytes(&links),
         held,
     )?;
     Ok(plan)
@@ -508,6 +510,7 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
         );
         assert!(plan.peers().tables <= MAX_FACE_SETS);
         assert_eq!(row(&plan, "face tables").count, plan.peers().sets());
+        assert_eq!(row(&plan, "room places").count, plan.peers().sets());
         // The index of held sets is a row of a build that takes faces beside the dial role's.
         if crate::arena::TAKES_FACES {
             assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
@@ -741,6 +744,50 @@ fn the_plan_lays_out_no_delivery_lane() {
         (round.count, round.entry_bytes),
         (1, core::mem::size_of::<crate::round::Round>())
     );
+}
+
+/// The plan lays out one place for each step lend the open places in the arena
+/// (`crate::engine::StepPlaces`): the registry's and the reassembly Router's, a cell each. Turned
+/// red by a plan that leaves either out, whose open would place it past what the arena has.
+#[test]
+fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    for (part, bytes) in [
+        ("registry lend", crate::engine::REGISTRY_LEND_BYTES),
+        ("router lend", crate::engine::ROUTER_LEND_BYTES),
+    ] {
+        let laid = row(&built, part);
+        assert_eq!((laid.count, laid.entry_bytes), (1, bytes), "{part}");
+    }
+}
+
+/// The faces' rooms lie in the arena: their places, a place for each set of face tables, are rows
+/// of the plan the limits lay out, and the rooms themselves, whose size is the stack's waits', a
+/// row the open lays out over the links (`lay_out_open`). Turned red by a plan that leaves either
+/// out, whose open would place it past what the arena has, or that lays the rooms out before the
+/// open knows the stack.
+#[test]
+fn the_plan_lays_out_the_faces_rooms_and_their_places() {
+    let config = CoopConfig {
+        max_faces: BESIDE_DIAL,
+        ..client_config()
+    };
+    let limits = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    let places = row(&limits, "room places");
+    assert_eq!(
+        (places.count, places.entry_bytes),
+        (limits.peers().sets(), crate::engine::ROOM_PLACE_BYTES)
+    );
+    assert!(
+        limits.rows().all(|laid| laid.part() != "link rooms"),
+        "the limits alone do not know the rooms' size"
+    );
+    let open = host_plan(&config).expect("the build's limits lay an arena out");
+    let rooms = row(&open, "link rooms");
+    let bytes = crate::engine::link_rooms_bytes(&PosixLinks::new(super::LOOPBACK, PosixTcpDial));
+    assert!(bytes > 0, "CONTROL: the rooms take bytes");
+    assert_eq!((rooms.count, rooms.entry_bytes), (1, bytes));
 }
 
 /// The key arena is the `KEY_ARENA_BYTES` the session's limits state, one area with its state: a
@@ -2129,7 +2176,7 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             ours.count * (faces + handshakes)
         } else if theirs.part() == "peer tables" {
             ours.count * faces
-        } else if ["face tables", "held faces"].contains(&theirs.part()) {
+        } else if ["face tables", "held faces", "room places"].contains(&theirs.part()) {
             // Its dial role's face holds a set of no rows all the same, first, beside the faces'.
             ours.count * (1 + faces)
         } else if FACE_PARTS.contains(&theirs.part()) {
@@ -2489,13 +2536,13 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
     }
 }
 
-/// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's
-/// handle and its places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the
-/// groups' counts are the rows the plan puts, in whichever build. A group that puts a row it does
-/// not count, or counts one it does not put, turns this red. A build that joins groups names one,
-/// since a config that names none plans no group receive table. Each of those rows names a part of
-/// its own, which a report finds it by: a part named as another, or a table laid out under the
-/// part of its flags twice, turns this red too.
+/// A plan with every row of the build, the links' cells, their gates', their actions', the faces'
+/// rooms, the ABI's handle and its places for every kind of entity among them, holds exactly
+/// `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in whichever build. A group
+/// that puts a row it does not count, or counts one it does not put, turns this red. A build that
+/// joins groups names one, since a config that names none plans no group receive table. Each of
+/// those rows names a part of its own, which a report finds it by: a part named as another, or a
+/// table laid out under the part of its flags twice, turns this red too.
 #[test]
 fn a_plan_with_every_row_holds_exactly_arena_rows() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -2542,6 +2589,8 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         halves: 64,
     })
     .expect("the build's limits lay the cells out");
+    plan.holding_rooms(64)
+        .expect("the build's limits lay the rooms out");
     plan.holding(&held)
         .expect("the build's limits lay the places out");
     assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);

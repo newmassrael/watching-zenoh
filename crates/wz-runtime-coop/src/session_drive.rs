@@ -1947,13 +1947,13 @@ pub trait MakeRouter<R> {
     feature = "alloc",
     not(feature = "session-slot")
 ))]
-impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
-    for wz_session_core::unicast_rx::RouterLend<D>
+impl<D, H> MakeRouter<wz_session_core::unicast_rx::RouterLend<D, H>>
+    for wz_session_core::unicast_rx::RouterLend<D, H>
 {
     fn make_in(
         self,
-        place: &mut MaybeUninit<wz_session_core::unicast_rx::RouterLend<D>>,
-    ) -> &mut wz_session_core::unicast_rx::RouterLend<D> {
+        place: &mut MaybeUninit<wz_session_core::unicast_rx::RouterLend<D, H>>,
+    ) -> &mut wz_session_core::unicast_rx::RouterLend<D, H> {
         place.write(self)
     }
 }
