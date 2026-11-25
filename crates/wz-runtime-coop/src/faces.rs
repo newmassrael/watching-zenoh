@@ -37,7 +37,7 @@ use crate::session_drive::{
     LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
     SessionDatagramLink, SessionLinks, WaitOn,
 };
-use crate::sync::{FacePlace, Lend, LockKind};
+use crate::sync::{AtSeat, FacePlace, Lend, LockKind, SeatOf};
 use crate::CoopLocalJoinHandle;
 use core::sync::atomic::{fence, AtomicU32, Ordering};
 
@@ -348,6 +348,17 @@ pub trait WireParts: FaceParts {
     fn pay(&mut self, owed: u32);
 }
 
+/// Parts of a face's link that a send writes through a part of their own (the actions' send path
+/// and the link's sink), apart from the part a read borrows: what a send seated by the read
+/// ([`FaceSite::lend_seating`]) or lent the parts writes ([`FaceSite::send`]).
+pub trait SendParts: WireParts {
+    /// The part a send writes.
+    type Tx;
+
+    /// The part a send writes of these parts.
+    fn tx(&mut self) -> &mut Self::Tx;
+}
+
 /// The bit of a site's debts that is its link's close: told through the wire's own close
 /// ([`FaceWire::close`]), so why the link closes is the wire's to say, and nowhere else.
 const CLOSE_OWED: u32 = 1 << 31;
@@ -398,6 +409,38 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         });
         self.pay_after();
         answer
+    }
+
+    /// [`Self::lend`], with the place's seat for the parts' send part ([`SeatOf`]): the holder
+    /// seats that part once it reaches it in the parts, so a send this thread makes while the
+    /// part is seated (a callback of what the holder hands out) writes it with no lend.
+    pub fn lend_seating<U>(
+        &self,
+        f: impl FnOnce(&mut FaceHeld<P>, SeatOf<'_, K, P::Tx>) -> U,
+    ) -> Option<U>
+    where
+        P: SendParts,
+    {
+        let seat = self.place.seat_of::<P::Tx>();
+        self.lend(|held| f(held, seat))
+    }
+
+    /// Send on the link: through the send part this thread seated ([`Self::lend_seating`]),
+    /// else by a lend of the parts that waits for whatever holds the place now ([`Self::lend`]),
+    /// paying what is owed as it lets go. `f` and its answer are `Send`, as every lend of the
+    /// parts' own is ([`FaceHeld::lend`]), so no handle on a cell of the link leaves through it.
+    /// `None`, with `f` not run, while the place holds no parts, or for a send inside a send
+    /// through the seat, which a debug build fails.
+    pub fn send<U: Send>(&self, f: impl FnOnce(&mut P::Tx) -> U + Send) -> Option<U>
+    where
+        P: SendParts,
+    {
+        // SAFETY: the place's seats are made by `Self::lend_seating` alone, each over `P::Tx`.
+        match unsafe { self.place.at_seat_of::<P::Tx>() } {
+            AtSeat::Taken(mut taken) => Some(f(taken.tx())),
+            AtSeat::InUse => None,
+            AtSeat::None => self.lend(|held| held.lend(|parts| f(parts.tx()))),
+        }
     }
 
     /// [`Self::lend`] that waits for nothing ([`FacePlace::try_lend`]).
@@ -2337,6 +2380,15 @@ mod tests {
         }
     }
 
+    /// The parts' send part: the sum their debts are paid into, which a test's send adds to too.
+    impl SendParts for ApartParts {
+        type Tx = Ended;
+
+        fn tx(&mut self) -> &mut Ended {
+            &mut self.1
+        }
+    }
+
     /// The count of the ends a test's link was told.
     type Ended = alloc::sync::Arc<core::sync::atomic::AtomicU32>;
 
@@ -2573,6 +2625,69 @@ mod tests {
             done.wait();
         });
         assert!(at.holds_input(), "its parts once the place is let go of");
+    }
+
+    /// A send on a link whose parts lie in a face's place writes the parts' send part: through
+    /// the seat the place's holder stands in on the sending thread, with no lend and leaving what
+    /// is owed to the holder's let go; by a lend that waits for another thread that holds the
+    /// place, after that thread's own write; and not at all while the place holds no parts.
+    /// Turned red by a seated send that lends the place (the test's thread then waits on its own
+    /// lend), a seated send that pays the holder's debts, or a send that does not wait.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_send_writes_through_the_holders_seat_else_waits_for_the_place() {
+        extern crate std;
+        use std::sync::Barrier;
+        let (aborted, ended, sent) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
+        let site = FaceSite::<crate::sync::Shared, ApartParts>::empty();
+        assert_eq!(
+            site.send(|tx| tx.fetch_add(1, Ordering::SeqCst)),
+            None,
+            "an empty place takes no send"
+        );
+        assert!(site.hold(paying_parts(&aborted, &ended, &sent)).is_none());
+        assert_eq!(
+            site.send(|tx| tx.fetch_add(10, Ordering::SeqCst)),
+            Some(0),
+            "a free place is lent to the send"
+        );
+        let (site_ref, sent_ref) = (&site, &sent);
+        let seated = site.lend_seating(|held, seat| {
+            site_ref.owe(2);
+            held.lend(move |parts| {
+                seat.seat(&mut parts.1, || {
+                    let took = site_ref.send(|tx| tx.fetch_add(100, Ordering::SeqCst));
+                    (took, sent_ref.load(Ordering::SeqCst))
+                })
+            })
+        });
+        assert_eq!(
+            seated,
+            Some((Some(10), 110)),
+            "the seated send wrote the part at once, and paid nothing"
+        );
+        assert_eq!(
+            sent.load(Ordering::SeqCst),
+            112,
+            "the debt owed inside paid as the holder let go"
+        );
+        let taken = Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                site.lend(|held| {
+                    taken.wait();
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    held.lend(|parts| parts.1.fetch_add(5, Ordering::SeqCst))
+                });
+            });
+            taken.wait();
+            assert_eq!(
+                site.send(|tx| tx.fetch_add(1000, Ordering::SeqCst)),
+                Some(117),
+                "the send waited for the holder, and wrote after it"
+            );
+        });
+        assert_eq!(sent.load(Ordering::SeqCst), 1117);
     }
 
     /// A face whose link lies in a face's place, kept by the supervisor.

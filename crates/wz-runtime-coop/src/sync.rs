@@ -628,8 +628,51 @@ impl<K: LockKind, X: FaceTx> Seat<'_, K, X> {
     /// other part of the values. A send of another thread lends the face as ever. Seats nest: the
     /// one `f` found stands again once `f` returns or unwinds.
     pub fn seat<U>(&self, tx: &mut X::Tx, f: impl FnOnce() -> U) -> U {
+        self.place.seat_of::<X::Tx>().seat(tx, f)
+    }
+}
+
+/// A seat of a face's place for a send part of type `T`, apart from the values the place holds:
+/// what a place whose values reach their send part only through a lend of their own
+/// (`crate::faces::FaceSite`) hands the holder of its lend, to seat that part with once it
+/// reaches it. It names only the place's seat, so it moves into such a lend whatever the place's
+/// lock kind is.
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+pub struct SeatOf<'a, K: LockKind, T> {
+    thread: &'a core::sync::atomic::AtomicUsize,
+    tx: &'a core::sync::atomic::AtomicPtr<()>,
+    of: PhantomData<fn() -> (K, T)>,
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: LockKind, T> Clone for SeatOf<'_, K, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: LockKind, T> Copy for SeatOf<'_, K, T> {}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: LockKind, T> SeatOf<'_, K, T> {
+    /// [`Seat::seat`] for a send part of type `T`.
+    pub fn seat<U>(&self, tx: &mut T, f: impl FnOnce() -> U) -> U {
         let _seated = Seated::enter(
-            self.place,
+            self.thread,
+            self.tx,
             K::current_thread(),
             core::ptr::from_mut(tx).cast(),
         );
@@ -655,20 +698,21 @@ struct Seated<'a> {
     any(feature = "alloc", feature = "session-slot")
 ))]
 impl<'a> Seated<'a> {
-    /// Seat `tx` for `thread` in `place`.
-    fn enter<K: LockKind, X: Send + 'static>(
-        place: &'a FacePlace<K, X>,
+    /// Seat `tx` for `thread` in a place's seat, `seat_thread` and `seat_tx`.
+    fn enter(
+        seat_thread: &'a core::sync::atomic::AtomicUsize,
+        seat_tx: &'a core::sync::atomic::AtomicPtr<()>,
         thread: usize,
         tx: *mut (),
     ) -> Self {
         use core::sync::atomic::Ordering;
-        let was_thread = place.seat_thread.load(Ordering::Acquire);
-        let was_tx = place.seat_tx.load(Ordering::Acquire);
-        place.seat_tx.store(tx, Ordering::Release);
-        place.seat_thread.store(thread, Ordering::Release);
+        let was_thread = seat_thread.load(Ordering::Acquire);
+        let was_tx = seat_tx.load(Ordering::Acquire);
+        seat_tx.store(tx, Ordering::Release);
+        seat_thread.store(thread, Ordering::Release);
         Self {
-            thread: &place.seat_thread,
-            tx: &place.seat_tx,
+            thread: seat_thread,
+            tx: seat_tx,
             was_thread,
             was_tx,
         }
@@ -693,7 +737,7 @@ impl Drop for Seated<'_> {
     feature = "session-unicast",
     any(feature = "alloc", feature = "session-slot")
 ))]
-struct SeatTaken<'a, T> {
+pub(crate) struct SeatTaken<'a, T> {
     tx: &'a core::sync::atomic::AtomicPtr<()>,
     taken: *mut (),
     of: PhantomData<*mut T>,
@@ -705,7 +749,7 @@ struct SeatTaken<'a, T> {
 ))]
 impl<T> SeatTaken<'_, T> {
     /// The send part the seat held.
-    fn tx(&mut self) -> &mut T {
+    pub(crate) fn tx(&mut self) -> &mut T {
         // SAFETY: the pointer was stored by `Seat::seat` from a `&mut T`, the send part of the
         // values the thread holding the place's lend split them into, borrowed for the length of
         // that call; the seat is cleared before the call returns or unwinds (`Seated`), and it is
@@ -735,7 +779,7 @@ impl<T> Drop for SeatTaken<'_, T> {
     feature = "session-unicast",
     any(feature = "alloc", feature = "session-slot")
 ))]
-enum AtSeat<'a, T> {
+pub(crate) enum AtSeat<'a, T> {
     /// No seat of this thread stands in the place.
     None,
     /// This thread's seat stands, and a send of this thread uses it now: a send inside a send.
@@ -780,6 +824,33 @@ impl<K: LockKind, X: FaceTx> FacePlace<K, X> {
 
     /// The seat this thread stands in, taken for a send.
     fn at_seat(&self) -> AtSeat<'_, X::Tx> {
+        // SAFETY: a place whose values are `FaceTx` is seated through `Seat::seat` alone, over
+        // their send part, and `seat_of` is not called for it with another type.
+        unsafe { self.at_seat_of::<X::Tx>() }
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
+    /// The place's seat, for a send part of type `T` ([`SeatOf`]).
+    pub(crate) fn seat_of<T>(&self) -> SeatOf<'_, K, T> {
+        SeatOf {
+            thread: &self.seat_thread,
+            tx: &self.seat_tx,
+            of: PhantomData,
+        }
+    }
+
+    /// The seat this thread stands in, taken for a send of a send part of type `T`.
+    ///
+    /// # Safety
+    ///
+    /// Every seat of this place is made with `T`: through [`Self::seat_of`] for `T` alone, or,
+    /// for values that are [`FaceTx`], through [`Seat::seat`] with `T` their send part.
+    pub(crate) unsafe fn at_seat_of<T>(&self) -> AtSeat<'_, T> {
         use core::sync::atomic::Ordering;
         // Another thread never reads its own number here unless it wrote it, so a seat is found
         // by the thread that stands in it alone.
