@@ -2005,7 +2005,7 @@ impl SessionLimits {
         max_local_tokens: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
         max_publishers: Limited::build_default(),
         max_queriers: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
-        max_matching_listeners: Limited::preset_or_build(Quota::at_most(1), LimitValue::Integer(1)),
+        max_matching_listeners: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
         max_decl_watches: Limited::build_default(),
         max_transport_events_listeners: Limited::preset_or_build(
             Quota::at_most(1),

@@ -188,7 +188,7 @@ config WZ_LIMIT_MAX_QUERIERS
 
 config WZ_LIMIT_MAX_MATCHING_LISTENERS
 	int "MAX_MATCHING_LISTENERS"
-	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The matching listeners a session holds at once, over all its publishers
