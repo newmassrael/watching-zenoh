@@ -632,19 +632,7 @@ impl DeclareWire {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: DeclareSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
-        let _p_header_i_0: bool = src.interest_id().is_some();
-        let _p_header_z_0: bool = src.extensions().is_some();
-        let _c_header: u8 = (((src.header() & !0x20) | (u8::from(_p_header_i_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
-        w.write_u8(_c_header)?;
-        if let Some(_v) = src.interest_id() {
-            w.write_vle_u64(_v)?;
-        }
-        if let Some(_v) = src.extensions() {
-            for (_i, _e) in _v.enumerate() {
-                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
-            }
-        }
+        Self::write_envelope(src.header(), src.interest_id(), src.extensions(), w)?;
         match src.body() {
             DeclareVariantSource::CodecZenohDeclKexpr(_b) => super::decl_kexpr::DeclKexprWire::write_source(_b, w)?,
             DeclareVariantSource::CodecZenohUndeclKexpr(_b) => super::undecl_kexpr::UndeclKexprWire::write_source(_b, w)?,
@@ -656,6 +644,28 @@ impl DeclareWire {
             DeclareVariantSource::CodecZenohUndeclToken(_b) => super::undecl_token::UndeclTokenWire::write_source(_b, w)?,
             DeclareVariantSource::CodecZenohDeclFinal(_b) => super::decl_final::DeclFinalWire::write_source(_b, w)?,
             DeclareVariantSource::Default { body: _b, .. } => super::decl_final::DeclFinalWire::write_source(_b, w)?,
+        }
+        Ok(())
+    }
+
+    /// The writes [`Self::write_source`] makes before the body of the arm
+    /// `src` holds, over the fields they read, each handed in as `src`
+    /// returned it: one copy for the values whose fields have these types,
+    /// whatever arm each holds (docs/adr/0126).
+    #[inline(never)]
+    fn write_envelope<K: SceSink>(_s_header: u8, _s_interest_id: Option<u64>, _s_extensions: Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>, w: &mut K) -> Result<(), K::Error> {
+        let _k_extensions: usize = _s_extensions.clone().map_or(0, |_l| _l.len());
+        let _p_header_i_0: bool = _s_interest_id.is_some();
+        let _p_header_z_0: bool = _s_extensions.clone().is_some();
+        let _c_header: u8 = (((_s_header & !0x20) | (u8::from(_p_header_i_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        w.write_u8(_c_header)?;
+        if let Some(_v) = _s_interest_id {
+            w.write_vle_u64(_v)?;
+        }
+        if let Some(_v) = _s_extensions.clone() {
+            for (_i, _e) in _v.enumerate() {
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
         }
         Ok(())
     }
