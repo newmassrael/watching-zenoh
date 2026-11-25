@@ -28,7 +28,7 @@ use wz_session_core::session_tables::PinnedFanOut;
 
 use super::registry::PeerRoom;
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the Push `record` of face `face`, lent where its frame lies, to each subscriber its
     /// key reaches, one call at a time with the session let go of: the sample over the frame, or,
     /// for a Push the lent form does not represent, its owned projection. A closed session hands

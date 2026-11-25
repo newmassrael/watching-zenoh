@@ -14,7 +14,7 @@ use core::ptr::NonNull;
 use wz_capi_port::EngineHolder;
 use wz_runtime_coop::kept::Shared;
 
-use super::{ClockSource, CoopEngine, ReachEngine, SessionLinks};
+use super::{ClockSource, CoopEngine, CoopLinks, ReachEngine};
 
 /// A holder of a session's engine: cloning takes a count of the engine, dropping gives it back,
 /// and the last holder drops the engine where it lies and gives the session's arena back.
@@ -62,7 +62,7 @@ impl<E> AsRef<E> for EngineHold<E> {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHold<CoopEngine<L, C>> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHold<CoopEngine<L, C>> {
     /// A reach of the engine that keeps nothing of it standing.
     pub fn downgrade(this: &Self) -> EngineHandle<CoopEngine<L, C>> {
         EngineHandle::reaching(this.reach)
@@ -96,7 +96,7 @@ impl<E> EngineHandle<E> {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<CoopEngine<L, C>> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<CoopEngine<L, C>> {
     /// A holder of the engine, while its session is open and one of its holders is left.
     pub fn upgrade(&self) -> Option<EngineHold<CoopEngine<L, C>>> {
         self.reach.reach().map(EngineHold)
@@ -115,7 +115,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<C
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHolder
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHolder
     for EngineHold<CoopEngine<L, C>>
 {
     type Handle = EngineHandle<CoopEngine<L, C>>;
@@ -138,7 +138,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHolder
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// A holder of this engine, taken while one of its holders is left.
     #[cfg(feature = "threads")]
     pub(super) fn hold(&self) -> Option<EngineHold<Self>> {

@@ -283,8 +283,8 @@ mod listen {
 mod shared_key_ids {
     use std::sync::Arc;
 
+    use crate::tests::host_links;
     use wz_capi_port::{SessionEngine, WireKey};
-    use wz_runtime_posix::links::PosixLinks;
     use wz_runtime_posix::stream::PosixTcpDial;
     use wz_runtime_posix::{PosixClock, PosixEntropy};
     use wz_session_core::locality::Locality;
@@ -309,7 +309,7 @@ mod shared_key_ids {
             .select_key_wire_form(KeyWireForm::Shared)
             .expect("a host build allows every value of the key-wire form");
         Engine::open_with_key_ids(
-            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             PosixClock,
             PosixEntropy,
             config,

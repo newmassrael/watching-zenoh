@@ -243,7 +243,7 @@ fn a_session_replays_at_the_pace_of_the_snapshot_it_is_handed() {
     }
     let router = Router::start(CatchAll::None);
     let engine = Engine::open_with_policy(
-        super::PosixLinks::new(super::LOOPBACK, super::PosixTcpDial).waited_by_owner(),
+        super::host_links(super::LOOPBACK, super::PosixTcpDial).waited_by_owner(),
         super::PosixClock,
         super::PosixEntropy,
         config(&router),
@@ -286,7 +286,7 @@ fn a_session_replays_at_the_pace_limits_of_the_snapshot_it_is_handed() {
     }
     let router = Router::start(CatchAll::None);
     let engine = Engine::open_with_policy(
-        super::PosixLinks::new(super::LOOPBACK, super::PosixTcpDial).waited_by_owner(),
+        super::host_links(super::LOOPBACK, super::PosixTcpDial).waited_by_owner(),
         super::PosixClock,
         super::PosixEntropy,
         CoopConfig {

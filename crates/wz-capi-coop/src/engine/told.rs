@@ -144,7 +144,7 @@ fn standing_key<C: ClockSource + 'static>(wire: &Wire<C>) -> Option<ToldKey> {
     })
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Note `listener` of `plane` told the row of `key` came (`SessionEngine::tell_came`):
     /// whether it is to be told. A row it is still owed the departure of under that key is not
     /// told again before that departure, so a reconnect reads as one, in order.

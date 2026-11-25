@@ -17,12 +17,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::tests::{host_links, PosixLinks};
+use crate::LinkCount;
 use wz_capi_port::{PeerLists, SessionDrive};
+use wz_runtime_coop::link_cells::CountKind;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::session_drive::{
     LinkOpenError, Locator, OpenedLink, PendingDial, SessionLinks,
 };
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::link_life::LinkPhase;
@@ -37,20 +39,20 @@ const DIAL_MS: u64 = 3_000;
 const PROMPT: Duration = Duration::from_millis(1_000);
 
 /// What the host's links pump.
-type Pump = <PosixLinks as SessionLinks>::Pump;
+type Pump = <PosixLinks as SessionLinks<LinkCount>>::Pump;
 
 /// A dial of [`SlowDials`]: the host's own, or, with none, one whose connection is never made nor
 /// refused.
-struct SlowDial(Option<<PosixLinks as SessionLinks>::Dial>);
+struct SlowDial(Option<<PosixLinks as SessionLinks<LinkCount>>::Dial>);
 
-impl PendingDial<Pump> for SlowDial {
-    fn poll(&mut self) -> Option<Result<OpenedLink<Pump>, LinkOpenError>> {
+impl PendingDial<Pump, LinkCount> for SlowDial {
+    fn poll(&mut self) -> Option<Result<OpenedLink<Pump, LinkCount>, LinkOpenError>> {
         self.0.as_mut()?.poll()
     }
 }
 
-impl From<OpenedLink<Pump>> for SlowDial {
-    fn from(opened: OpenedLink<Pump>) -> Self {
+impl From<OpenedLink<Pump, LinkCount>> for SlowDial {
+    fn from(opened: OpenedLink<Pump, LinkCount>) -> Self {
         SlowDial(Some(opened.into()))
     }
 }
@@ -63,27 +65,30 @@ struct SlowDials {
     dials: Arc<AtomicUsize>,
 }
 
-impl SessionLinks for SlowDials {
+impl SessionLinks<LinkCount> for SlowDials {
     type Pump = Pump;
 
     type Dial = SlowDial;
 
-    type Waits = <PosixLinks as SessionLinks>::Waits;
+    type Waits = <PosixLinks as SessionLinks<LinkCount>>::Waits;
 
     fn waits(&self) -> Self::Waits {
         self.inner.waits()
     }
 
-    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump, LinkCount>, LinkOpenError> {
         self.inner.open_acceptor(port)
     }
 
     // The session's tables reach the links it dials through, as they reach the host's links.
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<<LinkCount as CountKind>::Flag>) {
         self.inner.lend_buffers(tables);
     }
 
-    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_initiator(
+        &self,
+        to: Locator,
+    ) -> Result<OpenedLink<Self::Pump, LinkCount>, LinkOpenError> {
         if !self.slow.load(Ordering::SeqCst) {
             return self.inner.open_initiator(to);
         }
@@ -115,7 +120,7 @@ fn a_dial_under_way_holds_neither_the_session_nor_its_close() {
     let dials = Arc::new(AtomicUsize::new(0));
     let engine = CoopEngine::open(
         SlowDials {
-            inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             slow: slow.clone(),
             dials: dials.clone(),
         },
@@ -183,7 +188,7 @@ fn a_dial_under_way_holds_no_read_of_one_thread() {
     let dials = Arc::new(AtomicUsize::new(0));
     let engine = CoopEngine::open(
         SlowDials {
-            inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             slow: slow.clone(),
             dials: dials.clone(),
         },

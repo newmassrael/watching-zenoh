@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ffi::c_int;
 
-use wz_session_core::byte_cells::LentByteCells;
+use wz_session_core::byte_cells::{CellFlag, LentByteCells};
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::ws_link::{MaskKeys, KEY_LEN, MAX_HEAD_LEN};
 
@@ -31,8 +31,8 @@ use super::handshake::{answer_request, client_keys, read_answer, send_request, O
 use super::{WsFraming, WsSource, WS_MTU};
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::HeapLink;
-use crate::link_cells::CellRc;
-use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
+use crate::link_cells::{CellRc, CountKind, OneTask};
+use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
     SessionLinks, WaitOn, WsLocator,
@@ -60,18 +60,38 @@ type Stream<O> = <<O as WsOpen>::Dial as StreamDial>::Stream;
 /// What every WebSocket link of a [`WsLinks`] is given besides its connection: the session's
 /// tables and cells when it lent them, the slots its frames are encoded into, and whether its
 /// owner waits.
-#[derive(Clone, Copy, Default)]
-struct WsShape {
-    lent: Option<LinkTables>,
-    cells: Option<LentByteCells>,
+struct WsShape<N: CountKind> {
+    lent: Option<LinkTables<N::Flag>>,
+    cells: Option<LentByteCells<N::Flag>>,
     owner_waits: bool,
     tx_slots: usize,
     tx_capacity: usize,
 }
 
-impl WsShape {
+// Not derived: a derive would ask `N: Clone` and `N: Default` of a kind of count.
+impl<N: CountKind> Clone for WsShape<N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<N: CountKind> Copy for WsShape<N> {}
+
+impl<N: CountKind> Default for WsShape<N> {
+    fn default() -> Self {
+        Self {
+            lent: None,
+            cells: None,
+            owner_waits: false,
+            tx_slots: 0,
+            tx_capacity: 0,
+        }
+    }
+}
+
+impl<N: CountKind> WsShape<N> {
     /// The buffers of one link, claimed as every link's of the stack are.
-    fn buffers(&self) -> Result<(RxBuffer, TxBuffer), LinkOpenError> {
+    fn buffers(&self) -> Result<LinkBuffers<N::Flag>, LinkOpenError> {
         heap_link_buffers(
             self.lent.as_ref(),
             WS_RX_CAPACITY,
@@ -87,16 +107,16 @@ impl WsShape {
     fn link<P: StreamSocket + 'static>(
         &self,
         stream: P,
-        rx: RxBuffer,
+        rx: RxBuffer<N::Flag>,
         held: usize,
-        tx: TxBuffer,
+        tx: TxBuffer<N::Flag>,
         framing: WsFraming,
-    ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         if !stream_ends_fit(&stream) {
             return Err(LinkOpenError::Unsupported);
         }
         let owner_waits = self.owner_waits;
-        let link = CellRc::claim(self.cells.as_ref())
+        let link = CellRc::<_, N>::claim_of(self.cells.as_ref())
             .ok_or(LinkOpenError::Exhausted)?
             .made(|place| {
                 let link = place.write(StreamDriver::framed(stream, rx, held, tx, framing));
@@ -115,18 +135,18 @@ impl WsShape {
 
 /// A `ws/` dial under way: its connection being made, then its request written and the
 /// server's answer read into the buffer of the link it makes.
-struct WsDialing<P> {
+struct WsDialing<P, F: CellFlag> {
     stream: P,
     at: WsLocator,
-    rx: RxBuffer,
-    tx: TxBuffer,
+    rx: RxBuffer<F>,
+    tx: TxBuffer<F>,
     key: [u8; KEY_LEN],
     keys: MaskKeys,
     /// The bytes of the answer read, once the request is written.
     filled: Option<usize>,
 }
 
-impl<P: StreamSocket> WsDialing<P> {
+impl<P: StreamSocket, F: CellFlag> WsDialing<P, F> {
     /// One step of the dial, without waiting: what followed the server's head once it upgraded
     /// the connection, `None` while it has not answered.
     fn step(&mut self) -> Option<Result<usize, LinkOpenError>> {
@@ -150,17 +170,17 @@ impl<P: StreamSocket> WsDialing<P> {
 
 /// A `ws/` dial ([`SessionLinks::begin_initiator`]): asked at each poll, without waiting, until
 /// the server answers its request.
-pub struct WsDial<O: WsOpen> {
-    dialing: Option<WsDialing<Stream<O>>>,
+pub struct WsDial<O: WsOpen, N: CountKind = OneTask> {
+    dialing: Option<WsDialing<Stream<O>, N::Flag>>,
     opener: O,
-    shape: WsShape,
+    shape: WsShape<N>,
 }
 
-impl<O: WsOpen> PendingDial<HeapLink> for WsDial<O>
+impl<O: WsOpen, N: CountKind> PendingDial<HeapLink<N>, N> for WsDial<O, N>
 where
     Stream<O>: 'static,
 {
-    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         let made = self.dialing.as_mut()?.step()?;
         let dialing = self.dialing.take()?;
         Some(made.and_then(|held| {
@@ -175,14 +195,14 @@ where
     }
 }
 
-impl<O: WsOpen> WsDial<O>
+impl<O: WsOpen, N: CountKind> WsDial<O, N>
 where
     Stream<O>: 'static,
 {
     /// The dial, waited out: asked again each time its connection can be written or read, until
     /// the server answers or [`OPEN_WAIT_US`] has passed on the opener's clock, which refuses it
     /// as an open worth trying later.
-    fn wait(mut self) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn wait(mut self) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         let deadline = self.opener.now_us().saturating_add(OPEN_WAIT_US);
         loop {
             if let Some(made) = self.poll() {
@@ -209,18 +229,19 @@ where
 }
 
 /// A dial of [`WsLinks`]: the stack's, or a WebSocket one.
-pub enum WsLinksDial<D, O: WsOpen> {
+pub enum WsLinksDial<D, O: WsOpen, N: CountKind = OneTask> {
     /// A dial of the stack the WebSocket links stand beside.
     Links(D),
     /// A `ws/` dial.
-    Ws(WsDial<O>),
+    Ws(WsDial<O, N>),
 }
 
-impl<D: PendingDial<HeapLink>, O: WsOpen> PendingDial<HeapLink> for WsLinksDial<D, O>
+impl<D: PendingDial<HeapLink<N>, N>, O: WsOpen, N: CountKind> PendingDial<HeapLink<N>, N>
+    for WsLinksDial<D, O, N>
 where
     Stream<O>: 'static,
 {
-    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         match self {
             Self::Links(dial) => dial.poll(),
             Self::Ws(dial) => dial.poll(),
@@ -229,22 +250,24 @@ where
 }
 
 /// A link made at once is the stack's: a WebSocket link is made by its handshake.
-impl<D: From<OpenedLink<HeapLink>>, O: WsOpen> From<OpenedLink<HeapLink>> for WsLinksDial<D, O> {
-    fn from(opened: OpenedLink<HeapLink>) -> Self {
+impl<D: From<OpenedLink<HeapLink<N>, N>>, O: WsOpen, N: CountKind> From<OpenedLink<HeapLink<N>, N>>
+    for WsLinksDial<D, O, N>
+{
+    fn from(opened: OpenedLink<HeapLink<N>, N>) -> Self {
         Self::Links(D::from(opened))
     }
 }
 
 /// A connection accepted and its request not yet answered.
-struct WsAccepting<P> {
+struct WsAccepting<P, F: CellFlag> {
     stream: P,
-    rx: RxBuffer,
-    tx: TxBuffer,
+    rx: RxBuffer<F>,
+    tx: TxBuffer<F>,
     filled: usize,
     since_us: u64,
 }
 
-impl<P: StreamSocket> WsAccepting<P> {
+impl<P: StreamSocket, F: CellFlag> WsAccepting<P, F> {
     /// One step of the server's handshake, without waiting: what followed the client's head
     /// once its request is read and answered, `None` while it has not all arrived.
     fn step(&mut self) -> Option<Result<usize, LinkOpenError>> {
@@ -255,23 +278,23 @@ impl<P: StreamSocket> WsAccepting<P> {
 /// The accepting end of a `ws/` port: the stream listener of the stack's dial, and the
 /// connections it accepted whose requests are still to be answered, in a table of `handshakes`
 /// rows reserved when it opened.
-struct WsListener<O: WsOpen> {
+struct WsListener<O: WsOpen, N: CountKind> {
     listener: Box<dyn StreamListen<Stream = Stream<O>>>,
     opener: O,
-    shape: WsShape,
+    shape: WsShape<N>,
     /// Never longer than `handshakes`, which its capacity holds, so it never grows after the open.
-    accepting: RefCell<Vec<WsAccepting<Stream<O>>>>,
+    accepting: RefCell<Vec<WsAccepting<Stream<O>, N::Flag>>>,
     handshakes: usize,
 }
 
-impl<O: WsOpen> WsListener<O> {
+impl<O: WsOpen, N: CountKind> WsListener<O, N> {
     /// Whether a row of the table is free for the next connection.
     fn has_room(&self) -> bool {
         self.accepting.borrow().len() < self.handshakes
     }
 }
 
-impl<O: WsOpen> LinkListener<HeapLink> for WsListener<O>
+impl<O: WsOpen, N: CountKind> LinkListener<HeapLink<N>, N> for WsListener<O, N>
 where
     Stream<O>: 'static,
 {
@@ -279,7 +302,7 @@ where
         Locator::ws(self.listener.local())
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink<N>, N>>, LinkOpenError> {
         // A table with no row free leaves the next connection queued on the port until one is.
         let next = if self.has_room() {
             self.listener.accept()?
@@ -341,11 +364,12 @@ where
 /// The links of the stack `S` and WebSocket links beside them, over the connections `O` opens: a
 /// `ws/` locator is dialled and listened on here, any other is the stack's. WebSocket links take
 /// their buffers and cells from what the session lends the stack, and are placed and waited on as
-/// the stack's links of the heap profile are ([`HeapLink`]).
-pub struct WsLinks<S, O> {
+/// the stack's links of the heap profile are ([`HeapLink`]). `N` is how the sessions they serve
+/// count the handles on a link, as `S`'s sessions do.
+pub struct WsLinks<S, O, N: CountKind = OneTask> {
     links: S,
     opener: O,
-    shape: WsShape,
+    shape: WsShape<N>,
     handshakes: usize,
 }
 
@@ -359,6 +383,30 @@ impl<S, O: WsOpen> WsLinks<S, O> {
             opener,
             shape: WsShape::default(),
             handshakes,
+        }
+    }
+}
+
+impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
+    /// The same links, for sessions that count the handles on a link as `M` does, over `links`,
+    /// the stack's links counted so: asked before a session is opened over them, which is when it
+    /// lends them its cells.
+    pub fn counted_by<M: CountKind, T>(self, links: T) -> WsLinks<T, O, M> {
+        debug_assert!(
+            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            "cells and buffers are lent after the links are made"
+        );
+        WsLinks {
+            links,
+            opener: self.opener,
+            shape: WsShape {
+                lent: None,
+                cells: None,
+                owner_waits: self.shape.owner_waits,
+                tx_slots: self.shape.tx_slots,
+                tx_capacity: self.shape.tx_capacity,
+            },
+            handshakes: self.handshakes,
         }
     }
 
@@ -380,7 +428,7 @@ impl<S, O: WsOpen> WsLinks<S, O> {
 
     /// A dial of `at`: the connection begun, the link's buffers claimed and the client's key and
     /// mask keys drawn, so what the server answers is read into the link's buffer.
-    fn dial_ws(&self, at: WsLocator) -> Result<WsDial<O>, LinkOpenError>
+    fn dial_ws(&self, at: WsLocator) -> Result<WsDial<O, N>, LinkOpenError>
     where
         O: Clone,
     {
@@ -407,15 +455,15 @@ impl<S, O: WsOpen> WsLinks<S, O> {
     }
 }
 
-impl<S, O> SessionLinks for WsLinks<S, O>
+impl<S, O, N: CountKind> SessionLinks<N> for WsLinks<S, O, N>
 where
-    S: SessionLinks<Pump = HeapLink>,
+    S: SessionLinks<N, Pump = HeapLink<N>>,
     O: WsOpen + Clone + 'static,
     Stream<O>: 'static,
 {
-    type Pump = HeapLink;
+    type Pump = HeapLink<N>;
 
-    type Dial = WsLinksDial<S::Dial, O>;
+    type Dial = WsLinksDial<S::Dial, O, N>;
 
     const IPV6: bool = S::IPV6;
 
@@ -425,21 +473,21 @@ where
         self.links.waits()
     }
 
-    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         self.links.open_acceptor(port)
     }
 
     // A WebSocket link is made by its handshake, which waits for the server: a caller that opens
     // and does not ask again (a node's dialer over an endpoint its config names) is held until
     // the server answers, as a waiting open of a serial line is.
-    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         match to.as_ws() {
             Some(at) => self.dial_ws(at)?.wait(),
             None => self.links.open_initiator(to),
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         self.shape.lent = Some(tables);
         self.links.lend_buffers(tables);
     }
@@ -449,18 +497,21 @@ where
         match self.links.link_cell_bytes() {
             0 => 0,
             links => links.max(CellRc::<
-                StreamDriver<Stream<O>, RxBuffer, TxBuffer, WsFraming>,
+                StreamDriver<Stream<O>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, WsFraming>,
             >::cell_bytes()),
         }
     }
 
-    fn lend_cells(&mut self, cells: LentByteCells) {
+    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
         self.shape.cells = Some(cells);
         self.links.lend_cells(cells);
     }
 
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+    fn lend_port_rows(
+        &mut self,
+        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+    ) {
         self.links.lend_port_rows(rows);
     }
 
@@ -471,7 +522,10 @@ where
         }
     }
 
-    fn open_listener(&self, at: Locator) -> Result<Box<dyn LinkListener<HeapLink>>, LinkOpenError> {
+    fn open_listener(
+        &self,
+        at: Locator,
+    ) -> Result<Box<dyn LinkListener<HeapLink<N>, N>>, LinkOpenError> {
         let Some(at) = at.as_ws() else {
             return self.links.open_listener(at);
         };
@@ -493,7 +547,7 @@ where
         self.links.open_group(endpoint, group)
     }
 
-    fn share_pump(pump: HeapLink) -> CellRc<dyn SessionDatagramLink> {
+    fn share_pump(pump: HeapLink<N>) -> CellRc<dyn SessionDatagramLink, N> {
         S::share_pump(pump)
     }
 }

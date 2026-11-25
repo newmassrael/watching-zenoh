@@ -146,6 +146,7 @@ use crate::engine::REGISTRY_LEND_BYTES;
 use crate::engine::{CoopTables, FACE_SET_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
+use crate::form::SessionLock;
 use crate::open_source::EndpointList;
 use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -1134,13 +1135,18 @@ pub struct TransportRows {
     port_peers: usize,
 }
 
+/// The flag of a cell of the links' tables: the session's lock kind's
+/// (`wz_runtime_coop::sync::LockKind::Flag`), which the handles placed in it are counted by.
+type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
+
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
 pub(crate) struct TransportTables {
     /// The links' buffers and, where the links share pools, their places.
-    pub(crate) links: LinkTables,
+    pub(crate) links: LinkTables<LinkCellFlag>,
     /// The cells of the links' drivers, their gates and their actions, each `None` for a plan
-    /// with no such table.
-    pub(crate) cells: LinkCells<Option<LentByteCells>>,
+    /// with no such table: each cell's flag the one the session's lock kind counts a link's
+    /// handles by, so a handle let go of on any thread that may hold it gives its cell back.
+    pub(crate) cells: LinkCells<Option<LentByteCells<LinkCellFlag>>>,
     /// The reassembly buffers the links share.
     pub(crate) reassembly: LentByteCells,
     /// The rows of the endpoints' texts, none written.
@@ -1150,7 +1156,7 @@ pub(crate) struct TransportTables {
     pub(crate) handed: HandedTable,
     /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
     #[cfg(feature = "listen")]
-    pub(crate) port_rows: PortRows,
+    pub(crate) port_rows: PortRows<Lent, LinkCellFlag>,
 }
 
 impl TransportRows {
@@ -1198,12 +1204,15 @@ impl TransportRows {
 
     /// The cells of the links' drivers, their gates, their actions and their halves, lent by
     /// `lend` after the links' buffers: `None` for a table the plan holds no cells for.
-    fn cells_from(&self, lend: &mut TableLender<'_>) -> LinkCells<Option<LentByteCells>> {
+    fn cells_from(
+        &self,
+        lend: &mut TableLender<'_>,
+    ) -> LinkCells<Option<LentByteCells<LinkCellFlag>>> {
         let sizes = self.cell_bytes.into_array();
         let mut cells = [None, None, None, None];
         for at in self.cells_held.places() {
             if let (Some(lent), Some(&bytes)) = (cells.get_mut(at), sizes.get(at)) {
-                *lent = Some(lend.byte_cells(bytes, self.links));
+                *lent = Some(lend.byte_cells_of::<LinkCellFlag>(bytes, self.links));
             }
         }
         LinkCells::from_array(cells)
@@ -1214,11 +1223,11 @@ impl TransportRows {
     /// outbound slots they share, each held by a link from its grant to its send
     /// ([`LINK_TX_SLOTS`] at a time), and a place for each link the session may hold, which the
     /// session's links claim as they open and give back as they go.
-    pub(crate) fn links_from(&self, lend: &mut TableLender<'_>) -> LinkTables {
-        let rx = lend.byte_cells(self.link_bytes, self.rx_buffers);
-        let tx = lend.byte_cells(self.link_bytes, self.tx_slots);
+    pub(crate) fn links_from(&self, lend: &mut TableLender<'_>) -> LinkTables<LinkCellFlag> {
+        let rx = lend.byte_cells_of::<LinkCellFlag>(self.link_bytes, self.rx_buffers);
+        let tx = lend.byte_cells_of::<LinkCellFlag>(self.link_bytes, self.tx_slots);
         #[cfg(feature = "listen")]
-        let tables = LinkTables::pooled(rx, tx, lend.byte_cells(0, self.links));
+        let tables = LinkTables::pooled(rx, tx, lend.byte_cells_of(0, self.links));
         #[cfg(not(feature = "listen"))]
         let tables = LinkTables::new(rx, tx, self.link_bytes);
         let tables = self.group_rx_from(tables, lend);
@@ -1229,14 +1238,22 @@ impl TransportRows {
     /// until the links of their peers take them, lent by `lend` after the groups' buffers: the
     /// ports share them, a slot of the links' batch each.
     #[cfg(feature = "listen")]
-    fn port_rx_from(&self, tables: LinkTables, lend: &mut TableLender<'_>) -> LinkTables {
+    fn port_rx_from(
+        &self,
+        tables: LinkTables<LinkCellFlag>,
+        lend: &mut TableLender<'_>,
+    ) -> LinkTables<LinkCellFlag> {
         let (slots, bytes) = self.port_rx;
-        tables.with_port_rx(lend.byte_cells(bytes, slots))
+        tables.with_port_rx(lend.byte_cells_of(bytes, slots))
     }
 
     /// A build that listens on no port lends no port a slot.
     #[cfg(not(feature = "listen"))]
-    fn port_rx_from(&self, tables: LinkTables, _lend: &mut TableLender<'_>) -> LinkTables {
+    fn port_rx_from(
+        &self,
+        tables: LinkTables<LinkCellFlag>,
+        _lend: &mut TableLender<'_>,
+    ) -> LinkTables<LinkCellFlag> {
         tables
     }
 
@@ -1245,7 +1262,11 @@ impl TransportRows {
     /// group claims when it is joined, so a joined group's datagram is read where the session's
     /// memory holds it.
     #[cfg(feature = "group")]
-    fn group_rx_from(&self, tables: LinkTables, lend: &mut TableLender<'_>) -> LinkTables {
+    fn group_rx_from(
+        &self,
+        tables: LinkTables<LinkCellFlag>,
+        lend: &mut TableLender<'_>,
+    ) -> LinkTables<LinkCellFlag> {
         let (buffers, bytes) = self.group_rx;
         // A plan that counts no group laid no table of them out.
         if buffers == 0 {
@@ -1256,7 +1277,11 @@ impl TransportRows {
 
     /// A build that joins no group lends no group a buffer.
     #[cfg(not(feature = "group"))]
-    fn group_rx_from(&self, tables: LinkTables, _lend: &mut TableLender<'_>) -> LinkTables {
+    fn group_rx_from(
+        &self,
+        tables: LinkTables<LinkCellFlag>,
+        _lend: &mut TableLender<'_>,
+    ) -> LinkTables<LinkCellFlag> {
         tables
     }
 }

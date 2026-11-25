@@ -687,8 +687,10 @@ pub(crate) type HostLinks = TtyLinks;
 /// the host's and the program's transport the config chose. One type either way, so the engine
 /// over them is built once and reached as its own type, with no table of its functions.
 #[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
-pub(crate) type PicoLinks =
-    wz_capi_coop::either_links::EitherLinks<HostLinks, wz_capi_coop::app_link::AppLinks>;
+pub(crate) type PicoLinks = wz_capi_coop::either_links::EitherLinks<
+    HostLinks,
+    wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>,
+>;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 pub(crate) type PicoLinks = HostLinks;
 
@@ -1827,9 +1829,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
     not(feature = "engine-tokio")
 ))]
 fn app_links_on(
-    links: wz_capi_coop::app_link::AppLinks,
+    links: wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>,
     clock: &crate::time_base::SessionClock,
-) -> wz_capi_coop::app_link::AppLinks {
+) -> wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount> {
     match crate::time_base::open_bound(clock) {
         Some(bound) => links.with_open_bound(bound),
         None => links,
@@ -1843,9 +1845,9 @@ fn app_links_on(
     not(feature = "engine-tokio")
 ))]
 fn app_links_on<C>(
-    links: wz_capi_coop::app_link::AppLinks,
+    links: wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>,
     _clock: &C,
-) -> wz_capi_coop::app_link::AppLinks {
+) -> wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount> {
     links
 }
 
@@ -2249,6 +2251,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             wz_capi_coop::app_link::AppLinks::new(
                 wz_session_core::app_transport::SessionTransport::new(transport, &limits),
             )
+            .counted_by::<wz_capi_coop::LinkCount>()
             .with_rx_capacity(limits.pico_unicast_batch_bytes())
             .waited_by_owner(),
             &clock,
@@ -4160,7 +4163,7 @@ mod static_dispatch_tests {
             TypeId::of::<
                 wz_capi_coop::either_links::EitherLinks<
                     super::HostLinks,
-                    wz_capi_coop::app_link::AppLinks,
+                    wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>,
                 >,
             >()
         );

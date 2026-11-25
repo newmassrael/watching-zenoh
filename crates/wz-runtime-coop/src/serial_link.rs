@@ -20,7 +20,7 @@ use crate::session_drive::{LinkOpenError, SerialLocator};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 mod links;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use links::{SerialDial, SerialDriver, SerialLinks, SerialLinksDial};
+pub use links::{LineLease, SerialDial, SerialDriver, SerialLinks, SerialLinksDial};
 
 /// One open serial line: a platform's tty, or a UART. Only the one thread that drives the link
 /// touches it. A line keeps no message boundaries and has no peer address: what is written is read

@@ -66,7 +66,7 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
-use crate::byte_cells::LentByteCells;
+use crate::byte_cells::{CellFlag, LentByteCells};
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
@@ -1846,8 +1846,13 @@ impl<'a> TableLender<'a> {
     /// A table of `count` buffers of `size` bytes, as [`Arena::lend_byte_cells`] lends one; a
     /// table of no buffer once a table is refused, this one among them.
     pub fn byte_cells(&mut self, size: usize, count: usize) -> LentByteCells {
+        self.byte_cells_of(size, count)
+    }
+
+    /// [`Self::byte_cells`] with flags of the form `F` ([`CellFlag`]).
+    pub fn byte_cells_of<F: CellFlag>(&mut self, size: usize, count: usize) -> LentByteCells<F> {
         if self.refused.is_none() {
-            match self.arena.lend_byte_cells(size, count) {
+            match self.arena.lend_byte_cells_of::<F>(size, count) {
                 Ok(cells) => return cells,
                 Err(why) => self.refused = Some(why),
             }
@@ -2132,6 +2137,24 @@ impl Arena {
         size: usize,
         count: usize,
     ) -> Result<LentByteCells, LendRefused> {
+        self.lend_byte_cells_of::<Cell<bool>>(size, count)
+    }
+
+    /// [`Self::lend_byte_cells`] with flags of the form `F` ([`CellFlag`]): atomic ones for a
+    /// table whose buffers are given back on any thread. Every form lays its flag out in the same
+    /// byte, so the table takes the same spans.
+    pub fn lend_byte_cells_of<F: CellFlag>(
+        &mut self,
+        size: usize,
+        count: usize,
+    ) -> Result<LentByteCells<F>, LendRefused> {
+        const {
+            assert!(
+                core::mem::size_of::<F>() == core::mem::size_of::<Cell<bool>>()
+                    && core::mem::align_of::<F>() == 1,
+                "a table's flag is one byte with no alignment of its own"
+            )
+        };
         // `lent` never passes `bytes`.
         let left = self.bytes.wrapping_sub(self.lent);
         let (flags, bytes) = match Self::byte_cells_spans(size, count) {
@@ -2151,9 +2174,9 @@ impl Arena {
         // and each byte zero before the table is made, which is what `LentByteCells::over` asks.
         let table = unsafe {
             let at = self.base.as_ptr().add(self.lent);
-            let taken = at.cast::<Cell<bool>>();
+            let taken = at.cast::<F>();
             for cell in 0..count {
-                taken.add(cell).write(Cell::new(false));
+                taken.add(cell).write(F::new(false));
             }
             let data = at.add(flags);
             // `byte_cells_spans` answered, so the product does not overflow.

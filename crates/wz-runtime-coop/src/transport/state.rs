@@ -48,11 +48,11 @@ use crate::executor::SpawnRefusal;
 use crate::faces::Accepted;
 use crate::faces::{
     DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord, IdleWait,
-    LinkEnd, LinkSupervisor, Wire,
+    LinkEnd, LinkSupervisor, TaskEnd, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
-use crate::link_cells::CellRc;
+use crate::link_cells::{CellRc, CountKind, OneTask};
 #[cfg(feature = "listen")]
 use crate::locator_text::parse_listen_locator;
 use crate::locator_text::parse_locator;
@@ -62,7 +62,7 @@ use crate::session_drive::{
     PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump, SessionRole,
     WaitOn,
 };
-use crate::session_runtime::{SessionEntropy, SessionHandle};
+use crate::session_runtime::{EntropyCount, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::link_life::{Effects, LinkPhase, LinkRole};
@@ -95,9 +95,21 @@ type LinkHalves<T> = HalvesMaking<LinkRuntime<T>, LinkTime<T>>;
 
 /// A handle on each half of the actions of a link over the transport of `T`, as they hold them.
 type HalvesHeld<T> = (
-    CellRc<LinkState<LinkRuntime<T>>>,
-    CellRc<SessionCore<LinkRuntime<T>, LinkTime<T>>>,
+    CellRc<LinkState<LinkRuntime<T>>, CountOf<T>>,
+    CellRc<SessionCore<LinkRuntime<T>, LinkTime<T>>, CountOf<T>>,
 );
+
+/// How the handles on the parts of a link over the transport of `T` are counted: as the lock kind
+/// of the values its session is lent counts them (`LockKind::LinkCount`).
+type CountOf<T> = <<T as TransportFaces>::Lock as LockKind>::LinkCount;
+
+/// How the handles on what the links over the transport of `T` share are counted (the session's
+/// entropy): as the lock kind counts them (`LockKind::SharedCount`).
+type SharedOf<T> = <<T as TransportFaces>::Lock as LockKind>::SharedCount;
+
+/// The handle on the link a session over the transport of `T` sends and reads by, counted as the
+/// link's parts are.
+type LinkOf<T> = CellRc<dyn SessionDatagramLink, CountOf<T>>;
 
 /// What a session's transport is made of: the session's clock, the network its links are opened
 /// on, and the engine's records of the session's half of a link, of a face and of a group it
@@ -108,14 +120,15 @@ pub trait TransportFaces {
     /// How the session's runtime locks the values it lends each link's session.
     type Lock: LockKind;
     /// The network the session's links, ports and groups are opened on.
-    type Links: SessionLinks + 'static;
+    type Links: SessionLinks<<Self::Lock as LockKind>::LinkCount> + 'static;
     /// The session's half of one link.
     type Session: TransportSession<Self::Clock, Self::Lock>;
     /// The engine's record of one face.
     type Face: FaceRecord<
+        <Self::Lock as LockKind>::LinkCount,
         Session = Self::Session,
-        Pump = <Self::Links as SessionLinks>::Pump,
-        Dial = <Self::Links as SessionLinks>::Dial,
+        Pump = <Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Pump,
+        Dial = <Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Dial,
     >;
     /// The table the engine keeps its faces in by their places: one face alone for a session that
     /// only dials, a place for each face for one that takes faces beside it.
@@ -154,9 +167,14 @@ impl TransportRouter for () {
 }
 
 /// A dial under way over the network of `T`.
-type DialOf<T> = <<T as TransportFaces>::Links as SessionLinks>::Dial;
+type DialOf<T> = <<T as TransportFaces>::Links as SessionLinks<CountOf<T>>>::Dial;
 /// What the drive loop pumps for a link over the network of `T`.
-type PumpOf<T> = <<T as TransportFaces>::Links as SessionLinks>::Pump;
+type PumpOf<T> = <<T as TransportFaces>::Links as SessionLinks<CountOf<T>>>::Pump;
+/// A link over the network of `T` that opened, as its session is made of it.
+type OpenedOf<T> = OpenedLink<PumpOf<T>, CountOf<T>>;
+/// What a dial over the network of `T` answered: the link it made, the refusal, or `None` while
+/// it is under way.
+type AnswerOf<T> = DialAnswer<PumpOf<T>, CountOf<T>>;
 
 /// The transport of a session over the faces of [`crate::faces`]: the session's links and what
 /// their handshakes and receives are handed. What a link coming up or going does to the session's
@@ -175,7 +193,7 @@ pub struct TransportState<T: TransportFaces> {
     /// under way, the ports listened on and a read's waits are the driver's
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
-    pub links: LinkSupervisor<T::Links, T::Face, T::Places>,
+    pub links: LinkSupervisor<T::Links, T::Face, T::Places, CountOf<T>>,
     /// The texts of the endpoints the session dials and listens on, written once when it opened
     /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
     /// copies went with the open.
@@ -192,14 +210,14 @@ pub struct TransportState<T: TransportFaces> {
     pub admission: PlacedRef<dyn LinkAdmission>,
     /// The cells each link's gates are placed in when the session makes the link (`LinkGate`),
     /// lent from the arena; none for a plan that laid out none.
-    pub gate_cells: Option<LentByteCells>,
+    pub gate_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
     /// The cells each link's actions are placed in when the session makes the link, lent from the
     /// arena; none for a plan that laid out none.
-    pub actions_cells: Option<LentByteCells>,
+    pub actions_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
     /// The cells the two halves of each link's actions are placed in together when the session
     /// makes the link (its own state and the session's kernel, `place_halves`), lent from the
     /// arena; none for a plan that laid out none, whose halves lie on the heap.
-    pub halves_cells: Option<LentByteCells>,
+    pub halves_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
     /// The key-wire form of each link the session opens: the session's, and the one stated for an
     /// endpoint apart from it (`shared-key-ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -231,13 +249,13 @@ pub struct FaceStep {
 /// What the making of a link's session is handed beside the link ([`TransportState::make_wire`]):
 /// the parameters the session opens it with, and what it borrows of the session's driver (the set
 /// its task runs on, its source of entropy, its clock and the deadlines of its handshake).
-pub struct WireMaking<'a, C: ClockSource + 'static> {
+pub struct WireMaking<'a, C: ClockSource + 'static, N: EntropyCount = OneTask> {
     /// The parameters the link's session is opened with.
     pub params: SessionInitParams,
     /// The set the link's task is spawned on.
     pub local: &'a CoopLocalSet<C>,
     /// The session's one source of entropy, which every link's handshake draws from.
-    pub entropy: &'a mut SessionEntropy,
+    pub entropy: &'a mut SessionEntropy<N>,
     /// The session's clock.
     pub clock: &'a CoopTime<C>,
     /// The deadlines of the link's handshake.
@@ -259,7 +277,7 @@ pub struct OpenedAs<'e> {
 /// ([`TransportState::place_wire`]).
 pub struct PumpPlace<'p, T: TransportFaces, E> {
     /// The place the pump is built in, which its owner drops it in.
-    pub place: &'p mut MaybeUninit<LinkPump<T, CellRc<dyn SessionDatagramLink>>>,
+    pub place: &'p mut MaybeUninit<LinkPump<T, LinkOf<T>>>,
     /// How the owner tells the link's session ended, and ends it.
     pub end: E,
 }
@@ -268,20 +286,20 @@ pub struct PumpPlace<'p, T: TransportFaces, E> {
 /// wire its face keeps, what the session hands its reads to, and the pump, in its place.
 pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock>, E> {
     /// The wire the face keeps.
-    pub wire: Wire<K::Session, E>,
+    pub wire: Wire<K::Session, E, CountOf<T>>,
     /// What the owner hands each step of the pump.
     pub dispatch: K::Dispatch,
     /// The pump, in its place.
-    pub pump: &'p mut LinkPump<T, CellRc<dyn SessionDatagramLink>>,
+    pub pump: &'p mut LinkPump<T, LinkOf<T>>,
 }
 
 /// What the making of a link's session builds before the session runs
 /// ([`TransportState::build_wire`]).
 struct WireBuilt<T: TransportFaces, D, S> {
-    fields: PumpFields<T::Clock, CellRc<dyn SessionDatagramLink>, dyn BoxedLinkDriver, T::Lock>,
+    fields: PumpFields<T::Clock, LinkOf<T>, dyn BoxedLinkDriver, T::Lock>,
     dispatch: D,
     session: S,
-    link: CellRc<dyn SessionDatagramLink>,
+    link: LinkOf<T>,
     input_wait: Option<WaitOn>,
     room_wait: Option<WaitOn>,
 }
@@ -444,8 +462,9 @@ impl<T: TransportFaces> TransportState<T> {
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
     ) -> Result<LinkHandle<T>, TransportRefusal> {
-        let actions: LinkHandle<T> = CellRc::in_cells(self.actions_cells.as_ref(), actions)
-            .map_err(|_| self.cells_exhausted(endpoint))?;
+        let actions: LinkHandle<T> =
+            CellRc::<_, CountOf<T>>::in_cells_of(self.actions_cells.as_ref(), actions)
+                .map_err(|_| self.cells_exhausted(endpoint))?;
         #[cfg(feature = "listen")]
         actions
             .install_placed_link_admission(self.admission, matches!(role, SessionRole::Initiator));
@@ -472,7 +491,7 @@ impl<T: TransportFaces> TransportState<T> {
             unsafe { halves.write(link, kernel) }
         };
         // SAFETY: `HalvesMaking::write` leaves a whole value at each place when it returns.
-        unsafe { CellRc::halves_in(self.halves_cells.as_ref(), write) }
+        unsafe { CellRc::<_, CountOf<T>>::halves_in_of(self.halves_cells.as_ref(), write) }
             .ok_or_else(|| self.cells_exhausted(endpoint))
     }
 
@@ -497,8 +516,9 @@ impl<T: TransportFaces> TransportState<T> {
         &self,
         gate: Gate,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<CellRc<Gate>, TransportRefusal> {
-        CellRc::in_cells(self.gate_cells.as_ref(), gate).map_err(|_| self.cells_exhausted(endpoint))
+    ) -> Result<CellRc<Gate, CountOf<T>>, TransportRefusal> {
+        CellRc::<_, CountOf<T>>::in_cells_of(self.gate_cells.as_ref(), gate)
+            .map_err(|_| self.cells_exhausted(endpoint))
     }
 
     /// Spawn the task of a link's session on `local`. The link's fragmented messages are staged
@@ -693,7 +713,7 @@ impl<T: TransportFaces> TransportState<T> {
         at: usize,
         id: FaceId,
         now_us: u64,
-        answer: &mut DialAnswer<PumpOf<T>>,
+        answer: &mut AnswerOf<T>,
         dialled: &mut Option<DialEndpoint>,
     ) -> FaceStep {
         let FaceRead { role, input } = self.links.read_face(at, id, now_us, answer, dialled);
@@ -732,11 +752,11 @@ impl<T: TransportFaces> TransportState<T> {
         &self,
         calls: &mut K,
         face: FaceId,
-        opened: OpenedLink<PumpOf<T>>,
+        opened: OpenedOf<T>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-        making: WireMaking<'_, T::Clock>,
-    ) -> Result<Wire<K::Session>, TransportRefusal>
+        making: WireMaking<'_, T::Clock, SharedOf<T>>,
+    ) -> Result<Wire<K::Session, TaskEnd, CountOf<T>>, TransportRefusal>
     where
         K::Dispatch: EventSink + 'static,
     {
@@ -761,9 +781,9 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn place_wire<'p, K: LinkCalls<T::Clock, T::Lock>, E: LinkEnd>(
         &self,
         calls: &mut K,
-        opened: OpenedLink<PumpOf<T>>,
+        opened: OpenedOf<T>,
         opened_as: OpenedAs<'_>,
-        making: WireMaking<'_, T::Clock>,
+        making: WireMaking<'_, T::Clock, SharedOf<T>>,
         place: PumpPlace<'p, T, E>,
     ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal> {
         let runtime = making.local.runtime().retyped();
@@ -798,10 +818,10 @@ impl<T: TransportFaces> TransportState<T> {
         &self,
         calls: &mut K,
         face: FaceId,
-        opened: OpenedLink<PumpOf<T>>,
+        opened: OpenedOf<T>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-        making: WireMaking<'_, T::Clock>,
+        making: WireMaking<'_, T::Clock, SharedOf<T>>,
     ) -> Result<WireBuilt<T, K::Dispatch, K::Session>, TransportRefusal> {
         let OpenedLink { sink, pump } = opened;
         let WireMaking {
@@ -836,7 +856,7 @@ impl<T: TransportFaces> TransportState<T> {
         calls.link_made(face, &actions, key_form);
         // One handle to the link, which its gates hold: a stack whose pump is a shared handle
         // already gives that one (`SessionLinks::share_pump`).
-        let pump = <T::Links as SessionLinks>::share_pump(pump);
+        let pump = <T::Links as SessionLinks<CountOf<T>>>::share_pump(pump);
         // What the session's read waits on for the link's input and its room, read off it before
         // its gates take it.
         let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());
@@ -870,21 +890,18 @@ impl<T: TransportFaces> TransportState<T> {
     /// the dial at once.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
-    pub fn dial_row(
-        &mut self,
-        at: usize,
-        row: usize,
-    ) -> Result<DialAnswer<PumpOf<T>>, TransportRefusal> {
+    pub fn dial_row(&mut self, at: usize, row: usize) -> Result<AnswerOf<T>, TransportRefusal> {
         let pending = self.begin_dial(self.endpoints.dial_text(row))?;
         Ok(self.links.ask_dial(at, DialEndpoint::Listed(row), pending))
     }
+
     /// The link a dial of `endpoint` answered with, or why it is none: the endpoint and the
     /// network's refusal.
     pub fn dialled(
         &self,
         endpoint: Option<&DialEndpoint>,
-        answer: Result<OpenedLink<PumpOf<T>>, LinkOpenError>,
-    ) -> Result<OpenedLink<PumpOf<T>>, TransportRefusal> {
+        answer: Result<OpenedOf<T>, LinkOpenError>,
+    ) -> Result<OpenedOf<T>, TransportRefusal> {
         answer.map_err(|refused| {
             TransportRefusal::Unreachable(EndpointRefusal::new(
                 self.endpoint_text(endpoint),
@@ -915,10 +932,7 @@ impl<T: TransportFaces> TransportState<T> {
     #[cfg(feature = "listen")]
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
-    pub fn next_accepted(
-        &mut self,
-        at: &mut usize,
-    ) -> Option<(OpenedLink<PumpOf<T>>, Option<DialEndpoint>)> {
+    pub fn next_accepted(&mut self, at: &mut usize) -> Option<(OpenedOf<T>, Option<DialEndpoint>)> {
         while let Some(accepted) = self.links.accept_at(*at) {
             match accepted {
                 Accepted::Link(opened, endpoint) => return Some((opened, endpoint)),

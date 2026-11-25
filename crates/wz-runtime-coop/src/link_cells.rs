@@ -13,23 +13,27 @@
 //! (a host's links outside a session's arena) holds the same handle over a cell of its own on the
 //! heap, so a link is one type whichever memory it lives in.
 //!
-//! Making a cell, letting go of a handle and giving the cell back are one body each, generic over
-//! nothing: what is left for each kind of value is writing it into its cell with what drops it,
-//! and the last handle drops it through that, whatever view of it the handle is (the value's own
-//! type, a trait object of it or a part of it), so a kind of link adds no body of its own here.
+//! Making a cell, letting go of a handle and giving the cell back are one body each for each form
+//! of a table's flag a build uses ([`CountKind::Flag`]), and generic over nothing else: what is
+//! left for each kind of value is writing it into its cell with what drops it, and the last handle
+//! drops it through that, whatever view of it the handle is (the value's own type, a trait object
+//! of it or a part of it), so a kind of link adds no body of its own here.
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use core::alloc::Layout;
+use core::cell::Cell;
 use core::marker::PhantomData;
 use core::mem::{size_of, MaybeUninit};
 use core::ops::Deref;
 use core::ptr::NonNull;
+#[cfg(target_has_atomic = "8")]
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use portable_atomic::AtomicUsize as CountWord;
 
 use wz_session_core::bounded::ARENA_ALIGN;
-use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
+use wz_session_core::byte_cells::{ByteBuf, CellFlag, LentByteCells};
 use wz_session_core::link::BoxedLinkDriver;
 
 use crate::session_drive::SessionDatagramLink;
@@ -37,27 +41,58 @@ use crate::session_drive::SessionDatagramLink;
 /// What a cell keeps before its value: how many handles name it and where the value lies, where its
 /// memory came from, which is where it goes back once none does, and what drops the whole value
 /// placed in it, which its last handle calls whatever view of the value it is
-/// ([`CellRc::unsize`], [`CellRc::halves`]).
-struct CellHead {
+/// ([`CellRc::unsize`], [`CellRc::halves`]). `F` is the form of the flag of the table a cell
+/// is claimed from, which its handles' kind names ([`CountKind::Flag`]).
+struct CellHead<F: CellFlag = Cell<bool>> {
     /// The handles that name the value, counted in [`ONE_HANDLE`]s, above the place of the value
     /// ([`Slot::PLACE`]): one word, as the count alone was, so a cell is no larger for the place.
     /// A clone may name a value of no cell, so nothing bounds the count but the word: one held at
     /// its most keeps its value for good, and the clone past it is counted
     /// ([`held_past_count`]).
     word: CountWord,
-    owner: Owner,
+    owner: Owner<F>,
     whole: DropWhole,
 }
 
+// A cell's value lies past its head by the head's size alone (`value_at`), whichever form the
+// flag of its table takes.
+#[cfg(target_has_atomic = "8")]
+const _: () = assert!(size_of::<CellHead<AtomicBool>>() == size_of::<CellHead>());
+
 /// How the handles of a cell are counted. A cell's word is written by one kind's handles alone, so
-/// a kind is a type argument of the handle ([`CellRc`]) and never a choice made at run time.
-pub trait CountKind: 'static {
+/// a kind is a type argument of the handle ([`CellRc`]) and never a choice made at run time, and
+/// sized as that argument is, so a kind's own items may name a handle of their kind.
+pub trait CountKind: Sized + 'static {
+    /// The flag of a table's cell that a handle of this kind may be placed in: a handle's last let
+    /// go gives the cell back by it, on whichever thread a handle of this kind may be let go of.
+    type Flag: CellFlag;
+
+    /// How the handles on a value that several links of this kind share (a port their peers
+    /// read from, the session's entropy) are counted: such a value outlives any one link's
+    /// holder, so its handles are counted for every thread a link's handles may be on.
+    type Shared: CountKind<Flag = Self::Flag>;
+
     /// The word as it stands.
     fn read(word: &CountWord) -> usize;
 
     /// Write `f`'s answer over the word it is handed, when it answers one, and answer the word
     /// `f` was handed.
     fn update(word: &CountWord, f: impl FnMut(usize) -> Option<usize>) -> usize;
+
+    /// A value that handles of this kind share and reach one holder at a time: a `RefCell` where
+    /// one task holds them, the profile's lock ([`crate::sync::Mutex`]) where threads do.
+    type Local<T>;
+
+    /// `value`, in a new [`Self::Local`].
+    fn new_local<T>(value: T) -> Self::Local<T>;
+
+    /// Run `f` on the value of `local`. A hold inside another hold of the same value is the
+    /// caller's fault, as a `RefCell`'s second borrow is.
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U;
+
+    /// [`Self::with_local`] unless a holder has the value now (this task, inside a hold, or
+    /// another thread): `None` then, and `f` has not run.
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>;
 }
 
 /// Counted as an `Rc` is: the handles of a cell are held by one task at a time, so the word is
@@ -66,6 +101,9 @@ pub trait CountKind: 'static {
 pub enum OneTask {}
 
 impl CountKind for OneTask {
+    type Flag = Cell<bool>;
+    type Shared = OneTask;
+
     #[inline]
     fn read(word: &CountWord) -> usize {
         word.load(Ordering::Relaxed)
@@ -79,16 +117,38 @@ impl CountKind for OneTask {
         }
         was
     }
+
+    type Local<T> = core::cell::RefCell<T>;
+
+    #[inline]
+    fn new_local<T>(value: T) -> Self::Local<T> {
+        core::cell::RefCell::new(value)
+    }
+
+    #[inline]
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        f(&mut local.borrow_mut())
+    }
+
+    #[inline]
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        local.try_borrow_mut().ok().map(|mut value| f(&mut value))
+    }
 }
 
 /// Counted as an `Arc` is: handles of one cell may be cloned and let go of on several threads at
 /// once, so each change of the word is one read-modify-write, and the last handle's let go is
-/// ordered after every other handle's. A cell of this kind lies on the heap alone
-/// ([`CellRc::shared`]), whose block any thread may give back; a table's cell is given back
-/// through its claim's flag, which its table reads without a lock, so a table lends no cell to it.
+/// ordered after every other handle's. Its cell is a block of the heap, which any thread may give
+/// back, or a cell of a table of atomic flags, which the last handle gives back by an ordered store
+/// that the table's claims read atomically.
+#[cfg(target_has_atomic = "8")]
 pub enum Atomic {}
 
+#[cfg(target_has_atomic = "8")]
 impl CountKind for Atomic {
+    type Flag = AtomicBool;
+    type Shared = Atomic;
+
     #[inline]
     fn read(word: &CountWord) -> usize {
         word.load(Ordering::Acquire)
@@ -99,6 +159,93 @@ impl CountKind for Atomic {
         match word.fetch_update(Ordering::AcqRel, Ordering::Acquire, f) {
             Ok(was) | Err(was) => was,
         }
+    }
+
+    type Local<T> = crate::sync::Mutex<T>;
+
+    #[inline]
+    fn new_local<T>(value: T) -> Self::Local<T> {
+        #[cfg(feature = "host-lock")]
+        {
+            crate::cs::HostMutex::new(value)
+        }
+        #[cfg(not(feature = "host-lock"))]
+        {
+            critical_section::Mutex::new(core::cell::RefCell::new(value))
+        }
+    }
+
+    #[inline]
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        #[cfg(feature = "host-lock")]
+        {
+            local.with(f)
+        }
+        #[cfg(not(feature = "host-lock"))]
+        {
+            crate::cs::with(|cs| f(&mut local.borrow(cs).borrow_mut()))
+        }
+    }
+
+    #[inline]
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        #[cfg(feature = "host-lock")]
+        {
+            local.try_with(f)
+        }
+        #[cfg(not(feature = "host-lock"))]
+        {
+            crate::cs::with(|cs| {
+                local
+                    .borrow(cs)
+                    .try_borrow_mut()
+                    .ok()
+                    .map(|mut value| f(&mut value))
+            })
+        }
+    }
+}
+
+/// Counted as [`OneTask`] counts, for the handles of one face's link held together: every handle
+/// on such a cell lies in the one value a face keeps its link's parts in, which moves between
+/// threads whole and is reached by one thread at a time ([`FaceHeld`]), so the word is
+/// written by plain loads and stores as one task's is. The cell goes back to a table that the
+/// faces held on other threads claim cells of at the same time, so its flag is an atomic, given
+/// back by an ordered store, and what the links share is counted as an `Arc`'s is
+/// ([`Atomic`]). Its handles are not `Send`: only the face's value, as a whole, crosses threads.
+#[cfg(target_has_atomic = "8")]
+pub enum OneFace {}
+
+#[cfg(target_has_atomic = "8")]
+impl CountKind for OneFace {
+    type Flag = AtomicBool;
+    type Shared = Atomic;
+
+    #[inline]
+    fn read(word: &CountWord) -> usize {
+        OneTask::read(word)
+    }
+
+    #[inline]
+    fn update(word: &CountWord, f: impl FnMut(usize) -> Option<usize>) -> usize {
+        OneTask::update(word, f)
+    }
+
+    type Local<T> = core::cell::RefCell<T>;
+
+    #[inline]
+    fn new_local<T>(value: T) -> Self::Local<T> {
+        OneTask::new_local(value)
+    }
+
+    #[inline]
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        OneTask::with_local(local, f)
+    }
+
+    #[inline]
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        OneTask::try_with_local(local, f)
     }
 }
 
@@ -129,21 +276,21 @@ const fn value_at(place: usize) -> usize {
 type DropWhole = unsafe fn(*mut u8);
 
 /// Where a cell's memory came from, which is where it goes back.
-enum Owner {
+enum Owner<F: CellFlag = Cell<bool>> {
     /// A claim of a session's table: dropping it gives the cell back.
-    Table(ByteBuf),
+    Table(ByteBuf<F>),
     /// A block of its own on the heap, of this layout.
     Heap(Layout),
 }
 
 /// A cell as it is laid out: the head first, so a pointer to the head is one to the cell.
 #[repr(C)]
-struct Slot<K> {
-    head: CellHead,
+struct Slot<K, F: CellFlag = Cell<bool>> {
+    head: CellHead<F>,
     value: K,
 }
 
-impl<K> Slot<K> {
+impl<K, F: CellFlag> Slot<K, F> {
     /// The drop of a `K` as a cell's head keeps it: `K`'s own drop, the body a trait object of a
     /// `K` drops through too, and not a body of the cell's for each kind of value placed.
     // SAFETY: `K` is `Sized` (a slot's value is), so `*mut K` and `*mut u8` are pointers with no
@@ -171,7 +318,7 @@ impl<K> Slot<K> {
 /// object of it ([`Self::unsize`]). `N` is how its handles are counted ([`CountKind`]): one
 /// task's ([`OneTask`], not `Send`) or several threads' ([`Atomic`]).
 pub struct CellRc<T: ?Sized, N: CountKind = OneTask> {
-    head: NonNull<CellHead>,
+    head: NonNull<CellHead<N::Flag>>,
     value: NonNull<T>,
     _owns: PhantomData<T>,
     _count: PhantomData<fn() -> N>,
@@ -179,11 +326,14 @@ pub struct CellRc<T: ?Sized, N: CountKind = OneTask> {
 
 // SAFETY: a handle of the atomic kind counts its cell with read-modify-writes ordered as an
 // `Arc`'s are, so clones and let gos on several threads keep one count, and the last handle drops
-// the value after every other handle let go. Its cell is the heap's alone (`CellRc::shared`), which
-// any thread gives back. The value is reached through shared references only, so sending a
-// handle or sharing one needs the value to be `Send` and `Sync`, as `Arc` asks.
+// the value after every other handle let go. Its cell is the heap's, which any thread gives back,
+// or one of a table of atomic flags (`Atomic::Flag`), given back by an ordered store. The value
+// is reached through shared references only, so sending a handle or sharing one needs the value
+// to be `Send` and `Sync`, as `Arc` asks.
+#[cfg(target_has_atomic = "8")]
 unsafe impl<T: ?Sized + Send + Sync> Send for CellRc<T, Atomic> {}
 // SAFETY: as for `Send` above.
+#[cfg(target_has_atomic = "8")]
 unsafe impl<T: ?Sized + Send + Sync> Sync for CellRc<T, Atomic> {}
 
 /// A cell for a slot of `layout`, its head written with one handle, `whole` and `place`, its
@@ -192,12 +342,12 @@ unsafe impl<T: ?Sized + Send + Sync> Sync for CellRc<T, Atomic> {}
 /// when the heap refuses it. Out of line: the one body of every kind of value a cell holds, which
 /// tells them apart by the slot's layout, the drop of its value and where the value lies alone.
 #[inline(never)]
-fn head_in(
-    cells: Option<&LentByteCells>,
+fn head_in<F: CellFlag>(
+    cells: Option<&LentByteCells<F>>,
     layout: Layout,
     whole: DropWhole,
     place: usize,
-) -> Option<NonNull<CellHead>> {
+) -> Option<NonNull<CellHead<F>>> {
     match cells {
         Some(cells) => table_head(cells, layout, whole, place),
         None => heap_head(layout, whole, place),
@@ -207,12 +357,12 @@ fn head_in(
 /// A claimed cell of `cells` for a slot of `layout`, its head written with `whole` and
 /// `place`; `None` when every cell is taken, a cell is too small for the slot, or the cell is
 /// not aligned for it.
-fn table_head(
-    cells: &LentByteCells,
+fn table_head<F: CellFlag>(
+    cells: &LentByteCells<F>,
     layout: Layout,
     whole: DropWhole,
     place: usize,
-) -> Option<NonNull<CellHead>> {
+) -> Option<NonNull<CellHead<F>>> {
     if !fits_layout(cells.size(), layout) {
         return None;
     }
@@ -235,7 +385,11 @@ fn table_head(
 /// the heap refuses the block: a link made then is refused as one past a table's cells is, and the
 /// program goes on.
 #[inline(never)]
-fn heap_head(layout: Layout, whole: DropWhole, place: usize) -> Option<NonNull<CellHead>> {
+fn heap_head<F: CellFlag>(
+    layout: Layout,
+    whole: DropWhole,
+    place: usize,
+) -> Option<NonNull<CellHead<F>>> {
     // SAFETY: a slot's layout is never of no bytes: it holds a head.
     let base = NonNull::new(unsafe { alloc(layout) })?;
     // SAFETY: the block is the heap's, of the slot's layout, and this call's alone.
@@ -247,13 +401,13 @@ fn heap_head(layout: Layout, whole: DropWhole, place: usize) -> Option<NonNull<C
 /// # Safety
 /// `base` is memory of a slot's layout that nothing else reaches, and `owner` is where it came
 /// from.
-unsafe fn write_head(
+unsafe fn write_head<F: CellFlag>(
     base: NonNull<u8>,
-    owner: Owner,
+    owner: Owner<F>,
     whole: DropWhole,
     place: usize,
-) -> NonNull<CellHead> {
-    let head = base.cast::<CellHead>();
+) -> NonNull<CellHead<F>> {
+    let head = base.cast::<CellHead<F>>();
     // SAFETY: the caller's contract: the memory is the slot's alone, and a slot starts with its
     // head, aligned for it.
     unsafe {
@@ -271,7 +425,7 @@ unsafe fn write_head(
 /// # Safety
 /// `head` heads a cell whose value was dropped and which no handle names any more.
 #[inline(never)]
-unsafe fn give_back(head: NonNull<CellHead>) {
+unsafe fn give_back<F: CellFlag>(head: NonNull<CellHead<F>>) {
     // SAFETY: the caller's contract: the head is whole and read for the last time. The owner is
     // moved out before the memory it lies in is given back, so it is not read again.
     let owner = unsafe { core::ptr::addr_of!((*head.as_ptr()).owner).read() };
@@ -291,7 +445,7 @@ unsafe fn give_back(head: NonNull<CellHead>) {
 /// `head` heads a cell whose value was placed and not dropped, named by a handle that is let go
 /// of here and not used after.
 #[inline(never)]
-unsafe fn let_go<N: CountKind>(head: NonNull<CellHead>) {
+unsafe fn let_go<N: CountKind>(head: NonNull<CellHead<N::Flag>>) {
     // SAFETY: the caller's contract: a handle names the cell, so its head is live.
     let cell = unsafe { head.as_ref() };
     // A count held at its most was passed by a clone it did not count, so it no longer says when
@@ -327,25 +481,27 @@ const fn fits_layout(size: usize, layout: Layout) -> bool {
 }
 
 impl<K, N: CountKind> CellRc<K, N> {
-    /// `value` in a cell of its own on the heap. A heap that refuses the cell ends the program, as
-    /// a `Box` of the value would.
-    fn heap(value: K) -> Self {
-        let layout = Layout::new::<Slot<K>>();
-        let Some(head) = heap_head(layout, Slot::<K>::WHOLE, Slot::<K>::PLACE) else {
+    /// `value` in a cell of its own on the heap, its handles counted by `N`. A heap that refuses
+    /// the cell ends the program, as a `Box` of the value would.
+    pub fn on_heap(value: K) -> Self {
+        let layout = Layout::new::<Slot<K, N::Flag>>();
+        let Some(head) =
+            heap_head::<N::Flag>(layout, Slot::<K, N::Flag>::WHOLE, Slot::<K, N::Flag>::PLACE)
+        else {
             handle_alloc_error(layout)
         };
-        // SAFETY: the head heads a cell of `Slot<K>`'s layout, written with one handle, whose
-        // value this writes.
+        // SAFETY: the head heads a cell of `Slot<K, N::Flag>`'s layout, written with one handle,
+        // whose value this writes.
         unsafe { Self::fill(head, value) }
     }
 
     /// The handle of the cell `head` heads, its value written from `value`.
     ///
     /// # Safety
-    /// `head` heads a cell laid out for `Slot<K>`, its head written with one handle, its value not
-    /// written, and no handle names it yet.
-    unsafe fn fill(head: NonNull<CellHead>, value: K) -> Self {
-        let slot = head.cast::<Slot<K>>().as_ptr();
+    /// `head` heads a cell laid out for `Slot<K, N::Flag>`, its head written with one handle, its
+    /// value not written, and no handle names it yet.
+    unsafe fn fill(head: NonNull<CellHead<N::Flag>>, value: K) -> Self {
+        let slot = head.cast::<Slot<K, N::Flag>>().as_ptr();
         // SAFETY: the caller's contract: the cell is a slot of `K` that only this call reaches, so
         // its value's place is aligned for `K`, written once here, and never null.
         unsafe {
@@ -359,14 +515,54 @@ impl<K, N: CountKind> CellRc<K, N> {
             }
         }
     }
+
+    /// [`CellRc::in_cells`] for handles counted by `N`, of a table whose flags are the form
+    /// `N` gives a cell back by.
+    pub fn in_cells_of(cells: Option<&LentByteCells<N::Flag>>, value: K) -> Result<Self, K> {
+        match head_in(
+            cells,
+            Layout::new::<Slot<K, N::Flag>>(),
+            Slot::<K, N::Flag>::WHOLE,
+            Slot::<K, N::Flag>::PLACE,
+        ) {
+            // SAFETY: the head heads a cell of `Slot<K, N::Flag>`'s layout, written with one
+            // handle, whose value this writes.
+            Some(head) => Ok(unsafe { Self::fill(head, value) }),
+            None => Err(value),
+        }
+    }
+
+    /// The bytes of a cell that holds a `K` counted by `N`, a whole number of an arena's
+    /// alignments: what a cell `Self::in_cells_of` made on the heap asked of it.
+    pub const fn cell_bytes_of() -> usize {
+        match size_of::<Slot<K, N::Flag>>().checked_next_multiple_of(ARENA_ALIGN) {
+            Some(bytes) => bytes,
+            None => usize::MAX,
+        }
+    }
+
+    /// [`CellRc::claim`] for handles counted by `N`, of a table whose flags are the form `N`
+    /// gives a cell back by.
+    pub fn claim_of(cells: Option<&LentByteCells<N::Flag>>) -> Option<CellClaim<K, N>> {
+        let head = head_in(
+            cells,
+            Layout::new::<Slot<K, N::Flag>>(),
+            Slot::<K, N::Flag>::WHOLE,
+            Slot::<K, N::Flag>::PLACE,
+        )?;
+        Some(CellClaim {
+            head,
+            _owns: PhantomData,
+        })
+    }
 }
 
+#[cfg(target_has_atomic = "8")]
 impl<K> CellRc<K, Atomic> {
     /// `value` in a cell of its own on the heap, its handles counted as an `Arc`'s are: the
-    /// handle of a value several threads hold. Only the heap lends a cell of this kind
-    /// ([`Atomic`]).
+    /// handle of a value several threads hold ([`Atomic`]).
     pub fn shared(value: K) -> Self {
-        Self::heap(value)
+        Self::on_heap(value)
     }
 }
 
@@ -374,7 +570,7 @@ impl<K> CellRc<K> {
     /// `value` in a cell of `cells`, or `value` back when every cell is taken or a cell is too
     /// small for it, or not aligned for it.
     pub fn place(cells: &LentByteCells, value: K) -> Result<Self, K> {
-        Self::in_cells(Some(cells), value)
+        Self::in_cells_of(Some(cells), value)
     }
 
     /// `value` in a cell of `cells` when a table is lent, or `value` back when none of its cells
@@ -383,17 +579,7 @@ impl<K> CellRc<K> {
     /// lends. The cell is made by `head_in`, out of line; what is left here, for each kind of
     /// value, is moving the value into it.
     pub fn in_cells(cells: Option<&LentByteCells>, value: K) -> Result<Self, K> {
-        match head_in(
-            cells,
-            Layout::new::<Slot<K>>(),
-            Slot::<K>::WHOLE,
-            Slot::<K>::PLACE,
-        ) {
-            // SAFETY: the head heads a cell of `Slot<K>`'s layout, written with one handle, whose
-            // value this writes.
-            Some(head) => Ok(unsafe { Self::fill(head, value) }),
-            None => Err(value),
-        }
+        Self::in_cells_of(cells, value)
     }
 
     /// A cell for a value of `K`, claimed and not yet written: one of `cells` when a table is
@@ -402,22 +588,13 @@ impl<K> CellRc<K> {
     /// it stays ([`CellClaim::made`]); one let go of unwritten goes back. `None` too when the
     /// heap refuses the cell.
     pub fn claim(cells: Option<&LentByteCells>) -> Option<CellClaim<K>> {
-        let head = head_in(
-            cells,
-            Layout::new::<Slot<K>>(),
-            Slot::<K>::WHOLE,
-            Slot::<K>::PLACE,
-        )?;
-        Some(CellClaim {
-            head,
-            _owns: PhantomData,
-        })
+        Self::claim_of(cells)
     }
 
     /// `value` in a cell of its own on the heap: the handle of a link lent no table. A heap that
     /// refuses the cell ends the program, as a `Box` of the value would.
     pub fn boxed(value: K) -> Self {
-        Self::heap(value)
+        Self::on_heap(value)
     }
 
     /// Whether a value of `K` fits a cell of `size` bytes of a table, whose cells start on an
@@ -441,19 +618,14 @@ impl<K> CellRc<K> {
 /// before its value's maker is formed, so what the value is made of goes into the cell from where
 /// it lies, and a refused cell lets go of it there, never gathered into a maker first. Let go of
 /// unwritten, the cell goes back where it came from.
-pub struct CellClaim<K> {
-    head: NonNull<CellHead>,
-    _owns: PhantomData<K>,
+pub struct CellClaim<K, N: CountKind = OneTask> {
+    head: NonNull<CellHead<N::Flag>>,
+    _owns: PhantomData<(K, fn() -> N)>,
 }
 
-impl<K> CellClaim<K> {
-    /// The value `make` writes in the place it is handed, the claimed cell's, and lends back: made
-    /// where it stays and not in a frame that is then moved into it, and what `make` does to it
-    /// after (a link its owner waits on) is done there too. `None`, the cell given back and nothing
-    /// in it dropped, for a `make` that lends back anything but the place it was handed, which it
-    /// has not written; a `make` that unwinds gives the cell back the same way.
-    pub fn made(self, make: impl FnOnce(&mut MaybeUninit<K>) -> &mut K) -> Option<CellRc<K>> {
-        let slot = self.head.cast::<Slot<K>>().as_ptr();
+impl<K, N: CountKind> CellClaim<K, N> {
+    pub fn made(self, make: impl FnOnce(&mut MaybeUninit<K>) -> &mut K) -> Option<CellRc<K, N>> {
+        let slot = self.head.cast::<Slot<K, N::Flag>>().as_ptr();
         // SAFETY: the claim heads a cell of `Slot<K>`'s layout that only it reaches.
         let at = unsafe { core::ptr::addr_of_mut!((*slot).value) };
         // SAFETY: the value's place is aligned for `K`, not yet written and reached by nothing
@@ -476,7 +648,7 @@ impl<K> CellClaim<K> {
     }
 }
 
-impl<K> Drop for CellClaim<K> {
+impl<K, N: CountKind> Drop for CellClaim<K, N> {
     fn drop(&mut self) {
         // SAFETY: a claim still held is of a cell no handle names, whose value is not written
         // whole and is not dropped: it is not read before the cell goes back.
@@ -510,13 +682,28 @@ impl<A, B> CellRc<(A, B)> {
         cells: Option<&LentByteCells>,
         write: impl FnOnce(*mut A, *mut B),
     ) -> Option<(CellRc<A>, CellRc<B>)> {
+        // SAFETY: the caller's contract, which is this call's.
+        unsafe { Self::halves_in_of(cells, write) }
+    }
+}
+
+impl<A, B, N: CountKind> CellRc<(A, B), N> {
+    /// [`CellRc::halves_in`] for handles counted by `N`, of a table whose flags are the form
+    /// `N` gives a cell back by.
+    ///
+    /// # Safety
+    /// As [`CellRc::halves_in`].
+    pub unsafe fn halves_in_of(
+        cells: Option<&LentByteCells<N::Flag>>,
+        write: impl FnOnce(*mut A, *mut B),
+    ) -> Option<(CellRc<A, N>, CellRc<B, N>)> {
         let head = head_in(
             cells,
-            Layout::new::<Slot<(A, B)>>(),
-            Slot::<(A, B)>::WHOLE,
-            Slot::<(A, B)>::PLACE,
+            Layout::new::<Slot<(A, B), N::Flag>>(),
+            Slot::<(A, B), N::Flag>::WHOLE,
+            Slot::<(A, B), N::Flag>::PLACE,
         )?;
-        let slot = head.cast::<Slot<(A, B)>>().as_ptr();
+        let slot = head.cast::<Slot<(A, B), N::Flag>>().as_ptr();
         // SAFETY: the head heads a cell of `Slot<(A, B)>`'s layout, written with one handle and
         // named by none, whose value is not written: its two fields are places of `A` and `B`,
         // aligned, apart and this call's alone, which `write` leaves whole (the caller's
@@ -539,7 +726,7 @@ impl<A, B> CellRc<(A, B)> {
 
     /// This handle on a pair as one handle on each of its halves, the cell given back with the
     /// last of them, which drops the pair whole.
-    fn into_halves(self) -> (CellRc<A>, CellRc<B>) {
+    fn into_halves(self) -> (CellRc<A, N>, CellRc<B, N>) {
         let other = self.clone();
         // SAFETY: each closure answers a pointer to a field of the pair the handle names, which
         // lives as long as the cell does; the cell's `whole` drops the pair it was placed as.
@@ -603,23 +790,23 @@ impl<T: ?Sized, N: CountKind> CellRc<T, N> {
     }
 
     /// The cell's head.
-    fn head(&self) -> &CellHead {
+    fn head(&self) -> &CellHead<N::Flag> {
         // SAFETY: a handle keeps its cell, so the head is live for as long as the handle is.
         unsafe { self.head.as_ref() }
     }
 }
 
-impl<K: BoxedLinkDriver + 'static> CellRc<K> {
+impl<K: BoxedLinkDriver + 'static, N: CountKind> CellRc<K, N> {
     /// This handle as the one the session's actions send through.
-    pub fn into_sink(self) -> CellRc<dyn BoxedLinkDriver> {
+    pub fn into_sink(self) -> CellRc<dyn BoxedLinkDriver, N> {
         // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
         unsafe { self.unsize(|value| -> NonNull<dyn BoxedLinkDriver> { value }) }
     }
 }
 
-impl<K: SessionDatagramLink + 'static> CellRc<K> {
+impl<K: SessionDatagramLink + 'static, N: CountKind> CellRc<K, N> {
     /// This handle as the link the session's drive loop pumps.
-    pub fn into_link(self) -> CellRc<dyn SessionDatagramLink> {
+    pub fn into_link(self) -> CellRc<dyn SessionDatagramLink, N> {
         // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
         unsafe { self.unsize(|value| -> NonNull<dyn SessionDatagramLink> { value }) }
     }
@@ -652,7 +839,7 @@ pub fn held_past_count() -> usize {
 /// there, which keeps the value for good ([`let_go`]), and count the clone
 /// ([`held_past_count`]). Out of line: the one body of every handle's clone.
 #[inline(never)]
-fn hold<N: CountKind>(head: &CellHead) {
+fn hold<N: CountKind>(head: &CellHead<N::Flag>) {
     let was = N::update(&head.word, |word| word.checked_add(ONE_HANDLE));
     let past = was.checked_add(ONE_HANDLE).is_none();
     debug_assert!(
@@ -684,6 +871,60 @@ impl<T: ?Sized, N: CountKind> Drop for CellRc<T, N> {
         // SAFETY: the handle names its cell, whose value was placed and not dropped, and is let
         // go of here once.
         unsafe { let_go::<N>(self.head) }
+    }
+}
+
+/// A kind of value one face keeps its link's parts in (its pump, its actions, its sink), whose
+/// handles are counted for one task ([`OneFace`]) and so are not `Send` one by one: what
+/// [`FaceHeld`] moves between threads whole.
+///
+/// # Safety
+///
+/// A value of the type is not `Send` only because of handles, cells and counts whose every other
+/// holder is a part of the same value: it holds nothing bound to the thread it was made on (a
+/// guard of a lock, a value a thread-local names), and the drop of any of its parts may run on
+/// any thread once the whole value has moved there.
+pub unsafe trait FaceParts: 'static {}
+
+/// The parts of one face's link, held together: every handle on a cell of the link that any code
+/// holds is a part of [`Self`], so the whole moves to another thread with nothing left behind
+/// that names what it moved. Its parts are reached only while it is lent ([`Self::lend`]), and a
+/// lend neither takes a value that is not `Send` in nor answers one out, so a clone of a handle
+/// made in a lend stays in the parts, and no handle made outside them comes in. What a face's lock
+/// holds (`crate::sync::FacePlace`) where several threads drive a session's faces.
+pub struct FaceHeld<X: FaceParts> {
+    parts: X,
+}
+
+// SAFETY: every handle on the cells of the parts is a part of `parts` (`gather` takes the parts
+// from a `Send` closure, which captures no handle made elsewhere, and `lend` takes and answers
+// only `Send` values, which no handle counted for one task is), and nothing of them is bound to a
+// thread (`FaceParts`' contract). So the counts and cells that are not atomic are reached by the
+// thread that holds the whole value alone, as one task's are, wherever it moved.
+unsafe impl<X: FaceParts> Send for FaceHeld<X> {}
+
+impl<X: FaceParts> FaceHeld<X> {
+    /// The parts `make` makes, held together. `make` is `Send`, so it captures no handle of a
+    /// link made outside it, and what it keeps of the handles it makes is what it answers.
+    pub fn gather(make: impl FnOnce() -> X + Send) -> Self {
+        Self { parts: make() }
+    }
+
+    /// `parts` made outside a [`Self::gather`], held together.
+    ///
+    /// # Safety
+    ///
+    /// No handle on a cell of `parts` lives outside `parts`: the caller let go of every clone it
+    /// made of one while it built them.
+    pub unsafe fn gathered(parts: X) -> Self {
+        Self { parts }
+    }
+
+    /// Lend the parts to `f`, and answer what it answers. `f` and its answer are `Send`, so no
+    /// handle on a cell of the parts leaves them and none comes into them.
+    #[inline]
+    pub fn lend<U: Send>(&mut self, f: impl FnOnce(&mut X) -> U + Send) -> U {
+        f(&mut self.parts)
     }
 }
 
@@ -736,6 +977,11 @@ mod tests {
     /// A table of two cells of `size` bytes, in memory of the test's own, lent as a session's
     /// arena lends its tables.
     fn table(size: usize) -> LentByteCells {
+        table_of::<Cell<bool>>(size)
+    }
+
+    /// [`table`] with flags of the form `F`.
+    fn table_of<F: CellFlag>(size: usize) -> LentByteCells<F> {
         use wz_session_core::bounded::Arena;
 
         const BYTES: usize = 1024;
@@ -747,7 +993,7 @@ mod tests {
         // it; it is aligned as an arena's spans start, BYTES long, and used by nothing else.
         let mut arena = unsafe { Arena::over(NonNull::from(memory).cast::<u8>(), BYTES) };
         arena
-            .lend_byte_cells(size, 2)
+            .lend_byte_cells_of::<F>(size, 2)
             .expect("the memory holds two cells")
     }
 
@@ -1093,6 +1339,31 @@ mod tests {
         }
     }
 
+    /// A value either kind of count shares is reached by one holder at a time: a try inside a
+    /// hold finds it held and does not run, and runs once the hold is let go. Turned red by a try
+    /// that runs inside a hold, a second `&mut` of the value.
+    #[test]
+    fn a_shared_value_is_reached_by_one_holder_at_a_time() {
+        fn one_at_a_time<N: CountKind>() {
+            let local = N::new_local(0u32);
+            N::with_local::<u32, ()>(&local, |value| {
+                *value += 1;
+                assert_eq!(
+                    N::try_with_local::<u32, ()>(&local, |_| ()),
+                    None,
+                    "the value is held"
+                );
+            });
+            assert_eq!(
+                N::try_with_local::<u32, u32>(&local, |value| *value),
+                Some(1)
+            );
+        }
+        one_at_a_time::<OneTask>();
+        #[cfg(target_has_atomic = "8")]
+        one_at_a_time::<Atomic>();
+    }
+
     /// Handles counted as an `Arc`'s are may cross threads, as handles counted for one task may
     /// not. Turned red by an atomic handle that is not `Send` or not `Sync`.
     #[test]
@@ -1129,6 +1400,35 @@ mod tests {
             1,
             "the last handle dropped it once"
         );
+    }
+
+    /// A handle counted as an `Arc`'s is, placed in a table of atomic flags, keeps its cell while
+    /// a clone does, and the last handle, let go of on another thread than the one that placed it,
+    /// drops the value once and gives the cell back to the table. Turned red by an atomic handle
+    /// refused a table's cell, or a last let go that does not clear the cell's flag.
+    #[cfg(target_has_atomic = "8")]
+    #[test]
+    fn an_atomic_handle_in_a_table_gives_its_cell_back_on_another_thread() {
+        extern crate std;
+        let cells = table_of::<AtomicBool>(CellRc::<DropsOnce>::cell_bytes());
+        let drops = alloc::sync::Arc::new(AtomicUsize::new(0));
+        let Ok(handle) =
+            CellRc::<DropsOnce, Atomic>::in_cells_of(Some(&cells), DropsOnce(drops.clone()))
+        else {
+            panic!("a free cell of the table");
+        };
+        assert_eq!(cells.in_use(), 1);
+        let theirs = handle.clone();
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(theirs));
+        });
+        assert_eq!(cells.in_use(), 1, "a handle is left");
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(handle));
+        });
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "dropped once");
+        assert_eq!(cells.in_use(), 0, "the cell is back in the table");
     }
 
     /// The count of `handle`'s cell set to the most its word holds, its place kept.
@@ -1295,5 +1595,81 @@ mod tests {
         );
         drop(second);
         assert_eq!((drops.get(), cells.in_use()), (2, 0));
+    }
+
+    /// The parts of a face in the tests below: two handles on one value.
+    #[cfg(target_has_atomic = "8")]
+    struct Parts {
+        first: CellRc<DropsOnce, OneFace>,
+        second: CellRc<DropsOnce, OneFace>,
+    }
+
+    // SAFETY: the parts are two handles on one cell, which no other value holds, and nothing
+    // bound to a thread.
+    #[cfg(target_has_atomic = "8")]
+    unsafe impl FaceParts for Parts {}
+
+    /// A handle counted for one face does not cross threads alone, so a lend, whose closure and
+    /// answer do, neither takes one in nor answers one out; the parts held together do cross.
+    /// Turned red, at build, by a `Send` handle of one face (the call below is then ambiguous),
+    /// or by held parts that are not `Send`.
+    #[cfg(target_has_atomic = "8")]
+    #[test]
+    fn a_faces_handle_crosses_threads_only_with_the_parts_it_is_held_in() {
+        trait AmbiguousIfSend<A> {
+            fn some_item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+        <CellRc<u32, OneFace> as AmbiguousIfSend<_>>::some_item();
+        fn crosses<T: Send>() {}
+        crosses::<FaceHeld<Parts>>();
+    }
+
+    /// Parts placed in a table of atomic flags move to another thread whole: a clone made in a
+    /// lend counts with the parts' handles and goes with the lend, and the last handle, let go of
+    /// on that thread, drops the value once and gives the cell back to the table. Turned red by a
+    /// handle of the parts that outlives them, or a last let go that does not clear the cell's flag.
+    #[cfg(target_has_atomic = "8")]
+    #[test]
+    fn a_faces_parts_move_whole_and_their_handles_stay_in_them() {
+        extern crate std;
+        let cells = table_of::<AtomicBool>(CellRc::<DropsOnce>::cell_bytes());
+        let drops = alloc::sync::Arc::new(AtomicUsize::new(0));
+        let mut held = FaceHeld::gather(|| {
+            let Ok(first) =
+                CellRc::<DropsOnce, OneFace>::in_cells_of(Some(&cells), DropsOnce(drops.clone()))
+            else {
+                panic!("a free cell of the table");
+            };
+            let second = first.clone();
+            Parts { first, second }
+        });
+        assert_eq!(held.lend(|parts| CellRc::handles(&parts.first)), 2);
+        assert_eq!(cells.in_use(), 1);
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let counted = held.lend(|parts| {
+                    let third = parts.first.clone();
+                    CellRc::handles(&third)
+                });
+                assert_eq!(
+                    counted, 3,
+                    "a clone made in a lend counts with the parts' handles"
+                );
+                assert_eq!(
+                    held.lend(|parts| CellRc::handles(&parts.second)),
+                    2,
+                    "and went with the lend"
+                );
+                drop(held);
+            });
+        });
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "dropped once, on the other thread"
+        );
+        assert_eq!(cells.in_use(), 0, "the cell is back in the table");
     }
 }

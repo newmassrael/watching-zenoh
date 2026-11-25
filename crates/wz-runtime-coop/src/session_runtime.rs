@@ -54,6 +54,8 @@ use wz_session_core::session_actions::SessionLinkActions;
 #[cfg(feature = "session-slot")]
 use wz_session_core::session_slot::{SlotClaim, SlotRef, SlotSink};
 
+#[cfg(not(feature = "session-slot"))]
+use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::runtime_impl::CoopRuntime;
 use crate::sync::LockKind;
 use crate::time::{ClockSource, CoopTime};
@@ -98,7 +100,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> ShareVa
     for CoopRuntime<C, D, K>
 {
     fn share<U>(value: U) -> Self::Shared<U> {
-        crate::link_cells::CellRc::boxed(value)
+        crate::link_cells::CellRc::on_heap(value)
     }
 }
 
@@ -111,9 +113,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     type Driver = D;
 
     // The sink is a counted handle on the cell the link's driver lives in, lent from the session's
-    // arena or, for a link no table lends one, on the heap (`crate::link_cells`).
+    // arena or, for a link no table lends one, on the heap (`crate::link_cells`), counted as the
+    // lock kind counts the parts of one link (`LockKind::LinkCount`).
     #[cfg(not(feature = "session-slot"))]
-    type LinkSink = crate::link_cells::CellRc<D>;
+    type LinkSink = crate::link_cells::CellRc<D, K::LinkCount>;
 
     // Fixed-memory step S5 — under `session-slot` the sink is a reference to the
     // driver the session's own slot holds (`wz_session_core::session_slot`), not
@@ -127,7 +130,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     // writes a link's halves in one of them (`CellRc::halves_in`), and the same type names halves
     // on the heap (`ShareValues::share`).
     #[cfg(not(feature = "session-slot"))]
-    type Shared<U> = crate::link_cells::CellRc<U>;
+    type Shared<U> = crate::link_cells::CellRc<U, K::LinkCount>;
 
     // Fixed-memory step S9c -- the slot profile holds no shared pointer: the bundle
     // is one value in its slot, with its kernel and its link as its own fields
@@ -144,14 +147,14 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     // could name itself.
     type IterationWork = ();
 
-    // The session's holders are one task at a time: its handles are not `Send`, and an engine
-    // that hands a session to another thread does so behind a lock of its own. So what they write
-    // without a lock is a cell (no atomic instruction, and none of 64 bits that an ARMv6-M or a
-    // Cortex-M7 lacks), and what they reach one at a time needs no lock either.
-    type Flag = core::cell::Cell<bool>;
-    type Word = core::cell::Cell<u64>;
+    // What the session's holders write without a lock, and what they reach one at a time, are the
+    // lock kind's (`LockKind::Flag`, `Word`, `Local`): cells where one task holds them (no atomic
+    // instruction, and none of 64 bits that an ARMv6-M or a Cortex-M7 lacks), atomics and a lock of
+    // each value where several threads do.
+    type Flag = K::Flag;
+    type Word = K::Word;
     type Local<T>
-        = core::cell::RefCell<T>
+        = K::Local<T>
     where
         T: Send + 'static;
 
@@ -159,7 +162,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     where
         T: Send + 'static,
     {
-        core::cell::RefCell::new(value)
+        K::new_local(value)
     }
 
     // The cell's own refusal is dropped for the trait's, so the library carries no formatting
@@ -168,10 +171,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     where
         T: Send + 'static,
     {
-        match local.try_borrow_mut() {
-            Ok(mut value) => Ok(f(&mut value)),
-            Err(_) => Err(LocalHeld),
-        }
+        K::with_local(local, f)
     }
 
     // R311ja — the MCU action handle is counted without atomics, not an `Arc`:
@@ -181,7 +181,8 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     // an engine that lent a table of cells places the bundle in one of them
     // (`CellRc::place`) and the same type names a bundle on the heap.
     #[cfg(not(feature = "session-slot"))]
-    type ActionsHandle<T: TimeSource> = crate::link_cells::CellRc<SessionLinkActions<Self, T>>;
+    type ActionsHandle<T: TimeSource> =
+        crate::link_cells::CellRc<SessionLinkActions<Self, T>, K::LinkCount>;
 
     // Fixed-memory step S5 — under `session-slot` the handle is a counted
     // reference to the session in its slot, which the slot table hands out and
@@ -189,12 +190,16 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     #[cfg(feature = "session-slot")]
     type ActionsHandle<T: TimeSource> = SlotRef<Self, T>;
 
-    // The session's one entropy source, as each of its links' bindings holds it.
+    // The session's one entropy source, as each of its links' bindings holds it: counted as what
+    // the session's faces share is (`LockKind::SharedCount`).
+    #[cfg(not(feature = "session-slot"))]
+    type EntropyDraw = SessionEntropy<K::SharedCount>;
+    #[cfg(feature = "session-slot")]
     type EntropyDraw = SessionEntropy;
 
     #[cfg(not(feature = "session-slot"))]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
-        crate::link_cells::CellRc::boxed(actions)
+        crate::link_cells::CellRc::on_heap(actions)
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &D {
@@ -221,54 +226,162 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
 pub type SessionHandle<C, D = dyn BoxedLinkDriver, K = crate::sync::Shared> =
     <CoopRuntime<C, D, K> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
 
-/// The session's one entropy source, as this profile's [`SessionRuntime::EntropyDraw`]: a counted
-/// handle on it, cloned to each of the session's links, whose bindings draw every InitAck's cookie
-/// nonce and challenges from it. The board supplies its source once, as a TYPE, and a link's
-/// bundle keeps none. Single-task, as the rest of the profile is: the count needs no atomics, and
-/// a draw that found the source already drawing (a source that drew again from inside its own
-/// draw) is refused as no entropy, the fail-closed answer.
+/// The session's runtime's entropy handle, as `CoopRuntime<C, D, K>` holds it
+/// ([`SessionRuntime::EntropyDraw`]): what a pump of that runtime is built with.
+pub type EntropyOf<C, D = dyn BoxedLinkDriver, K = crate::sync::Shared> =
+    <CoopRuntime<C, D, K> as SessionRuntime>::EntropyDraw;
+
+/// A session's entropy source as its handles reach it: a draw answers the source's, or no entropy
+/// when the source cannot be drawn from now.
 #[cfg(not(feature = "session-slot"))]
-#[derive(Clone)]
-pub struct SessionEntropy(crate::link_cells::CellRc<core::cell::RefCell<dyn EntropySource>>);
+pub trait DrawsEntropy {
+    /// Fill `buf` from the source.
+    fn try_draw(&self, buf: &mut [u8]) -> Result<(), EntropyUnavailable>;
+}
+
+/// One task's handles reach the source one draw at a time; a draw that finds the source already
+/// drawing (a source that drew again from inside its own draw) is refused as no entropy, the
+/// fail-closed answer.
+#[cfg(not(feature = "session-slot"))]
+impl<S: EntropySource> DrawsEntropy for core::cell::RefCell<S> {
+    fn try_draw(&self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+        match self.try_borrow_mut() {
+            Ok(mut source) => source.try_fill_bytes(buf),
+            Err(_) => Err(EntropyUnavailable),
+        }
+    }
+}
+
+/// Handles on several threads reach the source through its lock: a draw waits for one under way
+/// on another thread, since two links' handshakes on two threads each draw and neither may be
+/// refused for the other's.
+#[cfg(all(not(feature = "session-slot"), feature = "host-lock"))]
+impl<S: EntropySource + Send> DrawsEntropy for crate::cs::HostMutex<S> {
+    fn try_draw(&self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+        self.with(|source| source.try_fill_bytes(buf))
+    }
+}
+
+/// How the handles on a session's entropy source are counted ([`CountKind`]), and what the
+/// source is held in for that count: one task's handles reach it through a `RefCell` and ask
+/// nothing more of it, handles that cross threads reach it through a lock and need it `Send`.
+#[cfg(not(feature = "session-slot"))]
+pub trait EntropyCount: CountKind {
+    /// The source as a handle of this count reaches it.
+    type Held: ?Sized + DrawsEntropy + 'static;
+
+    /// `source` on the heap, behind the first handle of this count.
+    fn hold<S: EntropySource + Send + 'static>(source: S) -> CellRc<Self::Held, Self>;
+
+    /// [`Self::hold`], or the bytes of the cell the heap refused, `source` let go of: what an
+    /// open that answers a full heap holds its source by.
+    fn try_hold<S: EntropySource + Send + 'static>(
+        source: S,
+    ) -> Result<CellRc<Self::Held, Self>, usize>;
+}
 
 #[cfg(not(feature = "session-slot"))]
-impl SessionEntropy {
-    /// The handle on `source`, the session's one source. A heap that refuses its cell ends the
-    /// program; an open that answers a full heap makes it with [`Self::try_new`].
-    pub fn new(source: impl EntropySource + 'static) -> Self {
-        Self::of_cell(crate::link_cells::CellRc::boxed(core::cell::RefCell::new(
-            source,
-        )))
+impl EntropyCount for OneTask {
+    type Held = dyn DrawsEntropy;
+
+    fn hold<S: EntropySource + Send + 'static>(source: S) -> CellRc<dyn DrawsEntropy> {
+        held_by_one_task(source)
     }
 
-    /// [`Self::new`], or the bytes of the cell the heap refused, `source` let go of.
-    pub fn try_new<E: EntropySource + 'static>(source: E) -> Result<Self, usize> {
-        type SourceCell<S> = crate::link_cells::CellRc<core::cell::RefCell<S>>;
-        SourceCell::<E>::in_cells(None, core::cell::RefCell::new(source))
-            .map(Self::of_cell)
-            .map_err(|_| SourceCell::<E>::cell_bytes())
-    }
-
-    /// The handle on the source `cell` holds.
-    fn of_cell<E: EntropySource + 'static>(
-        cell: crate::link_cells::CellRc<core::cell::RefCell<E>>,
-    ) -> Self {
+    fn try_hold<S: EntropySource + Send + 'static>(
+        source: S,
+    ) -> Result<CellRc<dyn DrawsEntropy>, usize> {
+        type SourceCell<S> = CellRc<core::cell::RefCell<S>>;
+        let held = SourceCell::<S>::in_cells(None, core::cell::RefCell::new(source))
+            .map_err(|_| SourceCell::<S>::cell_bytes())?;
         // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
-        Self(unsafe {
-            cell.unsize(
-                |value| -> core::ptr::NonNull<core::cell::RefCell<dyn EntropySource>> { value },
-            )
+        Ok(unsafe { held.unsize(|value| -> core::ptr::NonNull<dyn DrawsEntropy> { value }) })
+    }
+}
+
+#[cfg(all(
+    not(feature = "session-slot"),
+    feature = "host-lock",
+    target_has_atomic = "8"
+))]
+impl EntropyCount for crate::link_cells::Atomic {
+    type Held = dyn DrawsEntropy + Send + Sync;
+
+    fn hold<S: EntropySource + Send + 'static>(
+        source: S,
+    ) -> CellRc<dyn DrawsEntropy + Send + Sync, Self> {
+        let held = CellRc::<_, Self>::on_heap(crate::cs::HostMutex::new(source));
+        // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
+        unsafe {
+            held.unsize(|value| -> core::ptr::NonNull<dyn DrawsEntropy + Send + Sync> { value })
+        }
+    }
+
+    fn try_hold<S: EntropySource + Send + 'static>(
+        source: S,
+    ) -> Result<CellRc<dyn DrawsEntropy + Send + Sync, Self>, usize> {
+        type SourceCell<S> = CellRc<crate::cs::HostMutex<S>, crate::link_cells::Atomic>;
+        let held = SourceCell::<S>::in_cells_of(None, crate::cs::HostMutex::new(source))
+            .map_err(|_| SourceCell::<S>::cell_bytes_of())?;
+        // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
+        Ok(unsafe {
+            held.unsize(|value| -> core::ptr::NonNull<dyn DrawsEntropy + Send + Sync> { value })
         })
     }
 }
 
+/// `source` behind the first handle of one task's count: what a source that is not `Send` (a
+/// board's) is held by.
 #[cfg(not(feature = "session-slot"))]
-impl EntropySource for SessionEntropy {
+fn held_by_one_task<S: EntropySource + 'static>(source: S) -> CellRc<dyn DrawsEntropy> {
+    let held = CellRc::<_, OneTask>::on_heap(core::cell::RefCell::new(source));
+    // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
+    unsafe { held.unsize(|value| -> core::ptr::NonNull<dyn DrawsEntropy> { value }) }
+}
+
+/// The session's one entropy source, as this profile's [`SessionRuntime::EntropyDraw`]: a counted
+/// handle on it, cloned to each of the session's links, whose bindings draw every InitAck's cookie
+/// nonce and challenges from it. The board supplies its source once, as a TYPE, and a link's
+/// bundle keeps none. `N` counts the handles as the session's lock kind counts what its faces
+/// share (`LockKind::SharedCount`): one task's need no atomics and take any source ([`Self::new`]); handles
+/// that cross threads take a source that is `Send` ([`Self::held`]).
+#[cfg(not(feature = "session-slot"))]
+pub struct SessionEntropy<N: EntropyCount = OneTask>(CellRc<N::Held, N>);
+
+// Not derived: a derive would ask `N: Clone` of a kind of count.
+#[cfg(not(feature = "session-slot"))]
+impl<N: EntropyCount> Clone for SessionEntropy<N> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl SessionEntropy {
+    /// The handle on `source`, the session's one source, for a session of one task.
+    pub fn new(source: impl EntropySource + 'static) -> Self {
+        Self(held_by_one_task(source))
+    }
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl<N: EntropyCount> SessionEntropy<N> {
+    /// The handle on `source`, the session's one source, counted as `N` counts.
+    pub fn held(source: impl EntropySource + Send + 'static) -> Self {
+        Self(N::hold(source))
+    }
+
+    /// [`Self::held`], or the bytes of the cell the heap refused, `source` let go of: a heap
+    /// with no room for the cell is answered, and does not end the program.
+    pub fn try_held(source: impl EntropySource + Send + 'static) -> Result<Self, usize> {
+        N::try_hold(source).map(Self)
+    }
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl<N: EntropyCount> EntropySource for SessionEntropy<N> {
     fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
-        match self.0.try_borrow_mut() {
-            Ok(mut source) => source.try_fill_bytes(buf),
-            Err(_) => Err(EntropyUnavailable),
-        }
+        self.0.try_draw(buf)
     }
 }
 
@@ -502,18 +615,39 @@ mod cookie_nonce_draw_tests {
     }
 
     /// A source whose cell the heap has no room for is no handle, and with room it is the handle
-    /// a session draws from. Turned red by `try_new` made through `CellRc::boxed`, which ends the
-    /// process on the refusal.
+    /// a session draws from. Turned red by `try_held` made through `EntropyCount::hold`, which
+    /// ends the process on the refusal.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_source_the_heap_has_no_room_for_is_no_handle() {
-        assert!(crate::table_tests::refused(|| SessionEntropy::try_new(Counting(0))).is_err());
+        let refused =
+            crate::table_tests::refused(|| SessionEntropy::<OneTask>::try_held(Counting(0)));
+        assert!(refused.is_err());
         let mut probe = Counting(0);
         let expected = probe.try_next_u64().unwrap();
         let actions = build();
-        let mut entropy = SessionEntropy::try_new(Counting(0)).expect("room for the cell");
+        let mut entropy =
+            SessionEntropy::<OneTask>::try_held(Counting(0)).expect("room for the cell");
         assert!(actions.draw_cookie_nonce(&mut entropy));
         assert_eq!(actions.cookie_nonce(), Some(expected));
+    }
+
+    /// Handles on a source counted across threads draw from it on any thread, all from its one
+    /// stream: a draw on another thread and one here take its consecutive values.
+    #[cfg(all(feature = "host-lock", target_has_atomic = "8"))]
+    #[test]
+    fn an_entropy_handle_counted_across_threads_draws_on_another_thread() {
+        extern crate std;
+
+        let mut probe = Counting(0);
+        let (first, second) = (probe.try_next_u64().unwrap(), probe.try_next_u64().unwrap());
+        let mut here = SessionEntropy::<crate::link_cells::Atomic>::held(Counting(0));
+        let mut there = here.clone();
+        let drawn = std::thread::spawn(move || there.try_next_u64().is_ok_and(|n| n == first))
+            .join()
+            .expect("the other thread drew");
+        assert!(drawn, "the other thread's draw is the source's first value");
+        assert_eq!(here.try_next_u64().ok(), Some(second));
     }
 
     #[test]

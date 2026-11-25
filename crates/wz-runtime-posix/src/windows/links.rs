@@ -10,18 +10,26 @@
 //! `tcp/` listener takes connections as faces. What a program with an allocator (the pico C ABI
 //! over the cooperative engine) gives the session shell on Windows.
 
+use wz_runtime_coop::group_transport::NoGroups;
+use wz_runtime_coop::link_cells::OneTask;
+use wz_runtime_coop::stream_link::NoDial;
+
 use super::net::WindowsUdpSocket;
 use super::stream::WindowsTcpDial;
 
 /// The host's sockets as the session shell's links, on the heap profile, made with
 /// `WindowsLinks::new(local, WindowsTcpDial)`.
-pub type WindowsLinks = wz_runtime_coop::ip_stack::IpLinks<WindowsUdpSocket, WindowsTcpDial>;
+pub type WindowsLinks<N = OneTask> =
+    wz_runtime_coop::ip_stack::IpLinks<WindowsUdpSocket, WindowsTcpDial, NoDial, NoGroups, N>;
 
 /// [`WindowsLinks`] in a build that links no datagram link: `tcp/` as there, every `udp/` dial
 /// and listener refused as unsupported, and no link over a [`WindowsUdpSocket`] made.
-pub type WindowsStreamLinks = wz_runtime_coop::ip_stack::IpLinks<
+pub type WindowsStreamLinks<N = OneTask> = wz_runtime_coop::ip_stack::IpLinks<
     wz_runtime_coop::udp_link::NoDatagramOf<WindowsUdpSocket>,
     WindowsTcpDial,
+    NoDial,
+    NoGroups,
+    N,
 >;
 
 #[cfg(test)]

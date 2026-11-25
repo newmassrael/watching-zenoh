@@ -21,7 +21,6 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::session_runtime::new_session_actions;
 use wz_runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::close_reason::CloseReason;
@@ -43,6 +42,26 @@ use wz_session_core::WhatAmI;
 use wz_session_mcu::app_layer::dispatch_to;
 
 use crate::{CoopConfig, CoopEngine};
+
+/// The host's links, counted as the engine's sessions count the parts of a link
+/// ([`crate::LinkCount`]).
+pub(crate) type PosixLinks = wz_runtime_posix::links::PosixLinks<crate::LinkCount>;
+
+/// The host's links bound on `local`, whose `tcp/` dial is `dial`, counted as the engine's
+/// sessions count a link's parts.
+pub(crate) fn host_links(local: impl Into<std::net::IpAddr>, dial: PosixTcpDial) -> PosixLinks {
+    wz_runtime_posix::links::PosixLinks::new(local, dial).counted_by::<crate::LinkCount>()
+}
+
+/// The program's transport as the engine's links, counted as its sessions count a link's parts.
+#[cfg(feature = "app-transport")]
+pub(crate) type AppLinks = crate::app_link::AppLinks<crate::LinkCount>;
+
+/// The links over `transport`, counted as the engine's sessions count a link's parts.
+#[cfg(feature = "app-transport")]
+pub(crate) fn app_links(transport: wz_session_core::app_transport::SessionTransport) -> AppLinks {
+    crate::app_link::AppLinks::new(transport).counted_by::<crate::LinkCount>()
+}
 
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 
@@ -405,10 +424,15 @@ fn reply_key_of(
 /// (`SESSION_TX_SLOTS`).
 const ROUTER_TX_SLOTS: usize = 2;
 
+/// The host's links of the router stand-in, counted for one task: the stand-in's session runs on
+/// a runtime of its own on its own thread, whichever form the engine under test takes, so its
+/// link's parts are counted as that runtime's are and not as the engine's.
+type RouterLinks = wz_runtime_posix::links::PosixLinks<wz_runtime_coop::link_cells::OneTask>;
+
 /// The host's links the router stand-in accepts on: each lends its session [`ROUTER_TX_SLOTS`]
 /// slots of the stand-in's batch, `batch_size` bytes, in every build of the crate.
-fn router_links(batch_size: u16) -> PosixLinks {
-    PosixLinks::new(LOOPBACK, PosixTcpDial)
+fn router_links(batch_size: u16) -> RouterLinks {
+    RouterLinks::new(LOOPBACK, PosixTcpDial)
         .with_tx_buffers(ROUTER_TX_SLOTS, usize::from(batch_size))
 }
 
@@ -1028,7 +1052,7 @@ fn open(router: &Router) -> EngineHold<Engine> {
 
 fn open_with(config: CoopConfig) -> EngineHold<Engine> {
     Engine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         config,
@@ -1071,7 +1095,7 @@ fn the_router_stand_ins_link_lends_its_session_a_slot_of_its_batch() {
     sink.tx_slot_abort(grant.slot);
     sink.tx_slot_abort(second.slot);
 
-    let OpenedLink { sink: plain, .. } = PosixLinks::new(LOOPBACK, PosixTcpDial)
+    let OpenedLink { sink: plain, .. } = host_links(LOOPBACK, PosixTcpDial)
         .open_acceptor(0)
         .expect("bind a plain end");
     let held = [(); wz_session_core::link::SESSION_TX_SLOTS].map(|()| {
@@ -2666,7 +2690,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
     let layout = Layout::new::<Handle>();
     let router = Router::start(CatchAll::None);
     let holding = Engine::open_made_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         || config(&router),
@@ -2741,7 +2765,7 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     let held = HeldPlaces::NONE.with_entity(EntityKind::Subscriber, layout);
     let open = |router: &Router| {
         Engine::open_made_in(
-            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             PosixClock,
             PosixEntropy,
             || config(router),
@@ -2828,7 +2852,7 @@ fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
     let held = HeldPlaces::NONE.with_entity(EntityKind::Subscriber, layout);
     let router = Router::start(CatchAll::None);
     let engine = Engine::open_made_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         || config(&router),
@@ -3095,7 +3119,7 @@ fn an_open_whose_source_gives_no_cookie_key_is_refused_with_the_entropy_refusal(
 
     let router = Router::start(CatchAll::None);
     let refused = Engine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         Dry,
         config(&router),
@@ -3177,7 +3201,7 @@ fn a_key_wire_form_but_declared_is_refused_in_a_build_without_shared_key_ids() {
             .select_key_wire_form(form)
             .expect("a host build allows every value of the key-wire form");
         Engine::open_with_policy(
-            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             PosixClock,
             PosixEntropy,
             client_config(),
@@ -3206,7 +3230,7 @@ fn a_width_outside_the_sn_resolution_domain_is_refused_at_the_open() {
         let mut config = client_config();
         config.sn_resolution = width;
         let refused = Engine::open(
-            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             PosixClock,
             PosixEntropy,
             config,
@@ -3233,7 +3257,7 @@ fn a_group_of_a_width_outside_the_sn_resolution_domain_is_refused_at_the_open() 
 
     for width in SnResolution::WIDTHS {
         let refused = Engine::open(
-            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             PosixClock,
             PosixEntropy,
             CoopConfig {
@@ -3283,7 +3307,7 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
     use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
 
     let refused = Engine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         CoopConfig {
@@ -3474,7 +3498,7 @@ fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
 /// What the open of `config` was refused with, `None` when it opened.
 fn open_with_result(config: CoopConfig) -> Option<crate::OpenError> {
     Engine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         config,
@@ -3495,7 +3519,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
 
     let made = Cell::new(0u32);
     let refused = Engine::open_made_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         || {
@@ -3514,7 +3538,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
     assert_eq!(refused, Some(OpenError::NoEndpoint));
     assert_eq!(made.get(), 1, "the maker runs once, inside the open");
     let handed_in = Engine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         client_config(),
@@ -3543,7 +3567,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         ..client_config()
     };
     let made = Engine::open_made_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         listener,
@@ -3579,7 +3603,7 @@ fn an_open_whose_dial_is_refused_lets_go_of_the_port_it_bound() {
     };
     let (bound, dead) = (free_port(), free_port());
     let refused = Engine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         CoopConfig {

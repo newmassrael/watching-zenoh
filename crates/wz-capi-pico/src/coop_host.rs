@@ -25,9 +25,15 @@ mod posix_host {
     /// The host's sockets as the session's links: without its datagram links in a build without
     /// pico's unicast UDP link (`link-udp`).
     #[cfg(feature = "link-udp")]
-    pub(crate) type Links = wz_runtime_posix::links::PosixLinks;
+    pub(crate) type Links = wz_runtime_posix::links::PosixLinks<wz_capi_coop::LinkCount>;
     #[cfg(not(feature = "link-udp"))]
-    pub(crate) type Links = wz_runtime_posix::links::PosixStreamLinks;
+    pub(crate) type Links = wz_runtime_posix::links::PosixStreamLinks<wz_capi_coop::LinkCount>;
+    /// [`Links`] as the host makes them, before they are counted as the engine's sessions count
+    /// the parts of a link (`wz_capi_coop::LinkCount`).
+    #[cfg(feature = "link-udp")]
+    type Made = wz_runtime_posix::links::PosixLinks;
+    #[cfg(not(feature = "link-udp"))]
+    type Made = wz_runtime_posix::links::PosixStreamLinks;
     /// The host's monotonic clock.
     pub(crate) type Clock = wz_runtime_posix::PosixClock;
     /// The host kernel's random source.
@@ -40,7 +46,8 @@ mod posix_host {
     /// Links bound on every IPv4 interface of the host, whose `tcp/` dial is the host's. A dial to
     /// an IPv6 locator binds the unspecified IPv6 address, so both families are reached.
     pub(crate) fn links() -> Links {
-        Links::new(core::net::Ipv4Addr::UNSPECIFIED, tcp_dial())
+        Made::new(core::net::Ipv4Addr::UNSPECIFIED, tcp_dial())
+            .counted_by::<wz_capi_coop::LinkCount>()
     }
 
     pub(crate) fn tcp_dial() -> TcpDial {
@@ -50,37 +57,52 @@ mod posix_host {
     /// The links `S` with links over the host's ttys beside them, which `serial/` locators are
     /// dialled and listened on with.
     #[cfg(feature = "transport-link-serial")]
-    pub(crate) type WithSerial<S> = wz_runtime_posix::serial::PosixSerialLinks<S>;
+    pub(crate) type WithSerial<S> =
+        wz_runtime_posix::serial::PosixSerialLinks<S, wz_capi_coop::LinkCount>;
 
     /// `links`, and links over the host's ttys beside them, set as zenoh-pico's POSIX tty sets a
     /// line.
     #[cfg(feature = "transport-link-serial")]
     pub(crate) fn with_serial<S>(links: S) -> WithSerial<S> {
-        WithSerial::<S>::new(links, wz_runtime_posix::serial::PosixSerialOpen)
+        wz_runtime_posix::serial::PosixSerialLinks::<()>::new(
+            (),
+            wz_runtime_posix::serial::PosixSerialOpen,
+        )
+        .counted_by::<wz_capi_coop::LinkCount, S>(links)
     }
 
     /// The links `S` with WebSocket links over the host's TCP beside them, which `ws/` locators
     /// are dialled and listened on with.
     #[cfg(feature = "transport-link-ws")]
-    pub(crate) type WithWs<S> = wz_runtime_posix::ws::PosixWsLinks<S>;
+    pub(crate) type WithWs<S> = wz_runtime_posix::ws::PosixWsLinks<S, wz_capi_coop::LinkCount>;
 
     /// `links`, and WebSocket links over the host's TCP beside them, whose listeners answer as
     /// many opening requests at once as `handshakes`, the session's `accept_pending`.
     #[cfg(feature = "transport-link-ws")]
     pub(crate) fn with_ws<S>(links: S, handshakes: usize) -> WithWs<S> {
-        WithWs::<S>::new(links, wz_runtime_posix::ws::PosixWsOpen, handshakes)
+        wz_runtime_posix::ws::PosixWsLinks::<()>::new(
+            (),
+            wz_runtime_posix::ws::PosixWsOpen,
+            handshakes,
+        )
+        .counted_by::<wz_capi_coop::LinkCount, S>(links)
     }
 
     /// The links `S` with links over the host's named FIFOs beside them, which `unixpipe/`
     /// locators are dialled and listened on with.
     #[cfg(feature = "transport-link-unixpipe")]
-    pub(crate) type WithUnixpipe<S> = wz_runtime_posix::unixpipe::PosixUnixpipeLinks<S>;
+    pub(crate) type WithUnixpipe<S> =
+        wz_runtime_posix::unixpipe::PosixUnixpipeLinks<S, wz_capi_coop::LinkCount>;
 
     /// `links`, and links over the host's named FIFOs beside them, made and locked as zenoh's
     /// unixpipe link makes and locks its own.
     #[cfg(feature = "transport-link-unixpipe")]
     pub(crate) fn with_unixpipe<S>(links: S) -> WithUnixpipe<S> {
-        WithUnixpipe::<S>::new(links, wz_runtime_posix::unixpipe::PosixFifoOpen)
+        wz_runtime_posix::unixpipe::PosixUnixpipeLinks::<()>::new(
+            (),
+            wz_runtime_posix::unixpipe::PosixFifoOpen,
+        )
+        .counted_by::<wz_capi_coop::LinkCount, S>(links)
     }
 
     /// The groups `G` joins with the `reth/` groups beside them, joined on the host's raw packet
@@ -129,9 +151,16 @@ mod windows_host {
     /// Winsock's sockets as the session's links: without its datagram links in a build without
     /// pico's unicast UDP link (`link-udp`).
     #[cfg(feature = "link-udp")]
-    pub(crate) type Links = wz_runtime_posix::windows::links::WindowsLinks;
+    pub(crate) type Links = wz_runtime_posix::windows::links::WindowsLinks<wz_capi_coop::LinkCount>;
     #[cfg(not(feature = "link-udp"))]
-    pub(crate) type Links = wz_runtime_posix::windows::links::WindowsStreamLinks;
+    pub(crate) type Links =
+        wz_runtime_posix::windows::links::WindowsStreamLinks<wz_capi_coop::LinkCount>;
+    /// [`Links`] as the host makes them, before they are counted as the engine's sessions count
+    /// the parts of a link (`wz_capi_coop::LinkCount`).
+    #[cfg(feature = "link-udp")]
+    type Made = wz_runtime_posix::windows::links::WindowsLinks;
+    #[cfg(not(feature = "link-udp"))]
+    type Made = wz_runtime_posix::windows::links::WindowsStreamLinks;
     /// The performance counter.
     pub(crate) type Clock = wz_runtime_posix::windows::WindowsClock;
     /// The system's preferred random number generator.
@@ -144,7 +173,8 @@ mod windows_host {
     /// Links bound on every IPv4 interface of the host, whose `tcp/` dial is Winsock's. A dial to
     /// an IPv6 locator binds the unspecified IPv6 address, so both families are reached.
     pub(crate) fn links() -> Links {
-        Links::new(core::net::Ipv4Addr::UNSPECIFIED, tcp_dial())
+        Made::new(core::net::Ipv4Addr::UNSPECIFIED, tcp_dial())
+            .counted_by::<wz_capi_coop::LinkCount>()
     }
 
     pub(crate) fn tcp_dial() -> TcpDial {
@@ -154,17 +184,19 @@ mod windows_host {
     /// The links `S` with WebSocket links over Winsock's TCP beside them, which `ws/` locators
     /// are dialled and listened on with.
     #[cfg(feature = "transport-link-ws")]
-    pub(crate) type WithWs<S> = wz_runtime_posix::windows::ws::WindowsWsLinks<S>;
+    pub(crate) type WithWs<S> =
+        wz_runtime_posix::windows::ws::WindowsWsLinks<S, wz_capi_coop::LinkCount>;
 
     /// `links`, and WebSocket links over Winsock's TCP beside them, whose listeners answer as
     /// many opening requests at once as `handshakes`, the session's `accept_pending`.
     #[cfg(feature = "transport-link-ws")]
     pub(crate) fn with_ws<S>(links: S, handshakes: usize) -> WithWs<S> {
-        WithWs::<S>::new(
-            links,
+        wz_runtime_posix::windows::ws::WindowsWsLinks::<()>::new(
+            (),
             wz_runtime_posix::windows::ws::WindowsWsOpen,
             handshakes,
         )
+        .counted_by::<wz_capi_coop::LinkCount, S>(links)
     }
 
     pub(crate) fn clock() -> Clock {
@@ -222,9 +254,15 @@ mod zephyr_host {
     /// Zephyr's datagram and stream sockets as the session's links: its stream sockets alone in a
     /// build without pico's unicast UDP link (`link-udp`).
     #[cfg(feature = "link-udp")]
-    pub(crate) type Links = wz_runtime_zephyr::ZephyrIpLinks;
+    pub(crate) type Links = wz_runtime_zephyr::ZephyrIpLinks<wz_capi_coop::LinkCount>;
     #[cfg(not(feature = "link-udp"))]
-    pub(crate) type Links = wz_runtime_zephyr::ZephyrStreamLinks;
+    pub(crate) type Links = wz_runtime_zephyr::ZephyrStreamLinks<wz_capi_coop::LinkCount>;
+    /// [`Links`] as the host makes them, before they are counted as the engine's sessions count
+    /// the parts of a link (`wz_capi_coop::LinkCount`).
+    #[cfg(feature = "link-udp")]
+    type Made = wz_runtime_zephyr::ZephyrIpLinks;
+    #[cfg(not(feature = "link-udp"))]
+    type Made = wz_runtime_zephyr::ZephyrStreamLinks;
     /// The kernel's tick count.
     pub(crate) type Clock = wz_runtime_zephyr::ZephyrClock<TICK_HZ>;
     /// The board's random source (`wzApplicationGetRandom`), which pico's Zephyr backend reads
@@ -236,10 +274,11 @@ mod zephyr_host {
     /// Links bound on every interface of the node, as pico's Zephyr links bind (the stack picks
     /// the source address of each dial), whose `tcp/` dial is Zephyr's stream socket.
     pub(crate) fn links() -> Links {
-        Links::new(
+        Made::new(
             core::net::Ipv4Addr::UNSPECIFIED,
             wz_runtime_zephyr::stream::ZephyrTcpDial,
         )
+        .counted_by::<wz_capi_coop::LinkCount>()
     }
 
     pub(crate) fn clock() -> Clock {

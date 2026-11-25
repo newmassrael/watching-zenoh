@@ -89,10 +89,10 @@ type Queue = Rc<RefCell<VecDeque<Vec<u8>>>>;
 /// datagrams are the harness's queue; nothing listens.
 struct Links(Queue);
 
-impl SessionLinks for Links {
+impl SessionLinks<wz_capi_coop::LinkCount> for Links {
     type Pump = Feed;
 
-    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump, wz_capi_coop::LinkCount>;
 
     // The fed link names no handle a thread outside it could wait on.
     type Waits = wz_runtime_coop::session_drive::NoWaits;
@@ -101,13 +101,22 @@ impl SessionLinks for Links {
         wz_runtime_coop::session_drive::NoWaits
     }
 
-    fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Feed>, LinkOpenError> {
+    fn open_acceptor(
+        &self,
+        _port: u16,
+    ) -> Result<OpenedLink<Feed, wz_capi_coop::LinkCount>, LinkOpenError> {
         Err(LinkOpenError::Unsupported)
     }
 
-    fn open_initiator(&self, _to: Locator) -> Result<OpenedLink<Feed>, LinkOpenError> {
+    fn open_initiator(
+        &self,
+        _to: Locator,
+    ) -> Result<OpenedLink<Feed, wz_capi_coop::LinkCount>, LinkOpenError> {
         Ok(OpenedLink {
-            sink: wz_runtime_coop::link_cells::heap_sink(Nowhere),
+            sink: wz_runtime_coop::link_cells::CellRc::<_, wz_capi_coop::LinkCount>::on_heap(
+                Nowhere,
+            )
+            .into_sink(),
             pump: Feed(self.0.clone()),
         })
     }

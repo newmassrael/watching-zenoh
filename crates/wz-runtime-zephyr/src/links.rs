@@ -17,9 +17,11 @@
 //! family the image's Kconfig chose.
 
 use core::net::{IpAddr, SocketAddr};
-use wz_runtime_coop::link_cells::CellRc;
+use wz_runtime_coop::group_transport::NoGroups;
+use wz_runtime_coop::link_cells::{CellRc, OneTask};
 
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto, Locator, OpenedLink, SessionLinks};
+use wz_runtime_coop::stream_link::NoDial;
 use wz_runtime_coop::udp_link::{bind_refused, dial_bind};
 
 use crate::net::{HeapTx, ZephyrUdpDriver, ZephyrUdpSocket, UDP_RX_CAPACITY};
@@ -32,13 +34,17 @@ use crate::stream::ZephyrTcpDial;
 /// buffers when it opens. The twin of `wz-runtime-posix`'s `PosixLinks`, and what a program with an
 /// allocator on Zephyr (the pico C ABI over the cooperative engine) gives the session shell;
 /// [`ZephyrLinks`] is the datagram-only form the heap images that predate it were written against.
-pub type ZephyrIpLinks = wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial>;
+pub type ZephyrIpLinks<N = OneTask> =
+    wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial, NoDial, NoGroups, N>;
 
 /// [`ZephyrIpLinks`] in a build that links no datagram link: `tcp/` as there, every `udp/` dial
 /// and listener refused as unsupported, and no link over a [`ZephyrUdpSocket`] made.
-pub type ZephyrStreamLinks = wz_runtime_coop::ip_stack::IpLinks<
+pub type ZephyrStreamLinks<N = OneTask> = wz_runtime_coop::ip_stack::IpLinks<
     wz_runtime_coop::udp_link::NoDatagramOf<ZephyrUdpSocket>,
     ZephyrTcpDial,
+    NoDial,
+    NoGroups,
+    N,
 >;
 
 /// The links of a node whose network stack is Zephyr's own.

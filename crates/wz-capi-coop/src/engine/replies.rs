@@ -27,7 +27,7 @@ use wz_session_core::reply_sink::ReplyView;
 #[cfg(feature = "liveliness-get")]
 use wz_session_core::wireexpr_resolve::{KeyexprBuf, KeyexprOut};
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the reply of the Response `record` of face `face` lends to the get it answers, with
     /// the session let go of: the reply over the frame, or, for a Response the lent form does not
     /// represent, its owned projection. A reply the get's consolidation holds, or that reaches no

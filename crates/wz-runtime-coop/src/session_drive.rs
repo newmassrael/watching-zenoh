@@ -75,7 +75,7 @@ use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
-use crate::session_runtime::{SessionEntropy, SessionHandle};
+use crate::session_runtime::{EntropyOf, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
@@ -503,7 +503,9 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 /// A link in a cell is a link: the handle the drive loop pumps names the same driver the
 /// session's actions send through (`crate::link_cells`).
 #[cfg(not(feature = "session-slot"))]
-impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for crate::link_cells::CellRc<T> {
+impl<T: SessionDatagramLink + ?Sized, N: crate::link_cells::CountKind> SessionDatagramLink
+    for crate::link_cells::CellRc<T, N>
+{
     fn service(&self) {
         (**self).service()
     }
@@ -1027,10 +1029,10 @@ pub enum LinkOpenError {
 /// profile is a driver moved into a slot of the session table with a pump over a
 /// handle to it (fixed-memory step S9c; `wz_session_lwip::session_host::SessionHost`).
 #[cfg(not(feature = "session-slot"))]
-pub struct OpenedLink<P> {
+pub struct OpenedLink<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
     /// What the session's actions send through: a counted handle on the cell the link's driver
-    /// lives in (`crate::link_cells`).
-    pub sink: crate::link_cells::CellRc<dyn BoxedLinkDriver>,
+    /// lives in (`crate::link_cells`), counted as `N` counts the session's handles.
+    pub sink: crate::link_cells::CellRc<dyn BoxedLinkDriver, N>,
     /// What the drive loop services and takes datagrams from.
     pub pump: P,
 }
@@ -1045,8 +1047,11 @@ pub struct OpenedLink<P> {
 /// socket under it.
 ///
 /// Absent under `session-slot`, with [`OpenedLink`] (see there).
+///
+/// `N` is how the handles on a link's parts are counted (`crate::link_cells::CountKind`): a
+/// stack serves the sessions whose lock kind counts them so (`LockKind::LinkCount`).
 #[cfg(not(feature = "session-slot"))]
-pub trait SessionLinks {
+pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
     /// What the drive loop pumps for a link this stack opened.
     type Pump: SessionDatagramLink + 'static;
 
@@ -1054,7 +1059,7 @@ pub trait SessionLinks {
     /// its face: one type for each stack, so a dial is neither boxed nor called through a table of
     /// its own. A link made at once is one ([`From`]), which is what [`Dialled`] is for a stack
     /// whose dials do not wait.
-    type Dial: PendingDial<Self::Pump> + From<OpenedLink<Self::Pump>> + 'static;
+    type Dial: PendingDial<Self::Pump, N> + From<OpenedLink<Self::Pump, N>> + 'static;
 
     /// Whether the stack opens links to an IPv6 end. `false` for a stack built without IPv6:
     /// what reads an endpoint for it refuses a bracketed address as one it never dials and reads
@@ -1075,12 +1080,12 @@ pub trait SessionLinks {
 
     /// A UDP link that accepts: bound on `port`, with no peer until the first
     /// `InitSyn` it takes names one.
-    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump, N>, LinkOpenError>;
 
     /// A link that dials `to`: on a port the stack picks, with every send going
     /// to the end it names. A protocol the stack has no link for is
     /// [`LinkOpenError::Unsupported`].
-    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump, N>, LinkOpenError>;
 
     /// The buffers of every link the stack opens from now on, for the session the links serve:
     /// tables the session laid out in the memory it reserved when it opened, a receive buffer and
@@ -1089,7 +1094,7 @@ pub trait SessionLinks {
     /// [`LinkOpenError::Exhausted`], never one that allocates; told before the session listens, so
     /// a listener it opens after takes them too. The default ignores them: a stack whose links
     /// bring buffers of their own (an lwIP pool, a test network) keeps them.
-    fn lend_buffers(&mut self, tables: LinkTables) {
+    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
         let _ = tables;
     }
 
@@ -1103,7 +1108,7 @@ pub trait SessionLinks {
     /// The cells every link the stack opens from now on is placed in, for the session the links
     /// serve: a link that finds none free is [`LinkOpenError::Exhausted`], and none is placed on
     /// the heap. The default ignores them, as a stack whose `link_cell_bytes` is `0` does.
-    fn lend_cells(&mut self, cells: wz_session_core::byte_cells::LentByteCells) {
+    fn lend_cells(&mut self, cells: wz_session_core::byte_cells::LentByteCells<N::Flag>) {
         let _ = cells;
     }
 
@@ -1112,7 +1117,10 @@ pub trait SessionLinks {
     /// room for is dropped and counted, and none is kept on the heap. The default ignores them, as
     /// a stack that opens no udp port does.
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+    fn lend_port_rows(
+        &mut self,
+        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+    ) {
         let _ = rows;
     }
 
@@ -1133,7 +1141,7 @@ pub trait SessionLinks {
     fn open_listener(
         &self,
         at: Locator,
-    ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
+    ) -> Result<Box<dyn LinkListener<Self::Pump, N>>, LinkOpenError> {
         let _ = at;
         Err(LinkOpenError::Unsupported)
     }
@@ -1159,8 +1167,8 @@ pub trait SessionLinks {
     /// its loop reach the same link through clones of this. The default puts the
     /// pump behind a pointer of its own; a stack whose pump is already a shared handle hands that
     /// handle back, so its link is behind one pointer and not two.
-    fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink> {
-        crate::link_cells::CellRc::boxed(pump).into_link()
+    fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink, N> {
+        crate::link_cells::CellRc::<Self::Pump, N>::on_heap(pump).into_link()
     }
 }
 
@@ -1172,7 +1180,7 @@ pub trait SessionLinks {
 ///
 /// Absent under `session-slot`, with [`OpenedLink`] (see there).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait LinkListener<P> {
+pub trait LinkListener<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
     /// The locator the listener is bound to, with the port the stack chose when the one asked
     /// for was 0.
     fn local(&self) -> Locator;
@@ -1181,7 +1189,7 @@ pub trait LinkListener<P> {
     /// none waits. [`LinkOpenError::Exhausted`] when the stack had no socket or buffer for it
     /// (the connection is closed or stays queued, as the stack's listener says, and a later call
     /// tries again); [`LinkOpenError::Unsupported`] when the listener is broken for good.
-    fn accept(&self) -> Result<Option<OpenedLink<P>>, LinkOpenError>;
+    fn accept(&self) -> Result<Option<OpenedLink<P, N>>, LinkOpenError>;
 
     /// What a thread other than the one that accepts waits on for a connection
     /// ([`LinkWaits::wait`]); `None` when the stack gives none, and then the node looks for one
@@ -1203,35 +1211,37 @@ pub trait LinkListener<P> {
 /// A dial begun and not yet answered ([`SessionLinks::begin_initiator`]), asked without waiting
 /// whether its link has been made.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait PendingDial<P> {
+pub trait PendingDial<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
     /// The link, once its connection is made; the refusal, once the other end or the stack has
     /// refused it; `None` while it is still being made, and after it has answered.
-    fn poll(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>>;
+    fn poll(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>>;
 }
 
 /// A dial whose link was made by the time it was begun: what a stack whose dials do not wait
 /// answers [`SessionLinks::begin_initiator`] with.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub struct Dialled<P>(Option<OpenedLink<P>>);
+pub struct Dialled<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask>(
+    Option<OpenedLink<P, N>>,
+);
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P> Dialled<P> {
+impl<P, N: crate::link_cells::CountKind> Dialled<P, N> {
     /// The dial whose link is `opened`.
-    pub fn new(opened: OpenedLink<P>) -> Self {
+    pub fn new(opened: OpenedLink<P, N>) -> Self {
         Self(Some(opened))
     }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P> PendingDial<P> for Dialled<P> {
-    fn poll(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>> {
+impl<P, N: crate::link_cells::CountKind> PendingDial<P, N> for Dialled<P, N> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>> {
         self.0.take().map(Ok)
     }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P> From<OpenedLink<P>> for Dialled<P> {
-    fn from(opened: OpenedLink<P>) -> Self {
+impl<P, N: crate::link_cells::CountKind> From<OpenedLink<P, N>> for Dialled<P, N> {
+    fn from(opened: OpenedLink<P, N>) -> Self {
         Self::new(opened)
     }
 }
@@ -1381,7 +1391,7 @@ pub struct PumpFields<
     /// The link's actions.
     pub actions: SessionHandle<C, D, K>,
     /// The session's entropy source, which the engine's handshake binding holds.
-    pub entropy: SessionEntropy,
+    pub entropy: EntropyOf<C, D, K>,
     /// The session's clock.
     pub clock: CoopTime<C>,
     /// How the session is driven.
@@ -1499,7 +1509,7 @@ impl<
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
-        entropy: SessionEntropy,
+        entropy: EntropyOf<C, D, K>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Option<Self> {
@@ -1534,7 +1544,7 @@ impl<
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
-        entropy: SessionEntropy,
+        entropy: EntropyOf<C, D, K>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         arena: ReassemblyArena,
@@ -1570,7 +1580,7 @@ impl<
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
-        entropy: SessionEntropy,
+        entropy: EntropyOf<C, D, K>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         reasm: R,
@@ -1618,7 +1628,7 @@ impl<
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
-        entropy: SessionEntropy,
+        entropy: EntropyOf<C, D, K>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         reasm: R,

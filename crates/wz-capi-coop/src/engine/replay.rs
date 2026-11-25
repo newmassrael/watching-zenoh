@@ -35,9 +35,9 @@
 //! with no retry wait or after the no-progress bound, gives the replay up and the link with it
 //! ([`TurnEnd::EndsLink`]).
 
+use super::CoopLinks;
 use super::LinkActions;
 use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
-use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link_life::LinkPhase;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
@@ -200,7 +200,7 @@ impl Replay {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The place of the declaration at `rank` of `table`'s slot order in the replay's order.
     /// Only a replay's cursor reads a place, so a build that reaches no pace reads none.
     pub(super) fn place(&self, table: DeclaredTable, rank: usize) -> usize {
@@ -505,7 +505,7 @@ fn told<C: ClockSource + 'static>(
 /// takes back what the faces before it were sent and leaves every replay as it was, so nothing is
 /// kept to put back.
 #[inline(never)]
-fn announce_on<C: ClockSource + 'static, L: SessionLinks + 'static>(
+fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     faces: &mut impl FacePlaces<Face<C, L>>,
     place: usize,
     on_refusal: OnRefusal,

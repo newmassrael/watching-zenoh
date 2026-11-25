@@ -10,10 +10,10 @@ use std::net::UdpSocket;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::tests::host_links;
 use wz_capi_port::{SessionEngine, WireKey};
 use wz_runtime_coop::session_drive::SessionDatagramLink;
 use wz_runtime_coop::udp_link::{DatagramSocket, UdpDriver};
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
@@ -94,7 +94,7 @@ fn open_dialling(
     memory: &'static dyn ArenaMemory,
 ) -> Result<EngineHold<Engine>, OpenError> {
     Engine::open_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         dialling(probe, limits),
@@ -189,7 +189,7 @@ fn an_open_holding_the_handle_reserves_the_plan_with_its_place() {
     let held = HeldPlaces::handle(layout);
     let router = Router::start(CatchAll::None);
     let holding = Engine::open_made_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         || config(&router),
@@ -244,7 +244,7 @@ fn held_plan(
 ) -> Result<ArenaPlan, ArenaRefused> {
     let mut plan = ArenaPlan::vacant();
     plan.count(config, &config.limits)?;
-    let links = PosixLinks::new(super::LOOPBACK, PosixTcpDial);
+    let links = host_links(super::LOOPBACK, PosixTcpDial);
     let runtime = runtime_tables(config)
         .placed_bytes::<PosixClock>()
         .ok_or(ArenaRefused::TooLarge)?;
@@ -832,7 +832,7 @@ fn the_plan_lays_out_the_faces_rooms_and_their_places() {
     );
     let open = host_plan(&config).expect("the build's limits lay an arena out");
     let rooms = row(&open, "link rooms");
-    let bytes = crate::engine::link_rooms_bytes(&PosixLinks::new(super::LOOPBACK, PosixTcpDial));
+    let bytes = crate::engine::link_rooms_bytes(&host_links(super::LOOPBACK, PosixTcpDial));
     assert!(bytes > 0, "CONTROL: the rooms take bytes");
     assert_eq!((rooms.count, rooms.entry_bytes), (1, bytes));
 }
@@ -2698,7 +2698,7 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
 
     let long = format!("tcp/127.0.0.1:{}", "7".repeat(caps::MAX_LOCATOR_LEN));
     let refused = Engine::open_made_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         || CoopConfig {
@@ -2902,7 +2902,7 @@ fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
 
     let open_by = |config: CoopConfig, region: &'static ArenaRegion| {
         Engine::open_made_in(
-            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             PosixClock,
             PosixEntropy,
             || config,

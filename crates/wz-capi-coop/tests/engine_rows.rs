@@ -14,7 +14,6 @@ use wz_capi_coop::arena::{
     PlanFrom, PlanShape,
 };
 use wz_capi_coop::{CoopConfig, CoopEngine, EngineHold, OpenError, OpenKeyIds, RowClaim};
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps;
@@ -26,6 +25,8 @@ use wz_session_core::WhatAmI;
 
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 
+/// The host's links, counted as the engine's sessions count the parts of a link.
+type PosixLinks = wz_runtime_posix::links::PosixLinks<wz_capi_coop::LinkCount>;
 type Engine = CoopEngine<PosixLinks, PosixClock>;
 
 /// The arenas the allocator gave and was not given back.
@@ -84,7 +85,9 @@ fn open() -> Result<EngineHold<Engine>, OpenError> {
             .expect("the build lays the config out"),
     ));
     Engine::open_made_in(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        wz_runtime_posix::links::PosixLinks::new(LOOPBACK, PosixTcpDial)
+            .counted_by::<wz_capi_coop::LinkCount>()
+            .waited_by_owner(),
         PosixClock,
         PosixEntropy,
         || config,

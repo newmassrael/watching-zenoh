@@ -10,11 +10,11 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
+use crate::tests::host_links;
 use wz_capi_port::{
     FilterPlane, FilteredPut, QueryHolder, QueryableSink, ReplyCallback, SessionEngine,
     SubscriberSink, WireKey,
 };
-use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::declare_form::InterestAsk;
@@ -70,7 +70,7 @@ fn open_with_keys(
     policy: SessionPolicy,
 ) -> Result<EngineHold<Engine>, OpenError> {
     Engine::open_with_key_ids(
-        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         config,
