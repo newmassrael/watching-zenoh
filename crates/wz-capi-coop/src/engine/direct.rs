@@ -468,6 +468,9 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
 struct DialHeld<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     core: ManuallyDrop<LiveCore<'a, L, C>>,
     send: ManuallyDrop<Option<SiteSend<'a, DirectLock, DirectParts<L, C>>>>,
+    /// The wire `send` reaches, found once as the place was held: it lies in the face's place,
+    /// not in the hold, so it stays where it is while the hold is moved and kept.
+    wire: Option<NonNull<Wire<C>>>,
 }
 
 #[cfg(not(any(feature = "listen", feature = "group")))]
@@ -476,11 +479,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DialHeld<'_, L, C> {
     /// place is held and holds one.
     #[inline(always)]
     fn parts(&mut self) -> (&mut Core<L, C>, LinkTx<'_, C>) {
-        let wire = self
-            .send
-            .as_mut()
-            .and_then(|send| send.tx())
-            .and_then(|tx| tx.as_ref());
+        // SAFETY: the wire lies in the face's place, which does not move (`DirectFace`) and which
+        // `send` holds for as long as `self` lives, so no other holder reaches it meanwhile; the
+        // operation reaches it only through the shared borrow handed out here, which ends with
+        // the borrow of `self`, and nothing of `self` writes it.
+        let wire = self.wire.map(|wire| unsafe { wire.as_ref() });
         (&mut self.core.0, FaceTx { wire })
     }
 }
@@ -1773,11 +1776,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // the hold that ends before it (`DialHeld::parts`), and what it sends is made of the
         // session's state: no handle on a cell of the link leaves the parts and none comes into
         // them.
-        let send = unsafe { self.direct.dial.site.hold_send() };
+        let mut send = unsafe { self.direct.dial.site.hold_send() };
+        // Found here, once, so an operation's body reads the wire and walks no hold.
+        let wire = send
+            .as_mut()
+            .and_then(|send| send.tx())
+            .and_then(|tx| tx.as_ref())
+            .map(NonNull::from);
         let core = self.live()?;
         Some(DialHeld {
             core: ManuallyDrop::new(core),
             send: ManuallyDrop::new(send),
+            wire,
         })
     }
 
