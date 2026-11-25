@@ -794,24 +794,25 @@ parity_preset_env() {
 
 # zenoh-pico: the original is upstream's DEFAULT build (no switch passed; build-zenoh-pico-cli.sh configures that arm
 # as `zenoh-pico-build-default`, and this builds its shared library), wz is wz-capi-pico built for
-# configs/zenoh-pico_defconfig. The programs are compiled against the default arm's headers.
+# configs/zenoh-pico_defconfig, under the limits and policies it sets, in the form the pico C ABI's release ships, or
+# the one PICO_CMP_STDLIB names (perf_matrix.py bench-stdlib), as the size gate builds that form (perf_matrix.py
+# preset-arm, which applies what parity_preset_env gives the other families): a C library has no
+# unwinder and no symbolizer of its own, and the library with `std` carries both. The programs are compiled
+# against the default arm's headers.
 parity_build_pico() {
-    local dir="$1" default="$WZ_ARTIFACTS/target/zenoh-pico-build-default" args env_lines lib_p example variant name
-    local -a build_env=()
+    local dir="$1" default="$WZ_ARTIFACTS/target/zenoh-pico-build-default" stdlib built lib_p example variant name
     bash scripts/build-zenoh-pico-cli.sh >"$dir/build-pico.log" 2>&1 \
         || parity_fail "the pico arms did not configure (see $dir/build-pico.log)"
     cmake --build "$default" --target zenohpico_shared -j"$(nproc)" >>"$dir/build-pico.log" 2>&1 \
         || parity_fail "pico's default arm did not build (see $dir/build-pico.log)"
     lib_p="$(find "$default" -name 'libzenohpico.so' -print -quit)"
     [ -n "$lib_p" ] || parity_fail "no libzenohpico.so under $default"
-    args="$(parity_preset_args zenoh-pico)" || exit 2
-    env_lines="$(parity_preset_env zenoh-pico)" || exit 2
-    [ -z "$env_lines" ] || mapfile -t build_env <<<"$env_lines"
-    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && env "${build_env[@]}" cargo build --profile "$wz_profile" -p wz-capi-pico $args) >"$dir/build-wz.log" 2>&1 \
-        || parity_fail "wz-capi-pico did not build for the preset (see $dir/build-wz.log)"
+    stdlib="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" bench-stdlib ${PICO_CMP_STDLIB:+"$PICO_CMP_STDLIB"})" \
+        || parity_fail "the standard library of the wz preset did not resolve (bench-stdlib said why above)"
+    built="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" preset-arm --out "$dir" --original zenoh-pico \
+        --stdlib "$stdlib")" \
+        || parity_fail_log "$dir/build-wz.log" "wz-capi-pico was not built for the preset: $built"
     cp -a "$(dirname "$lib_p")"/libzenohpico.so* "$dir/lib-P/" || parity_fail "the pico library did not copy"
-    cp "$wz_lib/libwz_capi_pico.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
     for example in "${PARITY_PROGRAMS[@]}"; do
         for variant in P W; do
             name=zenohpico
@@ -828,8 +829,7 @@ parity_build_pico() {
     PARITY_SIZE_P="$(readlink -f "$dir/lib-P/libzenohpico.so")"
     PARITY_SIZE_W="$dir/lib-W/libwz_capi_pico.so"
     PARITY_NOTES="original=zenoh-pico default build (cmake, no switch), $(grep -c '^#define Z_FEATURE_[A-Z_]* 1' "$default/zenohpico/include/zenoh-pico/config.h") switches on in its config.h
-wz_cargo_args=-p wz-capi-pico $args
-wz_build_env=${build_env[*]}"
+$built"
 }
 
 # zenoh-c: the original is upstream's default build from the pinned source (install-zenoh-c-arm.sh nounstable: cmake
