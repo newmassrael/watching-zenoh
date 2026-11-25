@@ -6656,8 +6656,8 @@ mod repeated_extension_tests {
             assert_reads_last(
                 "request qos",
                 both,
-                crate::declare_ext_qos::read_qos_of(&alone(QOS, 2)),
-                crate::declare_ext_qos::read_qos_of(&alone(QOS, 5)),
+                crate::declare_ext_qos::read_qos_of(alone(QOS, 2)),
+                crate::declare_ext_qos::read_qos_of(alone(QOS, 5)),
             );
         }
         for both in [
@@ -6667,13 +6667,13 @@ mod repeated_extension_tests {
             assert_reads_last(
                 "request target",
                 both,
-                crate::request_routing_context::read_target_of(&alone(TARGET, 2)),
-                crate::request_routing_context::read_target_of(&alone(TARGET, 1)),
+                crate::request_routing_context::read_target_of(alone(TARGET, 2)),
+                crate::request_routing_context::read_target_of(alone(TARGET, 1)),
             );
         }
         assert_eq!(
             crate::request_routing_context::read_request_target(held),
-            crate::request_routing_context::read_target_of(&alone(TARGET, 2))
+            crate::request_routing_context::read_target_of(alone(TARGET, 2))
         );
         // The in-place receive path reads the target and the QoS in one walk.
         assert_eq!(

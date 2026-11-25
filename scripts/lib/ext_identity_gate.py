@@ -114,19 +114,6 @@ CLASSIFIED: dict[tuple[str, str], tuple[str, str]] = {
         "renders",
         "the field layer reports the id column of a header as a field of its own",
     ),
-    ("crates/wz-session-core/src/ext_chain.rs", "collect_walk"): (
-        "hint",
-        "decides which entries of a received handshake chain a `session-slot` build keeps, by "
-        "the id of the extensions its modules read; a look-alike of the same id is kept too, "
-        "and only takes a place in the chain, because every reader tells its extension by "
-        "identity and the admission rule judges the header of every entry, kept or not",
-    ),
-    ("crates/wz-session-core/src/inbound.rs", "next"): (
-        "hint",
-        "the entries of a control message's chain read where it lies, shown on a "
-        "`session-slot` build as `collect_walk` keeps them, by the same ids, so the two reads "
-        "of one message agree; every reader of an entry still tells its extension by identity",
-    ),
     ("crates/wz-session-core/src/ext_header.rs", "lookalike_headers"): (
         "family",
         "builds every header that shares an id with an identity, the look-alike "
@@ -147,7 +134,17 @@ CLASSIFIED: dict[tuple[str, str], tuple[str, str]] = {
         "absent extension. It reads no body, and a look-alike of the same id can "
         "only make it report an entry that was carried",
     ),
-    ("crates/wz-session-core/src/ext_chain.rs", "stage_in_canonical_order"): (
+    ("crates/wz-session-core/src/ext_chain.rs", "id"): (
+        "outbound",
+        "the 4-bit id of a kind of extension this side stages (`StagedExt::id`), which names "
+        "the place a stager writes on its own chain; no received extension is read",
+    ),
+    ("crates/wz-session-core/src/ext_chain.rs", "stage"): (
+        "outbound",
+        "asserts that an entry a stager built for its own handshake chain carries the id of "
+        "the place it is written to; no received extension is read",
+    ),
+    ("crates/wz-session-core/src/ext_chain.rs", "stage_id_in_canonical_order"): (
         "outbound",
         "replaces the entry of one id on this side's own handshake chain and places it "
         "where upstream's encoder writes that field, in ascending id order: "
@@ -163,17 +160,9 @@ CLASSIFIED: dict[tuple[str, str], tuple[str, str]] = {
         "sorts a chain this side hands over whole into the same ascending id order, "
         "so a seeded chain is written like a staged one",
     ),
-    ("crates/wz-session-core/src/session_actions.rs", "stage_local_remote_bound"): (
-        "outbound",
-        "replaces the remote-bound entry this side stages on its own Open chain",
-    ),
     ("crates/wz-session-core/src/session_actions.rs", "staged_multilink_ext_count"): (
         "outbound",
         "counts the multilink entries this side staged for sending",
-    ),
-    ("crates/wz-session-core/src/session_actions.rs", "stage_capability"): (
-        "outbound",
-        "replaces a capability entry this side stages in its own handshake chain",
     ),
     ("crates/wz-zenoh-protocol/src/common/extension.rs", "mid"): (
         "upstream-id",
