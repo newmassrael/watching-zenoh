@@ -1278,6 +1278,71 @@ mod tests {
         }
     }
 
+    /// What each part of a publisher's and a subscriber's place takes, printed for choosing which
+    /// part of the places their limits multiply is to be made smaller: the place, the object and
+    /// each value the object holds, in bytes. Run with `cargo test -p wz-capi-pico --lib
+    /// print_the_parts_of_the_publisher_and_subscriber_places -- --ignored --nocapture` under the
+    /// features of the build to read.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn print_the_parts_of_the_publisher_and_subscriber_places() {
+        use core::mem::size_of;
+        let parts: [(&str, usize); 24] = [
+            (
+                "publisher place",
+                InSession::<crate::pubsub::PublisherState>::LAYOUT.size(),
+            ),
+            (
+                "subscriber place",
+                InSession::<crate::pubsub::SubscriberPlace>::LAYOUT.size(),
+            ),
+            ("PublisherState", size_of::<crate::pubsub::PublisherState>()),
+            ("PlainPublisher", size_of::<crate::pubsub::PlainPublisher>()),
+            ("PublisherQos", size_of::<crate::pubsub::PublisherQos>()),
+            (
+                "Option<OwnedEncoding>",
+                size_of::<Option<crate::encoding::OwnedEncoding>>(),
+            ),
+            ("FilteredKey", size_of::<crate::write_filter::FilteredKey>()),
+            ("WriteFilter", size_of::<crate::write_filter::WriteFilter>()),
+            (
+                "DeclaredKeyexpr",
+                size_of::<crate::keyexpr::DeclaredKeyexpr>(),
+            ),
+            ("KeyText", size_of::<crate::keyexpr::KeyText>()),
+            ("HeldKey", size_of::<wz_capi_port::HeldKey>()),
+            (
+                "Option<WireDeclaration>",
+                size_of::<Option<crate::keyexpr::WireDeclaration>>(),
+            ),
+            ("KeyHold", size_of::<wz_capi_port::KeyHold>()),
+            ("WireKey", size_of::<wz_capi_port::WireKey>()),
+            (
+                "z_loaned_keyexpr_t",
+                size_of::<crate::abi::z_loaned_keyexpr_t>(),
+            ),
+            (
+                "SubscriberState",
+                size_of::<crate::pubsub::SubscriberState>(),
+            ),
+            (
+                "Option<DeclaredSubscriber>",
+                size_of::<Option<crate::pubsub::DeclaredSubscriber>>(),
+            ),
+            ("SubscriberKept", size_of::<crate::pubsub::SubscriberKept>()),
+            ("OpenClosures", size_of::<crate::ffi::OpenClosures>()),
+            ("Option<HeldIn>", size_of::<Option<crate::ffi::HeldIn>>()),
+            ("Lender", size_of::<Lender>()),
+            ("EntityPlace", size_of::<wz_capi_port::EntityPlace>()),
+            ("EngineHold", size_of::<crate::session::EngineHold>()),
+            ("EngineHandle", size_of::<crate::session::EngineHandle>()),
+        ];
+        for (part, bytes) in parts {
+            std::println!("place-part: {part:<28} {bytes:>5} B");
+        }
+    }
+
     /// The arena a session that listens opens, row by row: its tables' rows and the ABI's places
     /// as the open lays them out for a listener (and for a dialer) under the build's limits, each
     /// row's limit, count and the bytes of one, and the bytes a real open of a listener reserved.
