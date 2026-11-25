@@ -11,6 +11,7 @@
 //! inner `cfg` attribute at its top. See `scripts/lib/merge_tests.py`.
 
 mod files;
+mod programs;
 
 // The helper the link files of `files/` run a sample through. A file that named it by `#[path]`
 // would load it again in a build that holds two of them, which rustc refuses ("file is loaded as
