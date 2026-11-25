@@ -15,9 +15,9 @@
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,peer,multi-thread --test it files::coop_tcp_teardown::
+//!     --features os-host,peer,multi-thread --test it files::coop_tcp_teardown::
 //! ```
-#![cfg(all(feature = "engine-coop", feature = "peer", feature = "multi-thread"))]
+#![cfg(all(feature = "os-host", feature = "peer", feature = "multi-thread"))]
 
 use std::ffi::{c_void, CStr, CString};
 use std::sync::atomic::{AtomicU64, Ordering};

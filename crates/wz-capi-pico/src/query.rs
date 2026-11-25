@@ -3160,8 +3160,7 @@ mod pooled_text_tests {
 /// no memory of the heap.
 #[cfg(all(
     test,
-    not(feature = "engine-tokio"),
-    feature = "std",
+    feature = "os-host",
     feature = "peer",
     feature = "query",
     feature = "multi-thread"

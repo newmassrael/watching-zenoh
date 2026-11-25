@@ -23,8 +23,7 @@ publish = false
 cargo-fuzz = true
 
 [features]
-std = ["wz-capi-pico/std"]
-engine-coop = ["wz-capi-pico/engine-coop"]
+os-host = ["wz-capi-pico/os-host"]
 peer = ["wz-capi-pico/peer"]
 link-udp = ["wz-capi-pico/link-udp"]
 scout = ["wz-capi-pico/scout"]
