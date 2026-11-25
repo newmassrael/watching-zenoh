@@ -1386,8 +1386,8 @@ fn lay_stage<'a>(
 
 /// Reserve the pools `plan` makes for `stage` in `held` where it holds none yet ([`lay_stage`]):
 /// `false` only when the heap has not the memory, as a stage of no object in this build holds no
-/// pool. Not inlined: the first open asks it of each stage, and each asking is then a call.
-#[inline(never)]
+/// pool. Left to be inlined: the first open asks it of each stage, and beside its call to
+/// `lay_stage` an asking holds only the reading of the answer, which a call of its own outweighs.
 fn lay_missing(held: &mut Option<Pools>, plan: &Plan, stage: Stage) -> bool {
     !matches!(lay_stage(held, plan, stage), Err(Unlaid::NoMemory))
 }
