@@ -992,7 +992,8 @@ fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
 
 /// A read turns every face of the session's table once, after one wait: a session open on the
 /// dial role's face alone turns that face once a read. Turned red by a read that turns the dial
-/// role's face alone, or turns a face twice (`CoopEngine::read_faces`).
+/// role's face alone, or turns a face twice (`CoopEngine::read_faces`, or `CoopEngine::read_dial`
+/// where the dial role's face is the only face).
 #[cfg(not(wz_round))]
 #[test]
 fn a_read_turns_every_face_once() {

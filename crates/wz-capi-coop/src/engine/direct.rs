@@ -961,7 +961,48 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if self.deliveries.delivers_here() {
             return self.read_nothing();
         }
-        self.read_faces(|| self.direct.iter())
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            self.read_faces(|| self.direct.iter())
+        }
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        {
+            self.read_dial()
+        }
+    }
+
+    /// The read where the dial role's face is the only face: its read slot held for the whole
+    /// read, the wait among it, as nothing else of this thread's takes it meanwhile, then the
+    /// face's turn and the session's periodic jobs. A slot found held is a read under way on this
+    /// thread, whose callback this read is called from: it reads nothing.
+    #[cfg(not(any(feature = "listen", feature = "group")))]
+    fn read_dial(&self) -> Result<(), SessionClosed> {
+        let face = &self.direct.dial;
+        let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
+            return self.read_nothing();
+        };
+        let slot = &mut held.0;
+        let read = match self.link_turn(face, slot) {
+            Some(turn) => {
+                self.deliver();
+                if turn.ended.is_some() {
+                    Err(SessionClosed)
+                } else {
+                    if let Some(started_ms) = turn.jobs_due_ms {
+                        self.run_due_tickers(started_ms);
+                    }
+                    Ok(())
+                }
+            }
+            None => Err(SessionClosed),
+        };
+        // A close made while the read stepped the pump (a callback's) ended the link's life but
+        // left the pump, which the read held: it goes now, once no step of it is under way.
+        if self.closed.load(Ordering::Acquire) {
+            slot.let_go();
+            return Err(SessionClosed);
+        }
+        read
     }
 
     /// What a read that reads nothing answers: whether the session is closed.
@@ -977,6 +1018,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// look at each face's life and a step of its pump, the session's periodic jobs once every
     /// face was turned. A slot found held is a read under way on this thread, whose callback this
     /// read is called from: it reads nothing, so no record is handed out inside another's call.
+    #[cfg(any(feature = "listen", feature = "group"))]
     fn read_faces<'f, I>(&'f self, faces: impl Fn() -> I) -> Result<(), SessionClosed>
     where
         I: Iterator<Item = &'f DirectFace<L, C>>,
@@ -1028,7 +1070,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         read
     }
 
-    /// One turn of the face `face`, its read slot held as `slot`, the open's: the wait for the
+    /// One turn of the face `face`, its read slot held as `slot`, the open's and, where the dial
+    /// role's face is the only face, the read's: the wait for the
     /// link's input or the next deadline, then the face's turn (`Self::face_turn`). `None`
     /// once the session closed.
     fn link_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
