@@ -696,12 +696,16 @@ impl<L: LimitSpec, const HELD: usize> Limited<L, HELD> {
     }
 
     /// The value a snapshot's `words` keep from the word `at` on: `HELD` words, none where the
-    /// domain is one value. Read by the generated snapshots' accessors.
+    /// domain is one value. Read by the generated snapshots' accessors. A word past `words`, which
+    /// [`LimitField`] rules out, reads as the build's value rather than stopping the program.
     pub(crate) const fn in_words(words: &[usize], at: usize) -> Self {
         let value = if HELD == 0 {
             L::DEFAULT
         } else {
-            of_word(words[at])
+            match words.split_at_checked(at) {
+                Some((_, [word, ..])) => of_word(*word),
+                _ => L::DEFAULT,
+            }
         };
         Self {
             value: [value; HELD],
@@ -711,8 +715,10 @@ impl<L: LimitSpec, const HELD: usize> Limited<L, HELD> {
     /// Keeps the value in a snapshot's `words` from the word `at` on, where [`Self::in_words`]
     /// reads it: nothing where the domain is one value.
     pub(crate) const fn keep_in(&self, words: &mut [usize], at: usize) {
-        if let Some(value) = self.value.first() {
-            words[at] = word_of(value);
+        if let (Some(value), Some((_, [word, ..]))) =
+            (self.value.first(), words.split_at_mut_checked(at))
+        {
+            *word = word_of(value);
         }
     }
 }
@@ -733,7 +739,7 @@ const fn word_of<V: LimitValueType>(value: &V) -> usize {
 /// The word after those of `L` in the snapshot `S`: where the limit after it keeps its value, or,
 /// after the last, how many words `S` keeps. Read by the generated snapshots.
 pub(crate) const fn word_after<L: LimitField<S>, S>() -> usize {
-    L::WORD + L::HELD
+    L::WORD.saturating_add(L::HELD)
 }
 
 impl<L: LimitSpec<Value = Quota>, const HELD: usize> Limited<L, HELD> {
@@ -842,7 +848,10 @@ impl<S> LimitEntry<S> {
             L::HELD == 0
                 || (core::mem::size_of::<Limited<L, 1>>() == core::mem::size_of::<usize>()
                     && core::mem::align_of::<S>() == core::mem::align_of::<usize>()
-                    && L::WORD < core::mem::size_of::<S>() / core::mem::size_of::<usize>()),
+                    && matches!(
+                        core::mem::size_of::<S>().checked_div(core::mem::size_of::<usize>()),
+                        Some(words) if L::WORD < words
+                    )),
             "a limit's word is not inside its snapshot"
         );
         Self {
@@ -1198,6 +1207,40 @@ mod tests {
         );
         assert_eq!(snapshot.range(), 9);
         assert_eq!(snapshot.pinned(), 4);
+    }
+
+    /// A word past a snapshot's words reads as the build's value and keeps nothing, where an index
+    /// would stop the program; both are evaluated in a `const` too, as the generated presets are.
+    /// Turned red by indexing `words` at `at` in `in_words` or `keep_in`.
+    #[test]
+    fn a_word_past_the_snapshots_words_reads_the_build_value_and_keeps_nothing() {
+        type Range = Limited<Range64, { Range64::HELD }>;
+        const READ: usize = Range::in_words(&[7, 9], 1).get();
+        const KEPT: [usize; 2] = {
+            let mut words = [7; 2];
+            Range::build_default().keep_in(&mut words, 1);
+            Range::build_default().keep_in(&mut words, 2);
+            words
+        };
+        assert_eq!(READ, 9);
+        assert_eq!(KEPT, [7, Range64::DEFAULT]);
+
+        let mut words = [7_usize; 2];
+        assert_eq!(
+            Range::in_words(&words, 2).get(),
+            Range64::DEFAULT,
+            "past the words"
+        );
+        assert_eq!(
+            Range::in_words(&words, 1).get(),
+            7,
+            "CONTROL: a word inside is read"
+        );
+        let held = Range::select(9).expect("inside");
+        held.keep_in(&mut words, 2);
+        assert_eq!(words, [7, 7], "nothing kept past the words");
+        held.keep_in(&mut words, 1);
+        assert_eq!(words, [7, 9], "CONTROL: a word inside keeps it");
     }
 
     /// Two snapshots are equal where every limit holds the same value: the words compare as one

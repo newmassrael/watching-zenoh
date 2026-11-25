@@ -433,8 +433,9 @@ impl LinkBook {
             zid: None,
             state: LinkState::Handshaking,
         });
-        // SAFETY: the row past the last one was written just above, within the capacity.
-        unsafe { self.links.set_len(held + 1) };
+        // SAFETY: the row past the last one was written just above, within the capacity; `held`
+        // is below `rows`, so the length after it never saturates.
+        unsafe { self.links.set_len(held.saturating_add(1)) };
         token
     }
 
