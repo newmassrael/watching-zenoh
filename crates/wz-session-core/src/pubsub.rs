@@ -1732,10 +1732,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     // descriptor this branch resolves.
                     #[cfg(feature = "transport-shm")]
                     let put_payload = if crate::put_payload::is_sliced(put) {
-                        match self.unswap_shm_payload(push, put) {
-                            Some(bytes) => bytes,
-                            None => return None,
-                        }
+                        self.unswap_shm_payload(push, put)?
                     } else {
                         // The inline layout never fails: no slice, no descriptor.
                         crate::put_payload::collect_wire_payload(put, |_| None)

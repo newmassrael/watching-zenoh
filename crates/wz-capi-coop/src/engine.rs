@@ -137,7 +137,6 @@ use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{LinkWaits, WaitOn};
 use wz_runtime_coop::session_drive::{OpenedLink, SessionDatagramLink, SessionLinks, SessionRole};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::transport::{
     LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
