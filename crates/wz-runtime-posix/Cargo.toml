@@ -36,12 +36,11 @@ path = "src/lib.rs"
 # BSD sockets shares (`udp_link`): this profile reuses both, parameterised by the clock and the
 # socket.
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
-# The traits the seams implement (`EntropySource`, `EpochSource`).
+# The traits the seams implement (`EntropySource`, `EpochSource`), and the diagnostics (`diag`)
+# a host's multicast sockets report what is not an error of a call through (an `#iface=` the host
+# cannot resolve, a scouting membership the kernel refused): records where a build turns on
+# `wz-session-core/log`, nothing otherwise, so a library that installs no logger links no facade.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std"] }
-# What a host's multicast sockets report that is not an error of a call (an `#iface=` the host
-# cannot resolve, a scouting membership the kernel refused), as the host crate of the tokio runtime
-# reports it (`host-multicast`). No `std` feature: the crate's own macros, and nothing allocates.
-log = { version = "0.4", optional = true }
 
 # The POSIX hosts' system calls (`clock_gettime`, `getrandom`, `socket`, `poll`, `recvfrom`,
 # `write`). No `std` feature: this crate is `#![no_std]`, and `libc` is the C library's own names.
@@ -95,7 +94,7 @@ session-slot = ["wz-runtime-coop/session-slot"]
 # loopback and the refusal of an unpinned link) as the transport the shared group drive loop runs
 # on, and a scouting window's sockets, one for each interface that can carry multicast
 # (`scouting`). The heap profile's: the table and the members are lists the host sizes.
-host-multicast = ["alloc", "dep:log"]
+host-multicast = ["alloc"]
 # The host's ttys as the lines of the cooperative engine's `serial/` links (`serial`:
 # `PosixSerialLine`, set as zenoh-pico's POSIX tty sets one, on Linux and Android). The heap
 # profile's, as the engine's serial links are.

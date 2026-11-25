@@ -103,7 +103,9 @@ ext-pubsub-sample-miss-detection = ["ext-pubsub-serde-codec"]
 # The selector-parameter dialect, the outbound key-expression gate, the vocabulary of a reply
 # (`ReplyOut`, `SourceInfo`, `QosLevel`) and the publish options the composite folds its knobs
 # into. `alloc` is the heap profile, which is the only profile the advanced plane runs on. What the
-# composite stamps with is the `advanced-publisher` feature's, above.
+# composite stamps with is the `advanced-publisher` feature's, above. A reply the cache could not
+# stage is warned about through its diagnostics (`diag`, records with `wz-session-core/log`) and
+# the answer goes on, as upstream's does.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 # The engine's port, which the hosted subscriber (`engine-host`) is written over. It names no
 # engine, no async runtime and no thread.
@@ -112,8 +114,6 @@ wz-capi-port = { path = "../wz-capi-port", optional = true, default-features = f
 wz-node-time = { path = "../wz-node-time", optional = true, default-features = false }
 # The host's lock without `std` (`host-sync`).
 wz-host-sync = { path = "../wz-host-sync", optional = true }
-# A reply the cache could not stage is warned about and the answer goes on, as upstream's does.
-log = "0.4"
 # The recovering subscriber's set of gets in flight (`advanced-recovery`); its sources lie in fixed
 # tables of its own. The set is the one the session core links already, so its code is shared; the hasher is
 # foldhash's fixed-seed one, which needs no entropy without `std` and walks a set the same way every

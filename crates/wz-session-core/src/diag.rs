@@ -13,7 +13,10 @@
 //! compiles its log calls out unless a log level is selected when it is built.
 //!
 //! The choice is made once, here, by the crate that owns the calls; a crate above that wants the
-//! records turns on `wz-session-core/log`, which is in the default features.
+//! records turns on `wz-session-core/log`, which is in the default features. The crates a library
+//! without a logger links write their diagnostics with these macros too
+//! (`wz_session_core::diag_warn!`), so the one feature decides for all of them, and
+//! `scripts/lib/log_facade_gate.py` refuses a call of the facade past them.
 
 /// The `log` facade, for the expansion of the diagnostic macros in a crate that does not name it.
 #[cfg(feature = "log")]
