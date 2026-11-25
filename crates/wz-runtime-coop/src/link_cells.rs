@@ -60,8 +60,9 @@ struct CellHead<F: CellFlag = Cell<bool>> {
 const _: () = assert!(size_of::<CellHead<AtomicBool>>() == size_of::<CellHead>());
 
 /// How the handles of a cell are counted. A cell's word is written by one kind's handles alone, so
-/// a kind is a type argument of the handle ([`CellRc`]) and never a choice made at run time.
-pub trait CountKind: 'static {
+/// a kind is a type argument of the handle ([`CellRc`]) and never a choice made at run time, and
+/// sized as that argument is, so a kind's own items may name a handle of their kind.
+pub trait CountKind: Sized + 'static {
     /// The flag of a table's cell that a handle of this kind may be placed in: a handle's last let
     /// go gives the cell back by it, on whichever thread a handle of this kind may be let go of.
     type Flag: CellFlag;

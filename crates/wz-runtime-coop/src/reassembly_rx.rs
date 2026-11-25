@@ -1015,12 +1015,19 @@ mod tests {
         struct Memory([u8; 256]);
 
         /// Chain A best-effort and chain C reliable open, C completes, kept or borrowed, and chain
-        /// B reliable starts: B's outcome, the kept message, and the buffers lent after it.
+        /// B reliable starts: B's outcome, the kept message, the buffers lent after it, the table,
+        /// and the Router, whose open chains hold their buffers for as long as it is held.
         fn run(
             memory: &mut Memory,
             buffers: usize,
             keep: bool,
-        ) -> (IngestOutcome, Option<KeptBytes>, usize, LentByteCells) {
+        ) -> (
+            IngestOutcome,
+            Option<KeptBytes>,
+            usize,
+            LentByteCells,
+            SessionReassembly,
+        ) {
             // SAFETY: the memory is aligned as an arena's spans start, 256 bytes long, used by
             // nothing else, and the caller's, which outlives the table and every buffer of it.
             let mut arena = unsafe { Arena::over(NonNull::from(memory).cast::<u8>(), 256) };
@@ -1056,18 +1063,18 @@ mod tests {
             assert_eq!(completed, IngestOutcome::Reassembled);
             let started = router.ingest(frag(12, 1, b"b"), MASK, 0, |_| {});
             let lent = cells.in_use();
-            (started, kept, lent, cells)
+            (started, kept, lent, cells, router)
         }
 
         let mut memory = [Memory([0; 256]), Memory([0; 256]), Memory([0; 256])];
         let [first, second, third] = &mut memory;
-        let (borrowed, _, lent, _) = run(first, LENT_CHAINS, false);
+        let (borrowed, _, lent, _, _) = run(first, LENT_CHAINS, false);
         assert_eq!(
             (borrowed, lent),
             (IngestOutcome::Begun, 2),
             "borrowed for its call, the message's buffer served the next chain"
         );
-        let (started, kept, lent, cells) = run(second, SESSION_CHAIN_BUFFERS, true);
+        let (started, kept, lent, cells, router) = run(second, SESSION_CHAIN_BUFFERS, true);
         let kept = kept.expect("a lent staging keeps a completed chain");
         assert_eq!(kept.as_slice(), b"c-end");
         assert_eq!(
@@ -1081,7 +1088,13 @@ mod tests {
             2,
             "let go of, the kept buffer is the table's again"
         );
-        let (refused, kept, _, _) = run(third, LENT_CHAINS, true);
+        drop(router);
+        assert_eq!(
+            cells.in_use(),
+            0,
+            "dropped, the Router gives its open chains' buffers back"
+        );
+        let (refused, kept, _, _, _) = run(third, LENT_CHAINS, true);
         assert!(kept.is_some());
         assert_eq!(
             refused,
