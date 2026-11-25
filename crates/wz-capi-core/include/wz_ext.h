@@ -83,6 +83,21 @@ z_result_t wz_ext_config_profile(z_loaned_config_t *config,
 z_result_t wz_ext_config_document(z_loaned_config_t *config,
                                   const char *json5);
 
+/* The config key (zp_config_insert) whose value states the limits of the
+ * session the pico ABI's z_open opens from the config, in every build of it,
+ * the zenoh-pico preset included. A session opens its tables at a few, the
+ * counts zenoh-pico's parity examples declare, and takes no memory after its
+ * open; a program that holds more names them here before it opens, e.g.
+ * "MAX_SUBSCRIPTIONS=4,MAX_PUBLISHERS=2": NAME=count items separated by
+ * commas, each NAME a session limit's id, a later item over an earlier one.
+ * The build's value of each limit is its bound. An item that is not
+ * NAME=count, a name that is no session limit, a count the build's domain
+ * leaves out and a count past the bound answer _Z_ERR_CONFIG_INVALID_VALUE,
+ * at the insert and at the open, and the config keeps its earlier value. A
+ * declaration past what the session opened with is refused as one that
+ * finds no memory is. */
+#define WZ_EXT_CONFIG_LIMITS_KEY ((uint8_t)0xC0)
+
 /* The limits of the process's runtime, from a zenoh JSON5 document of which
  * only the wz member's wz/limits is read: the limits of the machines the
  * process makes apart from any session, its supervisor

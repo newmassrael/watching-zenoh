@@ -353,6 +353,19 @@ pub(crate) fn resolve_snapshots(
     Ok((policy, limits))
 }
 
+/// The snapshots `z_open` opens `cfg` under: [`resolve_snapshots`] of its doors' statements, and
+/// over them the counts its [`WZ_EXT_CONFIG_LIMITS_KEY`] states, which every build reads;
+/// `Z_ERR_CONFIG_INVALID_VALUE` when the build refuses any of it.
+///
+/// [`WZ_EXT_CONFIG_LIMITS_KEY`]: crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY
+pub(crate) fn resolve_open(cfg: &ConfigState) -> Result<(SessionPolicy, SessionLimits), ZResult> {
+    let (policy, mut limits) = resolve_snapshots(&cfg.policies)?;
+    if let Some(text) = cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY) {
+        crate::config_limits::state_over(text, &mut limits)?;
+    }
+    Ok((policy, limits))
+}
+
 /// The limits a session of this ABI opens under before its config states any: zenoh-pico's, as
 /// each ABI opens under its upstream's (`SessionLimits::PICO_PRESET`, each value with its reason in
 /// the declaration's `[limit.pico_preset]`, `deploy/wz-config.toml`), so a listener holds the ten
@@ -1162,7 +1175,7 @@ unsafe fn open_request(
     // comes back on another locator is found there and not here. The scout runs under the
     // snapshot of the open it finds a node for, and a config whose policies or limits the
     // build refuses opens nothing and scouts for nothing.
-    let (policy, limits) = resolve_snapshots(&cfg.policies)?;
+    let (policy, limits) = resolve_open(cfg)?;
     // The key-wire form, judged for the engine the session opens on, and the key ids every
     // node shares that the config states (`crate::key_ids`).
     #[cfg(feature = "shared-key-ids")]

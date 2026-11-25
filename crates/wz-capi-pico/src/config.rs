@@ -442,6 +442,14 @@ pub unsafe extern "C" fn zp_config_insert(
         let Some(val) = crate::abi::text_of(CStr::from_ptr(value).to_bytes()) else {
             return Z_ERR_INVALID;
         };
+        // Judged as the open will compose it, so a count the build refuses is refused here and
+        // the config keeps its earlier value.
+        if key == crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY {
+            let mut limits = crate::session::opening_limits();
+            if let Err(code) = crate::config_limits::state_over(val, &mut limits) {
+                return code;
+            }
+        }
         state.insert(key, val)
     })
 }
