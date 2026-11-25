@@ -5859,14 +5859,15 @@ def cmd_selftest() -> int:
     good = manifest_features(MANIFESTS["pico"])
     expect("the shipped pico manifest passes", check_manifest(decl, "pico", good) == [])
     # The cooperative list is the arm's with the engine changed: the base's tokio features and a
-    # capability that selects the tokio engine (the raw Ethernet group) are out, what the
-    # engines share stays (the multicast group among it), and the engine is named first.
-    arm = features_for(decl, "pico", {"peer", "query", "raweth-transport"})
+    # capability that selects the tokio engine (gossip, which the pico ABI runs on that engine
+    # alone) are out, what the engines share stays (the multicast group among it), and the engine
+    # is named first.
+    arm = features_for(decl, "pico", {"peer", "query", "multicast-transport", "gossip"})
     coop = coop_features(arm, good)
     expect("the cooperative list names its engine first and not the tokio one",
            coop[0] == "engine-coop" and "engine-tokio" not in coop)
     expect("the cooperative list drops what selects the tokio engine",
-           not {"serial-drive-own-thread", "rx-busy-poll", "raweth-transport"} & set(coop))
+           not {"serial-drive-own-thread", "rx-busy-poll", "gossip"} & set(coop))
     expect("the cooperative list keeps what the engines share",
            {"link-udp", "scout", "peer", "query", "multicast-transport"} <= set(coop))
     tokio_selecting = dict(good)
@@ -5880,7 +5881,7 @@ def cmd_selftest() -> int:
     expect("the tokio engine is the list with the base's engine replaced by the tokio option's",
            engine_features("pico", base, arm, False, good, switches) == tokio_features(arm, switches)
            and "engine-coop" not in engine_features("pico", base, arm, False, good, switches)
-           and "raweth-transport" in engine_features("pico", base, arm, False, good, switches))
+           and "gossip" in engine_features("pico", base, arm, False, good, switches))
     expect("the base is the cooperative engine's",
            "engine-coop" in base and "engine-tokio" not in base)
     expect("the cooperative engine is the cooperative list, the base's tokio switches out",
@@ -5895,7 +5896,7 @@ def cmd_selftest() -> int:
         return ""
 
     expect("a capability only the tokio engine runs is refused by name on the cooperative one",
-           "raweth-transport" in refusal("pico", arm))
+           "gossip" in refusal("pico", arm))
     expect("the cooperative engine is refused for the zenoh-c ABI",
            ENGINE_COOP_SYMBOL in refusal("c", features_for(decl, "c", set())))
     expect("the cargo arguments of a list are the list's",
@@ -5934,7 +5935,7 @@ def cmd_selftest() -> int:
            and bench_cargo_args("coop", [], good).startswith(
                "--no-default-features --features wz-capi-pico/engine-coop,"))
     expect("a capability asked of a bench that only the tokio engine runs is refused by name",
-           "raweth-transport" in refusal_text(lambda: bench_named_features("coop", ["raweth-transport"], good)))
+           "gossip" in refusal_text(lambda: bench_named_features("coop", ["gossip"], good)))
     # Without std: the same capabilities with the POSIX host's form in the place of the engine
     # feature, so a table read from it compares the libraries alike but for the standard library.
     on_nostd = bench_features("coop", [], good, "nostd")
@@ -5984,8 +5985,8 @@ def cmd_selftest() -> int:
     expect("a statement of the cooperative build states what that build has, not what was asked",
            {c["id"]: c["supported"] for c in conformance_statement(
                decl, "pico", coop, defaults, upstream, {"kind": "test"})["capabilities"]}
-           ["raweth-transport"] is False
-           and {c["id"]: c["supported"] for c in stated["capabilities"]}["raweth-transport"])
+           ["gossip"] is False
+           and {c["id"]: c["supported"] for c in stated["capabilities"]}["gossip"])
     expect("the digest does not depend on where the values were read from",
            conformance_statement(decl, "pico", arm, defaults, upstream, {"kind": "other"})["digest"]
            == stated["digest"] and stated["digest"].startswith("sha256:"))
