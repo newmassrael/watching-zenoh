@@ -2175,11 +2175,7 @@ pub unsafe extern "C" fn z_string_copy_from_str(
     str_out: *mut z_owned_string_t,
     value: *const c_char,
 ) -> ZResult {
-    let len = if value.is_null() {
-        0
-    } else {
-        CStr::from_ptr(value).to_bytes().len()
-    };
+    let len = crate::abi::c_str_len(value);
     z_string_copy_from_substr(str_out, value, len)
 }
 
@@ -2246,11 +2242,7 @@ pub unsafe extern "C" fn z_view_string_from_str(
     str_out: *mut z_view_string_t,
     value: *const c_char,
 ) -> ZResult {
-    let len = if value.is_null() {
-        0
-    } else {
-        CStr::from_ptr(value).to_bytes().len()
-    };
+    let len = crate::abi::c_str_len(value);
     z_view_string_from_substr(str_out, value, len)
 }
 

@@ -372,6 +372,22 @@ pub(crate) fn text_of(bytes: &[u8]) -> Option<&str> {
     core::str::from_utf8(bytes).ok()
 }
 
+/// The length of the NUL-terminated `text`, `0` for a null one: what each `_from_str` door hands
+/// its substring form, as zenoh-pico's `_from_str` doors are their `_from_substr` forms over the
+/// string's `strlen`. Out of line: each door held the null test and its arm of its own.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated string.
+#[inline(never)]
+pub(crate) unsafe fn c_str_len(text: *const core::ffi::c_char) -> usize {
+    if text.is_null() {
+        0
+    } else {
+        // SAFETY: the caller's: a non-null `text` is NUL-terminated.
+        unsafe { core::ffi::CStr::from_ptr(text) }.to_bytes().len()
+    }
+}
+
 /// Read a borrowed `{ start, len }` loaned view as a byte slice.
 ///
 /// # Safety
@@ -778,6 +794,19 @@ mod tests {
         assert_eq!(text_of(b"demo/key"), Some("demo/key"));
         assert_eq!(text_of(b""), Some(""));
         assert_eq!(text_of(&[b'a', 0xff]), None, "not UTF-8");
+    }
+
+    /// A NUL-terminated string's length is its bytes before the terminator, and a null one's is
+    /// none: every `_from_str` door hands a null string to its substring form as no bytes. Turned
+    /// red by a length that counts the terminator or reads through a null pointer.
+    #[test]
+    fn a_c_strings_length_is_its_bytes_and_a_null_ones_is_none() {
+        // SAFETY: null, or a NUL-terminated literal.
+        unsafe {
+            assert_eq!(c_str_len(core::ptr::null()), 0);
+            assert_eq!(c_str_len(c"".as_ptr()), 0);
+            assert_eq!(c_str_len(c"a=1;b=2".as_ptr()), 7);
+        }
     }
 
     /// A take moves every byte of the block, the padding too, and leaves the source null; a

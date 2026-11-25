@@ -694,6 +694,46 @@ impl<L: LimitSpec, const HELD: usize> Limited<L, HELD> {
             Err(_) => Self::build_default(),
         }
     }
+
+    /// The value a snapshot's `words` keep from the word `at` on: `HELD` words, none where the
+    /// domain is one value. Read by the generated snapshots' accessors.
+    pub(crate) const fn in_words(words: &[usize], at: usize) -> Self {
+        let value = if HELD == 0 {
+            L::DEFAULT
+        } else {
+            of_word(words[at])
+        };
+        Self {
+            value: [value; HELD],
+        }
+    }
+
+    /// Keeps the value in a snapshot's `words` from the word `at` on, where [`Self::in_words`]
+    /// reads it: nothing where the domain is one value.
+    pub(crate) const fn keep_in(&self, words: &mut [usize], at: usize) {
+        if let Some(value) = self.value.first() {
+            words[at] = word_of(value);
+        }
+    }
+}
+
+/// `word` as the value type of a limit.
+const fn of_word<V: LimitValueType>(word: usize) -> V {
+    // SAFETY: `LimitValueType` is sealed to `Quota`, transparent over a `usize`, and `usize`, so
+    // every word is a value of `V`, bit for bit, at the alignment of a `usize`.
+    unsafe { ptr::from_ref(&word).cast::<V>().read() }
+}
+
+/// The word `value` is kept in.
+const fn word_of<V: LimitValueType>(value: &V) -> usize {
+    // SAFETY: as in `of_word`: `V` is one `usize` word.
+    unsafe { ptr::from_ref(value).cast::<usize>().read() }
+}
+
+/// The word after those of `L` in the snapshot `S`: where the limit after it keeps its value, or,
+/// after the last, how many words `S` keeps. Read by the generated snapshots.
+pub(crate) const fn word_after<L: LimitField<S>, S>() -> usize {
+    L::WORD + L::HELD
 }
 
 impl<L: LimitSpec<Value = Quota>, const HELD: usize> Limited<L, HELD> {
@@ -730,21 +770,21 @@ impl<L: LimitSpec, const HELD: usize> Default for Limited<L, HELD> {
     }
 }
 
-/// A limit that is a field of the snapshot `S`: where a reader that names the limit by its id
-/// finds the field. Every entry of a table selects and reads through the same two bodies, which
-/// reach the field by its offset, so no limit links a function of its own. The generated module
-/// implements it for every limit's type.
+/// A limit that is held by the snapshot `S`: which of the snapshot's words keeps its value. A
+/// snapshot is one array of `usize` words, one for each of its limits whose domain is more than
+/// one value, so two snapshots compare as one slice. Every entry of a table selects and reads
+/// through the same two bodies, which reach the word by its index, so no limit links a function of
+/// its own. The generated module implements it for every limit's type.
 ///
 /// # Safety
 ///
-/// `AT` is the offset in `S` (`core::mem::offset_of!`) of a field of type
-/// `Limited<Self, { Self::HELD }>`: the field keeps the value in one `usize` word there
-/// ([`LimitValueType`] is sealed to [`Quota`] and `usize`, and [`Limited`] is transparent), or in
-/// no byte where the domain is one value. The generated module pins each field's type beside its
-/// `AT`, so a field of another type does not compile.
+/// `S` is `#[repr(transparent)]` over `[usize; N]`, and where [`LimitSpec::HELD`] is one, `WORD`
+/// is less than `N` and no other limit of `S` keeps its value there: the word keeps the value
+/// ([`LimitValueType`] is sealed to [`Quota`] and `usize`, and [`Limited`] is transparent). Where
+/// the domain is one value the limit keeps no word and `WORD` is never read.
 pub unsafe trait LimitField<S>: LimitSpec {
-    /// The offset in `S` of the field that keeps the limit's value.
-    const AT: usize;
+    /// The index, among the snapshot's words, of the word that keeps the limit's value.
+    const WORD: usize;
 }
 
 /// One limit as a reader that names it by its id sees it, in the snapshot `S` that holds it.
@@ -765,9 +805,9 @@ struct LimitRow {
     read_from_snapshot: bool,
     capacity: Option<usize>,
     domain: LimitDomain,
-    /// The offset of the word the snapshot keeps the value in ([`LimitField::AT`]), read only
-    /// where the domain is more than one value: a field of one value keeps no byte.
-    at: usize,
+    /// The index of the word the snapshot keeps the value in ([`LimitField::WORD`]), read only
+    /// where the domain is more than one value: a limit of one value keeps no word.
+    word: usize,
 }
 
 // Written out rather than derived: a derive would ask `S` for each trait, and an entry holds no `S`.
@@ -796,18 +836,14 @@ impl<S> fmt::Debug for LimitEntry<S> {
 impl<S> LimitEntry<S> {
     /// The entry of the limit whose type is `L`.
     pub const fn of<L: LimitField<S>>() -> Self {
-        // A field that keeps a value is `Limited<L, 1>` (its type is pinned where `AT` is
-        // stated); a wrong layout or offset is refused where the table is evaluated.
+        // A limit that keeps a value keeps it in one word of the snapshot's words; a word past
+        // them, or a snapshot that is not words, is refused where the table is evaluated.
         assert!(
             L::HELD == 0
                 || (core::mem::size_of::<Limited<L, 1>>() == core::mem::size_of::<usize>()
-                    && core::mem::align_of::<Limited<L, 1>>() == core::mem::align_of::<usize>()
-                    && matches!(L::AT.checked_rem(core::mem::align_of::<usize>()), Some(0))
-                    && match L::AT.checked_add(core::mem::size_of::<usize>()) {
-                        Some(end) => end <= core::mem::size_of::<S>(),
-                        None => false,
-                    }),
-            "a limit's field is not one word inside its snapshot"
+                    && core::mem::align_of::<S>() == core::mem::align_of::<usize>()
+                    && L::WORD < core::mem::size_of::<S>() / core::mem::size_of::<usize>()),
+            "a limit's word is not inside its snapshot"
         );
         Self {
             row: LimitRow {
@@ -817,7 +853,7 @@ impl<S> LimitEntry<S> {
                 read_from_snapshot: L::READ_FROM_SNAPSHOT,
                 capacity: L::CAPACITY,
                 domain: L::DOMAIN,
-                at: L::AT,
+                word: L::WORD,
             },
             snapshot: PhantomData,
         }
@@ -865,48 +901,68 @@ impl<S> LimitEntry<S> {
         if !self.row.read_from_snapshot {
             return None;
         }
-        // SAFETY: the entry was made by `Self::of` from a `LimitField<S>`, whose `AT` is the
-        // offset of the limit's word in `S`, and `snapshot` is borrowed for the write.
+        // SAFETY: the entry was made by `Self::of` from a `LimitField<S>`, whose `WORD` is the
+        // index of the limit's word in `S`, and `snapshot` is borrowed for the write.
         Some(unsafe {
             self.row
-                .select_at(ptr::from_mut(snapshot).cast::<u8>(), value)
+                .select_at(ptr::from_mut(snapshot).cast::<usize>(), value)
         })
     }
 
     /// The value `snapshot` holds.
     pub fn value_in(&self, snapshot: &S) -> LimitValue {
         // SAFETY: as in `Self::select`, for a read.
-        unsafe { self.row.value_at(ptr::from_ref(snapshot).cast::<u8>()) }
+        unsafe { self.row.value_at(ptr::from_ref(snapshot).cast::<usize>()) }
+    }
+
+    /// `snapshot` as its `Debug` shows it: `name`, and each limit of `entries` by its id with the
+    /// value `snapshot` holds. The generated snapshots' `Debug`, whose words name no limit.
+    pub(crate) fn fmt_snapshot(
+        entries: &[Self],
+        name: &str,
+        snapshot: &S,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        let mut out = f.debug_struct(name);
+        for entry in entries {
+            out.field(entry.id(), &entry.value_in(snapshot));
+        }
+        out.finish()
     }
 }
 
 impl LimitRow {
-    /// Selects `value` in the snapshot at `base`; a refusal writes nothing.
+    /// Selects `value` in the snapshot whose words start at `base`; a refusal writes nothing.
     ///
     /// # Safety
     ///
-    /// `base` points at a snapshot, writable, whose field at `self.at` keeps the limit's word.
-    unsafe fn select_at(&self, base: *mut u8, value: LimitValue) -> Result<(), OutsideLimitDomain> {
+    /// `base` points at a snapshot's words, writable, whose word `self.word` keeps the limit's
+    /// value.
+    unsafe fn select_at(
+        &self,
+        base: *mut usize,
+        value: LimitValue,
+    ) -> Result<(), OutsideLimitDomain> {
         let word = self.admit(value)?;
         if !self.domain.is_singleton() {
             // SAFETY: the caller's contract.
-            unsafe { base.add(self.at).cast::<usize>().write(word) };
+            unsafe { base.add(self.word).write(word) };
         }
         Ok(())
     }
 
-    /// The value the snapshot at `base` holds: the domain's one value where it is one, else the
-    /// word its field keeps, read as the limit's kind.
+    /// The value the snapshot whose words start at `base` holds: the domain's one value where it
+    /// is one, else the word the limit keeps, read as the limit's kind.
     ///
     /// # Safety
     ///
-    /// `base` points at a snapshot whose field at `self.at` keeps the limit's word.
-    unsafe fn value_at(&self, base: *const u8) -> LimitValue {
+    /// `base` points at a snapshot's words, whose word `self.word` keeps the limit's value.
+    unsafe fn value_at(&self, base: *const usize) -> LimitValue {
         if self.domain.is_singleton() {
             return self.domain.only();
         }
         // SAFETY: the caller's contract.
-        let word = unsafe { base.add(self.at).cast::<usize>().read() };
+        let word = unsafe { base.add(self.word).read() };
         match self.kind {
             LimitKind::Bound => Quota(word).as_value(),
             LimitKind::Parameter => LimitValue::Integer(word),
@@ -1019,49 +1075,158 @@ mod tests {
         const DEFAULT: usize = 4;
     }
 
+    /// A snapshot laid out as the generated ones are: one word for each limit whose domain is more
+    /// than one value, in the order of its limits.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[repr(transparent)]
     struct Snapshot {
-        open: Limited<Open, { Open::HELD }>,
-        sized: Limited<Sized8, { Sized8::HELD }>,
-        read: Limited<Read8, { Read8::HELD }>,
-        range: Limited<Range64, { Range64::HELD }>,
-        pinned: Limited<Pinned4, { Pinned4::HELD }>,
+        words: [usize; SNAPSHOT_WORDS],
     }
+
+    const SNAPSHOT_WORDS: usize = word_after::<Pinned4, Snapshot>();
+
+    static SNAPSHOT_LIMITS: [LimitEntry<Snapshot>; 5] = [
+        LimitEntry::of::<Open>(),
+        LimitEntry::of::<Sized8>(),
+        LimitEntry::of::<Read8>(),
+        LimitEntry::of::<Range64>(),
+        LimitEntry::of::<Pinned4>(),
+    ];
 
     impl Snapshot {
         fn build() -> Self {
-            Self {
-                open: Limited::default(),
-                sized: Limited::default(),
-                read: Limited::default(),
-                range: Limited::default(),
-                pinned: Limited::default(),
-            }
+            let mut snapshot = Self {
+                words: [0; SNAPSHOT_WORDS],
+            };
+            snapshot.keep(&Limited::<Open, { Open::HELD }>::build_default());
+            snapshot.keep(&Limited::<Sized8, { Sized8::HELD }>::build_default());
+            snapshot.keep(&Limited::<Read8, { Read8::HELD }>::build_default());
+            snapshot.keep(&Limited::<Range64, { Range64::HELD }>::build_default());
+            snapshot.keep(&Limited::<Pinned4, { Pinned4::HELD }>::build_default());
+            snapshot
+        }
+
+        fn limit<L: LimitField<Self>, const HELD: usize>(&self) -> Limited<L, HELD> {
+            Limited::in_words(&self.words, L::WORD)
+        }
+
+        fn keep<L: LimitField<Self>, const HELD: usize>(&mut self, held: &Limited<L, HELD>) {
+            held.keep_in(&mut self.words, L::WORD);
+        }
+
+        fn open(&self) -> Quota {
+            self.limit::<Open, { Open::HELD }>().get()
+        }
+
+        fn sized(&self) -> Quota {
+            self.limit::<Sized8, { Sized8::HELD }>().get()
+        }
+
+        fn read(&self) -> Quota {
+            self.limit::<Read8, { Read8::HELD }>().get()
+        }
+
+        fn range(&self) -> usize {
+            self.limit::<Range64, { Range64::HELD }>().get()
+        }
+
+        fn pinned(&self) -> usize {
+            self.limit::<Pinned4, { Pinned4::HELD }>().get()
         }
     }
 
-    // SAFETY: each `AT` is the offset of the field of `Snapshot` that holds the limit.
+    impl fmt::Debug for Snapshot {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            LimitEntry::fmt_snapshot(&SNAPSHOT_LIMITS, "Snapshot", self, f)
+        }
+    }
+
+    // SAFETY: `Snapshot` is transparent over its words, and each `WORD` follows the words of the
+    // limits before it, inside `SNAPSHOT_WORDS`.
     unsafe impl LimitField<Snapshot> for Open {
-        const AT: usize = core::mem::offset_of!(Snapshot, open);
+        const WORD: usize = 0;
     }
 
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Sized8 {
-        const AT: usize = core::mem::offset_of!(Snapshot, sized);
+        const WORD: usize = word_after::<Open, Snapshot>();
     }
 
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Read8 {
-        const AT: usize = core::mem::offset_of!(Snapshot, read);
+        const WORD: usize = word_after::<Sized8, Snapshot>();
     }
 
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Range64 {
-        const AT: usize = core::mem::offset_of!(Snapshot, range);
+        const WORD: usize = word_after::<Read8, Snapshot>();
     }
 
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Pinned4 {
-        const AT: usize = core::mem::offset_of!(Snapshot, pinned);
+        const WORD: usize = word_after::<Range64, Snapshot>();
+    }
+
+    /// A limit whose domain is more than one value keeps one word, after the limits before it,
+    /// and one of one value keeps none, so the snapshot is its words and no padding. Turned red by
+    /// a word kept for a limit of one value, or two limits that share a word.
+    #[test]
+    fn a_snapshot_keeps_one_word_for_each_limit_left_open_and_none_for_one_value() {
+        assert_eq!(
+            [
+                <Open as LimitField<Snapshot>>::WORD,
+                <Sized8 as LimitField<Snapshot>>::WORD,
+                <Read8 as LimitField<Snapshot>>::WORD,
+                <Range64 as LimitField<Snapshot>>::WORD,
+            ],
+            [0, 1, 2, 3]
+        );
+        assert_eq!(SNAPSHOT_WORDS, 4, "the pinned limit keeps no word");
+        assert_eq!(
+            core::mem::size_of::<Snapshot>(),
+            4 * core::mem::size_of::<usize>()
+        );
+        let mut snapshot = Snapshot::build();
+        assert_eq!(snapshot.words, [usize::MAX, 8, 8, 4], "the build's values");
+        snapshot.keep(&Limited::<Range64, { Range64::HELD }>::select(9).expect("inside"));
+        assert_eq!(snapshot.words, [usize::MAX, 8, 8, 9]);
+        snapshot.keep(&Limited::<Pinned4, { Pinned4::HELD }>::build_default());
+        assert_eq!(
+            snapshot.words,
+            [usize::MAX, 8, 8, 9],
+            "one value keeps nothing"
+        );
+        assert_eq!(snapshot.range(), 9);
+        assert_eq!(snapshot.pinned(), 4);
+    }
+
+    /// Two snapshots are equal where every limit holds the same value: the words compare as one
+    /// slice. Turned red by a comparison that misses a word.
+    #[test]
+    fn two_snapshots_are_equal_where_every_limit_holds_the_same_value() {
+        let build = Snapshot::build();
+        let mut other = build;
+        assert_eq!(other, build);
+        other.keep(&Limited::<Open, { Open::HELD }>::select(Quota::at_most(3)).expect("inside"));
+        assert_ne!(other, build, "the first word");
+        other = build;
+        other.keep(&Limited::<Range64, { Range64::HELD }>::select(5).expect("inside"));
+        assert_ne!(other, build, "the last word");
+        other.keep(&Limited::<Range64, { Range64::HELD }>::select(4).expect("inside"));
+        assert_eq!(other, build, "the same values again");
+    }
+
+    /// A snapshot's `Debug` names each limit by its id with the value it holds, as its words do
+    /// not. Turned red by a `Debug` that shows the words.
+    #[test]
+    fn a_snapshot_shows_each_limit_by_its_id() {
+        let mut snapshot = Snapshot::build();
+        snapshot.keep(&Limited::<Open, { Open::HELD }>::select(Quota::at_most(5)).expect("in"));
+        assert_eq!(
+            std::format!("{snapshot:?}"),
+            "Snapshot { TEST_OPEN: Integer(5), TEST_SIZED: Integer(8), TEST_READ: Integer(8), \
+             TEST_RANGE: Integer(4), TEST_PINNED: Integer(4) }"
+        );
     }
 
     /// A preset is taken where the build's domain holds it, and the build's value kept where the
@@ -1306,13 +1471,13 @@ mod tests {
         assert_eq!(refused.why, Outside::UnboundedOverCapacity { capacity: 8 });
         // A refusal leaves the snapshot as it was.
         assert_eq!(read.value_in(&snapshot), LimitValue::Integer(8));
-        assert_eq!(snapshot.read.get(), Quota::at_most(8));
+        assert_eq!(snapshot.read(), Quota::at_most(8));
         assert_eq!(sized.value_in(&snapshot), LimitValue::Integer(8));
     }
 
-    /// An entry writes the field of its own limit and no other: the one selection reaches each
-    /// field by the offset its `LimitField` states. Turned red by a write that ignores the offset,
-    /// or a read of a field that is not the limit's.
+    /// An entry writes the word of its own limit and no other: the one selection reaches each
+    /// word by the index its `LimitField` states. Turned red by a write that ignores the index,
+    /// or a read of a word that is not the limit's.
     #[test]
     fn an_entry_writes_its_own_field_and_no_other() {
         let mut snapshot = Snapshot::build();
@@ -1337,11 +1502,11 @@ mod tests {
             &mut snapshot,
             LimitValue::Integer(3),
         );
-        assert_eq!(snapshot.open.get(), Quota::at_most(12));
-        assert_eq!(snapshot.range.get(), 9);
-        assert_eq!(snapshot.read.get(), Quota::at_most(3));
-        assert_eq!(snapshot.sized.get(), Quota::at_most(8), "not selected");
-        assert_eq!(snapshot.pinned.get(), 4, "one value");
+        assert_eq!(snapshot.open(), Quota::at_most(12));
+        assert_eq!(snapshot.range(), 9);
+        assert_eq!(snapshot.read(), Quota::at_most(3));
+        assert_eq!(snapshot.sized(), Quota::at_most(8), "not selected");
+        assert_eq!(snapshot.pinned(), 4, "one value");
         let range = LimitEntry::<Snapshot>::of::<Range64>();
         assert_eq!(range.value_in(&snapshot), LimitValue::Integer(9));
         assert_eq!(range.kind(), LimitKind::Parameter);
@@ -1374,7 +1539,7 @@ mod tests {
                 why: Outside::Below { least: 1 },
             }))
         );
-        assert_eq!(snapshot.range.get(), 4, "refused, so the build's");
+        assert_eq!(snapshot.range(), 4, "refused, so the build's");
         let pinned = LimitEntry::<Snapshot>::of::<Pinned4>();
         assert_eq!(
             pinned
@@ -1418,13 +1583,13 @@ mod tests {
             .expect("a limit read from the snapshot has a selector")
             .expect("no bound, which a build with no capacity allows");
         assert_eq!(open.value_in(&snapshot), LimitValue::Unbounded);
-        assert_eq!(snapshot.open.get(), Quota::UNBOUNDED);
+        assert_eq!(snapshot.open(), Quota::UNBOUNDED);
     }
 
-    /// A limit whose `LimitField` states an offset past its snapshot is refused when its entry is
-    /// made, before anything is read or written there. Turned red by an entry made of any offset.
+    /// A limit whose `LimitField` states a word past its snapshot is refused when its entry is
+    /// made, before anything is read or written there. Turned red by an entry made of any word.
     #[test]
-    #[should_panic(expected = "a limit's field is not one word inside its snapshot")]
+    #[should_panic(expected = "a limit's word is not inside its snapshot")]
     fn an_offset_outside_the_snapshot_is_refused() {
         struct Past;
 
@@ -1438,9 +1603,9 @@ mod tests {
             const DEFAULT: usize = 4;
         }
 
-        // SAFETY: deliberately not a field of `Snapshot`; the entry refuses it before any access.
+        // SAFETY: deliberately not a word of `Snapshot`; the entry refuses it before any access.
         unsafe impl LimitField<Snapshot> for Past {
-            const AT: usize = core::mem::size_of::<Snapshot>();
+            const WORD: usize = SNAPSHOT_WORDS;
         }
 
         let _ = LimitEntry::<Snapshot>::of::<Past>();

@@ -2842,13 +2842,45 @@ mod tests {
         }
     }
 
-    /// Every entry a statement reaches selects the field of its own limit and no other, and reads
-    /// back what it selected: the tables reach each field by the offset its `LimitField` states,
-    /// so an offset that named another field would move a neighbour or read another limit.
+    /// Every entry a statement reaches selects the word of its own limit and no other, and reads
+    /// back what it selected: the tables reach each word by the index its `LimitField` states,
+    /// so an index that named another word would move a neighbour or read another limit.
     #[test]
     fn each_entry_selects_its_own_field_and_no_other() {
         each_entry_moves_only_itself(&SESSION_LIMITS, SessionLimits::defaults());
         each_entry_moves_only_itself(&RUNTIME_LIMITS, RuntimeLimits::defaults());
+    }
+
+    /// A snapshot is one word for each limit whose domain is more than one value and nothing
+    /// else, so its comparison is one comparison of its words; its `Debug` names each limit by its
+    /// id. Turned red by a word kept for a limit of one value, or a `Debug` that shows the words.
+    #[test]
+    fn a_snapshot_is_a_word_for_each_limit_left_open_and_shows_each_by_its_id() {
+        fn words<S>(table: &[LimitEntry<S>]) -> usize {
+            let open = table.iter().filter(|entry| !entry.domain().is_singleton());
+            open.count() * core::mem::size_of::<usize>()
+        }
+        assert_eq!(
+            core::mem::size_of::<SessionLimits>(),
+            words(&SESSION_LIMITS)
+        );
+        assert_eq!(
+            core::mem::size_of::<RuntimeLimits>(),
+            words(&RUNTIME_LIMITS)
+        );
+        let shown = std::format!("{:?}", SessionLimits::defaults());
+        let first = SESSION_LIMITS[0];
+        assert!(
+            shown.starts_with(&std::format!(
+                "SessionLimits {{ {}: {:?}",
+                first.id(),
+                first.value_in(&SessionLimits::defaults())
+            )),
+            "{shown}"
+        );
+        for entry in &SESSION_LIMITS {
+            assert!(shown.contains(entry.id()), "{} is not shown", entry.id());
+        }
     }
 
     fn each_entry_moves_only_itself<S: Copy + PartialEq + core::fmt::Debug>(

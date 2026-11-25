@@ -44,7 +44,7 @@
 //! bytes that decode as garbage on a real peer, so the wire shape is pinned
 //! against `libzenohpico.so` rather than against this crate's own reader.
 
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{c_char, c_void};
 
 use crate::abi::{
     impl_handle_ownership7, z_loaned_bytes_t, z_moved_bytes_t, z_owned_bytes_t, z_owned_slice_t,
@@ -438,11 +438,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_str(
 /// # Safety
 /// `val` must be null or a valid NUL-terminated string.
 unsafe fn str_run(val: *const c_char) -> (*const u8, usize) {
-    if val.is_null() {
-        return (core::ptr::null(), 0);
-    }
-    let bytes = CStr::from_ptr(val).to_bytes();
-    (bytes.as_ptr(), bytes.len())
+    (val.cast::<u8>(), crate::abi::c_str_len(val))
 }
 
 /// Write a length-prefixed owned string (pico `ze_serializer_serialize_string`).

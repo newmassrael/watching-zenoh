@@ -593,11 +593,7 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_str(
     encoding: *mut z_loaned_encoding_t,
     schema: *const c_char,
 ) -> ZResult {
-    let len = if schema.is_null() {
-        0
-    } else {
-        CStr::from_ptr(schema).to_bytes().len()
-    };
+    let len = crate::abi::c_str_len(schema);
     z_encoding_set_schema_from_substr(encoding, schema, len)
 }
 
