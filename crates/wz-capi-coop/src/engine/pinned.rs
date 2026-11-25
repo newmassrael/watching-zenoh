@@ -179,7 +179,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ) -> usize {
         let mut next = tables(&held.0.session.registry).pin_next_subscriber(fan);
         drop(held);
-        let mut reached = 0;
+        let mut reached: usize = 0;
         // A read a callback makes reads nothing, so no record is handed out inside another's call.
         self.deliveries.within(|_| {
             while let Some(call) = next.take() {
