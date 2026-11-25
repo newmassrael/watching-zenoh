@@ -66,34 +66,44 @@ impl<T> Drop for Placed<T> {
 }
 
 /// A handle of a [`Placed`] value: a shared borrow whose lifetime is its owner's, which the
-/// maker of the handle answers for ([`Placed::share`]).
-pub struct PlacedRef<T> {
+/// maker of the handle answers for ([`Placed::share`]). Of a part of the value, or of the value
+/// as a trait it implements, too ([`Self::map`]).
+pub struct PlacedRef<T: ?Sized> {
     at: NonNull<T>,
 }
 
 // SAFETY: a handle hands out only `&T`, as a `&T` sent or shared would.
-unsafe impl<T: Sync> Send for PlacedRef<T> {}
+unsafe impl<T: Sync + ?Sized> Send for PlacedRef<T> {}
 // SAFETY: as `Send`.
-unsafe impl<T: Sync> Sync for PlacedRef<T> {}
+unsafe impl<T: Sync + ?Sized> Sync for PlacedRef<T> {}
 
-impl<T> PlacedRef<T> {
+impl<T: ?Sized> PlacedRef<T> {
     /// A handle of a value that stands for the rest of the program, which no owner drops.
     pub fn of_static(value: &'static T) -> Self {
         Self {
             at: NonNull::from(value),
         }
     }
+
+    /// A handle of what `part` borrows of the value: a field of it, or the value as a trait it
+    /// implements. What `part` answers lies in the value or lives longer, as its signature binds
+    /// it, so the handle is good for as long as this one is.
+    pub fn map<U: ?Sized>(self, part: impl FnOnce(&T) -> &U) -> PlacedRef<U> {
+        PlacedRef {
+            at: NonNull::from(part(&*self)),
+        }
+    }
 }
 
-impl<T> Clone for PlacedRef<T> {
+impl<T: ?Sized> Clone for PlacedRef<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> Copy for PlacedRef<T> {}
+impl<T: ?Sized> Copy for PlacedRef<T> {}
 
-impl<T> Deref for PlacedRef<T> {
+impl<T: ?Sized> Deref for PlacedRef<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -196,5 +206,62 @@ mod tests {
         let handle = PlacedRef::of_static(&VALUE);
         assert_eq!(*handle, 7);
         assert!(core::ptr::eq(&*handle, &VALUE));
+    }
+
+    /// Says a number, as the trait a handle is mapped to reads it.
+    trait Numbered {
+        fn number(&self) -> u32;
+    }
+
+    /// Two numbers, the second of which the trait says.
+    struct Numbers {
+        first: u32,
+        second: u32,
+    }
+
+    impl Numbered for Numbers {
+        fn number(&self) -> u32 {
+            self.second
+        }
+    }
+
+    fn as_numbered(value: &Numbers) -> &(dyn Numbered + 'static) {
+        value
+    }
+
+    /// A handle mapped to a part of the value, or to the value as a trait it implements, reads the
+    /// value where its owner holds it. Turned red by a map that reads a copy of the part, or
+    /// answers a handle of anything but the part.
+    #[test]
+    fn a_mapped_handle_reads_the_part_where_the_owner_holds_it() {
+        let mut memory = [Block {
+            _bytes: [0; ARENA_ALIGN],
+        }; 2];
+        let bytes = core::mem::size_of_val(&memory);
+        // SAFETY: the blocks are aligned to `ARENA_ALIGN`, hold `bytes` bytes and outlive the
+        // arena and the value placed in it, which nothing else uses.
+        let mut arena = unsafe { Arena::over(NonNull::from(&mut memory).cast::<u8>(), bytes) };
+        let placed = arena
+            .place(Numbers {
+                first: 3,
+                second: 9,
+            })
+            .unwrap();
+        // SAFETY: the handles are used only while `placed` lives, and nothing changes it then.
+        let handle = unsafe { placed.share() };
+        let first = handle.map(|value| &value.first);
+        let numbered: PlacedRef<dyn Numbered> = handle.map(as_numbered);
+        assert_eq!((*first, numbered.number()), (3, 9));
+        assert!(
+            core::ptr::eq(&*first, &placed.first),
+            "the part is read where the owner holds it"
+        );
+        assert!(
+            core::ptr::eq(
+                core::ptr::from_ref::<dyn Numbered>(&*numbered).cast::<u8>(),
+                core::ptr::from_ref::<Numbers>(&*placed).cast::<u8>()
+            ),
+            "the value as a trait is the value where it lies"
+        );
     }
 }

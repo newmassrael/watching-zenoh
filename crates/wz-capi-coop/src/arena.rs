@@ -300,6 +300,7 @@ pub enum ArenaPart {
     QueryPlaneState,
     GetPlaneState,
     FacePlaneState,
+    LinkAdmissionState,
 }
 
 impl ArenaPart {
@@ -443,6 +444,7 @@ impl ArenaPart {
             Self::QueryPlaneState => ("query plane", ""),
             Self::GetPlaneState => ("get plane", ""),
             Self::FacePlaneState => ("face plane", ""),
+            Self::LinkAdmissionState => ("link admission", ""),
         }
     }
 }
@@ -542,7 +544,8 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + FINAL_ROWS
     + RUNTIME_ROWS
     + ENGINE_STATE_ROWS
-    + PLANE_ROWS;
+    + PLANE_ROWS
+    + ADMISSION_ROWS;
 
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
@@ -559,6 +562,9 @@ const ENGINE_STATE_ROWS: usize = 1;
 const PLANE_ROWS: usize = cfg!(feature = "queryable") as usize
     + cfg!(feature = "query") as usize
     + cfg!(feature = "connectivity") as usize;
+/// The admission the links of a session that listens ask while their handshakes run
+/// (`ArenaPlan::holding_admission`).
+const ADMISSION_ROWS: usize = cfg!(feature = "listen") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -2313,6 +2319,15 @@ impl ArenaPlan {
         #[cfg(feature = "connectivity")]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
         let _ = planes;
+        self.settled()
+    }
+
+    /// Lay out the place of `bytes` the admission of a session that listens lies in, which the
+    /// session's state owns and its links' leases reach by handles that count nothing. Laid out
+    /// once, at the open. The plan is laid out where it lies; a refused one is no plan to open by.
+    #[cfg(feature = "listen")]
+    pub(crate) fn holding_admission(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
+        self.put(ArenaPart::LinkAdmissionState, 1, bytes);
         self.settled()
     }
 

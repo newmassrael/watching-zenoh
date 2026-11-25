@@ -140,13 +140,15 @@ pub trait LinkAdmission: Send + Sync {
 
 /// A link's place in a node's [`LinkAdmission`], released when the link's session is dropped.
 ///
-/// A node shares its admission among the links it holds as an `alloc::sync::Arc`, which a target
-/// without atomics (ARMv6-M) has no type for: such a target holds at most the link its single
-/// task drives, has no second link to admit, and has no lease either. An `Rc` is not the
-/// answer: the session a link belongs to is `Send`, and a lease inside it must be too.
+/// A node whose loops outlive one another shares its admission among the links it holds as an
+/// `alloc::sync::Arc`, which a target without atomics (ARMv6-M) has no type for: such a target
+/// holds at most the link its single task drives, has no second link to admit, and has no lease
+/// either. An `Rc` is not the answer: the session a link belongs to is `Send`, and a lease inside
+/// it must be too. A session that owns its admission and outlives every link of it lends it
+/// instead ([`Self::placed`]).
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub struct LinkLease {
-    authority: alloc::sync::Arc<dyn LinkAdmission>,
+    authority: Authority,
     token: u64,
     /// The node the authority was last asked about, whatever it answered: what a link that was
     /// refused can still say of the node it was refused for. Held in place, so that asking takes
@@ -154,11 +156,40 @@ pub struct LinkLease {
     node: Option<crate::session_zid::SessionZid>,
 }
 
+/// Who answers a [`LinkLease`]: an admission the node's loops share by count, or one a session
+/// owns where its arena lent it, which the session drops after every link of it.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+enum Authority {
+    Shared(alloc::sync::Arc<dyn LinkAdmission>),
+    Placed(crate::placed::PlacedRef<dyn LinkAdmission>),
+}
+
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+impl Authority {
+    fn admission(&self) -> &dyn LinkAdmission {
+        match self {
+            Self::Shared(shared) => &**shared,
+            Self::Placed(placed) => &**placed,
+        }
+    }
+}
+
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl LinkLease {
     /// The lease of a link `dialled` (or not), opened with `authority`.
     pub fn new(authority: alloc::sync::Arc<dyn LinkAdmission>, dialled: bool) -> Self {
-        let token = authority.open(dialled);
+        Self::opened(Authority::Shared(authority), dialled)
+    }
+
+    /// The lease of a link `dialled` (or not), opened with the admission `authority` is a handle
+    /// of: its owner is dropped after the lease, as the handle's maker answered for
+    /// ([`crate::placed::Placed::share`]), since the lease's drop asks it.
+    pub fn placed(authority: crate::placed::PlacedRef<dyn LinkAdmission>, dialled: bool) -> Self {
+        Self::opened(Authority::Placed(authority), dialled)
+    }
+
+    fn opened(authority: Authority, dialled: bool) -> Self {
+        let token = authority.admission().open(dialled);
         Self {
             authority,
             token,
@@ -172,7 +203,7 @@ impl LinkLease {
     pub fn reserve(&mut self, remote_zid: Option<&crate::session_zid::SessionZid>) -> bool {
         self.node = remote_zid.copied();
         let bytes = remote_zid.map_or(&[][..], crate::session_zid::SessionZid::as_slice);
-        self.authority.reserve(self.token, bytes)
+        self.authority.admission().reserve(self.token, bytes)
     }
 
     /// The node the authority was last asked about ([`Self::reserve`]), or `None` before it was
@@ -183,20 +214,20 @@ impl LinkLease {
 
     /// See [`LinkAdmission::confirm`].
     pub fn confirm(&self) -> bool {
-        self.authority.confirm(self.token)
+        self.authority.admission().confirm(self.token)
     }
 
     /// See [`LinkAdmission::release`]. Called by the node when the link's face leaves, and by the
     /// drop of the lease when the session goes.
     pub fn release(&self) {
-        self.authority.release(self.token);
+        self.authority.admission().release(self.token);
     }
 }
 
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl Drop for LinkLease {
     fn drop(&mut self) {
-        self.authority.release(self.token);
+        self.release();
     }
 }
 
@@ -954,6 +985,67 @@ mod book_tests {
         assert_eq!(lease.node(), Some(high));
         assert!(!lease.reserve(None));
         assert_eq!(lease.node(), None, "a question naming no zid names no node");
+    }
+
+    /// An admission that admits every link and counts what it is asked.
+    #[cfg(target_has_atomic = "ptr")]
+    struct Counting {
+        opened: core::sync::atomic::AtomicUsize,
+        released: core::sync::atomic::AtomicUsize,
+    }
+
+    /// The token [`Counting`] hands every link.
+    #[cfg(target_has_atomic = "ptr")]
+    const COUNTED_TOKEN: u64 = 7;
+
+    #[cfg(target_has_atomic = "ptr")]
+    impl LinkAdmission for Counting {
+        fn open(&self, _dialled: bool) -> u64 {
+            self.opened
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            COUNTED_TOKEN
+        }
+
+        fn reserve(&self, _token: u64, _remote_zid: &[u8]) -> bool {
+            true
+        }
+
+        fn confirm(&self, _token: u64) -> bool {
+            true
+        }
+
+        fn release(&self, token: u64) {
+            if token == COUNTED_TOKEN {
+                self.released
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// A lease over an admission it borrows asks that admission, and gives its token back to it
+    /// when it is dropped, as a lease over a shared one does. Turned red by a borrowed lease that
+    /// asks another admission, or whose drop releases nothing.
+    #[cfg(target_has_atomic = "ptr")]
+    #[test]
+    fn a_lease_over_a_borrowed_admission_asks_it_and_releases_its_token_when_dropped() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        static COUNTING: Counting = Counting {
+            opened: AtomicUsize::new(0),
+            released: AtomicUsize::new(0),
+        };
+        let authority = crate::placed::PlacedRef::<dyn LinkAdmission>::of_static(&COUNTING);
+        let mut lease = LinkLease::placed(authority, false);
+        assert_eq!(COUNTING.opened.load(Ordering::Relaxed), 1, "opened once");
+        assert!(lease.reserve(None));
+        assert!(lease.confirm());
+        assert_eq!(COUNTING.released.load(Ordering::Relaxed), 0);
+        drop(lease);
+        assert_eq!(
+            COUNTING.released.load(Ordering::Relaxed),
+            1,
+            "the drop gave back the token the admission handed out"
+        );
     }
 
     /// A step of the two links' handshakes: link 0 is dialled by A and accepted by B, link 1 is

@@ -216,6 +216,16 @@ impl<C: ClockSource> CoopLocalSet<C> {
         }
     }
 
+    /// Drop, where it lies, every task of this set that has not ended, whatever handles of the
+    /// set are still held, one of its own tasks among them; a handle that waits for one reads
+    /// `JoinCancelled`, and the set takes tasks again after. What an owner whose tasks borrow
+    /// what it owns calls before it lets go of that: the last handle's drop does the same, but a
+    /// handle a task keeps is never the last.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn drop_tasks(&self) {
+        self.runtime.inner.executor.drop_tasks_of(self.owner.set);
+    }
+
     /// The number this set's tasks are marked with.
     fn set(&self) -> u32 {
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -381,5 +391,50 @@ mod tests {
         assert!(task.is_finished(), "the clone's pass ran it");
         assert_eq!(local.live_local_task_count(), 0);
         assert_eq!(local.block_on_local(task).expect("not cancelled"), 7);
+    }
+
+    /// Marks its drop in the flag it names.
+    struct Dropped(alloc::rc::Rc<core::cell::Cell<bool>>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    /// A set told to drop its tasks drops one that holds a handle of the set itself, which the
+    /// last handle's drop never reaches, and leaves another set's task alone; the set takes and
+    /// runs a task after. Turned red by a drop that waits for the set's last handle, or drops the
+    /// tasks of every set.
+    #[test]
+    fn a_set_told_to_drop_its_tasks_drops_one_that_holds_the_set() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let other = CoopLocalSet::new(&runtime);
+        let mine = alloc::rc::Rc::new(core::cell::Cell::new(false));
+        let theirs = alloc::rc::Rc::new(core::cell::Cell::new(false));
+        let kept = local.clone();
+        let guard = Dropped(mine.clone());
+        let task = local.spawn_local(async move {
+            let _kept = kept;
+            let _guard = guard;
+            core::future::pending::<()>().await;
+        });
+        let guard = Dropped(theirs.clone());
+        let _other_task = other.spawn_local(async move {
+            let _guard = guard;
+            core::future::pending::<()>().await;
+        });
+        local.run_until_idle();
+        assert!(
+            !mine.get(),
+            "CONTROL: a pending task stays while it is not dropped"
+        );
+        local.drop_tasks();
+        assert!(mine.get(), "the task that held its own set is dropped");
+        assert!(!theirs.get(), "another set's task stays");
+        assert!(task.is_finished(), "its handle reads the drop");
+        let after = local.spawn_local(async { 3u8 });
+        assert_eq!(local.block_on_local(after).expect("not cancelled"), 3);
     }
 }

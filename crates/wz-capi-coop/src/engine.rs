@@ -137,7 +137,7 @@ use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 #[cfg(feature = "listen")]
-use wz_session_core::link_admission::LinkRegistry;
+use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
 
 use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
@@ -1892,6 +1892,12 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// every holder of a handle of them (the transport, the tasks, `registry_lend`). Held for its
     /// owner's drop alone: the session reaches the places through those handles.
     _steps: StepPlaces,
+    /// The admission the session's links ask while their handshakes run, which each link's lease
+    /// and the transport reach by handles that count nothing: after the transport, the state and
+    /// the tasks, which hold every lease, and before the arena it lies in. Held for its owner's
+    /// drop alone.
+    #[cfg(feature = "listen")]
+    admission: Placed<Admission<C>>,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -2807,6 +2813,23 @@ pub(crate) struct OpenHolds<'h> {
     pub(crate) engine: usize,
     /// The places of the planes the session's state owns.
     pub(crate) planes: SessionPlanes,
+    /// The place of the admission the links of a session that listens ask ([`Admission`]).
+    #[cfg(feature = "listen")]
+    pub(crate) admission: usize,
+}
+
+/// The admission the links of a session over the clock `C` ask while their handshakes run: owned
+/// by the session's state where its arena lent it, and reached by each link's lease through a
+/// handle that counts nothing.
+#[cfg(feature = "listen")]
+pub(crate) type Admission<C> = LinkRegistry<CoopRuntime<C>>;
+
+/// The admission as its links' leases ask it.
+#[cfg(feature = "listen")]
+fn as_link_admission<C: ClockSource + 'static>(
+    admission: &Admission<C>,
+) -> &(dyn LinkAdmission + 'static) {
+    admission
 }
 
 /// The bytes of the place of each plane a session's state owns, which its tasks and its engine
@@ -2851,7 +2874,10 @@ pub(crate) fn lay_out_open(
     plan.holding(holds.held)?;
     plan.holding_runtime(holds.runtime)?;
     plan.holding_engine(holds.engine)?;
-    plan.holding_planes(holds.planes)
+    plan.holding_planes(holds.planes)?;
+    #[cfg(feature = "listen")]
+    plan.holding_admission(holds.admission)?;
+    Ok(())
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
@@ -4304,6 +4330,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             runtime: runtime_bytes,
             engine: Shared::<Self>::layout().size(),
             planes: SessionPlanes::OF_BUILD,
+            #[cfg(feature = "listen")]
+            admission: core::mem::size_of::<Admission<C>>(),
         };
         let mut lent =
             lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
@@ -4361,6 +4389,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 config.groups.len(),
             )))
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        // A row for each link the plan holds buffers for, reserved here: a link the session takes
+        // after its open is admitted in place. The admission lies in the row the plan laid out for
+        // it (`ArenaPlan::holding_admission`).
+        #[cfg(feature = "listen")]
+        let admission = lent
+            .arena
+            .arena_mut()
+            .place(Admission::<C>::with_order(
+                &wire,
+                policy.link_tie_order(),
+                lent.links,
+            ))
+            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        // SAFETY: the handle is held by the transport and by each link's lease, in the link's
+        // actions, which the faces, the tasks and the transport hold: the engine's drop drops the
+        // session's tasks before `Core` (`CoopLocalSet::drop_tasks`), and `Core` drops its
+        // transport and its state before the owner, a field after theirs. Nothing changes the
+        // admission through its owner.
+        #[cfg(feature = "listen")]
+        let link_admission = unsafe { admission.share() }.map(as_link_admission::<C>);
         // The faces' links keep the places the registry lends their tables at: one table of them.
         let places = lent.registry.places();
         // A place for each face the registry lent a set for, each face with its dial, and the waits
@@ -4399,13 +4447,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(feature = "group")]
                 groups: Vec::new(),
                 #[cfg(feature = "listen")]
-                // A row for each link the plan holds buffers for, reserved here: a link the
-                // session takes after its open is admitted in place.
-                admission: Arc::new(LinkRegistry::<CoopRuntime<C>>::with_order(
-                    &wire,
-                    policy.link_tie_order(),
-                    lent.links,
-                )),
+                admission: link_admission,
                 wire_zid: wire,
                 gate_cells: lent.transport.cells.gate,
                 actions_cells: lent.transport.cells.actions,
@@ -4463,6 +4505,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             session_time,
             places: lent.places,
             _steps: lent.steps,
+            #[cfg(feature = "listen")]
+            admission,
             arena: lent.arena,
         };
         let apart = LentApart {
@@ -4677,8 +4721,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The session's say on a second link to a node, the one its links' handshakes ask, for a
     /// test that asks it as they do.
     #[cfg(all(test, feature = "listen"))]
-    pub(crate) fn link_admission(&self) -> Arc<dyn wz_session_core::link_admission::LinkAdmission> {
-        Arc::clone(&self.core.lock().0.transport.admission)
+    pub(crate) fn link_admission(&self) -> PlacedRef<dyn LinkAdmission> {
+        self.core.lock().0.transport.admission
+    }
+
+    /// The session's local set, for a test that spawns a task of the session's.
+    #[cfg(all(test, feature = "listen"))]
+    pub(crate) fn local_set(&self) -> CoopLocalSet<C> {
+        self.core.lock().0.local.clone()
     }
 
     /// How many places of `kind` the ABI holds now, and how many the session's arena lends at
@@ -8789,6 +8839,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // The held Finals' rows lie in the arena too; the round's calls were ended above.
         #[cfg(feature = "queryable")]
         self.plane.let_go();
+        // No task of the session outlives it, though a handle of its set is kept past it (by one
+        // of its own tasks, say): each goes here, before `Core`'s fields, what its tasks borrow
+        // among them, as the set's last handle would drop them.
+        self.core.dropping().local.drop_tasks();
     }
 }
 
