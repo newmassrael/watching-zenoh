@@ -2626,16 +2626,10 @@ echo "          feature-matrix / clippy / footprint / cross-compile / interop ->
 fail=0
 for pkg in "${pkgs[@]}"; do
     echo "pre-push:   cargo test -p $pkg ..."
-    # wz-capi-pico's merged test executable `it` requires `object-pool` (its Cargo.toml), and
-    # cargo leaves a target whose features a run lacks out of it without a word.
-    pkg_args=()
-    if [[ "$pkg" == wz-capi-pico ]]; then
-        pkg_args=(--features object-pool)
-    fi
     if [[ -n "${BX:-}" && -x "${BX}" ]]; then
-        pkg_run=("${BX}" --label "pre-push-$pkg" -- cargo test -p "$pkg" ${pkg_args[@]+"${pkg_args[@]}"} --quiet)
+        pkg_run=("${BX}" --label "pre-push-$pkg" -- cargo test -p "$pkg" --quiet)
     else
-        pkg_run=(cargo test -p "$pkg" ${pkg_args[@]+"${pkg_args[@]}"} --quiet)
+        pkg_run=(cargo test -p "$pkg" --quiet)
     fi
     _pkg_rc=0
     (cd crates && "${pkg_run[@]}") || _pkg_rc=$?

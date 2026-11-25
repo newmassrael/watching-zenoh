@@ -373,27 +373,44 @@ multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,mul
 unstable-api,connectivity,config-policy,conformance-digest,device-requires,admin-space,\
 transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
 transport-link-ws|"
+    # The merged test executable `it` requires the pools' door (`object-pool`), its harness
+    # reserving through it the share of the programs it runs in one process (the crate's
+    # `Cargo.toml`), so a whole-crate leg leaves it out and tests the library in the form that
+    # ships. These legs run it whole with the door, on each engine, the tokio one over the list of
+    # the row above; a leg that names a file of it names the door too.
+    "wz-capi-pico|hook|object-pool|--test-target=it"
+    "wz-capi-pico|hook|-default,std,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,config-policy,conformance-digest,device-requires,admin-space,\
+transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
+transport-link-ws,object-pool|--test-target=it"
+    # The files of `it` that only a whole-crate or a module-name leg of their feature reached
+    # before the target required the door: each by name, with it.
+    "wz-capi-pico|hook|resource-snapshot,peer,query,admin-space,object-pool|--test=admin_space_roundtrip"
+    "wz-capi-pico|hook|e2e-supervision,object-pool|--test=stream_supervision_doors"
+    "wz-capi-pico|hook|time-base,object-pool|--test=time_base_accept"
+    "wz-capi-pico|hook|session-memory,object-pool|--test=session_memory_door"
     # The `serial/` link on the cooperative engine, the default one: the host's ttys beside its
     # sockets, a sample across two pty pairs this process pumps into each other, and a pin pair,
     # which names no tty of a host, refused at the dial. Nothing leaves the host.
-    "wz-capi-pico|hook|transport-link-serial|files::serial_link_roundtrip::"
+    "wz-capi-pico|hook|transport-link-serial,object-pool|files::serial_link_roundtrip::"
     # The `ws/` link on the cooperative engine, the default one: WebSocket links over the host's
     # TCP beside its sockets, a sample across a loopback ws listener. Nothing leaves the host.
-    "wz-capi-pico|hook|transport-link-ws,peer|files::ws_link_roundtrip::"
+    "wz-capi-pico|hook|transport-link-ws,peer,object-pool|files::ws_link_roundtrip::"
     # The `unixpipe/` link on the cooperative engine, the default one: the host's named FIFOs
     # beside its sockets, a listen that holds its request FIFO, and a sample across the pair a
     # dial reserved and the listener confirmed. Nothing leaves the host.
-    "wz-capi-pico|hook|transport-link-unixpipe|files::unixpipe_link_roundtrip::"
-    "wz-capi-pico|hook|transport-link-unixpipe|files::unixpipe_listen_multiclient::"
+    "wz-capi-pico|hook|transport-link-unixpipe,object-pool|files::unixpipe_link_roundtrip::"
+    "wz-capi-pico|hook|transport-link-unixpipe,object-pool|files::unixpipe_listen_multiclient::"
     # pico's session-local delivery, a row of its own rather than two more features on
     # the row above: with them a session's own put reaches its own subscribers, which
     # every other test of the crate is written against pico's default build NOT doing.
     # `--test=local_delivery` covers that target by construction.
-    "wz-capi-pico|hook|local-subscriber,local-queryable|--test=local_delivery"
+    "wz-capi-pico|hook|local-subscriber,local-queryable,object-pool|--test=local_delivery"
     # Open-debt item 911 -- `z_open` with a `reth/` listen endpoint opens pico's raweth
     # transport, or fails as its raw socket does where `CAP_NET_RAW` is absent. The target is
     # compiled only with `raweth-transport` on Linux, which no other leg turns on.
-    "wz-capi-pico|hook|raweth-transport|--test=raweth_door"
+    "wz-capi-pico|hook|raweth-transport,object-pool|--test=raweth_door"
     # The clock a program registers (`wz_ext_clock_source_register` and its two siblings), which
     # the stamp of `z_timestamp_new` reads: the unit tests of the module, and the target that opens a
     # session over a registered clock (`clock_source_stamps`, which `Cargo.toml` requires the feature
@@ -422,7 +439,7 @@ transport-link-ws|"
     # over loopback (`segment_sender_doors`, whose module is behind the feature, and its loopback
     # half behind `peer` too). The doors have no unit tests of their own, so the file is the
     # feature's whole population.
-    "wz-capi-pico|hook|segment-sender,peer|--test=segment_sender_doors"
+    "wz-capi-pico|hook|segment-sender,peer,object-pool|--test=segment_sender_doors"
     # Reception supervision per stream driven from C (`wz_ext_stream_supervisor_*`): the unit
     # tests of the module and the file that drives the doors on a model clock, its task half with
     # the default `multi-thread` (`stream_supervision_doors`, whose module is behind the feature).
@@ -432,8 +449,8 @@ transport-link-ws|"
     # (`e2e_doors`, whose module needs both capabilities). With the receiver's sender slots, where
     # the slot tests run; and without them, where the file asserts that sender keying is refused
     # by name. The doors have no unit tests of their own; the mechanism's are `wz-app-frame`'s.
-    "wz-capi-pico|hook|e2e-sender,e2e-sender-demux|--test=e2e_doors"
-    "wz-capi-pico|hook|e2e-sender,e2e-receiver|--test=e2e_doors"
+    "wz-capi-pico|hook|e2e-sender,e2e-sender-demux,object-pool|--test=e2e_doors"
+    "wz-capi-pico|hook|e2e-sender,e2e-receiver,object-pool|--test=e2e_doors"
     # The replay cache driven from C (`wz_ext_replay_publisher_*`, `wz_ext_replay_subscriber_*`):
     # the unit tests of the two modules and the file that answers a late subscriber's asking over
     # loopback, two publishers appearing at different times (`replay_cache_doors`, whose module is
@@ -465,7 +482,7 @@ transport-link-ws|"
     # The same doors driven from C-shaped calls over loopback: sessions joined by the program's
     # transport (`app_transport_doors`) and puts and gets by a shared id (`key_ids_tokio`), each
     # file behind its feature on top of the default peer, query and queryable.
-    "wz-capi-pico|hook|app-transport|--test=app_transport_doors"
+    "wz-capi-pico|hook|app-transport,object-pool|--test=app_transport_doors"
     # The same transport on the cooperative engine, with no tokio engine in the build: the
     # library's unit tests of the door and the file of sessions over the pipe, whose datagram pair
     # and two-member group (`multicast-transport`) this engine carries too. `multi-thread` gives
@@ -479,14 +496,15 @@ transport-link-ws|"
         query,\
         queryable,\
         multi-thread,\
-        multicast-transport\
+        multicast-transport,\
+        object-pool\
         |app_transport"
     # pico's multicast declarations (`multicast-declarations`): a session that joins a group tells it
     # its keyexprs and write filters too. The two-member group over the program's transport, on each
     # engine, opened with the group's declarations mapped: the put and the get still cross it. What
     # goes on the group's wire is held where the mapping is made (`wz-capi-port`'s `group` tests and
     # `wz-capi-coop`'s `tests::group::`); this is the open that selects it.
-    "wz-capi-pico|hook|app-transport,multicast-declarations|--test=app_transport_doors"
+    "wz-capi-pico|hook|app-transport,multicast-declarations,object-pool|--test=app_transport_doors"
     "wz-capi-pico|hook|\
         -default,\
         engine-coop,\
@@ -496,18 +514,19 @@ transport-link-ws|"
         queryable,\
         multi-thread,\
         multicast-transport,\
-        multicast-declarations\
+        multicast-declarations,\
+        object-pool\
         |app_transport"
     # The scout of an image (`scout-mcu`), over one datagram socket of the cooperative engine's
     # stack, here the host's: an open that names no locator scouts for the budget and finds nobody,
     # where a build that cannot scout answers at once. The C1co lane runs the same file with `scout`.
-    "wz-capi-pico|hook|-default,engine-coop,link-udp,scout-mcu|--test=open_scouts_for_a_locator"
-    "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
+    "wz-capi-pico|hook|-default,engine-coop,link-udp,scout-mcu,object-pool|--test=open_scouts_for_a_locator"
+    "wz-capi-pico|hook|shared-key-ids,object-pool|--test=key_ids_tokio"
     # A session's batch size stated by its config's document (`wz/limits`) through the document door:
     # three pairs of sessions open at once in one process, each held on the wire to its own size, and a
     # size past the build's ceiling refused by name (`batch_size_per_session`, behind `config-document`
     # on top of the default `peer`). Two tests.
-    "wz-capi-pico|hook|config-document|--test=batch_size_per_session"
+    "wz-capi-pico|hook|config-document,object-pool|--test=batch_size_per_session"
     # A time base the program supplies (`wz_ext_time_base_*`): the doors' refusals and ownership
     # and a listening session that runs on the program's time with its control on the system's
     # (`time_base::`), a silent inbound link held to the accept timeout of the program's time
@@ -532,17 +551,17 @@ transport-link-ws|"
     # those made by hand; with the receiver's sender slots, where a receiver of listed senders
     # binds them, and without, where it is refused by name. The reader's own tests are
     # `wz-app-frame`'s, in its default build.
-    "wz-capi-pico|hook|message-catalog|--test=message_catalog_doors"
-    "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-receiver,e2e-supervision|--test=message_catalog_doors"
-    "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-sender-demux|--test=message_catalog_doors"
+    "wz-capi-pico|hook|message-catalog,object-pool|--test=message_catalog_doors"
+    "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-receiver,e2e-supervision,object-pool|--test=message_catalog_doors"
+    "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-sender-demux,object-pool|--test=message_catalog_doors"
     # A catalog message's payload driven from C (`wz_ext_payload_schema_*`,
     # `wz_ext_message_payload_*`): the file that makes a schema and a payload, sets, encodes,
     # decodes and reads back, and refuses each misuse by its own code (`message_payload_doors`,
     # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
     # below. Alone the schema is read from a compiled descriptor set; with `proto-text` the file
     # also reads it from text and holds that door's refusals.
-    "wz-capi-pico|hook|message-payload|--test=message_payload_doors"
-    "wz-capi-pico|hook|message-payload,proto-text|--test=message_payload_doors"
+    "wz-capi-pico|hook|message-payload,object-pool|--test=message_payload_doors"
+    "wz-capi-pico|hook|message-payload,proto-text,object-pool|--test=message_payload_doors"
     # The object pools (`wz_ext_object_pool_*`): the unit tests of the doors, of the pools' plan and
     # layout, which the tokio engine has only with the doors, and of the place an object is taken
     # from, and the file that reserves, exhausts, reuses and
@@ -582,16 +601,16 @@ transport-link-ws|"
     # slots and the event log, where it also judges and protects in the stream of an instance,
     # refuses a receiver kept per sender, and reads a report of drops back as an event; with
     # `proto-text`, a keyer made from the schema's text as well as from its descriptor set.
-    "wz-capi-pico|hook|instance-key|--test=instance_key_doors"
-    "wz-capi-pico|hook|instance-key,proto-text|--test=instance_key_doors"
-    "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring|--test=instance_key_doors"
+    "wz-capi-pico|hook|instance-key,object-pool|--test=instance_key_doors"
+    "wz-capi-pico|hook|instance-key,proto-text,object-pool|--test=instance_key_doors"
+    "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring,object-pool|--test=instance_key_doors"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
     # names its peer and the sync is told; and the first alone, where the sync never is, which is
     # what the target asserts of a build without `declarations-synced-event`.
     "wz-capi-pico|hook|remote-declaration-watch,declarations-synced-event|"
-    "wz-capi-pico|hook|remote-declaration-watch|--test=decl_watch_doors"
+    "wz-capi-pico|hook|remote-declaration-watch,object-pool|--test=decl_watch_doors"
     # The most memory a session holds (`wz_ext_session_memory`, `_row`): the unit tests of the rows
     # this ABI adds and of how a row is handed over (`session_memory::`), and the doors over a
     # listener and a session that dials it (`files::session_memory_door::`), on each engine: the
@@ -599,7 +618,7 @@ transport-link-ws|"
     # document door, a session whose document lowers the batch size reports the lowered size.
     "wz-capi-pico|hook|session-memory|session_memory"
     "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,session-memory|session_memory"
-    "wz-capi-pico|hook|session-memory,config-document|session_memory_door::a_document"
+    "wz-capi-pico|hook|session-memory,config-document,object-pool|session_memory_door::a_document"
     # The rows of the process's machines in the report, which follow what its runtime lends them.
     "wz-capi-pico|hook|session-memory,supervision,e2e-supervision,message-catalog|session_memory::tests::the_process_rows"
     # What those doors do, once, in the port both C ABIs and both engines share
@@ -2179,17 +2198,6 @@ leg_feats() { local f="${1}"; echo "${f//[[:space:]]/}"; }
 # `env` is handed before cargo; one that is not a `WZ_` word set to a value fails, so a typo is no
 # leg built in the default environment. Every other token is a feature name. One function for the
 # run and the census, so the two cannot build a leg two ways.
-# The cargo words a package's tests need whatever a leg's features, in `LEG_PACKAGE_ARGS`:
-# wz-capi-pico's merged test executable `it` requires `object-pool`, whose door its harness
-# reserves the share of the programs it runs in one process through (its `Cargo.toml`), and cargo
-# leaves a target whose features a run lacks out of a whole-crate or filtered run without a word.
-leg_package_args() {
-    LEG_PACKAGE_ARGS=()
-    case "$1" in
-        wz-capi-pico) LEG_PACKAGE_ARGS=(--features object-pool) ;;
-    esac
-}
-
 leg_feature_args() {
     local feats="$1" f
     local -a parts=() names=()
@@ -2229,6 +2237,9 @@ leg_filter_args() {
     if [[ "$filter" == --test=* ]]; then
         wz_test_args "$pkg" "${filter#--test=}" || return 1
         LEG_FILTER_ARGS=("${WZ_TEST_ARGS[@]}")
+    elif [[ "$filter" == --test-target=* ]]; then
+        # A whole test target, every file of a merged one.
+        LEG_FILTER_ARGS=(--test "${filter#--test-target=}")
     else
         LEG_FILTER_ARGS=("$filter")
     fi
@@ -2299,8 +2310,7 @@ if [[ "${1:-}" == "--list" ]]; then
     for leg in "${LEGS[@]}"; do
         IFS='|' read -r pkg scope feats filter handoff <<<"$leg"
         leg_feature_args "$(leg_feats "$feats")" || exit 1
-        leg_package_args "$pkg"
-        echo "  [$scope] ${LEG_ENV[*]+${LEG_ENV[*]} }$pkg ${LEG_FEATURE_ARGS[*]}${LEG_PACKAGE_ARGS[*]+ ${LEG_PACKAGE_ARGS[*]}} ${filter:-<whole crate>}"
+        echo "  [$scope] ${LEG_ENV[*]+${LEG_ENV[*]} }$pkg ${LEG_FEATURE_ARGS[*]} ${filter:-<whole crate>}"
         [[ -n "$handoff" ]] && echo "          hands off to another leg: $handoff"
     done
     for row in "${SKIPS[@]}"; do
@@ -2377,8 +2387,6 @@ if [[ "${1:-}" == "--census" ]]; then
             leg_feature_args "$feats" || return 1
             argv+=(${LEG_FEATURE_ARGS[@]+"${LEG_FEATURE_ARGS[@]}"})
         fi
-        leg_package_args "$pkg"
-        argv+=(${LEG_PACKAGE_ARGS[@]+"${LEG_PACKAGE_ARGS[@]}"})
         leg_filter_args "$pkg" "$filter" || return 1
         argv+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
         if ! out="$(cd "$repo/crates" &&
@@ -2798,9 +2806,7 @@ for leg in "${LEGS[@]}"; do
     fi
 
     leg_feature_args "$feats" || { rc=1; continue; }
-    leg_package_args "$pkg"
     cargo_args=(test -p "$pkg" ${LEG_FEATURE_ARGS[@]+"${LEG_FEATURE_ARGS[@]}"})
-    cargo_args+=(${LEG_PACKAGE_ARGS[@]+"${LEG_PACKAGE_ARGS[@]}"})
     leg_filter_args "$pkg" "$filter" || { rc=1; continue; }
     cargo_args+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
     cargo_args+=(--quiet)

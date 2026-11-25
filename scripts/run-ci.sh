@@ -10972,7 +10972,7 @@ layer_c1bm_cargo_test_pico_failfast() {
         total=$((total + passed))
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
         (cd crates && cargo clippy -p wz-capi-pico --all-targets \
-            $tokio_args --features object-pool --quiet -- -D warnings) || return 1
+            $tokio_args --quiet -- -D warnings) || return 1
     done
     _runci_lane_did C1bm "$total" "fail-fast listen test(s) over 2 link(s), each clippy-gated"
 }
@@ -10989,21 +10989,31 @@ layer_c1bm_cargo_test_pico_failfast() {
 layer_c1pc_capi_pico_engines() {
     local tokio_args
     tokio_args="$(pico_tokio_args)" || return 1
-    # Each run names `object-pool`: the merged test executable `it` requires the pools' door, its
-    # harness reserving through it the share of the programs it runs in one process
-    # (`crates/wz-capi-pico/Cargo.toml`), and cargo leaves a target whose features a run lacks out
-    # of `--tests`, `--all-targets` and a whole-crate run without a word.
     _runci_guarded_test "C1pc wz-capi-pico, the cooperative engine (default)" + \
-        cargo test -p wz-capi-pico --features object-pool --no-fail-fast || return 1
-    (cd crates && cargo clippy -p wz-capi-pico --all-targets --features object-pool --quiet \
-        -- -D warnings) || return 1
+        cargo test -p wz-capi-pico --no-fail-fast || return 1
+    (cd crates && cargo clippy -p wz-capi-pico --all-targets --quiet -- -D warnings) || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     _runci_guarded_test "C1pc wz-capi-pico, the tokio engine (removed in P5)" + \
-        cargo test -p wz-capi-pico $tokio_args --features object-pool --no-fail-fast || return 1
+        cargo test -p wz-capi-pico $tokio_args --no-fail-fast || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo clippy -p wz-capi-pico --all-targets $tokio_args --features object-pool \
+    (cd crates && cargo clippy -p wz-capi-pico --all-targets $tokio_args --quiet \
+        -- -D warnings) || return 1
+    # The merged test executable `it` requires the pools' door (`object-pool`), its harness
+    # reserving through it the share of the programs it runs in one process
+    # (`crates/wz-capi-pico/Cargo.toml`). The runs above leave it out, so the library and the other
+    # targets are tested in the forms that ship; it runs here, on each engine, with the door.
+    _runci_guarded_test "C1pc wz-capi-pico it, the cooperative engine" + \
+        cargo test -p wz-capi-pico --features object-pool --test it --no-fail-fast || return 1
+    (cd crates && cargo clippy -p wz-capi-pico --features object-pool --test it --quiet \
+        -- -D warnings) || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    _runci_guarded_test "C1pc wz-capi-pico it, the tokio engine (removed in P5)" + \
+        cargo test -p wz-capi-pico $tokio_args --features object-pool --test it --no-fail-fast \
+        || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo clippy -p wz-capi-pico $tokio_args --features object-pool --test it \
         --quiet -- -D warnings) || return 1
-    _runci_lane_did C1pc 2 "test run(s) of wz-capi-pico, one per engine, each clippy-gated"
+    _runci_lane_did C1pc 4 "test run(s) of wz-capi-pico, the crate and its it target per engine, each clippy-gated"
 }
 
 # ─── Layer C1x — routing-routes: the route cache the forwarders compute through ─
@@ -13362,8 +13372,12 @@ _c1p32_pico_profile_tests() {
     fi
     read -r -a args <<<"$resolved"
     _runci_guarded_test "C1p32 pico host-peer-ext (the profile's engine)" + \
-        cargo test -p wz-capi-pico --target "$target" "${args[@]}" --features object-pool --tests \
-        --no-fail-fast
+        cargo test -p wz-capi-pico --target "$target" "${args[@]}" --tests --no-fail-fast || return 1
+    # `--tests` leaves out the merged executable `it`, which requires the pools' door
+    # (`crates/wz-capi-pico/Cargo.toml`): the profile's build runs it with the door.
+    _runci_guarded_test "C1p32 pico host-peer-ext it (the profile's engine)" + \
+        cargo test -p wz-capi-pico --target "$target" "${args[@]}" --features object-pool \
+        --test it --no-fail-fast
 }
 
 # ─── Layer C1nh — what the pico C ABI allocates after a session opens ──────
