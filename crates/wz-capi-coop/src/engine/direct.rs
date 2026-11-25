@@ -126,9 +126,6 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
     ) {
         let face = self.face;
         let actions = &*self.actions;
-        let (plane, generation) = (&self.plane, self.generation);
-        // The queries this frame carries arrive on this face's link.
-        plane.set_arriving(generation);
         // What the declaration watches are told of this frame is this link's peer's.
         #[cfg(any(
             feature = "remote-declaration-watch",

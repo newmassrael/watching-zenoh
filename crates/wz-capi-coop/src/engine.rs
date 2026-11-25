@@ -2491,10 +2491,17 @@ impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for 
         // go out through a responder of the plane's own.
         // SAFETY: the session's tables are dispatched under the session's lock, which only `Core`
         // holds, as the plane's arrival asks.
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         unsafe {
             cx.plane
                 .arrive(&cx.round, || QueryableCall::begin(row.row()), query)
         };
+        // A read that steps its one link itself hands each query of the link to the queryables
+        // (`queries`), so only the session's own get is asked here, which hands the calls its
+        // queryables begin its own view.
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        cx.plane
+            .arrive_own(|| QueryableCall::begin(row.row()), query);
     }
 }
 
@@ -5068,8 +5075,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // before its place is given back.
             let reach = unsafe { row.fill(reachable) };
             // The round hands the queries it holds to their queryables through the engine,
-            // which sends what they answer.
-            #[cfg(feature = "queryable")]
+            // which sends what they answer. A read that steps its one link itself holds no query
+            // in the round (`queries`).
+            #[cfg(all(
+                feature = "queryable",
+                any(feature = "threads", feature = "listen", feature = "group")
+            ))]
             {
                 let answering: NonNull<dyn crate::round::AnswersQueries<crate::round::CoopCalls>> =
                     this;
@@ -7226,8 +7237,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // the Final is owed as one that matched none.
         let query = opts.loopback_query().ok();
         // The session's queryables only begin a call and hold the query's Final
-        // (`QueryPlane::arrive`), so none stages a reply here: the stage they are handed has no
-        // room.
+        // (`QueryPlane::arrive`, `QueryPlane::arrive_own`), so none stages a reply here: the
+        // stage they are handed has no room.
         let mut staged = ReplyStage::<Lent>::default();
         let registry = &mut core.session.registry;
         if let Some(query) = &query {
@@ -7258,12 +7269,40 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.deliveries.within(|_| {
             for call in asked {
                 self.run_queryable(&call, get, query::LOCAL_QUERY);
-                self.samples.end_query_call(call);
+                self.end_own_call(call);
             }
         });
-        // A row whose last call one of these was, its queryable undeclared meanwhile, is let go
-        // of by the delivery's walk, its drop perhaps the program's own, with no lock held.
+        // What they answered is handed out with no lock held, and, in a build of threads, a row
+        // whose last call one of these was, its queryable undeclared meanwhile, is let go of by
+        // the delivery's walk, its drop perhaps the program's own.
         self.deliver();
+    }
+
+    /// End `call`, which the session's own get made of one of its queryables: a row whose last
+    /// call it was is marked for the round's walk to let go of after the delivery.
+    #[cfg(all(
+        feature = "local-queryable",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
+    fn end_own_call(&self, call: QueryableCall) {
+        self.samples.end_query_call(call);
+    }
+
+    /// End `call`, which the session's own get made of one of its queryables: a row whose last
+    /// call it was is let go of here, with no lock held, as a link's query's walk lets it go
+    /// (`queries`).
+    #[cfg(all(
+        feature = "local-queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn end_own_call(&self, call: QueryableCall) {
+        if call.end() {
+            self.let_go_of_drained(|tables, cursor| {
+                tables
+                    .release_drained_queryable(cursor)
+                    .map(|row| row.into_callback())
+            });
+        }
     }
 
     /// Whether write filter `id` holds what it filters back: a filter is created suppressing,
@@ -9518,7 +9557,10 @@ impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G
     type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J>;
 }
 
-#[cfg(feature = "queryable")]
+#[cfg(all(
+    feature = "queryable",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>
     crate::round::AnswersQueries<crate::round::CoopCalls> for CoopEngine<L, C>
 {
@@ -9537,7 +9579,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         self.direct.let_go_owned();
         // The round names this engine to answer its queries: no longer, before anything of the
         // engine goes (`Round::answer_queries_with`).
-        #[cfg(feature = "queryable")]
+        #[cfg(all(
+            feature = "queryable",
+            any(feature = "threads", feature = "listen", feature = "group")
+        ))]
         self.samples.answer_no_queries();
         // The last handle is gone, so no read task holds one: it has stopped, or is about to
         // drop the handle it held. A session never closed is closed now; a closed one has no

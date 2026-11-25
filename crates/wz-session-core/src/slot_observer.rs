@@ -1354,11 +1354,14 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
     ) {
-        self.dispatch_event_among(cx, peers, requesters, event, &NoOtherPeers);
+        self.dispatch_event_among(cx, peers, requesters, event, &NoOtherPeers, false);
     }
 
     /// [`Self::dispatch_event`] for a session that holds other faces: `others` is what their
-    /// peers declare, counted by the matching verdicts beside this face's own.
+    /// peers declare, counted by the matching verdicts beside this face's own. A caller that hands
+    /// every peer's query to the queryables itself, before this, and owes its Final
+    /// (`QueryPeer::pin_request`), says so with `queries_taken`, and the queries' plane takes
+    /// nothing.
     // Each plane's fan below is a function of its own and not inlined here: inlined, the
     // temporaries of every plane (the views and records each decodes) are laid out in this one
     // frame, which the compiler does not overlap reliably, and the frame is held on every event
@@ -1372,13 +1375,14 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
+        queries_taken: bool,
     ) {
         peers
             .subscribers
             .dispatch_iteration_event(&mut self.tables, cx, event);
         let taken = TakenAhead {
             replies: false,
-            queries: false,
+            queries: queries_taken,
         };
         self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
     }
@@ -2550,6 +2554,50 @@ mod tests {
                     !peers.finals.is_empty(),
                     "the routed query is owed its Final"
                 );
+            }
+        }
+    }
+
+    /// The whole fan leaves a peer's query to a caller that handed it to the queryables itself
+    /// (`queries_taken`), as the planes beside the subscribers do: no row is asked and no Final is
+    /// owed. The CONTROL is a caller that did not, its row asked and its Final owed. Turned red by
+    /// a whole fan that runs the queries' plane for a query the caller took.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    #[test]
+    fn the_whole_fan_leaves_a_query_the_caller_took() {
+        use crate::session_tables::KeyForm;
+        for taken in [false, true] {
+            let mut observer = SlotObserverOf::<QuerySinks>::new();
+            let mut peers = PeerTables::new();
+            let mut requesters = Req::new();
+            let asked = observer
+                .tables
+                .declare_queryable("q/a", Locality::Any, false, KeyForm::default(), AskedRow)
+                .expect("a table of the build's bound has room");
+            let mut log = QueryLog::default();
+            crate::driver_loop::deliver_frame(&query_frame(), |event| {
+                observer.dispatch_event_among(
+                    &mut log,
+                    &mut peers,
+                    &mut requesters,
+                    event,
+                    &NoOtherPeers,
+                    taken,
+                )
+            });
+            if taken {
+                assert!(
+                    log.0.is_empty(),
+                    "a query the caller took is asked of no row"
+                );
+                assert!(peers.finals.is_empty(), "its Final is the caller's to owe");
+            } else {
+                assert_eq!(
+                    log.0,
+                    vec![asked.handle],
+                    "CONTROL: the query is dispatched"
+                );
+                assert!(!peers.finals.is_empty(), "CONTROL: its Final is owed");
             }
         }
     }

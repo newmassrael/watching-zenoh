@@ -51,7 +51,10 @@ use wz_capi_port::ReplyCallback;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
-#[cfg(feature = "queryable")]
+#[cfg(all(
+    feature = "queryable",
+    any(test, feature = "threads", feature = "listen", feature = "group")
+))]
 pub(crate) use wz_session_core::round::AnswersQueries;
 #[cfg(feature = "query")]
 pub(crate) use wz_session_core::round::LegHolders;

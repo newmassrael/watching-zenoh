@@ -440,6 +440,18 @@ type BuildHolders = held::OneHolder;
 /// The application layer of one session, as the build holds its faces.
 pub(super) type Registry = RegistryOf<BuildHolders>;
 
+/// Whether the read hands every query of a link to the queryables itself (`queries`), so the
+/// queries' plane of a face's dispatch takes none: a build with queryables whose read steps its
+/// one link itself. One without leaves them to the queries' plane, which owes each its Final.
+const READ_TAKES_QUERIES: bool = cfg!(all(
+    feature = "queryable",
+    not(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group"
+    ))
+));
+
 /// The planes of the application layer a dispatch of a face's event reaches.
 #[derive(Clone, Copy)]
 pub(super) enum Planes {
@@ -1022,12 +1034,14 @@ impl<H: Holders> RegistryOf<H> {
         }) = self.split(self.place(face))
         {
             match planes {
-                Planes::All => {
-                    app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others)
-                }
-                // A build with queryables hands each of the frame's queries to them itself
-                // (`queries`); one without leaves them to the queries' plane, which owes each
-                // its Final.
+                Planes::All => app.dispatch_event_among(
+                    delivery,
+                    &mut set.peer,
+                    &mut set.gets,
+                    event,
+                    &others,
+                    READ_TAKES_QUERIES,
+                ),
                 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
                 Planes::BesideSubscribers => app.dispatch_event_beside_subscribers(
                     delivery,
@@ -1035,7 +1049,7 @@ impl<H: Holders> RegistryOf<H> {
                     &mut set.gets,
                     event,
                     &others,
-                    cfg!(feature = "queryable"),
+                    READ_TAKES_QUERIES,
                 ),
             }
         }
