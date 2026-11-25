@@ -907,6 +907,10 @@ pub mod capacity;
 #[cfg(feature = "storage-profile")]
 mod ext_chain;
 
+// The rule `build.rs` sets the cfg `wz_ext_chains` by, compiled here for its tests.
+#[cfg(test)]
+mod ext_chains_cfg;
+
 /// Lease-deadline check outcome (R77 helper surface). no_std +
 /// no_alloc clean (pure enum); unconditional.
 pub mod lease;
