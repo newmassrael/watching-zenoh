@@ -3,7 +3,7 @@
   "schema": 2,
   "case": "pico-client-coop-nostd",
   "unclassified_bytes_at_most": 1024,
-  "unattributed_bytes_at_most": null,
+  "unattributed_bytes_at_most": 0,
   "areas": [
     {"id": "sessions", "title": "sessions, routing, entities (declare, subscribe, query, reply, interest)"},
     {"id": "doors", "title": "C ABI doors (z_*, zp_*, ze_*)"},
@@ -14,13 +14,13 @@
     {"id": "language", "title": "language support (Rust core, alloc and drop glue, and the out-of-line bodies of the standard library; heapless; zenoh-pico's collections, buffers and utilities)"}
   ],
   "rows": {
-    "sessions": {"ratio_at_most": 2.571, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-25", "wz_text": 81494, "pico_text": 31698, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"}},
-    "doors": {"ratio_at_most": 2.092, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-24", "wz_text": 43958, "pico_text": 21013, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "transport": {"ratio_at_most": 2.3719, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-25", "wz_text": 34966, "pico_text": 14742, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"}},
-    "driver": {"ratio_at_most": 1.3641, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-25", "wz_text": 25594, "pico_text": 18763, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"}},
-    "keyexpr": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-24", "wz_text": 12214, "pico_text": 12953, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "codec": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-24", "wz_text": 31652, "pico_text": 36390, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "language": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-24", "wz_text": 18976, "pico_text": 34941, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}}
+    "sessions": {"ratio_at_most": 2.5675, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 70626, "pico_text": 27508, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "doors": {"ratio_at_most": 2.2219, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 42291, "pico_text": 19034, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "transport": {"ratio_at_most": 2.3557, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 32863, "pico_text": 13951, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "driver": {"ratio_at_most": 1.8347, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 29444, "pico_text": 16049, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "keyexpr": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 10088, "pico_text": 13490, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "codec": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 31798, "pico_text": 35440, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "language": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 17953, "pico_text": 45028, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}}
   },
   "rules": {
     "wz": {
