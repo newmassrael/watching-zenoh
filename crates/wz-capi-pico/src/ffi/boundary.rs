@@ -12,42 +12,19 @@
 
 use crate::result::{ZResult, Z_ERR_GENERIC};
 
-/// Run `body`, or answer `None` when it panicked, so that no panic unwinds into the C frame that
-/// called. A body that ran to the end answers `Some`. The landing of a panic is [`catch_erased`],
-/// one body for every export: an export instantiates only the closure it runs, where a
-/// `catch_unwind` of its own type held a call and a catch of the payload per export.
-#[cfg(feature = "std")]
-#[inline]
-pub(crate) fn catch<R>(body: impl FnOnce() -> R) -> Option<R> {
-    let mut body = Some(body);
-    let mut out = None;
-    catch_erased(&mut || {
-        if let Some(body) = body.take() {
-            out = Some(body());
-        }
-    });
-    out
-}
-
-/// Run `body` under `catch_unwind`; a panic's payload is dropped here. Whether it ran to the end
-/// is what its caller's result says.
-#[cfg(feature = "std")]
-#[inline(never)]
-fn catch_erased(body: &mut dyn FnMut()) {
-    let _ = std::panic::catch_unwind(core::panic::AssertUnwindSafe(body));
-}
-
-/// Run `body`. Without `std` a panic does not unwind (the module doc), so a body that returns
-/// ran to the end.
-#[cfg(not(feature = "std"))]
-#[inline]
+/// Run `body`: a plain call in every build. A panic aborts at the C boundary (the owner's panic
+/// policy for the C libraries, as zenoh-pico is C and upstream zenoh's release profile aborts):
+/// without `std` the panic handler stops the program, and with it a panic that reaches an
+/// `extern "C"` frame aborts there, as a Rust function of the C ABI cannot unwind. So no export
+/// carries a landing pad, and a panic is a defect the no-panic gate finds, never an error code.
+/// The answer is always `Some`; the `Option` is the shape its callers read.
+#[inline(always)]
 pub(crate) fn catch<R>(body: impl FnOnce() -> R) -> Option<R> {
     Some(body())
 }
 
-/// Run an export body, converting a panic into a status code instead of
-/// unwinding across the C ABI boundary. Returns `fallback` if the body
-/// panics.
+/// Run an export body that returns a status code. `fallback` is the answer of a body that does
+/// not run to the end, which none does: [`catch`] is a plain call and a panic aborts.
 #[inline]
 pub(crate) fn guard<F>(fallback: ZResult, body: F) -> ZResult
 where
@@ -56,8 +33,7 @@ where
     catch(body).unwrap_or(fallback)
 }
 
-/// Run an export body that returns a status code, defaulting the panic
-/// fallback to [`Z_ERR_GENERIC`].
+/// Run an export body that returns a status code, its fallback [`Z_ERR_GENERIC`] ([`guard`]).
 #[inline]
 pub(crate) fn guarded<F>(body: F) -> ZResult
 where
@@ -66,8 +42,7 @@ where
     guard(Z_ERR_GENERIC, body)
 }
 
-/// Run an export body returning a value (e.g. a `usize` length); a panic
-/// yields `fallback`.
+/// Run an export body returning a value (e.g. a `usize` length), `fallback` as in [`guard`].
 #[inline]
 pub(crate) fn guard_val<F, T>(fallback: T, body: F) -> T
 where
@@ -95,22 +70,22 @@ unsafe impl Send for SendPtr {}
 mod tests {
     use super::*;
 
-    /// A body that runs to the end is answered with its value, through the guard too. Turned red
-    /// by a catch that loses the value of a body that returned.
+    /// The boundary is a plain call in every build: a body runs once and its value is answered,
+    /// through the guards too, whatever their fallback. Turned red by a catch that drops the value
+    /// or runs the body twice.
     #[test]
-    fn a_body_that_returns_is_answered_with_its_value() {
-        assert_eq!(catch(|| 7u8), Some(7));
+    fn a_body_runs_once_and_is_answered_with_its_value() {
+        let mut runs = 0u8;
+        assert_eq!(
+            catch(|| {
+                runs += 1;
+                7u8
+            }),
+            Some(7)
+        );
+        assert_eq!(runs, 1);
         assert_eq!(guard_val(0u8, || 5), 5);
         assert_eq!(guarded(|| crate::result::Z_OK), crate::result::Z_OK);
-    }
-
-    /// With `std` a panicking body is caught at the boundary: the catch answers nothing and the
-    /// guard its fallback. Turned red by a catch that lets the panic unwind past it.
-    #[cfg(feature = "std")]
-    #[test]
-    fn a_body_that_panics_answers_nothing_and_the_fallback() {
-        assert_eq!(catch(|| -> u8 { panic!("a panic at the boundary") }), None);
-        assert_eq!(guard_val(3u8, || panic!("a panic at the boundary")), 3);
-        assert_eq!(guarded(|| panic!("a panic at the boundary")), Z_ERR_GENERIC);
+        assert_eq!(guard(Z_ERR_GENERIC, || 3), 3);
     }
 }
