@@ -1011,36 +1011,6 @@ fn response_view_admission(
     )
 }
 
-/// The batch a participant may act on: `messages` itself, or the refusal of the
-/// first message whose chains a conforming participant must refuse the whole batch
-/// for ([`NetworkMessage::ext_admission`]). Out of line: it is called from each
-/// receive path of a decoded batch, none of which holds anything to judge one
-/// with.
-///
-/// The decode itself reads such a batch, so a capture sees it; this is the one
-/// place a participant stops it.
-#[cfg(feature = "alloc")]
-#[inline(never)]
-pub fn refuse_unknown_mandatory_ext(
-    messages: Vec<NetworkMessage>,
-) -> Result<Vec<NetworkMessage>, crate::parse_error::InboundParseError> {
-    match first_unknown_mandatory_ext(&messages) {
-        Some(refusal) => Err(refusal),
-        None => Ok(messages),
-    }
-}
-
-/// The refusal [`refuse_unknown_mandatory_ext`] makes of `messages`, or `None`
-/// when a participant may act on every one of them.
-#[cfg(feature = "alloc")]
-fn first_unknown_mandatory_ext(
-    messages: &[NetworkMessage],
-) -> Option<crate::parse_error::InboundParseError> {
-    messages
-        .iter()
-        .find_map(|message| message.ext_admission().refusal())
-}
-
 /// R74 — decode a `Frame.payload` byte slice into the in-order batch
 /// of network messages it carries.
 ///
@@ -1073,7 +1043,7 @@ fn first_unknown_mandatory_ext(
 /// (`N_MID_PUSH` under `codec-push`, etc.).
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecError> {
-    parse_batch(bytes, NO_ORIGIN)
+    parse_batch(bytes, NO_ORIGIN, false).map(|(messages, _)| messages)
 }
 
 /// [`parse_frame_payload`] over a frame that can be shared: each decoded
@@ -1089,13 +1059,10 @@ pub fn parse_frame_payload_in(
     origin: &crate::link::RxBytes,
 ) -> Result<Vec<NetworkMessage>, CodecError> {
     #[cfg(feature = "rx-shared-bytes")]
-    {
-        parse_batch(origin.as_slice(), Some(origin))
-    }
+    let parsed = parse_batch(origin.as_slice(), Some(origin), false);
     #[cfg(not(feature = "rx-shared-bytes"))]
-    {
-        parse_batch(origin.as_slice(), NO_ORIGIN)
-    }
+    let parsed = parse_batch(origin.as_slice(), NO_ORIGIN, false);
+    parsed.map(|(messages, _)| messages)
 }
 
 /// [`parse_frame_payload`] for a batch that exists only as a BORROWED slice,
@@ -1124,9 +1091,76 @@ pub fn parse_frame_payload_lending(bytes: &[u8]) -> Result<Vec<NetworkMessage>, 
     }
 }
 
+/// The batch a participant may act on: what [`parse_frame_payload_in`] decodes, or the refusal of
+/// the first message whose chains a conforming participant must refuse the whole batch for, judged
+/// in the same pass as the decode. A Push is judged as its chains are read; any other message by
+/// its own verdict ([`NetworkMessage::ext_admission`]). A batch that does not decode is refused
+/// with its codec error, ahead of any refusal of the rule.
+///
+/// The decode itself reads such a batch, so a capture sees it; this is the one place a
+/// participant stops it.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, CodecError> {
+pub fn admit_frame_payload_in(
+    origin: &crate::link::RxBytes,
+) -> Result<Vec<NetworkMessage>, crate::parse_error::InboundParseError> {
+    #[cfg(feature = "rx-shared-bytes")]
+    let parsed = parse_batch(origin.as_slice(), Some(origin), true);
+    #[cfg(not(feature = "rx-shared-bytes"))]
+    let parsed = parse_batch(origin.as_slice(), NO_ORIGIN, true);
+    admitted(parsed)
+}
+
+/// [`admit_frame_payload_in`] for a batch that exists only as a borrowed slice, as
+/// [`parse_frame_payload_lending`] is [`parse_frame_payload_in`] for one.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+pub fn admit_frame_payload_lending(
+    bytes: &[u8],
+) -> Result<Vec<NetworkMessage>, crate::parse_error::InboundParseError> {
+    #[cfg(feature = "rx-shared-bytes")]
+    {
+        admit_frame_payload_in(&crate::link::RxBytes::lend(bytes.to_vec()))
+    }
+    #[cfg(not(feature = "rx-shared-bytes"))]
+    {
+        admitted(parse_batch(bytes, NO_ORIGIN, true))
+    }
+}
+
+/// What a participant acts on of a judged batch ([`parse_batch`]): the codec's error first, then
+/// the rule's refusal, then the messages.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+fn admitted(
+    parsed: Result<
+        (
+            Vec<NetworkMessage>,
+            Option<crate::parse_error::InboundParseError>,
+        ),
+        CodecError,
+    >,
+) -> Result<Vec<NetworkMessage>, crate::parse_error::InboundParseError> {
+    match parsed {
+        Ok((messages, None)) => Ok(messages),
+        Ok((_, Some(refusal))) => Err(refusal),
+        Err(error) => Err(crate::parse_error::InboundParseError::Codec(error)),
+    }
+}
+
+/// The messages of a batch, and with `judge` the refusal of the mandatory-extension rule of the
+/// first of them a participant must refuse, by the verdict each decode returns.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+fn parse_batch(
+    bytes: &[u8],
+    origin: Origin<'_>,
+    judge: bool,
+) -> Result<
+    (
+        Vec<NetworkMessage>,
+        Option<crate::parse_error::InboundParseError>,
+    ),
+    CodecError,
+> {
     let mut messages = Vec::new();
+    let mut refusal = None;
     let mut cursor = SceCursor::new(bytes);
     while cursor.remaining() > 0 {
         // R311y578 — the per-MID dispatch moved to `decode_one_record`, the
@@ -1134,12 +1168,16 @@ fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, 
         // here is unchanged: `Ok(None)` (no envelope decoder for the MID)
         // absorbs the tail as `Unknown` and terminates, a codec error
         // propagates and fails the whole batch.
-        if !decode_one_record(&mut cursor, &mut messages, origin)? {
+        let decoded = decode_one_record(&mut cursor, &mut messages, origin)?;
+        if decoded == Decoded::Unknown {
             absorb_unknown(&mut cursor, &mut messages)?;
             break;
         }
+        if judge && refusal.is_none() {
+            refusal = decoded.refusal(messages.last());
+        }
     }
-    Ok(messages)
+    Ok((messages, refusal))
 }
 
 /// The record at the cursor has a MID this build has no envelope decoder for,
@@ -1320,8 +1358,8 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 }
 
 /// Walk a `Frame.payload` one record at a time: decode the next record into
-/// `record` (emptied first), judge it as [`refuse_unknown_mandatory_ext`]
-/// judges a batch, and hand it to `each` before the following one is decoded.
+/// `record` (emptied first), judge it as [`admit_frame_payload_in`] judges a
+/// batch, and hand it to `each` before the following one is decoded.
 ///
 /// The participant walk of a receive path that dispatches each record as it is
 /// decoded (`drive::dispatch_datagram`): what it holds at any moment is one
@@ -1782,12 +1820,12 @@ fn walk_records<'f>(
             }
             // Only an owned record is decoded into the buffer, so only it clears it first.
             record.clear();
-            let known = decode_one_record(&mut cursor, record, NO_ORIGIN)
+            let decoded = decode_one_record(&mut cursor, record, NO_ORIGIN)
                 .map_err(InboundParseError::Codec)?;
-            if !known {
+            if decoded == Decoded::Unknown {
                 absorb_unknown(&mut cursor, record).map_err(InboundParseError::Codec)?;
             }
-            if let Some(refusal) = first_unknown_mandatory_ext(record) {
+            if let Some(refusal) = decoded.refusal(record.last()) {
                 record.clear();
                 return Err(refusal);
             }
@@ -1917,24 +1955,20 @@ fn admit_lent(
     }
 }
 
-/// The reader of a Push on the walks that lend one (`lend_push`).
+/// The reader of a Push: on the walks that lend one (`lend_push`), and on the owned parse
+/// (`decode_one_record`), which a build with an allocator has.
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
     any(
+        feature = "alloc",
         all(
-            feature = "alloc",
-            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-        ),
-        feature = "rx-push"
-    ),
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
+            feature = "rx-push",
+            any(test, feature = "session-unicast", feature = "session-multicast")
+        )
     )
 ))]
-mod push_read;
+pub(crate) mod push_read;
 
 #[cfg(all(
     feature = "codec-frame",
@@ -1964,7 +1998,7 @@ fn lend_push<'f>(
     // judges the chains as it reads them. It reads into the binding that lends it, at the frame's
     // lifetime, in which a view is invariant.
     let mut push = wz_codecs::push::PushView::<'f>::default();
-    let admission = push_read::read_push_view(cursor, &mut push)
+    let admission = push_read::read_push_view(cursor, &mut push, &mut push_read::Lending)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(admission)?;
     each.take_record(WalkedRecord::Push(&push))
@@ -2456,16 +2490,7 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
         // vectors one apart for the rest of the walk.
         let before = messages.len();
         match decode_one_record(&mut cursor, &mut messages, NO_ORIGIN) {
-            Ok(true) => {
-                let len = total
-                    .saturating_sub(cursor.remaining())
-                    .saturating_sub(offset);
-                spans.resize(before, (0, 0));
-                for _ in before..messages.len() {
-                    spans.push((offset, len));
-                }
-            }
-            Ok(false) => {
+            Ok(Decoded::Unknown) => {
                 // An unknown MID: absorb the rest verbatim (the strict
                 // parse's own behaviour) and stop, since the record's
                 // length is unknowable and there is nothing to resync on.
@@ -2490,6 +2515,16 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
                 spans.push((offset, rem));
                 halt = Some(BatchHalt::UnknownMid { mid, offset });
                 break;
+            }
+            // A message, judged or not: a capture judges nothing.
+            Ok(_) => {
+                let len = total
+                    .saturating_sub(cursor.remaining())
+                    .saturating_sub(offset);
+                spans.resize(before, (0, 0));
+                for _ in before..messages.len() {
+                    spans.push((offset, len));
+                }
             }
             Err(error) => {
                 halt = Some(BatchHalt::CodecError { offset, error });
@@ -2522,9 +2557,43 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 type LentHeap<'f> = sce_forge_runtime::codec::Lent<'f, WireStorage>;
 
-/// Decode ONE record at the cursor and PUSH it onto `out`. `Ok(false)` means
-/// the MID has no envelope decoder in this build — the caller decides whether
-/// that is a terminating `Unknown` absorb (both parsers) or something else.
+/// What [`decode_one_record`] made of the record at the cursor.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decoded {
+    /// A MID this build has no envelope decoder for: nothing was read or put.
+    Unknown,
+    /// One message, put, whose chains the decode judged as it read them: the verdict the
+    /// mandatory-extension rule gives it, which a participant uses rather than walking the
+    /// chains of the owned message again.
+    #[cfg(feature = "codec-push")]
+    Judged(crate::ext_admit::ExtAdmission),
+    /// One message, put, whose decode judged nothing: its verdict is its own
+    /// ([`NetworkMessage::ext_admission`]).
+    Unjudged,
+}
+
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+impl Decoded {
+    /// The refusal the rule makes of the message the decode put, `put`, or `None` when a
+    /// participant may act on it.
+    fn refusal(
+        self,
+        put: Option<&NetworkMessage>,
+    ) -> Option<crate::parse_error::InboundParseError> {
+        match self {
+            Self::Unknown => None,
+            #[cfg(feature = "codec-push")]
+            Self::Judged(verdict) => verdict.refusal(),
+            Self::Unjudged => put.and_then(|message| message.ext_admission().refusal()),
+        }
+    }
+}
+
+/// Decode ONE record at the cursor and PUSH it onto `out`, and say what it was
+/// ([`Decoded`]). `Decoded::Unknown` means the MID has no envelope decoder in this
+/// build — the caller decides whether that is a terminating `Unknown` absorb (both
+/// parsers) or something else.
 ///
 /// The single MID-dispatch SSOT: adding a `codec-*` feature adds an arm
 /// here and both the strict and the best-effort walk gain it together.
@@ -2543,7 +2612,7 @@ fn decode_one_record(
     cursor: &mut SceCursor<'_>,
     out: &mut impl RecordOut,
     origin: Origin<'_>,
-) -> Result<bool, CodecError> {
+) -> Result<Decoded, CodecError> {
     let header = cursor
         .peek_slice(1)?
         .first()
@@ -2574,10 +2643,16 @@ fn decode_one_record(
             let req = wz_codecs::request::RequestIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::Request(Box::new(own_wire!(req, origin))))?;
         }
+        // A Push is read by the one reader every walk reads it with (`push_read`), which judges
+        // its chains as it reads them and builds each entry into the record at the heap's capacity
+        // as it decodes it; the owned message is projected from that record. The verdict goes back
+        // with it.
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
-            let push = wz_codecs::push::PushIn::<LentHeap<'_>>::decode(cursor)?;
+            let mut push = wz_codecs::push::PushIn::<LentHeap<'_>>::default();
+            let verdict = push_read::read_push_owned(cursor, &mut push)?;
             out.put(NetworkMessage::Push(Box::new(own_wire!(push, origin))))?;
+            return Ok(Decoded::Judged(verdict));
         }
         #[cfg(feature = "codec-response-final")]
         wire_const::N_MID_RESPONSE_FINAL => {
@@ -2610,9 +2685,9 @@ fn decode_one_record(
                 decl.try_into_owned_in::<crate::transport_profile::TransportStorage>()?,
             )))?;
         }
-        _ => return Ok(false),
+        _ => return Ok(Decoded::Unknown),
     }
-    Ok(true)
+    Ok(Decoded::Unjudged)
 }
 
 // ── R311y582 — A1: a chain that never terminated must not reach a consumer.
@@ -4516,7 +4591,7 @@ mod record_walk_tests {
         let mut record = new_record_buf();
         assert!(matches!(
             decode_one_record(&mut cursor, &mut record, NO_ORIGIN),
-            Ok(true)
+            Ok(Decoded::Unjudged)
         ));
         assert_eq!(record.len(), 1, "the buffer is full");
         assert!(
@@ -6290,14 +6365,26 @@ mod mandatory_extension_rule_tests {
             push.wire()
         };
         let optional = wire_of(0x03);
-        let parsed = parse_frame_payload(&optional).expect("the optional one decodes");
-        assert!(refuse_unknown_mandatory_ext(parsed).is_ok());
+        parse_frame_payload(&optional).expect("the optional one decodes");
+        assert!(admit_frame_payload_lending(&optional).is_ok());
         let mandatory = wire_of(0x13);
-        let parsed = parse_frame_payload(&mandatory).expect("the decode reads the mandatory one");
+        parse_frame_payload(&mandatory).expect("the decode reads the mandatory one");
         assert_eq!(
-            refuse_unknown_mandatory_ext(parsed).unwrap_err(),
+            admit_frame_payload_lending(&mandatory).unwrap_err(),
             crate::parse_error::InboundParseError::UnknownMandatoryExt { eid: 0x13 }
         );
+        // The verdict is the first offender's, judged as the batch is read, and a batch that does
+        // not decode is refused for that, whatever the rule says of a message before the damage.
+        let both = [&optional[..], &mandatory[..], &optional[..]].concat();
+        assert_eq!(
+            admit_frame_payload_lending(&both).unwrap_err(),
+            crate::parse_error::InboundParseError::UnknownMandatoryExt { eid: 0x13 }
+        );
+        let cut = [&mandatory[..], &optional[..optional.len() - 1]].concat();
+        assert!(matches!(
+            admit_frame_payload_lending(&cut),
+            Err(crate::parse_error::InboundParseError::Codec(_))
+        ));
     }
 }
 

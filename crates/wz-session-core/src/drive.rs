@@ -43,12 +43,12 @@ use crate::session_fsm_unicast::{SessionFsmUnicastActions, SessionFsmUnicastPoli
     all(feature = "codec-frame", feature = "session-slot")
 ))]
 use crate::inbound::InboundFrame;
-// parse_frame_payload_in backs the codec-frame `Frame` arm only (the heap profile's:
+// admit_frame_payload_in backs the codec-frame `Frame` arm only (the heap profile's:
 // the slot profile reads a frame where it lies).
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-use crate::network_message::parse_frame_payload_in;
+use crate::network_message::admit_frame_payload_in;
 
-/// R2965 (open-debt item 847) — [`parse_frame_payload_in`], never inlined, for
+/// R2965 (open-debt item 847) — [`admit_frame_payload_in`], never inlined, for
 /// [`dispatch_unit`]'s callers of it and no one else's. It takes the batch as a
 /// [`RxBytes`](crate::link::RxBytes) so the messages it decodes are ranges of
 /// it, not copies out of it.
@@ -76,16 +76,13 @@ use crate::network_message::parse_frame_payload_in;
 /// `if u.is_mandatory() {`). The decode reads it, so a capture still sees it, and
 /// the refusal is made here, in the one function both unicast paths of a whole
 /// batch go through; a batch put back together from fragments and a multicast
-/// batch are judged by the same
-/// [`refuse_unknown_mandatory_ext`](crate::network_message::refuse_unknown_mandatory_ext)
-/// at their own seams.
+/// batch are judged by the same [`admit_frame_payload_in`] at their own seams.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 #[inline(never)]
 fn parse_frame_payload_out_of_line(
     batch: &crate::link::RxBytes,
 ) -> Result<alloc::vec::Vec<crate::network_message::NetworkMessage>, InboundParseError> {
-    let messages = parse_frame_payload_in(batch).map_err(InboundParseError::Codec)?;
-    crate::network_message::refuse_unknown_mandatory_ext(messages)
+    admit_frame_payload_in(batch)
 }
 
 /// A Frame's payload ends where its unit does only when nothing follows it. The sender of a
