@@ -350,10 +350,9 @@ impl Held {
     /// Set the count of the limit `name` spells to `count`: `None` when `name` spells none of
     /// these, `Some(false)` with nothing set for a count past the build's value of it.
     pub(crate) fn select(&mut self, name: &[u8], count: usize) -> Option<bool> {
-        let (row, held) = HELD_ROWS
-            .iter()
-            .zip(self.0.iter_mut())
-            .find(|(row, _)| crate::config_limits::names(row.id, name))?;
+        let at =
+            crate::config_limits::position_named(&mut HELD_ROWS.iter().map(|row| row.id), name)?;
+        let (row, held) = HELD_ROWS.get(at).zip(self.0.get_mut(at))?;
         if count > row.build {
             return Some(false);
         }

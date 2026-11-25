@@ -17,7 +17,7 @@
 //! `HELD_SMALL_PAYLOAD_BLOCKS`, ...): the first open reserves those pools from its statement and
 //! fixes them, so a later open that states more of one is refused (`crate::process_pool`).
 
-use wz_session_core::limit_binding::LimitValue;
+use wz_session_core::limit_binding::{LimitEntry, LimitValue};
 use wz_session_core::limits::{SessionLimits, SESSION_LIMITS};
 
 use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
@@ -58,7 +58,8 @@ impl Stated {
                 return admitted;
             }
         }
-        let Some(entry) = SESSION_LIMITS.iter().find(|entry| names(entry.id(), name)) else {
+        let at = position_named(&mut SESSION_LIMITS.iter().map(LimitEntry::id), name);
+        let Some(entry) = at.and_then(|at| SESSION_LIMITS.get(at)) else {
             return false;
         };
         if let LimitValue::Integer(bound) = entry.value_in(&SessionLimits::BUILD) {
@@ -104,12 +105,26 @@ pub(crate) fn state_over(text: Option<&str>, limits: &SessionLimits) -> Result<S
     Ok(next)
 }
 
-/// Whether `name` spells the id `id`, byte for byte: a name that is no text spells none. One body
-/// every table a statement's name is found in compares through, not inlined: inlined, each row of
-/// a short table would hold a comparison of its own, spelled out for its id's length.
-#[inline(never)]
-pub(crate) fn names(id: &str, name: &[u8]) -> bool {
+/// Whether `name` spells the id `id`, byte for byte: a name that is no text spells none.
+fn names(id: &str, name: &[u8]) -> bool {
     id.as_bytes() == name
+}
+
+/// Where among `ids` lies the id `name` spells ([`names`]), or `None`. One loop every table a
+/// statement's name is found in shares, each row reached through its iterator's `next`: a short
+/// table known when compiled, walked where it is named, is unrolled into a comparison of its own
+/// for each row.
+#[inline(never)]
+pub(crate) fn position_named(
+    ids: &mut dyn Iterator<Item = &'static str>,
+    name: &[u8],
+) -> Option<usize> {
+    for (at, id) in ids.enumerate() {
+        if names(id, name) {
+            return Some(at);
+        }
+    }
+    None
 }
 
 /// The count `digits` spell in decimal, read as `usize`'s `FromStr` reads one: an optional `+`
@@ -127,7 +142,7 @@ fn count_of(digits: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_of, names, state_over, Stated};
+    use super::{count_of, names, position_named, state_over, Stated};
     use crate::result::Z_ERR_CONFIG_INVALID_VALUE;
     use wz_session_core::limit_binding::Quota;
     use wz_session_core::limits::SessionLimits;
@@ -201,6 +216,36 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// A name is found at the place of the id it spells, the first of two that it spells, and
+    /// nowhere among ids it does not spell. Turned red by a search that answers the last place it
+    /// looked at, or a place counted from one.
+    #[test]
+    fn a_name_is_found_at_its_ids_place() {
+        let ids = [
+            "HELD_SAMPLES",
+            "MAX_PUBLISHERS",
+            "MAX_PUBLISHERS",
+            "HELD_REPLIES",
+        ];
+        assert_eq!(
+            position_named(&mut ids.into_iter(), b"HELD_SAMPLES"),
+            Some(0)
+        );
+        assert_eq!(
+            position_named(&mut ids.into_iter(), b"MAX_PUBLISHERS"),
+            Some(1)
+        );
+        assert_eq!(
+            position_named(&mut ids.into_iter(), b"HELD_REPLIES"),
+            Some(3)
+        );
+        assert_eq!(position_named(&mut ids.into_iter(), b"HELD_REPLIE"), None);
+        assert_eq!(
+            position_named(&mut core::iter::empty(), b"HELD_REPLIES"),
+            None
+        );
     }
 
     /// A name spells an id when its bytes are the id's, and no prefix of the id, no longer name
