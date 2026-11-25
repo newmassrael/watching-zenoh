@@ -647,15 +647,13 @@ pub struct KeyexprHead {
     /// holders in the lower: one word of the machine's atomic width, so a hold taken or given back
     /// at the address is of the declaration its holder took it of.
     count: AtomicU32,
-    /// The length of the declared key, in bytes.
-    key_len: u32,
-    /// The address of the tables the row lies in.
-    table: usize,
+    /// The length of the declared key, in bytes, in the narrowest type the build's bound on a
+    /// key's length fits ([`caps::KeyLen`]).
+    key_len: caps::KeyLen,
     /// The id the wire names the declaration by.
     id: ExprId,
-    /// The index half of the row's handle, which the address keeps whatever its generation; `0`
-    /// until the table names the row ([`Self::name_row`]).
-    place: u16,
+    /// The address of the tables the row lies in.
+    table: usize,
 }
 
 /// Why a declaration's row took no more hold at its address ([`KeyexprHead::retain`]).
@@ -670,24 +668,20 @@ pub enum RowHoldRefused {
 
 impl KeyexprHead {
     /// The head of a declaration of `id` on a key of `key_len` bytes in the tables at `table`. It
-    /// is held by none, and names no row, until the table names the row it was put in
-    /// ([`Self::name_row`]): a hold kept of the row's last declaration takes and gives back
-    /// nothing in between.
-    fn new(id: ExprId, key_len: usize, table: usize) -> Self {
+    /// is held by none until the table takes its first hold at the generation of the row it was
+    /// put in ([`Self::first_hold`]): a hold kept of the row's last declaration takes and gives
+    /// back nothing in between.
+    fn new(id: ExprId, key_len: caps::KeyLen, table: usize) -> Self {
         Self {
             count: AtomicU32::new(0),
-            key_len: u32::try_from(key_len).unwrap_or(u32::MAX),
-            table,
+            key_len,
             id,
-            place: 0,
+            table,
         }
     }
 
-    /// Name `row` as the row this head lies in, held once by the table that declared it, at
-    /// `row`'s generation.
-    fn name_row(&mut self, row: KeyexprHandle) {
-        let bits = row.to_bits().get();
-        self.place = (bits & 0xffff) as u16;
+    /// The table's first hold of the declaration it put in `row`, at `row`'s generation.
+    fn first_hold(&self, row: KeyexprHandle) {
         self.count.store(
             Self::word(Self::generation_of(row), 1),
             core::sync::atomic::Ordering::Release,
@@ -714,23 +708,9 @@ impl KeyexprHead {
         (word & 0xffff) as KeyexprHolds
     }
 
-    /// The handle of the row at the generation in `word`, `None` before the row is named.
-    fn row_in(&self, word: u32) -> Option<KeyexprHandle> {
-        core::num::NonZeroU32::new(
-            (u32::from(Self::generation_in(word)) << 16) | u32::from(self.place),
-        )
-        .and_then(KeyexprHandle::from_bits)
-    }
-
     /// The id the wire names the declaration by.
     pub fn id(&self) -> ExprId {
         self.id
-    }
-
-    /// The row the head lies in, at the generation its count names, `None` before the table
-    /// names it.
-    pub fn row(&self) -> Option<KeyexprHandle> {
-        self.row_in(self.count.load(core::sync::atomic::Ordering::Relaxed))
     }
 
     /// Its holders now.
@@ -741,6 +721,7 @@ impl KeyexprHead {
     /// How many bytes of a key the declaration covers: the length of its own key, which every key
     /// named by it begins with.
     pub fn key_len(&self) -> usize {
+        // Every `KeyLen` is at most 32 bits wide, which no target's `usize` is narrower than.
         self.key_len as usize
     }
 
@@ -750,28 +731,10 @@ impl KeyexprHead {
     /// took the row's place since).
     pub fn retain(&self, row: KeyexprHandle) -> Result<(), RowHoldRefused> {
         let generation = Self::generation_of(row);
-        self.take_hold(|now| Self::generation_in(now) == generation)
-            .map(|_| ())
-    }
-
-    /// One more hold of whatever declaration the row holds now, for a holder that names it by
-    /// the address alone while another holder keeps it standing: the row, at the generation the
-    /// hold was taken at, and the declaration's id, to give it back by ([`Self::release_shared`]).
-    /// Refused as [`Self::retain`] is, and for a head no row is named for yet.
-    pub fn hold(&self) -> Result<(KeyexprHandle, ExprId), RowHoldRefused> {
-        let taken = self.take_hold(|_| self.place != 0)?;
-        self.row_in(taken)
-            .map(|row| (row, self.id))
-            .ok_or(RowHoldRefused::Released)
-    }
-
-    /// One more hold when `ours` reads the word as the declaration the holder asks for: the word
-    /// the hold was added to.
-    fn take_hold(&self, ours: impl Fn(u32) -> bool) -> Result<u32, RowHoldRefused> {
         let mut now = self.count.load(core::sync::atomic::Ordering::Relaxed);
         loop {
             let holds = Self::holds_of(now);
-            if !ours(now) || holds == 0 {
+            if Self::generation_in(now) != generation || holds == 0 {
                 return Err(RowHoldRefused::Released);
             }
             if holds == KeyexprHolds::MAX {
@@ -784,7 +747,7 @@ impl KeyexprHead {
                 core::sync::atomic::Ordering::AcqRel,
                 core::sync::atomic::Ordering::Relaxed,
             ) {
-                Ok(_) => return Ok(now),
+                Ok(_) => return Ok(()),
                 Err(seen) => now = seen,
             }
         }
@@ -2035,6 +1998,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if self.keyexprs.is_full() {
             return Err(RegisterError::TableFull);
         }
+        // A key longer than its row can state is refused as one longer than a row keeps.
+        let key_len =
+            caps::KeyLen::try_from(key.len()).map_err(|_| RegisterError::KeyexprTooLong)?;
         let table = self.address();
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.mint_expr(usable).ok_or(RegisterError::IdsExhausted)?;
@@ -2042,11 +2008,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .keyexprs
             .insert(KeyexprRow {
                 key: kept,
-                head: KeyexprHead::new(id, key.len(), table),
+                head: KeyexprHead::new(id, key_len, table),
             })
             .map_err(|_| RegisterError::TableFull)?;
-        if let Some(row) = self.keyexprs.get_mut(handle) {
-            row.head.name_row(handle);
+        if let Some(row) = self.keyexprs.get(handle) {
+            row.head.first_hold(handle);
         }
         Ok(KeyexprDeclared {
             handle,

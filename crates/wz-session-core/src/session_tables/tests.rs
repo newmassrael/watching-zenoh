@@ -3473,7 +3473,6 @@ fn a_retracted_declarations_hold_spares_its_rows_next_declaration_below_65536_re
     // SAFETY: the table keeps its rows where they were put; the head is read while the first
     // declaration stands and while a later one stands in the same row, never in between.
     let head = unsafe { &*at };
-    assert_eq!(head.row(), Some(first.handle), "the head names its row");
     assert_eq!(head.retain(first.handle), Ok(()));
     assert_eq!(tables.retract_keyexpr(first.handle), Some(first.id));
     let second = tables.declare_keyexpr("demo/row/second").unwrap();
@@ -3483,7 +3482,6 @@ fn a_retracted_declarations_hold_spares_its_rows_next_declaration_below_65536_re
         "the second declaration takes the first's row"
     );
     assert_ne!(second.handle, first.handle, "at the row's next generation");
-    assert_eq!(head.row(), Some(second.handle));
     assert_eq!(head.id(), second.id);
     assert_eq!(head.retain(second.handle), Ok(()));
     assert!(
@@ -3496,8 +3494,6 @@ fn a_retracted_declarations_hold_spares_its_rows_next_declaration_below_65536_re
         "and takes none"
     );
     assert_eq!(head.holds(), 2);
-    assert_eq!(head.hold(), Ok((second.handle, second.id)));
-    assert_eq!(head.holds(), 3);
     assert_eq!(tables.retract_keyexpr(second.handle), Some(second.id));
     // The slot taken again until its generation is the first declaration's once more.
     let mut last = second.handle;
@@ -3520,6 +3516,38 @@ fn a_retracted_declarations_hold_spares_its_rows_next_declaration_below_65536_re
         head.release_shared(first.handle),
         "past the bound the stale hold reads as the new declaration's"
     );
+}
+
+/// A declaration's row keeps its key's length in the narrowest integer the build's bound on a
+/// key's length fits, and a key longer than that integer states is refused as too long, taking no
+/// row, by a table that keeps keys of any length.
+///
+/// # Control
+///
+/// A `KeyLen` chosen apart from the bound reds the width assertion; a declaration that cuts the
+/// length to fit reds the refusal.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_rows_key_length_is_as_wide_as_the_builds_bound_and_a_longer_key_is_refused() {
+    let fits = caps::MAX_KEYEXPR_BYTES <= usize::from(u16::MAX);
+    let width = if fits { 2 } else { 4 };
+    assert_eq!(core::mem::size_of::<caps::KeyLen>(), width);
+    assert_eq!(
+        core::mem::size_of::<KeyexprHead>(),
+        (4 + width + 2).next_multiple_of(core::mem::size_of::<usize>())
+            + core::mem::size_of::<usize>(),
+        "the count, the length and the id share the word before the tables' address"
+    );
+    if fits {
+        type Growable = SessionTables<Calls, crate::bounded::Heap>;
+        let mut tables = Growable::new();
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        assert_eq!(
+            tables.declare_keyexpr(&past).err(),
+            Some(RegisterError::KeyexprTooLong)
+        );
+        assert!(tables.keyexprs().is_empty());
+    }
 }
 
 /// Rows of a growable table stay where they were put however many declarations come after them,
