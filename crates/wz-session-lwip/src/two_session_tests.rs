@@ -172,14 +172,17 @@ fn put_payloads(event: &IterationEvent<'_, '_>) -> Vec<Vec<u8>> {
             }
         }
         IterationEvent::InPlace(record) => {
-            use wz_codecs::lent::PushVariant;
+            use wz_codecs::msg_put::MsgPutExtensionsHas0x12;
+            use wz_codecs::push::PushViewVariant;
             if let Some(
-                PushVariant::CodecZenohMsgPut(put) | PushVariant::Default { body: put, .. },
+                PushViewVariant::CodecZenohMsgPut(put) | PushViewVariant::Default { body: put, .. },
             ) = record.push().map(|push| &push.body)
             {
-                let bytes =
-                    wz_session_core::put_payload::inline_bytes(put).expect("an inline payload");
-                out.push(bytes.to_vec());
+                let MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } = &put.extensions_has_0x12
+                else {
+                    panic!("an inline payload");
+                };
+                out.push(payload.into_inner().to_vec());
             }
         }
         _ => {}

@@ -831,6 +831,7 @@ mod lent_delivery {
             Ok(())
         })
         .expect("a frame a test writes is walked whole");
+        on_event.end_records();
         if !walked {
             on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
                 reliable,
@@ -1145,7 +1146,7 @@ enum LentRecord<'a, 'f> {
             feature = "rx-push"
         )
     ))]
-    Push(&'a wz_codecs::lent::Push<'f>),
+    Push(&'a wz_codecs::push::PushView<'f>),
     #[cfg(feature = "codec-request")]
     Request(&'a wz_codecs::request::RequestView<'f>),
     #[cfg(all(
@@ -1276,7 +1277,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn push_of_frame(
-        push: &'a wz_codecs::lent::Push<'f>,
+        push: &'a wz_codecs::push::PushView<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -1530,12 +1531,12 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         self.past_sender_bound
     }
 
-    /// The Push, as it is decoded: its keyexpr, extensions and payload are
-    /// ranges of the frame. `None` when the record is of another kind.
+    /// The Push, as its view: its keyexpr and payload ranges of the frame, and its extension chains
+    /// as the bytes they occupy, walked where they lie. `None` when the record is of another kind.
     ///
     /// Always `None` in a build that reads no Push off the wire (`rx-push`).
     #[cfg(feature = "codec-push")]
-    pub fn push(&self) -> Option<&'a wz_codecs::lent::Push<'f>> {
+    pub fn push(&self) -> Option<&'a wz_codecs::push::PushView<'f>> {
         match self.record {
             #[cfg(any(
                 all(
@@ -1680,6 +1681,12 @@ pub trait EventSink {
     fn takes_another(&mut self) -> bool {
         true
     }
+
+    /// The records of the frame just walked have been handed, all of them or as many as the host
+    /// took: a host that put off what follows each record of a run does it now. Called once a
+    /// frame, after its last record and before what the frame's walk answers is acted on. Defaults
+    /// to nothing.
+    fn end_records(&mut self) {}
 
     /// Whether the datagram being dispatched stays where the link holds it when its dispatch
     /// stops before its end, to be lent again whole on a later step. Defaults to `false`: what
@@ -1865,25 +1872,22 @@ pub(crate) fn walk_lent_payload(
     use crate::network_message::{new_record_buf, try_for_each_record_while, RecordForm};
     let mut record = new_record_buf();
     let mut dispatched = false;
-    // Set once the host has no room for another record; the walk then ends before the next.
-    let stopping = core::cell::Cell::new(false);
-    let go_on = || !stopping.get();
     let walked = try_for_each_record_while(
         payload,
         &mut record,
         RecordForm::LentControl,
-        &go_on,
         |one| {
             report_lent_record(one, reliable, sn, priority, &mut *on_event);
             dispatched = true;
-            if may_stop && !on_event.takes_another() {
-                stopping.set(true);
-            }
-            Ok(())
+            // A host with no room for another record ends the walk before the next.
+            Ok(!may_stop || on_event.takes_another())
         },
         #[cfg(all(feature = "transport-stats", feature = "alloc"))]
         counted,
-    )?;
+    );
+    // What the host put off for the records it was handed is owed whatever the walk answers.
+    on_event.end_records();
+    let walked = walked?;
     if !dispatched {
         #[cfg(feature = "alloc")]
         on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {

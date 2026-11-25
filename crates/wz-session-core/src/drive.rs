@@ -2927,14 +2927,10 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     ))]
     let mut outcome: Option<DriverLoopOutcome> = None;
     let mut dispatched = false;
-    // Set once the host has no room for another record; the walk then ends before the next.
-    let stopping = core::cell::Cell::new(false);
-    let go_on = || !stopping.get();
-    let (read, stopped) = crate::network_message::try_for_each_record_while(
+    let walked = crate::network_message::try_for_each_record_while(
         payload,
         record,
         form,
-        &go_on,
         |one| {
             // A build with no owned record walks none: every one is lent.
             #[cfg(all(
@@ -3005,10 +3001,8 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                 }
             }
             dispatched = true;
-            if may_stop && !on_event.takes_another() {
-                stopping.set(true);
-            }
-            Ok(())
+            // A host with no room for another record ends the walk before the next.
+            Ok(!may_stop || on_event.takes_another())
         },
         // A record lent is counted by its class, read off it as it was decoded, as an owned one is
         // counted above: a `Frame`'s, as the copying path counts.
@@ -3018,7 +3012,10 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                 count_rx_record(actions, record);
             }
         },
-    )?;
+    );
+    // What the host put off for the records it was handed is owed whatever the walk answers.
+    on_event.end_records();
+    let (read, stopped) = walked?;
     if !dispatched {
         #[cfg(all(
             feature = "alloc",

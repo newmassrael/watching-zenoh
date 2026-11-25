@@ -2174,12 +2174,14 @@ mod in_place {
         use wz_session_core::multicast_rx::dispatch_multicast_inbound_kept;
         use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
         use wz_session_core::wire_const::T_MID_KEEP_ALIVE;
-        use wz_session_core::wireexpr_resolve::id_and_suffix_view;
+        use wz_session_core::wireexpr_resolve::id_suffix_and_space_viewed;
 
-        /// The keys of the Puts it was handed, and how many more records it takes.
+        /// The keys of the Puts it was handed, how many more records it takes, and how many keys it
+        /// held each time it was told a frame's records were handed.
         struct Host {
             keys: Vec<String>,
             room: usize,
+            ended: Vec<usize>,
         }
 
         impl EventSink for Host {
@@ -2187,7 +2189,7 @@ mod in_place {
 
             fn record(&mut self, record: InPlaceRecord<'_, '_>) {
                 if let Some(push) = record.push() {
-                    let (_, suffix) = id_and_suffix_view(&push.keyexpr.body);
+                    let (_, suffix, _) = id_suffix_and_space_viewed(&push.keyexpr.body);
                     self.keys.push(suffix.unwrap_or_default().to_owned());
                 }
                 self.room = self.room.saturating_sub(1);
@@ -2195,6 +2197,10 @@ mod in_place {
 
             fn takes_another(&mut self) -> bool {
                 self.room > 0
+            }
+
+            fn end_records(&mut self) {
+                self.ended.push(self.keys.len());
             }
         }
 
@@ -2246,6 +2252,7 @@ mod in_place {
         let mut host = Host {
             keys: Vec::new(),
             room: 0,
+            ended: Vec::new(),
         };
         let mut walk = |host: &mut Host, resume| {
             dispatch_multicast_inbound_kept(
@@ -2287,6 +2294,9 @@ mod in_place {
         let stopped = walk(&mut host, stopped);
         assert_eq!(stopped, None, "read whole");
         assert_eq!(host.keys, keys);
+        // Each walk of the frame ends its records once, after the last it handed; the walk that
+        // stopped before the frame handed none and ends none.
+        assert_eq!(host.ended, [1, 2, 3]);
         #[cfg(feature = "transport-stats")]
         {
             assert_eq!(

@@ -1087,43 +1087,47 @@ impl<H: Holders> RegistryOf<H> {
     /// A Push of face `id` lent where its frame lies ([`super::lent_push`]), handed to the
     /// subscribers' plane alone, which is the one plane that reads a Push: the fan over every
     /// plane ([`Self::dispatch_event`]) is spared, and so are the watches' staging, which a Push
-    /// stages nothing into. What follows the dispatch of every record follows it all the same,
-    /// under the one lookup of the face the dispatch made: the subscribers' tables reconciled with
-    /// what the application registered since, what anything staged drained through `actions`
+    /// stages nothing into. What follows the dispatch of a record is put off to the end of the run
+    /// of Pushes it is one of ([`Self::after_pushes`]): a Push stages nothing for it to drain, so
+    /// it is done once for the run and not once for each. A face the session no longer holds hears
+    /// nothing.
+    pub(super) fn dispatch_push(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
+        #[cfg(all(test, feature = "std"))]
+        let written = self.faces_written;
+        if let Some(Split {
+            app,
+            delivery,
+            face,
+            ..
+        }) = self.split(self.place(face))
+        {
+            face.peer
+                .subscribers
+                .dispatch_iteration_event(&mut app.tables, delivery, event);
+        }
+        #[cfg(all(test, feature = "std"))]
+        self.counted_push(written);
+    }
+
+    /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
+    /// under one lookup of the face: the subscribers' tables reconciled with what the application
+    /// registered since, what anything staged drained through `actions`
     /// ([`Self::flush_pending_replies`]), and the `Final`s owed taken for the caller
-    /// ([`Self::take_pending_final_rids`]). A face the session no longer holds hears nothing.
+    /// ([`Self::take_pending_final_rids`]). A face the session no longer holds owes nothing.
     #[cfg(feature = "queryable")]
-    pub(super) fn dispatch_push<S>(
-        &mut self,
-        face: HeldFace,
-        event: IterationEvent<'_, '_>,
-        actions: &S,
-    ) -> FinalStage<Static>
+    pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S) -> FinalStage<Static>
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        #[cfg(all(test, feature = "std"))]
-        let written = self.faces_written;
-        let owed = match self.split(self.place(face)) {
-            Some(Split {
-                app,
-                delivery,
-                face,
-                ..
-            }) => {
-                face.peer
-                    .subscribers
-                    .dispatch_iteration_event(&mut app.tables, delivery, event);
+        match self.split(self.place(face)) {
+            Some(Split { app, face, .. }) => {
                 #[cfg(feature = "interest-answer")]
                 reconcile_face(app, face);
                 app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
                 face.peer.finals.take_owed()
             }
             None => FinalStage::default(),
-        };
-        #[cfg(all(test, feature = "std"))]
-        self.counted_push(written);
-        owed
+        }
     }
 
     /// Fan and drain in one call, the `Final`s with the rest: what a session with no queryable
@@ -1141,36 +1145,18 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
-    /// [`Self::dispatch`] of a lent Push ([`super::lent_push`]), handed to the subscribers' plane
-    /// alone, the one plane that reads a Push, and drained under the one lookup of the face the
-    /// dispatch made.
+    /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
+    /// drained under one lookup of the face, as [`Self::dispatch`] drains after every other record.
     #[cfg(not(feature = "queryable"))]
-    pub(super) fn dispatch_push<S>(
-        &mut self,
-        face: HeldFace,
-        event: IterationEvent<'_, '_>,
-        actions: &S,
-    ) where
+    pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S)
+    where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        #[cfg(all(test, feature = "std"))]
-        let written = self.faces_written;
-        if let Some(Split {
-            app,
-            delivery,
-            face,
-            ..
-        }) = self.split(self.place(face))
-        {
-            face.peer
-                .subscribers
-                .dispatch_iteration_event(&mut app.tables, delivery, event);
+        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             #[cfg(feature = "interest-answer")]
             reconcile_face(app, face);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
-        #[cfg(all(test, feature = "std"))]
-        self.counted_push(written);
     }
 
     /// The link of face `id` was lost: every subscriber and queryable its peer declared is gone,

@@ -2731,42 +2731,50 @@ pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     /// The session's round of deliveries: told where a rejoined message lies while its records are
     /// dispatched, and, in a debug build, that what is offered waited for room (`Gated`).
     lane: PlacedRef<Round>,
+    /// Whether Pushes were dispatched whose drains are still owed ([`EventSink::end_records`]).
+    after_pushes: bool,
 }
 
 impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
     #[cfg(feature = "queryable")]
     fn event(&mut self, event: IterationEvent<'_, '_>) {
+        let face = self.face;
+        // A Push is no query and no declaration: it is handed to the subscribers alone, and what
+        // follows a record (the drains, the Finals owed) is put off to the end of its run.
+        if lent_push(&event) {
+            #[cfg(debug_assertions)]
+            let _gated = Gated::over(&self.lane);
+            let dispatched = self
+                .registry
+                .with(|registry| registry.dispatch_push(face, event));
+            debug_assert!(dispatched.is_some(), "{UNLENT}");
+            self.after_pushes = true;
+            return;
+        }
+        // What the Pushes before this record put off is done before it, as it was after each.
+        self.end_records();
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&self.lane);
-        let face = self.face;
         let actions = &*self.actions;
         let plane = &self.plane;
         let generation = self.generation;
         let dispatched = self.registry.with(|registry| {
-            // A Push is no query and no declaration: it is handed to the subscribers alone, and
-            // what follows every record (the drains, the Finals owed) under the one lookup of the
-            // face.
-            let owed = if lent_push(&event) {
-                registry.dispatch_push(face, event, actions)
-            } else {
-                // The queries this frame carries arrive on this face's link, whichever was
-                // dialled last.
-                plane.set_arriving(generation);
-                // A query by an id of the shared dictionary is kept, so its replies mirror its key
-                // form.
-                #[cfg(feature = "shared-key-ids")]
-                actions.note_requests(&event);
-                // What the declaration watches are told of this frame is this link's peer's.
-                #[cfg(any(
-                    feature = "remote-declaration-watch",
-                    feature = "declarations-synced-event"
-                ))]
-                registry.hear_decl_link(|| actions.peer_session_zid());
-                registry.dispatch_event(face, event);
-                registry.flush_pending_replies(face, actions);
-                registry.take_pending_final_rids(face)
-            };
-            for (rid, qos) in owed {
+            // The queries this frame carries arrive on this face's link, whichever was
+            // dialled last.
+            plane.set_arriving(generation);
+            // A query by an id of the shared dictionary is kept, so its replies mirror its key
+            // form.
+            #[cfg(feature = "shared-key-ids")]
+            actions.note_requests(&event);
+            // What the declaration watches are told of this frame is this link's peer's.
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            registry.hear_decl_link(|| actions.peer_session_zid());
+            registry.dispatch_event(face, event);
+            registry.flush_pending_replies(face, actions);
+            for (rid, qos) in registry.take_pending_final_rids(face) {
                 if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
                     actions.send_response_final(rid, qos);
                 }
@@ -2777,16 +2785,25 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 
     #[cfg(not(feature = "queryable"))]
     fn event(&mut self, event: IterationEvent<'_, '_>) {
+        let face = self.face;
+        // A Push is no query and no declaration: it is handed to the subscribers alone, and what
+        // follows a record (the drains) is put off to the end of its run.
+        if lent_push(&event) {
+            #[cfg(debug_assertions)]
+            let _gated = Gated::over(&self.lane);
+            let dispatched = self
+                .registry
+                .with(|registry| registry.dispatch_push(face, event));
+            debug_assert!(dispatched.is_some(), "{UNLENT}");
+            self.after_pushes = true;
+            return;
+        }
+        // What the Pushes before this record put off is done before it, as it was after each.
+        self.end_records();
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&self.lane);
-        let face = self.face;
         let actions = &*self.actions;
         let dispatched = self.registry.with(|registry| {
-            // A Push is no query and no declaration: it is handed to the subscribers alone.
-            if lent_push(&event) {
-                registry.dispatch_push(face, event, actions);
-                return;
-            }
             // What the declaration watches are told of this frame is this link's peer's.
             #[cfg(any(
                 feature = "remote-declaration-watch",
@@ -2794,6 +2811,29 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             ))]
             registry.hear_decl_link(|| actions.peer_session_zid());
             registry.dispatch(face, event, actions);
+        });
+        debug_assert!(dispatched.is_some(), "{UNLENT}");
+    }
+
+    /// The drains a run of Pushes put off ([`Registry::after_pushes`]), once for the run: at the
+    /// end of the frame, or before the first record of it that is not a Push.
+    fn end_records(&mut self) {
+        if !core::mem::take(&mut self.after_pushes) {
+            return;
+        }
+        let face = self.face;
+        let actions = &*self.actions;
+        #[cfg(feature = "queryable")]
+        let (plane, generation) = (&self.plane, self.generation);
+        let dispatched = self.registry.with(|registry| {
+            #[cfg(feature = "queryable")]
+            for (rid, qos) in registry.after_pushes(face, actions) {
+                if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
+                    actions.send_response_final(rid, qos);
+                }
+            }
+            #[cfg(not(feature = "queryable"))]
+            registry.after_pushes(face, actions);
         });
         debug_assert!(dispatched.is_some(), "{UNLENT}");
     }
@@ -3164,6 +3204,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
             // holds, dropped before its state (`Core`'s fields), whose round's owner changes it no
             // more.
             lane: unsafe { self.session.lane.share() },
+            after_pushes: false,
         };
         // The wire keeps a handle on the gates to admit the link through them.
         #[cfg(not(feature = "listen"))]
