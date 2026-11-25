@@ -382,7 +382,7 @@ fn the_samples_of_a_lent_datagram_are_handed_where_they_lie() {
     unsafe { round.offer_sample(first.call(), &borrowed(&datagram[2..]), true) };
     assert_eq!(
         gate.takes_input(),
-        <crate::round::CoopForm as wz_session_core::row_callback::ThreadForm>::OTHER_THREADS,
+        <crate::form::CoopForm as wz_session_core::row_callback::ThreadForm>::OTHER_THREADS,
         "a round of threads takes the datagram's next record; one of one thread hands these out first"
     );
     unsafe { round.set_lending(None) };

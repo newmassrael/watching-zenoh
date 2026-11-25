@@ -61,7 +61,9 @@ use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 use super::lock;
 use super::registry::FaceTables;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-use crate::round::{CoopForm, Round};
+use crate::form::CoopForm;
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+use crate::round::Round;
 
 /// Whether a watch is told its catch-up in parts: a round of one thread is handed out after each
 /// message and holds the records of one alone, so it takes a catch-up a declaration a round.

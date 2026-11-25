@@ -2895,10 +2895,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The port's mutex, as the lock the session core's planes keep their state under and the queues
-/// the deliveries drain sit behind: the query plane's (every build, `PlaneCalls::Queues`), the
-/// faces' watchers (`connectivity`) and the gets' queues (`query`).
+/// the deliveries drain sit behind: the round's planes' (`PlaneCalls::Queues`, every build that
+/// keeps the round), the faces' watchers (`connectivity`) and the gets' queues (`query`).
+#[cfg(any(wz_round, feature = "connectivity"))]
 pub(crate) enum CoopLocks {}
 
+#[cfg(any(wz_round, feature = "connectivity"))]
 impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     type Lock<T> = Mutex<T>;
 
