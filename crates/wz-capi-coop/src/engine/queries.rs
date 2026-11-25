@@ -5,8 +5,13 @@
 //! read steps its one link itself (`direct`): a Request read where its frame lies.
 //!
 //! The query is read off its Request under the session's lock into the read's own frame
-//! (`PinnedQuery`): its key copied out of the peer's tables, every other part where the frame
-//! lies, which the pump holds through the read. The first queryable it reaches is pinned there: a
+//! (`PinnedQuery`), nothing of it copied: its key is the frame's, the face's peer's literal, or
+//! composed in a buffer of this frame where an alias and a suffix join, and every other part lies
+//! in the frame, which the pump holds through the read. The peer and its buffer are written only
+//! by the dispatch of the face's records, which the read makes one at a time and which waits for
+//! this walk; a read from a callback reads nothing; and the face's tables are given back only when
+//! the face is taken out, which a session of its dial face alone never does, a close from a
+//! callback included. The first queryable it reaches is pinned there: a
 //! hold taken on its Final and a call begun on its row. The lock is let go of, the query is handed
 //! to the callback, whose replies go out on the query's link as it makes them, and the call is
 //! ended with no lock held; the next row is pinned under the lock again, from the place after the
@@ -43,14 +48,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .session
             .registry
             .pin_lent_query(records.face, record, &mut room);
-        if let Err(OwedToProjection) = pinned {
-            return Some(held);
-        }
+        let mut query = match pinned {
+            // SAFETY: what the query borrows outlives the walk, which holds it no longer than this
+            // call: the frame is lent by the pump the read holds through it, `room` stays in this
+            // frame, and the face's peer and its buffer are neither written nor let go of while it
+            // runs (see the module's docs).
+            Ok(Some(query)) => unsafe { past_the_lock(query, record) },
+            Ok(None) => {
+                records.note_requests(event);
+                records.owe_finals(&mut held.0.session.registry);
+                return None;
+            }
+            Err(OwedToProjection) => return Some(held),
+        };
         records.note_requests(event);
-        match pinned {
-            Ok(Some(mut query)) => self.hand_query(held, records, &mut query),
-            _ => records.owe_finals(&mut held.0.session.registry),
-        }
+        self.hand_query(held, records, &mut query);
         None
     }
 
@@ -112,4 +124,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         None
     }
+}
+
+/// `query`, read under the session's lock, held past it for as long as the read lends `_frame`.
+///
+/// # Safety
+///
+/// Nothing the query borrows is written or let go of while the result is held.
+unsafe fn past_the_lock<'r>(
+    query: PinnedQuery<'_>,
+    _frame: &'r InPlaceRecord<'_, '_>,
+) -> PinnedQuery<'r> {
+    // SAFETY: the two types differ in their lifetime alone, so they are laid out alike; what the
+    // result borrows is the caller's to keep where it lies.
+    unsafe { core::mem::transmute::<PinnedQuery<'_>, PinnedQuery<'r>>(query) }
 }

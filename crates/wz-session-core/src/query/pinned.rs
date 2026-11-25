@@ -6,8 +6,10 @@
 //!
 //! A session whose read steps its one link itself hands each record out as it reads it. A query is
 //! read off its Request under the session's lock into a [`PinnedQuery`] in the read's own frame
-//! (`QueryPeer::pin_request_in_place`): its key copied out of the peer's tables, which only the
-//! lock keeps, and every other part read where the frame lies, which the read holds throughout. The
+//! (`QueryPeer::pin_request_in_place`), nothing of it copied: its key is the frame's, the peer's
+//! literal, or composed in a buffer of the read's frame where an alias and a suffix join, and every
+//! other part lies in the frame, which the read holds throughout. A read that walks with the lock
+//! let go of keeps the peer's tables unwritten for as long as it holds the query. The
 //! queryables it reaches are found one at a time from the place after the last
 //! (`SessionTables::next_queryable_reached`), each called with the lock let go of, so a callback
 //! finds the session free and what the queryables before its own did. The match and the view are
@@ -31,7 +33,7 @@ pub struct PinnedQuery<'q> {
     pub(super) qos: QosLevel,
     /// The zid the link's key proved, as each queryable is shown it (decision D12).
     pub(super) requester: Option<[u8; 16]>,
-    /// The key, copied out of the peer's tables into the walk's frame.
+    /// The key, where it lies: the frame, the peer's literal, or the walk's buffer.
     pub(super) keyexpr: &'q str,
     pub(super) facts: KeyFacts,
     pub(super) parameters: Option<&'q [u8]>,

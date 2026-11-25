@@ -220,17 +220,20 @@ impl QueryPeer {
 
     /// Read the Request `record` lends for a walk that hands its query to each queryable it reaches
     /// with no lock held ([`PinnedQuery`]), by the rules of `Self::dispatch_request_in_place`:
-    /// the key resolved through `peer_keyexpr_table` and copied into `room`, every other part read
-    /// where the frame lies. `None`, with what the Request owes staged in `pending_final_rids` as
-    /// its dispatch stages it, for a record that is no Query, one the table has no room to owe a
-    /// Final for, one whose key does not resolve and one past the bounds the face holds queries to.
-    /// The query handed back owes its Final once the walk is over, which stages nothing here.
-    /// Refused with [`OwedToProjection`] for a Request the lent form does not represent where the
-    /// build dispatches its owned projection instead, which the caller then does.
-    pub fn pin_request_in_place<'a, 'q, 'f: 'q, PS, OS, S>(
+    /// the key resolved through `peer_keyexpr_table` and borrowed where it lies, the frame or the
+    /// peer's literal, and composed into `room`, an empty buffer, only where an alias and a suffix
+    /// join; every other part read where the frame lies. The query so borrows the peer's space: a
+    /// caller that walks with the session's lock let go of keeps the peer's tables unwritten while
+    /// it holds the query. `None`, with what the Request owes staged in `pending_final_rids` as its
+    /// dispatch stages it, for a record that is no Query, one the table has no room to owe a Final
+    /// for, one whose key does not resolve and one past the bounds the face holds queries to. The
+    /// query handed back owes its Final once the walk is over, which stages nothing here. Refused
+    /// with [`OwedToProjection`] for a Request the lent form does not represent where the build
+    /// dispatches its owned projection instead, which the caller then does.
+    pub fn pin_request_in_place<'q, 'r: 'q, 'f: 'r, PS, OS, S>(
         &mut self,
-        record: &InPlaceRecord<'q, 'f>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+        record: &InPlaceRecord<'r, 'f>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'q, PS, OS>>,
         room: &'q mut KeyexprBuf,
         pending_final_rids: &mut FinalStage<S>,
     ) -> Result<Option<PinnedQuery<'q>>, OwedToProjection>
@@ -254,8 +257,7 @@ impl QueryPeer {
             return lent_form_refused(request.rid, qos, pending_final_rids);
         }
         let spaces = MappingSpaces::from_sender(peer_keyexpr_table.into(), record.sender());
-        let mut composed = KeyexprBuf::new();
-        let keyexpr = match resolve_wireexpr_viewed(&request.keyexpr.body, spaces, &mut composed) {
+        let keyexpr = match resolve_wireexpr_viewed(&request.keyexpr.body, spaces, room) {
             Ok(Some(keyexpr)) => keyexpr,
             Ok(None) => {
                 if DispatchOutcome::UNRESOLVED.owes_final(self.answers_unresolved_queries()) {
@@ -267,13 +269,6 @@ impl QueryPeer {
                 return lent_form_refused(request.rid, qos, pending_final_rids);
             }
         };
-        // The key may be the peer's, which the session's lock keeps and the walk lets go of.
-        room.clear();
-        if room.push_str(keyexpr).is_err() {
-            return lent_form_refused(request.rid, qos, pending_final_rids);
-        }
-        let room: &'q KeyexprBuf = room;
-        let keyexpr = room.as_str();
         #[cfg(all(feature = "alloc", feature = "pubsub-ts-stack"))]
         let ts_stack = crate::ts_stack::read_ts_stack(walked(request.extensions.as_ref()));
         let projection = lent_projection(

@@ -1391,18 +1391,19 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The query the Request `record` of face `face` lends, read for a walk that hands it to each
-    /// queryable it reaches with the session let go of (`queries`), its key copied into `room`
-    /// (`QueryPeer::pin_request_in_place`). `None`, with what the Request owes staged in the
+    /// queryable it reaches with the session let go of (`queries`), its key borrowed where it lies
+    /// or composed into `room` (`QueryPeer::pin_request_in_place`): it borrows the face's peer,
+    /// as long as the session is held. `None`, with what the Request owes staged in the
     /// face's Finals, for one no queryable is handed, and for a face the session no longer holds;
     /// refused for a Request the lent form does not represent, which the caller dispatches.
     #[cfg(all(
         feature = "queryable",
         not(any(feature = "threads", feature = "listen", feature = "group"))
     ))]
-    pub(super) fn pin_lent_query<'q, 'f: 'q>(
-        &mut self,
+    pub(super) fn pin_lent_query<'q, 'r: 'q, 'f: 'r>(
+        &'q mut self,
         face: HeldFace,
-        record: &InPlaceRecord<'q, 'f>,
+        record: &InPlaceRecord<'r, 'f>,
         room: &'q mut wz_session_core::wireexpr_resolve::KeyexprBuf,
     ) -> Result<
         Option<wz_session_core::query::pinned::PinnedQuery<'q>>,
