@@ -647,8 +647,9 @@ mod round_tests {
         let round = crate::round::leaked(4);
         let noting = Arc::new(Noting(Noted::default()));
         // Made of the stand-in's own type, then unsized where the round takes it.
-        let answering: Weak<Noting> = Arc::downgrade(&noting);
-        round.answer_queries_with(answering);
+        let answering: NonNull<Noting> = NonNull::from(&*noting);
+        // SAFETY: the stand-in stands past the round's one delivery, below.
+        unsafe { round.answer_queries_with(answering) };
         let row = row();
         // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
         unsafe { round.set_lending(Some(&datagram[..])) };

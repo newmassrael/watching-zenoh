@@ -658,7 +658,8 @@ fn a_query_is_held_where_queries_are_kept_and_refused_where_they_are_not() {
     let log = Arc::new(Log::default());
     let kept = round::<Kept>();
     let answers: Arc<dyn AnswersQueries<Kept>> = Arc::new(Answers(log.clone()));
-    kept.answer_queries_with(Arc::downgrade(&answers));
+    // SAFETY: the stand-in stands past the round's last delivery, below.
+    unsafe { kept.answer_queries_with(NonNull::from(&*answers)) };
     let call = Call {
         row: 3,
         log: log.clone(),
@@ -685,6 +686,49 @@ fn a_query_is_held_where_queries_are_kept_and_refused_where_they_are_not() {
     assert_eq!(log.ended(), 2, "the refused query's call is ended");
     assert_eq!(lean.counts().held_over, 1);
     assert_eq!(log.handed(), ["3 query q/1 9"]);
+}
+
+/// A round told to answer no more hands the query it holds after to none and ends its call all
+/// the same, as an engine's drop tells it first. Turned red by an `answer_no_queries` that leaves
+/// the engine named, which would hand the query to an engine being let go of.
+#[test]
+fn a_round_told_to_answer_no_more_hands_its_query_to_none() {
+    let log = Arc::new(Log::default());
+    let answers: Arc<dyn AnswersQueries<Kept>> = Arc::new(Answers(log.clone()));
+    let kept = round::<Kept>();
+    // SAFETY: the stand-in stands past the round, which is told to answer no more at once.
+    unsafe { kept.answer_queries_with(NonNull::from(&*answers)) };
+    kept.answer_no_queries();
+    let call = Call {
+        row: 3,
+        log: log.clone(),
+    };
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    let taken = unsafe {
+        let taken = kept.offer_query(call, &Query("q/1"), 9);
+        kept.seal();
+        taken
+    };
+    assert!(taken, "CONTROL: the round still keeps queries");
+    assert!(kept.deliver());
+    assert!(log.handed().is_empty(), "handed to no engine");
+    assert_eq!(log.ended(), 1, "its call ended all the same");
+}
+
+/// A round let go of while it still names the engine that answers its queries is a defect a debug
+/// build stops at: the engine tells the round to answer no more before it lets it go. Turned red
+/// by a `let_go` that no longer checks it.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "the engine that answers the round's queries is let go of before")]
+fn a_round_let_go_of_while_it_names_its_engine_is_a_defect() {
+    let log = Arc::new(Log::default());
+    let answers: Arc<dyn AnswersQueries<Kept>> = Arc::new(Answers(log));
+    let kept = round::<Kept>();
+    // SAFETY: the stand-in stands past the round; no delivery runs.
+    unsafe { kept.answer_queries_with(NonNull::from(&*answers)) };
+    // SAFETY: no delivery runs and none starts.
+    unsafe { kept.let_go() };
 }
 
 /// A peer's declaration is written once for the watches it reaches one after the other and handed
@@ -1207,7 +1251,8 @@ fn a_query_for_two_queryables_is_one_record_owing_both() {
     let log = Arc::new(Log::default());
     let kept = round_of::<Kept>(1, 4);
     let answers: Arc<dyn AnswersQueries<Kept>> = Arc::new(Answers(log.clone()));
-    kept.answer_queries_with(Arc::downgrade(&answers));
+    // SAFETY: the stand-in stands past the round's last delivery, below.
+    unsafe { kept.answer_queries_with(NonNull::from(&*answers)) };
     let call = |row| Call {
         row,
         log: log.clone(),

@@ -4418,10 +4418,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // The round hands the queries it holds to their queryables through the engine, which
             // sends what they answer.
             #[cfg(feature = "queryable")]
-            {
-                let answering: Weak<dyn crate::round::AnswersQueries<crate::round::CoopCalls>> =
-                    Weak::<Self>::clone(this);
-                samples.answer_queries_with(answering);
+            if let Some(engine) = NonNull::new(this.as_ptr().cast_mut()) {
+                let answering: NonNull<dyn crate::round::AnswersQueries<crate::round::CoopCalls>> =
+                    engine;
+                // SAFETY: the engine owns the round and tells it to answer no more first in its
+                // drop, before the round is let go of; the place is the engine's from here on.
+                unsafe { samples.answer_queries_with(answering) };
             }
             Self {
                 core: CoreLock::new(core),
@@ -8603,6 +8605,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {
     fn drop(&mut self) {
+        // The round names this engine to answer its queries: no longer, before anything of the
+        // engine goes (`Round::answer_queries_with`).
+        #[cfg(feature = "queryable")]
+        self.samples.answer_no_queries();
         // The last handle is gone, so no read task holds one: it has stopped, or is about to
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
