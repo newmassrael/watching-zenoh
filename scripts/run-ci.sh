@@ -10979,12 +10979,20 @@ pico_lib_tokio_args() {
 # A profile that unwinds cannot build it. Run from `crates/`.
 pico_nostd_args() {
     local host
+    host="$(rust_host_triple)" || return 1
+    echo "--profile capi-nostd --config .cargo/capi-nostd.toml --target $host"
+}
+
+# The host's own target triple, as rustc names it: the directory under a target directory that a
+# build naming the host as its target (`--target`) puts its products in.
+rust_host_triple() {
+    local host
     host="$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')"
     if [[ -z "$host" ]]; then
-        echo "  rustc named no host target to build the pico C library for" >&2
+        echo "  rustc named no host target" >&2
         return 1
     fi
-    echo "--profile capi-nostd --config .cargo/capi-nostd.toml --target $host"
+    echo "$host"
 }
 
 layer_c1bm_cargo_test_pico_failfast() {
@@ -17391,7 +17399,9 @@ layer_c1so_cdylib_soname() {
 # executable. `abi_stamp_gate.py` reads it out of the built file and holds it to a pin.
 #
 # BOTH profiles, and a stripped copy of each: `lto = "thin"` runs in release only, and a consumer
-# ships a stripped binary. The selftest runs first and drives every FAIL path through a synthetic
+# ships a stripped binary. The pico C library is built once: its default build is the cooperative
+# engine's, which has no `std` form, so its one profile is `capi-nostd`, for the host's own target
+# (`pico_nostd_args`). The selftest runs first and drives every FAIL path through a synthetic
 # ELF plus a clean control, so a gate that had started passing everything cannot be mistaken for
 # artifacts that are in order.
 #
@@ -17407,8 +17417,12 @@ layer_c1st_abi_stamp() {
         }
     done
     python3 scripts/lib/abi_stamp_gate.py --selftest >/dev/null || return 1
-    local crate
-    for crate in wz-capi-pico wz-capi-c wz-ap-demo; do
+    local crate host nostd_args
+    host="$(rust_host_triple)" || return 1
+    nostd_args="$(pico_nostd_args)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico-lib $nostd_args --quiet) || return 1
+    for crate in wz-capi-c wz-ap-demo; do
         (cd crates && cargo build -p "$crate" --quiet) || return 1
         (cd crates && cargo build -p "$crate" --release --quiet) || return 1
     done
@@ -17422,7 +17436,7 @@ layer_c1st_abi_stamp() {
         cargo build --bin declared-node --features declared --release --quiet) || return 1
     local t="$WZ_ARTIFACTS/crates/target" n="$WZ_ARTIFACTS/deploy/host-slot-node/target"
     python3 scripts/lib/abi_stamp_gate.py --call-doors \
-        "capi-pico=$t/debug/libwz_capi_pico.so" "capi-pico=$t/release/libwz_capi_pico.so" \
+        "capi-pico=$t/$host/capi-nostd/libwz_capi_pico.so" \
         "capi-c=$t/debug/libwz_capi_c.so" "capi-c=$t/release/libwz_capi_c.so" \
         "ap-demo-surface=$t/debug/wz-ap-demo" "ap-demo-surface=$t/release/wz-ap-demo" \
         "declared-node=$n/debug/declared-node" "declared-node=$n/release/declared-node" || return 1
