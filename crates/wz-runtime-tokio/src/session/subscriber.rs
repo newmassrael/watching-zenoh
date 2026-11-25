@@ -25,7 +25,7 @@ pub struct SubscribeOptions {
     /// every matching Sample regardless of origin; `Remote` fires
     /// only on wire-arrived Samples; `SessionLocal` fires only on
     /// loopback Samples (R227+
-    /// [`wz_session_core::pubsub::SubscriberTable::local_publish`]).
+    /// [`wz_session_core::pubsub::LocalSubscribers::local_publish`]).
     pub allowed_origin: Locality,
     /// The key the retraction names, when it names one — see
     /// [`Self::with_retraction_naming`].

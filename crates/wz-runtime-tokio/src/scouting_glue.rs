@@ -265,7 +265,6 @@ mod tests {
             .pending_scout
             .lock()
             .unwrap()
-            .clone()
             .expect("scout_emit staged a datagram");
         // [S_MID_SCOUT, version, cbyte, zid(4)]
         let cbyte = 0x03 /*what*/ | 0x08 /*I*/ | ((4 - 1) << 4) /*zid_len_m1*/;

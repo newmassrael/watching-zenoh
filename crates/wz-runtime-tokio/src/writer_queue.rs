@@ -792,7 +792,9 @@ const INLINE_MIN_QUIET_NS: u64 = 8_000;
 pub(crate) struct LinkHearing(Arc<AtomicU64>);
 
 impl LinkHearing {
-    /// The reader took a frame off the wire.
+    /// The reader took a frame off the wire. Its one reader is the TCP link's
+    /// ([`crate::stream_link`]); the tests drive it by hand.
+    #[cfg(any(feature = "transport-link-tcp", test))]
     pub(crate) fn heard(&self) {
         self.0.fetch_add(1, Ordering::Release);
     }
@@ -2161,7 +2163,9 @@ impl OutboundTx {
 
     /// Give the queue its link's count of what the link's reader took off the wire
     /// ([`LinkHearing`]), by which a sender's own write tells a turn of a conversation from a
-    /// stream. Once, before the first frame; a second call is ignored.
+    /// stream. Once, before the first frame; a second call is ignored. Its one caller is the
+    /// TCP link's pipeline (`crate::link_pipeline`); the tests set it by hand.
+    #[cfg(any(feature = "transport-link-tcp", test))]
     pub(crate) fn set_hearing(&self, hearing: LinkHearing) {
         let _ = self.shared.hearing.set(hearing);
     }

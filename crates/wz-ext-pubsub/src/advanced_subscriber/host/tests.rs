@@ -48,6 +48,13 @@ type SampleFn = Box<dyn FnMut(&dyn wz_session_core::sink::SampleView) + Send>;
 /// holes reported.
 type Recorded = (EngineSubscriber, Arc<Mutex<Vec<u8>>>, Arc<Mutex<Vec<u32>>>);
 
+/// One subscription the engine declared: its id, its keyexpr, its key on the wire and its sink.
+type SubscriptionRecord = (SubId, String, WireKey, Arc<SubscriberSink>);
+
+/// One liveliness subscription the engine declared: its id, its keyexpr, whether it asked for the
+/// tokens already alive, and its sink.
+type LivelinessRecord = (SubId, String, bool, Arc<LivelinessSink>);
+
 /// One get the engine was asked: where, with what parameters, and the legs it minted.
 struct GetRecord {
     keyexpr: String,
@@ -77,8 +84,8 @@ struct Script {
     legs: Mutex<usize>,
     /// What was declared and retracted, in order.
     events: Mutex<Vec<String>>,
-    subscriptions: Mutex<Vec<(SubId, String, WireKey, Arc<SubscriberSink>)>>,
-    liveliness: Mutex<Vec<(SubId, String, bool, Arc<LivelinessSink>)>>,
+    subscriptions: Mutex<Vec<SubscriptionRecord>>,
+    liveliness: Mutex<Vec<LivelinessRecord>>,
     gets: Mutex<Vec<GetRecord>>,
     tickers: Mutex<Vec<(TickerId, u64, Tick)>>,
 }
