@@ -350,3 +350,44 @@ fn mixed_batch_is_dispatched_as_before() {
         "the samples around the KeepAlive, in order"
     );
 }
+
+/// A session whose link is up and settled, read while the router streams batches at it: the
+/// step's bookkeeping (the sweeps, the move of the links, the read of the matching listeners) runs
+/// at none of them, since nothing it follows changed and nothing of it fell due. Turned red by a
+/// step that runs its bookkeeping whatever its ledger says, at every batch.
+#[test]
+fn a_steady_stream_runs_no_bookkeeping_per_batch() {
+    const BATCHES: usize = 100;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let received = received.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                received.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    // One batch first: whatever the declaration left owed is serviced by its reads.
+    router.send(Command::PushBatch("demo/in", COUNT));
+    until(&engine, "the first batch", || {
+        received.load(Ordering::SeqCst) >= usize::from(COUNT)
+    });
+    let before = engine.services();
+    for batch in 2..=BATCHES + 1 {
+        router.send(Command::PushBatch("demo/in", COUNT));
+        until(&engine, "the next batch", || {
+            received.load(Ordering::SeqCst) >= usize::from(COUNT) * batch
+        });
+    }
+    assert_eq!(
+        engine.services() - before,
+        0,
+        "the bookkeeping ran during a stream that changed nothing it follows"
+    );
+}
