@@ -42,7 +42,8 @@ Usage:
     facility_trace.py --judge PACKAGE_DIR
         Runs every artifact of a package that has scenarios (`SCENARIOS`, or for a registered
         profile's package `PROFILE_SCENARIOS`) and judges each run against the artifact's own
-        manifest entry; an artifact with none is reported NOT JUDGED.
+        manifest entry; an artifact with none is reported NOT JUDGED, and so is a run denied a
+        facility on a library built without the door its configuration is held to.
 """
 
 from __future__ import annotations
@@ -462,6 +463,12 @@ class Driver:
     header of them) and run with the library's directory on the loader's path."""
     source: str
     include: tuple[str, ...] = ()
+    # The library's own door that answers what a config asks of the device: the cargo feature of the
+    # library that exports it and the symbol the driver calls. A package's library is built from
+    # its ABI's defconfig unless a profile is named, and that build leaves wz's own doors off, so
+    # the driver calls the door only when compiled with `DOOR_MACRO` (`has_door`).
+    door: str | None = None
+    door_call: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -615,8 +622,9 @@ SESSIONS_DOCUMENT = """{
 }
 """
 
-PICO_DRIVER = Driver("pico_session.c", ("crates/wz-capi-pico/include", "crates/wz-capi-core/include"))
-C_DRIVER = Driver("c_session.c")
+PICO_DRIVER = Driver("pico_session.c", ("crates/wz-capi-pico/include", "crates/wz-capi-core/include"),
+                     door="device-requires", door_call="wz_ext_config_device_requires")
+C_DRIVER = Driver("c_session.c", door="config-verdict", door_call="wz_capi_c_config_device_requires")
 
 SCENARIOS = {
     "capi-pico": library_scenarios(PICO_DRIVER) + denial_corpus(PICO_DRIVER),
@@ -652,27 +660,64 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def build_driver(driver: Driver, library: pathlib.Path, work: pathlib.Path) -> pathlib.Path:
-    """The driver compiled against `library` (linked by its file name, so no other copy of it on the
-    machine can stand in)."""
-    out = work / pathlib.Path(driver.source).stem
+# The macro a driver is compiled with when the library it links exports its requirement door.
+DOOR_MACRO = "WZ_DRIVER_STATES_REQUIREMENT"
+
+
+def has_door(driver: Driver | None, features: list[str]) -> bool:
+    """Whether a run of `driver` states its configuration's requirement: the library it links was
+    built with the feature of the driver's door. `features` is the build fact the manifest records
+    for the artifact, read rather than assumed from the crate's default build."""
+    return driver is not None and driver.door is not None and driver.door in features
+
+
+def driver_argv(driver: Driver, library: pathlib.Path, out: pathlib.Path, door: bool) -> list[str]:
+    """The compiler command of `driver` against `library`, linked by its file name so no other copy
+    of it on the machine can stand in, with `DOOR_MACRO` defined when the library has the door."""
     argv = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror"]
+    if door:
+        argv.append(f"-D{DOOR_MACRO}")
     for directory in driver.include:
         argv += ["-I", str(ROOT / directory)]
-    argv += [str(DRIVERS / driver.source), "-L", str(library.parent), f"-l:{library.name}", "-o", str(out)]
-    subprocess.run(argv, check=True)
+    return argv + [str(DRIVERS / driver.source), "-L", str(library.parent), f"-l:{library.name}", "-o", str(out)]
+
+
+def unguarded_door_calls(text: str, symbol: str) -> list[int]:
+    """The lines of a driver's source that call `symbol` outside an `#ifdef DOOR_MACRO` block: a
+    call there would leave the driver unlinkable against a library built without the door."""
+    out: list[int] = []
+    guards: list[bool] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        word = line.strip()
+        if word.startswith("#if"):
+            guards.append(word == f"#ifdef {DOOR_MACRO}")
+        elif word.startswith(("#else", "#elif")) and guards:
+            guards[-1] = False
+        elif word.startswith("#endif") and guards:
+            guards.pop()
+        elif f"{symbol}(" in line and not any(guards) and not word.startswith(("//", "extern ")):
+            out.append(number)
     return out
 
 
-def run_scenario(scenario: Scenario, artifact: pathlib.Path, package: pathlib.Path) -> Observation:
-    """The observation of one scenario: the peer is started and stopped around the traced run."""
+def build_driver(driver: Driver, library: pathlib.Path, work: pathlib.Path, door: bool) -> pathlib.Path:
+    """The driver compiled against `library` (`driver_argv`)."""
+    out = work / pathlib.Path(driver.source).stem
+    subprocess.run(driver_argv(driver, library, out, door), check=True)
+    return out
+
+
+def run_scenario(scenario: Scenario, artifact: pathlib.Path, package: pathlib.Path,
+                 door: bool = False) -> Observation:
+    """The observation of one scenario: the peer is started and stopped around the traced run.
+    `door` says whether the library of a driven run exports the driver's requirement door."""
     with tempfile.TemporaryDirectory(prefix="wz-facility-driver-") as tmp:
         work = pathlib.Path(tmp)
         if scenario.tls:
             make_tls_material(work)
         if scenario.driver is None:
             return _run(scenario, artifact, package, {}, work)
-        binary = build_driver(scenario.driver, artifact, work)
+        binary = build_driver(scenario.driver, artifact, work, door)
         return _run(scenario, binary, package, {"LD_LIBRARY_PATH": str(artifact.parent)}, work)
 
 
@@ -762,8 +807,16 @@ def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
             continue
         requires = art.get("requires", [])
         may = art.get("may_require", art["device_requires"]) if "requires" in art else art["device_requires"]
+        features = art.get("features", [])
         for scenario in scenarios:
-            seen = run_scenario(scenario, directory / art["path"], directory)
+            door = has_door(scenario.driver, features)
+            # A denied run is held to its configuration's door alone: the build's bound cannot say
+            # whether a run denied a facility it may ask for has to fail.
+            if scenario.deny and scenario.driver is not None and not door:
+                report.append(f"{art['id']} ({scenario.name}): NOT JUDGED, a denied run is held to its "
+                              f"configuration's door, and the build has no `{scenario.driver.door}`")
+                continue
+            seen = run_scenario(scenario, directory / art["path"], directory, door)
             stated = stated_requirement(seen.stated) if seen.stated else configuration_requirement(seen.stdout)
             if scenario.deny and stated is None:
                 raise ValueError(f"{scenario.name}: a run denied a facility is held to its configuration's "
@@ -1004,6 +1057,27 @@ def _selftest() -> int:
            judge(failed_run, ["entropy", "name-resolution", "threads"], ["sockets-tcp"], ("name-resolution",),
                  True)
            == ["the run asked for sockets-udp outside requires and may_require (u)"])
+    expect("a driver states its configuration's requirement exactly when its library has the door",
+           has_door(PICO_DRIVER, ["device-requires", "peer"]) and not has_door(PICO_DRIVER, ["peer"])
+           and has_door(C_DRIVER, ["config-verdict"]) and not has_door(C_DRIVER, ["device-requires"])
+           and not has_door(None, ["device-requires"])
+           and not has_door(Driver("x.c"), ["device-requires"]))
+    library = pathlib.Path("/p/lib/libwz_capi_pico.so")
+    with_door = driver_argv(PICO_DRIVER, library, pathlib.Path("/w/d"), True)
+    without_door = driver_argv(PICO_DRIVER, library, pathlib.Path("/w/d"), False)
+    expect("the driver is compiled with the door's macro only against a library that has the door",
+           f"-D{DOOR_MACRO}" in with_door and f"-D{DOOR_MACRO}" not in without_door
+           and without_door[-5:] == ["-L", "/p/lib", "-l:libwz_capi_pico.so", "-o", "/w/d"])
+    expect("a door call outside the macro's block is found, and one inside it is not",
+           unguarded_door_calls("int a;\nrc = door(x);\n", "door") == [2]
+           and unguarded_door_calls(f"#ifdef {DOOR_MACRO}\nrc = door(x);\n#endif\n", "door") == []
+           and unguarded_door_calls("#if 1\n#ifdef OTHER\nrc = door(x);\n#endif\n#endif\n", "door") == [3]
+           and unguarded_door_calls(f"#ifdef {DOOR_MACRO}\n#else\nrc = door(x);\n#endif\n", "door") == [3])
+    for drv in (PICO_DRIVER, C_DRIVER):
+        source = (DRIVERS / drv.source).read_text(encoding="utf-8")
+        expect(f"{drv.source} calls its door {drv.door_call} only under {DOOR_MACRO}",
+               drv.door_call is not None and f"{drv.door_call}(" in source
+               and unguarded_door_calls(source, drv.door_call) == [])
     expect("only what the shim brackets or a capability grants can be denied, and each is a facility",
            set(DENIABLE) <= set(wz_config.OS_FACILITIES)
            and not set(SHIM_DENIABLE) & set(CAPABILITY_DENIABLE))

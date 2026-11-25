@@ -8,8 +8,9 @@
 // `demo/x` every 100 ms for the given seconds, and closes the session: the run ends by itself,
 // through the library's own close. Before it opens, it prints what the library says the config
 // asks of the device (`wz_ext_config_device_requires`, of the unstable surface), which the oracle
-// holds the traced run to. It exits 0 when every call succeeded and names the one that did not
-// otherwise.
+// holds the traced run to; the door is a capability of its own (`device-requires`), so the oracle
+// compiles that call only against a library built with it (WZ_DRIVER_STATES_REQUIREMENT). It exits
+// 0 when every call succeeded and names the one that did not otherwise.
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -45,6 +46,7 @@ int main(int argc, char **argv) {
     rc = zp_config_insert(z_config_loan_mut(&config), listens ? Z_CONFIG_LISTEN_KEY : Z_CONFIG_CONNECT_KEY,
                           argv[2]);
     if (rc != Z_OK) return failed("zp_config_insert(locator)", rc);
+#ifdef WZ_DRIVER_STATES_REQUIREMENT
     // What the library says this config asks of the device, on the line the oracle judges the run
     // by (`device_requires <json>`), before the open consumes the config.
     z_owned_string_t requirement;
@@ -54,6 +56,7 @@ int main(int argc, char **argv) {
            z_string_data(z_string_loan(&requirement)));
     fflush(stdout);
     z_string_drop(z_string_move(&requirement));
+#endif
 
     z_owned_session_t session;
     rc = z_open(&session, z_config_move(&config), NULL);

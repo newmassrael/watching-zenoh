@@ -7,7 +7,8 @@
 // `-` for none, and any further `<key>=<json5 value>` argument is one more key of its config),
 // puts `v` on `demo/x` every 100 ms for the given seconds, and closes it. Before it opens, it prints
 // what the library says the config asks of the device (`wz_capi_c_config_device_requires`), which
-// the oracle holds the traced run to.
+// the oracle holds the traced run to; the door is a door of `config-verdict`, so the oracle compiles
+// that call only against a library built with it (WZ_DRIVER_STATES_REQUIREMENT).
 //
 // It declares the calls it makes instead of including zenoh.h. The sizes of zenoh-c's owned types
 // depend on the arm a build is (Z_FEATURE_UNSTABLE_API, Z_FEATURE_SHARED_MEMORY), and the header of
@@ -43,7 +44,9 @@ extern z_result_t z_put(const void *session, const void *key, storage *payload, 
 extern z_result_t z_close(void *session, const void *options);
 extern void *z_session_loan_mut(storage *session);
 extern void z_session_drop(storage *session);
+#ifdef WZ_DRIVER_STATES_REQUIREMENT
 extern z_result_t wz_capi_c_config_device_requires(const void *config, storage *out);
+#endif
 extern const void *z_string_loan(const storage *string);
 extern const char *z_string_data(const void *string);
 extern size_t z_string_len(const void *string);
@@ -96,6 +99,7 @@ int main(int argc, char **argv) {
         rc = zc_config_insert_json5(z_config_loan_mut(&config), key, eq + 1);
         if (rc != 0) return failed(argv[i], rc);
     }
+#ifdef WZ_DRIVER_STATES_REQUIREMENT
     // What the library says this config asks of the device, on the line the oracle judges the run
     // by (`device_requires <json>`), before the open consumes the config.
     static storage requirement;
@@ -105,6 +109,7 @@ int main(int argc, char **argv) {
            z_string_data(z_string_loan(&requirement)));
     fflush(stdout);
     z_string_drop(&requirement);
+#endif
     rc = z_open(&session, &config, NULL);
     if (rc != 0) return failed("z_open", rc);
 
