@@ -617,8 +617,9 @@ suites (C1co, Layer Z) unchanged.
     into the payloads' area with its other bytes.
     The bytes of payloads, strings and slices are blocks of three pools of fixed blocks beside them
     (`HELD_SMALL_PAYLOAD_BLOCKS` of `PAYLOAD_SMALL_BLOCK_BYTES`, `HELD_MEDIUM_PAYLOAD_BLOCKS` of
-    `PAYLOAD_MEDIUM_BLOCK_BYTES`, `HELD_LARGE_PAYLOAD_BLOCKS` each holding the largest message a
-    session delivers; taken and given back by the same code as a kind's slot, a payload taking the
+    `PAYLOAD_MEDIUM_BLOCK_BYTES`, `HELD_LARGE_PAYLOAD_BLOCKS` each holding the largest sample a
+    session delivers, its message and a key of `MAX_KEYEXPR_BYTES`, which a kept sample copies
+    into one block; taken and given back by the same code as a kind's slot, a payload taking the
     smallest pool whose blocks hold it and that has one free; `bytes.rs` `Block` with its count
     in its head in place of `Arc<Backing>`; the buddy area of `HELD_PAYLOAD_BYTES` it replaced
     split and joined its blocks in halves); every constructor and copy is fallible and answers

@@ -94,11 +94,17 @@ const LARGEST_MESSAGE: usize = larger(
     caps::PICO_MULTICAST_BATCH_BYTES,
 );
 
-/// The bytes of each block of the largest pool of payload blocks: the largest message and the
-/// head of the block it lies in, so every payload a session hands a program has a block that holds
-/// it, whatever the counts.
-pub(crate) const LARGEST_BLOCK: usize =
-    block_of(LARGEST_MESSAGE.saturating_add(crate::bytes::HEAD));
+/// The most bytes a sample a session hands a program lends it, which a copy kept past its
+/// callback takes ONE block for (`crate::pubsub::SampleMarshal::write_copy`): its payload, its
+/// attachment and its encoding's schema are bytes of the one message it arrived in, and its key is
+/// at most a key the session holds (`MAX_KEYEXPR_BYTES`), or a declared one of at most that which
+/// the message's own bytes extend.
+const LARGEST_SAMPLE: usize = LARGEST_MESSAGE.saturating_add(caps::MAX_KEYEXPR_BYTES);
+
+/// The bytes of each block of the largest pool of payload blocks: the largest sample and the head
+/// of the block it lies in, so every payload a session hands a program, and every sample it hands
+/// one kept whole, has a block that holds it, whatever the counts.
+pub(crate) const LARGEST_BLOCK: usize = block_of(LARGEST_SAMPLE.saturating_add(crate::bytes::HEAD));
 
 /// The bytes of each block of the three pools of payload blocks, in the order their counts are
 /// stated: the two the limits state, and the largest.
@@ -1258,17 +1264,20 @@ mod tests {
         assert_eq!(block_of(usize::MAX) % SLOT_ALIGN, 0);
     }
 
-    /// The largest payload block holds the largest message a session hands a program and its
-    /// head, whichever of the rejoining ceiling and the two batches is the largest. Turned red by
-    /// a largest block sized by one of them alone, or without the head.
+    /// The largest payload block holds the largest sample a session hands a program and its head:
+    /// the largest message, whichever of the rejoining ceiling and the two batches is the largest,
+    /// and the longest key the session holds. Turned red by a largest block sized by one of them
+    /// alone, for the message without the key, or without the head.
     #[test]
-    fn the_largest_block_holds_the_largest_message_and_its_head() {
+    fn the_largest_block_holds_the_largest_sample_and_its_head() {
         let largest = caps::PICO_FRAG_MAX_BYTES
             .max(caps::PICO_UNICAST_BATCH_BYTES)
             .max(caps::PICO_MULTICAST_BATCH_BYTES);
         assert_eq!(LARGEST_MESSAGE, largest);
-        assert!(LARGEST_BLOCK >= largest + crate::bytes::HEAD);
-        assert!(LARGEST_BLOCK < largest + crate::bytes::HEAD + SLOT_ALIGN);
+        let sample = largest + caps::MAX_KEYEXPR_BYTES;
+        assert_eq!(LARGEST_SAMPLE, sample);
+        assert!(LARGEST_BLOCK >= sample + crate::bytes::HEAD);
+        assert!(LARGEST_BLOCK < sample + crate::bytes::HEAD + SLOT_ALIGN);
         assert_eq!(PAYLOAD_BLOCKS[PAYLOAD_CLASSES - 1], LARGEST_BLOCK);
         assert_eq!(larger(3, 5), 5);
         assert_eq!(larger(5, 3), 5);

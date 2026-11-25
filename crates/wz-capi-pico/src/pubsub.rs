@@ -4241,6 +4241,59 @@ mod tests {
         );
     }
 
+    /// The largest sample a session hands a program is kept whole: the longest key the session
+    /// holds, the longest schema, an attachment and a payload that together with the schema fill
+    /// the largest message are copied into the one block a kept sample takes. The CONTROL, where
+    /// the process pools hold the blocks, is a sample one byte past the largest block, refused.
+    /// Turned red by a largest block sized for the message alone (`process_pool::LARGEST_SAMPLE`).
+    #[test]
+    fn the_largest_sample_a_session_hands_is_kept_whole() {
+        use wz_session_core::caps;
+        let message = caps::PICO_FRAG_MAX_BYTES
+            .max(caps::PICO_UNICAST_BATCH_BYTES)
+            .max(caps::PICO_MULTICAST_BATCH_BYTES);
+        let key = "k".repeat(caps::MAX_KEYEXPR_BYTES);
+        let schema = [b's'; caps::MAX_ENCODING_SCHEMA_BYTES];
+        let attachment = [b'a'; 64];
+        let payload = alloc::vec![b'p'; message.saturating_sub(schema.len() + attachment.len())];
+        let kept_whole = |payload: &[u8]| {
+            let mut sample = SampleRef::new(&key, payload, SampleKind::Put, Reliability::Reliable);
+            sample.attachment = Some(&attachment[..]);
+            sample.encoding = Some((7, Some(&schema[..])));
+            // SAFETY: the marshal is dropped before `sample` and what it borrows.
+            let mut marshal = unsafe { SampleMarshal::lent(&sample) };
+            marshal.bind();
+            let kept = marshal.deep_copy();
+            drop(core::mem::ManuallyDrop::into_inner(marshal));
+            kept
+        };
+
+        let kept = kept_whole(&payload).expect("the largest sample is kept");
+        assert_eq!(kept.payload.as_slice(), &payload[..]);
+        assert_eq!(
+            kept.payload.holders(),
+            4,
+            "key, schema, payload and attachment"
+        );
+        assert_eq!(kept.keyexpr.as_str(), key);
+        let attachment_kept = kept.attachment.as_ref().expect("the sample carried one");
+        assert_eq!(attachment_kept.as_slice(), &attachment[..]);
+        let encoding = kept.encoding.as_ref().expect("the sample carried one");
+        assert_eq!(encoding.view().schema, Some(&schema[..]));
+        drop(kept);
+
+        #[cfg(wz_process_pools)]
+        {
+            let room = crate::process_pool::LARGEST_BLOCK - crate::bytes::HEAD;
+            let past = room + 1 - (key.len() + schema.len() + attachment.len());
+            let refused = kept_whole(&alloc::vec![b'p'; past]);
+            assert!(
+                matches!(refused, Err(crate::bytes::NoRoom)),
+                "CONTROL: a sample past the largest block is refused"
+            );
+        }
+    }
+
     /// A subscriber's marshal reads the session's sample by its fields: a sample of parts, with no
     /// view behind it and no hint built, hands the callback its key and attachment where they lie,
     /// its encoding and its timestamp.
