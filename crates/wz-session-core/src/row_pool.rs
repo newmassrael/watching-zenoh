@@ -2805,11 +2805,14 @@ mod tests {
             assert_eq!(Rc::strong_count(&value), 1, "each item dropped once");
         }
         let pool = pool_of::<Seq<Rc<()>>>(4);
-        let mut head = PooledRows::<Seq<Rc<()>>, 4>::new();
-        lent(&mut head, &pool.space())
-            .push(Rc::clone(&value))
-            .expect("room");
-        drop(head);
+        {
+            // A head reaches no rows, so going out of scope gives none back: the row stays held
+            // until its owner releases it through the space.
+            let mut head = PooledRows::<Seq<Rc<()>>, 4>::new();
+            lent(&mut head, &pool.space())
+                .push(Rc::clone(&value))
+                .expect("room");
+        }
         assert_eq!((pool.counts().used, Rc::strong_count(&value)), (1, 2));
     }
 
