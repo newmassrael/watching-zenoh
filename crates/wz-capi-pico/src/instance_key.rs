@@ -501,7 +501,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_flush(
     now_ms: u64,
     out: *mut wz_ext_instance_key_t,
 ) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         let Ok(out) = Out::of(out) else {
             return false;
         };
@@ -871,7 +871,7 @@ pub unsafe extern "C" fn wz_ext_internal_instance_keyer_null(
 pub unsafe extern "C" fn wz_ext_internal_instance_keyer_check(
     this_: *const wz_ext_owned_instance_keyer_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 #[cfg(test)]

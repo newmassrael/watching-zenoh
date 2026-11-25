@@ -230,10 +230,15 @@ core a side on a host with too few for two, and a host with too few for one is r
 The run prints the CPUs it chose (`pico-compare: pinning ...`) and the report carries them. To place
 the run by hand, name CPUs that are idle and that do not share a physical core across the two sides.
 
-The three measurements are declared in `bx.toml` as runs that hold their machine alone (bx RFC
-0072): `bx --command pico-perf`, `bx --command pico-perf-tcp` (`PICO_CMP_PERF_TRANSPORTS=tcp`) and
-`bx --command pico-subprofile`, with `--host <alias>` to choose the machine. bx waits until every
-other run there has ended and admits none after it until it ends.
+The measurements are declared in `bx.toml` as runs that hold their machine alone (bx RFC
+0072): `bx --command pico-perf`, `bx --command pico-perf-tcp` (`PICO_CMP_PERF_TRANSPORTS=tcp`),
+`bx --command pico-subprofile`, `bx --command pico-opprofile` (the instructions of one put, get,
+declaration and open, `pico-compare.sh opprofile`) and the parity matrix of each family,
+`bx --command pico-parity-pico`, `pico-parity-c` and `pico-parity-rust`, with `--host <alias>` to
+choose the machine. bx waits until every other run there has ended and admits none after it until it
+ends. A measurement started through ad hoc words (`bx -- bash scripts/pico-compare.sh ...`) is not held
+alone and shares its machine with whatever runs there: the parity run of 2026-11-25 went that way and
+lost most of its timed workloads to CPUs 10 to 42 percent used by something else.
 
 **Picking idle CPUs on a shared host such as pc2.** Other jobs run there, and a cell whose pinned CPUs
 were busy is run again and finally lost ("the pinned CPUs were used by something else in 6 runs").

@@ -531,7 +531,7 @@ unsafe extern "C" fn on_query_drop(context: *mut c_void) {
 pub unsafe extern "C" fn wz_ext_replay_publisher_storage_size(
     shape: *const wz_ext_replay_shape_t,
 ) -> usize {
-    guard_val(0, || {
+    guard_val(|| {
         if shape.is_null() {
             return 0;
         }
@@ -881,7 +881,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_serve(
 pub unsafe extern "C" fn wz_ext_replay_publisher_phase(
     this_: *const wz_ext_loaned_replay_publisher_t,
 ) -> u8 {
-    guard_val(WZ_EXT_REPLAY_NO_CACHE, || {
+    guard_val(|| {
         let Some(handle) = handle_of(this_) else {
             return WZ_EXT_REPLAY_NO_CACHE;
         };
@@ -995,7 +995,7 @@ pub unsafe extern "C" fn wz_ext_internal_replay_publisher_null(
 pub unsafe extern "C" fn wz_ext_internal_replay_publisher_check(
     this_: *const wz_ext_owned_replay_publisher_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 #[cfg(test)]

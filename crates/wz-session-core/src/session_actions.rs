@@ -113,17 +113,7 @@ use crate::wire::ResponseOwned;
 
 use crate::action_trace::ActionTrace;
 use crate::close_reason::CloseReason;
-#[cfg(any(
-    not(feature = "session-fixed-storage"),
-    not(feature = "tx-lend-only"),
-    feature = "session-unicast-accept",
-    feature = "transport-qos",
-    feature = "session-extshm",
-    feature = "session-extauth",
-    feature = "transport-multilink",
-    feature = "transport-lowlatency",
-    feature = "session-extcompression"
-))]
+#[cfg(wz_ext_chains)]
 use crate::ext_chain::ExtChainBuf;
 // The union of its readers' gates: the lend-only control sends (`holds_answer`,
 // `send_init_lent`, `send_open_lent`), the owned encoders (`encode_init_with_role`,
@@ -140,15 +130,7 @@ use crate::ext_chain::ExtChainBuf;
         feature = "alloc",
         any(feature = "codec-init-body", feature = "codec-open-body")
     ),
-    not(feature = "session-fixed-storage"),
-    not(feature = "tx-lend-only"),
-    feature = "session-unicast-accept",
-    feature = "transport-qos",
-    feature = "session-extshm",
-    feature = "session-extauth",
-    feature = "transport-multilink",
-    feature = "transport-lowlatency",
-    feature = "session-extcompression"
+    wz_ext_chains
 ))]
 use crate::ext_chain_role::ExtChainRole;
 use crate::link::{BoxedLinkDriver, SessionRuntime};
@@ -1316,33 +1298,11 @@ enum ControlBody<
         initial_sn: u64,
         is_ack: bool,
         echo_inbound_cookie: bool,
-        #[cfg(any(
-            not(feature = "session-fixed-storage"),
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        ))]
+        #[cfg(wz_ext_chains)]
         has_ext: bool,
         /// The bound announced for the peer, the one entry of the chain of a build that stages no
         /// handshake extension (`ext_chain`).
-        #[cfg(all(
-            feature = "session-fixed-storage",
-            feature = "tx-lend-only",
-            not(any(
-                feature = "session-unicast-accept",
-                feature = "transport-qos",
-                feature = "session-extshm",
-                feature = "session-extauth",
-                feature = "transport-multilink",
-                feature = "transport-lowlatency",
-                feature = "session-extcompression"
-            ))
-        ))]
+        #[cfg(not(wz_ext_chains))]
         bound: Option<crate::extbound::Bound>,
         role: ExtChainRole,
     },
@@ -2168,53 +2128,13 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     ///
     /// Absent from a build that stages no handshake extension (`ext_chain`): each of its
     /// handshake messages carries what its parameters and facts name, written from them.
-    #[cfg(any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    ))]
+    #[cfg(wz_ext_chains)]
     init_syn_ext: R::Mutex<ExtChainBuf>,
-    #[cfg(any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    ))]
+    #[cfg(wz_ext_chains)]
     init_ack_ext: R::Mutex<ExtChainBuf>,
-    #[cfg(any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    ))]
+    #[cfg(wz_ext_chains)]
     open_syn_ext: R::Mutex<ExtChainBuf>,
-    #[cfg(any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    ))]
+    #[cfg(wz_ext_chains)]
     open_ack_ext: R::Mutex<ExtChainBuf>,
     /// R3b — the Z_EXT_AUTH dispatch (`session-extauth`). Holds the negotiated
     /// auth methods (usrpwd, ...) and mux/demuxes their per-stage sub-exts into
@@ -5847,53 +5767,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // [`default_init_patch_ext_entry`] for the wire-spec
                 // citation and the foreign-interop failure mode this
                 // closes.
-                #[cfg(any(
-                    not(feature = "session-fixed-storage"),
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                ))]
+                #[cfg(wz_ext_chains)]
                 init_syn_ext => |field| unsafe { Self::init_ext_chain(field, true) },
-                #[cfg(any(
-                    not(feature = "session-fixed-storage"),
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                ))]
+                #[cfg(wz_ext_chains)]
                 init_ack_ext => |field| unsafe { Self::init_ext_chain(field, true) },
-                #[cfg(any(
-                    not(feature = "session-fixed-storage"),
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                ))]
+                #[cfg(wz_ext_chains)]
                 open_syn_ext => |field| unsafe { Self::init_ext_chain(field, false) },
-                #[cfg(any(
-                    not(feature = "session-fixed-storage"),
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                ))]
+                #[cfg(wz_ext_chains)]
                 open_ack_ext => |field| unsafe { Self::init_ext_chain(field, false) },
             }
         );
@@ -5908,17 +5788,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// # Safety
     ///
     /// `at` is valid for writes of the chain's mutex and holds no live value.
-    #[cfg(any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    ))]
+    #[cfg(wz_ext_chains)]
     #[inline(never)]
     unsafe fn init_ext_chain(at: *mut R::Mutex<ExtChainBuf>, patch: bool) {
         // The growable chain holds exactly what it starts with: a push onto an empty `Vec`
@@ -8119,17 +7989,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 cookie_override,
                 role,
             } => {
-                #[cfg(any(
-                    not(feature = "session-fixed-storage"),
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                ))]
+                #[cfg(wz_ext_chains)]
                 R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                     crate::handshake_encode::encode_init_into(
                         buf,
@@ -8140,19 +8000,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         cookie_override,
                     )
                 })?;
-                #[cfg(all(
-                    feature = "session-fixed-storage",
-                    feature = "tx-lend-only",
-                    not(any(
-                        feature = "session-unicast-accept",
-                        feature = "transport-qos",
-                        feature = "session-extshm",
-                        feature = "session-extauth",
-                        feature = "transport-multilink",
-                        feature = "transport-lowlatency",
-                        feature = "session-extcompression"
-                    ))
-                ))]
+                #[cfg(not(wz_ext_chains))]
                 crate::handshake_encode::encode_init_patch_into(
                     buf,
                     &self.params,
@@ -8171,48 +8019,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 initial_sn,
                 is_ack,
                 echo_inbound_cookie,
-                #[cfg(any(
-                    not(feature = "session-fixed-storage"),
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                ))]
+                #[cfg(wz_ext_chains)]
                 has_ext,
-                #[cfg(all(
-                    feature = "session-fixed-storage",
-                    feature = "tx-lend-only",
-                    not(any(
-                        feature = "session-unicast-accept",
-                        feature = "transport-qos",
-                        feature = "session-extshm",
-                        feature = "session-extauth",
-                        feature = "transport-multilink",
-                        feature = "transport-lowlatency",
-                        feature = "session-extcompression"
-                    ))
-                ))]
+                #[cfg(not(wz_ext_chains))]
                 bound,
                 role,
             } => {
                 use crate::handshake_encode::encode_open_head_into;
-                #[cfg(all(
-                    feature = "session-fixed-storage",
-                    feature = "tx-lend-only",
-                    not(any(
-                        feature = "session-unicast-accept",
-                        feature = "transport-qos",
-                        feature = "session-extshm",
-                        feature = "session-extauth",
-                        feature = "transport-multilink",
-                        feature = "transport-lowlatency",
-                        feature = "session-extcompression"
-                    ))
-                ))]
+                #[cfg(not(wz_ext_chains))]
                 let has_ext = bound.is_some();
                 // The head under the cookie's mutex when it echoes one, then the staged chain
                 // under the chain's: the two scopes stay disjoint.
@@ -8230,36 +8044,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 } else {
                     encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
                 }
-                #[cfg(any(
-                    not(feature = "session-fixed-storage"),
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                ))]
+                #[cfg(wz_ext_chains)]
                 R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                     crate::handshake_encode::encode_held_chain_into(
                         buf,
                         crate::ext_chain::ChainRef::from(&*chain),
                     )
                 })?;
-                #[cfg(all(
-                    feature = "session-fixed-storage",
-                    feature = "tx-lend-only",
-                    not(any(
-                        feature = "session-unicast-accept",
-                        feature = "transport-qos",
-                        feature = "session-extshm",
-                        feature = "session-extauth",
-                        feature = "transport-multilink",
-                        feature = "transport-lowlatency",
-                        feature = "session-extcompression"
-                    ))
-                ))]
+                #[cfg(not(wz_ext_chains))]
                 crate::handshake_encode::encode_open_bound_into(buf, bound)?;
                 answer = holds_answer(role);
             }
@@ -8415,17 +8207,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             .reseed_tx_sn(derived)
             .map(crate::sn::to_wire)
             .unwrap_or(self.params.initial_sn);
-        #[cfg(any(
-            not(feature = "session-fixed-storage"),
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        ))]
+        #[cfg(wz_ext_chains)]
         let bound_entry = bound.map(crate::extbound::encode_remote_bound_ext);
         // The Open is written in two steps, each under ONE session mutex: the
         // header and the body under the cookie's, when it echoes one, then the
@@ -8440,17 +8222,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // chain's emptiness: the pin's Open carries the entry exactly when its callback answered
         // `Some`. A build that stages no handshake extension holds no chain: the bound is handed
         // to the write, which writes it as the chain's one entry.
-        #[cfg(any(
-            not(feature = "session-fixed-storage"),
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        ))]
+        #[cfg(wz_ext_chains)]
         let has_ext = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
             crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::RemoteBound, bound_entry);
             !crate::ext_chain::ChainRef::from(&*chain).is_empty()
@@ -8464,31 +8236,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 initial_sn,
                 is_ack,
                 echo_inbound_cookie,
-                #[cfg(any(
-                    not(feature = "session-fixed-storage"),
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                ))]
+                #[cfg(wz_ext_chains)]
                 has_ext,
-                #[cfg(all(
-                    feature = "session-fixed-storage",
-                    feature = "tx-lend-only",
-                    not(any(
-                        feature = "session-unicast-accept",
-                        feature = "transport-qos",
-                        feature = "session-extshm",
-                        feature = "session-extauth",
-                        feature = "transport-multilink",
-                        feature = "transport-lowlatency",
-                        feature = "session-extcompression"
-                    ))
-                ))]
+                #[cfg(not(wz_ext_chains))]
                 bound,
                 role,
             },
@@ -9176,17 +8926,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // undefined). The chain slot stays inside the closure so the
         // encode call composes against `&chain` without an extra clone.
         let caps = self.init_caps(is_ack);
-        #[cfg(any(
-            not(feature = "session-fixed-storage"),
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        ))]
+        #[cfg(wz_ext_chains)]
         {
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 let chain = crate::ext_chain::ChainRef::from(&*chain);
@@ -9195,19 +8935,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         // A build that stages no handshake extension announces its patch level on either Init, as
         // its lend-only send writes it (`encode_init_patch_into`).
-        #[cfg(all(
-            feature = "session-fixed-storage",
-            feature = "tx-lend-only",
-            not(any(
-                feature = "session-unicast-accept",
-                feature = "transport-qos",
-                feature = "session-extshm",
-                feature = "session-extauth",
-                feature = "transport-multilink",
-                feature = "transport-lowlatency",
-                feature = "session-extcompression"
-            ))
-        ))]
+        #[cfg(not(wz_ext_chains))]
         {
             let _ = role;
             let chain = [default_init_patch_ext_entry()];
@@ -9246,17 +8974,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `inbound_peer_init_caps`, and a nested `R::with_mutex_mut` would
         // deadlock the non-reentrant lwIP `critical_section`.
         let params_owned = self.open_params();
-        #[cfg(any(
-            not(feature = "session-fixed-storage"),
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        ))]
+        #[cfg(wz_ext_chains)]
         {
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
                 let params = params_owned.as_ref().unwrap_or(&self.params);
@@ -9270,19 +8988,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         // A build that stages no handshake extension carries on either Open the bound it
         // announces for the peer, as its lend-only send writes it (`encode_open_bound_into`).
-        #[cfg(all(
-            feature = "session-fixed-storage",
-            feature = "tx-lend-only",
-            not(any(
-                feature = "session-unicast-accept",
-                feature = "transport-qos",
-                feature = "session-extshm",
-                feature = "session-extauth",
-                feature = "transport-multilink",
-                feature = "transport-lowlatency",
-                feature = "session-extcompression"
-            ))
-        ))]
+        #[cfg(not(wz_ext_chains))]
         {
             let _ = role;
             let chain = self
@@ -9357,17 +9063,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         initial_sn
     }
 
-    #[cfg(any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    ))]
+    #[cfg(wz_ext_chains)]
     fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<ExtChainBuf> {
         match role {
             ExtChainRole::InitSyn => &self.init_syn_ext,
@@ -10376,7 +10072,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// handshake is byte-identical to today (no dispatch installed ⇒
     /// `Self::stage_multilink_send` stages nothing); `> 0` once a multilink send
     /// stage has run. Reads only the staged chains, no wire capture.
-    #[cfg(feature = "transport-multilink")]
+    #[cfg(all(feature = "transport-multilink", wz_ext_chains))]
     pub fn staged_multilink_ext_count(&self) -> usize {
         let count_in = |slot: &R::Mutex<ExtChainBuf>| {
             R::with_mutex_mut(slot, |chain| {
@@ -10925,17 +10621,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// derived from it cannot drift into two spellings (the R311y605 lesson on
     /// this exact extension).
     pub fn advertised_patch(&self) -> u8 {
-        #[cfg(any(
-            not(feature = "session-fixed-storage"),
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        ))]
+        #[cfg(wz_ext_chains)]
         {
             R::with_mutex_mut(&self.init_syn_ext, |chain| {
                 crate::extpatch::peer_patch_in(chain.iter())
@@ -10943,19 +10629,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         // A build that stages no handshake extension holds no InitSyn chain to read: its InitSyn
         // is written with this level (`encode_init_patch_into`).
-        #[cfg(all(
-            feature = "session-fixed-storage",
-            feature = "tx-lend-only",
-            not(any(
-                feature = "session-unicast-accept",
-                feature = "transport-qos",
-                feature = "session-extshm",
-                feature = "session-extauth",
-                feature = "transport-multilink",
-                feature = "transport-lowlatency",
-                feature = "session-extcompression"
-            ))
-        ))]
+        #[cfg(not(wz_ext_chains))]
         {
             crate::extpatch::CURRENT_PATCH
         }
@@ -12517,13 +12191,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The RX-activity stamp [`Self::observe_inbound`] takes for every decoded
     /// transport message but an unknown one. A `Frame` read where its unit lies
-    /// (`drive::dispatch_datagram`, under `codec-frame`) takes nothing else from
-    /// it here: a Frame carries no handshake fact.
+    /// (`drive::dispatch_datagram`, under `codec-frame`) takes
+    /// [`Self::stamp_rx_activity_at`] instead, and nothing else from it here: a Frame
+    /// carries no handshake fact.
     // Out of line: every receive path takes the stamp, and the clock read and lock it inlines
     // were copied into each.
     #[inline(never)]
     pub(crate) fn stamp_rx_activity(&self) {
         self.link.note_received_at(self.clock.now_monotonic_ms());
+    }
+
+    /// [`Self::stamp_rx_activity`] at `now_ms`, a reading of this session's clock its caller
+    /// already holds: the receive in place stamps the time of the turn of input that read the
+    /// datagram, so a message on that path reads no clock.
+    #[cfg(feature = "codec-frame")]
+    #[inline]
+    pub(crate) fn stamp_rx_activity_at(&self, now_ms: u64) {
+        self.link.note_received_at(now_ms);
     }
 
     /// R311y632 (§17) — park the undispatched remainder of a framing unit.

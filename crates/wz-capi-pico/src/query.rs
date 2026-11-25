@@ -1818,11 +1818,9 @@ pub unsafe extern "C" fn z_query_payload(
 pub unsafe extern "C" fn z_query_accepts_replies(
     query: *const z_loaned_query_t,
 ) -> z_reply_keyexpr_t {
-    crate::ffi::guard_val(Z_REPLY_KEYEXPR_MATCHING_QUERY, || {
-        match query_marshal(query) {
-            Some(marshal) if marshal.anyke => Z_REPLY_KEYEXPR_ANY,
-            _ => Z_REPLY_KEYEXPR_MATCHING_QUERY,
-        }
+    crate::ffi::guard_val(|| match query_marshal(query) {
+        Some(marshal) if marshal.anyke => Z_REPLY_KEYEXPR_ANY,
+        _ => Z_REPLY_KEYEXPR_MATCHING_QUERY,
     })
 }
 
@@ -2098,7 +2096,7 @@ pub(crate) unsafe fn queryable_identity(
 pub unsafe extern "C" fn z_query_source_info(
     query: *const z_loaned_query_t,
 ) -> *const crate::pubsub::z_source_info_t {
-    crate::ffi::guard_val(core::ptr::null(), || match query_marshal(query) {
+    crate::ffi::guard_val(|| match query_marshal(query) {
         Some(marshal) => match marshal.source_info.as_ref() {
             Some(info) => info as *const crate::pubsub::z_source_info_t,
             None => core::ptr::null(),

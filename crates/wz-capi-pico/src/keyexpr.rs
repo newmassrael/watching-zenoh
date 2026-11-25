@@ -1180,7 +1180,7 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_unchecked(
 /// `true` iff the view keyexpr is empty (pico `z_view_keyexpr_is_empty`).
 #[no_mangle]
 pub unsafe extern "C" fn z_view_keyexpr_is_empty(keyexpr: *const z_view_keyexpr_t) -> bool {
-    guard_val(true, || keyexpr.is_null() || (*keyexpr)._len == 0)
+    guard_val(|| keyexpr.is_null() || (*keyexpr)._len == 0)
 }
 
 /// Borrow a view keyexpr immutably (pico `z_view_keyexpr_loan`).
@@ -1853,7 +1853,7 @@ pub unsafe extern "C" fn z_keyexpr_equals(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(false, || keyexpr_pair(l, r).is_some_and(|(a, b)| a == b))
+    guard_val(|| keyexpr_pair(l, r).is_some_and(|(a, b)| a == b))
 }
 
 /// The texts of two loaned keyexprs, or `None` when either is null or not UTF-8: what each door
@@ -1878,7 +1878,7 @@ pub unsafe extern "C" fn z_keyexpr_includes(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         keyexpr_pair(l, r)
             .is_some_and(|(a, b)| wz_session_core::keyexpr_match::keyexpr_includes(a, b))
     })
@@ -1893,7 +1893,7 @@ pub unsafe extern "C" fn z_keyexpr_intersects(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         keyexpr_pair(l, r)
             .is_some_and(|(a, b)| wz_session_core::keyexpr_match::keyexpr_intersects(a, b))
     })
@@ -1914,7 +1914,7 @@ pub unsafe extern "C" fn z_keyexpr_relation_to(
     left: *const z_loaned_keyexpr_t,
     right: *const z_loaned_keyexpr_t,
 ) -> z_keyexpr_intersection_level_t {
-    guard_val(Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT, || {
+    guard_val(|| {
         // The two texts are read once, and the cascade asks of them.
         let Some((a, b)) = keyexpr_pair(left, right) else {
             return Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT;

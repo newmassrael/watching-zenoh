@@ -139,3 +139,9 @@ pub(crate) fn sleep_ms(ms: u64) {
         }
     }
 }
+
+/// `Sleep` counts whole milliseconds; a part of one is rounded up, so the sleep is at least what
+/// was asked.
+pub(crate) fn sleep_us(us: u64) {
+    sleep_ms(us.div_ceil(1_000));
+}

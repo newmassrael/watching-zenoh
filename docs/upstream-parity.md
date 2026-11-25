@@ -722,12 +722,16 @@ the other side.
 | `text` | `size` of the arm's file | lower |
 | `file_bytes` | bytes of the file stripped (`strip --strip-unneeded`) | lower |
 | `rtt_us` | median of 20,000 round trips of 8 B (`z_ping` / `z_pong`, after a 3 s warm-up) | lower |
-| `throughput_<n>B` | median of the subscriber's reports over a 10 s window after a 3 s warm-up (`z_pub_thr` / `z_sub_thr`), n = 8 and 1024 | higher |
-| `cpu_ns_per_msg_<n>B` | the CPU of both processes over that window (`/proc/<pid>/stat`), per message the median rate delivers in it | lower |
+| `throughput_nodrop_<n>B` | the no-drop rate (RFC 2544, `scripts/host-bench/nodrop.py`'s search: the highest rate OFFERED at which every message is delivered, doubled from 20,000 a second and bisected to 5 percent, trials of 3 s), of `paced_pub` and `count_sub` built against the arm as the examples are, n = 8 and 1024; the C families only | higher |
+| `cpu_ns_per_msg_nodrop_<n>B` | the CPU of both processes (their reaped resource use) in a trial at that rate with the publisher sleeping between its slots (`paced_pub -w`), per message put | lower |
 | `rss_kib_<workload>` | peak resident set of the workload's two processes, summed: the maxrss each program's launcher (`scripts/host-bench/fork_rss.c`) reads of the program it forked, since the maxrss of a child the Python runner reaps itself is at least the runner's own resident set, which Linux keeps across the child's exec | lower |
 | `heap_peak_<workload>` | peak of the bytes held through the C allocator by each process, summed (`heap_peak.so` preloaded, in runs of their own so no time figure carries its cost) | lower |
 
-The workloads with a memory cell are `rtt`, `thr_<n>B`, `pubsub` (`z_sub` and one `z_put`, which
+The free-running pair of upstream's throughput examples (`z_pub_thr` floods, `z_sub_thr` reports every
+100 ms; its median over a 10 s window after 3 s, the CPU over that window and the RSS of the pair) is run
+in every boot as a DIAGNOSTIC: printed and kept in the boot's `diagnostic`, never a cell, because a rate
+read under a flood is not a rate at which nothing was lost, and a reference may not survive the flood
+(below). The workloads with a memory cell are `rtt`, `pubsub` (`z_sub` and one `z_put`, which
 must be delivered) and `query` (`z_queryable` and one `z_get`, which must be answered); the heap is
 read for `pubsub`, `query` and `thr` at the largest size. Every figure of a pair is the sum of its two
 processes because both arms run both sides: a cost moved from one side to the other is the same cost.
@@ -753,8 +757,14 @@ is lost with the publisher's reports beside them where the publisher prints its 
 told from a busy host. The pico reference does that under the flood: in the 12-boot run of 2026-11-25
 its subscriber reported for 0.4 s at 8 B and then nothing, in every boot, while its publisher went on
 at the rate of puts that reach no link; at 1 KiB it held for seconds and then did the same in 7 of 12
-boots. That is the reference failing the workload, and the free-running cell of that family stays
-ungraded for it; the no-drop rate (section 2, `pico-compare.sh nodrop`) is the throughput that grades it. A size figure names its host (section 2).
+boots. That is the reference failing the flood, and why the throughput cell is the no-drop rate. The
+candidate cause, read in the source and to be confirmed by a run of the reference built with
+`ZENOH_LOG=ERROR` (which then prints `Dropping peer due to processing error`): the peer's stream reader
+keeps the state of a length prefix split between two reads after the message it framed is handled
+(`vendor/zenoh-pico/src/transport/unicast/read.c` @ `peer->flow_curr_size += (uint16_t)(_z_zbuf_read(&ztu->_common._zbuf) << 8);`,
+which leaves `_Z_FLOW_STATE_PENDING_SIZE` set), so the next read adds a new prefix's low byte as a high
+byte and loses the frames; a read splits a prefix only when the subscriber is behind and reads fill its
+buffer, which the flood makes certain at 8 B and occasional at 1 KiB. A size figure names its host (section 2).
 
 **What a run is not.** One host, loopback, peer mode; the C families measure the library under
 upstream's programs, the Rust family the whole program. Arm W of the Rust family carries what the

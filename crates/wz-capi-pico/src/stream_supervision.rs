@@ -601,7 +601,7 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_stream_errors(
 pub unsafe extern "C" fn wz_ext_stream_supervisor_node_errors(
     this_: *const wz_ext_loaned_stream_supervisor_t,
 ) -> u8 {
-    guard_val(0, || match handle_of(this_) {
+    guard_val(|| match handle_of(this_) {
         Some(handle) => locked(&handle.state).supervisor.node_errors(),
         None => 0,
     })
@@ -616,7 +616,7 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_node_errors(
 pub unsafe extern "C" fn wz_ext_stream_supervisor_phase(
     this_: *const wz_ext_loaned_stream_supervisor_t,
 ) -> u8 {
-    guard_val(WZ_EXT_STREAM_NO_SUPERVISOR, || {
+    guard_val(|| {
         let Some(handle) = handle_of(this_) else {
             return WZ_EXT_STREAM_NO_SUPERVISOR;
         };
@@ -639,7 +639,7 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_phase(
 pub unsafe extern "C" fn wz_ext_stream_supervisor_notify(
     this_: *const wz_ext_loaned_stream_supervisor_t,
 ) -> u8 {
-    guard_val(WZ_EXT_STREAM_NO_SUPERVISOR, || {
+    guard_val(|| {
         let Some(handle) = handle_of(this_) else {
             return WZ_EXT_STREAM_NO_SUPERVISOR;
         };
@@ -809,7 +809,7 @@ pub unsafe extern "C" fn wz_ext_internal_stream_supervisor_null(
 pub unsafe extern "C" fn wz_ext_internal_stream_supervisor_check(
     this_: *const wz_ext_owned_stream_supervisor_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 #[cfg(test)]

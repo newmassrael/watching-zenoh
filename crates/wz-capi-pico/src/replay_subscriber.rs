@@ -1121,7 +1121,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_poll(
 pub unsafe extern "C" fn wz_ext_replay_subscriber_phase(
     this_: *const wz_ext_loaned_replay_subscriber_t,
 ) -> u8 {
-    guard_val(WZ_EXT_REPLAY_NO_SUBSCRIBER, || {
+    guard_val(|| {
         let Some(handle) = handle_of(this_) else {
             return WZ_EXT_REPLAY_NO_SUBSCRIBER;
         };
@@ -1248,7 +1248,7 @@ pub unsafe extern "C" fn wz_ext_internal_replay_subscriber_null(
 pub unsafe extern "C" fn wz_ext_internal_replay_subscriber_check(
     this_: *const wz_ext_owned_replay_subscriber_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 #[cfg(test)]

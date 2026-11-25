@@ -397,6 +397,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
                 &actions,
                 &mut engine,
                 &mut reader,
+                0,
                 &mut |event: IterationEvent<'_, '_>| match event {
                     IterationEvent::InPlace(_) => {
                         handed += 1;
@@ -449,6 +450,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             &actions,
             &mut engine,
             &mut reader,
+            0,
             &mut |event: IterationEvent<'_, '_>| match event {
                 IterationEvent::InPlace(lent) => got.push(
                     lent.push()
@@ -478,6 +480,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
         &actions,
         &mut engine,
         &mut reader,
+        0,
         &mut |_: IterationEvent<'_, '_>| {},
     );
     assert_eq!(

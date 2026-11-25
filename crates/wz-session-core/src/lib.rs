@@ -392,6 +392,10 @@ pub mod registry_error;
 // R311gh).
 pub mod sink;
 
+// The subscribers a peer's key reached, kept while the subscriptions stand: the receive path's
+// answer for a key it has matched before, read with no pattern matched.
+pub mod match_set;
+
 #[cfg(feature = "alloc")]
 mod once_built;
 
@@ -906,6 +910,10 @@ pub mod capacity;
 /// the decoder returns an owned `Vec` of entries.
 #[cfg(feature = "storage-profile")]
 mod ext_chain;
+
+// The rule `build.rs` sets the cfg `wz_ext_chains` by, compiled here for its tests.
+#[cfg(test)]
+mod ext_chains_cfg;
 
 /// Lease-deadline check outcome (R77 helper surface). no_std +
 /// no_alloc clean (pure enum); unconditional.

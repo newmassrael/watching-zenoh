@@ -251,7 +251,7 @@ pub unsafe extern "C" fn wz_ext_message_catalog_new(
 pub unsafe extern "C" fn wz_ext_message_catalog_len(
     this_: *const wz_ext_loaned_message_catalog_t,
 ) -> usize {
-    guard_val(0, || held(this_).map_or(0, |h| h.catalog.messages().len()))
+    guard_val(|| held(this_).map_or(0, |h| h.catalog.messages().len()))
 }
 
 /// Write to `out` the index of a match `found` gives, for the doors that look one up.
@@ -426,7 +426,7 @@ pub unsafe extern "C" fn wz_ext_message_catalog_direction(
     index: usize,
     node: usize,
 ) -> u8 {
-    guard_val(0, || {
+    guard_val(|| {
         let Some(message) = held(this_).and_then(|h| h.catalog.messages().get(index)) else {
             return 0;
         };
@@ -450,9 +450,7 @@ pub unsafe extern "C" fn wz_ext_message_catalog_direction(
 pub unsafe extern "C" fn wz_ext_message_catalog_supervision_start_delay(
     this_: *const wz_ext_loaned_message_catalog_t,
 ) -> u32 {
-    guard_val(0, || {
-        held(this_).map_or(0, |h| h.catalog.supervision_start_delay_ms())
-    })
+    guard_val(|| held(this_).map_or(0, |h| h.catalog.supervision_start_delay_ms()))
 }
 
 /// The code and the reason of a piece the catalog entry does not give.
@@ -756,7 +754,7 @@ pub unsafe extern "C" fn wz_ext_internal_message_catalog_null(
 pub unsafe extern "C" fn wz_ext_internal_message_catalog_check(
     this_: *const wz_ext_owned_message_catalog_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 #[cfg(test)]

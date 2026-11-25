@@ -502,7 +502,7 @@ impl z_bytes_reader_t {
 /// Build a reader over a payload (pico `z_bytes_get_reader`).
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_get_reader(bytes: *const z_loaned_bytes_t) -> z_bytes_reader_t {
-    guard_val(z_bytes_reader_t::empty(), || match bytes_ref(bytes) {
+    guard_val(|| match bytes_ref(bytes) {
         Some(buf) => z_bytes_reader_t {
             data: buf.as_ptr(),
             len: buf.len(),
@@ -521,7 +521,7 @@ pub unsafe extern "C" fn z_bytes_reader_read(
     dst: *mut u8,
     len: usize,
 ) -> usize {
-    guard_val(0, || {
+    guard_val(|| {
         if reader.is_null() || (len != 0 && dst.is_null()) {
             return 0;
         }
@@ -538,7 +538,7 @@ pub unsafe extern "C" fn z_bytes_reader_read(
 /// Bytes not yet consumed (pico `z_bytes_reader_remaining`).
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_reader_remaining(reader: *const z_bytes_reader_t) -> usize {
-    guard_val(0, || {
+    guard_val(|| {
         if reader.is_null() {
             return 0;
         }
@@ -580,7 +580,7 @@ pub unsafe extern "C" fn z_bytes_reader_seek(
 /// Current read offset (pico `z_bytes_reader_tell`).
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_reader_tell(reader: *const z_bytes_reader_t) -> i64 {
-    guard_val(-1, || {
+    guard_val(|| {
         if reader.is_null() {
             return -1;
         }
@@ -612,7 +612,7 @@ pub unsafe extern "C" fn ze_deserializer_from_bytes(
 /// Whether everything has been consumed (pico `ze_deserializer_is_done`).
 #[no_mangle]
 pub unsafe extern "C" fn ze_deserializer_is_done(deserializer: *const ze_deserializer_t) -> bool {
-    guard_val(true, || {
+    guard_val(|| {
         if deserializer.is_null() {
             return true;
         }

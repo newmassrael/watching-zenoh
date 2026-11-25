@@ -2818,6 +2818,44 @@ mod unicast_transport {
         );
     }
 
+    /// A `Frame` read where its datagram lies stamps the link's last receipt with the time of the
+    /// turn of input that read it, not with a reading of the session's clock, which stands at 0
+    /// here. Turned red by an admitted head that reads the clock for its stamp again.
+    #[cfg(feature = "rx-in-place")]
+    #[test]
+    fn a_frame_read_in_place_stamps_its_receipt_at_the_time_of_its_turn() {
+        use crate::drive::DatagramPath;
+        use wz_codecs::wire_const::{FLAG_T_FRAME_R, T_MID_FRAME};
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let transport = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        assert_eq!(actions.link.fact_last_inbound_at(|slot| *slot), None);
+        // A reliable `Frame` at SN 1 that carries no record.
+        let frame = [T_MID_FRAME | FLAG_T_FRAME_R, 0x01];
+        let path = transport.on_datagram(
+            &frame,
+            &mut engine,
+            &*actions,
+            7_000,
+            &mut |_: IterationEvent<'_, '_>| {},
+        );
+        assert_eq!(path, DatagramPath::InPlace, "the Frame is read in place");
+        assert_eq!(
+            actions.link.fact_last_inbound_at(|slot| *slot),
+            Some(7_000),
+            "the receipt is stamped at the turn's time"
+        );
+    }
+
     /// A datagram its link keeps is read on from where the last turn stopped, which the receive
     /// notes beside its record: two KeepAlives in one datagram are read over two lends of the same
     /// bytes, one a lend, and the turn between says the link is to keep it. A kept datagram read

@@ -1777,9 +1777,7 @@ pub unsafe extern "C" fn z_get_with_parameters_substr(
 /// answer (pico would dereference and crash).
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_is_ok(reply: *const z_loaned_reply_t) -> bool {
-    guard_val(false, || {
-        reply_marshal(reply).is_some_and(|marshal| marshal.is_ok)
-    })
+    guard_val(|| reply_marshal(reply).is_some_and(|marshal| marshal.is_ok))
 }
 
 /// Borrow a data reply's sample (pico `z_reply_ok`). The C side must check
@@ -1791,7 +1789,7 @@ pub unsafe extern "C" fn z_reply_is_ok(reply: *const z_loaned_reply_t) -> bool {
 /// empty.
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_ok(reply: *const z_loaned_reply_t) -> *const z_loaned_sample_t {
-    guard_val(core::ptr::null(), || match reply_marshal(reply) {
+    guard_val(|| match reply_marshal(reply) {
         Some(marshal) if marshal.is_ok => marshal.sample.as_loaned(),
         _ => core::ptr::null(),
     })
@@ -1803,7 +1801,7 @@ pub unsafe extern "C" fn z_reply_ok(reply: *const z_loaned_reply_t) -> *const z_
 pub unsafe extern "C" fn z_reply_err(
     reply: *const z_loaned_reply_t,
 ) -> *const z_loaned_reply_err_t {
-    guard_val(core::ptr::null(), || match reply_marshal(reply) {
+    guard_val(|| match reply_marshal(reply) {
         Some(marshal) if !marshal.is_ok => {
             marshal as *const ReplyMarshal as *const z_loaned_reply_err_t
         }
@@ -1817,7 +1815,7 @@ pub unsafe extern "C" fn z_reply_err(
 pub unsafe extern "C" fn z_reply_err_payload(
     reply_err: *const z_loaned_reply_err_t,
 ) -> *const z_loaned_bytes_t {
-    guard_val(core::ptr::null(), || match reply_err_marshal(reply_err) {
+    guard_val(|| match reply_err_marshal(reply_err) {
         Some(marshal) => &marshal.loaned_err_payload as *const z_loaned_bytes_t,
         None => core::ptr::null(),
     })
@@ -1877,7 +1875,7 @@ impl z_owned_reply_err_t {
 pub unsafe extern "C" fn z_reply_err_encoding(
     reply_err: *const z_loaned_reply_err_t,
 ) -> *const crate::encoding::z_loaned_encoding_t {
-    guard_val(core::ptr::null(), || match reply_err_marshal(reply_err) {
+    guard_val(|| match reply_err_marshal(reply_err) {
         Some(marshal) => crate::pubsub::z_sample_encoding(marshal.sample.as_loaned()),
         None => core::ptr::null(),
     })
@@ -1936,7 +1934,7 @@ pub unsafe extern "C" fn z_reply_err_clone(
 pub unsafe extern "C" fn z_reply_err_loan(
     err: *const z_owned_reply_err_t,
 ) -> *const z_loaned_reply_err_t {
-    guard_val(core::ptr::null(), || {
+    guard_val(|| {
         if err.is_null() {
             return core::ptr::null();
         }
@@ -1952,7 +1950,7 @@ pub unsafe extern "C" fn z_reply_err_loan(
 pub unsafe extern "C" fn z_reply_err_loan_mut(
     err: *mut z_owned_reply_err_t,
 ) -> *mut z_loaned_reply_err_t {
-    guard_val(core::ptr::null_mut(), || {
+    guard_val(|| {
         if err.is_null() {
             return core::ptr::null_mut();
         }
@@ -2093,7 +2091,7 @@ pub unsafe extern "C" fn z_reply_replier_id(
     reply: *const z_loaned_reply_t,
     out_id: *mut crate::entity::z_entity_global_id_t,
 ) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         if out_id.is_null() {
             return false;
         }

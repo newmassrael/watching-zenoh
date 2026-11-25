@@ -202,7 +202,7 @@ pub unsafe extern "C" fn z_cancellation_token_cancel(
 pub unsafe extern "C" fn z_cancellation_token_is_cancelled(
     token: *const z_loaned_cancellation_token_t,
 ) -> bool {
-    crate::ffi::guard_val(false, || match token_ref(token) {
+    crate::ffi::guard_val(|| match token_ref(token) {
         Some(shared) => shared.is_cancelled(),
         None => false,
     })

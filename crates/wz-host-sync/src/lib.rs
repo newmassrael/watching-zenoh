@@ -607,6 +607,13 @@ pub fn sleep_ms(ms: u64) {
     sys::sleep_ms(ms);
 }
 
+/// Sleep the calling thread for at least `us` microseconds, the finest a C program's sleep asks
+/// for, so a library's sleeps of every unit are this one body. Windows sleeps whole milliseconds,
+/// a part of one rounded up.
+pub fn sleep_us(us: u64) {
+    sys::sleep_us(us);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,6 +1034,21 @@ mod tests {
         thread.join();
         assert_eq!(seen.load(Ordering::SeqCst), id);
         assert_ne!(id, current_thread());
+    }
+
+    /// A sleep in microseconds lasts at least what it asks, below a millisecond and past one. Turned
+    /// red by a sleep that reads its count in a coarser unit or drops the part below a second.
+    #[cfg(unix)]
+    #[test]
+    fn a_sleep_in_microseconds_lasts_at_least_what_it_asks() {
+        for us in [700u64, 1_300_000] {
+            let started = Instant::now();
+            sleep_us(us);
+            assert!(
+                started.elapsed() >= Duration::from_micros(us),
+                "slept {us} us"
+            );
+        }
     }
 
     /// A thread reads as running while its body runs and as finished once it has returned, before
