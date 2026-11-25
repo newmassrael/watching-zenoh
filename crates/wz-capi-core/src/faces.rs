@@ -134,6 +134,7 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 mod multicast;
 #[cfg(feature = "multicast-transport")]
 pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
+mod send_deferral;
 
 // R311y498 — NO `use crate::pubsub` / `use crate::query` here, deliberately.
 //
@@ -2004,10 +2005,17 @@ impl TransportsCell {
 }
 
 /// A hold of the registry's lock and this thread's mark of it, let go of together.
+///
+/// The fields are dropped in the order they are declared, so the lock is released before either
+/// mark goes. What the thread sent its faces while it held the lock was queued on each face
+/// (`send_deferral`) and is written when `_sends` goes, last: no send waits for room under the
+/// registry's lock.
 struct InnerGuard<'a> {
     guard: MutexGuard<'a, Inner>,
     // Read by a debug build only; let go of after the lock.
     _held: wz_capi_port::sync::SessionHeld,
+    // Let go of after the lock: its drop writes the sends this thread queued under it.
+    _sends: send_deferral::RegistryHold,
 }
 
 impl core::ops::Deref for InnerGuard<'_> {
@@ -3338,7 +3346,12 @@ impl SharedSession {
     /// (`wz_capi_port::sync::SessionHeld`): a take on the thread that holds the lock already (a
     /// drop made under it that reaches the session again) fails a debug build there instead of
     /// waiting on itself.
+    ///
+    /// It counts the hold for the faces' sends too (`send_deferral::RegistryHold`): a face's send
+    /// made under the lock is queued on the face, and the thread writes it once it has let go of
+    /// the lock.
     fn lock(&self) -> InnerGuard<'_> {
+        let sends = send_deferral::RegistryHold::enter();
         let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(&self.inner).cast());
         InnerGuard {
             guard: self
@@ -3346,6 +3359,7 @@ impl SharedSession {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             _held: held,
+            _sends: sends,
         }
     }
 
@@ -3482,6 +3496,10 @@ impl SharedSession {
         // Before the replay below declares anything on the face: the entities it replays are
         // declared to the peer under the node's aggregates, one declaration per aggregate.
         session.set_declaration_aggregation(self.aggregation.clone());
+        // Before the registry sends the face anything under its lock (the gossip below, the replay
+        // and every declaration after): such a send is queued on the face in the order the
+        // registry decides it, and written once the lock is let go (`send_deferral`).
+        send_deferral::defer_under_the_registry(actions);
 
         let peer_zid = actions.peer_zid();
         let mut guard = self.admit_under_lock(id, peer_zid.as_deref(), dialled)?;
@@ -3501,7 +3519,8 @@ impl SharedSession {
         // reached, and the faces that hear of a new link are told this one is up. Sent from
         // here, with the face's identity read off its handshake (this runs past a completed
         // one), so a face that was refused above is never announced. The plane takes its own
-        // lock for the decision and returns, so what is sent here is sent under this lock only.
+        // lock for the decision and returns, so what is sent here is decided under this lock only,
+        // and queued on each face it goes to, ahead of the replay (`send_deferral`).
         //
         // BEFORE the first declaration the face is owed, and that order is the point. A
         // router that learns this node's subscriber before it learns this node's links reads the
@@ -11075,6 +11094,207 @@ mod aggregation_tests {
             ),
             (1, 1),
             "the last subscriber under the aggregate retracts it on every face"
+        );
+    }
+}
+
+/// No send a face waits for room for is made under the registry's lock (`send_deferral`).
+#[cfg(test)]
+mod send_deferral_tests {
+    use super::*;
+    use std::sync::Condvar;
+    use wz_runtime_tokio_test_support::{
+        establish_capability_pair_between, establish_pair_through, EstablishedPair,
+        LifecycleRecordingDriver,
+    };
+    use wz_session_core::inbound::InboundFrame;
+    use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+
+    /// A link with no room for a message that may not be dropped until the test opens it. A
+    /// sender that asks for room while the link is shut waits, and is counted as waiting, until
+    /// the link opens: no clock decides anything. Every frame goes to the recorder it wraps.
+    struct ShutLink {
+        recorder: Arc<LifecycleRecordingDriver>,
+        state: StdMutex<Shut>,
+        changed: Condvar,
+    }
+
+    #[derive(Default)]
+    struct Shut {
+        shut: bool,
+        waiting: usize,
+    }
+
+    impl ShutLink {
+        fn over(recorder: Arc<LifecycleRecordingDriver>) -> Arc<Self> {
+            Arc::new(Self {
+                recorder,
+                state: StdMutex::new(Shut::default()),
+                changed: Condvar::new(),
+            })
+        }
+
+        fn state(&self) -> std::sync::MutexGuard<'_, Shut> {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        fn shut(&self) {
+            self.state().shut = true;
+        }
+
+        fn open(&self) {
+            self.state().shut = false;
+            self.changed.notify_all();
+        }
+
+        /// Return once a sender waits for room on this link.
+        fn await_a_waiting_sender(&self) {
+            let mut state = self.state();
+            while state.waiting == 0 {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+    }
+
+    impl BoxedLinkDriver for ShutLink {
+        fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+            self.recorder.send_blocking(bytes, reliability)
+        }
+        fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+            if let RoomWait::Block { .. } = wait {
+                let mut state = self.state();
+                if state.shut {
+                    state.waiting += 1;
+                    self.changed.notify_all();
+                    while state.shut {
+                        state = self
+                            .changed
+                            .wait(state)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    }
+                    state.waiting -= 1;
+                }
+            }
+            RoomAnswer::at_once(LinkRoom::Free)
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+    }
+
+    /// Opens the link when dropped, so a failed assertion does not leave the sender waiting.
+    struct OpenOnDrop(Arc<ShutLink>);
+
+    impl Drop for OpenOnDrop {
+        fn drop(&mut self) {
+            self.0.open();
+        }
+    }
+
+    /// How many declarations the link of `pair` was sent after its `before`-th send.
+    fn declarations_since(pair: &EstablishedPair, before: usize) -> usize {
+        let mut declarations = 0;
+        for (bytes, _) in pair.resp_driver.snapshot().sends.iter().skip(before) {
+            let Ok(InboundFrame::Frame { payload, .. }) = pair.init_actions.handle_inbound(bytes)
+            else {
+                continue;
+            };
+            declarations += parse_frame_payload(&payload)
+                .expect("the frame decodes")
+                .iter()
+                .filter(|message| matches!(message, NetworkMessage::Declare(_)))
+                .count();
+        }
+        declarations
+    }
+
+    /// While a declaration waits for room on one face, nothing waits for it that reads the
+    /// registry: the registry's lock is free, the other face's drive reads the registry (its
+    /// deadline and its wake, as the drive loop does between two events), and a get chooses its
+    /// faces. Once the link has room the declaration goes out, on both faces.
+    ///
+    /// The face's link refuses room until the test opens it, and the test reads the registry only
+    /// once the declaring thread waits on that link, so the order of the two threads is fixed
+    /// and no clock is read. Before the send was deferred, the declaring thread waited for the
+    /// room with the registry's lock held, and the lock was found taken.
+    #[tokio::test]
+    async fn a_face_with_no_room_holds_up_no_reader_of_the_registry() {
+        let mut shut = None;
+        let full = establish_pair_through(
+            0x01,
+            0x02,
+            |recorder| -> Arc<dyn BoxedLinkDriver + Send + Sync> {
+                let link = ShutLink::over(recorder);
+                shut = Some(Arc::clone(&link));
+                link
+            },
+        )
+        .await;
+        let shut = shut.expect("the link was made");
+        let free = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let shared = Arc::new(
+            SharedSession::new(
+                TokioTime::new(),
+                [0x11; 16].into(),
+                SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
+        );
+        let full_face = 1;
+        let free_face = LISTENER_FACE_STRIDE + 1;
+        assert!(shared.face_up(full_face, &full.resp_actions, false));
+        assert!(shared.face_up(free_face, &free.resp_actions, false));
+        let full_before = full.resp_driver.snapshot().sends.len();
+        let free_before = free.resp_driver.snapshot().sends.len();
+
+        shut.shut();
+        let opener = OpenOnDrop(Arc::clone(&shut));
+        let declarer = {
+            let shared = Arc::clone(&shared);
+            let runtime = tokio::runtime::Handle::current();
+            std::thread::spawn(move || {
+                let _runtime = runtime.enter();
+                let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+                shared.declare_subscriber("wz/full/sub".to_owned(), Locality::Any, sink)
+            })
+        };
+        shut.await_a_waiting_sender();
+
+        assert!(
+            shared.inner.try_lock().is_ok(),
+            "the registry's lock is free while a declaration waits for room"
+        );
+        let _ = shared.next_reply_deadline_ms(free_face);
+        assert!(
+            shared.deadline_revised(free_face).is_some(),
+            "the other face's drive reads the registry"
+        );
+        assert_eq!(
+            shared.query_targets().faces.len(),
+            2,
+            "a get chooses its faces"
+        );
+        assert_eq!(
+            declarations_since(&full, full_before),
+            0,
+            "the face with no room was sent nothing yet"
+        );
+
+        drop(opener);
+        let declared = declarer.join().expect("the declaring thread ends");
+        assert!(declared.is_some(), "the subscriber is declared");
+        assert_eq!(
+            (
+                declarations_since(&full, full_before),
+                declarations_since(&free, free_before)
+            ),
+            (1, 1),
+            "once there is room, each face is sent the declaration"
         );
     }
 }
