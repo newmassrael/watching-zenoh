@@ -3279,8 +3279,7 @@ impl SessionArena {
     /// back once the session lets the arena go and the runtime's last holder lets go, whichever
     /// is last. Refused past what the arena has left.
     pub(crate) fn runtime_place(&mut self, bytes: usize) -> Result<RuntimePlace, LendRefused> {
-        let memory = self.keep()?;
-        let at = self.arena.lend_span(Some(bytes))?;
+        let (at, memory) = self.kept_span(bytes)?;
         // SAFETY: the span is `bytes` of the arena's memory, lent to the runtime alone, and the
         // memory stands while a count of `memory` is held, which the session holds until it lets
         // the arena go, after the runtime is made.
@@ -3292,9 +3291,19 @@ impl SessionArena {
     /// its own when it is written there, so the memory goes back once the engine's last holder
     /// lets go, whichever of them is last. Refused past what the arena has left.
     pub(crate) fn engine_place(&mut self, bytes: usize) -> Result<EnginePlace, LendRefused> {
+        let (at, memory) = self.kept_span(bytes)?;
+        Ok(EnginePlace { at, memory })
+    }
+
+    /// A span of `bytes` of the arena, on its alignment, and the count that keeps the arena's
+    /// memory for what is placed there. Refused past what the arena has left. Out of line: the
+    /// runtime's place and the engine's are both lent by it, and a copy in each would carry the
+    /// placing of the count twice.
+    #[inline(never)]
+    fn kept_span(&mut self, bytes: usize) -> Result<(NonNull<u8>, NonNull<Kept>), LendRefused> {
         let memory = self.keep()?;
         let at = self.arena.lend_span(Some(bytes))?;
-        Ok(EnginePlace { at, memory })
+        Ok((at, memory))
     }
 
     /// The bytes reserved: the plan's.
