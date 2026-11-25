@@ -153,6 +153,10 @@ impl<V, const N: usize> crate::pool_gauge::PoolGauge for FixedIdMap<V, N> {
     }
 }
 
+// SAFETY: its rows are a heapless 0.8 `Vec` (`ZeroEmpty`), its count of refusals zero, its mark
+// one that has seen nothing: all zero bytes are a table of no ids.
+unsafe impl<V, const N: usize> crate::bounded::ZeroEmpty for FixedIdMap<V, N> {}
+
 impl<V, const N: usize> Default for FixedIdMap<V, N> {
     fn default() -> Self {
         Self::new()

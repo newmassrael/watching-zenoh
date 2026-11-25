@@ -218,6 +218,17 @@ unsafe impl<T: ZeroEmpty> ZeroEmpty for Cell<T> {}
 // SAFETY: the null pointer is `None`, guaranteed for an `Option` of a `NonNull`.
 unsafe impl<T> ZeroEmpty for Option<NonNull<T>> {}
 
+// SAFETY: a `PhantomData` is no bytes.
+unsafe impl<T: ?Sized> ZeroEmpty for PhantomData<T> {}
+
+/// A policy each of whose sequences and texts is [`ZeroEmpty`] whatever it holds: a table of it is
+/// empty at all zero bytes for every row type, which a bound on each sequence could state only by
+/// naming the row's type, a private one of the table's own.
+///
+/// # Safety
+/// For every `T` and `N`, `Self::Seq<T, N>` and `Self::Text<N>` are `ZeroEmpty`.
+pub unsafe trait ZeroSeqs: Storage {}
+
 // SAFETY: heapless 0.8's `Vec` is its length and an array of `MaybeUninit` rows; a length of zero is
 // a sequence of no rows, which holds nothing to drop. The crate pins `heapless = "0.8"`.
 unsafe impl<T, const N: usize> ZeroEmpty for heapless::Vec<T, N> {}
@@ -552,6 +563,13 @@ impl Storage for Region {
     #[cfg(feature = "storage-profile")]
     type Compose = crate::wireexpr_resolve::ComposeInline;
 }
+
+// SAFETY: heapless 0.8's `Vec` and `String`, both `ZeroEmpty`.
+unsafe impl ZeroSeqs for Static {}
+// SAFETY: a `LentSeq` and a heapless 0.8 `String`, both `ZeroEmpty`.
+unsafe impl ZeroSeqs for Lent {}
+// SAFETY: as `Lent`'s.
+unsafe impl ZeroSeqs for Region {}
 
 /// The policy this build's features choose, and the default of every container's
 /// policy parameter: [`Heap`] when `alloc` is on and `bounded-heapless` is off.
@@ -1285,7 +1303,7 @@ impl SeqPlace {
             "a lent table counts its rows in 32 bits"
         );
         assert!(
-            rows % core::mem::align_of::<T>() == 0,
+            matches!(rows.checked_rem(core::mem::align_of::<T>()), Some(0)),
             "a table's rows start where their type's alignment allows"
         );
         Self {
