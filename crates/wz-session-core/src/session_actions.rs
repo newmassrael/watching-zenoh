@@ -3608,10 +3608,14 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// The sends this session's owner deferred, and the deferral that decides which
     /// ([`SessionLinkActions::install_send_deferral`]). A build with no dispatch arm sends no
     /// network message, so it has nothing to defer.
+    ///
+    /// Every other heap build that sends has it, as it has the block-first hand-off, whichever
+    /// atomics the build takes: the `no_std` feature selects those atomics and nothing else, and
+    /// Cargo turns it on in a host build that also links `wz-runtime-coop` (which forwards it),
+    /// so a deferral gated on its absence would leave such a build sending under its owner's lock.
     #[cfg(all(
         feature = "alloc",
         not(feature = "tx-lend-only"),
-        not(feature = "no_std"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -5317,7 +5321,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(all(
                 feature = "alloc",
                 not(feature = "tx-lend-only"),
-                not(feature = "no_std"),
                 any(
                     feature = "codec-push",
                     feature = "codec-request",
@@ -5360,7 +5363,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(all(
                 feature = "alloc",
                 not(feature = "tx-lend-only"),
-                not(feature = "no_std"),
                 any(
                     feature = "codec-push",
                     feature = "codec-request",
@@ -5775,7 +5777,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(all(
                 feature = "alloc",
                 not(feature = "tx-lend-only"),
-                not(feature = "no_std"),
                 any(
                     feature = "codec-push",
                     feature = "codec-request",
@@ -7260,36 +7261,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// sends to this session under a lock of its own, before it sends anything under that lock.
     #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub fn install_send_deferral(&self, deferral: alloc::boxed::Box<dyn SendDeferral>) {
-        #[cfg(all(
-            not(feature = "no_std"),
-            any(
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "declare-keyexpr",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "declare-token",
-                feature = "declare-interest",
-                feature = "liveliness-token",
-            )
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
         ))]
         self.deferred_sends.install(deferral);
-        #[cfg(not(all(
-            not(feature = "no_std"),
-            any(
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "declare-keyexpr",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "declare-token",
-                feature = "declare-interest",
-                feature = "liveliness-token",
-            )
+        #[cfg(not(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
         )))]
         drop(deferral);
     }
@@ -7304,20 +7299,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the deferral exists to keep free of that wait, which a debug build refuses.
     #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub fn flush_deferred_sends(&self) {
-        #[cfg(all(
-            not(feature = "no_std"),
-            any(
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "declare-keyexpr",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "declare-token",
-                feature = "declare-interest",
-                feature = "liveliness-token",
-            )
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
         ))]
         self.deferred_sends
             .flush(|deferred| self.send_deferred(deferred));
@@ -7334,7 +7326,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(
         feature = "alloc",
         not(feature = "tx-lend-only"),
-        not(feature = "no_std"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -7411,7 +7402,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(
         feature = "alloc",
         not(feature = "tx-lend-only"),
-        not(feature = "no_std"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -13000,11 +12990,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // or held behind what was, by [`Self::dispatch_deferrable`]. Every other stage continues a
         // send that passed here already (a block-first job, a send under room its sender
         // reserved) or is a probe, which waits for nothing.
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "tx-lend-only"),
-            not(feature = "no_std")
-        ))]
+        #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
         if !STAGED && self.deferred_sends.engaged() {
             return self.dispatch_deferrable(
                 conduit,
