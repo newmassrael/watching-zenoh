@@ -130,17 +130,28 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     // taken: the kernel may take a little more of a stream that has just begun to back up (its
     // buffers grow as it fills), which writes the rest and gives the slot back. So the stream is
     // filled until the link has owed for `STILL` without a break.
+    //
+    // A stream can also fill with nothing of it owed: the publisher's read task writes the rest
+    // of the frame owed, and what room that leaves is under what the stack reports as writable,
+    // so every droppable publish after it is refused before a byte of it is written, and the
+    // stream stays so for as long as its peer reads nothing. Each round that leaves nothing owed
+    // therefore has the slow peer read one message, which gives its stream room again, and
+    // hands the stream two publishes, so a stream that took them fills by at least one a round
+    // and one that took neither is moved on by the read.
     let payload = vec![0x5a; PAYLOAD];
     let mut owing_since: Option<Instant> = None;
     for _ in 0..FILL_AT_MOST {
-        let _ = publisher.publish_on_wire_all(
-            "demo/pool/fill",
-            &WireKey::literal(),
-            &payload,
-            &publish(CongestionControl::Drop),
-        );
+        for _ in 0..2 {
+            let _ = publisher.publish_on_wire_all(
+                "demo/pool/fill",
+                &WireKey::literal(),
+                &payload,
+                &publish(CongestionControl::Drop),
+            );
+        }
         if publisher.links_owing() == 0 {
             owing_since = None;
+            SessionDrive::read(&*slow, true).expect("the slow peer's session is open");
             continue;
         }
         let since = *owing_since.get_or_insert_with(Instant::now);
