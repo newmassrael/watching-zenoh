@@ -628,6 +628,10 @@ pub trait StreamFraming {
     /// `consume` the unit is the receive's to hand over, and the framing may change its bytes
     /// where they lie (unmask them, join the parts of a message); without it the receive only asks
     /// whether a whole unit is there, and nothing changes.
+    ///
+    /// A front that answers [`Front::Partial`] changes nothing, and answers so again until bytes
+    /// are added behind it: a receive that found the part of a batch reads the stream for the
+    /// rest without asking again.
     fn front(&self, held: &mut [u8], capacity: usize, consume: bool) -> Front;
 
     /// The batch the last consuming [`Self::front`] answered has been passed over: the bytes
@@ -841,13 +845,17 @@ struct RxHalf<B> {
     /// receive starts behind them, and moves what follows them to the front only when it must
     /// read the stream for the rest of a batch.
     spent: Cell<usize>,
-    /// Whether a whole batch lies behind the spent bytes, as the last receive left the buffer: what
-    /// the next receive hands over without a read. Kept apart from the buffer so that asking it
-    /// does not touch the bytes a lent batch may still be read from.
-    ready: Cell<bool>,
+    /// What lies behind the spent bytes, as the last receive left the buffer: a whole batch, which
+    /// the next receive hands over without a read, or the part of one, for which it reads the
+    /// stream without reading the front again. Kept apart from the buffer so that asking it does
+    /// not touch the bytes a lent batch may still be read from.
+    behind: Cell<Behind>,
     /// The bytes the receive moved within its buffer, which the tests count.
     #[cfg(test)]
     moved: Cell<usize>,
+    /// How many times the receive read the front of its buffer, which the tests count.
+    #[cfg(test)]
+    fronts: Cell<usize>,
     /// How many times the receive moved bytes within its buffer, which the tests count.
     #[cfg(test)]
     moves: Cell<usize>,
@@ -857,6 +865,19 @@ struct RxHalf<B> {
     /// The batches the copying receive let go of for want of heap room, until the loop takes them.
     #[cfg(feature = "alloc")]
     drops: crate::link_storage::RxDrops,
+}
+
+/// What a receive found behind the bytes it spent, for the next receive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Behind {
+    /// Not read, or read as what no receive goes on from (a length past the buffer, the peer's
+    /// end inside the framing): the next receive reads the front.
+    Unread,
+    /// The part of a batch, or nothing: the next receive reads the stream for the rest before it
+    /// reads the front, which answers the same until bytes are added behind it.
+    Part,
+    /// A whole batch, an empty one included: the next receive hands it over with no read.
+    Whole,
 }
 
 /// The half of a [`StreamDriver`] a send reaches: the memory the session encodes its frames into
@@ -912,9 +933,11 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                 len: rx_len,
                 held: Cell::new(held.min(rx_len)),
                 spent: Cell::new(0),
-                ready: Cell::new(false),
+                behind: Cell::new(Behind::Unread),
                 #[cfg(test)]
                 moved: Cell::new(0),
+                #[cfg(test)]
+                fronts: Cell::new(0),
                 #[cfg(test)]
                 moves: Cell::new(0),
                 keeping: Cell::new(false),
@@ -964,7 +987,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
 
     /// Whether a whole batch lies in the buffer for the next receive, which then needs no read.
     fn batch_held(&self) -> bool {
-        self.rx.ready.get()
+        self.rx.behind.get() == Behind::Whole
     }
 
     /// Hand the next whole batch to `f` where the buffer holds it, reading the socket until there
@@ -989,20 +1012,30 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
         };
         let mut start = self.rx.spent.get();
         let mut held = self.rx.held.get();
-        // Once a batch is lent, the front is read once more and only to say whether a whole batch
-        // lies behind it for the next receive (`ready`): one reading of the front serves both.
+        // Once a batch is lent, the front is read once more and only to say what lies behind it
+        // for the next receive (`behind`): one reading of the front serves both. The part of a
+        // batch the last receive found there is what a reading would find again, nothing having
+        // been read since, so this receive reads the stream for the rest first.
         let mut lent = false;
-        let ready = loop {
+        let mut part_known = self.rx.behind.get() == Behind::Part;
+        let behind = loop {
             // `start` and `held` are places of the buffer, `start` the earlier, and a batch `front`
             // answered lies whole between them: the sums below stay inside it.
-            let unit = self.framing.front(
-                bytes.get_mut(start..held).unwrap_or_default(),
-                self.rx.len,
-                !lent,
-            );
+            let unit = if core::mem::take(&mut part_known) {
+                Front::Partial
+            } else {
+                #[cfg(test)]
+                self.rx.fronts.set(self.rx.fronts.get() + 1);
+                self.framing.front(
+                    bytes.get_mut(start..held).unwrap_or_default(),
+                    self.rx.len,
+                    !lent,
+                )
+            };
             match unit {
-                Front::Batch { .. } | Front::Skip(_) if lent => break true,
-                _ if lent => break false,
+                Front::Batch { .. } | Front::Skip(_) if lent => break Behind::Whole,
+                Front::Partial if lent => break Behind::Part,
+                _ if lent => break Behind::Unread,
                 Front::Skip(used) => start = start.wrapping_add(used),
                 Front::Batch { at, len, used } => {
                     let body = start.wrapping_add(at);
@@ -1019,14 +1052,14 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                 }
                 Front::TooLong => {
                     self.end(LostCause::PeerClosed);
-                    break false;
+                    break Behind::Unread;
                 }
                 // The peer's end inside the framing is answered as the framing answers it, with
                 // what the link owes written first, and the link ends.
                 Front::Closed => {
                     self.write_owed();
                     self.end(LostCause::PeerClosed);
-                    break false;
+                    break Behind::Unread;
                 }
                 Front::Partial => {
                     // Nothing before the part of a batch is lent any more: it moves to the front,
@@ -1055,15 +1088,16 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                     {
                         Ok(Some(0)) => {
                             self.end(LostCause::PeerClosed);
-                            break false;
+                            break Behind::Unread;
                         }
                         // A read fills at most the room after `held`.
                         Ok(Some(n)) => held = held.wrapping_add(n),
-                        Ok(None) => break false,
+                        // Nothing was added to the part of a batch the front found.
+                        Ok(None) => break Behind::Part,
                         Err(e) => {
                             self.error.set(Some(e));
                             self.end(LostCause::OsError);
-                            break false;
+                            break Behind::Unread;
                         }
                     }
                 }
@@ -1071,7 +1105,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
         };
         self.rx.spent.set(start);
         self.rx.held.set(held);
-        self.rx.ready.set(ready);
+        self.rx.behind.set(behind);
         // Nothing of the link's own is left in the buffer, no part of a batch and no batch kept:
         // a pooled buffer goes back for any link to read into. The facts of a part of a batch are
         // this link's (`held`, `spent`), so its buffer stays its own while one is there.
@@ -2148,6 +2182,38 @@ mod tests {
         );
         assert_eq!(received(&long), None);
         assert_eq!(long.lost(), Some(LostCause::PeerClosed));
+    }
+
+    /// A receive reads the front of its buffer once for the batch it lends and once for what lies
+    /// behind it, and the part of a batch found there is not read again before the stream is: the
+    /// next receive reads the stream first. Turned red by a receive that reads again a front it
+    /// found to be the part of a batch, before reading the stream.
+    #[test]
+    fn a_receive_does_not_read_again_the_part_of_a_batch_it_found() {
+        let link = link();
+        queue(&link, &batch(b"one"));
+        assert_eq!(received(&link).as_deref(), Some(&b"one"[..]));
+        let first = link.rx.fronts.get();
+        assert_eq!(first, 3, "a front never read, the batch, and behind it");
+        queue(&link, &batch(b"two"));
+        assert_eq!(received(&link).as_deref(), Some(&b"two"[..]));
+        assert_eq!(link.rx.fronts.get(), first + 2, "the batch, and behind it");
+        let reads = link.socket.reads.get();
+        assert_eq!(received(&link), None, "nothing more was sent");
+        assert_eq!(
+            link.rx.fronts.get(),
+            first + 2,
+            "no front is read when the stream brings nothing"
+        );
+        assert_eq!(link.socket.reads.get(), reads + 1, "the stream is read");
+        queue(&link, &batch(b"three")[..3]);
+        assert_eq!(received(&link), None, "part of a batch");
+        queue(&link, &batch(b"three")[3..]);
+        assert_eq!(
+            received(&link).as_deref(),
+            Some(&b"three"[..]),
+            "the part the front found is read on from where it lies"
+        );
     }
 
     #[test]
