@@ -1905,6 +1905,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The policies the session runs under, as its open was handed them: every link's session
     /// is given them, and the replay and the admission of a second link follow them.
     policy: SessionPolicy,
+    /// Whether the close let go of what the session holds: its row, its links, its tables' rows.
+    /// Apart from the session's being closed, which a step that loses the dial role's link says
+    /// too, so the close that follows such a step still lets them go, and once.
+    released: bool,
     /// How often a read's wait and its step read the session's clock ([`Self::now_us`]), which the
     /// tests count.
     #[cfg(test)]
@@ -4551,6 +4555,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             entropy,
             config,
             policy,
+            released: false,
             #[cfg(test)]
             clock_reads: core::cell::Cell::new(0),
             #[cfg(test)]
@@ -8513,7 +8518,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         #[cfg(feature = "threads")]
         let _ = self.stop_reader();
         let mut guard = self.core.lock();
-        if self.closed.swap(true, Ordering::AcqRel) {
+        self.closed.store(true, Ordering::Release);
+        // A session a step ended is closed already, and still holds its row and its links: the
+        // close lets them go all the same, whoever said the session closed first.
+        if core::mem::replace(&mut guard.0.released, true) {
             return;
         }
         // No handle reaches the session from here on: a key, a query or a token kept past the
