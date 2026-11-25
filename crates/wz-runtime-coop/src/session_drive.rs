@@ -10,10 +10,10 @@
 //!
 //! - inbound: what [`SessionDatagramLink::try_recv`] read, or under `rx-in-place` what
 //!   [`SessionDatagramLink::recv_with`] lends, is handed with the time to the session's
-//!   receive ([`UnicastRx`]), which dispatches it, stages its fragments and reports each
-//!   outcome. The pump keeps no state of the receive between two datagrams.
-//! - deadlines: the session's own timers
-//!   ([`wz_session_core::transport_timers::TransportTimers`])
+//!   transport ([`UnicastTransport`]), whose receive dispatches it, stages its fragments and
+//!   reports each outcome. The pump keeps no state of the receive between two datagrams.
+//! - deadlines: the session's own timers, the transport's
+//!   ([`wz_session_core::transport_timers::TransportTimers`]),
 //!   say how long the link may wait and judge the handshake, lease and
 //!   keep-alive deadlines when the loop hands them the time; the loop keeps
 //!   none of its own.
@@ -61,8 +61,8 @@ use wz_session_core::locator_grammar::{write_unixpipe_path_with_config, UNIXPIPE
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::{FixedText, TextOut};
-use wz_session_core::transport_timers::TransportTimers;
-use wz_session_core::unicast_rx::{RxReassembly, UnicastRx};
+use wz_session_core::unicast_rx::RxReassembly;
+use wz_session_core::unicast_transport::{InputTurn, LinkWake, MadeLink, UnicastTransport};
 
 // The units a pump dispatched in place, by the path they took: the session receive's count.
 #[cfg(feature = "rx-in-place")]
@@ -1263,7 +1263,8 @@ impl SessionRole {
 /// fields are `Copy`, so this owns them by value and carries no lifetime.
 pub struct SessionDriveConfig {
     /// The handshake deadline budget ([`SessionTimeouts::spec_defaults`]);
-    /// seeds the session's timers ([`TransportTimers`]).
+    /// seeds the session's timers
+    /// ([`wz_session_core::transport_timers::TransportTimers`]).
     pub timeouts: SessionTimeouts,
     /// The role to activate the FSM with before the loop starts
     /// ([`SessionRole::Acceptor`] listens for an inbound peer;
@@ -1394,19 +1395,34 @@ pub struct SessionPump<
     R = DefaultRouter,
     K: LockKind = crate::sync::Shared,
 > {
+    /// The session of the pump's one link: the runtime, the link, the actions, the clock and the
+    /// machine, which the pump's transport is handed at each step.
+    session: LinkSession<C, L, D, K>,
+    /// The session's transport over the link it was handed made: its receive (the reassembly
+    /// Router its fragments are staged in and, with `rx-in-place`, the record buffer each inbound
+    /// record is decoded into and the count of the paths its units took) and its timers, which
+    /// the pump asks how long its link may wait and hands the time, keeping no deadline of its
+    /// own. Under `session-slot` it lives in the pump, and the pump in a cell of a `PumpSlots`
+    /// table, so a datagram costs the heap nothing.
+    transport: UnicastTransport<R, MadeLink>,
+}
+
+/// The session of one link a pump steps, apart from the transport it is stepped with: the
+/// runtime it was built against, the link it reads, its actions, its clock and its machine. A
+/// [`SessionPump`] holds one beside a transport of its own; an owner that keeps the transport
+/// of a face for longer than one link holds the transport itself and hands it to each step
+/// ([`Self::step`], [`Self::service_due`], [`Self::take_input_now`]).
+pub struct LinkSession<
+    C: ClockSource,
+    L: SessionDatagramLink,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+    K: LockKind = crate::sync::Shared,
+> {
     runtime: CoopRuntime<C, D, K>,
     link: L,
     actions: SessionHandle<C, D, K>,
     clock: CoopTime<C>,
     engine: SessionEngine<CoopRuntime<C, D, K>, CoopTime<C>>,
-    /// The session's own timers: the pump asks them how long its link may wait and hands them
-    /// the time, and keeps no deadline of its own.
-    timers: TransportTimers,
-    /// The session's receive: the reassembly Router its fragments are staged in and, with
-    /// `rx-in-place`, the record buffer each inbound record is decoded into and the count of the
-    /// paths its units took. Under `session-slot` it lives in the pump, and the pump in a cell of
-    /// a `PumpSlots` table, so a datagram costs the heap nothing.
-    rx: UnicastRx<R>,
     /// `session-slot` -- the role this pump is to activate the engine with at its
     /// FIRST step, and has not yet. The profile's pump does not speak when it is
     /// built: a dialling pump's activation sends the `InitSyn`, and a pump that
@@ -1509,7 +1525,7 @@ impl<
     /// witness of a delivered payload).
     #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
     pub fn reassembly(&self) -> &InPlaceReassembly {
-        self.rx.router()
+        self.transport.rx().router()
     }
 }
 
@@ -1557,14 +1573,17 @@ impl<
         make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
     ) -> Option<&mut Self> {
         let at = place.as_mut_ptr();
-        // SAFETY: `at` is `place`, valid for writes of a `Self`, and the receive's field is lent as
-        // the uninitialised place `MaybeUninit<UnicastRx<R>>` lays out as a `UnicastRx<R>`.
-        let rx =
-            unsafe { &mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>() };
-        UnicastRx::init_in(rx, make_router)?;
-        // SAFETY: the receive is written, and the rest of the pump is written by `build_in`.
+        // SAFETY: `at` is `place`, valid for writes of a `Self`, and the transport's field is lent
+        // as the uninitialised place `MaybeUninit<UnicastTransport<R, MadeLink>>` lays out as a
+        // `UnicastTransport<R, MadeLink>`.
+        let transport = unsafe {
+            &mut *core::ptr::addr_of_mut!((*at).transport)
+                .cast::<MaybeUninit<UnicastTransport<R, MadeLink>>>()
+        };
+        UnicastTransport::init_made_in(transport, fields.config.timeouts, make_router)?;
+        // SAFETY: the transport is written, and the session is written by `build_in`.
         unsafe {
-            Self::build_in(place, runtime, fields, |_| {});
+            Self::build_in(place, runtime, fields, |_, _| {});
             Some(place.assume_init_mut())
         }
     }
@@ -1582,9 +1601,9 @@ impl<
         reasm: R,
     ) -> Self {
         let mut place = MaybeUninit::<Self>::uninit();
-        // SAFETY: the receive is written in the place it is handed: `MaybeUninit::write` lends back
-        // the place it wrote, so `init_in` takes it as written. Then `build_in` has written every
-        // field of the pump into `place`.
+        // SAFETY: the transport is written in the place it is handed: `MaybeUninit::write` lends
+        // back the place it wrote, so `init_made_in` takes it as written. Then `build_in` has
+        // written every field of the pump into `place`.
         unsafe {
             Self::build_in(
                 &mut place,
@@ -1596,36 +1615,127 @@ impl<
                     clock,
                     config,
                 },
-                |rx| {
-                    let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
+                |transport, timeouts| {
+                    let _ = UnicastTransport::init_made_in(transport, timeouts, |slot| {
+                        slot.write(reasm)
+                    });
                 },
             );
             place.assume_init()
         }
     }
 
-    /// Build the pump IN `place`: the engine is made in its field and initialised there, and
-    /// every other field is written where it lies, so no copy of the pump or of the engine
-    /// is ever on the stack. `place` is fully written on return.
+    /// Build the pump IN `place`: the transport by `write_transport` in its field, handed the
+    /// handshake bounds of `fields` (one already written, which [`Self::with_router_in`]
+    /// checked, is left as it is), so a transport whose Router could not be made is refused
+    /// before any other part is taken; then the session in its own
+    /// ([`LinkSession::init_in`]). No copy of the pump or of its machine is ever on the stack.
+    ///
+    /// # Safety
+    /// `write_transport` leaves the transport written in the place it is handed, or finds it
+    /// written.
+    #[inline(always)]
+    unsafe fn build_in(
+        place: &mut MaybeUninit<Self>,
+        runtime: CoopRuntime<C, D, K>,
+        fields: PumpFields<C, L, D, K>,
+        write_transport: impl FnOnce(&mut MaybeUninit<UnicastTransport<R, MadeLink>>, SessionTimeouts),
+    ) {
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` (it is `place`), and each of its two fields
+        // is lent once as the uninitialised place of its type: the transport is written by
+        // `write_transport`, as the caller vouches, and the session by `LinkSession::init_in`.
+        unsafe {
+            write_transport(
+                &mut *core::ptr::addr_of_mut!((*at).transport)
+                    .cast::<MaybeUninit<UnicastTransport<R, MadeLink>>>(),
+                fields.config.timeouts,
+            );
+            LinkSession::init_in(
+                &mut *core::ptr::addr_of_mut!((*at).session)
+                    .cast::<MaybeUninit<LinkSession<C, L, D, K>>>(),
+                runtime,
+                fields,
+            );
+        }
+    }
+
+    /// Borrow the runtime this session was built against. The synchronous
+    /// driver uses it to take the executor pass that [`Self::step`] does
+    /// not.
+    pub fn runtime(&self) -> &CoopRuntime<C, D, K> {
+        self.session.runtime()
+    }
+
+    /// `rx-in-place` — the units this session dispatched so far, by the path
+    /// they took ([`RxPathCounts`]).
+    #[cfg(feature = "rx-in-place")]
+    pub fn rx_path_counts(&self) -> RxPathCounts {
+        self.transport.rx().path_counts()
+    }
+
+    /// Advance the session by one iteration ([`LinkSession::step`] with the pump's own
+    /// transport). `Some(outcome)` means the session is finished (terminal FSM state, or the
+    /// test iteration cap); `None` means call again.
+    pub fn step<F>(&mut self, on_event: &mut F) -> Option<DriverOutcome>
+    where
+        F: EventSink,
+    {
+        self.session.step(&mut self.transport, on_event)
+    }
+
+    /// The session's bookkeeping at `now_ms`, with no input taken ([`LinkSession::service_due`]).
+    pub fn service_due<F: EventSink>(
+        &mut self,
+        now_ms: u64,
+        on_event: &mut F,
+    ) -> Option<DriverOutcome> {
+        self.session
+            .service_due(&mut self.transport, now_ms, on_event)
+    }
+
+    /// One unit of the link's input handed to the session at `now_ms`
+    /// ([`LinkSession::take_input_now`]): whether a unit was taken.
+    pub fn take_input_now<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) -> bool {
+        self.session
+            .take_input_now(&mut self.transport, now_ms, on_event)
+    }
+
+    /// The first instant at which this session's bookkeeping falls due ([`LinkSession::due_ms`]).
+    pub fn due_ms(&mut self, now_ms: u64) -> Option<u64> {
+        self.session.due_ms(&mut self.transport, now_ms)
+    }
+
+    /// Whether something was asked of the session from outside its loop
+    /// ([`LinkSession::owes_out_of_band`]).
+    pub fn owes_out_of_band(&self) -> bool {
+        self.session.owes_out_of_band()
+    }
+}
+
+impl<
+        C: ClockSource,
+        L: SessionDatagramLink,
+        D: BoxedLinkDriver + ?Sized + 'static,
+        K: LockKind,
+    > LinkSession<C, L, D, K>
+{
+    /// Build the session IN `place` and lend it: the engine is made in its field and
+    /// initialised there, and every other field is written where it lies, so no copy of the
+    /// session or of its machine is ever on the stack. `place` is overwritten without dropping
+    /// what it held. The handshake bounds of `fields` are the transport's, which its owner built
+    /// with them, and are not read here.
     ///
     /// Never inlined, for the stack: the engine's initial transition runs in here, and what
     /// the machine calls beneath (the transition sets, the actions, the hash of the initial
     /// sequence number) is on the stack for as long as it runs. Inlined into the caller of a
     /// slot, that caller's frame would be under all of it.
-    ///
-    /// The receive is written first, by `write_rx` in its field (one already written, which
-    /// [`Self::with_router_in`] checked, is left as it is), so a receive whose Router could not be
-    /// made is refused before any other part is taken.
-    ///
-    /// # Safety
-    /// `write_rx` leaves the receive written in the place it is handed, or finds it written.
     #[inline(never)]
-    unsafe fn build_in(
+    pub fn init_in(
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D, K>,
         fields: PumpFields<C, L, D, K>,
-        write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
-    ) {
+    ) -> &mut Self {
         let PumpFields {
             link,
             actions,
@@ -1634,16 +1744,15 @@ impl<
             config,
         } = fields;
         let SessionDriveConfig {
-            timeouts,
+            timeouts: _,
             role,
             max_iters,
         } = config;
         let at = place.as_mut_ptr();
         // SAFETY: `at` is valid for writes of a `Self` (it is `place`), each field is written
         // exactly once below through its own address, and the engine is used only after its
-        // field is written.
+        // field is written; then every field is written and the session is whole.
         unsafe {
-            write_rx(&mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>());
             // The engine is made in its field (`MaybeUninit<T>` has the layout of `T`).
             let engine = new_session_engine_in(
                 &mut *core::ptr::addr_of_mut!((*at).engine)
@@ -1669,42 +1778,35 @@ impl<
             core::ptr::addr_of_mut!((*at).link).write(link);
             core::ptr::addr_of_mut!((*at).actions).write(actions);
             core::ptr::addr_of_mut!((*at).clock).write(clock);
-            core::ptr::addr_of_mut!((*at).timers).write(TransportTimers::new(timeouts));
             #[cfg(feature = "session-slot")]
             core::ptr::addr_of_mut!((*at).pending_role).write(Some(role));
             core::ptr::addr_of_mut!((*at).iter).write(0);
             core::ptr::addr_of_mut!((*at).max_iters).write(max_iters);
+            place.assume_init_mut()
         }
     }
 
-    /// Borrow the runtime this session was built against. The synchronous
-    /// driver uses it to take the executor pass that [`Self::step`] does
-    /// not.
+    /// Borrow the runtime this session was built against.
     pub fn runtime(&self) -> &CoopRuntime<C, D, K> {
         &self.runtime
     }
 
-    /// `rx-in-place` — the units this session dispatched so far, by the path
-    /// they took ([`RxPathCounts`]).
-    #[cfg(feature = "rx-in-place")]
-    pub fn rx_path_counts(&self) -> RxPathCounts {
-        self.rx.path_counts()
-    }
-
-    /// How long the loop may wait for a datagram before something of this session's or this
-    /// runtime's falls due, in milliseconds, rounded UP so the wait never ends before the
-    /// deadline it was computed from: the earliest of the handshake deadline, the lease deadline,
-    /// the keep-alive deadline and the next registered timer, less now. A deadline already past
-    /// is 0, and `u64::MAX` is nothing due at all.
+    /// How long the loop may wait for a datagram before something of this session's, its
+    /// transport's or this runtime's falls due, in milliseconds, rounded UP so the wait never
+    /// ends before the deadline it was computed from: the earliest of the handshake deadline, the
+    /// lease deadline, the keep-alive deadline, the link's next look and the next registered
+    /// timer, less now. A deadline already past is 0, and `u64::MAX` is nothing due at all.
     ///
-    /// The session's deadlines are its timers' ([`TransportTimers::next_due_ms`]), which arm
-    /// the handshake deadline of a state they see for the first time from this instant; the
+    /// The session's deadlines are its transport's ([`UnicastTransport::due_ms`]), whose timers
+    /// arm the handshake deadline of a state they see for the first time from this instant; the
     /// runtime's next timer is the driver's own.
-    fn wake_budget_ms(&mut self) -> u64 {
+    fn wake_budget_ms<R: RxReassembly, Lf: LinkWake>(
+        &mut self,
+        transport: &mut UnicastTransport<R, Lf>,
+    ) -> u64 {
         let now_ms = self.clock.now_monotonic_ms();
-        let due_ms = self
-            .timers
-            .next_due_ms(&self.engine, &self.actions, now_ms)
+        let due_ms = transport
+            .due_ms(&self.engine, &self.actions, now_ms)
             .unwrap_or(u64::MAX);
         let mut wait_ms = due_ms.saturating_sub(now_ms);
         if let Some(timer_us) = self.runtime.time_to_next_timer_us() {
@@ -1713,9 +1815,9 @@ impl<
         wait_ms
     }
 
-    /// Advance the session by one iteration. `Some(outcome)` means the
-    /// session is finished (terminal FSM state, or the test iteration cap);
-    /// `None` means call again.
+    /// Advance the session by one iteration over `transport`. `Some(outcome)` means the
+    /// session is finished (terminal FSM state, or the test iteration cap); `None` means call
+    /// again.
     ///
     /// Deliberately does NOT pump the runtime. Who drives the executor is
     /// the DRIVER's question and the two drivers answer it differently:
@@ -1725,86 +1827,95 @@ impl<
     /// is precisely the inversion [`CoopLocalSet`] exists to remove.
     ///
     /// One iteration is [`Self::service_due`]'s work around [`Self::take_input_now`]'s, in the
-    /// order a task that is polled once a pass needs: the timers are handed the time after the
-    /// unit is taken, so the lease is judged after what the peer sent last.
-    pub fn step<F>(&mut self, on_event: &mut F) -> Option<DriverOutcome>
-    where
-        F: EventSink,
-    {
-        match self.open_step() {
+    /// order a task that is polled once a pass needs, which the transport's turn keeps
+    /// ([`UnicastTransport::begin_input`]): what falls due before input is raised, one unit is
+    /// taken, and the timers are handed the time after it, so the lease is judged after what the
+    /// peer sent last.
+    pub fn step<R: RxReassembly, Lf: LinkWake, F: EventSink>(
+        &mut self,
+        transport: &mut UnicastTransport<R, Lf>,
+        on_event: &mut F,
+    ) -> Option<DriverOutcome> {
+        match self.open_step(transport) {
             Opened::Ended(outcome) => return Some(outcome),
             Opened::Raised => return None,
             Opened::Ready => {}
         }
         let now_ms = self.clock.now_monotonic_ms();
-        self.raise_before_input(now_ms, on_event);
+        let turn = transport.begin_input(&self.actions, now_ms, &mut *on_event);
 
         // A Router lent to the receive only for its session's step (`RxReassembly::ready`): outside
         // the lend the step takes no input, which the link keeps for a step that can stage it.
-        if !self.rx.ready() {
+        if !turn.ready() {
             return None;
         }
 
         // One unit of input at most a step. A link that is gone ends the step once the session is
         // told: the next step finds the engine final.
-        if matches!(self.take_or_lose(now_ms, on_event), Input::Lost) {
-            return None;
-        }
-
+        //
         // The session's timers are handed the time whether or not a unit was taken: a peer that
         // sends faster than this end reads leaves a unit waiting at every step, and a step that
         // ended on its unit would never send the keep-alive this end owes, so the peer's lease of
-        // this end would run out while its input is being read. The unit is taken first, so the
-        // lease is judged after what the peer sent last.
-        self.timers
-            .fire_due(&mut self.engine, &self.actions, now_ms, on_event);
-
+        // this end would run out while its input is being read.
+        if let Some((turn, _taken)) = self.take_or_lose(turn, on_event) {
+            turn.end(&mut self.engine, &self.actions, on_event);
+        }
         None
     }
 
     /// The session's bookkeeping at `now_ms`, with no input taken: the role's deferred
     /// activation, the end of a finished session, what was asked of it from outside the loop, the
-    /// link's own service, the application layer's wake, the reassembly sweep and the timers.
-    /// What a driver that holds the pump itself calls when something of the session is due
-    /// ([`Self::due_ms`], [`Self::owes_out_of_band`]) and not at every unit of input.
-    /// `Some(outcome)` once the session is finished.
-    pub fn service_due<F: EventSink>(
+    /// link's own service, and the time handed to `transport` (the application layer's wake, the
+    /// reassembly sweep and the timers, [`UnicastTransport::on_time`]). What a driver that holds
+    /// the pump itself calls when something of the session is due ([`Self::due_ms`],
+    /// [`Self::owes_out_of_band`]) and not at every unit of input. `Some(outcome)` once the
+    /// session is finished.
+    pub fn service_due<R: RxReassembly, Lf: LinkWake, F: EventSink>(
         &mut self,
+        transport: &mut UnicastTransport<R, Lf>,
         now_ms: u64,
         on_event: &mut F,
     ) -> Option<DriverOutcome> {
-        match self.open_step() {
+        match self.open_step(transport) {
             Opened::Ended(outcome) => return Some(outcome),
             Opened::Raised => return None,
             Opened::Ready => {}
         }
-        self.raise_before_input(now_ms, on_event);
-        self.timers
-            .fire_due(&mut self.engine, &self.actions, now_ms, on_event);
+        transport.on_time(&mut self.engine, &self.actions, now_ms, on_event);
         None
     }
 
-    /// One unit of the link's input handed to the session at `now_ms`, with none of the
-    /// bookkeeping of [`Self::service_due`]: whether a unit was taken. None is taken while the
-    /// Router is not lent to the receive, when the link holds nothing, or when the link is gone,
-    /// which the session is then told.
-    pub fn take_input_now<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) -> bool {
-        self.rx.ready() && matches!(self.take_or_lose(now_ms, on_event), Input::Taken)
+    /// One unit of the link's input handed to the session at `now_ms` through `transport`, with
+    /// none of the bookkeeping of [`Self::service_due`] ([`UnicastTransport::input_at`]): whether
+    /// a unit was taken. None is taken while the Router is not lent to the receive, when the link
+    /// holds nothing, or when the link is gone, which the session is then told.
+    pub fn take_input_now<R: RxReassembly, Lf, F: EventSink>(
+        &mut self,
+        transport: &mut UnicastTransport<R, Lf>,
+        now_ms: u64,
+        on_event: &mut F,
+    ) -> bool {
+        let turn = transport.input_at(now_ms);
+        turn.ready() && matches!(self.take_or_lose(turn, on_event), Some((_, true)))
     }
 
     /// The first instant, in the session's monotonic milliseconds, at which this session's
-    /// bookkeeping falls due ([`Self::service_due`]): its timers' deadlines (the handshake's, the
-    /// lease's, the keep-alive's and the application layer's) and the runtime's next timer. A
-    /// Router this pump is lent keeps the deadline of its chains with its owner, which sweeps it.
-    /// `None` when nothing is armed.
-    pub fn due_ms(&mut self, now_ms: u64) -> Option<u64> {
-        let timers = self.timers.next_due_ms(&self.engine, &self.actions, now_ms);
+    /// bookkeeping falls due ([`Self::service_due`]): its transport's ([`UnicastTransport::due_ms`]:
+    /// the handshake's, the lease's, the keep-alive's, the application layer's and the link's next
+    /// look) and the runtime's next timer. A Router the transport is lent keeps the deadline of
+    /// its chains with its owner, which sweeps it. `None` when nothing is armed.
+    pub fn due_ms<R: RxReassembly, Lf: LinkWake>(
+        &mut self,
+        transport: &mut UnicastTransport<R, Lf>,
+        now_ms: u64,
+    ) -> Option<u64> {
+        let session = transport.due_ms(&self.engine, &self.actions, now_ms);
         let runtime = self
             .runtime
             .time_to_next_timer_us()
             .map(|timer_us| now_ms.saturating_add(timer_us.div_ceil(1000)));
-        match (timers, runtime) {
-            (Some(timers), Some(runtime)) => Some(timers.min(runtime)),
+        match (session, runtime) {
+            (Some(session), Some(runtime)) => Some(session.min(runtime)),
             (due, None) | (None, due) => due,
         }
     }
@@ -1819,7 +1930,10 @@ impl<
     /// The part of an iteration before the clock is read: the role's deferred activation, the end
     /// of a finished session or of the test iteration cap, a request from outside the loop, which
     /// ends the iteration once raised, and the link's own service.
-    fn open_step(&mut self) -> Opened {
+    fn open_step<R: RxReassembly, Lf: LinkWake>(
+        &mut self,
+        transport: &mut UnicastTransport<R, Lf>,
+    ) -> Opened {
         // The role's activation, deferred from the pump's making (`session-slot`).
         #[cfg(feature = "session-slot")]
         if let Some(role) = self.pending_role.take() {
@@ -1846,7 +1960,7 @@ impl<
         }
 
         if self.link.uses_wake_budget() {
-            let wake_budget_ms = self.wake_budget_ms();
+            let wake_budget_ms = self.wake_budget_ms(transport);
             self.link.service_within(wake_budget_ms);
         } else {
             self.link.service();
@@ -1854,35 +1968,33 @@ impl<
         Opened::Ready
     }
 
-    /// What is raised at `now_ms` before the input is read, so a stream of input cannot hold it
-    /// off: the application layer's own deadline (a pending query's, a query left for it), which
-    /// is not a datagram or the lease, and the end of the reassembly chains past theirs, told as
-    /// `IterationEvent::ReassemblyTimeout` (the shared SSOT the AP loop calls too).
-    fn raise_before_input<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) {
-        if self.actions.take_app_wake_due(now_ms) {
-            on_event.event(IterationEvent::AppWake);
-        }
-        self.rx.sweep(now_ms, &mut *on_event);
-    }
-
-    /// Hand the session one unit of input, and when the link had none and is gone (a stream
-    /// whose peer closed it), tell the session, after everything queued before the end was read.
-    fn take_or_lose<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) -> Input {
-        if self.take_input(now_ms, on_event) {
-            return Input::Taken;
+    /// Hand the session one unit of input through `turn`, and when the link had none and is gone
+    /// (a stream whose peer closed it), tell the session, after everything queued before the end
+    /// was read, which ends the turn: `None`. Otherwise the turn back, with whether a unit was
+    /// taken.
+    fn take_or_lose<'t, R: RxReassembly, Lf, F: EventSink>(
+        &mut self,
+        mut turn: InputTurn<'t, R, Lf>,
+        on_event: &mut F,
+    ) -> Option<(InputTurn<'t, R, Lf>, bool)> {
+        if self.take_input(&mut turn, on_event) {
+            return Some((turn, true));
         }
         if let Some(cause) = self.link.lost() {
-            let outcome = wz_session_core::drive::dispatch_link_lost(&mut self.engine, cause);
-            on_event.event(IterationEvent::Poll(&outcome));
-            return Input::Lost;
+            turn.lose(&mut self.engine, cause, on_event);
+            return None;
         }
-        Input::Empty
+        Some((turn, false))
     }
 
-    /// Hand the session one unit of input, when the link has one: the parked remainder of the
-    /// last unit first, then the link's next datagram. Whether a unit was handed.
+    /// Hand the session one unit of input through `turn`, when the link has one: the parked
+    /// remainder of the last unit first, then the link's next datagram. Whether a unit was handed.
     #[cfg(any(feature = "alloc", feature = "rx-in-place"))]
-    fn take_input<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) -> bool {
+    fn take_input<R: RxReassembly, Lf, F: EventSink>(
+        &mut self,
+        turn: &mut InputTurn<'_, R, Lf>,
+        on_event: &mut F,
+    ) -> bool {
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
         // is a batch, and `try_recv` below would otherwise hold the second
         // message until the peer sends again.
@@ -1891,21 +2003,8 @@ impl<
         // does a receive in place, but for the rest of a compressed batch, which
         // was inflated into a buffer of its own.
         #[cfg(feature = "alloc")]
-        if self.link.takes_input() {
-            #[cfg(not(feature = "rx-in-place"))]
-            let parked =
-                self.rx
-                    .dispatch_pending(&self.actions, &mut self.engine, now_ms, &mut *on_event);
-            #[cfg(feature = "rx-in-place")]
-            let parked = self.rx.dispatch_parked_in_place(
-                &self.actions,
-                &mut self.engine,
-                now_ms,
-                &mut *on_event,
-            );
-            if parked {
-                return true;
-            }
+        if self.link.takes_input() && turn.parked(&mut self.engine, &self.actions, &mut *on_event) {
+            return true;
         }
 
         // `rx-in-place` — the datagram is read where the link holds it and
@@ -1913,19 +2012,19 @@ impl<
         // it happens. Inside the lend: what the observer does runs on the stack
         // above the receive. A Push record arrives as `IterationEvent::InPlace`,
         // lent where the datagram lies; a Fragment is staged into its slot from
-        // where the link holds it. Which path the unit took is counted.
+        // where the link holds it. Which path the unit took is counted. The turn's
+        // timers come after the lend, once the link has let the datagram go.
         #[cfg(feature = "rx-in-place")]
         {
             let link = &self.link;
             let actions = &self.actions;
             let engine = &mut self.engine;
-            let rx = &mut self.rx;
             let received = link.recv_with(&mut |unit| {
                 let mut sink = LinkSink {
                     link,
                     sink: &mut *on_event,
                 };
-                rx.dispatch_datagram(unit, actions, engine, now_ms, &mut sink);
+                turn.datagram(unit, engine, actions, &mut sink);
                 // The dispatch stopped where the session had no room: the link keeps the
                 // datagram, and a later step reads on from there.
                 #[cfg(feature = "alloc")]
@@ -1943,13 +2042,7 @@ impl<
         // source attribution is needed.
         #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
         if let Some(frame) = self.link.try_recv() {
-            self.rx.dispatch_frame(
-                frame,
-                &self.actions,
-                &mut self.engine,
-                now_ms,
-                &mut *on_event,
-            );
+            turn.frame(frame, &mut self.engine, &self.actions, &mut *on_event);
             return true;
         }
 
@@ -1958,12 +2051,16 @@ impl<
 
     /// A build with neither receive takes no input.
     #[cfg(not(any(feature = "alloc", feature = "rx-in-place")))]
-    fn take_input<F: EventSink>(&mut self, _now_ms: u64, _on_event: &mut F) -> bool {
+    fn take_input<R: RxReassembly, Lf, F: EventSink>(
+        &mut self,
+        _turn: &mut InputTurn<'_, R, Lf>,
+        _on_event: &mut F,
+    ) -> bool {
         false
     }
 }
 
-/// How the part of a pump's iteration before its clock reading ended ([`SessionPump::step`]).
+/// How the part of a pump's iteration before its clock reading ended ([`LinkSession::step`]).
 enum Opened {
     /// The session is finished.
     Ended(DriverOutcome),
@@ -1971,16 +2068,6 @@ enum Opened {
     Raised,
     /// The iteration goes on.
     Ready,
-}
-
-/// What a pump's take of one unit of input came to.
-enum Input {
-    /// A unit was handed to the session.
-    Taken,
-    /// The link holds nothing.
-    Empty,
-    /// The link is gone, and the session was told.
-    Lost,
 }
 
 /// The MCU session AS A TASK — the `!Send` future that
@@ -2697,14 +2784,17 @@ impl<
                     clock,
                     config,
                 },
-                // `MaybeUninit::write` lends back the place it wrote, so the receive is written.
+                // `MaybeUninit::write` lends back the place it wrote, so the transport is written.
                 #[cfg(feature = "reassembly")]
-                |rx| {
-                    let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
+                |transport, timeouts| {
+                    let _ = UnicastTransport::init_made_in(transport, timeouts, |slot| {
+                        slot.write(reasm)
+                    });
                 },
                 #[cfg(not(feature = "reassembly"))]
-                |rx| {
-                    let _ = UnicastRx::init_in(rx, |slot| slot.write(()));
+                |transport, timeouts| {
+                    let _ =
+                        UnicastTransport::init_made_in(transport, timeouts, |slot| slot.write(()));
                 },
             );
         }
@@ -3655,15 +3745,77 @@ mod wake_budget_tests {
     #[test]
     fn the_session_timers_name_the_nearest_deadline() {
         let (mut pump, now_ms) = acceptor();
-        let unprompted = pump.timers.next_due_ms(&pump.engine, &pump.actions, now_ms);
+        let unprompted = pump
+            .transport
+            .due_ms(&pump.session.engine, &pump.session.actions, now_ms);
         assert!(
             !unprompted.is_some_and(|due| due <= now_ms + 3),
             "an idle session has nothing due within 3 ms, and named {unprompted:?}"
         );
-        pump.actions.set_app_wake_deadline_ms(Some(now_ms + 3));
+        pump.session
+            .actions
+            .set_app_wake_deadline_ms(Some(now_ms + 3));
         assert_eq!(
-            pump.timers.next_due_ms(&pump.engine, &pump.actions, now_ms),
+            pump.transport
+                .due_ms(&pump.session.engine, &pump.session.actions, now_ms),
             Some(now_ms + 3)
+        );
+    }
+
+    /// A session stepped with a transport its owner keeps, over a link whose life the transport
+    /// holds, is due when the life asks for a look as well as when its own timers are: a life
+    /// that owes a dial a report makes it due at once. Turned red by a `LinkSession::due_ms` that
+    /// reads the session's timers and leaves the transport's life out.
+    #[test]
+    fn a_session_stepped_with_its_owners_transport_is_due_at_the_links_look() {
+        use wz_session_core::link_life::{LinkInput, LinkTimes, UnicastLink};
+
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let now_ms = clock.now_monotonic_ms();
+        let fields = PumpFields {
+            link: Rc::new(Recording::default()),
+            actions,
+            entropy: SessionEntropy::new(Counting(0)),
+            clock,
+            config: SessionDriveConfig {
+                timeouts: SessionTimeouts::from_build(),
+                role: SessionRole::Acceptor,
+                max_iters: None,
+            },
+        };
+        let mut session_place = MaybeUninit::<LinkSession<Stopped, Rc<Recording>>>::uninit();
+        let session = LinkSession::init_in(&mut session_place, runtime, fields);
+        let mut transport_place = MaybeUninit::<UnicastTransport<(), UnicastLink>>::uninit();
+        let transport = UnicastTransport::init_in(
+            &mut transport_place,
+            LinkTimes {
+                open_timeout_ms: 1_000,
+                redial_ms: None,
+                dial_look_ms: 10,
+            },
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        assert_ne!(
+            session.due_ms(transport, now_ms),
+            Some(now_ms),
+            "an idle life and a handshake just begun are not due now"
+        );
+        assert_eq!(
+            transport
+                .input(LinkInput::Open, now_ms.saturating_mul(1000))
+                .dial(),
+            Some(0)
+        );
+        assert_eq!(
+            session.due_ms(transport, now_ms),
+            Some(now_ms),
+            "a dial owed a report is looked at now"
         );
     }
 
@@ -3674,7 +3826,7 @@ mod wake_budget_tests {
     #[test]
     fn the_session_timers_raise_the_handshake_timeout_at_its_deadline_and_not_before() {
         let (mut pump, now_ms) = acceptor();
-        let state = pump.engine.get_current_state();
+        let state = pump.session.engine.get_current_state();
         let window = wz_session_core::session_timeouts::handshake_deadline_for(
             state,
             &SessionTimeouts::from_build(),
@@ -3682,25 +3834,30 @@ mod wake_budget_tests {
         .expect("an activated acceptor waits on its handshake's bound")
         .deadline_ms;
         assert_eq!(
-            pump.timers.next_due_ms(&pump.engine, &pump.actions, now_ms),
+            pump.transport
+                .due_ms(&pump.session.engine, &pump.session.actions, now_ms),
             Some(now_ms + window)
         );
         let mut events = 0;
         let mut count = |_event: IterationEvent<'_, '_>| events += 1;
-        pump.timers.fire_due(
-            &mut pump.engine,
-            &pump.actions,
+        pump.transport.on_time(
+            &mut pump.session.engine,
+            &pump.session.actions,
             now_ms + window - 1,
             &mut count,
         );
         assert!(
-            pump.engine.get_current_state() == state,
+            pump.session.engine.get_current_state() == state,
             "not yet due: the machine is where it was"
         );
-        pump.timers
-            .fire_due(&mut pump.engine, &pump.actions, now_ms + window, &mut count);
+        pump.transport.on_time(
+            &mut pump.session.engine,
+            &pump.session.actions,
+            now_ms + window,
+            &mut count,
+        );
         assert!(
-            pump.engine.get_current_state() != state,
+            pump.session.engine.get_current_state() != state,
             "due: the timeout moved the machine on"
         );
         assert_eq!(events, 0, "the handshake's timeout is the machine's event");
@@ -3820,10 +3977,10 @@ mod wake_budget_tests {
                 clock,
                 config,
             );
-            pump.engine.process_event(E::InitAckReceived);
-            pump.engine.process_event(E::OpenAckReceived);
+            pump.session.engine.process_event(E::InitAckReceived);
+            pump.session.engine.process_event(E::OpenAckReceived);
             assert!(
-                pump.engine.get_current_state() == S::Established,
+                pump.session.engine.get_current_state() == S::Established,
                 "the handshake's answers establish the dialled session"
             );
             let mut at = Vec::new();
@@ -3840,7 +3997,7 @@ mod wake_budget_tests {
                 ms += TICK_MS;
             }
             assert!(
-                pump.engine.get_current_state() == S::Established,
+                pump.session.engine.get_current_state() == S::Established,
                 "the session is still up at the end of the span"
             );
             let taken = link.taken.get();
