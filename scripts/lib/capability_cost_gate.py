@@ -240,7 +240,10 @@ SCOUTING = r"scouting_glue|scouting_fanout|ScoutFanOut"
 GOSSIP = r"gossip_plane|GossipPlane"
 UDP = r"udp_pipeline|UdpDriver|udp_writer"
 CLOCK = r"uhlc|NodeClock"
-ADVANCED = r"advanced_publisher|AdvancedPublisher"
+# The declaration's table of limits names every limit whatever the build has (`limit_binding`'s
+# `held_at` and `select_at` for `MaxAdvancedPublishers`, `SessionLimits::max_advanced_publishers`,
+# since 3d47ed315): the limit is not the plane, so its names are not read as it.
+ADVANCED = r"(?<!max_)advanced_publisher|(?<!Max)AdvancedPublisher"
 # pico's two header arms (`multi-thread`): each exports doors the other must not. A build
 # without the capability is the single-threaded arm, so the two are each other's absence.
 THREADED = r"^(z_mutex_init|zp_start_read_task)$"
@@ -270,9 +273,12 @@ LOG_FACADE = r"(?<![\w])log::"
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
 COOP_ENGINE = r"wz_capi_coop::"
-# The cooperative engine's listening role: the ports it holds and the faces it makes of what they
-# accept (`wz-capi-coop`'s `listen`).
-COOP_LISTEN = r"wz_capi_coop::engine::Listening<"
+# The cooperative engine's listening role (`wz-capi-coop`'s `listen`): the listeners its links open
+# on a port, which the session's driver holds (`wz_runtime_coop::faces::LinkSupervisor::listen`)
+# since d781d9310 moved the ports out of the engine. The driver's table of ports is in every build,
+# so the witness is what only an open port makes: a listener of the links, reached through its
+# table of functions.
+COOP_LISTEN = r"wz_runtime_coop::ip_stack::Ip(Udp|Tls)?Listener<"
 # The cooperative engine's scouting window (`wz_capi_coop::scout`) and the session's window it
 # pumps: what a cooperative build that scouts has and the tokio engine's `SCOUTING` is not.
 COOP_SCOUT = r"wz_capi_coop::scout|scouting_host"
@@ -1491,8 +1497,10 @@ CASES: tuple[Case, ...] = (
     Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_252_900,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
-         exports=837,
-         note="837 exports with the conformance digest's door (`wz_capi_c_conformance_digest`, "
+         exports=838,
+         note="838 exports with the door that answers what a config's access control decides "
+              "(`wz_capi_c_config_acl_verdicts`, c87d823ca, `config-verdict` with `interceptors`), "
+              "837 before. 837 with the conformance digest's door (`wz_capi_c_conformance_digest`, "
               "decision C15), 836 before. "
               "zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
               "rsa): 8,866,359 measured, up from about 5.1 MB without them; 9,029,823 with "
