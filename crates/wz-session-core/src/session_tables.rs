@@ -2144,14 +2144,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         apart: bool,
         usable: impl Fn(ExprId) -> bool,
     ) -> Result<KeyexprDeclared, RegisterError> {
-        // A row whose last holder let go of it at its address waits for the table to remove it,
-        // and is not held again: the key is declared apart.
+        // The row's count is read once, by the hold taken of it: a row stands with a holder, since
+        // a holder at its address never lets go of the last hold (`KeyexprCount::release_shared`)
+        // and a retraction removes the row it emptied, and a count that holds none even so takes no
+        // hold, so the key is declared apart.
         let found = if apart {
             None
         } else {
             self.keyexprs
                 .iter()
-                .find(|(_, row)| row.holds() > 0 && text(&row.key) == key)
+                .find(|(_, row)| text(&row.key) == key)
                 .map(|(handle, row)| (handle, row.id(), row.head.count.retain(handle)))
         };
         match found {
