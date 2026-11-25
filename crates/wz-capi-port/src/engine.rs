@@ -831,8 +831,8 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
 
 /// What holds a session's engine for as long as it is held, and reaches it without holding it
 /// ([`Self::Handle`]): a count of an engine of the heap (`Arc`, reached by a `Weak`), or of one an
-/// engine places in its session's own memory, reached through a row of the process's table
-/// ([`crate::reach::ReachEngine`]). What keeps an engine generic over this keeps either, so an
+/// engine places in its session's own memory, reached through a row of a table of the process its
+/// own crate keeps. What keeps an engine generic over this keeps either, so an
 /// engine that takes no memory of the heap is not made to take it for its holders.
 pub trait EngineHolder: Clone + Send + Sync + 'static + Deref<Target: SessionEngine> {
     /// What reaches the engine without keeping it standing.
