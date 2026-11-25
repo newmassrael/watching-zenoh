@@ -14117,7 +14117,8 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu --quiet || return 1
     # 23 -> 24, printed: the merge of main at `0e24b2486` (Round 4581) into the limits rounds
     # prints one more here, which neither tree printed before it.
-    _runci_guarded_test "C1m mcu unicast app layer" 24 \
+    # 24 -> 25, printed: the in-memory link's lent-slot test (`7ec73acff`), as in the default leg.
+    _runci_guarded_test "C1m mcu unicast app layer" 25 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
