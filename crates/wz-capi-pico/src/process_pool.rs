@@ -367,20 +367,27 @@ fn held_id(at: usize) -> Option<&'static str> {
 
 /// The stages the pools are reserved in, each by the door that first needs it: a program's first
 /// object is a config, made before any open states a count, and a scout may keep hellos before
-/// any open, so each of those takes memory of its own and the rest waits for the first open.
+/// any open, so each of those takes memory of its own and the rest waits for the first open. A
+/// build that keeps no hellos has no stage of them: no pool would lie in it, and the first open
+/// and every place given back would ask it for nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Config = 0,
+    #[cfg(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu")))]
     Hello = 1,
-    Open = 2,
+    Open,
 }
 
-/// How many stages there are.
-const STAGES: usize = 3;
+/// How many stages there are: the open's is the last.
+const STAGES: usize = Stage::Open as usize + 1;
 
 impl Stage {
     /// Every stage, each at its own number.
+    #[cfg(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu")))]
     const ALL: [Stage; STAGES] = [Stage::Config, Stage::Hello, Stage::Open];
+    /// Every stage, each at its own number.
+    #[cfg(not(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu"))))]
+    const ALL: [Stage; STAGES] = [Stage::Config, Stage::Open];
 
     /// The stage whose pools hold the objects of `kind`.
     const fn of(kind: Kind) -> Self {
@@ -1241,7 +1248,7 @@ struct Reserved {
 impl Reserved {
     /// None reserved.
     const NONE: Self = Self {
-        stages: [None, None, None],
+        stages: [const { None }; STAGES],
         whole: false,
         fixed: false,
     };
@@ -3259,6 +3266,10 @@ mod tests {
                 if pool.slots > 0 {
                     match stage {
                         Stage::Config => assert_eq!(at, Kind::Config as usize),
+                        #[cfg(all(
+                            wz_process_pools,
+                            any(feature = "scout", feature = "scout-mcu")
+                        ))]
                         Stage::Hello => assert!(at != Kind::Config as usize && at < KINDS),
                         Stage::Open => assert_ne!(at, Kind::Config as usize),
                     }
@@ -3269,6 +3280,20 @@ mod tests {
         assert_eq!(Stage::of(Kind::Config), Stage::Config);
         assert_eq!(Stage::of(Kind::Sample), Stage::Open);
         assert_eq!(Stage::of(Kind::Keyexpr), Stage::Open);
+    }
+
+    /// Every stage is the stage of a pool, each at its own place among the reservation's: a
+    /// build that keeps no hellos has no stage of them. Turned red by a stage no pool lies in,
+    /// which the first open would lay and a place given back would ask, for nothing.
+    #[test]
+    fn every_stage_holds_a_pool_of_its_own() {
+        for (at, stage) in Stage::ALL.into_iter().enumerate() {
+            assert_eq!(stage as usize, at, "{stage:?}");
+            assert!(
+                (0..POOLS).any(|pool| Stage::holding(pool) == stage),
+                "{stage:?} holds no pool"
+            );
+        }
     }
 
     /// A program's first object, its config, reserves the configs' stage and no other: the
