@@ -7,7 +7,8 @@
 //! their types and result codes; what a time base is and how a session runs on it are
 //! `wz_node_time::time_base`'s.
 
-use std::ffi::c_void;
+use alloc::boxed::Box;
+use core::ffi::c_void;
 
 use wz_node_time::time_base::{ProgramTime, TimeBaseHold};
 
@@ -67,7 +68,7 @@ pub unsafe fn over_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     /// The program's time and how often its drop ran.
     #[derive(Default)]
