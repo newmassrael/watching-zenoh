@@ -151,9 +151,10 @@ mod tests {
         // SAFETY: the place is valid for writes of the lock, which stays there and is dropped
         // there below.
         unsafe {
-            F::init_at(core::ptr::NonNull::from(&mut place).cast(), |value| {
-                value.write(1)
-            })
+            F::init_at(
+                core::ptr::NonNull::from(&mut place).cast::<F::Lock<u8>>(),
+                |value: &mut core::mem::MaybeUninit<u8>| value.write(1),
+            )
         };
         // SAFETY: made above.
         let lock = unsafe { place.assume_init_mut() };

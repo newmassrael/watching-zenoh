@@ -158,10 +158,13 @@ mod tests {
         let mut handed = 0usize;
         // SAFETY: the place is valid for writes of the lock, which stays there.
         unsafe {
-            OneThreadLock::init_at(core::ptr::NonNull::from(&mut place).cast(), |value| {
-                handed = value.as_ptr() as usize;
-                value.write([3; 32])
-            });
+            OneThreadLock::init_at(
+                core::ptr::NonNull::from(&mut place).cast::<OneThreadLock<[u8; 32]>>(),
+                |value: &mut core::mem::MaybeUninit<[u8; 32]>| {
+                    handed = value.as_ptr() as usize;
+                    value.write([3; 32])
+                },
+            );
         }
         assert!(
             lock_bytes.contains(&handed),

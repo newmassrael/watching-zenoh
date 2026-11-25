@@ -2920,33 +2920,28 @@ impl wz_session_core::plane_lock::LockFamily for CoopLocks {
 #[cfg(all(test, feature = "std"))]
 mod plane_lock_tests {
     use super::{CoopLocks, Mutex};
-    use core::mem::{size_of, MaybeUninit};
+    use core::mem::MaybeUninit;
     use core::ptr::NonNull;
     use wz_session_core::plane_lock::LockFamily;
 
-    /// A plane's lock is made where it stays, around a value written in the lock's own place: the
-    /// place the maker is handed lies inside the lock's, and what it wrote is what the lock holds.
-    /// Turned red by a family that makes the value in a frame of its own and moves it in.
+    /// A plane's lock made in a place holds there the value its maker wrote, and is dropped there
+    /// once. Where the host's lock takes the value is the host lock's own (`wz-host-sync`: in place
+    /// where `std`'s would box, moved once into `std`'s otherwise). Turned red by a family that
+    /// writes the lock anywhere but the place it is handed, or loses the value made.
     #[test]
-    fn a_planes_lock_is_made_around_a_value_written_in_its_place() {
+    fn a_planes_lock_made_in_a_place_holds_what_its_maker_wrote() {
         let mut place = MaybeUninit::<Mutex<[u8; 64]>>::uninit();
-        let start = place.as_ptr() as usize;
-        let lock_bytes = start..start + size_of::<Mutex<[u8; 64]>>();
-        let mut handed = 0usize;
-        // SAFETY: the place is valid for writes of the lock, which is dropped there below.
+        // SAFETY: the place is valid for writes of a lock of `[u8; 64]`, the type written, and
+        // the lock is dropped there below.
         unsafe {
-            CoopLocks::init_at(NonNull::from(&mut place).cast(), |value| {
-                handed = value.as_ptr() as usize;
-                value.write([7; 64])
-            });
+            CoopLocks::init_at(
+                NonNull::from(&mut place).cast::<Mutex<[u8; 64]>>(),
+                |value: &mut MaybeUninit<[u8; 64]>| value.write([7; 64]),
+            );
         }
-        assert!(
-            lock_bytes.contains(&handed),
-            "the value is written inside the lock's place"
-        );
         // SAFETY: the lock was made in the place above.
         let lock = unsafe { place.assume_init_ref() };
-        assert_eq!(CoopLocks::with(lock, |value| value[63]), 7);
+        assert_eq!(CoopLocks::with(lock, |value| (value[0], value[63])), (7, 7));
         // SAFETY: the lock was made in the place and is dropped once, there.
         unsafe { place.assume_init_drop() };
     }
