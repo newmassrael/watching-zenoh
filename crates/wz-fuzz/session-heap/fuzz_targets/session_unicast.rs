@@ -146,7 +146,9 @@ fuzz_target!(|data: &[u8]| {
         None => (0, data),
     };
     reset_clock();
-    let runtime = CoopRuntime::new(Clock);
+    let Some(runtime) = CoopRuntime::try_new(Clock) else {
+        return;
+    };
     let clock = CoopTime::new(&runtime);
     let sink = wz_runtime_coop::link_cells::heap_sink(Nowhere);
     let actions = new_session_actions(sink, params(), clock.clone());

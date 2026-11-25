@@ -13,8 +13,8 @@
 //! ## Where the table lies
 //!
 //! - In a `static` the image declares (`TimerTable`, `session-slot`).
-//! - Reserved once, when the runtime is made (`CoopRuntime::reserved`): `timers` entries.
-//! - Grown by one entry whenever every entry is taken (`CoopRuntime::new`); an entry that comes
+//! - Reserved once, when the runtime is made (`CoopRuntime::try_reserved`): `timers` entries.
+//! - Grown by one entry whenever every entry is taken (`CoopRuntime::try_new`); an entry that comes
 //!   free is reused, so the table is as long as the most deadlines that ever waited at once.
 //!
 //! A sleep that finds a fixed table full is NOT lost: [`TimerQueue::register`] answers `false`

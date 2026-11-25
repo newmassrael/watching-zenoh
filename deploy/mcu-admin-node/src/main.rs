@@ -254,7 +254,9 @@ fn run_heap() -> ! {
 
     let policy = resolve_policy();
     let limits = resolve_limits();
-    let runtime = CoopRuntime::new(SystickClockRef);
+    let Some(runtime) = CoopRuntime::try_new(SystickClockRef) else {
+        fail("the heap has no room for the runtime");
+    };
     let local = CoopLocalSet::new(&runtime);
     let zid_hex = zid_to_zenoh_hex(&ZID);
     let accept_runtime = runtime.clone();

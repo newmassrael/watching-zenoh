@@ -278,7 +278,7 @@ fn new_links(link: Rc<LwipLink>) -> LwipLinks {
 
 /// An acceptor on `port` and an initiator dialling it.
 fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
-    let runtime = CoopRuntime::new(Frozen);
+    let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
     let links = new_links(link.clone());
 
     let opened = links.open_acceptor(port).expect("bind the acceptor");

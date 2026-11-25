@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn a_link_gives_the_session_nothing_between_its_handshake_and_its_admission() {
         let net = MemoryNetwork::new();
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
 
         let OpenedLink { sink, pump } = MemoryLinks::new(net.clone(), ACCEPTOR)
@@ -284,7 +284,7 @@ mod tests {
     /// an admission kept in a cell of the heap that the gate and the engine's wire share.
     #[test]
     fn a_gate_and_its_admission_take_no_memory_of_the_heap() {
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let OpenedLink { sink, pump } = MemoryLinks::new(MemoryNetwork::new(), ACCEPTOR)
             .open_acceptor(7447)
             .expect("bind the acceptor's end");
@@ -324,7 +324,7 @@ mod tests {
             }
         }
 
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let OpenedLink { sink, .. } = MemoryLinks::new(MemoryNetwork::new(), ACCEPTOR)
             .open_acceptor(7447)
             .expect("bind the acceptor's end");

@@ -441,7 +441,7 @@ mod tests {
 
         let net = MemoryNetwork::new();
         let near = Rc::new(MemoryLinks::new(net, NODE));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         for width in SnResolution::WIDTHS {
             let mut dialer = UdpDialer::new(
@@ -480,7 +480,7 @@ mod tests {
         // The acceptor's host and the dialling node's are two hosts on one net.
         let far = Rc::new(MemoryLinks::new(net.clone(), FAR));
         let near = Rc::new(MemoryLinks::new(net.clone(), NODE));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
 
         // The acceptor the dial will reach.
@@ -605,7 +605,7 @@ mod tests {
         let net = MemoryNetwork::new();
         let far = Rc::new(MemoryLinks::new(net.clone(), FAR));
         let near = Rc::new(MemoryLinks::new(net.clone(), NODE));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
 
         // Three acceptors, all node 0xa1, one per dial below.
@@ -710,7 +710,7 @@ mod tests {
                 Err(LinkOpenError::Exhausted)
             }
         }
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         let mut dialer = UdpDialer::new(
             &local,

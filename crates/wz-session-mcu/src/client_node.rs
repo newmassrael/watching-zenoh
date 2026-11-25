@@ -337,7 +337,7 @@ mod tests {
         let net = MemoryNetwork::new();
         let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
         let far_links = MemoryLinks::new(net.clone(), [10, 0, 0, 1]);
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
 
         let OpenedLink {
@@ -495,7 +495,7 @@ mod tests {
             return;
         }
         let net = MemoryNetwork::new();
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         let sink = || BoxedSink::new(|_sample: &dyn wz_session_core::sink::SampleView| {});
 

@@ -207,30 +207,19 @@ impl<C: ClockSource, D: ?Sized, K: LockKind> Clone for CoopRuntime<C, D, K> {
 }
 
 impl<C: ClockSource> CoopRuntime<C> {
-    /// Construct a new runtime backed by `clock`. The clock is moved
-    /// into the runtime; `CoopTime::new(&runtime)` then borrows the
-    /// shared `Arc<RuntimeInner<C>>` so time-source ops and runtime
-    /// ops see the same instance.
-    ///
-    /// R311bc breaking sig — R311av's parameterless `new()` is
-    /// retired because the runtime now owns the timer queue and
-    /// timer-queue evaluation needs a clock reference at every
-    /// `run_until_idle` pass.
+    /// A new runtime backed by `clock`, or `None`, having kept nothing of the heap, when the heap
+    /// has no room for its state. The clock is moved into the runtime; `CoopTime::new(&runtime)`
+    /// then borrows the shared `RuntimeInner<C>` so time-source ops and runtime ops see the same
+    /// instance.
     ///
     /// The task table grows when every cell is taken, each cell keeping its bytes for the next
     /// task that fits them, so a program that spawns the same tasks again allocates nothing after
-    /// the first ([`crate::executor`]).
+    /// the first ([`crate::executor`]); a spawn the heap has no room to grow it for is refused,
+    /// counted.
     ///
     /// Absent under `session-slot`, whose runtime is made by
     /// `RuntimeCell::start` over tables the image declares: this constructor
     /// allocates the runtime's state.
-    #[cfg(not(feature = "session-slot"))]
-    pub fn new(clock: C) -> Self {
-        Self::made(Self::try_new(clock))
-    }
-
-    /// [`Self::new`], or `None`, having kept nothing of the heap, when the heap has no room for
-    /// the runtime's state.
     #[cfg(not(feature = "session-slot"))]
     pub fn try_new(clock: C) -> Option<Self> {
         Self::try_over(clock, ExecutorState::try_growing()?, TimerQueue::growing())
@@ -240,20 +229,14 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// grow: a spawn past the tasks, or of a task larger than its cells, is refused and counted
     /// ([`Self::task_refusals`]); a sleep past the timers is refused an entry, counted
     /// ([`Self::timer_refusals`]), and ends by polling. No spawn and no sleep allocates. What an
-    /// engine that owes no allocation after its open makes at its open.
+    /// engine that owes no allocation after its open makes at its open. `None`, having kept
+    /// nothing of the heap, when the heap has no room for the runtime's state or its task table;
+    /// a timer table the heap has no room for is made with no entries, and every sleep is then
+    /// refused an entry, counted.
     ///
     /// `rows.timers` of 0 makes no timer table at all (a build in which no task sleeps). Always
     /// inlined, as are the other reserved makings: a maker that states the count as a constant
     /// links only the making of that count.
-    #[cfg(not(feature = "session-slot"))]
-    #[inline(always)]
-    pub fn reserved(clock: C, rows: RuntimeRows) -> Self {
-        Self::made(Self::try_reserved(clock, rows))
-    }
-
-    /// [`Self::reserved`], or `None`, having kept nothing of the heap, when the heap has no room
-    /// for the runtime's state or its task table. A timer table the heap has no room for is made
-    /// with no entries, and every sleep is then refused an entry, counted.
     #[cfg(not(feature = "session-slot"))]
     #[inline(always)]
     pub fn try_reserved(clock: C, rows: RuntimeRows) -> Option<Self> {
@@ -264,21 +247,13 @@ impl<C: ClockSource> CoopRuntime<C> {
         )
     }
 
-    /// [`Self::reserved`] for a runtime that hosts one task at a time: an engine whose session holds
-    /// one link, its dial role's, and runs no task beside that link's. It holds one cell of
+    /// [`Self::try_reserved`] for a runtime that hosts one task at a time: an engine whose session
+    /// holds one link, its dial role's, and runs no task beside that link's. It holds one cell of
     /// `rows.task_bytes` (none for `rows.tasks` of 0, and one for a count past it), and its
     /// passes, spawns and sweeps look at that cell alone: a spawn while the cell is taken is
     /// refused, counted, as one past a reserved table's rows is. As only this names the walks of
     /// one cell and only the other makings name the walks of many, a build whose runtimes are all
-    /// made here links no walk of many cells.
-    #[cfg(not(feature = "session-slot"))]
-    #[inline(always)]
-    pub fn reserved_for_one(clock: C, rows: RuntimeRows) -> Self {
-        Self::made(Self::try_reserved_for_one(clock, rows))
-    }
-
-    /// [`Self::reserved_for_one`], or `None`, having kept nothing of the heap, as
-    /// [`Self::try_reserved`] answers.
+    /// made here links no walk of many cells. `None` as [`Self::try_reserved`] answers it.
     #[cfg(not(feature = "session-slot"))]
     #[inline(always)]
     pub fn try_reserved_for_one(clock: C, rows: RuntimeRows) -> Option<Self> {
@@ -289,22 +264,15 @@ impl<C: ClockSource> CoopRuntime<C> {
         )
     }
 
-    /// [`Self::reserved`] for an engine whose open spawns tasks it cannot size before it opens (a
-    /// group's session): beside the `rows.tasks` cells it holds `added` cells with no bytes yet,
-    /// and until [`Self::seal`] a task that no free cell fits takes one of those and bytes of its
-    /// own size, kept for the next task it fits, so what the open spawns is placed while it opens
-    /// and a task spawned again after it finds its cell. The table never holds more than
+    /// [`Self::try_reserved`] for an engine whose open spawns tasks it cannot size before it opens
+    /// (a group's session): beside the `rows.tasks` cells it holds `added` cells with no bytes
+    /// yet, and until [`Self::seal`] a task that no free cell fits takes one of those and bytes of
+    /// its own size, kept for the next task it fits, so what the open spawns is placed while it
+    /// opens and a task spawned again after it finds its cell. The table never holds more than
     /// `rows.tasks + added` cells: a spawn past them is refused, counted, as one past a reserved
-    /// table's rows is. Once sealed the runtime is [`Self::reserved`]'s: no spawn and no sleep
-    /// allocates.
-    #[cfg(not(feature = "session-slot"))]
-    #[inline(always)]
-    pub fn opening(clock: C, rows: RuntimeRows, added: usize) -> Self {
-        Self::made(Self::try_opening(clock, rows, added))
-    }
-
-    /// [`Self::opening`], or `None`, having kept nothing of the heap, as [`Self::try_reserved`]
-    /// answers, and when the heap has no room for the added cells' table.
+    /// table's rows is. Once sealed the runtime is a reserved one: no spawn and no sleep
+    /// allocates. `None` as [`Self::try_reserved`] answers it, and when the heap has no room for
+    /// the added cells' table.
     #[cfg(not(feature = "session-slot"))]
     #[inline(always)]
     pub fn try_opening(clock: C, rows: RuntimeRows, added: usize) -> Option<Self> {
@@ -330,22 +298,11 @@ impl<C: ClockSource> CoopRuntime<C> {
             driver: PhantomData,
         })
     }
-
-    /// The runtime a making of the heap answered, or the end of the program when the heap had no
-    /// room for it, as a `Box` of the runtime's state ends it: the makings that cannot answer a
-    /// refusal. A maker that can answers one with the `try_` making.
-    #[cfg(not(feature = "session-slot"))]
-    fn made(runtime: Option<Self>) -> Self {
-        match runtime {
-            Some(runtime) => runtime,
-            None => alloc::alloc::handle_alloc_error(Layout::new::<RuntimeInner<C>>()),
-        }
-    }
 }
 
 /// Which table a runtime placed in a span holds ([`CoopRuntime::placed`]): the one
-/// [`CoopRuntime::reserved`] holds, the one cell [`CoopRuntime::reserved_for_one`] holds, or the
-/// cells [`CoopRuntime::opening`] holds with its count of cells added while the open lasts, which
+/// [`CoopRuntime::try_reserved`] holds, the one cell [`CoopRuntime::try_reserved_for_one`] holds, or the
+/// cells [`CoopRuntime::try_opening`] holds with its count of cells added while the open lasts, which
 /// take their bytes of the heap.
 #[cfg(not(feature = "session-slot"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,7 +397,7 @@ impl<C: ClockSource> CoopRuntime<C> {
         PlacedParts::of::<C>(rows, form).map(|parts| parts.layout)
     }
 
-    /// The runtime [`Self::reserved`], [`Self::reserved_for_one`] or [`Self::opening`] makes,
+    /// The runtime [`Self::try_reserved`], [`Self::try_reserved_for_one`] or [`Self::try_opening`] makes,
     /// as `form` says, with its state, its task table and its timer table placed in `place`
     /// rather than on the heap, and its local set, whose shared owner lies there too: nothing
     /// allocates, and the memory of the span is kept until the runtime's last holder lets go.
@@ -526,7 +483,7 @@ impl<C: ClockSource> CoopRuntime<C> {
     }
 }
 
-/// What a reserved runtime holds ([`CoopRuntime::reserved`]): its tasks, the bytes each may
+/// What a reserved runtime holds ([`CoopRuntime::try_reserved`]): its tasks, the bytes each may
 /// take (a future and its output together), and the deadlines that may wait at once.
 #[cfg(not(feature = "session-slot"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -763,13 +720,6 @@ fn owned_flag_waker(flag: Arc<AtomicBool>) -> Waker {
     unsafe { Waker::from_raw(raw) }
 }
 
-#[cfg(not(feature = "session-slot"))]
-impl<C: ClockSource + Default> Default for CoopRuntime<C> {
-    fn default() -> Self {
-        Self::new(C::default())
-    }
-}
-
 impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
     /// The spawns the task table refused, by reason.
     pub fn task_refusals(&self) -> crate::executor::Refusals {
@@ -787,7 +737,7 @@ impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
         self.inner.executor.live_task_count()
     }
 
-    /// The open is over: a runtime made by [`CoopRuntime::opening`] takes no more memory, and a
+    /// The open is over: a runtime made by [`CoopRuntime::try_opening`] takes no more memory, and a
     /// spawn that finds no free cell it fits is refused, counted. Nothing for any other runtime.
     #[cfg(not(feature = "session-slot"))]
     pub fn seal(&self) {
@@ -972,7 +922,7 @@ impl<C: ClockSource, D: ?Sized + 'static, K: LockKind> Runtime for CoopRuntime<C
     }
 }
 
-// These two modules build their runtimes with `CoopRuntime::new`, which
+// These two modules build their runtimes with `CoopRuntime::try_new`, which
 // `session-slot` does not have; the static form's own tests are in
 // `static_tests`.
 #[cfg(all(test, not(feature = "session-slot")))]
@@ -1057,7 +1007,7 @@ mod compile_time_assertions {
     // monomorphised at build time (otherwise dead code
     // elimination can let bound violations slip).
     const _: fn() = || {
-        let rt: CoopRuntime<NopClock> = CoopRuntime::new(NopClock);
+        let rt: CoopRuntime<NopClock> = CoopRuntime::try_new(NopClock).expect("the heap has room");
         let clock = CoopTime::new(&rt);
         runtime_and_time_compose_in_generic_code(&rt, &clock);
     };
@@ -1160,7 +1110,7 @@ mod tests {
     #[test]
     fn a_confined_runtime_lends_values_its_owner_holds() {
         type R = CoopRuntime<NopClock, DefaultDriver, Confined<crate::sync::tests::TestOwner>>;
-        let shared = CoopRuntime::new(NopClock);
+        let shared = CoopRuntime::try_new(NopClock).expect("the heap has room");
         let rt: R = shared.confined();
         let value = <R as Runtime>::new_mutex(1u32);
         <R as Runtime>::with_mutex_mut(&value, |held| *held += 1);
@@ -1179,7 +1129,7 @@ mod tests {
 
     #[test]
     fn spawn_resolves_to_future_output() {
-        let rt = CoopRuntime::new(NopClock);
+        let rt = CoopRuntime::try_new(NopClock).expect("the heap has room");
         let h = rt.spawn(async { 42_u32 });
         let result = rt.block_on(h).expect("not stalled");
         assert_eq!(result.expect("spawn ok"), 42);
@@ -1187,7 +1137,7 @@ mod tests {
 
     #[test]
     fn spawn_unit_output_resolves_to_ok_unit() {
-        let rt = CoopRuntime::new(NopClock);
+        let rt = CoopRuntime::try_new(NopClock).expect("the heap has room");
         let h = rt.spawn(async {});
         rt.block_on(h)
             .expect("not stalled")
@@ -1196,7 +1146,7 @@ mod tests {
 
     #[test]
     fn spawn_string_output_round_trips() {
-        let rt = CoopRuntime::new(NopClock);
+        let rt = CoopRuntime::try_new(NopClock).expect("the heap has room");
         let h = rt.spawn(async { alloc::string::String::from("payload") });
         let s = rt.block_on(h).expect("not stalled").expect("spawn ok");
         assert_eq!(s, "payload");
@@ -1208,7 +1158,7 @@ mod tests {
         // a task closure can spawn nested tasks. Pin the contract:
         // outer task spawns an inner task, awaits it, and returns
         // inner+1.
-        let rt = CoopRuntime::new(NopClock);
+        let rt = CoopRuntime::try_new(NopClock).expect("the heap has room");
         let rt2 = rt.clone();
         let h = rt.spawn(async move {
             let inner = rt2.spawn(async { 100_u32 });
@@ -1220,7 +1170,7 @@ mod tests {
     #[test]
     fn time_now_monotonic_ms_reflects_clock_advance() {
         let clock = TestClock::new();
-        let rt = CoopRuntime::new(clock.clone());
+        let rt = CoopRuntime::try_new(clock.clone()).expect("the heap has room");
         let time = CoopTime::new(&rt);
         let t0 = time.now_monotonic_ms();
         clock.tick_us(2_500); // 2.5ms
@@ -1233,7 +1183,7 @@ mod tests {
     fn time_now_monotonic_us_is_the_clocks_own_resolution_on_the_same_epoch() {
         let clock = TestClock::new();
         clock.tick_us(40_000);
-        let rt = CoopRuntime::new(clock.clone());
+        let rt = CoopRuntime::try_new(clock.clone()).expect("the heap has room");
         let time = CoopTime::new(&rt);
         assert_eq!(time.now_monotonic_us(), 0, "the epoch is the construction");
         clock.tick_us(2_537);
@@ -1257,7 +1207,7 @@ mod tests {
         // run_until_idle calls pop_expired(now), and once the
         // clock crosses the 5ms deadline the registered waker
         // fires and the sleep task is polled to Ready.
-        let rt = CoopRuntime::new(TestClock::new());
+        let rt = CoopRuntime::try_new(TestClock::new()).expect("the heap has room");
         let clock = rt.clock().clone();
         let time = CoopTime::new(&rt);
         let advance_clock = clock.clone();
@@ -1280,7 +1230,7 @@ mod tests {
         // construction-time t=0 the deadline is exactly now and
         // the first poll sees `now_us >= deadline_us` and returns
         // Ready without ever registering on the timer queue.
-        let rt = CoopRuntime::new(TestClock::new());
+        let rt = CoopRuntime::try_new(TestClock::new()).expect("the heap has room");
         let time = CoopTime::new(&rt);
         let h = rt.spawn(async move {
             time.sleep(0).await;
@@ -1295,7 +1245,7 @@ mod tests {
         // queue's pending_count() reports >= 1. Drives the runtime
         // through one executor pass (so the sleep registers via
         // its first Pending poll) and then samples the count.
-        let rt = CoopRuntime::new(TestClock::new());
+        let rt = CoopRuntime::try_new(TestClock::new()).expect("the heap has room");
         let time = CoopTime::new(&rt);
         let _h = rt.spawn(async move {
             time.sleep(100).await;
@@ -1340,7 +1290,7 @@ mod tests {
         // deadline elapsed → Ok(output). With TestClock not
         // advancing, the deadline never elapses; an immediately-
         // ready inner future resolves Ok.
-        let rt = CoopRuntime::new(TestClock::new());
+        let rt = CoopRuntime::try_new(TestClock::new()).expect("the heap has room");
         let time = CoopTime::new(&rt);
         let h = rt.spawn(async move { time.timeout(1000, async { 99_u32 }).await });
         let result = rt.block_on(h).expect("not stalled").expect("spawn ok");
@@ -1356,7 +1306,7 @@ mod tests {
         // outer TimeoutFuture registers its waker on the timer
         // queue exactly once; subsequent polls re-check the inner
         // + the deadline without re-registering.
-        let rt = CoopRuntime::new(TestClock::new());
+        let rt = CoopRuntime::try_new(TestClock::new()).expect("the heap has room");
         let clock = rt.clock().clone();
         let time = CoopTime::new(&rt);
         let advance_clock = clock.clone();
@@ -1398,7 +1348,7 @@ mod tests {
         // should resolve immediately to Err(JoinCancelled) via
         // the synchronous JoinState write inside abort().
         use wz_runtime_core::RuntimeError;
-        let rt = CoopRuntime::new(TestClock::new());
+        let rt = CoopRuntime::try_new(TestClock::new()).expect("the heap has room");
         let time = CoopTime::new(&rt);
         let h = rt.spawn(async move {
             time.sleep(u64::MAX / 2).await; // effectively forever
@@ -1422,7 +1372,7 @@ mod tests {
         // arrives stores its Ok(output) in JoinState; the later
         // abort sees result.is_some() and skips the JoinCancelled
         // write. The handle resolves to Ok(output).
-        let rt = CoopRuntime::new(NopClock);
+        let rt = CoopRuntime::try_new(NopClock).expect("the heap has room");
         let h = rt.spawn(async { 17_u32 });
         // First drive the task to completion via block_on. We
         // can't await the handle here because we need to keep it
@@ -1445,7 +1395,7 @@ mod tests {
         // see result.is_some() and skip the write (and the
         // cancel_flag.store(true) is itself idempotent).
         use wz_runtime_core::RuntimeError;
-        let rt = CoopRuntime::new(TestClock::new());
+        let rt = CoopRuntime::try_new(TestClock::new()).expect("the heap has room");
         let time = CoopTime::new(&rt);
         let h = rt.spawn(async move {
             time.sleep(u64::MAX / 2).await;
@@ -1463,7 +1413,7 @@ mod tests {
     #[test]
     fn a_future_nothing_can_wake_is_refused_as_stalled() {
         use wz_runtime_core::RuntimeError;
-        let rt = CoopRuntime::new(NopClock);
+        let rt = CoopRuntime::try_new(NopClock).expect("the heap has room");
         let result = rt.block_on(core::future::pending::<()>());
         assert!(matches!(result, Err(RuntimeError::Stalled)), "{result:?}");
     }

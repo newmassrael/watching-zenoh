@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The task table a heap-profile runtime owns, grown (`CoopRuntime::new`) or reserved
-//! (`CoopRuntime::reserved`), against what it promises beside the static table's own tests
+//! The task table a heap-profile runtime owns, grown (`CoopRuntime::try_new`) or reserved
+//! (`CoopRuntime::try_reserved`), against what it promises beside the static table's own tests
 //! (`static_tests`): a grown table spawns the same tasks again without allocating; a reserved one
 //! allocates nothing after it is made and refuses past its rows, counted; the tasks are dropped
 //! with the runtime; a waker kept past the runtime still points at a cell; and the timer table,
@@ -155,7 +155,7 @@ async fn forever() {
 
 #[test]
 fn a_grown_table_spawns_the_same_task_again_without_allocating() {
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let round = |n: u32| {
         let handle = local.spawn_local(async move {
@@ -178,7 +178,7 @@ fn a_grown_table_spawns_the_same_task_again_without_allocating() {
 
 #[test]
 fn a_grown_table_grows_past_its_first_chunk_and_never_refuses() {
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let handles: std::vec::Vec<_> = (0..10).map(|_| local.spawn_local(forever())).collect();
     assert_eq!(local.live_local_task_count(), 10);
@@ -203,7 +203,7 @@ fn a_grown_table_grows_past_its_first_chunk_and_never_refuses() {
 /// table grows under the pass that polls it, and the new task runs.
 #[test]
 fn a_task_spawned_from_inside_a_poll_grows_the_table_under_the_pass() {
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     // Seven fill the first chunk (four cells) and all of the second (four) but the outer task's
     // cell, so the inner task finds none free.
@@ -228,14 +228,15 @@ fn a_task_spawned_from_inside_a_poll_grows_the_table_under_the_pass() {
 
 #[test]
 fn a_reserved_table_takes_its_rows_and_refuses_one_more_counted() {
-    let runtime = CoopRuntime::reserved(
+    let runtime = CoopRuntime::try_reserved(
         Still,
         RuntimeRows {
             tasks: 2,
             task_bytes: 128,
             timers: 1,
         },
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let first = local.try_spawn_local(forever()).expect("a cell");
     let second = local.try_spawn_local(forever()).expect("a cell");
@@ -289,28 +290,30 @@ fn a_reserved_table_refuses_a_task_one_byte_larger_than_its_cells() {
         }
     }
     const BYTES: usize = crate::executor::cell_bytes_of(task);
-    let fits = CoopRuntime::reserved(
+    let fits = CoopRuntime::try_reserved(
         Still,
         RuntimeRows {
             tasks: 1,
             task_bytes: BYTES,
             timers: 1,
         },
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&fits);
     let handle = local
         .try_spawn_local(task(3, [4; 100]))
         .expect("a cell of exactly its bytes");
     assert_eq!(local.block_on_local(handle).expect("ran"), 7);
 
-    let short = CoopRuntime::reserved(
+    let short = CoopRuntime::try_reserved(
         Still,
         RuntimeRows {
             tasks: 1,
             task_bytes: BYTES - 1,
             timers: 1,
         },
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&short);
     assert!(matches!(
         local.try_spawn_local(task(3, [4; 100])),
@@ -324,7 +327,7 @@ fn a_reserved_table_refuses_a_task_one_byte_larger_than_its_cells() {
 #[test]
 fn a_reserved_runtime_allocates_when_it_is_made_and_never_after() {
     let (runtime, made) = allocations(|| {
-        CoopRuntime::reserved(
+        CoopRuntime::try_reserved(
             Still,
             RuntimeRows {
                 tasks: 3,
@@ -332,6 +335,7 @@ fn a_reserved_runtime_allocates_when_it_is_made_and_never_after() {
                 timers: 1,
             },
         )
+        .expect("the heap has room")
     });
     assert!(made > 0, "the table is reserved when the runtime is made");
     let local = CoopLocalSet::new(&runtime);
@@ -420,7 +424,7 @@ impl ClockSource for Counted {
 fn a_pass_over_the_ready_tasks_reads_no_clock() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static READS: AtomicUsize = AtomicUsize::new(0);
-    let runtime = CoopRuntime::new(Counted(&NOW, &READS));
+    let runtime = CoopRuntime::try_new(Counted(&NOW, &READS)).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let time = CoopTime::new(&runtime);
     let task = local.spawn_local(async move {
@@ -469,14 +473,15 @@ fn a_pass_over_the_ready_tasks_reads_no_clock() {
 #[test]
 fn a_reserved_timer_table_refuses_counted_and_the_sleep_still_ends_by_polling() {
     static NOW: AtomicU64 = AtomicU64::new(0);
-    let runtime = CoopRuntime::reserved(
+    let runtime = CoopRuntime::try_reserved(
         Hand(&NOW),
         RuntimeRows {
             tasks: 3,
             task_bytes: 256,
             timers: 1,
         },
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     assert_eq!(runtime.timers().capacity(), 1);
     let first = sleeper(&runtime, &local, 5, 1);
@@ -506,14 +511,15 @@ fn a_reserved_timer_table_refuses_counted_and_the_sleep_still_ends_by_polling() 
 #[test]
 fn a_reserved_runtime_takes_no_memory_for_a_sleep() {
     static NOW: AtomicU64 = AtomicU64::new(0);
-    let runtime = CoopRuntime::reserved(
+    let runtime = CoopRuntime::try_reserved(
         Hand(&NOW),
         RuntimeRows {
             tasks: 2,
             task_bytes: 256,
             timers: 2,
         },
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let (answer, made) = allocations(|| {
         let handle = sleeper(&runtime, &local, 5, 9);
@@ -530,14 +536,15 @@ fn a_reserved_runtime_takes_no_memory_for_a_sleep() {
 #[test]
 fn a_timeout_holds_its_future_in_place_and_takes_no_memory() {
     static NOW: AtomicU64 = AtomicU64::new(0);
-    let runtime = CoopRuntime::reserved(
+    let runtime = CoopRuntime::try_reserved(
         Hand(&NOW),
         RuntimeRows {
             tasks: 1,
             task_bytes: 256,
             timers: 1,
         },
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let (elapsed, made) = allocations(|| {
         let time = CoopTime::new(&runtime);
@@ -556,7 +563,7 @@ fn a_timeout_holds_its_future_in_place_and_takes_no_memory() {
 #[test]
 fn a_grown_timer_table_takes_every_sleep_and_reuses_its_entries() {
     static NOW: AtomicU64 = AtomicU64::new(0);
-    let runtime = CoopRuntime::new(Hand(&NOW));
+    let runtime = CoopRuntime::try_new(Hand(&NOW)).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let round = |deadline_ms: u64| {
         let handles: std::vec::Vec<_> = (0..5u32)
@@ -592,7 +599,7 @@ fn a_grown_timer_table_takes_every_sleep_and_reuses_its_entries() {
 #[test]
 fn dropping_the_runtime_drops_its_tasks_and_their_handles_read_cancelled() {
     static DROPS: AtomicU32 = AtomicU32::new(0);
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let guard = Counted(&DROPS);
     let mut handle = local.spawn_local(async move {
@@ -639,7 +646,7 @@ fn larger(bytes: [u8; 1024]) -> impl Future<Output = u8> {
 
 #[test]
 fn an_opening_runtime_places_what_its_open_spawns_and_nothing_once_sealed() {
-    let runtime = CoopRuntime::opening(
+    let runtime = CoopRuntime::try_opening(
         Still,
         RuntimeRows {
             tasks: 1,
@@ -647,7 +654,8 @@ fn an_opening_runtime_places_what_its_open_spawns_and_nothing_once_sealed() {
             timers: 0,
         },
         1,
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let small = local.try_spawn_local(forever()).expect("the reserved cell");
     let first = local
@@ -700,7 +708,7 @@ fn an_opening_runtime_places_what_its_open_spawns_and_nothing_once_sealed() {
 /// and the table holds what it held.
 #[test]
 fn an_opening_runtime_adds_no_cell_past_the_ones_it_may_add() {
-    let runtime = CoopRuntime::opening(
+    let runtime = CoopRuntime::try_opening(
         Still,
         RuntimeRows {
             tasks: 1,
@@ -708,7 +716,8 @@ fn an_opening_runtime_adds_no_cell_past_the_ones_it_may_add() {
             timers: 0,
         },
         1,
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let small = local.try_spawn_local(forever()).expect("the reserved cell");
     let added = local
@@ -771,12 +780,15 @@ fn a_runtime_whose_task_holds_it_is_let_go_with_the_last_handle_outside_its_tabl
     };
     type Make = fn() -> CoopRuntime<Released>;
     let makers: [(&str, Make); 3] = [
-        ("grown", || CoopRuntime::new(Released(&RELEASED))),
+        ("grown", || {
+            CoopRuntime::try_new(Released(&RELEASED)).expect("the heap has room")
+        }),
         ("reserved", || {
-            CoopRuntime::reserved(Released(&RELEASED), ROWS)
+            CoopRuntime::try_reserved(Released(&RELEASED), ROWS).expect("the heap has room")
         }),
         ("opened and sealed", || {
-            let runtime = CoopRuntime::opening(Released(&RELEASED), ROWS, 0);
+            let runtime =
+                CoopRuntime::try_opening(Released(&RELEASED), ROWS, 0).expect("the heap has room");
             runtime.seal();
             runtime
         }),
@@ -814,7 +826,7 @@ fn a_runtime_whose_task_holds_it_is_let_go_with_the_last_handle_outside_its_tabl
 #[test]
 fn dropping_a_local_set_drops_its_tasks_while_the_runtime_lives() {
     static DROPS: AtomicU32 = AtomicU32::new(0);
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let first = CoopLocalSet::new(&runtime);
     let second = CoopLocalSet::new(&runtime);
     let held = runtime.clone();
@@ -848,7 +860,7 @@ fn dropping_a_local_set_drops_its_tasks_while_the_runtime_lives() {
 #[test]
 fn a_waker_kept_past_the_runtime_still_points_at_a_cell() {
     let kept: Rc<RefCell<Option<Waker>>> = Rc::new(RefCell::new(None));
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let stash = Rc::clone(&kept);
     let handle = local.spawn_local(core::future::poll_fn(move |cx| {
@@ -1026,7 +1038,7 @@ fn a_spawn_whose_cell_bytes_the_heap_refuses_is_refused_as_the_heaps() {
         task_bytes: 0,
         timers: 0,
     };
-    let runtime = CoopRuntime::opening(Still, rows, 1);
+    let runtime = CoopRuntime::try_opening(Still, rows, 1).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let spawned = refused(|| {
         local
@@ -1065,14 +1077,15 @@ fn a_value_the_heap_refuses_is_handed_back() {
 #[test]
 fn a_pass_frees_the_cells_of_tasks_no_handle_waits_for_and_drops_their_output_once() {
     static DROPS: AtomicU32 = AtomicU32::new(0);
-    let runtime = CoopRuntime::reserved(
+    let runtime = CoopRuntime::try_reserved(
         Still,
         RuntimeRows {
             tasks: 2,
             task_bytes: 256,
             timers: 0,
         },
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     drop(local.spawn_local(async { Counted(&DROPS) }));
     drop(local.spawn_local(async { 7u32 }));
@@ -1091,14 +1104,15 @@ fn a_pass_frees_the_cells_of_tasks_no_handle_waits_for_and_drops_their_output_on
 #[test]
 fn a_cell_the_pass_freed_is_free_for_a_task_the_next_cell_spawns() {
     static DROPS: AtomicU32 = AtomicU32::new(0);
-    let runtime = CoopRuntime::reserved(
+    let runtime = CoopRuntime::try_reserved(
         Still,
         RuntimeRows {
             tasks: 2,
             task_bytes: 256,
             timers: 0,
         },
-    );
+    )
+    .expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     drop(local.spawn_local(async { Counted(&DROPS) }));
     let inner = local.clone();
@@ -1117,7 +1131,7 @@ fn a_cell_the_pass_freed_is_free_for_a_task_the_next_cell_spawns() {
 /// in the same pass, and reads the output.
 #[test]
 fn a_task_waiting_on_the_cell_before_it_reads_the_output_in_the_same_pass() {
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let go = Rc::new(Cell::new(false));
     let parked: Rc<RefCell<Option<Waker>>> = Rc::new(RefCell::new(None));
@@ -1152,7 +1166,7 @@ fn a_task_waiting_on_the_cell_before_it_reads_the_output_in_the_same_pass() {
 #[test]
 fn a_handle_let_go_after_its_task_ended_frees_the_cell() {
     static DROPS: AtomicU32 = AtomicU32::new(0);
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let plain = local.spawn_local(async { 3u32 });
     let owning = local.spawn_local(async { Counted(&DROPS) });
@@ -1186,7 +1200,7 @@ impl std::task::Wake for Recorder {
 /// order they were registered, and an entry not yet due stays.
 #[test]
 fn every_due_timer_is_woken_earliest_first_past_one_batch() {
-    let runtime = CoopRuntime::new(Still);
+    let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
     let woken = std::sync::Arc::new(std::sync::Mutex::new(std::vec::Vec::new()));
     let entries = [
         (1u32, 50u64),

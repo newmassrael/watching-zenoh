@@ -549,7 +549,7 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
     #[cfg(feature = "session-slot")]
     let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
     #[cfg(not(feature = "session-slot"))]
-    let runtime = CoopRuntime::new(Frozen);
+    let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
     let port = 7701;
 
     // The sockets are bound, and the pumps and applications built, outside any

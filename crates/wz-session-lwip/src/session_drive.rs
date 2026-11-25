@@ -340,7 +340,7 @@ mod tests {
             ));
             let driver = CellRc::boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
 
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let driver_sink = driver.clone().into_sink();
             // R311ja — `R = CoopRuntime<FrozenClock>` annotated: `new_generic`
@@ -477,7 +477,7 @@ mod tests {
                 bind_session_rx(&link, port).expect("bind session rx"),
             ));
             let driver = CellRc::boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let driver_sink = driver.clone().into_sink();
             let actions =
@@ -623,7 +623,7 @@ mod tests {
         let payload: &[u8] = b"joined at both ends";
 
         let push_through = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let actions = established(driver_sink, clock);
             actions
@@ -800,7 +800,7 @@ mod tests {
         let payloads: [&[u8]; 4] = [b"one", b"two", b"three", b"four"];
 
         let window = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let actions = established(driver_sink, clock);
             actions.batch_start().expect("batch_start");

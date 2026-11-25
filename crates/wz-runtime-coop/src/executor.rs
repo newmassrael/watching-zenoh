@@ -13,16 +13,16 @@
 //!
 //! - In a `static` the image declares (`TaskTable`, `session-slot`), which the runtime's cell
 //!   starts (`RuntimeCell`): no heap at all.
-//! - Reserved once, when the runtime is made (`CoopRuntime::reserved`, the heap profile):
+//! - Reserved once, when the runtime is made (`CoopRuntime::try_reserved`, the heap profile):
 //!   `tasks` cells and their `task_bytes` each, in one block. What an engine that owes no
 //!   allocation after its open asks for: the table is the open's, and a spawn past it is refused.
-//! - Grown when every cell is taken (`CoopRuntime::new`, the heap profile), by a chunk of bare
+//! - Grown when every cell is taken (`CoopRuntime::try_new`, the heap profile), by a chunk of bare
 //!   cells that never moves; a cell keeps the bytes a spawn gave it for the next task that fits
 //!   them, so a program that spawns the same tasks again allocates nothing after the first. A
-//!   table reserved while its open lasts (`CoopRuntime::opening`) holds such cells beside the ones
+//!   table reserved while its open lasts (`CoopRuntime::try_opening`) holds such cells beside the ones
 //!   it reserved. What these do is reached only through the table that has them, so a runtime
 //!   whose table is reserved links none of it.
-//! - Reserved once for one task at most (`CoopRuntime::reserved_for_one`), for an engine whose
+//! - Reserved once for one task at most (`CoopRuntime::try_reserved_for_one`), for an engine whose
 //!   session holds one link at a time: its passes, spawns and sweeps look at that cell alone
 //!   (`Walks`), and only the making of such a table names them, as only the making of a table of
 //!   many names theirs, so a build whose runtimes are all of one cell links no walk of many.

@@ -349,7 +349,7 @@ struct Pair {
 
 impl Pair {
     fn establish(link: &Rc<LwipLink>, port: u16) -> Self {
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let links = new_links(link.clone());
         let config = |role| SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),

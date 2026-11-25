@@ -131,7 +131,7 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let links = test_links(Rc::new(link));
     let clock = StepClock::default();
-    let runtime = CoopRuntime::new(clock.clone());
+    let runtime = CoopRuntime::try_new(clock.clone()).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let pool = InstalledPool::install();
 

@@ -759,7 +759,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         let outcome = run_multicast_session(
@@ -822,7 +822,7 @@ mod tests {
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
 
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
 
         // The sibling: a task that counts the passes it was polled in.
@@ -901,7 +901,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, member_port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // One queued Put on the reliable channel (pico Z_RELIABILITY_DEFAULT);
@@ -996,7 +996,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, member_port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // One queued DeclFinal reply for interest id 9 — the trivial terminal of a
@@ -1127,7 +1127,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // A held local liveliness token at the queried keyexpr — the declarer
@@ -1246,7 +1246,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // A registered queryable at the queried keyexpr — its handler stages one
@@ -1352,7 +1352,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, member_port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         // A 64-byte batch budget forces the 200-byte payload to fragment (the
         // owned-push codec caps payloads, so 200 stays under the cap while
         // exceeding the batch — the AP fragmentation test's sizing).
@@ -1511,7 +1511,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // Phase 1 — no predicate at all: the pre-round entry point, pre-round
@@ -1610,7 +1610,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         let outcome = run_multicast_session_with_shutdown(
@@ -1668,7 +1668,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         let outcome = run_multicast_session_with_shutdown(
@@ -1747,7 +1747,7 @@ mod tests {
         let port: u16 = 7461;
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
         let driver = LwipMulticastDriver::new(socket, group, port);
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // Down BEFORE the first run, so it ends on the carrier rather than the
@@ -1830,7 +1830,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
         let cfg = || MulticastDriveConfig {
             params: &self_params,
@@ -1932,7 +1932,7 @@ mod tests {
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
         let cfg = || MulticastDriveConfig {
             params: &self_params,
@@ -2001,7 +2001,7 @@ mod tests {
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
         std::assert!(link.any_link_is_up(), "the carrier is not the cause");
 

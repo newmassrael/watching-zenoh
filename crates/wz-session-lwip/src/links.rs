@@ -356,7 +356,7 @@ mod tests {
         fn lwip_links_carry_a_handshake_between_an_acceptor_and_an_initiator() {
             let (_serial, link) = wz_link_lwip::lwip_test_link();
             let links = test_links(Rc::new(link));
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let local = CoopLocalSet::new(&runtime);
 
             let OpenedLink {

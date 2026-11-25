@@ -2903,7 +2903,7 @@ mod wake_budget_tests {
     /// handle not passing the question on.
     #[test]
     fn a_step_takes_the_datagrams_its_link_dropped() {
-        let runtime = CoopRuntime::new(Stopped);
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone());
@@ -2927,7 +2927,7 @@ mod wake_budget_tests {
     /// What one step of an acceptor pump tells its link it may wait, after the application layer
     /// stated a deadline `in_ms` from now (or nothing).
     fn waited(in_ms: Option<u64>) -> u64 {
-        let runtime = CoopRuntime::new(Stopped);
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone());
@@ -2950,7 +2950,7 @@ mod wake_budget_tests {
     /// The events a pump raises over one step, after the application layer stated a deadline
     /// `in_ms` from now, and the deadline left afterwards.
     fn raised(in_ms: Option<u64>) -> (usize, Option<u64>) {
-        let runtime = CoopRuntime::new(Stopped);
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone());
@@ -2980,7 +2980,7 @@ mod wake_budget_tests {
     #[cfg(not(feature = "rx-in-place"))]
     #[test]
     fn a_held_link_leaves_the_rest_of_a_datagram_parked() {
-        let runtime = CoopRuntime::new(Stopped);
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone());
@@ -3032,7 +3032,7 @@ mod wake_budget_tests {
     #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn a_link_that_is_gone_ends_its_session() {
-        let runtime = CoopRuntime::new(Stopped);
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone());
@@ -3097,7 +3097,7 @@ mod wake_budget_tests {
     #[cfg(feature = "reassembly")]
     #[test]
     fn a_session_spawned_over_a_router_made_in_place_runs_and_goes_with_its_task() {
-        let runtime = CoopRuntime::new(Stopped);
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
@@ -3157,7 +3157,7 @@ mod wake_budget_tests {
     fn a_session_over_a_lent_router_reads_its_link_inside_the_lend_alone() {
         use wz_session_core::unicast_rx::RouterLend;
         type Router = crate::reassembly_rx::CoopReassembly;
-        let runtime = CoopRuntime::new(Stopped);
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
@@ -3213,14 +3213,15 @@ mod wake_budget_tests {
         type Sink = fn(IterationEvent<'_, '_>);
         let bytes = router_session_task_bytes::<Stopped, Link, Router, CountedRouter, Sink>();
         for (cell, fits) in [(bytes, true), (bytes - 1, false)] {
-            let runtime = CoopRuntime::reserved(
+            let runtime = CoopRuntime::try_reserved(
                 Stopped,
                 crate::RuntimeRows {
                     tasks: 1,
                     task_bytes: cell,
                     timers: 0,
                 },
-            );
+            )
+            .expect("the heap has room");
             let local = CoopLocalSet::new(&runtime);
             let clock = CoopTime::new(&runtime);
             let sink = crate::link_cells::heap_sink(Null);
@@ -3277,14 +3278,15 @@ mod wake_budget_tests {
     #[test]
     fn a_session_refused_a_cell_lets_go_of_what_it_was_handed() {
         type Sink = fn(IterationEvent<'_, '_>);
-        let runtime = CoopRuntime::reserved(
+        let runtime = CoopRuntime::try_reserved(
             Stopped,
             crate::RuntimeRows {
                 tasks: 0,
                 task_bytes: 64,
                 timers: 0,
             },
-        );
+        )
+        .expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
@@ -3350,7 +3352,7 @@ mod wake_budget_tests {
         type Router = crate::reassembly_rx::CoopReassembly;
         type Sink = fn(IterationEvent<'_, '_>);
         let task_bytes = router_session_task_bytes::<Released, Link, Router, CountedRouter, Sink>();
-        let runtime = CoopRuntime::opening(
+        let runtime = CoopRuntime::try_opening(
             Released,
             crate::RuntimeRows {
                 tasks: 1,
@@ -3358,7 +3360,8 @@ mod wake_budget_tests {
                 timers: 1,
             },
             0,
-        );
+        )
+        .expect("the heap has room");
         runtime.seal();
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
@@ -3421,7 +3424,7 @@ mod wake_budget_tests {
 
     /// An acceptor's pump over the test's link, and the session's clock reading when it was made.
     fn acceptor() -> (SessionPump<Stopped, Rc<Recording>>, u64) {
-        let runtime = CoopRuntime::new(Stopped);
+        let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
         let actions = new_session_actions(sink, params(), clock.clone());
@@ -3579,7 +3582,8 @@ mod wake_budget_tests {
             const TICK_MS: u64 = 500;
             const SPAN_MS: u64 = 9_000;
             let now_us = Arc::new(AtomicU64::new(START_US));
-            let runtime = CoopRuntime::new(Moved(Arc::clone(&now_us)));
+            let runtime =
+                CoopRuntime::try_new(Moved(Arc::clone(&now_us))).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let sent = Rc::new(Cell::new(0u32));
             let sink = crate::link_cells::heap_sink(KeepAlivesSent(Rc::clone(&sent)));

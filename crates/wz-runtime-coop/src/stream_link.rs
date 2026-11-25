@@ -3100,7 +3100,7 @@ mod tests {
         /// stream takes bytes again the next message is written.
         #[test]
         fn a_droppable_message_on_a_full_stream_is_dropped_within_its_own_wait() {
-            let runtime = CoopRuntime::new(Stopped);
+            let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
             let link = link();
             let sink = link.clone().into_sink();
             let actions = established(sink, &runtime);
@@ -3139,7 +3139,7 @@ mod tests {
         /// `Block` through the publish metadata would hold this test to that feature.
         #[test]
         fn a_blocking_message_on_a_full_stream_closes_the_session_after_its_wait() {
-            let runtime = CoopRuntime::new(Stopped);
+            let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
             let link = link();
             let sink = link.clone().into_sink();
             let actions = established(sink, &runtime);
@@ -3183,7 +3183,7 @@ mod tests {
         #[test]
         fn two_conduits_alternating_on_a_stream_lose_no_message() {
             use wz_session_core::link::STREAM_BATCH_LENGTH_BYTES;
-            let runtime = CoopRuntime::new(Stopped);
+            let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
             let link = crate::link_cells::CellRc::boxed(StreamDriver::with_buffers(
                 Pipe::<false>::default(),
                 STREAM_RX_CAPACITY,

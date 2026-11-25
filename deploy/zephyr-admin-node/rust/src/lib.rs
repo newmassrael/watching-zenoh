@@ -336,7 +336,10 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     }
 
     let clock = ZephyrClock::<TICK_HZ>;
-    let runtime = CoopRuntime::new(clock);
+    let Some(runtime) = CoopRuntime::try_new(clock) else {
+        log(c"wz: FAIL - the heap has no room for the runtime");
+        return 2;
+    };
     let local = CoopLocalSet::new(&runtime);
     let Ok(zid) = SessionZid::new(&net.zid()) else {
         log(c"wz: FAIL - the board's zid is not 1 to 16 bytes");
@@ -499,7 +502,10 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
     }
 
     let clock = ZephyrClock::<TICK_HZ>;
-    let runtime = CoopRuntime::new(clock);
+    let Some(runtime) = CoopRuntime::try_new(clock) else {
+        log(c"wz: FAIL - the heap has no room for the runtime");
+        return 2;
+    };
     let local = CoopLocalSet::new(&runtime);
     let Ok(zid) = SessionZid::new(&net.zid()) else {
         log(c"wz: FAIL - the board's zid is not 1 to 16 bytes");

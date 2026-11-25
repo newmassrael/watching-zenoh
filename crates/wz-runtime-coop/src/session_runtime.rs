@@ -435,7 +435,7 @@ mod cookie_nonce_draw_tests {
     }
 
     fn build() -> SessionHandle<StoppedClock> {
-        let runtime = CoopRuntime::new(StoppedClock);
+        let runtime = CoopRuntime::try_new(StoppedClock).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let driver = crate::link_cells::heap_sink(NullDriver);
         new_session_actions(driver, params(), clock)

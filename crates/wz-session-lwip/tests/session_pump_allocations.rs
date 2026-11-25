@@ -508,7 +508,7 @@ mod placing_on_the_heap {
 
     /// A runtime as every image makes one: an `Arc` of its pools.
     pub fn runtime() -> Rt {
-        CoopRuntime::new(Clk)
+        CoopRuntime::try_new(Clk).expect("the heap has room")
     }
 
     pub fn session(
