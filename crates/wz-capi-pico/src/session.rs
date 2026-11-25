@@ -358,7 +358,11 @@ pub(crate) fn resolve_snapshots(
 /// held values the process pools reserve at the first open among them;
 /// `Z_ERR_CONFIG_INVALID_VALUE` when the build refuses any of it.
 ///
+/// Not inlined: `z_open` and the device requirements' judgement share this one body, and its
+/// result is written once where the caller holds it rather than moved through each layer's.
+///
 /// [`WZ_EXT_CONFIG_LIMITS_KEY`]: crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY
+#[inline(never)]
 pub(crate) fn resolve_open(
     cfg: &ConfigState,
 ) -> Result<(SessionPolicy, crate::config_limits::Stated), ZResult> {
