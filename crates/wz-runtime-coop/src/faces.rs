@@ -760,6 +760,10 @@ pub struct LinkSupervisor<L: SessionLinks, F, P = ManyFaces<F>> {
     /// another thread then makes no buffer of its own after the open.
     waits: Option<Vec<LinkWait>>,
     next_face: FaceId,
+    /// How often a face or a port was reached to be changed, or a port came to be asked: what a
+    /// session that moved its links on compares, to move them again only once one may have
+    /// changed ([`Self::moves`]). Wraps; only its change is read.
+    moves: u32,
     /// The record each face is kept as: the table `P` holds it, the supervisor names it.
     records: core::marker::PhantomData<fn() -> F>,
 }
@@ -781,6 +785,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             listeners: Vec::new(),
             waits: Some(room),
             next_face: 1,
+            moves: 0,
             records: core::marker::PhantomData,
         })
     }
@@ -809,6 +814,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
 
     /// The face at place `at`, while one holds it, to change what the session keeps of it.
     pub fn face_mut(&mut self, at: usize) -> Option<&mut F> {
+        self.moved();
         self.faces.get_mut(at)
     }
 
@@ -819,6 +825,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
 
     /// The faces in the order of their places, to change what the session keeps of each.
     pub fn faces_mut(&mut self) -> impl Iterator<Item = &mut F> {
+        self.moved();
         self.faces.iter_mut()
     }
 
@@ -829,7 +836,29 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
 
     /// The table of the faces by their places, for a walk that names a face by its place.
     pub fn places_mut(&mut self) -> &mut P {
+        self.moved();
         &mut self.faces
+    }
+
+    /// The count of the reaches of a face or a port to change it, and of the ports that came to
+    /// be asked, since the session began: equal at two reads, no face and no port was changed
+    /// through the supervisor between them, and a face's link moved on only by its task, whose
+    /// end the session's runtime counts (`CoopLocalSet::tasks_ended`).
+    pub fn moves(&self) -> u32 {
+        self.moves
+    }
+
+    /// Count one reach of a face or a port to change it ([`Self::moves`]).
+    fn moved(&mut self) {
+        self.moves = self.moves.wrapping_add(1);
+    }
+
+    /// Whether a port is to be asked for a connection at the next step: one asked at every step,
+    /// or one a wait found ready ([`Self::accept_at`]).
+    pub fn ports_to_ask(&self) -> bool {
+        self.listeners
+            .iter()
+            .any(|listening| listening.on.is_none() || listening.ready)
     }
 
     /// How many places a face holds, the dial role's among them.
@@ -850,12 +879,14 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// Put `face` at the free place `at`, which it keeps until it is taken out; handed back at
     /// the dial role's place, at a place another face holds, and past the table.
     pub fn place_face(&mut self, at: usize, face: F) -> Result<(), F> {
+        self.moved();
         self.faces.put(at, face)
     }
 
     /// Take the face at `at` out of the table, its place free from then; the dial role's, at the
     /// first, is never taken. No other face moves.
     pub fn take_face(&mut self, at: usize) -> Option<F> {
+        self.moved();
         self.faces.take(at)
     }
 
@@ -870,6 +901,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// texts when the session states one.
     pub fn listen(&mut self, at: Locator, endpoint: Option<usize>) -> Result<(), LinkOpenError> {
         let listener = self.links.open_listener(at)?;
+        self.moved();
         self.listeners.push(Listening {
             listener,
             endpoint,
@@ -1169,13 +1201,19 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         // that takes no connection now gives no wait on its port until that changes.
         for listening in &mut self.listeners {
             let on = listening.listener.input_wait();
+            let was = listening.on;
             listening.on = on.filter(|_| listening.listener.asked_when_ready());
+            if listening.on.is_none() && was.is_some() {
+                self.moves = self.moves.wrapping_add(1);
+            }
             match on {
                 Some(on) => {
                     if !put_wait(&mut waits, LinkWait::input(on)) {
                         // No wait can find a port ready that the read has no room to wait on:
                         // it is asked at every look until a read has room for it.
-                        listening.on = None;
+                        if listening.on.take().is_some() {
+                            self.moves = self.moves.wrapping_add(1);
+                        }
                         look_again = true;
                     }
                 }
@@ -1232,6 +1270,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
                     .is_some_and(|port| on.iter().any(|ready| ready.on == port))
                 {
                     listening.ready = true;
+                    self.moves = self.moves.wrapping_add(1);
                 }
             }
             on.clear();
@@ -1576,6 +1615,25 @@ mod tests {
     fn supervisor(link: TestLink, faces: usize) -> LinkSupervisor<Net, TestFace> {
         LinkSupervisor::new(Net, TestFace { id: 100, link }, faces, 2)
             .expect("the heap holds two waits")
+    }
+
+    /// A reach of a face to change it is counted, and a look at one is not: what a session that
+    /// left its links settled compares to move them again. A supervisor with no port has none to
+    /// ask. Turned red by a mutable reach that counts nothing (`face_mut`, `put_link`), or a look
+    /// that counts one (`face`, `faces`).
+    #[test]
+    fn a_change_of_a_face_is_counted_and_a_look_is_not() {
+        let mut faces = supervisor(Link::Waiting { at_us: 5 }, 2);
+        assert!(!faces.ports_to_ask(), "no port, none to ask");
+        let before = faces.moves();
+        assert!(faces.face(0).is_some());
+        assert_eq!(faces.faces().count(), 1);
+        assert_eq!(faces.moves(), before, "a look changes nothing");
+        faces.put_link(0, Link::Waiting { at_us: 9 });
+        let put = faces.moves();
+        assert_ne!(put, before, "a link put in is a change");
+        assert!(faces.face_mut(0).is_some());
+        assert_ne!(faces.moves(), put, "a reach to change a face is a change");
     }
 
     /// A dial answers what its network answered once, and names the endpoint it reaches.

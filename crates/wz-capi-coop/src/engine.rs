@@ -1870,6 +1870,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, 
 #[cfg(feature = "query")]
 type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, Lent>;
 
+/// What a move of the links left settled ([`Core::move_links`]): every face up or waiting for a
+/// time, no port to ask and no group. The links are moved again once a face's link ended, a face
+/// or a port was changed through the faces' table (`moves`, its count after the move), or a face
+/// is due (`due_us`, the earliest of a replay's next turn and a wait to dial again).
+#[derive(Clone, Copy)]
+struct LinksSettled {
+    moves: u32,
+    due_us: u64,
+}
+
 /// The session's state under its one lock, in the layers that own it: the driver's tasks, clock,
 /// policy and arena stay here beside the ABI's places, what the links carry is the transport's
 /// ([`TransportState`]) and what the session declared and asked is the session's
@@ -1910,6 +1920,8 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// Apart from the session's being closed, which a step that loses the dial role's link says
     /// too, so the close that follows such a step still lets them go, and once.
     released: bool,
+    /// The links as the last move left them, when it left them settled ([`Self::move_links`]).
+    links_settled: Option<LinksSettled>,
     /// How often a read's wait and its step read the session's clock ([`Self::now_us`]), which the
     /// tests count.
     #[cfg(test)]
@@ -3411,6 +3423,60 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         Ok(())
     }
 
+    /// Move the links on as [`Self::poll_links`] does, unless the last move left them settled and
+    /// nothing that moves them came since: no face's link ended, no face or port was changed
+    /// through the faces' table, and no face is due by `now_us` ([`LinksSettled`]). A session
+    /// whose links are all up, and stay so, then looks at each face's task alone, one load a face,
+    /// and turns no face's value, replay or dial until one of those comes. `Err` as
+    /// [`Self::poll_links`].
+    fn move_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
+        let links = &self.transport.links;
+        if self.links_settled.is_some_and(|settled| {
+            settled.moves == links.moves()
+                && now_us < settled.due_us
+                && !links
+                    .faces()
+                    .any(|face| face.link.wire().is_some_and(|wire| wire.finished()))
+        }) {
+            return Ok(());
+        }
+        self.links_settled = None;
+        self.poll_links(redial_ms, now_us)?;
+        self.links_settled = self.links_settle();
+        Ok(())
+    }
+
+    /// What the links are settled at after a move: `None` while a face dials, is in its
+    /// handshake or stands by for a node, while a face's link ended, while a port is to be asked
+    /// for a connection, or while the session holds a group, each of which a step moves on by
+    /// what it reads and not by a time or a change counted.
+    fn links_settle(&self) -> Option<LinksSettled> {
+        #[cfg(feature = "group")]
+        if !self.transport.groups.is_empty() {
+            return None;
+        }
+        let links = &self.transport.links;
+        if links.ports_to_ask() {
+            return None;
+        }
+        let mut due_us = u64::MAX;
+        for face in links.faces() {
+            let at_us = match &face.link {
+                Link::Up(wire) if wire.finished() => return None,
+                Link::Up(_) => face.replay.next_turn_ms().map(|ms| ms.saturating_mul(1000)),
+                Link::Waiting { at_us } => Some(*at_us),
+                _ => return None,
+            };
+            if let Some(at_us) = at_us {
+                due_us = due_us.min(at_us);
+            }
+        }
+        Some(LinksSettled {
+            moves: links.moves(),
+            due_us,
+        })
+    }
+
     /// Move every face's link on, after the session was stepped, against the step's reading of the
     /// clock, `now_us`; see [`Self::poll_face`]. `Err` when the session ends, which only the dial
     /// role's face can bring about.
@@ -4556,6 +4622,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             config,
             policy,
             released: false,
+            links_settled: None,
             #[cfg(test)]
             clock_reads: core::cell::Cell::new(0),
             #[cfg(test)]
@@ -6495,7 +6562,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
         }
         let redial_ms = core.config.redial_ms;
-        if core.poll_links(redial_ms, now_us).is_err() {
+        if core.move_links(redial_ms, now_us).is_err() {
             // A handle reads the session closed from its row from here on, as after a close.
             self.reach.end();
             self.closed.store(true, Ordering::Release);
