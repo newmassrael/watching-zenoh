@@ -1325,14 +1325,19 @@ enum Unlaid {
 
 /// Reserve the pools `plan` makes for `stage` from the heap in `held`, laid where they are held
 /// rather than returned and copied in, and sized by the same pass; `held` is left empty when
-/// the stage holds no slot or the heap has not the memory. One body for the first object of a
-/// stage and the first open.
+/// the stage holds no slot or the heap has not the memory, and as it is when it holds the
+/// stage's pools already, which are answered. One body for the first object of a stage and the
+/// first open.
 #[inline(never)]
 fn lay_stage<'a>(
     held: &'a mut Option<Pools>,
     plan: &Plan,
     stage: Stage,
 ) -> Result<&'a mut Pools, Unlaid> {
+    // Asked first, so no pools are ever laid over others, nor the old ones let go here.
+    if held.is_some() {
+        return held.as_mut().ok_or(Unlaid::Empty);
+    }
     let pools = held.insert(Pools::unlaid(NonNull::dangling(), Origin::Unfound));
     // SAFETY: the pools are unlaid and hold no object; their memory is set below before anything
     // is taken from them, or they are dropped, giving up nothing.
@@ -1359,7 +1364,7 @@ fn lay_stage<'a>(
 /// pool. Not inlined: the first open asks it of each stage, and each asking is then a call.
 #[inline(never)]
 fn lay_missing(held: &mut Option<Pools>, plan: &Plan, stage: Stage) -> bool {
-    held.is_some() || !matches!(lay_stage(held, plan, stage), Err(Unlaid::NoMemory))
+    !matches!(lay_stage(held, plan, stage), Err(Unlaid::NoMemory))
 }
 
 // SAFETY: the memory of the pools is reached only through the lock this is held behind, by one
@@ -3525,6 +3530,13 @@ mod tests {
             held.as_ref().map(|pools| pools.base),
             laid,
             "a held stage stays"
+        );
+        assert_eq!(
+            lay_stage(&mut held, &too_many, Stage::Open)
+                .ok()
+                .map(|pools| pools.base),
+            laid,
+            "a held stage's pools are answered as they are"
         );
         let mut missing = None;
         assert!(!lay_missing(&mut missing, &too_many, Stage::Open));
