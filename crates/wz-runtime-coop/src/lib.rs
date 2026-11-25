@@ -259,6 +259,13 @@ pub mod ws_link;
 #[cfg(all(feature = "unixpipe", not(feature = "session-slot")))]
 pub mod unixpipe_link;
 
+/// The multicast groups over raw Ethernet on this engine: the device a platform opens on an
+/// interface ([`raweth_group::RawEthOpen`], [`raweth_group::RawEthDevice`]) under the session
+/// core's raweth link, and the joiner that opens it beside another's
+/// ([`raweth_group::RawethJoiner`]).
+#[cfg(all(feature = "raweth", not(feature = "session-slot")))]
+pub mod raweth_group;
+
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
 /// (`alloc` without `session-slot`: `session_drive::LinkWaits`, and the `Waits` type and the
 /// `input_wait` and `room_wait` methods of the socket traits), and nothing elsewhere.

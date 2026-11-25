@@ -881,11 +881,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `unixpipe` joins: the locator of a link over a pair of named FIFOs (`Locator::Unixpipe`,
         # `UnixpipeLocator`, `UnixpipePath`, `UNIXPIPE_PATH_LEN` in `pub mod session_drive`), selected
         # by the pico ABI's `transport-link-unixpipe`; the shape `serial`'s have.
+        # `raweth` joins: the groups over raw Ethernet (`pub mod raweth_group`: `RawEthDevice`,
+        # `RawEthOpen`, `RawEthGroup`, `RawethJoiner`), selected by the crate that joins
+        # `reth/` groups on this engine; the shape `app-link`'s site has.
         frozenset(
             {
                 "alloc",
                 "app-link",
                 "host-lock",
+                "raweth",
                 "reassembly",
                 "runtime",
                 "rx-in-place",
@@ -1496,11 +1500,14 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # not(session-slot))`, compound and nested, which the second clause reads off the sites.
     # `serial` joins with its OFF_AXIS row: its sites sit inside `pub mod session_drive`, nested,
     # which the second clause reads off the sites. `ws` and `unixpipe` join the same way.
+    # `raweth` joins with its OFF_AXIS row: its one site, `pub mod raweth_group`, is at the crate
+    # root behind `all(raweth, not(session-slot))`, the compound `app-link`'s site has.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
             "app-link",
             "host-lock",
+            "raweth",
             "reassembly",
             "runtime",
             "rx-in-place",
