@@ -52,6 +52,16 @@ pub fn with<R>(f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
     }
 }
 
+/// [`with`], or `f` run with no section at all where `owned`: what the cells of a runtime
+/// confined to one lock of the engine that owns it take on a host (`ExecutorState::confine`),
+/// since that lock already keeps them to one thread and the host's section is a lock of the whole
+/// process. `f` is run once either way, so its body is laid out once.
+#[cfg(feature = "host-lock")]
+#[inline]
+pub fn with_unless<R>(owned: bool, f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
+    host::with_unless(owned, f)
+}
+
 // The host's section has two makings, each a module of its own name, and the build names the one it
 // has `host`: on `std`'s thread-locals, or on the host's own calls alone (`host-lock-sys`).
 #[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
@@ -212,6 +222,17 @@ mod host_std {
         drop(section);
         result
     }
+
+    pub(super) fn with_unless<R>(owned: bool, f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
+        let section = (!owned).then(Section::enter);
+        // SAFETY: with a section, as in `with`; without one, the caller's cells are reached only
+        // under the lock of the engine that owns them, which keeps them to one thread
+        // (`super::with_unless`).
+        let token = unsafe { CriticalSection::new() };
+        let result = f(token);
+        drop(section);
+        result
+    }
 }
 
 /// The host's, over its own calls (`host-lock-sys`): the same section and the same lock of each
@@ -344,6 +365,17 @@ mod host_sys {
         // SAFETY: this thread holds `LOCK`, taken at its outermost section, and keeps it until
         // that section ends; every critical section of this crate is entered through `with`, so
         // no other thread holds a token while this one does.
+        let token = unsafe { CriticalSection::new() };
+        let result = f(token);
+        drop(section);
+        result
+    }
+
+    pub(super) fn with_unless<R>(owned: bool, f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
+        let section = (!owned).then(Section::enter);
+        // SAFETY: with a section, as in `with`; without one, the caller's cells are reached only
+        // under the lock of the engine that owns them, which keeps them to one thread
+        // (`super::with_unless`).
         let token = unsafe { CriticalSection::new() };
         let result = f(token);
         drop(section);

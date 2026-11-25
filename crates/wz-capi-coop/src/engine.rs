@@ -1638,7 +1638,9 @@ enum UnderCoreLock {}
 // reached by one thread at a time on the ground the `Send` above states: every path to them holds
 // the session's `CoreLock` (the links' tasks run in `Core::run_tasks`, under `&mut Core`), the
 // engine's drop reaches them with the lock's value owned (`CoreLock::dropping`), and no handle of
-// them is handed out of the lock.
+// them is handed out of the lock. The session's runtime is confined to the lock the same way
+// (`RuntimeTables::runtime`): it and its local set are the `Core`'s, its tasks are spawned and run
+// and their handles held by the `Core` alone, and the group's pace holds the set in an `Rc`.
 unsafe impl ConfinedOwner for UnderCoreLock {}
 
 /// How the session's runtime holds what it lends a link's session: in no lock of its own, the
@@ -3007,7 +3009,10 @@ impl RuntimeTables {
         clock: C,
         place: RuntimePlace,
     ) -> Option<(CoopRuntime<C>, CoopLocalSet<C>)> {
-        CoopRuntime::placed(clock, self.rows(), Self::form(self.groups), place)
+        let (runtime, local) =
+            CoopRuntime::placed(clock, self.rows(), Self::form(self.groups), place)?;
+        runtime.confine_tasks::<UnderCoreLock>();
+        Some((runtime, local))
     }
 
     /// The bytes of the span of the session's arena [`Self::runtime`] places the runtime in;

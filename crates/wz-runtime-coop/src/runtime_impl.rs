@@ -528,6 +528,16 @@ impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
         self.retyped()
     }
 
+    /// Keep the runtime's task table to the lock of `O`'s engine: on a host its passes take no
+    /// section of the process, a lock every session of the program shares, since that engine's
+    /// lock already keeps the table to one thread. What `O`'s `unsafe impl ConfinedOwner`
+    /// answers for when its engine calls this on a runtime it made and has handed to nothing yet.
+    /// Nothing where the section is not a lock of the host's.
+    pub fn confine_tasks<O: ConfinedOwner>(&self) {
+        #[cfg(feature = "host-lock")]
+        self.inner.executor.confine();
+    }
+
     /// The same runtime state under another driver and lock type: both are types the session
     /// tier reads back, and the runtime holds a value of neither.
     pub(crate) fn retyped<D2: ?Sized, K2: LockKind>(&self) -> CoopRuntime<C, D2, K2> {
