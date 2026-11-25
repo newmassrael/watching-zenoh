@@ -144,6 +144,20 @@ pub trait FaceWire: FaceSession {
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self);
 
+    /// What a read's wait reads of the link ([`WireLook`]), in one look: a handle whose every
+    /// read takes a hold of the link's place reads the three facts under one hold.
+    fn look(&self) -> WireLook {
+        if self.holds_input() {
+            WireLook::HoldsInput
+        } else if self.waits_for_buffer() {
+            WireLook::WaitsForBuffer
+        } else if self.owes_write() {
+            WireLook::OwesWrite
+        } else {
+            WireLook::Quiet
+        }
+    }
+
     /// Tell an established peer the link ends ([`FaceSession::end`]); a link not established
     /// is told nothing.
     fn close(&self) {
@@ -151,6 +165,20 @@ pub trait FaceWire: FaceSession {
             self.end();
         }
     }
+}
+
+/// What a read's wait reads of a link ([`FaceWire::look`]): the first of these that holds, in
+/// the order the wait takes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireLook {
+    /// The link holds input it has already taken from its stack: the read waits for nothing.
+    HoldsInput,
+    /// Its stack holds input it cannot read until another link gives a receive buffer back.
+    WaitsForBuffer,
+    /// It owes its stack the rest of a frame: waited on for its room as well as its input.
+    OwesWrite,
+    /// None of these: waited on for its input alone.
+    Quiet,
 }
 
 /// How a face's owner tells that the session of a link ended, and ends it ([`Wire`]). A
@@ -686,8 +714,11 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
         unsafe { self.site.as_ref() }
     }
 
-    /// `f` on the wire of the parts when the place lends them now, else `absent`.
-    fn read<U: Send>(&self, absent: U, f: impl FnOnce(&P::Wire) -> U + Send) -> U {
+    /// `f` on the wire of the parts when the place lends them now, else `absent`. Out of line,
+    /// and handed `f` as a pointer, so each kind of answer has one body of the lend and its pay
+    /// whichever fact it reads: a read of the session reads its faces at several places.
+    #[inline(never)]
+    fn read<U: Send>(&self, absent: U, f: fn(&P::Wire) -> U) -> U {
         match self
             .site()
             .try_lend(|held| held.lend(|parts| parts.wire().map(f)))
@@ -719,7 +750,12 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceSession for FaceAt<K, P, E> {
 
     #[cfg(any(feature = "listen", feature = "group"))]
     fn input_seen(&self, ready: bool) {
-        self.read((), move |wire| wire.input_seen(ready));
+        let seen: fn(&P::Wire) = if ready {
+            |wire| wire.input_seen(true)
+        } else {
+            |wire| wire.input_seen(false)
+        };
+        self.read((), seen);
     }
 }
 
@@ -761,6 +797,12 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceWire for FaceAt<K, P, E> {
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         self.read((), |wire| wire.write_owed_now());
+    }
+
+    /// The three facts under one lend of the place; a place another thread holds, or that holds
+    /// no wire, looks quiet, as each of its reads does.
+    fn look(&self) -> WireLook {
+        self.read(WireLook::Quiet, |wire| wire.look())
     }
 }
 
@@ -2024,23 +2066,23 @@ impl<
                 dial_left_ms = Some(dial_left_ms.map_or(left_ms, |held| held.min(left_ms)));
             }
             match face.link() {
-                Link::Wire(wire) => {
-                    if wire.holds_input() {
-                        holds = true;
-                    } else if wire.waits_for_buffer() {
-                        // Its input waits in the stack until another link gives a receive
-                        // buffer back, which that link's own input wakes the read for.
-                    } else if let Some(on) = wire.input_wait() {
-                        let wait = if wire.owes_write() {
-                            LinkWait::input_or_room(on)
-                        } else {
-                            LinkWait::input(on)
-                        };
-                        look_again |= !put_wait(&mut waits, wait);
-                    } else {
-                        own_loop = true;
-                    }
-                }
+                Link::Wire(wire) => match wire.look() {
+                    WireLook::HoldsInput => holds = true,
+                    // Its input waits in the stack until another link gives a receive buffer
+                    // back, which that link's own input wakes the read for.
+                    WireLook::WaitsForBuffer => {}
+                    look => match wire.input_wait() {
+                        Some(on) => {
+                            let wait = if look == WireLook::OwesWrite {
+                                LinkWait::input_or_room(on)
+                            } else {
+                                LinkWait::input(on)
+                            };
+                            look_again |= !put_wait(&mut waits, wait);
+                        }
+                        None => own_loop = true,
+                    },
+                },
                 // A face waiting, dialling or standing by brings no input of its own: its time,
                 // read above, is what wakes the read for it.
                 Link::Idle | Link::Dialing(_) => {}
@@ -2644,6 +2686,7 @@ mod tests {
     /// the link as the parts answer, which it is told here.
     struct ApartWire {
         holds: bool,
+        owes: bool,
         finished: bool,
         aborted: Rc<Cell<u32>>,
         /// The ends the link was told, counted by whichever thread tells one.
@@ -2682,7 +2725,7 @@ mod tests {
         }
 
         fn owes_write(&self) -> bool {
-            false
+            self.owes
         }
 
         fn waits_for_buffer(&self) -> bool {
@@ -2741,6 +2784,7 @@ mod tests {
         let aborted = Rc::new(Cell::new(0));
         let apart = |holds, finished| ApartWire {
             holds,
+            owes: false,
             finished,
             aborted: Rc::clone(&aborted),
             ended: alloc::sync::Arc::default(),
@@ -2853,6 +2897,7 @@ mod tests {
         let parts = ApartParts(
             Some(ApartWire {
                 holds: true,
+                owes: false,
                 finished: false,
                 aborted: Rc::clone(aborted),
                 ended: alloc::sync::Arc::clone(ended),
@@ -3130,6 +3175,46 @@ mod tests {
         assert!(!at.holds_input(), "a place emptied reads as no input");
     }
 
+    /// A link's look reads the first of its facts in the order a wait takes them, and through a
+    /// face's place reads them under one lend: an empty place, or one read inside its own lend,
+    /// looks quiet. Turned red by a look that reads an owed write ahead of held input
+    /// (`FaceWire::look`), or a handle's look that does not read the parts' wire
+    /// (`FaceAt::look`).
+    #[test]
+    fn a_links_look_reads_its_first_fact_through_its_place() {
+        let wire = |holds, owes| ApartWire {
+            holds,
+            owes,
+            finished: false,
+            aborted: Rc::new(Cell::new(0)),
+            ended: Ended::default(),
+        };
+        assert_eq!(wire(true, true).look(), WireLook::HoldsInput);
+        assert_eq!(wire(false, true).look(), WireLook::OwesWrite);
+        assert_eq!(wire(false, false).look(), WireLook::Quiet);
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        // SAFETY: the site outlives the handle, in this frame.
+        let at = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) };
+        assert_eq!(at.look(), WireLook::Quiet, "an empty place looks quiet");
+        let parts = ApartParts(Some(wire(false, true)), Ended::default());
+        // SAFETY: no handle on a cell of the parts lives outside them.
+        assert!(site.hold(unsafe { FaceHeld::gathered(parts) }).is_none());
+        assert_eq!(at.look(), WireLook::OwesWrite, "the parts' wire looked at");
+        assert_eq!(
+            site.lend(|_| at.look()),
+            Some(WireLook::Quiet),
+            "a look inside the place's own lend reads as quiet"
+        );
+        let parts = ApartParts(Some(wire(true, true)), Ended::default());
+        // SAFETY: as above.
+        assert!(site.hold(unsafe { FaceHeld::gathered(parts) }).is_some());
+        assert_eq!(
+            at.look(),
+            WireLook::HoldsInput,
+            "held input ahead of an owed write"
+        );
+    }
+
     /// A link whose place another thread holds reads as a quiet link at once, waiting for
     /// nothing, and as its parts once that thread lets go of the place. Turned red by a read that
     /// waits for the place (the test then never ends), or reads it held as holding input.
@@ -3240,6 +3325,7 @@ mod tests {
         let site = FaceSite::<crate::sync::Shared, SeatedParts>::empty();
         let wire = ApartWire {
             holds: true,
+            owes: false,
             finished: false,
             aborted: Rc::new(Cell::new(0)),
             ended: Ended::default(),
