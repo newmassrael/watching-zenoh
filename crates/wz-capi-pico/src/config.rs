@@ -228,6 +228,10 @@ mod entries {
         /// Keeps `value` under `key`, in place of the value the key held, or
         /// `Z_ERR_CONFIG_FAILED_INSERT` when a new key finds no row or the value no room, the
         /// table then as it was.
+        ///
+        /// Inlined: `zp_config_insert` is its one caller in a library build, and out of line the
+        /// door pays a call and the frame of a body it alone runs.
+        #[inline(always)]
         pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
             // Every refusal is taken before anything is written, so a refused insert leaves the
             // table as it was; each index is read checked, so no refusal of the config's is a
