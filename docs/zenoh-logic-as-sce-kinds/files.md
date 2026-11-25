@@ -174,8 +174,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/get.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/group.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/hold.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/ledger.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/liveliness.rs` | S7 | |
-| `crates/wz-capi-coop/src/engine/one_thread_lock.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/query.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/reach.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
@@ -185,6 +185,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/ticker.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/told.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/transport.rs` | S7 | |
+| `crates/wz-capi-coop/src/form.rs` | S7 | |
+| `crates/wz-capi-coop/src/form/one_thread_lock.rs` | S7 | |
 | `crates/wz-capi-coop/src/host_group.rs` | S7 | |
 | `crates/wz-capi-coop/src/lib.rs` | S7 | |
 | `crates/wz-capi-coop/src/open_source.rs` | S7 | |
@@ -201,6 +203,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/congestion.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/dial_in_flight.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/direct_receive.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/entity_tables.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/face_table.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/faces.rs` | S7 | |
@@ -853,6 +856,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/limits_generated.rs` | S10 | |
 | `crates/wz-session-core/src/link.rs` | S1 | |
 | `crates/wz-session-core/src/link_admission.rs` | S1 | |
+| `crates/wz-session-core/src/link_life.rs` | S1 | |
 | `crates/wz-session-core/src/link_restriction.rs` | S1 | |
 | `crates/wz-session-core/src/linkstate_oam.rs` | S10 | |
 | `crates/wz-session-core/src/locality.rs` | S2 | |
@@ -874,6 +878,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/named_key.rs` | S2 | |
 | `crates/wz-session-core/src/namespace.rs` | S2 | |
 | `crates/wz-session-core/src/network_message.rs` | S1 | |
+| `crates/wz-session-core/src/network_message/pull.rs` | S1 | |
 | `crates/wz-session-core/src/network_message/push_read.rs` | S1 | |
 | `crates/wz-session-core/src/ntp64.rs` | S1 | |
 | `crates/wz-session-core/src/observer.rs` | S3 | |
@@ -999,6 +1004,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/transport_header_parity.rs` | excluded: test | Parity tests of the Frame and Fragment headers against their documents, compiled only under `#[cfg(all(test, ...))]` (`lib.rs:1149`). |
 | `crates/wz-session-core/src/transport_message_parity.rs` | excluded: test | Parity tests of the handshake messages against their documents, compiled only under `#[cfg(all(test, ...))]` (`lib.rs:1128`). |
 | `crates/wz-session-core/src/transport_mode.rs` | S1 | |
+| `crates/wz-session-core/src/transport_place.rs` | S1 | |
 | `crates/wz-session-core/src/transport_profile.rs` | S1 | |
 | `crates/wz-session-core/src/transport_profile/owned.rs` | S1 | |
 | `crates/wz-session-core/src/transport_timers.rs` | S1 | |
@@ -1007,6 +1013,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/tx_deadline.rs` | S1 | |
 | `crates/wz-session-core/src/tx_lease.rs` | S1 | |
 | `crates/wz-session-core/src/unicast_rx.rs` | S1 | |
+| `crates/wz-session-core/src/unicast_transport.rs` | S1 | |
 | `crates/wz-session-core/src/unit_ext.rs` | S1 | |
 | `crates/wz-session-core/src/vle.rs` | S3 | |
 | `crates/wz-session-core/src/wire.rs` | S1 | |
