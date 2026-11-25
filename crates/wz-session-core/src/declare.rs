@@ -123,18 +123,18 @@ pub type DeclEpoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
 /// `matching_peers` scan uses.
 ///
 /// S9a — over a [`DeclaredKeys`](crate::id_map::DeclaredKeys), the table in the
-/// shape the build keeps it. On the fixed backing a keyexpr deeper than
+/// shape the build keeps it, read through the view its owner lends it
+/// ([`crate::id_map::PeerIds::lend_ref`]). On the fixed backing a keyexpr deeper than
 /// [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS) matches
 /// nothing, the conservative answer every sibling scan gives an over-deep key;
 /// the matcher applies that bound itself.
 #[cfg(feature = "storage-profile")]
-pub(crate) fn declared_intersects<M, K>(declared: &M, keyexpr: &str) -> bool
+pub(crate) fn declared_intersects<'a, M, K>(declared: &M, keyexpr: &str) -> bool
 where
-    M: crate::id_map::IdMap<K>,
-    K: AsRef<str>,
+    M: crate::id_map::IdRead<'a, K>,
+    K: AsRef<str> + 'a,
 {
-    declared
-        .entries()
+    crate::id_map::IdRead::into_entries(*declared)
         .any(|(_, candidate)| crate::keyexpr_match::keyexpr_intersects(candidate.as_ref(), keyexpr))
 }
 

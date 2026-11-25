@@ -27,7 +27,9 @@ use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
-use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
+use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap, IdRead, KeyText, PeerIds};
+#[cfg(feature = "storage-profile")]
+use crate::peer_tables::PeerSlot;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::transport_profile::owned::DeclareOwnedVariant;
@@ -138,10 +140,10 @@ impl PublisherCriterion {
 /// consults the membership table while the watch list itself is mutably
 /// borrowed.
 #[cfg(feature = "alloc")]
-fn declared_reaches<M, K>(declared: &M, criterion: &PublisherCriterion) -> bool
+fn declared_reaches<'a, M, K>(declared: &M, criterion: &PublisherCriterion) -> bool
 where
-    M: IdMap<K>,
-    K: AsRef<str>,
+    M: IdRead<'a, K>,
+    K: AsRef<str> + 'a,
 {
     criterion.locality.allows_remote() && declared_intersects(declared, &criterion.keyexpr)
 }
@@ -350,7 +352,7 @@ impl RemoteSubscriberPeer<crate::bounded::Lent> {
         &mut self,
         rows: crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>,
     ) {
-        self.declared.keep_rows_in(rows);
+        self.declared.attach(&rows);
     }
 
     /// Keep the repeats of the subscribers the peer declares from here on in rows of `repeats`, the
@@ -360,7 +362,7 @@ impl RemoteSubscriberPeer<crate::bounded::Lent> {
         &mut self,
         repeats: crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>,
     ) {
-        self.aliases.keep_rows_in(repeats);
+        self.aliases.attach(&repeats);
     }
 }
 
@@ -416,7 +418,7 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     /// `declared_count`.
     #[cfg(feature = "storage-profile")]
     pub fn declared_count(&self) -> usize {
-        self.declared.count()
+        Self::declared_ref(&self.declared, &self.keys).count()
     }
 
     /// R290 — iterate over currently-declared peer subscribers as
@@ -424,7 +426,9 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     /// `iter_declared`. Ordering is unspecified.
     #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
-        self.declared.entries().map(|(id, ke)| (id, ke.as_ref()))
+        Self::declared_ref(&self.declared, &self.keys)
+            .into_entries()
+            .map(|(id, ke)| (id, ke.as_ref()))
     }
 
     /// [`Self::iter_declared`] with the key of the session's key arena each key is the whole text
@@ -434,8 +438,8 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     pub fn iter_declared_held(
         &self,
     ) -> impl Iterator<Item = (u64, &str, Option<&crate::key_arena::KeyRef>)> + '_ {
-        self.declared
-            .entries()
+        Self::declared_ref(&self.declared, &self.keys)
+            .into_entries()
             .map(|(id, ke)| (id, ke.as_ref(), crate::bounded::KeyBacking::held(ke)))
     }
 
@@ -466,9 +470,11 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     }
 
     /// Keep the keys of the rows the peer declares from here on in `keys`: the session's key
-    /// arena, on the lent policy. The rows already held keep theirs.
+    /// arena, on the lent policy. Rows lent from the space the keys before name are given back
+    /// first, through them, as no other keys reach them; rows a table keeps itself are kept.
     #[cfg(feature = "storage-profile")]
     pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        self.release();
         self.keys = keys;
     }
 
@@ -485,7 +491,9 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     /// the growable backing while no quota is stated, as its room refuses nothing.
     #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
-        self.declared.refusals().saturating_add(self.oversize)
+        Self::declared_ref(&self.declared, &self.keys)
+            .refusals()
+            .saturating_add(self.oversize)
     }
 
     /// Backbone for `Publisher::get_matching_status` (R290 surfaced
@@ -503,7 +511,10 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     /// itself is symmetric.
     #[cfg(feature = "storage-profile")]
     pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
-        declared_intersects(&self.declared, publish_keyexpr)
+        declared_intersects(
+            &Self::declared_ref(&self.declared, &self.keys),
+            publish_keyexpr,
+        )
     }
 
     /// R311y797 — the criterion-aware consult: the REMOTE half of a
@@ -512,24 +523,29 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     /// question and stays exactly that for its other callers.
     #[cfg(feature = "alloc")]
     pub fn has_matching_for(&self, criterion: &PublisherCriterion) -> bool {
-        declared_reaches(&self.declared, criterion)
+        declared_reaches(&Self::declared_ref(&self.declared, &self.keys), criterion)
     }
 
     /// [`Self::has_matching_for`] over the publisher's own two knobs, the keyexpr borrowed: a
     /// poll asks it with no criterion made, so no keyexpr is copied and none is refused.
     #[cfg(feature = "storage-profile")]
     pub fn has_matching_at(&self, keyexpr: &str, locality: crate::locality::Locality) -> bool {
-        locality.allows_remote() && declared_intersects(&self.declared, keyexpr)
+        locality.allows_remote()
+            && declared_intersects(&Self::declared_ref(&self.declared, &self.keys), keyexpr)
     }
 
     /// Drop everything the peer declared, in place; the refusal count is kept.
     /// Returns how many declarations were dropped.
     #[cfg(feature = "storage-profile")]
     pub fn forget(&mut self) -> usize {
-        let dropped = self.declared.count();
-        self.declared.reset();
+        let dropped = {
+            let mut declared = Self::declared_mut(&mut self.declared, &self.keys);
+            let dropped = declared.count();
+            declared.reset();
+            dropped
+        };
         #[cfg(feature = "alloc")]
-        self.aliases.clear();
+        Self::aliases_mut(&mut self.aliases, &self.keys).clear();
         // A reconnected peer declares again from the start and ends it again.
         self.initial_final = false;
         self.changed();
@@ -546,10 +562,87 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         feature = "codec-declare"
     ))]
     fn told_as(&self, key: &str) -> Option<u64> {
-        self.declared
-            .entries()
+        Self::declared_ref(&self.declared, &self.keys)
+            .into_entries()
             .find(|(_, held)| held.as_ref() == key)
-            .map(|(other, _)| self.aliases.told_as(other).unwrap_or(other))
+            .map(|(other, _)| {
+                Self::aliases_ref(&self.aliases, &self.keys)
+                    .told_as(other)
+                    .unwrap_or(other)
+            })
+    }
+}
+
+/// The peer's tables lent the space its keys name for each: the one place a view of each is made.
+/// A table and the keys are borrowed apart, so the peer's other fields stay usable beside a view.
+#[cfg(feature = "storage-profile")]
+impl<P: Storage> RemoteSubscriberPeer<P> {
+    /// The declarations lent their space, to bind and unbind.
+    fn declared_mut<'a>(
+        declared: &'a mut DeclaredKeys<P>,
+        keys: &'a P::Keys,
+    ) -> <DeclaredKeys<P> as PeerIds<KeyText<P>, P::Keys>>::Mut<'a> {
+        // SAFETY: the peer attaches each of its tables only to the space its keys name for that
+        // table's slot (`keep_rows_in`, `keep_repeat_rows_in`), and `keep_keys_in` gives every row
+        // back through the old keys before it changes them, so the keys lend each table the space
+        // it was attached to.
+        unsafe { PeerIds::lend(declared, keys, PeerSlot::Subscribers) }
+    }
+
+    /// The declarations lent their space, to read.
+    fn declared_ref<'a>(
+        declared: &'a DeclaredKeys<P>,
+        keys: &'a P::Keys,
+    ) -> <DeclaredKeys<P> as PeerIds<KeyText<P>, P::Keys>>::Ref<'a> {
+        // SAFETY: as `declared_mut`'s.
+        unsafe { PeerIds::lend_ref(declared, keys, PeerSlot::Subscribers) }
+    }
+
+    /// The repeats lent their space, to record and forget.
+    #[cfg(feature = "alloc")]
+    fn aliases_mut<'a>(
+        aliases: &'a mut crate::id_map::DeclaredAliases<P>,
+        keys: &'a P::Keys,
+    ) -> crate::id_map::LentAliases<'a, P> {
+        // SAFETY: as `declared_mut`'s.
+        unsafe { aliases.lend(keys, PeerSlot::SubRepeats) }
+    }
+
+    /// The repeats lent their space, to read.
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        feature = "codec-declare"
+    ))]
+    fn aliases_ref<'a>(
+        aliases: &'a crate::id_map::DeclaredAliases<P>,
+        keys: &'a P::Keys,
+    ) -> crate::id_map::LentAliasesRef<'a, P> {
+        // SAFETY: as `declared_mut`'s.
+        unsafe { aliases.lend_ref(keys, PeerSlot::SubRepeats) }
+    }
+
+    /// Give every lent row back through the keys that name its space; rows a table keeps itself
+    /// are kept.
+    fn release(&mut self) {
+        // SAFETY: as `declared_mut`'s.
+        unsafe {
+            PeerIds::release(&mut self.declared, &self.keys, PeerSlot::Subscribers);
+        }
+        // SAFETY: as `declared_mut`'s.
+        #[cfg(feature = "alloc")]
+        unsafe {
+            self.aliases.release(&self.keys, PeerSlot::SubRepeats);
+        }
+    }
+}
+
+/// The rows of a lent table lie in the session's space, which the table cannot reach without the
+/// peer's keys: they are given back here, through them, as the table itself gives nothing back.
+#[cfg(feature = "storage-profile")]
+impl<P: Storage> Drop for RemoteSubscriberPeer<P> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -967,8 +1060,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         peer: &RemoteSubscriberPeer<Q>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) -> usize {
+        let held = RemoteSubscriberPeer::<Q>::declared_ref(&peer.declared, &peer.keys);
         self.matching_watches
-            .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c))
+            .reevaluate(|c| declared_reaches(&held, c) || local_matching(c))
     }
 
     /// R311y799 — the peer's link died: drop every declaration it had made
@@ -1009,8 +1103,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         let _ = &local_matching;
         let dropped = peer.forget();
         #[cfg(feature = "session-matching")]
-        self.matching_watches
-            .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
+        {
+            let held = RemoteSubscriberPeer::<Q>::declared_ref(&peer.declared, &peer.keys);
+            self.matching_watches
+                .reevaluate(|c| declared_reaches(&held, c) || local_matching(c));
+        }
         dropped
     }
 
@@ -1204,7 +1301,8 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
             // No room where the rows keep their keys: dropped and counted as a declaration the
             // table has no room for, as zenoh-pico drops one its heap cannot hold.
             Err(KeyUnkept::NoRoom) => {
-                peer.declared.count_refused();
+                RemoteSubscriberPeer::<Q>::declared_mut(&mut peer.declared, &peer.keys)
+                    .count_refused();
                 return;
             }
         };
@@ -1213,8 +1311,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         // Past the room or the quota: refused and counted by the table, and announced to no
         // observer, so what they are told is what the table holds.
         let quota = peer.quota;
-        if peer
-            .declared
+        if RemoteSubscriberPeer::<Q>::declared_mut(&mut peer.declared, &peer.keys)
             .bind_within(id, text, |count| quota.admits(count))
             .is_err()
         {
@@ -1228,12 +1325,13 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         match told_as {
             Some(told) => {
                 if told != id {
-                    peer.aliases.insert(id, told);
+                    RemoteSubscriberPeer::<Q>::aliases_mut(&mut peer.aliases, &peer.keys)
+                        .insert(id, told);
                 }
                 return;
             }
             None => {
-                peer.aliases.remove(id);
+                RemoteSubscriberPeer::<Q>::aliases_mut(&mut peer.aliases, &peer.keys).remove(id);
             }
         }
         // R311gb-3d / Track 2 — fan through the DeclSink seam via
@@ -1244,8 +1342,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         let view = BorrowedDecl {
             id,
             keyexpr: resolved,
-            held: peer
-                .declared
+            held: RemoteSubscriberPeer::<Q>::declared_ref(&peer.declared, &peer.keys)
                 .find(id)
                 .and_then(crate::bounded::KeyBacking::held),
         };
@@ -1255,8 +1352,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         // watch list is &mut, the membership table is read
         // through the free-fn consult.
         #[cfg(feature = "session-matching")]
-        self.matching_watches
-            .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
+        {
+            let held = RemoteSubscriberPeer::<Q>::declared_ref(&peer.declared, &peer.keys);
+            self.matching_watches
+                .reevaluate(|c| declared_reaches(&held, c) || local_matching(c));
+        }
     }
 
     /// What an undeclared peer subscriber does, whichever form carried the
@@ -1280,18 +1380,22 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         // Whether another declaration still names the keyexpr `id` named, read before the row
         // goes and by reference (the receive of a record costs the heap nothing).
         #[cfg(feature = "alloc")]
-        let remains = peer.declared.find(id).is_some_and(|key| {
-            peer.declared
-                .entries()
-                .any(|(other, held)| other != id && held.as_ref() == key.as_ref())
-        });
-        peer.declared.unbind(id);
+        let remains = {
+            let declared = RemoteSubscriberPeer::<Q>::declared_ref(&peer.declared, &peer.keys);
+            declared.find(id).is_some_and(|key| {
+                declared
+                    .into_entries()
+                    .any(|(other, held)| other != id && held.as_ref() == key.as_ref())
+            })
+        };
+        RemoteSubscriberPeer::<Q>::declared_mut(&mut peer.declared, &peer.keys).unbind(id);
         peer.changed();
         // The application is told a keyexpr is gone when its last declaration goes, under the
         // id it was told it by ([`RemoteSubscriberPeer::aliases`]).
         #[cfg(feature = "alloc")]
         let report = {
-            let told = peer.aliases.remove(id);
+            let told =
+                RemoteSubscriberPeer::<Q>::aliases_mut(&mut peer.aliases, &peer.keys).remove(id);
             if remains {
                 return;
             }
@@ -1302,8 +1406,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         self.dispatch_undeclared(report);
         // R311kh — see `apply_declared`.
         #[cfg(feature = "session-matching")]
-        self.matching_watches
-            .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
+        {
+            let held = RemoteSubscriberPeer::<Q>::declared_ref(&peer.declared, &peer.keys);
+            self.matching_watches
+                .reevaluate(|c| declared_reaches(&held, c) || local_matching(c));
+        }
     }
 
     /// Drain a `Vec<NetworkMessage>` (typically the

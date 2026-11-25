@@ -1157,18 +1157,21 @@ the face's pending gets and `PeerTables` of what its peer writes and is owed. Wh
 is rows the arena lends each set at the open, sized by limits a document lowers; the reply stage is
 lent none, as nothing stages there (this engine's queryable answers into a stage of its own, and the
 sink it registers leaves the face's untouched). What the peer writes by its own choice is in the
-session's pools or the face's own spans (below): the set holds a head for each of those tables, a
-pointer and three counters, in the registry. Estimates, not a measurement; the arena's parts are
+session's pools or the face's own spans (below): the set holds a head for each of those tables, in
+the registry, which names its rows by index and holds no pointer: its first row and its count, two
+`u16`s, and for a table keyed by the peer's ids the `u32` count of refusals its inline twin keeps.
+Where the rows lie is held once for the session, in a directory of one span its key arena names,
+which every table of a face reaches through the key arena it already holds. Estimates, not a measurement; the arena's parts are
 its row `peer tables` and its row `pending gets`:
 
 | part | where | sized by | build's defaults | pico preset |
 |------|-------|----------|-----------------:|------------:|
 | the answers staged to the peer's interests, and the `Final`s owed | arena | `MAX_PENDING_DECLARES`, `MAX_PENDING_FINALS` | 32 and 8 rows | 4 and 2 |
 | the face's pending gets | arena | `MAX_PENDING_QUERIES`, `MAX_PENDING_LIVELINESS_GETS` | 16 and 8 rows | 2 and 1 |
-| the heads of the peer's aliases, subscribers, queryables, tokens, the two repeats and interests | registry | none: the rows lie in the pools or the face's spans | 7 heads, about 110 on a 64-bit host and 70 on a 32-bit core | the same |
+| the heads of the peer's aliases, subscribers, queryables, tokens, the two repeats and interests | registry | none: the rows lie in the pools or the face's spans | 7 heads, 44 bytes on every target | the same |
 
 A set is about 7,600 bytes on a 64-bit host at the build's defaults and about 1,400 at the pico
-preset, besides its 110 of registry heads, and a link's buffers about 4,100 at a batch of 2,048
+preset, besides its 44 of registry heads, and a link's buffers about 4,100 at a batch of 2,048
 bytes. Before the pools a set also held a reply stage (8 replies of a key and a payload, about 10,500
 bytes at the defaults, 2,600 at the preset), its peer's interests (16 rows, about 640 bytes) and,
 inline in the registry, its peer's declarations at the build's capacities (about 2,200 bytes on a
@@ -1199,12 +1202,25 @@ Estimates, not a measurement, on a 64-bit host:
 | together | 2,816 | about 6,880 | about 3,716,000 |
 
 The heads and the spans of one face together take no more than the inline tables of the same
-bounds did, checked by `one_faces_own_spans_take_no_more_than_the_inline_tables`
-(`crates/wz-session-core/src/peer_tables.rs`): on a 64-bit host the same bytes (a head is the room
-the inline table's length, count and padding took; the repeats' heads are 8 bytes longer each and
-the interests' 16 shorter), on a 32-bit core 24 fewer at the speed image's bounds. What the spans
-may add is their rounding to an arena's spans, under 16 bytes for each of the three, none at bounds
-whose rows fill 16 bytes. A row of a pool no face has ever held is never written (the pool hands
+bounds did, on every target wz builds for, checked by
+`one_faces_own_spans_take_no_more_than_the_inline_tables` (`crates/wz-session-core/src/peer_tables.rs`),
+and for one table by `a_lent_table_of_its_own_span_is_no_larger_than_the_inline_table`
+(`crates/wz-session-core/src/id_map.rs`). Each table's rows are the inline table's, byte for byte,
+and its head fits the room the inline table keeps beside them, each table kind counting what its
+inline twin counts:
+
+| target | a keyed head, against `FixedIdMap`'s room | a sequence's head, against a `BoundedVec`'s length | one face's heads, against the inline tables' rooms |
+|--------|------------------------------------------:|-------------------------------------------------:|---------------------------------------------------:|
+| a 64-bit host | 8 against 16 | 4 against 8 | 44 against 96 |
+| a 32-bit core whose `u64` aligns to 8 (thumbv7m, armv7, Windows x86) | 8 against 16 | 4 against 8 | 44 against 92 |
+| i386 System V, whose `u64` aligns to 4 | 8 against 8 | 4 against 4 | 44 against 52 |
+
+The last row is why no head holds a pointer, nor any table's owner one of its own: there the room
+is the head's counters exactly, and a face's whole slack, 8 bytes, is the interests' (an inline
+lent table is a pointer and two `u32`s, its head two `u16`s). The directory of where the rows lie
+is one span of the arena for the session, held once as the handles of the pools were. What the
+spans may add is their rounding to an arena's spans, under 16 bytes for each of the three, none at
+bounds whose rows fill 16 bytes. A row of a pool no face has ever held is never written (the pool hands
 out the rows past those written last), so on a host only the rows the peers declared become
 resident.
 
@@ -1215,17 +1231,17 @@ spans of its one face; a peer lends the client's rows, with a set and a link's b
 its 10 faces and a link's buffers for its one handshake, and pools at the preset's limits in place of
 the spans, every other row item for item the client's. So a peer reserves about
 10 × (1,400 + 4,100) + 4,100 + (6,880 − 2,816), about 63,200 bytes, beyond the client's arena, and
-10 sets of registry heads, about 1,100 bytes, beside it.
+10 sets of registry heads, 440 bytes, beside it.
 
 | session | sets | links | reserved by the faces (64-bit host, estimate) |
 |---------|-----:|------:|----------------------------------------------:|
 | a listener at the build's defaults, a set per handshake | 1,101 | 1,101 | about 25,100,000 in the arena and 2,400,000 of registry rows |
 | a listener at the build's defaults, a set per face | 1,001 | 1,101 | about 23,200,000 and 2,200,000 |
-| a listener at the build's defaults, with the pools | 1,001 | 1,101 | about 15,840,000 and 110,000, the pools' rows written only as peers declare |
+| a listener at the build's defaults, with the pools | 1,001 | 1,101 | about 15,840,000 and 44,000, the pools' rows written only as peers declare |
 | a listener at the pico preset, a set per face | 11 | 12 | about 100,000 and 24,000 |
-| a listener at the pico preset, with the pools | 11 | 12 | about 71,500 and 1,200 |
+| a listener at the pico preset, with the pools | 11 | 12 | about 71,500 and 480 |
 | a client, a set per face | 1 | 1 | about 8,700 and 2,200 at the preset, 22,800 and 2,200 at the defaults |
-| a client, with its own spans | 1 | 1 | about 8,300 and 110 at the preset, 14,500 and 110 at the defaults |
+| a client, with its own spans | 1 | 1 | about 8,300 and 44 at the preset, 14,500 and 44 at the defaults |
 
 A client's tables take what its inline tables took; what it no longer reserves is the reply stage
 nothing staged in. A listener's faces share the pools: a peer of the preset reserves about 51,000
@@ -1242,8 +1258,9 @@ of reservation, until it states the preset's environment.
 
 **On an MCU.** The speed image is a client that states its own limits (`arm_w.conf`: four
 declarations of each kind, four aliases, two interests) and none of the session's, so its tables
-take spans of their own of those bounds: on a 32-bit core 592 bytes of rows and 72 of heads, where
+take spans of their own of those bounds: on a 32-bit core 592 bytes of rows and a head of 8 bytes for
+each keyed table and 4 for each sequence, where
 its inline tables and its interests' table took about 688, and its set lends no reply stage. One
 that listens at the preset reserves its 10 faces and one handshake, about 57,000 bytes of arena and
-800 of registry heads on a 32-bit core, where before the pools it reserved about 87,000 and 21,000,
+about 480 of registry heads on a 32-bit core, where before the pools it reserved about 87,000 and 21,000,
 and states fewer where its memory is smaller. Estimates the speed matrix is to measure.

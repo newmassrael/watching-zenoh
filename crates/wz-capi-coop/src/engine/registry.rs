@@ -564,7 +564,7 @@ impl<H: Holders> RegistryOf<H> {
         delivery: RoundDelivery,
     ) -> Result<Self, LendRefused> {
         let app = App::lent(arena, keys, rows, limits)?;
-        let mut pools = PeerPools::lent(arena, peers.pools)?;
+        let mut pools = PeerPools::lent(arena, keys, peers.pools)?;
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
         let owed = arena.lend(peers.owed_tokens())?;
         // One face's own spans are handed to that face's tables alone, so a plan that lends them
@@ -2028,40 +2028,43 @@ mod tests {
             finals: 1,
         };
         // The pools are lent from an arena of their own, so the two arenas compared hold the sets'
-        // rows alone.
-        // Shared: the set lent by value and the one lent in place both take rows of them.
+        // rows alone. Shared, as a session of many faces lends them.
         let pool_rows = PeerPoolRows {
             aliases: 1,
             remote_decls: 1,
             interests: 1,
             shared: true,
         };
-        let mut pool_arena =
-            SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
-        let mut pools =
-            PeerPools::lent(pool_arena.arena_mut(), pool_rows).expect("the arena has the pools");
         let mut by_value_arena =
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
         let by_value_keys = by_value_arena
             .arena_mut()
             .lend_keys(256, limits.max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
-        let by_value_gets =
-            Gets::lent(by_value_arena.arena_mut(), by_value_keys, gets, &limits).expect("rows");
-        let mut by_value_peer = Peer::lent(
-            by_value_arena.arena_mut(),
-            by_value_keys,
-            peer,
-            &mut pools,
-            &limits,
-        )
-        .expect("rows");
         let mut arena =
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
         let keys = arena
             .arena_mut()
             .lend_keys(256, limits.max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
+        // A set's tables reach the rows of their pools through the key arena they keep their keys
+        // in, which names the pools lent with it: pools of their own for each key arena.
+        let mut pool_arena =
+            SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
+        let mut by_value_pools = PeerPools::lent(pool_arena.arena_mut(), by_value_keys, pool_rows)
+            .expect("the arena has the pools");
+        let mut pools = PeerPools::lent(pool_arena.arena_mut(), keys, pool_rows)
+            .expect("the arena has the pools");
+        let by_value_gets =
+            Gets::lent(by_value_arena.arena_mut(), by_value_keys, gets, &limits).expect("rows");
+        let mut by_value_peer = Peer::lent(
+            by_value_arena.arena_mut(),
+            by_value_keys,
+            peer,
+            &mut by_value_pools,
+            &limits,
+        )
+        .expect("rows");
         // The table of sets lies in an arena of its own, so `arena` counts the set's rows alone.
         let mut sets_arena = SessionArena::of_bytes(
             FACE_SET_BYTES + wz_session_core::bounded::ARENA_ALIGN,

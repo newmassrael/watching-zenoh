@@ -25,7 +25,9 @@ use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
-use crate::id_map::{DeclaredQueryable, DeclaredQueryables, FixedIdMap, IdMap};
+use crate::id_map::{DeclaredQueryable, DeclaredQueryables, FixedIdMap, IdMap, IdRead, PeerIds};
+#[cfg(feature = "storage-profile")]
+use crate::peer_tables::PeerSlot;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::transport_profile::owned::DeclareOwnedVariant;
@@ -206,10 +208,10 @@ impl QuerierCriterion {
 /// aggregate member (see the `declare-interest` atom) — so the waiver
 /// could only ever fire on a flag wz cannot emit.
 #[cfg(feature = "alloc")]
-fn declared_answers<M, V>(declared: &M, criterion: &QuerierCriterion) -> bool
+fn declared_answers<'a, M, V>(declared: &M, criterion: &QuerierCriterion) -> bool
 where
-    M: IdMap<V>,
-    V: DeclaredRow,
+    M: IdRead<'a, V>,
+    V: DeclaredRow + 'a,
 {
     declared_answers_for(
         declared,
@@ -224,7 +226,7 @@ where
 /// owned [`QuerierCriterion`] (the slot profile) asks the same question with
 /// a borrowed keyexpr and no allocation.
 #[cfg(feature = "storage-profile")]
-fn declared_answers_for<M, V>(
+fn declared_answers_for<'a, M, V>(
     declared: &M,
     keyexpr: &str,
     locality: Locality,
@@ -232,8 +234,8 @@ fn declared_answers_for<M, V>(
     remote_includes: bool,
 ) -> bool
 where
-    M: IdMap<V>,
-    V: DeclaredRow,
+    M: IdRead<'a, V>,
+    V: DeclaredRow + 'a,
 {
     // R311y797 — the querier's own locality gates this half BEFORE the
     // membership is consulted at all: a `Locality::SessionLocal` querier
@@ -249,7 +251,7 @@ where
     if complete_required || remote_includes {
         #[cfg(feature = "keyexpr-includes")]
         {
-            declared.entries().any(|(_, candidate)| {
+            IdRead::into_entries(*declared).any(|(_, candidate)| {
                 (candidate.complete() || !complete_required)
                     && crate::keyexpr_match::keyexpr_includes(candidate.keyexpr(), keyexpr)
             })
@@ -264,7 +266,7 @@ where
             false
         }
     } else {
-        declared.entries().any(|(_, candidate)| {
+        IdRead::into_entries(*declared).any(|(_, candidate)| {
             crate::keyexpr_match::keyexpr_intersects(candidate.keyexpr(), keyexpr)
         })
     }
@@ -487,7 +489,7 @@ impl RemoteQueryablePeer<crate::bounded::Lent> {
             crate::row_pool::Keyed<DeclaredQueryable<crate::bounded::Lent>>,
         >,
     ) {
-        self.declared.keep_rows_in(rows);
+        self.declared.attach(&rows);
     }
 
     /// Keep the repeats of the queryables the peer declares from here on in rows of `repeats`, the
@@ -497,7 +499,7 @@ impl RemoteQueryablePeer<crate::bounded::Lent> {
         &mut self,
         repeats: crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>,
     ) {
-        self.aliases.keep_rows_in(repeats);
+        self.aliases.attach(&repeats);
     }
 }
 
@@ -530,7 +532,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// declared at all.
     #[cfg(feature = "storage-profile")]
     pub fn declared_count(&self) -> usize {
-        self.declared.count()
+        Self::declared_ref(&self.declared, &self.keys).count()
     }
 
     /// R288 — iterate over currently-declared peer queryables as
@@ -539,8 +541,8 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// `has_matching` accessor below is the production consult path.
     #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
-        self.declared
-            .entries()
+        Self::declared_ref(&self.declared, &self.keys)
+            .into_entries()
             .map(|(id, q)| (id, q.keyexpr.as_ref()))
     }
 
@@ -550,13 +552,15 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     pub fn iter_declared_held(
         &self,
     ) -> impl Iterator<Item = (u64, &str, Option<&crate::key_arena::KeyRef>)> + '_ {
-        self.declared.entries().map(|(id, q)| {
-            (
-                id,
-                q.keyexpr.as_ref(),
-                crate::bounded::KeyBacking::held(&q.keyexpr),
-            )
-        })
+        Self::declared_ref(&self.declared, &self.keys)
+            .into_entries()
+            .map(|(id, q)| {
+                (
+                    id,
+                    q.keyexpr.as_ref(),
+                    crate::bounded::KeyBacking::held(&q.keyexpr),
+                )
+            })
     }
 
     /// R311y797 — [`Self::iter_declared`] carrying the third fact the
@@ -566,8 +570,8 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// and would otherwise have to destructure a flag it ignores.
     #[cfg(feature = "storage-profile")]
     pub fn iter_declared_info(&self) -> impl Iterator<Item = (u64, &str, bool)> + '_ {
-        self.declared
-            .entries()
+        Self::declared_ref(&self.declared, &self.keys)
+            .into_entries()
             .map(|(id, q)| (id, q.keyexpr.as_ref(), q.complete))
     }
 
@@ -598,9 +602,11 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     }
 
     /// Keep the keys of the rows the peer declares from here on in `keys`: the session's key
-    /// arena, on the lent policy. The rows already held keep theirs.
+    /// arena, on the lent policy. Rows lent from the space the keys before name are given back
+    /// first, through them, as no other keys reach them; rows a table keeps itself are kept.
     #[cfg(feature = "storage-profile")]
     pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        self.release();
         self.keys = keys;
     }
 
@@ -617,7 +623,9 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// the growable backing while no quota is stated, as its room refuses nothing.
     #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
-        self.declared.refusals().saturating_add(self.oversize)
+        Self::declared_ref(&self.declared, &self.keys)
+            .refusals()
+            .saturating_add(self.oversize)
     }
 
     /// Backbone for `Querier::get_matching_status` (R288 surfaced
@@ -655,7 +663,8 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// registry now stores.
     #[cfg(feature = "storage-profile")]
     pub fn has_matching(&self, query_keyexpr: &str) -> bool {
-        declared_answers_for(&self.declared, query_keyexpr, Locality::Any, false, false)
+        let declared = Self::declared_ref(&self.declared, &self.keys);
+        declared_answers_for(&declared, query_keyexpr, Locality::Any, false, false)
     }
 
     /// Whether a queryable the peer declared answers a querier on `query_keyexpr` that admits
@@ -664,7 +673,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     #[cfg(feature = "storage-profile")]
     pub fn answers_query(&self, query_keyexpr: &str, complete_required: bool) -> bool {
         declared_answers_for(
-            &self.declared,
+            &Self::declared_ref(&self.declared, &self.keys),
             query_keyexpr,
             Locality::Remote,
             complete_required,
@@ -679,7 +688,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// upstream sites.
     #[cfg(feature = "alloc")]
     pub fn has_matching_for(&self, criterion: &QuerierCriterion) -> bool {
-        declared_answers(&self.declared, criterion)
+        declared_answers(&Self::declared_ref(&self.declared, &self.keys), criterion)
     }
 
     /// [`Self::has_matching_for`] over the querier's own knobs, the keyexpr borrowed: a poll
@@ -693,7 +702,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
         remote_includes: bool,
     ) -> bool {
         declared_answers_for(
-            &self.declared,
+            &Self::declared_ref(&self.declared, &self.keys),
             keyexpr,
             locality,
             complete_required,
@@ -705,10 +714,14 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// Returns how many declarations were dropped.
     #[cfg(feature = "storage-profile")]
     pub fn forget(&mut self) -> usize {
-        let dropped = self.declared.count();
-        self.declared.reset();
+        let dropped = {
+            let mut declared = Self::declared_mut(&mut self.declared, &self.keys);
+            let dropped = declared.count();
+            declared.reset();
+            dropped
+        };
         #[cfg(feature = "alloc")]
-        self.aliases.clear();
+        Self::aliases_mut(&mut self.aliases, &self.keys).clear();
         self.changed();
         dropped
     }
@@ -721,10 +734,87 @@ impl<P: Storage> RemoteQueryablePeer<P> {
         feature = "codec-declare"
     ))]
     fn told_as(&self, key: &str, complete: bool) -> Option<u64> {
-        self.declared
-            .entries()
+        Self::declared_ref(&self.declared, &self.keys)
+            .into_entries()
             .find(|(_, held)| held.complete == complete && held.keyexpr.as_ref() == key)
-            .map(|(other, _)| self.aliases.told_as(other).unwrap_or(other))
+            .map(|(other, _)| {
+                Self::aliases_ref(&self.aliases, &self.keys)
+                    .told_as(other)
+                    .unwrap_or(other)
+            })
+    }
+}
+
+/// The peer's tables lent the space its keys name for each: the one place a view of each is made.
+/// A table and the keys are borrowed apart, so the peer's other fields stay usable beside a view.
+#[cfg(feature = "storage-profile")]
+impl<P: Storage> RemoteQueryablePeer<P> {
+    /// The declarations lent their space, to bind and unbind.
+    fn declared_mut<'a>(
+        declared: &'a mut DeclaredQueryables<P>,
+        keys: &'a P::Keys,
+    ) -> <DeclaredQueryables<P> as PeerIds<DeclaredQueryable<P>, P::Keys>>::Mut<'a> {
+        // SAFETY: the peer attaches each of its tables only to the space its keys name for that
+        // table's slot (`keep_rows_in`, `keep_repeat_rows_in`), and `keep_keys_in` gives every row
+        // back through the old keys before it changes them, so the keys lend each table the space
+        // it was attached to.
+        unsafe { PeerIds::lend(declared, keys, PeerSlot::Queryables) }
+    }
+
+    /// The declarations lent their space, to read.
+    fn declared_ref<'a>(
+        declared: &'a DeclaredQueryables<P>,
+        keys: &'a P::Keys,
+    ) -> <DeclaredQueryables<P> as PeerIds<DeclaredQueryable<P>, P::Keys>>::Ref<'a> {
+        // SAFETY: as `declared_mut`'s.
+        unsafe { PeerIds::lend_ref(declared, keys, PeerSlot::Queryables) }
+    }
+
+    /// The repeats lent their space, to record and forget.
+    #[cfg(feature = "alloc")]
+    fn aliases_mut<'a>(
+        aliases: &'a mut crate::id_map::DeclaredAliases<P>,
+        keys: &'a P::Keys,
+    ) -> crate::id_map::LentAliases<'a, P> {
+        // SAFETY: as `declared_mut`'s.
+        unsafe { aliases.lend(keys, PeerSlot::QueryableRepeats) }
+    }
+
+    /// The repeats lent their space, to read.
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        feature = "codec-declare"
+    ))]
+    fn aliases_ref<'a>(
+        aliases: &'a crate::id_map::DeclaredAliases<P>,
+        keys: &'a P::Keys,
+    ) -> crate::id_map::LentAliasesRef<'a, P> {
+        // SAFETY: as `declared_mut`'s.
+        unsafe { aliases.lend_ref(keys, PeerSlot::QueryableRepeats) }
+    }
+
+    /// Give every lent row back through the keys that name its space; rows a table keeps itself
+    /// are kept.
+    fn release(&mut self) {
+        // SAFETY: as `declared_mut`'s.
+        unsafe {
+            PeerIds::release(&mut self.declared, &self.keys, PeerSlot::Queryables);
+        }
+        // SAFETY: as `declared_mut`'s.
+        #[cfg(feature = "alloc")]
+        unsafe {
+            self.aliases.release(&self.keys, PeerSlot::QueryableRepeats);
+        }
+    }
+}
+
+/// The rows of a lent table lie in the session's space, which the table cannot reach without the
+/// peer's keys: they are given back here, through them, as the table itself gives nothing back.
+#[cfg(feature = "storage-profile")]
+impl<P: Storage> Drop for RemoteQueryablePeer<P> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -1132,8 +1222,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         peer: &RemoteQueryablePeer<Q>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) -> usize {
+        let held = RemoteQueryablePeer::<Q>::declared_ref(&peer.declared, &peer.keys);
         self.matching_watches
-            .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c))
+            .reevaluate(|c| declared_answers(&held, c) || local_matching(c))
     }
 
     /// R311y799 — the queryable-plane twin of
@@ -1152,8 +1243,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         let _ = &local_matching;
         let dropped = peer.forget();
         #[cfg(feature = "session-matching")]
-        self.matching_watches
-            .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
+        {
+            let held = RemoteQueryablePeer::<Q>::declared_ref(&peer.declared, &peer.keys);
+            self.matching_watches
+                .reevaluate(|c| declared_answers(&held, c) || local_matching(c));
+        }
         dropped
     }
 
@@ -1348,7 +1442,8 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
             // No room where the rows keep their keys: dropped and counted as a declaration the
             // table has no room for, as zenoh-pico drops one its heap cannot hold.
             Err(KeyUnkept::NoRoom) => {
-                peer.declared.count_refused();
+                RemoteQueryablePeer::<Q>::declared_mut(&mut peer.declared, &peer.keys)
+                    .count_refused();
                 return;
             }
         };
@@ -1357,8 +1452,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         // Past the room or the quota: refused and counted by the table, and announced to no
         // observer, so what they are told is what the table holds.
         let quota = peer.quota;
-        if peer
-            .declared
+        if RemoteQueryablePeer::<Q>::declared_mut(&mut peer.declared, &peer.keys)
             .bind_within(
                 id,
                 DeclaredQueryable {
@@ -1378,12 +1472,13 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         match told_as {
             Some(told) => {
                 if told != id {
-                    peer.aliases.insert(id, told);
+                    RemoteQueryablePeer::<Q>::aliases_mut(&mut peer.aliases, &peer.keys)
+                        .insert(id, told);
                 }
                 return;
             }
             None => {
-                peer.aliases.remove(id);
+                RemoteQueryablePeer::<Q>::aliases_mut(&mut peer.aliases, &peer.keys).remove(id);
             }
         }
         // The key as the row just bound keeps it, so a holder that reads it past the call holds
@@ -1391,8 +1486,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         let view = BorrowedDecl {
             id,
             keyexpr: resolved,
-            held: peer
-                .declared
+            held: RemoteQueryablePeer::<Q>::declared_ref(&peer.declared, &peer.keys)
                 .find(id)
                 .and_then(|row| crate::bounded::KeyBacking::held(&row.keyexpr)),
         };
@@ -1400,8 +1494,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         // R311kh — membership changed: flip-fire the matching
         // watches (disjoint field borrows via the free-fn consult).
         #[cfg(feature = "session-matching")]
-        self.matching_watches
-            .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
+        {
+            let held = RemoteQueryablePeer::<Q>::declared_ref(&peer.declared, &peer.keys);
+            self.matching_watches
+                .reevaluate(|c| declared_answers(&held, c) || local_matching(c));
+        }
     }
 
     /// What an undeclared peer queryable does, whichever form carried the
@@ -1420,20 +1517,24 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         // Whether another declaration still names the queryable `id` named, read before the row
         // goes and by reference (the receive of a record costs the heap nothing).
         #[cfg(feature = "alloc")]
-        let remains = peer.declared.find(id).is_some_and(|row| {
-            peer.declared.entries().any(|(other, held)| {
-                other != id
-                    && held.complete == row.complete
-                    && held.keyexpr.as_ref() == row.keyexpr.as_ref()
+        let remains = {
+            let declared = RemoteQueryablePeer::<Q>::declared_ref(&peer.declared, &peer.keys);
+            declared.find(id).is_some_and(|row| {
+                declared.into_entries().any(|(other, held)| {
+                    other != id
+                        && held.complete == row.complete
+                        && held.keyexpr.as_ref() == row.keyexpr.as_ref()
+                })
             })
-        });
-        peer.declared.unbind(id);
+        };
+        RemoteQueryablePeer::<Q>::declared_mut(&mut peer.declared, &peer.keys).unbind(id);
         peer.changed();
         // Told gone when the last declaration of the queryable goes, under the id it was told
         // by (`RemoteSubscriberPeer::aliases` for the reading).
         #[cfg(feature = "alloc")]
         let report = {
-            let told = peer.aliases.remove(id);
+            let told =
+                RemoteQueryablePeer::<Q>::aliases_mut(&mut peer.aliases, &peer.keys).remove(id);
             if remains {
                 return;
             }
@@ -1444,8 +1545,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         self.dispatch_undeclared(report);
         // R311kh — see `apply_declared`.
         #[cfg(feature = "session-matching")]
-        self.matching_watches
-            .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
+        {
+            let held = RemoteQueryablePeer::<Q>::declared_ref(&peer.declared, &peer.keys);
+            self.matching_watches
+                .reevaluate(|c| declared_answers(&held, c) || local_matching(c));
+        }
     }
 
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
