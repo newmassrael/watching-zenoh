@@ -94,7 +94,7 @@ pub(crate) fn state_over(text: Option<&str>, stated: &mut Stated) -> Result<(), 
         .unwrap_or_default()
         .as_bytes()
         .split(|byte| *byte == b',')
-        .map(<[u8]>::trim_ascii)
+        .map(trimmed)
         .filter(|item| !item.is_empty())
     {
         let equals = item
@@ -103,14 +103,19 @@ pub(crate) fn state_over(text: Option<&str>, stated: &mut Stated) -> Result<(), 
             .ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
         let (name, count) = item.split_at(equals);
         let count = count.get(1..).unwrap_or_default();
-        // The item is trimmed at both ends, so a name has spaces only before the `=` and a count
-        // only after it.
-        let count = count_of(count.trim_ascii_start()).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        if !stated.select(name.trim_ascii_end(), count) {
+        let count = count_of(trimmed(count)).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
+        if !stated.select(trimmed(name), count) {
             return Err(Z_ERR_CONFIG_INVALID_VALUE);
         }
     }
     Ok(())
+}
+
+/// `bytes` without the ASCII whitespace at either end. Out of line: an item, its name and its
+/// count are each trimmed, and inlined each trim carried its two loops of its own.
+#[inline(never)]
+fn trimmed(bytes: &[u8]) -> &[u8] {
+    bytes.trim_ascii()
 }
 
 /// Whether `name` spells the id `id`, byte for byte: a name that is no text spells none.
@@ -158,7 +163,7 @@ fn count_of(digits: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_of, names, position_named, state_over, Stated};
+    use super::{count_of, names, position_named, state_over, trimmed, Stated};
     use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
     use wz_session_core::limit_binding::Quota;
     use wz_session_core::limits::SessionLimits;
@@ -366,6 +371,17 @@ mod tests {
             assert_eq!(state(Some(spaced.as_str())), stated, "{name}");
         }
         assert!(stated_any, "an opening count of an entity is stated");
+    }
+
+    /// A trim takes the ASCII whitespace off both ends and keeps what lies between, so a name
+    /// with a space inside it is still no id. Turned red by a trim of one end only, or of every
+    /// space.
+    #[test]
+    fn a_trim_takes_only_the_whitespace_at_the_ends() {
+        assert_eq!(trimmed(b" \tMAX PUBLISHERS\t "), b"MAX PUBLISHERS");
+        assert_eq!(trimmed(b"2 \t"), b"2");
+        assert_eq!(trimmed(b" \t "), b"");
+        assert_eq!(trimmed(b""), b"");
     }
 
     /// A text that states nothing, and no text, leave the statement as it is. Turned red by a
