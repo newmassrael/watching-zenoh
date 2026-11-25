@@ -4892,7 +4892,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         })?;
         links.lend_buffers(lent.transport.links);
         #[cfg(feature = "listen")]
-        links.lend_port_rows(lent.transport.port_rows);
+        links
+            .lend_port_rows(lent.transport.port_rows)
+            .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
         if let Some(driver_cells) = lent.transport.cells.driver {
             links.lend_cells(driver_cells);
         }

@@ -1030,8 +1030,8 @@ where
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) {
-        self.links.lend_port_rows(rows);
+    ) -> Result<(), usize> {
+        self.links.lend_port_rows(rows)
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
@@ -1053,9 +1053,12 @@ where
             at,
             shape: self.shape,
             waiting: RefCell::new(None),
-            home: CellRc::on_heap(<N::Shared as CountKind>::new_local(LineHome::new(
+            // A heap with no room for the home refuses the listener, as a stack with no line
+            // left does.
+            home: CellRc::try_on_heap(<N::Shared as CountKind>::new_local(LineHome::new(
                 !at.options.release_on_close,
-            ))),
+            )))
+            .ok_or(LinkOpenError::Exhausted)?,
         }))
     }
 
@@ -1422,7 +1425,8 @@ mod tests {
         let closed = Rc::new(Cell::new(0));
         for keep in [true, false] {
             let home: HomeOf<Closes, OneTask> =
-                CellRc::on_heap(OneTask::new_local(LineHome::new(keep)));
+                CellRc::try_on_heap(OneTask::new_local(LineHome::new(keep)))
+                    .expect("the heap has room");
             let before = closed.get();
             let lease = LineLease::homed(Closes(closed.clone()), home.clone());
             let lent = OneTask::with_local::<LineHome<Closes>, _>(&home, |home| home.free());

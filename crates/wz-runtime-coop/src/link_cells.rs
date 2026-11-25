@@ -481,20 +481,6 @@ const fn fits_layout(size: usize, layout: Layout) -> bool {
 }
 
 impl<K, N: CountKind> CellRc<K, N> {
-    /// `value` in a cell of its own on the heap, its handles counted by `N`. A heap that refuses
-    /// the cell ends the program, as a `Box` of the value would.
-    pub fn on_heap(value: K) -> Self {
-        let layout = Layout::new::<Slot<K, N::Flag>>();
-        let Some(head) =
-            heap_head::<N::Flag>(layout, Slot::<K, N::Flag>::WHOLE, Slot::<K, N::Flag>::PLACE)
-        else {
-            handle_alloc_error(layout)
-        };
-        // SAFETY: the head heads a cell of `Slot<K, N::Flag>`'s layout, written with one handle,
-        // whose value this writes.
-        unsafe { Self::fill(head, value) }
-    }
-
     /// `value` in a cell of its own on the heap, its handles counted by `N`. `None`, with
     /// `value` let go of, when the heap refuses the cell: the program goes on.
     pub fn try_on_heap(value: K) -> Option<Self> {
@@ -560,15 +546,6 @@ impl<K, N: CountKind> CellRc<K, N> {
             head,
             _owns: PhantomData,
         })
-    }
-}
-
-#[cfg(target_has_atomic = "8")]
-impl<K> CellRc<K, Atomic> {
-    /// `value` in a cell of its own on the heap, its handles counted as an `Arc`'s are: the
-    /// handle of a value several threads hold ([`Atomic`]).
-    pub fn shared(value: K) -> Self {
-        Self::on_heap(value)
     }
 }
 
@@ -1408,7 +1385,8 @@ mod tests {
     fn atomic_handles_let_go_on_several_threads_drop_the_value_once() {
         extern crate std;
         let drops = alloc::sync::Arc::new(AtomicUsize::new(0));
-        let handle = CellRc::shared(DropsOnce(drops.clone()));
+        let handle =
+            CellRc::<_, Atomic>::try_on_heap(DropsOnce(drops.clone())).expect("the heap has room");
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 let mine = handle.clone();

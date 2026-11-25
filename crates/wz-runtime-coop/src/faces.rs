@@ -1975,7 +1975,9 @@ mod tests {
     #[test]
     fn a_wire_ends_its_link_by_the_end_it_was_made_with() {
         let end = Rc::new(HeldEnd::default());
-        let link = CellRc::boxed(Quiet { holds: false }).into_link();
+        let link = CellRc::try_boxed(Quiet { holds: false })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         let wire = Wire::new(
             session(true, None),

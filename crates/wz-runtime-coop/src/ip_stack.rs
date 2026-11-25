@@ -756,13 +756,15 @@ where
     }
 
     /// Every udp port these links listen on from now on keeps its peers and their datagrams in
-    /// `rows`, which the ports share.
+    /// `rows`, which the ports share through one book on the heap: the bytes of its cell when the
+    /// heap refuses it, and the links keep no rows.
     #[cfg(feature = "udp-listen")]
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) {
-        self.ports = Some(crate::udp_link::shared_book::<N::Shared>(Some(rows)));
+    ) -> Result<(), usize> {
+        self.ports = Some(crate::udp_link::shared_book::<N::Shared>(Some(rows))?);
+        Ok(())
     }
 
     /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
@@ -814,18 +816,20 @@ where
                 let socket = U::bind(ip.at).map_err(bind_refused::<U>)?;
                 // A session that lent its ports a table of datagram slots has the port read into
                 // them, and a port that finds none free to read into is not opened; without the
-                // table the port reads into memory of its own.
-                let book = self
-                    .ports
-                    .clone()
-                    .unwrap_or_else(|| crate::udp_link::shared_book::<N::Shared>(None));
+                // table the port reads into memory of its own. A heap with no room for the book or
+                // the port's cell refuses the listener, as a stack with no port left does.
+                let book = match &self.ports {
+                    Some(book) => book.clone(),
+                    None => crate::udp_link::shared_book::<N::Shared>(None)
+                        .map_err(|_| LinkOpenError::Exhausted)?,
+                };
                 let port = match self.shape.lent.and_then(|tables| tables.port_rx()) {
                     Some(table) => UdpPort::lent_in_book(socket, table, &book)
                         .ok_or(LinkOpenError::Exhausted)?,
                     None => UdpPort::in_book(socket, self.shape.datagram_rx, &book),
                 };
                 Ok(Box::new(IpUdpListener {
-                    port: CellRc::on_heap(port),
+                    port: CellRc::try_on_heap(port).ok_or(LinkOpenError::Exhausted)?,
                     shape: self.shape,
                 }))
             }
@@ -2925,7 +2929,8 @@ mod tests {
                 sent: Rc::clone(&sent),
             };
             let listener = IpUdpListener {
-                port: CellRc::on_heap(UdpPort::new(socket, 2048)),
+                port: CellRc::try_on_heap(UdpPort::new(socket, 2048).expect("the heap has room"))
+                    .expect("the heap has room"),
                 shape: LinkShape::default(),
             };
             (listener, queued, sent)

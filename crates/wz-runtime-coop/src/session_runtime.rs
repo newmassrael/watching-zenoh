@@ -272,11 +272,8 @@ pub trait EntropyCount: CountKind {
     /// The source as a handle of this count reaches it.
     type Held: ?Sized + DrawsEntropy + 'static;
 
-    /// `source` on the heap, behind the first handle of this count.
-    fn hold<S: EntropySource + Send + 'static>(source: S) -> CellRc<Self::Held, Self>;
-
-    /// [`Self::hold`], or the bytes of the cell the heap refused, `source` let go of: what an
-    /// open that answers a full heap holds its source by.
+    /// `source` on the heap, behind the first handle of this count, or the bytes of the cell the
+    /// heap refused, `source` let go of: a session's open answers a full heap.
     fn try_hold<S: EntropySource + Send + 'static>(
         source: S,
     ) -> Result<CellRc<Self::Held, Self>, usize>;
@@ -285,10 +282,6 @@ pub trait EntropyCount: CountKind {
 #[cfg(not(feature = "session-slot"))]
 impl EntropyCount for OneTask {
     type Held = dyn DrawsEntropy;
-
-    fn hold<S: EntropySource + Send + 'static>(source: S) -> CellRc<dyn DrawsEntropy> {
-        held_by_one_task(source)
-    }
 
     fn try_hold<S: EntropySource + Send + 'static>(
         source: S,
@@ -305,16 +298,6 @@ impl EntropyCount for OneTask {
 impl EntropyCount for crate::link_cells::Atomic {
     type Held = dyn DrawsEntropy + Send + Sync;
 
-    fn hold<S: EntropySource + Send + 'static>(
-        source: S,
-    ) -> CellRc<dyn DrawsEntropy + Send + Sync, Self> {
-        let held = CellRc::<_, Self>::on_heap(crate::cs::HostMutex::new(source));
-        // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
-        unsafe {
-            held.unsize(|value| -> core::ptr::NonNull<dyn DrawsEntropy + Send + Sync> { value })
-        }
-    }
-
     fn try_hold<S: EntropySource + Send + 'static>(
         source: S,
     ) -> Result<CellRc<dyn DrawsEntropy + Send + Sync, Self>, usize> {
@@ -328,16 +311,8 @@ impl EntropyCount for crate::link_cells::Atomic {
     }
 }
 
-/// `source` behind the first handle of one task's count: what a source that is not `Send` (a
-/// board's) is held by.
-#[cfg(not(feature = "session-slot"))]
-fn held_by_one_task<S: EntropySource + 'static>(source: S) -> CellRc<dyn DrawsEntropy> {
-    let held = CellRc::<_, OneTask>::on_heap(core::cell::RefCell::new(source));
-    // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
-    unsafe { held.unsize(|value| -> core::ptr::NonNull<dyn DrawsEntropy> { value }) }
-}
-
-/// [`held_by_one_task`], or the bytes of the cell the heap refused, `source` let go of.
+/// `source` behind the first handle of one task's count, what a source that is not `Send` (a
+/// board's) is held by, or the bytes of the cell the heap refused, `source` let go of.
 #[cfg(not(feature = "session-slot"))]
 fn try_held_by_one_task<S: EntropySource + 'static>(
     source: S,
@@ -354,7 +329,7 @@ fn try_held_by_one_task<S: EntropySource + 'static>(
 /// nonce and challenges from it. The board supplies its source once, as a TYPE, and a link's
 /// bundle keeps none. `N` counts the handles as the session's lock kind counts what its faces
 /// share (`LockKind::SharedCount`): one task's need no atomics and take any source ([`Self::try_new`]); handles
-/// that cross threads take a source that is `Send` ([`Self::held`]).
+/// that cross threads take a source that is `Send` ([`Self::try_held`]).
 #[cfg(not(feature = "session-slot"))]
 pub struct SessionEntropy<N: EntropyCount = OneTask>(CellRc<N::Held, N>);
 
@@ -377,13 +352,9 @@ impl SessionEntropy {
 
 #[cfg(not(feature = "session-slot"))]
 impl<N: EntropyCount> SessionEntropy<N> {
-    /// The handle on `source`, the session's one source, counted as `N` counts.
-    pub fn held(source: impl EntropySource + Send + 'static) -> Self {
-        Self(N::hold(source))
-    }
-
-    /// [`Self::held`], or the bytes of the cell the heap refused, `source` let go of: a heap
-    /// with no room for the cell is answered, and does not end the program.
+    /// The handle on `source`, the session's one source, counted as `N` counts, or the bytes of
+    /// the cell the heap refused, `source` let go of: a heap with no room for the cell is
+    /// answered, and does not end the program.
     pub fn try_held(source: impl EntropySource + Send + 'static) -> Result<Self, usize> {
         N::try_hold(source).map(Self)
     }
@@ -659,8 +630,8 @@ mod cookie_nonce_draw_tests {
     }
 
     /// A source whose cell the heap has no room for is no handle, and with room it is the handle
-    /// a session draws from. Turned red by `try_held` made through `EntropyCount::hold`, which
-    /// ends the process on the refusal.
+    /// a session draws from. Turned red by `try_held` made over a cell the heap cannot refuse,
+    /// which ends the process on the refusal.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_source_the_heap_has_no_room_for_is_no_handle() {
@@ -685,7 +656,8 @@ mod cookie_nonce_draw_tests {
 
         let mut probe = Counting(0);
         let (first, second) = (probe.try_next_u64().unwrap(), probe.try_next_u64().unwrap());
-        let mut here = SessionEntropy::<crate::link_cells::Atomic>::held(Counting(0));
+        let mut here = SessionEntropy::<crate::link_cells::Atomic>::try_held(Counting(0))
+            .expect("room for the cell");
         let mut there = here.clone();
         let drawn = std::thread::spawn(move || there.try_next_u64().is_ok_and(|n| n == first))
             .join()

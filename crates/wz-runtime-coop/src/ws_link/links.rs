@@ -511,8 +511,8 @@ where
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) {
-        self.links.lend_port_rows(rows);
+    ) -> Result<(), usize> {
+        self.links.lend_port_rows(rows)
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {

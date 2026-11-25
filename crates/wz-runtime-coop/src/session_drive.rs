@@ -1114,14 +1114,16 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
 
     /// The rows every udp port the stack opens from now on keeps its peers and the datagrams it
     /// sorted for them in, for the session the ports serve: a peer or a datagram the rows have no
-    /// room for is dropped and counted, and none is kept on the heap. The default ignores them, as
-    /// a stack that opens no udp port does.
+    /// room for is dropped and counted, and none is kept on the heap. The bytes the heap refused
+    /// when the stack cannot hold the rows, which refuses the session's open. The default ignores
+    /// them, as a stack that opens no udp port does.
     #[cfg(feature = "udp-listen")]
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) {
+    ) -> Result<(), usize> {
         let _ = rows;
+        Ok(())
     }
 
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the

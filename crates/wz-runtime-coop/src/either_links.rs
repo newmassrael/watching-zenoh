@@ -274,7 +274,7 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) {
+    ) -> Result<(), usize> {
         on_side!(EitherLinks, self, links => links.lend_port_rows(rows))
     }
 

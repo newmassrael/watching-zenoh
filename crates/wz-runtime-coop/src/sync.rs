@@ -667,9 +667,11 @@ mod many_threads_tests {
     #[test]
     fn a_session_of_several_threads_counts_shared_handles_atomically() {
         use crate::link_cells::{Atomic, CellRc, OneFace};
-        let handle: CellRc<u32, <Kind as LockKind>::SharedCount> = CellRc::<u32, Atomic>::shared(5);
+        let handle: CellRc<u32, <Kind as LockKind>::SharedCount> =
+            CellRc::<u32, Atomic>::try_on_heap(5).expect("the heap has room");
         assert_eq!(*handle, 5);
-        let link: CellRc<u32, <Kind as LockKind>::LinkCount> = CellRc::<u32, OneFace>::on_heap(6);
+        let link: CellRc<u32, <Kind as LockKind>::LinkCount> =
+            CellRc::<u32, OneFace>::try_on_heap(6).expect("the heap has room");
         assert_eq!(*link, 6);
     }
 
