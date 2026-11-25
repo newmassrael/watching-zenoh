@@ -2128,6 +2128,10 @@ impl<C: ClockSource + 'static, L: CoopLinks> Face<C, L> {
 struct UpFacts {
     /// The zid the link's peer announced.
     peer: Option<SessionZid>,
+    /// The link's generation, which the queries it carries are answered under: how an answer
+    /// finds its link without a lend of it.
+    #[cfg(feature = "queryable")]
+    generation: u64,
     /// Whether a step of the link was seen to end its session: the face no longer stands.
     ended: bool,
     /// The face's first row as its watchers are told it (`FaceLinkRow::each_of_actions`): a
@@ -2151,6 +2155,8 @@ impl UpFacts {
         };
         Self {
             peer: session.actions.peer_session_zid(),
+            #[cfg(feature = "queryable")]
+            generation: session.generation,
             ended: false,
             #[cfg(feature = "connectivity")]
             row,
@@ -2251,11 +2257,6 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
 impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<C> {
     fn actions(&self) -> &LinkHandle<C> {
         &self.actions
-    }
-
-    #[cfg(feature = "queryable")]
-    fn answers_as(&self, generation: u64) -> bool {
-        self.generation == generation
     }
 }
 
@@ -4450,6 +4451,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .faces()
             .find_map(|face| match &face.link {
                 Link::Up(wire) if face.id == id => Some(wire),
+                _ => None,
+            })
+    }
+
+    /// The link of the face a query that came in under `generation` came over, while it is up:
+    /// where the query's answer goes. Found by the face's record of the link, as a lend of the
+    /// link may find it held by the face's own read.
+    #[cfg(feature = "queryable")]
+    fn answer_wire(&self, generation: u64) -> Option<&Wire<C>> {
+        self.transport
+            .links
+            .faces()
+            .find_map(|face| match (&face.link, &face.facts) {
+                (Link::Up(wire), Some(facts)) if facts.generation == generation => Some(wire),
                 _ => None,
             })
     }
@@ -7063,8 +7078,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             return Ok(());
         }
-        if let Some(route) = core.0.transport.answer_route(generation) {
-            route.send_reply_parts(parts);
+        #[cfg(feature = "group")]
+        if let Some(sink) = core.0.transport.group_answer_sink(generation) {
+            sink.send_reply_parts(parts);
+            return Ok(());
+        }
+        if let Some(link) = core.0.answer_wire(generation) {
+            send_on(link, 0, &|actions: &LinkActions<C>| {
+                wz_session_core::response_sink::ResponseSink::send_reply_parts(actions, parts);
+                true
+            });
         }
         Ok(())
     }
@@ -7109,8 +7132,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.deliver();
             return;
         }
-        if let (Some(qos), Some(route)) = (due, core.0.transport.answer_route(generation)) {
-            route.send_response_final(rid, qos);
+        #[cfg(feature = "group")]
+        let due = match (due, core.0.transport.group_answer_sink(generation)) {
+            (Some(qos), Some(sink)) => {
+                sink.send_response_final(rid, qos);
+                None
+            }
+            (due, _) => due,
+        };
+        if let (Some(qos), Some(link)) = (due, core.0.answer_wire(generation)) {
+            send_on(link, 0, &|actions: &LinkActions<C>| {
+                actions.send_response_final(rid, qos);
+                true
+            });
         }
         // A group's sink only stages: a kept query answered from the program's own thread would
         // otherwise leave when the read task's wait ends, up to the group's tick a leg.
@@ -7392,10 +7426,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let mut asked = None;
         while let Some(face) = core.transport.next_up_face(true, asked) {
             asked = Some(face);
-            if let Some(actions) = core.transport.up_actions(face) {
-                actions
-                    .next_outbound_interest_id
-                    .store(u64::from(u32::MAX) + 1, Ordering::Relaxed);
+            if let Some(link) = core.up_wire(face) {
+                lend_actions(link, |actions: &LinkActions<C>| {
+                    actions
+                        .next_outbound_interest_id
+                        .store(u64::from(u32::MAX) + 1, Ordering::Relaxed);
+                });
             }
         }
     }

@@ -27,7 +27,7 @@ use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link_admission::LinkAdmission;
 #[cfg(feature = "listen")]
 use wz_session_core::placed::PlacedRef;
-#[cfg(feature = "queryable")]
+#[cfg(all(feature = "queryable", feature = "group"))]
 use wz_session_core::response_sink::ResponseSink;
 use wz_session_core::session_actions::{HalvesMaking, LinkState, SessionCore, SessionLinkActions};
 use wz_session_core::session_init_params::SessionInitParams;
@@ -398,6 +398,16 @@ impl<T: TransportFaces> TransportState<T> {
         {
             group.write_staged();
         }
+    }
+
+    /// The sink an answer to a query that came in on a group under `generation` goes through,
+    /// while the group's session runs. A query that came in on a link is answered over that link,
+    /// which the session finds by its own record of the face.
+    #[cfg(all(feature = "queryable", feature = "group"))]
+    pub fn group_answer_sink(&self, generation: u64) -> Option<&dyn ResponseSink> {
+        self.groups
+            .iter()
+            .find_map(|group| group.answer_sink(generation))
     }
 
     /// Begin a dial of `endpoint`, which the network answers later
@@ -1047,35 +1057,5 @@ where
                 Link::Up(wire) => Some((at, face.id(), wire.actions())),
                 _ => None,
             })
-    }
-
-    /// The actions of face `id` while its link is up.
-    #[cfg(feature = "query")]
-    pub fn up_actions(&self, id: FaceId) -> Option<&LinkHandle<T>> {
-        self.links.faces().find_map(|face| match face.link() {
-            Link::Up(wire) if face.id() == id => Some(wire.actions()),
-            _ => None,
-        })
-    }
-
-    /// Where an answer to a query that came in under `generation` goes: the link of that
-    /// generation while it is up, or the group the query came on while its session runs
-    /// (`group`). Either is the sink a reply and a Final are sent through.
-    #[cfg(feature = "queryable")]
-    pub fn answer_route(&self, generation: u64) -> Option<&dyn ResponseSink> {
-        #[cfg(feature = "group")]
-        if let Some(sink) = self
-            .groups
-            .iter()
-            .find_map(|group| group.answer_sink(generation))
-        {
-            return Some(sink);
-        }
-        self.links.faces().find_map(|face| match face.link() {
-            Link::Up(wire) if wire.answers_as(generation) => {
-                Some(&**wire.actions() as &dyn ResponseSink)
-            }
-            _ => None,
-        })
     }
 }

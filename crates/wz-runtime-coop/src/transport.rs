@@ -165,20 +165,13 @@ pub enum TransportRefusal {
 }
 
 /// What the transport reads of the session's half of a link beyond what its supervisor asks
-/// ([`FaceSession`]): the actions the session sends over the link through, and whether a query
-/// the link carried is answered over it. `K` is how the session's runtime locks what it lends.
+/// ([`FaceSession`]): the actions the session sends over the link through. `K` is how the
+/// session's runtime locks what it lends.
 pub trait TransportSession<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>:
     FaceSession
 {
     /// The actions of the link's session.
     fn actions(&self) -> &SessionHandle<C, dyn BoxedLinkDriver, K>;
-
-    /// Whether a query that came in under `generation` came over this link, so that its answer
-    /// goes back over it. A session that answers no query names no link for one.
-    fn answers_as(&self, generation: u64) -> bool {
-        let _ = generation;
-        false
-    }
 }
 
 /// What the session does in the making of each of its links' sessions, in the engine's own types
