@@ -35,8 +35,7 @@ use core::marker::PhantomData;
 use core::num::{NonZeroU16, NonZeroU32};
 
 use crate::bounded::{
-    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, SeqBacking, Storage, TableLender,
-    ARENA_ALIGN,
+    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Storage, TableLender, ARENA_ALIGN,
 };
 use core::ptr::NonNull;
 
@@ -212,8 +211,18 @@ struct Meta {
     state: State,
 }
 
-/// The slot the core took for a row: its place and generation, and whether it was added after
-/// every slot there was, so the rows' column takes one more place for its row.
+impl Meta {
+    /// A slot added after every slot there was, holding a row.
+    const ADDED: Self = Self {
+        generation: 0,
+        next: NIL,
+        pins: 0,
+        state: State::Live,
+    };
+}
+
+/// The slot the core took for a row: its place and generation, and whether it is one to add after
+/// every slot there is, so both columns take one more place for it.
 struct Taken {
     at: usize,
     generation: u16,
@@ -258,21 +267,20 @@ impl Core {
         }
     }
 
-    /// A live slot for a row: a free one, or else one added after every slot there is, its
-    /// metadata pushed, when the rows' column has a place for its row too (`rows_room`). `None`,
+    /// A live slot for a row: a free one, or else the one after every slot there is, counted
+    /// here and pushed by the caller, when both columns have a place for it (`room`). `None`,
     /// nothing taken, when the table is at its bound or has neither.
     ///
-    /// Generic over the metadata column's sequence alone, not over the rows' type or the bound:
-    /// on the lent policy that is one type for every table, so every table's insert calls this one
-    /// body, where each inlined the slot's bookkeeping of its own.
+    /// Untyped and over the column as a slice, so it is one body for every table of every policy
+    /// and bound, where each insert inlined the slot's bookkeeping of its own.
     #[inline(never)]
-    fn take_slot<S: SeqBacking<Meta>>(&mut self, meta: &mut S, rows_room: bool) -> Option<Taken> {
+    fn take_slot(&mut self, meta: &mut [Meta], room: bool) -> Option<Taken> {
         if self.held >= self.limit {
             return None;
         }
         if self.free != NIL {
             let at = usize::from(self.free);
-            let slot = meta.as_mut_slice().get_mut(at)?;
+            let slot = meta.get_mut(at)?;
             self.free = slot.next;
             slot.next = NIL;
             slot.pins = 0;
@@ -284,18 +292,11 @@ impl Core {
                 grown: false,
             });
         }
-        let at = meta.as_slice().len();
+        let at = meta.len();
         // A slot's index is a `u16` counted from one: the place past the last has none.
-        if at >= MAX_SLOTS || !rows_room {
+        if at >= MAX_SLOTS || !room {
             return None;
         }
-        meta.push(Meta {
-            generation: 0,
-            next: NIL,
-            pins: 0,
-            state: State::Live,
-        })
-        .ok()?;
         self.held = self.held.saturating_add(1);
         Some(Taken {
             at,
@@ -517,13 +518,14 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     pub fn insert(&mut self, value: T) -> Result<Handle<K>, CapacityFull<T>> {
         // The slot is found first and the row written once, whichever way it was found: a row
         // written in each way would be written twice in every caller of every row type.
-        let rows_room = self.rows.free_slots() != 0;
-        let Some(taken) = self.core.take_slot(self.meta.seq_mut(), rows_room) else {
+        let room = self.meta.free_slots() != 0 && self.rows.free_slots() != 0;
+        let Some(taken) = self.core.take_slot(&mut self.meta, room) else {
             return Err(CapacityFull(value));
         };
         if taken.grown {
-            // An empty place, so a refused push holds no value; the core added the slot only where
-            // the rows' column had room for it.
+            // Both columns were found to have a place, so neither push is refused; the row's is
+            // empty until the value is written once below.
+            let _ = self.meta.push(Meta::ADDED);
             let _ = self.rows.push(None);
         }
         match (

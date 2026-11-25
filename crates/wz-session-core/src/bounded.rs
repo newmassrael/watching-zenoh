@@ -862,13 +862,6 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
         self.inner.pop()
     }
 
-    /// The policy's sequence behind the table, for a body generic over the sequence alone and not
-    /// over `N`: on the lent policy every table of one element type has one, so such a body is one
-    /// copy for every bound.
-    pub(crate) fn seq_mut(&mut self) -> &mut P::Seq<T, N> {
-        &mut self.inner
-    }
-
     /// Remove and return the entry at `index`, the entries after it moving down so the order
     /// holds. A table whose index is its declaration order (a replay walks it by position) keeps
     /// it. Panics when `index` is out of bounds, as `Vec::remove` does.
