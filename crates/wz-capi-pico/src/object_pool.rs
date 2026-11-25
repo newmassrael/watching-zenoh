@@ -103,9 +103,9 @@ pub struct wz_ext_object_pool_counts_t {
     pub replies: usize,
     /// Owned queries, each holding its query open until it is dropped.
     pub queries: usize,
-    /// Not read: an owned payload (`z_owned_bytes_t`) lies in its own value and takes no slot of
-    /// the pools, only a payload block for its bytes. Kept so that a program's struct keeps its
-    /// layout.
+    /// Accepted with any value and of no effect: an owned payload (`z_owned_bytes_t`) lies in its
+    /// own value and takes no slot of the pools, only a payload block for its bytes. Kept so that a
+    /// program's struct keeps its layout and a program that states it is not refused.
     pub bytes: usize,
     /// Configs (`z_owned_config_t`), each from `z_config_default` or `z_config_clone` to its
     /// move into an open or a scout, or its drop.
@@ -519,6 +519,21 @@ mod tests {
                 link_events_listeners: 22,
             }
         );
+    }
+
+    /// The count of payloads is accepted whatever it is and changes nothing the counts make: a
+    /// payload takes no slot. Turned red by a `counts` that reads `bytes` into any count.
+    #[test]
+    fn the_count_of_payloads_changes_nothing() {
+        let none = wz_ext_object_pool_counts_t {
+            bytes: 0,
+            ..every_count(size_of::<wz_ext_object_pool_counts_t>())
+        };
+        let most = wz_ext_object_pool_counts_t {
+            bytes: usize::MAX,
+            ..none
+        };
+        assert_eq!(most.counts(), none.counts());
     }
 
     /// Counts with every field stated and a nonzero sentinel in each, as a program compiled with

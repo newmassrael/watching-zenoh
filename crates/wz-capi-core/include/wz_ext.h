@@ -2093,8 +2093,9 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t samples;
   size_t replies;
   size_t queries;
-  size_t bytes; /* not read: an owned payload lies in its own value, and
-                 * only its bytes take a payload block */
+  size_t bytes; /* accepted, any value, and has no effect: an owned
+                 * payload lies in its own value and takes no slot, only
+                 * a payload block for its bytes */
   size_t configs;
   size_t hellos;
   size_t payload_bytes; /* 0; any other value is refused with Z_EINVAL */
