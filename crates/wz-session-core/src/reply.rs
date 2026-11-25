@@ -1238,6 +1238,10 @@ struct Pending<C: ReplySink, P: Storage = Profile> {
 /// hard-capped table and the growable one.
 pub struct ReplyRegistry<C: ReplySink, P: Storage = Profile> {
     pending: BoundedVec<Pending<C, P>, { caps::MAX_PENDING_QUERIES }, P>,
+    /// No pending entry's deadline is before this ([`Self::due_ms`]): lowered as an entry with a
+    /// deadline is registered, worked out again by a sweep that ran. An entry that ended otherwise
+    /// leaves it where it was, which only brings a sweep that finds nothing forward.
+    due_ms: u64,
     /// The most queries the registry holds pending (`MAX_PENDING_QUERIES`): what the creator of
     /// the registry resolved ([`Self::limit_to`]), the build's value until it does. A growable
     /// table refuses nothing by its storage, so this is what bounds it; where the build fixes the
@@ -1272,6 +1276,7 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
     fn default() -> Self {
         Self {
             pending: BoundedVec::default(),
+            due_ms: u64::MAX,
             quota: Default::default(),
             key_quota: Default::default(),
             keys: Default::default(),
@@ -1455,6 +1460,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         let accept = accept.store(&self.keys, self.key_quota)?;
         if !self.has_room() {
             return Err(RegisterError::TableFull);
+        }
+        if let Some(deadline_ms) = deadline_ms {
+            self.due_ms = self.due_ms.min(deadline_ms);
         }
         self.pending
             .push(Pending {
@@ -1893,7 +1901,15 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             // siblings.
             entry.sink.on_timeout(rid);
         }
+        self.due_ms = self.next_deadline_ms().unwrap_or(u64::MAX);
         swept
+    }
+
+    /// No pending entry's deadline is before this: a sweep before it ends nothing, and its holder
+    /// may pass it over ([`Self::sweep_timed_out`]). `u64::MAX` with no deadline registered since
+    /// the last sweep.
+    pub fn due_ms(&self) -> u64 {
+        self.due_ms
     }
 
     /// R311y296 — the EARLIEST absolute deadline among the pending
@@ -4937,6 +4953,39 @@ mod tests {
             reg.next_deadline_ms(),
             Some(1500),
             "a never-expiring entry must not arm a wake"
+        );
+    }
+
+    /// The watermark a holder passes the sweep over by is lowered as a deadline is registered,
+    /// stays where it is through an entry that never expires, and is worked out again by a
+    /// sweep: from the next deadline left, and to none once none is left. Turned red by a
+    /// register that leaves it high (a sweep passed over past its deadline) or a sweep that
+    /// leaves it low.
+    #[test]
+    fn due_ms_falls_with_a_registered_deadline_and_rises_with_a_sweep() {
+        let mut reg = ReplyRegistry::new();
+        assert_eq!(reg.due_ms(), u64::MAX, "an empty table is due never");
+        for (rid, deadline_ms) in [(1, Some(2000)), (2, None), (3, Some(1000))] {
+            reg.register(
+                rid,
+                1,
+                deadline_ms,
+                crate::reply_acceptance::ReplyAcceptance::Any,
+                |_| {},
+                |_| {},
+            )
+            .expect("no quota is stated on this table");
+        }
+        assert_eq!(reg.due_ms(), 1000, "the earliest deadline registered");
+        assert_eq!(reg.sweep_timed_out(999), 0);
+        assert_eq!(reg.due_ms(), 1000, "a sweep before it ends nothing");
+        assert_eq!(reg.sweep_timed_out(1000), 1);
+        assert_eq!(reg.due_ms(), 2000, "the next deadline left");
+        assert_eq!(reg.sweep_timed_out(2000), 1);
+        assert_eq!(
+            reg.due_ms(),
+            u64::MAX,
+            "only an entry that never expires is left"
         );
     }
 

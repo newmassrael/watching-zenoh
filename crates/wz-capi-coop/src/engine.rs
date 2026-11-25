@@ -6542,7 +6542,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // Router past their deadline here, once a step and by its reading, whichever link's task
         // ran; on the epoch its links staged them on, which is not the clock's own.
         let chain_ms = core.session_time.ms_at(now_us);
-        core.transport.router.sweep(chain_ms);
+        if chain_ms >= core.transport.router.due_ms() {
+            core.transport.router.sweep(chain_ms);
+        }
         // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,
         // because this is what runs on every step and the entries are the registry's.
         #[cfg(feature = "query")]
@@ -6550,7 +6552,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let now_ms = now_us / 1000;
             let registry = &mut core.session.registry;
             for gets in registry.all_gets_mut() {
-                gets.replies.sweep_timed_out(now_ms);
+                // A get's deadline is the earliest the sweep could end one at.
+                if now_ms >= gets.replies.due_ms() {
+                    gets.replies.sweep_timed_out(now_ms);
+                }
                 // A liveliness snapshot that expired ends the same way. Its terminated ids are
                 // staged for a reconnect cache this engine does not keep (it declares again from
                 // its own entries), so they are drained and dropped: staged ones would pile up.
