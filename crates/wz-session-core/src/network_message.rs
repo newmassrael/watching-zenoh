@@ -3182,6 +3182,61 @@ pub fn named_put_stats_class(keyexpr: &str, pl_bytes: usize) -> crate::stats::Ne
     )
 }
 
+/// [`push_stats_class`] for a Put or a Del a sender writes from its parts (the key's mapping `id`
+/// and `suffix`, the payload's length and the attachment's), with no owned message to read: the
+/// class [`push_stats_class`] gives the owned Push of the same parts, whose Del is sized by its
+/// attachment alone.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+pub fn publication_stats_class<F>(
+    id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    kind: crate::sample::SampleKind,
+    payload: usize,
+    attachment: usize,
+    resolve_alias: F,
+) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
+{
+    use crate::sample::SampleKind;
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
+    let space = stats_space_of_key(id, suffix, &resolve_alias);
+    match kind {
+        SampleKind::Put => NetworkStatsClass::net(
+            MessageLabel::Put,
+            StatMessage::Put,
+            space,
+            payload.saturating_add(attachment),
+        ),
+        SampleKind::Del => {
+            NetworkStatsClass::net(MessageLabel::Del, StatMessage::Del, space, attachment)
+        }
+    }
+}
+
+/// [`request_stats_class`] for a get a sender writes from its parts, with no owned `Request` to
+/// read: the class the owned `Request` of the same parts is given
+/// ([`crate::query_parts::GetParts::owned_request`]), its payload the value the query carries
+/// and its attachment.
+#[cfg(all(feature = "transport-stats", feature = "codec-request"))]
+pub fn get_stats_class<F>(
+    parts: &crate::query_parts::GetParts<'_>,
+    resolve_alias: F,
+) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
+{
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
+    let query = &parts.query;
+    let value = query.value.as_ref().map_or(0, |(_, payload)| payload.len());
+    NetworkStatsClass::net(
+        MessageLabel::Query,
+        StatMessage::Query,
+        stats_space_of_key(parts.key.id(), parts.key.suffix(), &resolve_alias),
+        value.saturating_add(query.attachment.len()),
+    )
+}
+
 /// Fold a classified body into a class, selecting the `shm` medium when the
 /// body's extension chain carries the SHM descriptor marker — the wz twin of
 /// upstream's `labels.shm`.

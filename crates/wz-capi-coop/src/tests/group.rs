@@ -394,14 +394,17 @@ fn put(engine: &Engine, keyexpr: &str, payload: &[u8]) {
 }
 
 /// What a member sends on the group is counted in its transport counters as its stack takes it:
-/// each datagram's bytes, its beacon and the put's frame a transport message each. No read task
-/// runs, so everything is written on this thread, and the stack's record and the counters are read
-/// at one point.
+/// each datagram's bytes, its beacon and the put's frame a transport message each; and the put,
+/// one network message of the user space's puts by its payload, as it enters the group's queue. No
+/// read task runs, so everything is written on this thread, and the stack's record and the
+/// counters are read at one point.
 #[cfg(all(feature = "transport-stats", feature = "query"))]
 #[test]
 fn what_a_member_sends_on_the_group_is_counted_in_its_transport_stats() {
+    use wz_session_core::stats::{DirectionReport, StatMedium, StatMessage, StatSpace};
     let network = Arc::new(Network::default());
     let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let before = member.transport_stats().tx;
     put(&member, "demo/group/sent", b"counted");
     let sent: Vec<Vec<u8>> = network
         .datagrams
@@ -423,6 +426,20 @@ fn what_a_member_sends_on_the_group_is_counted_in_its_transport_stats() {
         "each datagram's bytes"
     );
     assert_eq!(counted.t_msgs, sent.len(), "a transport message each");
+    assert_eq!(
+        counted.n_msgs_on(StatMedium::Net),
+        before.n_msgs_on(StatMedium::Net) + 1,
+        "the put, one network message"
+    );
+    let puts = |report: &DirectionReport| report.payload_of(StatMessage::Put, StatSpace::User);
+    assert_eq!(
+        (puts(&counted).msgs, puts(&counted).pl_bytes),
+        (
+            puts(&before).msgs + 1,
+            puts(&before).pl_bytes + b"counted".len()
+        ),
+        "counted by its class"
+    );
     SessionDrive::close(&*member);
 }
 

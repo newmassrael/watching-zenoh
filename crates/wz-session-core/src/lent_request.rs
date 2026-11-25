@@ -75,6 +75,11 @@ impl<'a> RequestWriter<'a> {
         Self { parts }
     }
 
+    /// The parts the writer writes, which the network counters read the get by.
+    pub const fn parts(&self) -> &GetParts<'a> {
+        &self.parts
+    }
+
     /// Encode the `Request` into `sink`. `LengthOutOfRange`, before a byte is written, for what
     /// the owned builder refuses: a key suffix past the protocol's `u16` length, parameters, a
     /// value or an attachment past its `u32` length, a schema past [`SCHEMA_MAX`], and a source

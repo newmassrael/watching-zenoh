@@ -271,10 +271,11 @@ impl<R: MulticastStatsRecorder + ?Sized> MulticastStatsRecorder for &R {
 }
 
 /// A session's counters as a group reports into them: the bytes and transport messages of each
-/// datagram its writers sent and of each it received, and each network message a member sent,
-/// classified as the tokio engine's group recorder classifies one, with no alias table. A
-/// session's counters hold no partition per member, so who sent a message, and who came and
-/// went, is not kept.
+/// datagram its writers sent and of each it received, each network message the session pushed onto
+/// the group, and each a member sent, classified as the tokio engine's group recorder classifies
+/// one, with no alias table. A message dropped before it reached the group's queue is the group's
+/// own drop count, which its holder charges, and is not counted here. A session's counters hold
+/// no partition per member, so who sent a message, and who came and went, is not kept.
 #[cfg(feature = "transport-stats")]
 impl MulticastStatsRecorder for crate::stats::TransportStats {
     fn datagram_sent(&self, bytes: usize, transport_messages: u64) {
@@ -290,6 +291,19 @@ impl MulticastStatsRecorder for crate::stats::TransportStats {
 
     fn transport_message_received(&self) {
         self.inc_rx_transport_message();
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        )
+    ))]
+    fn network_message_sent(&self, tally: &crate::multicast_tx::MulticastTxTally) {
+        self.inc_tx_network(tally.class());
     }
 
     fn network_message_received(&self, _zid: &[u8], msg: &NetworkMessage) {
@@ -537,6 +551,54 @@ mod session_counter_tests {
 
         let none: Option<&TransportStats> = None;
         none.datagram_sent(24, 1);
+        assert_eq!(
+            counters.report(),
+            report,
+            "a host that holds no counters counts nothing"
+        );
+    }
+
+    /// A network message the session pushed onto a group counts into the outbound half by its
+    /// tally's class, as one a member sent counts into the inbound half: `n_msgs`, and the payload
+    /// cell of a data message. It is no datagram, and no transport message. With none held,
+    /// nothing is counted.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    ))]
+    #[test]
+    fn a_message_pushed_onto_a_group_counts_into_the_outbound_half_by_its_class() {
+        use crate::multicast_tx::MulticastTxTally;
+        let counters = TransportStats::default();
+        let held = Some(&counters);
+        let put = NetworkStatsClass::net(MessageLabel::Put, StatMessage::Put, StatSpace::User, 3);
+        let declare = NetworkStatsClass::control(MessageLabel::Declare);
+        held.network_message_sent(&MulticastTxTally::new(Priority::DEFAULT, put));
+        held.network_message_sent(&MulticastTxTally::new(Priority::DEFAULT, declare));
+        let report = counters.report();
+        assert_eq!(
+            report.tx.n_msgs_on(StatMedium::Net),
+            2,
+            "the put and the declare"
+        );
+        let cell = report.tx.payload_of(StatMessage::Put, StatSpace::User);
+        assert_eq!(
+            (cell.msgs, cell.pl_bytes),
+            (1, 3),
+            "the put's payload alone"
+        );
+        assert_eq!((report.tx.bytes, report.tx.t_msgs), (0, 0), "no datagram");
+        assert_eq!(
+            report.rx,
+            DirectionReport::default(),
+            "nothing was received"
+        );
+
+        let none: Option<&TransportStats> = None;
+        none.network_message_sent(&MulticastTxTally::new(Priority::DEFAULT, put));
         assert_eq!(
             counters.report(),
             report,

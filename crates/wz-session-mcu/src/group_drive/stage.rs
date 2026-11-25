@@ -613,29 +613,50 @@ impl GroupTxStage {
     /// two fragments is stopped by the drop marker. Pushed while another push holds the conduits
     /// (from inside that push's wait for room), its body is kept encoded and it is framed when they
     /// are let go; one the kept storage has no room for is a congestion drop of its lane, counted.
+    /// A message pushed or kept is counted, as it enters the stage, as one network message of its
+    /// tally's class into the counters attached (`attach_stats`); a dropped one is the lane's drop
+    /// and no more, as the tokio engine's group counts one or the other.
     pub fn push_encoded(
         &self,
         message: &MulticastTxEncoded<'_>,
         pace: &dyn GroupTxPace,
     ) -> PushOutcome {
         let inner = &*self.inner;
-        let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
-            let meta = MulticastTxMeta::of_encoded(message, &inner.params);
-            return self.stage(meta, message.size, message.body, false);
+        let outcome = match inner.conduits.try_borrow_mut() {
+            Err(_) => {
+                let meta = MulticastTxMeta::of_encoded(message, &inner.params);
+                self.stage(meta, message.size, message.body, false)
+            }
+            Ok(mut conduits) => {
+                let conduit = multicast_tx_encoded_conduit(message, &inner.params);
+                let params = &inner.params;
+                let outcome = self.push_on(
+                    &mut conduits,
+                    conduit,
+                    Some(pace),
+                    false,
+                    |minted, queue, window| {
+                        multicast_tx_push_encoded(
+                            message,
+                            minted,
+                            params,
+                            &params.tx_queue,
+                            queue,
+                            window,
+                        )
+                    },
+                );
+                drop(conduits);
+                self.push_deferred();
+                outcome
+            }
         };
-        let conduit = multicast_tx_encoded_conduit(message, &inner.params);
-        let params = &inner.params;
-        let outcome = self.push_on(
-            &mut conduits,
-            conduit,
-            Some(pace),
-            false,
-            |minted, queue, window| {
-                multicast_tx_push_encoded(message, minted, params, &params.tx_queue, queue, window)
-            },
-        );
-        drop(conduits);
-        self.push_deferred();
+        #[cfg(feature = "transport-stats")]
+        if let (PushOutcome::Pushed, Some(stats)) =
+            (outcome, inner.writer.borrow().stats.as_deref())
+        {
+            stats.network_message_sent(&message.tally);
+        }
         outcome
     }
 
@@ -913,7 +934,9 @@ impl GroupTxStage {
     }
 
     /// Count each datagram of the stage the socket takes into `stats`, whoever writes it, the pump
-    /// or the holder: its bytes, and one transport message, the frame or fragment it is.
+    /// or the holder: its bytes, and one transport message, the frame or fragment it is; and each
+    /// message of the session pushed onto it ([`Self::push_encoded`]), one network message of its
+    /// class.
     #[cfg(feature = "transport-stats")]
     pub fn attach_stats(&self, stats: Rc<TransportStats>) {
         self.inner.writer.borrow_mut().stats = Some(stats);
@@ -1345,11 +1368,12 @@ mod tests {
     use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
     use wz_session_core::multicast_tx::{
         multicast_put_literal, multicast_tx_encoded_conduit, MulticastTxEncoded,
-        MulticastTxFraming, MulticastTxItem,
+        MulticastTxFraming, MulticastTxItem, MulticastTxTally,
     };
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::qos::Priority;
     use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+    use wz_session_core::stats::NetworkStatsClass;
     use wz_session_core::tx_deadline::PushOutcome;
     use wz_session_core::wire_const::T_MID_JOIN;
     use wz_session_core::WhatAmI;
@@ -1623,6 +1647,7 @@ mod tests {
             },
             size: 64,
             body: &body,
+            tally: MulticastTxTally::new(Priority::DEFAULT, NetworkStatsClass::unread()),
         };
 
         let stage = GroupTxStage::new(&params);
@@ -1749,6 +1774,7 @@ mod tests {
             },
             size: 64,
             body: &body,
+            tally: MulticastTxTally::new(Priority::DEFAULT, NetworkStatsClass::unread()),
         };
         assert_eq!(stage.push_encoded(&lent, &host), PushOutcome::Pushed);
         {
@@ -1870,6 +1896,70 @@ mod tests {
         assert_eq!(taken(&wire), ["join", "first", "second", "join", "third"]);
         assert!(matches_the_wire(), "each datagram once, as it left");
         assert_eq!(stats.report().tx.t_msgs, 5);
+    }
+
+    /// Each message of the session the stage takes is counted into the counters its holder
+    /// attached as one network message of its class as it enters the stage, put on its lane or
+    /// kept while another push holds the conduits; one the kept storage has no room for is the
+    /// lane's drop and is not counted, and framing what was kept counts nothing again. No datagram
+    /// is counted until the socket takes one. Turned red by a push counted before its outcome is
+    /// known, a kept one counted twice, or none counted.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn a_message_of_the_session_is_counted_by_its_class_as_it_enters_the_stage() {
+        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+        use wz_session_core::stats::{StatMedium, StatMessage, StatSpace, TransportStats};
+        let mut params = one_batch_lanes();
+        params.tx_queue.sizes = [MAX_MULTICAST_REPLIES + 1; Priority::NUM];
+        let stage = GroupTxStage::new(&params);
+        let stats = Rc::new(TransportStats::default());
+        stage.attach_stats(Rc::clone(&stats));
+        // The network messages, and the count and payload bytes of the user space's puts.
+        let counted = || {
+            let sent = stats.report().tx;
+            let puts = sent.payload_of(StatMessage::Put, StatSpace::User);
+            (sent.n_msgs_on(StatMedium::Net), puts.msgs, puts.pl_bytes)
+        };
+
+        push_at_once(&stage, Put::of("first"));
+        assert_eq!(counted(), (1, 1, "first".len()), "put on its lane");
+
+        let nothing = || {};
+        let host = FullHost::new(&nothing);
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            for _ in 0..MAX_MULTICAST_REPLIES {
+                assert_eq!(
+                    push_put(&stage, Put::of("kept"), &host),
+                    PushOutcome::Pushed
+                );
+            }
+            assert_eq!(
+                push_put(&stage, Put::of("dropped"), &host),
+                PushOutcome::Congested
+            );
+        }
+        let pushed = 1 + MAX_MULTICAST_REPLIES;
+        let expected = (
+            pushed,
+            pushed,
+            "first".len() + MAX_MULTICAST_REPLIES * "kept".len(),
+        );
+        assert_eq!(
+            counted(),
+            expected,
+            "each kept one, and not the dropped one"
+        );
+        assert_eq!(stage.drops(Priority::DEFAULT), 1, "which its lane counts");
+
+        stage.push_deferred();
+        assert_eq!(
+            counted(),
+            expected,
+            "framing what was kept counts nothing again"
+        );
+        let sent = stats.report().tx;
+        assert_eq!((sent.bytes, sent.t_msgs), (0, 0), "nothing has left");
     }
 
     /// Each datagram asks its lane for room by its own bytes: a push on a lane with room is
