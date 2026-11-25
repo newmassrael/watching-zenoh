@@ -2869,7 +2869,8 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
 /// rooms, the ABI's handle and its places for every kind of entity among them, holds exactly
 /// `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in whichever build. A group
 /// that puts a row it does not count, or counts one it does not put, turns this red. A build that
-/// joins groups names one, since a config that names none plans no group receive table. Each of
+/// joins groups names one, since a config that names none plans no group receive table, and a
+/// build that listens names a port, as one that listens on none plans no row of the ports. Each of
 /// those rows names a part of its own, which a report finds it by: a part named as another, or a
 /// table laid out under the part of its flags twice, turns this red too.
 #[test]
@@ -2894,6 +2895,9 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         declarations: GroupDeclarations::Entities,
     };
     let groups = usize::from(cfg!(feature = "group"));
+    // A build that listens names a port, since a config that listens on none plans no row of
+    // the ports.
+    let listens = usize::from(cfg!(feature = "listen"));
     let place = core::alloc::Layout::new::<u64>();
     let held = EntityKind::ALL
         .into_iter()
@@ -2907,6 +2911,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         &CoopConfig {
             max_faces: BESIDE_DIAL,
             groups: vec![join; groups],
+            listen: vec!["udp/127.0.0.1:0".to_owned(); listens],
             ..client_config()
         },
         &SessionLimits::defaults(),
