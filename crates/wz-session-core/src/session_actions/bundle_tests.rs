@@ -1877,7 +1877,7 @@ mod unicast_transport {
     use crate::link_life::{LinkInput, LinkTimes};
     use crate::session_actions::SessionLinkActions;
     use crate::session_timeouts::SessionTimeouts;
-    use crate::unicast_transport::UnicastTransport;
+    use crate::unicast_transport::{MadeLink, UnicastTransport};
 
     const TIMES: LinkTimes = LinkTimes {
         open_timeout_ms: 1_000,
@@ -1993,5 +1993,101 @@ mod unicast_transport {
             counted,
             "the receive counted the one datagram on the path it took"
         );
+    }
+
+    /// A transport over a link handed to it made is due when its session is, and a life that
+    /// asks for a look moves only the transport that holds it. Turned red by a made link that adds
+    /// a wake of its own, or a due instant that reads another transport's life.
+    #[test]
+    fn a_transport_over_a_made_link_is_due_when_its_session_is() {
+        let (actions, _link) = bundle();
+        let engine = engine(&actions);
+        let mut made_place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let made = UnicastTransport::init_made_in(
+            &mut made_place,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let dialling = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        actions.set_app_wake_deadline_ms(Some(9));
+        assert_eq!(
+            made.due_ms(&engine, &*actions, 0),
+            dialling.due_ms(&engine, &*actions, 0),
+            "an idle life adds nothing to the session's own"
+        );
+        assert_eq!(dialling.input(LinkInput::Open, 0).dial(), Some(0));
+        assert_eq!(dialling.due_ms(&engine, &*actions, 0), Some(0));
+        assert!(
+            made.due_ms(&engine, &*actions, 0)
+                .is_some_and(|due_ms| due_ms <= 9),
+            "the session's deadline still bounds the made link's transport"
+        );
+    }
+
+    /// A turn that raises nothing first leaves the application layer's deadline for the time its
+    /// owner hands apart, and a turn begun raises it. Turned red by an `input_at` that raises.
+    #[test]
+    fn a_turn_that_raises_nothing_leaves_the_deadline_for_the_time() {
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let transport =
+            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
+        actions.set_app_wake_deadline_ms(Some(0));
+        {
+            let turn = transport.input_at(0);
+            assert!(turn.ready(), "a Router of its own takes input");
+        }
+        assert_eq!(actions.app_wake_deadline_ms(), Some(0), "left for the time");
+        let mut wakes = 0usize;
+        let mut count = |event: IterationEvent<'_, '_>| {
+            if matches!(event, IterationEvent::AppWake) {
+                wakes += 1;
+            }
+        };
+        transport
+            .begin_input(&*actions, 0, &mut count)
+            .end(&mut engine, &*actions, &mut count);
+        assert_eq!(wakes, 1, "a turn begun raises it");
+        assert_eq!(actions.app_wake_deadline_ms(), None);
+    }
+
+    /// A link that is gone is told to the session's machine and reported to the owner as the
+    /// link's loss, with its cause. Turned red by a `lose` that reports another outcome or does
+    /// not reach the machine.
+    #[test]
+    fn a_lost_link_is_told_to_the_machine_and_reported_with_its_cause() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::link::LostCause;
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let transport =
+            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
+        let mut lost = Vec::new();
+        let mut seen = |event: IterationEvent<'_, '_>| {
+            if let IterationEvent::Poll(DriverLoopOutcome::LinkLost(cause)) = event {
+                lost.push(matches!(cause, LostCause::PeerClosed));
+            }
+        };
+        let turn = transport.begin_input(&*actions, 0, &mut seen);
+        turn.lose(&mut engine, LostCause::PeerClosed, &mut seen);
+        assert_eq!(lost, [true], "one loss, with the peer's close as its cause");
     }
 }
