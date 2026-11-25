@@ -3625,7 +3625,7 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
             feature = "liveliness-token",
         )
     ))]
-    deferred_sends: send_deferral::DeferredSends<R>,
+    deferred_sends: crate::send_deferral::DeferredSends<R, send_deferral::DeferredSend>,
 }
 
 /// R2952 (open-debt item 835) — one block-first message whose slot the core
@@ -4277,13 +4277,26 @@ where
 #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
 pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
 
-/// The sends a session's owner defers while it holds a lock of its own, and the order they leave
-/// in ([`SessionLinkActions::install_send_deferral`]). The heap profile's, as the block-first
-/// hand-off is: a deferred send owns a copy of its message's body.
+/// What a session queues of a send its owner defers while it holds a lock of its own
+/// ([`SessionLinkActions::install_send_deferral`], [`crate::send_deferral`]): a copy of the
+/// message's encoded body.
 #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
 mod send_deferral;
 #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
-pub use send_deferral::SendDeferral;
+use crate::send_deferral::SendDeferral;
+
+/// A session is a sender its owner may owe a flush to, beside the other kinds of sender the
+/// owner defers sends on.
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+impl<R: SessionRuntime, T: TimeSource> crate::send_deferral::DeferredSender
+    for SessionLinkActions<R, T>
+where
+    Self: Send + Sync,
+{
+    fn flush_deferred_sends(&self) {
+        SessionLinkActions::flush_deferred_sends(self);
+    }
+}
 
 /// The §5.16 egress verdict a session hands its action bundle for the replies it sends: `true`
 /// admits the `Response`, or the `Declare` that answers a peer's Interest. See
@@ -5318,7 +5331,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     feature = "liveliness-token",
                 )
             ))]
-            deferred_sends: send_deferral::DeferredSends::new(),
+            deferred_sends: crate::send_deferral::DeferredSends::new(),
         })
     }
 
@@ -5362,7 +5375,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 )
             ))]
             core::ptr::addr_of_mut!((*at).deferred_sends)
-                .write(send_deferral::DeferredSends::new());
+                .write(crate::send_deferral::DeferredSends::new());
         }
     }
 
@@ -5776,7 +5789,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     feature = "liveliness-token",
                 )
             ))]
-            deferred_sends: send_deferral::DeferredSends::new(),
+            deferred_sends: crate::send_deferral::DeferredSends::new(),
         })
     }
 }
@@ -7243,7 +7256,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Give this session its owner's [`SendDeferral`]: from now on, a send the calling thread
     /// makes while the deferral says it defers is queued and not written, and is written by the
     /// thread's [`Self::flush_deferred_sends`]; a send of a thread that does not defer leaves
-    /// after whatever is queued (see the `send_deferral` module). Installed by an owner that
+    /// after whatever is queued ([`crate::send_deferral`]). Installed by an owner that
     /// sends to this session under a lock of its own, before it sends anything under that lock.
     #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub fn install_send_deferral(&self, deferral: alloc::boxed::Box<dyn SendDeferral>) {
@@ -7306,14 +7319,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 feature = "liveliness-token",
             )
         ))]
-        if !self.deferred_sends.is_idle() {
-            debug_assert!(
-                !self.deferred_sends.defers_here(),
-                "a thread flushed its deferred sends while it still defers them"
-            );
-            self.deferred_sends
-                .in_order(|| self.send_deferred_in_order());
-        }
+        self.deferred_sends
+            .flush(|deferred| self.send_deferred(deferred));
     }
 
     /// [`Self::dispatch_network_message_in`] for a send of the caller's own on a session whose
@@ -7369,28 +7376,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             });
             return Ok(Dispatched::Sent);
         }
-        let send = || {
-            self.dispatch_network_message_in::<true, P>(
-                DispatchStage::Fresh,
-                conduit,
-                qos,
-                worst_case_payload,
-                stats_class,
-                encode_body,
-            )
-        };
-        if sends.is_idle() {
-            return send();
-        }
-        sends.in_order(|| {
-            self.send_deferred_in_order();
-            send()
-        })
+        sends.after_queued(
+            |deferred| self.send_deferred(deferred),
+            || {
+                self.dispatch_network_message_in::<true, P>(
+                    DispatchStage::Fresh,
+                    conduit,
+                    qos,
+                    worst_case_payload,
+                    stats_class,
+                    encode_body,
+                )
+            },
+        )
     }
 
-    /// Send what is queued, oldest first, each as the send its thread deferred would have been
-    /// sent: it waits for room, and a failure has no caller to reach, as a block-first job's has
-    /// none. Called under `DeferredSends::in_order`.
+    /// Send one queued send as the send its thread deferred would have been sent: it waits for
+    /// room as that send would have.
+    ///
+    /// Its outcome reaches no caller, and none needs it. What a failed send costs the session is
+    /// decided inside the dispatch, by the session, on whichever thread runs it: a blocking send
+    /// that found no room in its deadline settles that here as at the call
+    /// ([`Self::settle_blocking_expiry`]: the close it orders of the drive loop, which takes the
+    /// face down, or under `tx-expiry-keeps-session` the run of such drops that ends in one),
+    /// and a session whose link is gone or whose close is ordered refuses it
+    /// ([`SendWireError::TransportUnavailable`]), as it refuses every send until a link is up
+    /// again. What is left is the message's own (past the reassembly cap, past the fragment
+    /// budget), and the caller it would have reached, a thread that sends under its owner's
+    /// lock, belongs to an owner whose sends there are best effort per sender: a node's registry
+    /// discards a face's refused declaration and keeps the entity for every later face
+    /// (`wz-capi-core`'s `SharedSession::declare_subscriber`). The one error known without
+    /// waiting, the body's own refusal, is still answered to the caller, which encodes the body
+    /// before it is queued.
     #[cfg(all(
         feature = "alloc",
         not(feature = "tx-lend-only"),
@@ -7408,25 +7425,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         )
     ))]
-    fn send_deferred_in_order(&self) {
-        while let Some(deferred) = self.deferred_sends.next() {
-            let send_deferral::DeferredSend {
-                conduit,
-                qos,
-                stats_class,
-                body,
-            } = deferred;
-            let _ = self.dispatch_network_message_in::<true, _>(
-                DispatchStage::Fresh,
-                conduit,
-                qos,
-                body.len(),
-                stats_class,
-                as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| {
-                    sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
-                }),
-            );
-        }
+    fn send_deferred(&self, deferred: send_deferral::DeferredSend) {
+        let send_deferral::DeferredSend {
+            conduit,
+            qos,
+            stats_class,
+            body,
+        } = deferred;
+        let _ = self.dispatch_network_message_in::<true, _>(
+            DispatchStage::Fresh,
+            conduit,
+            qos,
+            body.len(),
+            stats_class,
+            as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| {
+                sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
+            }),
+        );
     }
 
     /// R311kw — the one wire-emit seam: stamp [`LinkState::fact_last_outbound_at`]

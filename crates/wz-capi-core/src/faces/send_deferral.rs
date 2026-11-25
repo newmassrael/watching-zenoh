@@ -26,7 +26,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
 use wz_runtime_tokio::session_glue::SessionLinkActions;
-use wz_session_core::session_actions::SendDeferral;
+use wz_session_core::send_deferral::SendDeferral;
 
 std::thread_local! {
     /// How many registry locks this thread holds, counted from before it waits for each.

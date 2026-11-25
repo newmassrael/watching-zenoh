@@ -3176,6 +3176,14 @@ pub struct OutboundRx {
 }
 
 impl OutboundRx {
+    /// How many senders wait for room on this queue right now, each on its own thread
+    /// ([`OutboundTx::link_room`]). A sender counts itself in under the lanes' lock before its
+    /// wait gives the lock up, so a reader that sees it counted knows it waits or is about to: what
+    /// a test reads to know that a sender is held by a full lane, with no clock to read.
+    pub fn room_waiters(&self) -> usize {
+        self.shared.room.waiters.load(Ordering::SeqCst)
+    }
+
     /// The writer is done with `frame`, which it received with `priority`
     /// ([`Self::recv_tagged`]): keep its buffer for that priority's lane to lend again. Called
     /// after the bytes are written, never before — the buffer is overwritten by the
