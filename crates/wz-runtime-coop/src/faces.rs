@@ -1438,16 +1438,55 @@ mod tests {
 
     /// The life of a test face's link: the dial role's over two endpoints, not opened yet.
     fn idle_life() -> UnicastLink {
-        UnicastLink::new(
-            wz_session_core::link_life::LinkTimes {
-                open_timeout_ms: 1,
-                redial_ms: None,
-                dial_look_ms: DIAL_LOOK_MS,
-                accept_timeout_ms: 1,
-            },
-            LinkRole::Dial,
-            2,
-        )
+        life_in(&[])
+    }
+
+    /// The dial role's life over two endpoints, a dial and its handshake given ten seconds and
+    /// the endpoints dialled again 5 ms after none answered, moved by `inputs` at time 0.
+    fn life_in(inputs: &[LinkInput]) -> UnicastLink {
+        let times = wz_session_core::link_life::LinkTimes {
+            open_timeout_ms: 10_000,
+            redial_ms: Some(5),
+            dial_look_ms: DIAL_LOOK_MS,
+            accept_timeout_ms: 1,
+        };
+        let mut life = UnicastLink::new(times, LinkRole::Dial, 2);
+        for input in inputs {
+            let _ = life.input(*input, 0);
+        }
+        life
+    }
+
+    /// A life waiting until 5 ms to dial again: up once, lost, then both endpoints refused.
+    fn backing_off() -> UnicastLink {
+        life_in(&[
+            LinkInput::Open,
+            LinkInput::DialMade,
+            LinkInput::HandshakeBegun,
+            LinkInput::Established,
+            LinkInput::Ended,
+            LinkInput::DialRefused,
+            LinkInput::DialRefused,
+        ])
+    }
+
+    /// A life standing by for a node another face held when its handshake ended.
+    #[cfg(feature = "listen")]
+    fn standing_by() -> UnicastLink {
+        life_in(&[
+            LinkInput::Open,
+            LinkInput::DialMade,
+            LinkInput::HandshakeBegun,
+            LinkInput::HeldElsewhere,
+        ])
+    }
+
+    /// Give the dial role's face of `faces` the life `life`.
+    fn set_life<L: SessionLinks<Pump = Rc<Quiet>, Dial = Answer>>(
+        faces: &mut LinkSupervisor<L, TestFace>,
+        life: UnicastLink,
+    ) {
+        faces.face_mut(0).expect("the dial role's face").life = life;
     }
 
     impl FaceRecord for TestFace {
@@ -1954,6 +1993,57 @@ mod tests {
         assert!(faces.held_node(9, 100).is_none(), "a face past the table");
     }
 
+    /// The dial role's handshake that ends at a node another face holds is read as held
+    /// elsewhere, and its life stands by; while the other face holds the node nothing moves it,
+    /// and once that face goes the node is read as free. CONTROL: with no other face, the same
+    /// end is read as ended. Turned red by a stand-by left to a link the life no longer holds.
+    #[cfg(feature = "listen")]
+    #[test]
+    fn the_dial_role_stands_by_while_another_face_holds_its_node() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let node = [7u8, 1];
+        let mut faces = supervisor(
+            Link::Wire(wire(&local, session(false, Some(&node)), false, true)),
+            2,
+        );
+        set_life(
+            &mut faces,
+            life_in(&[
+                LinkInput::Open,
+                LinkInput::DialMade,
+                LinkInput::HandshakeBegun,
+            ]),
+        );
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).input,
+            LinkInput::Ended,
+            "CONTROL: no other face holds the node"
+        );
+        let other = TestFace {
+            life: idle_life(),
+            id: 1,
+            link: Link::Wire(wire(&local, session(true, Some(&node)), false, false)),
+        };
+        assert!(faces.place_face(1, other).is_ok());
+        let read = faces.read_face(0, 100, 0, &mut None, &mut None);
+        assert_eq!(read.input, LinkInput::HeldElsewhere);
+        let face = faces.face_mut(0).expect("the dial role's face");
+        assert!(face.life.input(read.input, 0).end_handshake());
+        assert_eq!(face.life.phase(), LinkPhase::Held);
+        faces.put_link(0, Link::Idle);
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).input,
+            LinkInput::Tick,
+            "the other face holds the node still"
+        );
+        assert!(faces.take_face(1).is_some());
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).input,
+            LinkInput::NodeFree
+        );
+    }
+
     /// A handshake that ended names the Close its peer sent, else the end of its task, else the
     /// deadline it is given up at; ending the link's task is what makes it the second.
     #[test]
@@ -2166,6 +2256,10 @@ mod tests {
         ));
     }
 
+    /// A read sleeps to the end of a wait to dial again, and to the next look of a dial under way
+    /// when its deadline is later; a face standing by gives no time, and its read takes none
+    /// from the clock. A link holding input makes no wait. Turned red by a wake read off the link
+    /// and not off the face's life.
     #[test]
     fn a_read_sleeps_to_the_next_dial_and_does_not_wait_on_held_input() {
         let mut clock_reads = 0;
@@ -2174,12 +2268,21 @@ mod tests {
             1_000u64
         };
         let mut faces = supervisor(Link::Idle, 1);
+        set_life(&mut faces, backing_off());
+        assert_eq!(
+            faces.face(0).map(|face| face.life.phase()),
+            Some(LinkPhase::Backoff { until_us: 5_000 })
+        );
         assert!(matches!(
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(4)
         ));
         // A dial under way is looked at again on the next look, its deadline being later.
         faces.put_link(0, dialing(DialEndpoint::Listed(0), None));
+        set_life(
+            &mut faces,
+            life_in(&[LinkInput::Open, LinkInput::DialPending]),
+        );
         assert!(matches!(
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(1)
@@ -2187,12 +2290,22 @@ mod tests {
         #[cfg(feature = "listen")]
         {
             faces.put_link(0, Link::Idle);
+            set_life(&mut faces, standing_by());
+            let before = clock_reads;
             assert!(matches!(
-                faces.idle_wait(10, &mut now, [], None),
+                faces.idle_wait(
+                    10,
+                    &mut || {
+                        clock_reads += 1;
+                        1_000u64
+                    },
+                    [],
+                    None
+                ),
                 IdleWait::None
             ));
+            assert_eq!(clock_reads, before, "a face standing by reads no clock");
         }
-        assert_eq!(clock_reads, 1, "only the waiting face read the clock");
 
         let runtime = CoopRuntime::new(Still);
         let local = CoopLocalSet::new(&runtime);
@@ -2500,6 +2613,7 @@ mod tests {
     fn a_wake_beside_the_links_joins_their_wait_and_makes_none_of_its_own() {
         let wake = LinkWait::input(WaitOn::Wake(5));
         let mut faces = supervisor(Link::Idle, 1);
+        set_life(&mut faces, backing_off());
         assert!(
             matches!(
                 faces.idle_wait(10, &mut || 1_000u64, [], None),
@@ -2516,7 +2630,7 @@ mod tests {
         }
         #[cfg(feature = "listen")]
         {
-            faces.put_link(0, Link::Idle);
+            set_life(&mut faces, standing_by());
             assert!(
                 matches!(
                     faces.idle_wait(10, &mut || 0u64, [], Some(wake)),
