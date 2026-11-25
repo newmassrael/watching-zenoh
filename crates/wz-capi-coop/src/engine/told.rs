@@ -161,7 +161,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .any(|group| group.tell_came(plane, listener, key));
         }
         for face in self.transport.links.faces_mut() {
-            let Link::Up(wire) = &face.link else {
+            let Some(wire) = face.up() else {
                 continue;
             };
             if standing_key(wire) == Some(*key) {
@@ -277,7 +277,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let id = self.transport.links.next_face_id();
         let departed = Face {
             id,
-            link: Link::Waiting { at_us: u64::MAX },
+            link: Link::Idle,
+            // A tomb's life is never opened: it stays idle, and no step moves it.
+            life: UnicastLink::new(self.link_times(), LinkRole::Taken, 0),
             replay: Replay::idle(),
             told: FaceTold::departed(apart),
         };
@@ -301,8 +303,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return false;
         }
         face.told.departed = true;
-        // A wait that is never due: the face is not dialled, and its value stays as it is.
-        face.link = Link::Waiting { at_us: u64::MAX };
+        // The face is not dialled again: its life, closed with its link, moves no more.
+        face.link = Link::Idle;
         let id = face.id;
         self.session.registry.depart(HeldFace::new(at, id));
         true

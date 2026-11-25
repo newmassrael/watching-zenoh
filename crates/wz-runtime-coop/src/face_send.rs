@@ -9,7 +9,7 @@
 //! The executor holds the session's lock, the rooms of its faces and the mark of who holds the
 //! session, the publishes kept for other faces, the clock and the sends. It asks here what each of
 //! them comes to, does it, and reports back what the sends found; the decisions are here once,
-//! testable without a link, as a face's life is ([`crate::face_life`]).
+//! testable without a link, as a face's link life is (`wz_session_core::link_life`).
 //!
 //! What a droppable publish that finds the session held does, by what the rooms answered:
 //!

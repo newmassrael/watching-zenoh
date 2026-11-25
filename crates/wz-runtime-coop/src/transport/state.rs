@@ -42,12 +42,11 @@ use wz_session_core::unicast_rx::RouterLend;
 #[cfg(feature = "group")]
 use super::GroupRecord;
 use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
-use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
 use crate::faces::{
     Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord,
-    IdleWait, Link, LinkSupervisor, Wire,
+    IdleWait, LinkSupervisor, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
@@ -63,6 +62,7 @@ use crate::session_drive::{
 use crate::session_runtime::{SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
+use wz_session_core::link_life::{Effects, LinkPhase, LinkRole};
 
 /// The runtime of a link's session over the transport of `T`, read under the lock type of the
 /// values it lends the session.
@@ -177,17 +177,15 @@ pub struct TransportState<T: TransportFaces> {
     pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
 }
 
-/// What a step reads of a face and decides for it ([`TransportState::face_step`]): the face's
-/// value and what the session does about its link, and no more, so a step that leaves a face as it
-/// is moves a few words. The answer of a dial is written where the step asked for it, and a dial
-/// that is over (a [`FaceEffect::Handshake`] or a [`FaceEffect::DialFailed`], which nothing
-/// else decides) is let go of by the arm that carries the effect out, which takes its endpoint
-/// then ([`LinkSupervisor::end_dial`]).
+/// What a step reads of a face and what its life makes of it ([`TransportState::face_step`]): the
+/// face's role and what the session does about its link, and no more, so a step that leaves a face
+/// as it is moves a few words. The answer of a dial, and the endpoint it dialled, are written where
+/// the step asked for them.
 pub struct FaceStep {
-    /// The face's value, read at the step.
-    pub life: FaceLife,
-    /// What the session does about the face's link.
-    pub effect: FaceEffect,
+    /// Which face it is.
+    pub role: LinkRole,
+    /// What the session does about the face's link, in the order [`Effects`] names.
+    pub effects: Effects,
 }
 
 /// A dial of one of the session's endpoints, asked once as it is begun
@@ -215,31 +213,6 @@ pub struct WireMaking<'a, C: ClockSource + 'static> {
     pub timeouts: SessionTimeouts,
 }
 
-/// The next step of the dial role's walk over the session's endpoints
-/// ([`TransportState::walk_dials`]): what the session carries out.
-pub enum DialWalk<D, P> {
-    /// The dial of a row is under way: the face holds it, and the walk goes on from row `next`
-    /// when it fails.
-    Dialing {
-        /// The dial under way.
-        dial: Dial<D>,
-        /// The row the walk goes on from when the dial or its handshake fails.
-        next: usize,
-    },
-    /// The dial of `endpoint` answered at once: the session opens the link's session over
-    /// `answer`, and the walk goes on from row `next` when that fails for the endpoint's reason.
-    Answered {
-        /// The endpoint dialled.
-        endpoint: DialEndpoint,
-        /// The row the walk goes on from when the link's session is not opened.
-        next: usize,
-        /// The link the dial made, or why the network refused it.
-        answer: Result<OpenedLink<P>, LinkOpenError>,
-    },
-    /// No row is left: the walk ended with no link, for the last reason it met.
-    Ended,
-}
-
 impl<T: TransportFaces> TransportState<T> {
     /// The dial role's face, which the session holds for its whole life: the first of the faces,
     /// placed by the open, so `None` is a session no open made.
@@ -251,10 +224,9 @@ impl<T: TransportFaces> TransportState<T> {
     /// face whose link is dialled or waits to be is not among them: what is declared then is
     /// declared when it comes up.
     pub fn ups(&self) -> impl Iterator<Item = &LinkHandle<T>> {
-        self.links.faces().filter_map(|face| match face.link() {
-            Link::Up(wire) => Some(wire.actions()),
-            _ => None,
-        })
+        self.links
+            .faces()
+            .filter_map(|face| face.up().map(|wire| wire.actions()))
     }
 
     /// [`Self::ups`], each with its face's place, which the session's other tables of the face
@@ -262,10 +234,7 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn ups_at(&self) -> impl Iterator<Item = (usize, FaceId, &LinkHandle<T>)> {
         self.links
             .placed()
-            .filter_map(|(at, face)| match face.link() {
-                Link::Up(wire) => Some((at, face.id(), wire.actions())),
-                _ => None,
-            })
+            .filter_map(|(at, face)| Some((at, face.id(), face.up()?.actions())))
     }
 
     /// The face of the least id past `after` (any, for none) whose link is up, when `remote`:
@@ -279,7 +248,7 @@ impl<T: TransportFaces> TransportState<T> {
         }
         self.links
             .faces()
-            .filter(|face| matches!(face.link(), Link::Up(_)))
+            .filter(|face| face.up().is_some())
             .map(FaceRecord::id)
             .filter(|id| match after {
                 Some(after) => *id > after,
@@ -310,9 +279,10 @@ impl<T: TransportFaces> TransportState<T> {
     /// The actions of face `id` while its link is up.
     #[cfg(feature = "query")]
     pub fn up_actions(&self, id: FaceId) -> Option<&LinkHandle<T>> {
-        self.links.faces().find_map(|face| match face.link() {
-            Link::Up(wire) if face.id() == id => Some(wire.actions()),
-            _ => None,
+        self.links.faces().find_map(|face| {
+            face.up()
+                .filter(|_| face.id() == id)
+                .map(|wire| wire.actions())
         })
     }
 
@@ -329,8 +299,8 @@ impl<T: TransportFaces> TransportState<T> {
         {
             return Some(sink);
         }
-        self.links.faces().find_map(|face| match face.link() {
-            Link::Up(wire) if wire.answers_as(generation) => {
+        self.links.faces().find_map(|face| match face.up() {
+            Some(wire) if wire.answers_as(generation) => {
                 Some(&**wire.actions() as &dyn ResponseSink)
             }
             _ => None,
@@ -505,22 +475,6 @@ impl<T: TransportFaces> TransportState<T> {
         self.groups.push(group);
     }
 
-    /// The node a handshake that is over reached, when another face holds it or brings a link to
-    /// it up: what the dial role's face stands by for. Read before the link's task is ended.
-    #[cfg(feature = "listen")]
-    pub fn stood_by(&self, at: usize, id: FaceId, turn: &Turn) -> Option<SessionZid> {
-        if !matches!(turn, Turn::HandshakeOver { .. }) {
-            return None;
-        }
-        self.links.held_node(at, id)
-    }
-
-    /// A session that takes no face besides its dial never finds its node held by another.
-    #[cfg(not(feature = "listen"))]
-    pub fn stood_by(&self, _at: usize, _id: FaceId, _turn: &Turn) -> Option<SessionZid> {
-        None
-    }
-
     /// Whether the session holds a transport, as zenoh-pico's `_z_transport_get_common` finds
     /// one: a link that is up, a port it listens on (a peer's unicast transport stands before any
     /// peer comes), or a group it joined. A client whose router went away holds none until a dial
@@ -575,7 +529,7 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
         let mut at = at;
         for face in self.links.faces() {
-            let Link::Up(wire) = face.link() else {
+            let Some(wire) = face.up() else {
                 continue;
             };
             if !wire.actions().is_established() {
@@ -600,8 +554,8 @@ impl<T: TransportFaces> TransportState<T> {
     /// The faces that stand: those whose links have completed their handshakes.
     #[cfg(feature = "connectivity")]
     pub fn standing_faces(&self) -> Vec<FaceSnapshot> {
-        let links = self.links.faces().filter_map(|face| match face.link() {
-            Link::Up(wire) if wire.actions().is_established() => {
+        let links = self.links.faces().filter_map(|face| match face.up() {
+            Some(wire) if wire.actions().is_established() => {
                 FaceSnapshot::of_actions(&**wire.actions())
             }
             _ => None,
@@ -623,81 +577,49 @@ impl<T: TransportFaces> TransportState<T> {
         self.links.holds_input()
     }
 
-    /// Whether the dial role's face has what an open waits for: its link is up, or the node it
-    /// reached is held by another face (`Link::Held`, with `listen`).
+    /// Whether the dial role's face has what an open waits for: its link is up, or it stands by
+    /// for the node it reached, which another face holds (with `listen`).
     pub fn dial_settled(&self) -> bool {
-        match self.dial().map(|face| face.link()) {
-            Some(Link::Up(_)) => true,
-            #[cfg(feature = "listen")]
-            Some(Link::Held { .. }) => true,
-            _ => false,
-        }
+        self.dial()
+            .is_some_and(|face| matches!(face.life().phase(), LinkPhase::Up | LinkPhase::Held))
     }
 
     /// What became of the link of the face at `at`, numbered `id`, read off it at `now_us` with
-    /// the face's role, and what the face does about it (`FaceLife`), `redials` when the session
-    /// dials its endpoints again: the session carries it out, with the answer of the dial, written
-    /// to `answer` when one was asked. A dial that is over stays in its face for the session to
-    /// let go of as it carries the effect out, with what it held for its link (a socket, the
-    /// link's buffers), before the face is dialled anew.
+    /// the face's role, and what the session does about it, which the face's life decides: the
+    /// session carries it out, with the answer of a dial and the endpoint it dialled, written to
+    /// `answer` and `dialled` when the dial answered ([`LinkSupervisor::read_face`]). A face past
+    /// the table asks for nothing.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn face_step(
         &mut self,
         at: usize,
         id: FaceId,
-        redials: bool,
         now_us: u64,
         answer: &mut DialAnswer<PumpOf<T>>,
+        dialled: &mut Option<DialEndpoint>,
     ) -> FaceStep {
-        let FaceRead {
-            role,
-            phase,
-            signals,
-        } = self.links.read_face(at, id, answer);
+        let FaceRead { role, input } = self.links.read_face(at, id, now_us, answer, dialled);
         // The face is read out of line, so its role is a value here; a table of the dial role's
         // face alone holds no other role, which this step then knows when compiled.
         let role = if self.links.takes_faces() {
             role
         } else {
-            FaceRole::Dial
+            LinkRole::Dial
         };
-        let life = FaceLife::new(id, role, phase);
-        let turn = life.turn(now_us, signals);
-        let stood_by = self.stood_by(at, id, &turn);
-        let effect = life.effect(turn, redials, stood_by);
-        FaceStep { life, effect }
+        let effects = self.links.face_mut(at).map_or(Effects::default(), |face| {
+            face.life_mut().input(input, now_us)
+        });
+        FaceStep { role, effects }
     }
 
-    /// End the handshake of the face at `at` that failed, and say why: the Close its peer sent,
+    /// End the handshake of the face at `at` that is over, and say why: the Close its peer sent,
     /// its task's end, or its deadline. Its task is told to stop, and ends in the session's next
-    /// pass of its tasks, before [`Self::handshake_failed`] lets the link go.
+    /// pass of its tasks; the link is let go of then by the caller.
     pub fn end_handshake(&self, at: usize) -> Refusal {
         let why = Refusal::from(self.links.handshake_end(at));
         self.links.abort_link(at);
         why
-    }
-
-    /// Let go of the link of the face at `at`, whose handshake failed for `why` and whose task
-    /// ended, the face waiting from `now_us`: the reason the face's next step (`then`) goes on
-    /// with, which names the endpoint dialled last when the face dials the next one.
-    // Always inlined: its one caller held these values in its own frame.
-    #[inline(always)]
-    pub fn handshake_failed(
-        &mut self,
-        at: usize,
-        then: &Next,
-        why: Refusal,
-        now_us: u64,
-    ) -> TransportRefusal {
-        self.links.put_link(at, Link::Waiting { at_us: now_us });
-        match then {
-            Next::DialFrom { from } => TransportRefusal::Unreachable(EndpointRefusal::new(
-                self.endpoints.dial_text(from.saturating_sub(1)),
-                why,
-            )),
-            _ => TransportRefusal::NoEndpoint,
-        }
     }
 
     /// The session of the link `opened` as face `face`, in `role`, dialled to or taken on
@@ -792,36 +714,6 @@ impl<T: TransportFaces> TransportState<T> {
             None => DialRow::Pending(Dial::new(DialEndpoint::Listed(at), pending)),
             Some(answer) => DialRow::Answered(answer),
         })
-    }
-
-    /// The next step of the dial role's walk over the session's endpoints from row `from` on: a
-    /// row whose dial is refused at once is passed, its refusal kept in `last`, and the first row
-    /// whose dial is under way or answered is handed back for the session to carry out
-    /// ([`DialWalk::Ended`] when no row is left, `last` then holding the last row's reason).
-    // Always inlined: its one caller held these values in its own frame.
-    #[inline(always)]
-    pub fn walk_dials<E: From<TransportRefusal>>(
-        &self,
-        from: usize,
-        last: &mut E,
-    ) -> DialWalk<DialOf<T>, PumpOf<T>> {
-        for at in from..self.endpoints.dials() {
-            // A resume past every row dials none, so one held at `usize::MAX` still means the
-            // rows are done; `at` is below the count of rows, so it is never held there.
-            let next = at.saturating_add(1);
-            match self.dial_row(at) {
-                Err(refused) => *last = refused.into(),
-                Ok(DialRow::Pending(dial)) => return DialWalk::Dialing { dial, next },
-                Ok(DialRow::Answered(answer)) => {
-                    return DialWalk::Answered {
-                        endpoint: DialEndpoint::Listed(at),
-                        next,
-                        answer,
-                    }
-                }
-            }
-        }
-        DialWalk::Ended
     }
 
     /// The link a dial of `endpoint` answered with, or why it is none: the endpoint and the

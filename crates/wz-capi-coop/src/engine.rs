@@ -96,7 +96,6 @@ use wz_capi_port::Refusal as Declined;
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::face_life::{FaceEffect, FaceRole, Next};
 use wz_runtime_coop::face_send::{self, Behind, FaceSend, Pass, PublishRun, Then, FIRST_FACE};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
@@ -106,7 +105,7 @@ use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 use wz_runtime_coop::faces::OwingWaits;
 use wz_runtime_coop::faces::{
     DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
-    LinkSupervisor,
+    LinkSupervisor, DIAL_LOOK_MS,
 };
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
@@ -123,7 +122,7 @@ use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::sync::ConfinedOwner;
 use wz_runtime_coop::transport::{
-    DialWalk, FaceStep, LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
+    DialRow, LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
 };
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::{
@@ -140,6 +139,9 @@ use wz_session_core::lent_push;
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkBook, LinkRegistry};
+use wz_session_core::link_life::{
+    Effects, LinkInput, LinkPhase, LinkRole, LinkTimes, Refused as HandshakeRefusal, UnicastLink,
+};
 use wz_session_core::locality::Locality;
 
 use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
@@ -2044,6 +2046,8 @@ impl SessionParts for CoopSession {
 struct Face<C: ClockSource + 'static, L: SessionLinks> {
     id: FaceId,
     link: Link<LinkSession<C>, L::Dial>,
+    /// Where the face's link stands: the one state of it the session keeps.
+    life: UnicastLink,
     replay: Replay,
     /// What the connectivity listeners whose history is being replayed were told of the face, and
     /// the tomb of a row of it that went (`told`).
@@ -2066,6 +2070,25 @@ impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
 
     fn link_mut(&mut self) -> &mut Link<LinkSession<C>, L::Dial> {
         &mut self.link
+    }
+
+    fn life(&self) -> &UnicastLink {
+        &self.life
+    }
+
+    fn life_mut(&mut self) -> &mut UnicastLink {
+        &mut self.life
+    }
+}
+
+/// The times the life of each link of a session opened with `config` is counted in: a dial and
+/// its handshake by the open's timeout, an accepted link's handshake by the acceptor's.
+fn link_times(config: &CoopConfig) -> LinkTimes {
+    LinkTimes {
+        open_timeout_ms: config.open_timeout_ms,
+        redial_ms: config.redial_ms,
+        dial_look_ms: DIAL_LOOK_MS,
+        accept_timeout_ms: config.timeouts.accepting_inactivity_ms,
     }
 }
 
@@ -3254,36 +3277,6 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
     }
 }
 
-/// Where a dial of a face begins ([`Core::dial`]).
-enum DialStart<P> {
-    /// The session's endpoints, from this row on.
-    Row(usize),
-    /// The dial the face held answered with `answer` from `endpoint`: its link's handshake is
-    /// given up at `deadline_us`, as the dial was, and the dial role goes on from row `next` when
-    /// the link's session is not opened.
-    Answer {
-        /// The endpoint the dial reached.
-        endpoint: Option<DialEndpoint>,
-        /// The row the dial role goes on from.
-        next: usize,
-        /// When the handshake is given up.
-        deadline_us: u64,
-        /// The link the dial made, or why the network refused it.
-        answer: Result<OpenedLink<P>, LinkOpenError>,
-    },
-}
-
-/// What a dial of a face came to ([`Core::dial`]).
-enum Dialled {
-    /// A dial under way is held in the face: the steps that follow ask it.
-    Pending,
-    /// A link answered, and its handshake was begun in the face.
-    Opened,
-    /// No link was opened: every endpoint from the first dialled on was refused, or the face
-    /// dials no other. The reason the last one gave.
-    Exhausted(OpenError),
-}
-
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
     /// spawned on the session's local set and stepped once so that an initiator's InitSyn is sent
@@ -3368,136 +3361,92 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .map_err(OpenError::from)
     }
 
-    /// When a handshake begun now is given up, in microseconds on the session's clock.
-    fn open_deadline_us(&self) -> u64 {
-        self.clock
-            .now_us()
-            .saturating_add(self.config.open_timeout_ms.saturating_mul(1000))
+    /// The times the life of each of the session's links is counted in.
+    fn link_times(&self) -> LinkTimes {
+        link_times(&self.config)
     }
 
-    /// Dial the face at `at`, numbered `face`, from `start`: the first of the session's
-    /// endpoints from a row on whose link opens, or the link a dial the face held answered with.
-    /// The face holds the link from then on: a dial the network has not answered yet is left
-    /// under way (`Link::Dialing`), and the steps that follow ask it, so no dial is waited for
-    /// while the session is held; a link that answered has its handshake begun here. `walks` for
-    /// the dial role's face, which goes on to the next endpoint when one is refused; any other
-    /// face is dialled once. A dial names its endpoint by its row of the session's endpoint texts,
-    /// which holds the text.
-    ///
-    /// [`Dialled::Exhausted`] with the reason the last endpoint tried gave (`last` when none
-    /// is); the face keeps the link it held then. `Err` only with
-    /// [`OpenError::EntropyUnavailable`], when the platform gives no cookie key for the attempt.
-    ///
-    /// The link is put in its face where it is made, and not handed back: the link is the
-    /// largest value of the dial, and each caller that put it would move it once more. Out of
-    /// line: the open, a face whose dial answered and a face that dials again all dial, and one
-    /// body serves them.
-    #[inline(never)]
-    fn dial(
+    /// Dial the session's endpoint at `row` for the face at `at`, and say what came of it as the
+    /// input of the face's life. A dial the network has not answered yet is left under way in the
+    /// face and asked at the steps that follow, so no dial is waited for while the session is
+    /// held; one answered at once with a link has it kept in `answer`, its endpoint in `dialled`,
+    /// for the handshake the life asks for next. A refusal is kept in `last`. A dial names its
+    /// endpoint by its row of the session's endpoint texts, which holds the text.
+    fn dial_endpoint(
         &mut self,
         at: usize,
-        face: FaceId,
-        mut start: DialStart<L::Pump>,
-        walks: bool,
-        mut last: OpenError,
-    ) -> Result<Dialled, OpenError> {
-        // Which row is dialled next is the transport's walk to say; each turn moves the row past
-        // the one it handed back, so the walk ends.
-        loop {
-            let (endpoint, next, deadline_us, answer) = match start {
-                DialStart::Answer {
-                    endpoint,
-                    next,
-                    deadline_us,
-                    answer,
-                } => (endpoint, next, deadline_us, answer),
-                DialStart::Row(from) => {
-                    let walked = self.transport.walk_dials(from, &mut last);
-                    let deadline_us = self.open_deadline_us();
-                    match walked {
-                        DialWalk::Dialing { dial, next } => {
-                            self.transport.links.put_link(
-                                at,
-                                Link::Dialing {
-                                    dial,
-                                    next,
-                                    deadline_us,
-                                },
-                            );
-                            return Ok(Dialled::Pending);
-                        }
-                        DialWalk::Answered {
-                            endpoint,
-                            next,
-                            answer,
-                        } => (Some(endpoint), next, deadline_us, answer),
-                        DialWalk::Ended => return Ok(Dialled::Exhausted(last)),
-                    }
-                }
-            };
-            let opened = match self.transport.dialled(endpoint.as_ref(), answer) {
-                Ok(opened) => {
-                    self.open_wire(face, opened, SessionRole::Initiator, endpoint.as_ref())
-                }
-                Err(refused) => Err(OpenError::from(refused)),
-            };
-            match opened {
-                Ok(wire) => {
-                    self.transport.links.put_link(
-                        at,
-                        Link::Opening {
-                            wire,
-                            next,
-                            deadline_us,
-                        },
-                    );
-                    return Ok(Dialled::Opened);
-                }
-                Err(OpenError::EntropyUnavailable) => return Err(OpenError::EntropyUnavailable),
-                // A task refused is not the endpoint's: the next one would be refused the same.
-                Err(refused) if walks && !matches!(refused, OpenError::NoTask(_)) => {
-                    last = refused;
-                    start = DialStart::Row(next);
-                }
-                Err(refused) => return Ok(Dialled::Exhausted(refused)),
+        row: usize,
+        answer: &mut DialAnswer<L::Pump>,
+        dialled: &mut Option<DialEndpoint>,
+        last: &mut OpenError,
+    ) -> LinkInput {
+        match self.transport.dial_row(row) {
+            Err(refused) => {
+                *last = OpenError::from(refused);
+                LinkInput::DialRefused
+            }
+            Ok(DialRow::Pending(dial)) => {
+                self.transport.links.put_link(at, Link::Dialing(dial));
+                LinkInput::DialPending
+            }
+            Ok(DialRow::Answered(Ok(opened))) => {
+                *answer = Some(Ok(opened));
+                *dialled = Some(DialEndpoint::Listed(row));
+                LinkInput::DialMade
+            }
+            Ok(DialRow::Answered(Err(refused))) => {
+                *last = OpenError::Unreachable(EndpointRefusal::new(
+                    self.transport.endpoints.dial_text(row),
+                    Refusal::Link(refused),
+                ));
+                LinkInput::DialRefused
             }
         }
     }
 
-    /// The dial role's face at `at`, whose dial came to no link for `last`: it waits
-    /// `redial_ms` to dial every endpoint again, or the session ends with `last` when it redials
-    /// none; the face keeps the link it held then.
-    ///
-    /// The wait is counted from the end of the dials, read from the clock after them. A dial
-    /// blocks the read step, which holds the session, and a host may refuse one only after
-    /// retries of its own (a refused loopback connect takes about two seconds on Windows): a wait
-    /// counted from before the dials would then already be over, the next read would dial again at
-    /// once, and the session would be held through dial after dial with no room for a publish or
-    /// a close to take it.
-    fn redial_later(
+    /// Begin the handshake of the link the dial of the face at `at`, numbered `id`, made: the
+    /// link in `answer`, from the endpoint in `dialled`. The face holds the link from then on,
+    /// and the input of its life says whether the handshake began; why it did not is kept in
+    /// `last`. A task refused is not the endpoint's (the next one would be refused the same),
+    /// and no cookie key for the attempt is not a reason any endpoint can pass.
+    fn begin_handshake(
         &mut self,
         at: usize,
-        last: OpenError,
-        redial_ms: Option<u64>,
-    ) -> Result<(), OpenError> {
-        let Some(ms) = redial_ms else {
-            return Err(last);
+        id: FaceId,
+        answer: &mut DialAnswer<L::Pump>,
+        dialled: &mut Option<DialEndpoint>,
+        last: &mut OpenError,
+    ) -> LinkInput {
+        let endpoint = dialled.take();
+        let Some(answered) = answer.take() else {
+            return LinkInput::HandshakeRefused(HandshakeRefusal::Endpoint);
         };
-        let ended_us = self.now_us();
-        self.transport.links.put_link(
-            at,
-            Link::Waiting {
-                at_us: ended_us.saturating_add(ms.saturating_mul(1000)),
-            },
-        );
-        Ok(())
+        let opened = match self.transport.dialled(endpoint.as_ref(), answered) {
+            Ok(opened) => self.open_wire(id, opened, SessionRole::Initiator, endpoint.as_ref()),
+            Err(refused) => Err(OpenError::from(refused)),
+        };
+        match opened {
+            Ok(wire) => {
+                self.transport.links.put_link(at, Link::Wire(wire));
+                LinkInput::HandshakeBegun
+            }
+            Err(refused) => {
+                let why = match refused {
+                    OpenError::EntropyUnavailable => HandshakeRefusal::Fatal,
+                    OpenError::NoTask(_) => HandshakeRefusal::Task,
+                    _ => HandshakeRefusal::Endpoint,
+                };
+                *last = refused;
+                LinkInput::HandshakeRefused(why)
+            }
+        }
     }
 
     /// Move the links on as [`Self::poll_links`] does, unless the last move left them settled and
     /// nothing that moves them came since: no face's link ended, no face or port was changed
     /// through the faces' table, and no face is due by `now_us` ([`LinksSettled`]). A session
     /// whose links are all up, and stay so, then looks at each face's task alone, one load a face,
-    /// and turns no face's value, replay or dial until one of those comes. `Err` as
+    /// and turns no face's life, replay or dial until one of those comes. `Err` as
     /// [`Self::poll_links`].
     fn move_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
         let links = &self.transport.links;
@@ -3531,11 +3480,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         let mut due_us = u64::MAX;
         for face in links.faces() {
-            let at_us = match &face.link {
-                Link::Up(wire) if wire.finished() => return None,
-                Link::Up(_) => face.replay.next_turn_ms().map(|ms| ms.saturating_mul(1000)),
-                Link::Waiting { at_us } => Some(*at_us),
-                _ => return None,
+            let at_us = match face.life.phase() {
+                LinkPhase::Up if face.link.wire().is_some_and(|wire| wire.finished()) => {
+                    return None
+                }
+                LinkPhase::Up => face.replay.next_turn_ms().map(|ms| ms.saturating_mul(1000)),
+                LinkPhase::Backoff { until_us } => Some(until_us),
+                LinkPhase::Idle | LinkPhase::Closed => None,
+                LinkPhase::Dialing { .. } | LinkPhase::Handshaking { .. } | LinkPhase::Held => {
+                    return None
+                }
             };
             if let Some(at_us) = at_us {
                 due_us = due_us.min(at_us);
@@ -3548,8 +3502,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Move every face's link on, after the session was stepped, against the step's reading of the
-    /// clock, `now_us`; see [`Self::poll_face`]. `Err` when the session ends, which only the dial
-    /// role's face can bring about.
+    /// clock, `now_us`; see [`Self::poll_face`]. `redial_ms` is the wait of a group whose link
+    /// was lost. `Err` when the session ends, which only the dial role's face can bring about.
     fn poll_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
         #[cfg(test)]
         self.link_polls.set(self.link_polls.get() + 1);
@@ -3563,37 +3517,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // A group whose link was lost is let go of, and joined again when its time comes.
         #[cfg(feature = "group")]
         self.poll_groups(redial_ms);
+        #[cfg(not(feature = "group"))]
+        let _ = redial_ms;
         // From the last face to the first: a face that is gone is removed, which moves none of the
         // ones before it.
         for at in (0..self.transport.links.places()).rev() {
-            self.poll_face(at, redial_ms, now_us)?;
+            self.poll_face(at, now_us)?;
         }
         Ok(())
     }
 
-    /// Move the link of the face at `at` on. A handshake that completed brings the link up and
-    /// begins to declare over it what the session holds, and a link that is up goes on with the
-    /// telling when a turn of it is due (`replay`), or ends when the replay is given up on a send
-    /// the link refused, and is then lost as any other link is. The dial role's face is kept: a
-    /// link that ended or ran out of time gives way to the next endpoint, and a lost link takes
-    /// what its peer declared with it and is dialled again. Any other face is not dialled again:
-    /// its lost or failed link takes the face with it. `Err` when the session ends: the dial
-    /// role's link was lost, or no endpoint answered, and `redial_ms` is `None`; or the platform
-    /// gave no entropy.
-    ///
-    /// What became of the link, and what the session does about it, is the face's value to say
-    /// (`wz_runtime_coop::face_life`); the link stays in its face while that is done here.
-    fn poll_face(
-        &mut self,
-        at: usize,
-        redial_ms: Option<u64>,
-        now_us: u64,
-    ) -> Result<(), OpenError> {
+    /// Move the link of the face at `at` on. A link that is up goes on with the telling when a
+    /// turn of it is due (`replay`), or ends when the replay is given up on a send the link
+    /// refused, and is then lost as any other link is. What became of the link, and what the
+    /// session does about it, is the face's life's to say ([`UnicastLink`]): the transport reads
+    /// the link into the life's input, and the session carries out what the life asks for
+    /// ([`Self::carry_out`]). `Err` when the session ends.
+    fn poll_face(&mut self, at: usize, now_us: u64) -> Result<(), OpenError> {
         let now_ms = now_us / 1000;
         let Some(face) = self.transport.links.face(at) else {
             return Ok(());
         };
         let id = face.id;
+        let was = face.life.phase();
         // A link that is up goes on telling its peer what the session holds, when a turn is due.
         // A turn the replay is given up on (a refused send, at once without a pace or when the
         // pace says so) ends the link here, with no Close, as
@@ -3602,168 +3548,132 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // then finds it lost, so the dial role's face dials again and tells everything over the
         // next link, and any other face goes.
         // A build that reaches no pace told the peer everything when the link came up.
-        let up = match &face.link {
-            Link::Up(wire) if ReplayPacing::REACHABLE && !wire.finished() => {
-                Some(wire.actions.clone())
-            }
-            _ => None,
-        };
+        let up = face
+            .up()
+            .filter(|wire| ReplayPacing::REACHABLE && !wire.finished())
+            .map(|wire| wire.actions.clone());
         if let Some(actions) = up {
             if self.replay_turn(at, &actions, now_ms) == TurnEnd::EndsLink {
                 self.transport.links.abort_link(at);
                 self.run_tasks();
             }
         }
-        // What became of the link is the face's value's to say (`FaceLife`), from what the
-        // transport reads of the link here, the face's role among it; carrying it out is the
-        // session's.
         let mut answer = None;
+        let mut dialled = None;
         let step = self
             .transport
-            .face_step(at, id, redial_ms.is_some(), now_us, &mut answer);
-        self.carry_out(at, step, &mut answer, redial_ms, now_us)
+            .face_step(at, id, now_us, &mut answer, &mut dialled);
+        if step.effects.is_empty() {
+            return Ok(());
+        }
+        self.carry_out(at, step.effects, was, &mut answer, &mut dialled, now_us)
     }
 
-    /// Carry out what the face at `at` does at a step (`step`): what its value decided, with the
-    /// answer of its dial, taken from `answer` where the step wrote it, and the endpoint of a dial
-    /// that is over, moved out of the dial as the arm that needs it lets the dial go. The session's part of its value's decision. `Err` when the session
-    /// ends: the dial role's link was lost, or no endpoint answered, and `redial_ms` is `None`;
-    /// or the platform gave no entropy.
+    /// Give the life of the face at `at` the input `input` at `now_us`, and carry out what it
+    /// asks for ([`Self::carry_out`]).
+    fn give_face(&mut self, at: usize, input: LinkInput, now_us: u64) -> Result<(), OpenError> {
+        let Some(face) = self.transport.links.face_mut(at) else {
+            return Ok(());
+        };
+        let was = face.life.phase();
+        let effects = face.life.input(input, now_us);
+        self.carry_out(at, effects, was, &mut None, &mut None, now_us)
+    }
+
+    /// Carry out what the life of the face at `at`, which stood at `was`, asks for (`effects`),
+    /// in the order [`Effects`] names, reporting the dial or the handshake it asks for back to it
+    /// as its next input, read at the clock after the I/O, until it asks for no more. `answer` and
+    /// `dialled` hold the answer of the face's dial and the endpoint it dialled when the step read
+    /// them. `Err` when the session ends, with the reason the last endpoint tried gave.
     fn carry_out(
         &mut self,
         at: usize,
-        step: FaceStep,
+        mut effects: Effects,
+        was: LinkPhase,
         answer: &mut DialAnswer<L::Pump>,
-        redial_ms: Option<u64>,
+        dialled: &mut Option<DialEndpoint>,
         now_us: u64,
     ) -> Result<(), OpenError> {
-        let FaceStep { life, effect } = step;
-        let id = life.id();
-        // Every arm that does not end here names what follows and the reason the last endpoint
-        // gave, and one call carries them out.
-        let (then, last) = match effect {
-            FaceEffect::Stay => return Ok(()),
-            // The face table decides whether the node is held already, and installs the link
-            // itself.
-            FaceEffect::BringUp => {
-                self.bring_up(at, now_us);
-                return Ok(());
+        let Some(id) = self.transport.links.face(at).map(|face| face.id) else {
+            return Ok(());
+        };
+        let mut last = OpenError::NoEndpoint;
+        // The dial the step read the refusal of, and one the life walked past or let go of with
+        // no answer read: either is over, and its endpoint names the reason.
+        if matches!(answer, Some(Err(_))) {
+            if let Some(Err(refused)) = answer.take() {
+                last = OpenError::Unreachable(EndpointRefusal::new(
+                    self.transport.endpoint_text(dialled.as_ref()),
+                    Refusal::Link(refused),
+                ));
+            }
+        } else if let Some(endpoint) = self.transport.links.end_dial(at) {
+            last = OpenError::Unreachable(EndpointRefusal::new(
+                self.transport.endpoint_text(Some(&endpoint)),
+                Refusal::NoAnswerInTime,
+            ));
+        }
+        loop {
+            if effects.let_go() {
+                self.transport.links.abort_link(at);
+                self.transport.links.put_link(at, Link::Idle);
+            }
+            // The link's task, told to stop, ends in the pass of the tasks before its link goes.
+            if effects.end_handshake() {
+                let why = self.transport.end_handshake(at);
+                self.run_tasks();
+                self.transport.links.put_link(at, Link::Idle);
+                if let LinkPhase::Handshaking { row, .. } = was {
+                    last = OpenError::Unreachable(EndpointRefusal::new(
+                        self.transport.endpoints.dial_text(row),
+                        why,
+                    ));
+                }
             }
             // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
             // that failed, a Close from the router
             // (`vendor/zenoh-pico/src/transport/unicast/read.c` @
             // `return _zp_unicast_failed_result(ztu, executor);`).
-            FaceEffect::Lose { then } => {
-                self.lose_face_link(at, id, now_us);
-                let last = if then == Next::EndSession {
-                    OpenError::Unreachable(EndpointRefusal::new("", Refusal::LinkLost))
-                } else {
-                    OpenError::NoEndpoint
-                };
-                (then, last)
+            if effects.lose() {
+                self.lose_face_link(at, id);
+                last = OpenError::Unreachable(EndpointRefusal::new("", Refusal::LinkLost));
             }
-            // The link's task, told to stop, ends in the pass of the tasks before its link goes.
-            FaceEffect::Fail { then } => {
-                let why = self.transport.end_handshake(at);
-                self.run_tasks();
-                let last = OpenError::from(self.transport.handshake_failed(at, &then, why, now_us));
-                (then, last)
+            // The face table decides whether the node is held already.
+            if effects.bring_up() {
+                self.bring_up(at, now_us);
             }
-            // The dial under way was asked, never waited for: its link's handshake begins once
-            // it is made. Refused, or not answered by its deadline, the dial role's face dials the
-            // next endpoint, and any other face goes, as one whose handshake fails does.
-            FaceEffect::Handshake { next, deadline_us } => {
-                let endpoint = self.transport.links.end_dial(at, now_us);
-                let Some(answer) = answer.take() else {
-                    let last = OpenError::Unreachable(EndpointRefusal::new(
-                        self.transport.endpoint_text(endpoint.as_ref()),
-                        Refusal::NoAnswerInTime,
-                    ));
-                    return self.follow(at, life.after_failure(next), last, redial_ms);
-                };
-                let start = DialStart::Answer {
-                    endpoint,
-                    next,
-                    deadline_us,
-                    answer,
-                };
-                let walks = life.role() == FaceRole::Dial;
-                match self.dial(at, id, start, walks, OpenError::NoEndpoint)? {
-                    Dialled::Pending | Dialled::Opened => return Ok(()),
-                    Dialled::Exhausted(last) if walks => {
-                        return self.redial_later(at, last, redial_ms);
-                    }
-                    Dialled::Exhausted(last) => (life.after_failure(next), last),
-                }
+            if effects.ends_session() {
+                return Err(last);
             }
-            FaceEffect::DialFailed { then } => {
-                let endpoint = self.transport.links.end_dial(at, now_us);
-                let why = match answer.take() {
-                    Some(Err(refused)) => Refusal::Link(refused),
-                    _ => Refusal::NoAnswerInTime,
-                };
-                let last = OpenError::Unreachable(EndpointRefusal::new(
-                    self.transport.endpoint_text(endpoint.as_ref()),
-                    why,
-                ));
-                (then, last)
-            }
-            // A face whose wait is over, or whose node no other face holds now (with `listen`):
-            // the face that held the node is gone, and so is any link in the making to it. Read
-            // from the face table each step and not told by the face that goes, so a link that
-            // dies in its handshake frees the node as well.
-            FaceEffect::Dial { from } => (Next::DialFrom { from }, OpenError::NoEndpoint),
-        };
-        self.follow(at, then, last, redial_ms)
-    }
-
-    /// What follows a link of the face at `at` that failed or was lost (`then`), `last` the
-    /// reason of the last endpoint tried: the face goes, the session ends with `last`, the face
-    /// dials from an endpoint (and waits `redial_ms` to dial them all again when none answers),
-    /// or it stands by for a node another face holds. A face goes, and the dial role stands by,
-    /// only in a session that takes faces besides its dial (`listen`).
-    fn follow(
-        &mut self,
-        at: usize,
-        then: Next,
-        last: OpenError,
-        redial_ms: Option<u64>,
-    ) -> Result<(), OpenError> {
-        // Only a face taken beside the dial role's goes, and the dial role's stands by only for a
-        // node such a face holds: a build without `listen` has neither decision, and a session
-        // whose table holds the dial role's face alone is asked neither (`FacePlaces::TAKES`).
-        match then {
+            // A face taken beside the dial role's goes with its link; a session whose table holds
+            // the dial role's face alone has no such face (`FacePlaces::TAKES`).
             #[cfg(feature = "listen")]
-            Next::Remove => {
+            if effects.removes() {
                 if self.transport.links.takes_faces() {
                     self.remove_face(at);
                 }
-                Ok(())
+                return Ok(());
             }
-            Next::EndSession => Err(last),
-            Next::DialFrom { from } => {
-                match self.dial(at, DIAL_FACE, DialStart::Row(from), true, last)? {
-                    Dialled::Pending | Dialled::Opened => Ok(()),
-                    Dialled::Exhausted(last) => self.redial_later(at, last, redial_ms),
-                }
-            }
-            // The dial role's link reached a node another face holds or is bringing up: the node
-            // refused it (`install_link_admission`). It stands by, and dials again when no other
-            // face has the node, where dialling at once would be refused again and the handshake
-            // paid each time.
-            #[cfg(feature = "listen")]
-            Next::StandBy { node } => {
-                if self.transport.links.takes_faces() {
-                    self.transport.links.put_link(at, Link::Held { zid: node });
-                }
-                Ok(())
-            }
+            let input = if effects.begin_handshake() {
+                self.begin_handshake(at, id, answer, dialled, &mut last)
+            } else if let Some(row) = effects.dial() {
+                self.dial_endpoint(at, row, answer, dialled, &mut last)
+            } else {
+                // A wait to dial again is the life's: its wake (`UnicastLink::wake_at`) brings
+                // the face's next step.
+                return Ok(());
+            };
+            let now_us = self.now_us();
+            let Some(face) = self.transport.links.face_mut(at) else {
+                return Ok(());
+            };
+            effects = face.life.input(input, now_us);
         }
     }
 
-    /// What a lost link of the face at `at`, numbered `id`, takes with it at `now_us`: its
-    /// peer's chains, its room, what its peer declared, and the face's watchers are told it went.
-    fn lose_face_link(&mut self, at: usize, id: FaceId, now_us: u64) {
+    /// What a lost link of the face at `at`, numbered `id`, takes with it: its peer's chains,
+    /// its room, what its peer declared, and the face's watchers are told it went.
+    fn lose_face_link(&mut self, at: usize, id: FaceId) {
         // The face is read before the wire goes: what it was is what a watcher is told, its rows
         // queued now and handed out once the session is let go of.
         let lost = self
@@ -3780,9 +3690,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // What a replaying listener was told of the face is read while its link is held.
         #[cfg(feature = "connectivity")]
         self.face_went(at);
-        self.transport
-            .links
-            .put_link(at, Link::Waiting { at_us: now_us });
+        self.transport.links.put_link(at, Link::Idle);
         // What the lost link's peer was told went with it: the next link's peer holds nothing.
         if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.discard();
@@ -3807,14 +3715,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Tell the peer of the face at `at` everything the session holds again (`redeclare`):
     /// whether it was told, which a place with no face, or a face whose link is not up, is not.
     fn redeclare_on(&mut self, at: usize, now_ms: u64) -> bool {
-        let actions = match self.transport.links.face(at).map(|face| &face.link) {
-            Some(Link::Up(wire)) => wire.actions.clone(),
-            _ => return false,
+        let Some(actions) = self
+            .transport
+            .links
+            .face(at)
+            .and_then(|face| face.up())
+            .map(|wire| wire.actions.clone())
+        else {
+            return false;
         };
         match self.begin_replay(at, &actions, now_ms) {
             TurnEnd::Kept => true,
             TurnEnd::EndsLink => {
-                if let Some(Link::Up(wire)) = self.transport.links.face(at).map(|face| &face.link) {
+                if let Some(wire) = self.transport.links.face(at).and_then(|face| face.up()) {
                     wire.abort();
                 }
                 false
@@ -3845,7 +3758,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
         }
-        self.transport.links.establish(at);
         if self.session.faces_watched() {
             FaceLinkRow::each_of_actions(&*actions, |row| {
                 self.session.report_face_row(FaceEventKind::Up, row);
@@ -4172,9 +4084,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let links = &self.transport.links;
         let faces = move || {
             links.faces().filter_map(move |face| {
-                let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
-                    return None;
-                };
+                let wire = face.link.wire()?;
                 let peer = decl_watch::named(|| wire.actions.peer_session_zid());
                 Some((registry.tables_of(face.id)?, peer))
             })
@@ -4619,7 +4529,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             links,
             Face {
                 id: DIAL_FACE,
-                link: Link::Waiting { at_us: u64::MAX },
+                link: Link::Idle,
+                life: UnicastLink::new(
+                    link_times(&config),
+                    LinkRole::Dial,
+                    lent.transport.endpoints.dials(),
+                ),
                 replay: Replay::idle(),
                 #[cfg(feature = "connectivity")]
                 told: FaceTold::default(),
@@ -4864,11 +4779,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core.transport.endpoints.listens(),
             core.config.groups.len(),
         ) {
-            if let Dialled::Exhausted(last) =
-                core.dial(0, DIAL_FACE, DialStart::Row(0), true, OpenError::NoEndpoint)?
-            {
-                return Err(last);
-            }
+            // An open that no endpoint answers ends here: the link has not been up, so its life
+            // dials none again.
+            let now_us = core.now_us();
+            core.give_face(0, LinkInput::Open, now_us)?;
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
             while !core.transport.dial_settled() {
@@ -5065,10 +4979,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .transport
                 .links
                 .faces()
-                .filter(|face| match &face.link {
-                    Link::Up(wire) | Link::Opening { wire, .. } => wire.owes_write(),
-                    _ => false,
-                })
+                .filter(|face| face.link.wire().is_some_and(|wire| wire.owes_write()))
                 .count()
         })
     }

@@ -32,9 +32,8 @@
 //! "Back off or end": the session dials every endpoint again `redial_ms` after the dials ended,
 //! counted from the time of the input that ended them, once its link has been up and when it has
 //! a `redial_ms`; before that, or without one, it ends. An established link that ends is dialled
-//! again at once, from the first endpoint. These are the decisions the cooperative engine's
-//! supervisor makes for its dial role's face (`wz_runtime_coop::face_life` and the engine's
-//! `dial`, `carry_out`, `follow` and `redial_later`), here for a session of that face alone.
+//! again at once, from the first endpoint. The cooperative engine keeps one such link for each
+//! face it holds, and carries out its effects with the face's I/O.
 //!
 //! A face taken beside the dial role's ([`LinkRole::Taken`]) is dialled once at most and goes
 //! with its link: where the dial role's face would dial on, back off, stand by or end the
@@ -390,6 +389,22 @@ impl UnicastLink {
             .initialize()
             .unwrap_or_else(|never| match never {});
         link
+    }
+
+    /// [`Self::init_in`] for an owner that keeps the link as a field of a value it moves into
+    /// its place (a face's record), built in a slot of this frame and moved out whole.
+    pub fn new(times: LinkTimes, role: LinkRole, endpoints: usize) -> Self {
+        let mut slot = MaybeUninit::uninit();
+        Self::init_in(&mut slot, times, role, endpoints);
+        // SAFETY: `init_in` wrote both fields of the link in `slot`. The machine holds no
+        // address of itself (its engine is built in place for the stack alone), so the link it
+        // makes is whole wherever it is moved.
+        unsafe { slot.assume_init() }
+    }
+
+    /// Which face of the session the link is.
+    pub fn role(&self) -> LinkRole {
+        self.data.role
     }
 
     /// Where the link stands.
