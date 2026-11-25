@@ -239,22 +239,6 @@ pub trait RecordForm: ThreadForm {
 /// keys as the form that holds the most of them keeps.
 pub type RoundKeys = BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>;
 
-/// The table of `room` rows of `T` at `base`, at most `there` of them.
-///
-/// # Safety
-/// `base` is aligned for `T`, and the `there` rows of `T` from it are valid for reads and
-/// writes, hold no value and are reached by nothing but the table for as long as it lives.
-unsafe fn table_in<T, const N: usize>(
-    base: NonNull<T>,
-    room: usize,
-    there: usize,
-) -> BoundedVec<T, N, Lent> {
-    // At most the rows there and at most what a lent table counts.
-    let room = room.min(there).min(u32::MAX as usize) as u32;
-    // SAFETY: the caller's contract, for no more rows than lie there.
-    unsafe { BoundedVec::lent_over(base, room) }
-}
-
 /// The records of a round, in the order they were written.
 pub trait RecordRows<T>: Default + core::ops::Deref<Target = [T]> + core::ops::DerefMut {
     /// Hold `value` after the others.
@@ -305,19 +289,13 @@ impl RecordForm for crate::row_callback::Threads {
         places: NonNull<Self::RecordPlaces<T>>,
         rows: usize,
     ) -> Self::Records<T> {
-        // SAFETY: the caller's contract; the places are `DELIVERY_LANE_EVENTS` rows of `T`.
-        unsafe { table_in(places.cast::<T>(), rows, caps::DELIVERY_LANE_EVENTS) }
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, rows) }
     }
 
     unsafe fn keys_in(places: NonNull<Self::KeyPlaces>, bytes: usize) -> RoundKeys {
-        // SAFETY: the caller's contract; the places are bytes, as many as their size.
-        unsafe {
-            table_in(
-                places.cast::<u8>(),
-                bytes,
-                core::mem::size_of::<Self::KeyPlaces>(),
-            )
-        }
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, bytes) }
     }
 }
 
@@ -346,14 +324,8 @@ impl RecordForm for crate::row_callback::OneThread {
     }
 
     unsafe fn keys_in(places: NonNull<Self::KeyPlaces>, bytes: usize) -> RoundKeys {
-        // SAFETY: the caller's contract; the places are bytes, as many as their size.
-        unsafe {
-            table_in(
-                places.cast::<u8>(),
-                bytes,
-                core::mem::size_of::<Self::KeyPlaces>(),
-            )
-        }
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, bytes) }
     }
 }
 
@@ -854,10 +826,9 @@ impl<C: RoundCalls> RoundRows<C> {
                     NonNull::new_unchecked(addr_of_mut!((*at).records)),
                     counts.records,
                 ),
-                callbacks: table_in(
-                    NonNull::new_unchecked(addr_of_mut!((*at).callbacks)).cast::<Owed<C>>(),
+                callbacks: BoundedVec::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).callbacks)),
                     counts.callbacks,
-                    caps::DELIVERY_LANE_CALLBACKS,
                 ),
                 keys: <C::Form as RecordForm>::keys_in(
                     NonNull::new_unchecked(addr_of_mut!((*at).keys)),

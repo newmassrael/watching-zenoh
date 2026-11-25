@@ -258,7 +258,7 @@ fn a_round_placed_in_an_arena_is_built_there_whole() {
 /// The tables of a round placed over a region's rows take the rows the counts state, at most the
 /// build's bound of each, and lie in those rows: records only where the form lends them, keys of as
 /// many of the longest as the form holds. Turned red by a table placed over more rows than the
-/// region keeps (`table_in`), or keys sized by the other form's count.
+/// region keeps (`BoundedVec::placed_over`), or keys sized by the other form's count.
 #[test]
 fn a_rounds_tables_placed_in_a_region_take_its_rows_at_most() {
     fn check<C: RoundCalls>() {

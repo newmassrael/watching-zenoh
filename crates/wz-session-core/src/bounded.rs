@@ -1013,6 +1013,23 @@ impl<T, const N: usize> BoundedVec<T, N, Lent> {
         Self { inner }
     }
 
+    /// The table over the `M` rows at `places`, rows a region the build lays out keeps beside
+    /// the table instead of an arena's span: `room` of them, at most the rows there, the build's
+    /// ceiling `N` and what a lent table counts.
+    ///
+    /// # Safety
+    /// `places` is aligned and valid for reads and writes, holds no value, and is reached by
+    /// nothing but the table for as long as it lives.
+    pub unsafe fn placed_over<const M: usize>(
+        places: NonNull<[core::mem::MaybeUninit<T>; M]>,
+        room: usize,
+    ) -> Self {
+        let room = room.min(M).min(N).min(u32::MAX as usize) as u32;
+        // SAFETY: the caller's contract, for no more rows than lie at `places`: an array of
+        // `MaybeUninit<T>` is laid out as as many rows of `T`.
+        unsafe { Self::lent_over(places.cast::<T>(), room) }
+    }
+
     /// The next row, for `write` to build a value in where the table keeps it, counted as held
     /// once `write` returns, and the value built; `None`, `write` not called, when the table holds
     /// every row it was lent. For a value too large to be one of its own in a frame, which
@@ -3060,6 +3077,29 @@ mod tests {
             .lend(0)
             .expect("no rows fit any arena");
         assert_eq!(table.push(1).map_err(|full| full.0), Err(1));
+    }
+
+    /// A table placed over a region's rows takes the rows asked, at most the rows there and the
+    /// build's ceiling, and keeps its values in them. Turned red by a table that takes more rows
+    /// than lie there or than its ceiling, or that keeps its rows anywhere else.
+    #[test]
+    fn a_table_placed_over_rows_takes_them_at_most() {
+        let mut places = [core::mem::MaybeUninit::<u32>::uninit(); 3];
+        let at = NonNull::from(&mut places);
+        // SAFETY: the rows are this frame's, hold no value and are reached by this table alone,
+        // which is dropped before the next one is placed over them.
+        let mut table = unsafe { BoundedVec::<u32, { usize::MAX }, Lent>::placed_over(at, 5) };
+        assert_eq!(table.free_slots(), 3, "held to the rows there");
+        assert!(table.push(7).is_ok());
+        assert_eq!(table.as_ptr(), at.cast::<u32>().as_ptr().cast_const());
+        drop(table);
+        // SAFETY: as above; the table before is gone.
+        let ceiling = unsafe { BoundedVec::<u32, 2, Lent>::placed_over(at, 3) };
+        assert_eq!(ceiling.free_slots(), 2, "held to the build's ceiling");
+        drop(ceiling);
+        // SAFETY: as above.
+        let fewer = unsafe { BoundedVec::<u32, 8, Lent>::placed_over(at, 1) };
+        assert_eq!(fewer.free_slots(), 1, "CONTROL: the rows asked, under both");
     }
 
     /// A lent table is a pointer and two 32-bit counts, whatever its rows: a set of a session's

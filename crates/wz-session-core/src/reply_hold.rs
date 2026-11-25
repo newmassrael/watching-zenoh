@@ -17,6 +17,9 @@
 //! [`flush_latest`]: crate::reply_hold::flush_latest
 //! [`HeldReplies`]: crate::reply_hold::HeldReplies
 
+use core::mem::MaybeUninit;
+use core::ptr::NonNull;
+
 use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
 use crate::caps;
 use crate::query_mode::ConsolidationMode;
@@ -356,6 +359,10 @@ pub struct HeldReplies<O, P: Storage = Profile> {
     refused: u32,
 }
 
+/// The rows a region keeps a hold's replies in ([`HeldReplies::placed_over`]): the build's bound
+/// of them.
+pub type HeldReplyPlaces<O> = [MaybeUninit<HeldReply<O, Lent>>; caps::MAX_PENDING_REPLIES];
+
 impl<O, P: Storage> Default for HeldReplies<O, P> {
     fn default() -> Self {
         Self {
@@ -377,6 +384,19 @@ impl<O> HeldReplies<O, Lent> {
     /// The bytes of an arena [`Self::lent`] takes for `rows`. `None` past the address space.
     pub const fn arena_bytes(rows: usize) -> Option<usize> {
         Arena::table_bytes::<HeldReply<O, Lent>>(rows)
+    }
+
+    /// A hold of `rows` rows over `places`, the rows a region the build lays out keeps in place of
+    /// the ones [`Self::lent`] takes from an arena: at most the build's bound of them.
+    ///
+    /// # Safety
+    /// As [`BoundedVec::placed_over`]'s, for `places`.
+    pub unsafe fn placed_over(places: NonNull<HeldReplyPlaces<O>>, rows: usize) -> Self {
+        Self {
+            // SAFETY: the caller's contract.
+            rows: unsafe { BoundedVec::placed_over(places, rows) },
+            refused: 0,
+        }
     }
 }
 
@@ -503,6 +523,34 @@ mod tests {
     use super::*;
     use crate::bounded::Static;
     use std::vec::Vec;
+
+    /// A hold placed over a region's rows takes the rows asked, at most the build's bound of them,
+    /// and lies in those rows. Turned red by a hold that takes more rows than the region keeps, or
+    /// that keeps them anywhere else.
+    #[test]
+    fn a_hold_placed_over_a_regions_rows_takes_them_at_most() {
+        let mut places = std::boxed::Box::new(MaybeUninit::<HeldReplyPlaces<u64>>::uninit());
+        let at = NonNull::from(&mut *places).cast::<HeldReplyPlaces<u64>>();
+        // SAFETY: the rows are this frame's box, hold no value and are reached by this hold alone,
+        // which is dropped before the next one is placed over them and before the box.
+        let past =
+            unsafe { HeldReplies::<u64, Lent>::placed_over(at, caps::MAX_PENDING_REPLIES + 1) };
+        assert_eq!(past.rows.free_slots(), caps::MAX_PENDING_REPLIES);
+        assert_eq!(
+            past.rows.as_ptr(),
+            at.cast::<HeldReply<u64, Lent>>().as_ptr().cast_const()
+        );
+        drop(past);
+        let asked = 1.min(caps::MAX_PENDING_REPLIES);
+        // SAFETY: as above; the hold before is gone.
+        let hold = unsafe { HeldReplies::<u64, Lent>::placed_over(at, asked) };
+        assert_eq!(
+            hold.rows.free_slots(),
+            asked,
+            "CONTROL: the rows asked, under the bound"
+        );
+        assert!(hold.is_empty());
+    }
 
     /// A reply as a test states it: a key, a kind, a payload and a stamp, with an encoding and an
     /// attachment on a Put.
