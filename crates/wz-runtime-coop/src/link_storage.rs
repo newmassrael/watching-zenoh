@@ -236,8 +236,28 @@ impl HeapTx {
     /// no more. So a link's send never waits on memory it does not hold since it was opened, and
     /// the session never finds every slot out (`SESSION_TX_SLOTS` says why).
     pub fn for_link(slots: usize, slot_len: usize, rx_len: usize) -> Self {
+        let (slots, slot_len) = Self::link_shape(slots, slot_len, rx_len);
+        Self::new(slots, slot_len)
+    }
+
+    /// [`Self::for_link`], or `None` when the heap has no room for the slots.
+    pub fn try_for_link(slots: usize, slot_len: usize, rx_len: usize) -> Option<Self> {
+        let (slots, slot_len) = Self::link_shape(slots, slot_len, rx_len);
+        let len = slots.saturating_mul(slot_len);
+        let bytes = zeroed_bytes(len)?;
+        let mut bytes = core::mem::ManuallyDrop::new(bytes);
+        let (at, len, capacity) = (bytes.as_mut_ptr(), bytes.len(), bytes.capacity());
+        // SAFETY: `UnsafeCell<u8>` has the layout of `u8`, so the vector's allocation, length and
+        // capacity are those of a vector of cells; the bytes' vector is not dropped.
+        let cells =
+            unsafe { Vec::from_raw_parts(at.cast::<core::cell::UnsafeCell<u8>>(), len, capacity) };
+        Some(Self { cells, slot_len })
+    }
+
+    /// The slots and their length [`Self::for_link`] holds.
+    fn link_shape(slots: usize, slot_len: usize, rx_len: usize) -> (usize, usize) {
         let slot_len = if slot_len == 0 { rx_len } else { slot_len };
-        Self::new(slots.max(SESSION_TX_SLOTS), slot_len)
+        (slots.max(SESSION_TX_SLOTS), slot_len)
     }
 }
 
@@ -701,11 +721,29 @@ pub(crate) fn heap_link_buffers(
                 .ok_or(crate::session_drive::LinkOpenError::Exhausted)?;
             Ok((RxBuffer::Lent(rx), TxBuffer::Lent(tx)))
         }
-        None => Ok((
-            RxBuffer::Owned(alloc::vec![0u8; rx]),
-            TxBuffer::Owned(HeapTx::for_link(tx_slots, tx_len, rx)),
-        )),
+        // Buffers the heap has no room for are a stack with no buffer left to give.
+        None => {
+            let exhausted = crate::session_drive::LinkOpenError::Exhausted;
+            let rx_bytes = zeroed_bytes(rx).ok_or(exhausted)?;
+            let tx = HeapTx::try_for_link(tx_slots, tx_len, rx).ok_or(exhausted)?;
+            Ok((RxBuffer::Owned(rx_bytes), TxBuffer::Owned(tx)))
+        }
     }
+}
+
+/// `len` zero bytes on the heap, or `None` when the heap has no room for them: `vec![0; len]`
+/// with no path that ends the program.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+fn zeroed_bytes(len: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).ok()?;
+    // SAFETY: room for `len` bytes was reserved above, and each is written before the length
+    // covers it.
+    unsafe {
+        core::ptr::write_bytes(bytes.as_mut_ptr(), 0, len);
+        bytes.set_len(len);
+    }
+    Some(bytes)
 }
 
 /// The most slots a link lends: what a session needs of it (`SESSION_TX_SLOTS`), and never fewer
@@ -898,7 +936,11 @@ impl<T: TxStore> TxLender<T> {
 #[inline(never)]
 pub fn copied_receive(link: &dyn SessionDatagramLink) -> Option<RxFrame> {
     let mut frame = None;
-    link.recv_with(&mut |datagram| frame = Some(RxFrame::new(datagram.to_vec())));
+    // A datagram the heap has no room to copy is dropped as a socket drops one it has no buffer
+    // for: lent once, it is gone, and the next receive reads the next one.
+    link.recv_with(&mut |datagram| {
+        frame = wz_session_core::bounded::heap_copy(datagram).map(RxFrame::new)
+    });
     frame
 }
 
@@ -1190,6 +1232,28 @@ mod tests {
         assert_eq!((tx.slots(), tx.slot_len()), (SESSION_TX_SLOTS, 48));
     }
 
+    /// A link whose buffers the heap has no room for is refused as a stack with none left to give,
+    /// which a dial tries again; with room its buffers are zeroed and as long as asked. Turned red
+    /// by buffers allocated with `vec!` or collected, which end the process on the refusal.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_link_the_heap_has_no_room_for_is_refused_as_exhausted() {
+        let refused = crate::table_tests::refused(|| heap_link_buffers(None, 48, 0, 0));
+        assert!(matches!(
+            refused,
+            Err(crate::session_drive::LinkOpenError::Exhausted)
+        ));
+        let (mut rx, tx) = heap_link_buffers(None, 48, 0, 0).expect("allocated");
+        assert_eq!(
+            rx.bytes().map(|bytes| bytes.to_vec()),
+            Some(std::vec![0u8; 48])
+        );
+        assert_eq!((tx.slots(), tx.slot_len()), (SESSION_TX_SLOTS, 48));
+        let only = HeapTx::try_for_link(0, 8, 0).expect("allocated");
+        assert_eq!((only.slots(), only.slot_len()), (SESSION_TX_SLOTS, 8));
+        assert!(crate::table_tests::refused(|| HeapTx::try_for_link(0, 8, 0)).is_none());
+    }
+
     /// Tables lent a group receive table hand it on, each buffer claimed once until given back,
     /// and tables lent none have none. Turned red by a table the tables lose, or one they hand
     /// out to a group past its buffers.
@@ -1265,5 +1329,21 @@ mod copied_receive_tests {
         assert_eq!(&second.bytes[..], b"second");
         assert!(link.try_recv().is_none(), "nothing is queued");
         assert_eq!(link.lends.get(), 2, "one lend for each datagram");
+    }
+
+    /// A datagram the heap has no room to copy is lent once and dropped, and the next one is
+    /// copied when the heap has room again. Turned red by a copy made with `to_vec`, which ends the
+    /// process on the refusal.
+    #[cfg(not(feature = "session-slot"))]
+    #[test]
+    fn a_datagram_the_heap_has_no_room_to_copy_is_dropped() {
+        let link = Lending {
+            queued: RefCell::new(vec![b"dropped".to_vec(), b"kept".to_vec()]),
+            lends: Cell::new(0),
+        };
+        assert!(crate::table_tests::refused(|| link.try_recv()).is_none());
+        assert_eq!(link.lends.get(), 1, "the datagram was lent");
+        let kept = link.try_recv().expect("the next datagram");
+        assert_eq!(&kept.bytes[..], b"kept");
     }
 }
