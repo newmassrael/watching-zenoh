@@ -2640,20 +2640,24 @@ impl RowCallback for SubscriberRow {
 
     const READS_ROW_IN_PLACE: bool = true;
 
+    #[inline]
     fn begin(&self) -> Option<RowCall> {
         self.latch.begin().then(|| RowCall(NonNull::from(self)))
     }
 
+    #[inline]
     unsafe fn end(call: RowCall) -> bool {
         // SAFETY: the caller's: the row has not moved since the call began and is still in its
         // table, which keeps it until its last call ended.
         unsafe { call.0.as_ref() }.latch.end()
     }
 
+    #[inline]
     fn retire(&self) -> bool {
         self.latch.retire()
     }
 
+    #[inline]
     fn drained(&self) -> bool {
         self.latch.drained()
     }
@@ -2675,6 +2679,7 @@ impl SubscriberCall {
     }
 
     /// Hand `sample` to the row's callback.
+    #[inline]
     pub(crate) fn hand(&self, sample: &SampleRef<'_>) {
         // SAFETY: the row lies where the call began until its last call ended, and this one has
         // not; nothing writes a row's sink or its timestamp choice after it is declared.
@@ -2683,6 +2688,7 @@ impl SubscriberCall {
 
     /// End the call: `true` when it was the last call of an undeclared subscriber, whose row the
     /// session's walk of its tables then lets go of (`SessionTables::release_drained_subscriber`).
+    #[inline]
     pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row, asserted above)
         // and keeps its slot until its last call ended, which this one is not yet; a call ends with

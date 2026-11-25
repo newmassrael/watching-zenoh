@@ -403,6 +403,7 @@ impl SubscriberSink {
     /// sample so, its timestamp shown only when `shows_timestamp` (`entity-timestamp-opt-in`): a
     /// plain one reads its parts with no call through a view, and leaves out a timestamp it is not
     /// to show.
+    #[inline]
     pub fn call_ref(&self, sample: &SampleRef<'_>, shows_timestamp: bool) {
         match self {
             // SAFETY: the constructor's contract: the call may be made from here, now.
