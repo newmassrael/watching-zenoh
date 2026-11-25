@@ -106,30 +106,30 @@ use wz_session_core::WhatAmI;
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
 pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
-    // Read as bytes: `#` and `;` are ASCII, so they split no character of the text, and a test an
-    // open makes once links no character searcher.
-    let mut halves = endpoint.as_bytes().splitn(2, |&byte| byte == b'#');
-    let locator = halves.next().unwrap_or_default();
-    let metadata = halves.next().unwrap_or_default();
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
-    if locator.starts_with(b"reth/") {
+    if endpoint.starts_with("reth/") {
         return true;
     }
-    locator.starts_with(b"udp/")
-        && metadata
-            .split(|&byte| byte == b';')
-            .any(|pair| pair.starts_with(b"iface="))
+    // The config span and its key are read by the locator grammar's one reader of them.
+    endpoint.starts_with("udp/")
+        && wz_session_core::locator_grammar::config_value(
+            wz_session_core::locator_grammar::endpoint_config(endpoint),
+            wz_session_core::group_locator::IFACE_KEY,
+        )
+        .is_some()
 }
 
 #[cfg(test)]
 mod group_endpoint_tests {
     use super::is_group_endpoint;
 
-    /// A group is a `udp/` locator one of whose metadata pairs names an interface: the pairs are
-    /// split at `;` after the first `#`, and a pair that only contains the name is none. Turned
-    /// red by a reading that splits at a later `#`, or finds the name inside another pair.
+    /// A group is a `udp/` locator one of whose config pairs names an interface, an empty one
+    /// too: the pairs are split at `;` after the first `#`, and a pair that only contains the
+    /// name is none, as is one in the `?` span. What a group is does not depend on its address or
+    /// the values of its other keys: those are the open's to refuse. Turned red by a reading that
+    /// splits at a later `#`, finds the name inside another pair, or asks more than the key.
     #[test]
-    fn a_group_is_a_udp_locator_whose_metadata_names_an_interface() {
+    fn a_group_is_a_udp_locator_whose_config_names_an_interface() {
         assert!(is_group_endpoint("udp/224.0.0.224:7447#iface=lo"));
         assert!(is_group_endpoint("udp/224.0.0.224:7447#ttl=1;iface=lo"));
         assert!(!is_group_endpoint("udp/224.0.0.224:7447"));
@@ -138,6 +138,12 @@ mod group_endpoint_tests {
         assert!(!is_group_endpoint("udp/224.0.0.224:7447#ttl=iface=lo"));
         assert!(!is_group_endpoint("udp/224.0.0.224:7447#ttl#iface=lo"));
         assert!(!is_group_endpoint("udp/224.0.0.224:7447#iface"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447?iface=lo"));
+        assert!(is_group_endpoint("udp/224.0.0.224:7447#iface="));
+        assert!(is_group_endpoint("udp/127.0.0.1:7447#iface=lo"));
+        assert!(is_group_endpoint(
+            "udp/224.0.0.224:7447?rel=1#ttl=x;iface=lo"
+        ));
         assert!(!is_group_endpoint("tcp/127.0.0.1:7447#iface=lo"));
         assert!(!is_group_endpoint("udp#iface=lo"));
         assert!(!is_group_endpoint(""));
