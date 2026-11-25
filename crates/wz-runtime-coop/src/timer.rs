@@ -48,7 +48,9 @@ use alloc::vec::Vec;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use core::alloc::Layout;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use core::ptr;
+use core::ops::{Deref, DerefMut};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use core::ptr::{self, NonNull};
 use critical_section::{CriticalSection, Mutex};
 
 /// The due wakers [`TimerQueue::pop_expired`] takes out in one section: a few, because they are
@@ -127,6 +129,48 @@ enum Slots {
     /// is one body and not one for each.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     Owned(Mutex<RefCell<Vec<TimerSlot>>>),
+    /// Entries in memory the table does not own, placed with the runtime's state
+    /// (`TimerQueue::placed`): a table that never grows.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    Lent(Mutex<RefCell<LentSlots>>),
+}
+
+/// Entries written in memory the table does not own, dropped where they lie with the table.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+struct LentSlots {
+    first: NonNull<TimerSlot>,
+    len: usize,
+}
+
+// SAFETY: the entries are the table's alone, reached only through its critical section, and what
+// they hold (deadlines and wakers) may be handed between contexts.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+unsafe impl Send for LentSlots {}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl Deref for LentSlots {
+    type Target = [TimerSlot];
+
+    fn deref(&self) -> &[TimerSlot] {
+        // SAFETY: `len` entries were written at `first` and stand until this is dropped.
+        unsafe { core::slice::from_raw_parts(self.first.as_ptr(), self.len) }
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl DerefMut for LentSlots {
+    fn deref_mut(&mut self) -> &mut [TimerSlot] {
+        // SAFETY: as `deref`, and `&mut self` is the one way to them.
+        unsafe { core::slice::from_raw_parts_mut(self.first.as_ptr(), self.len) }
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl Drop for LentSlots {
+    fn drop(&mut self) {
+        // SAFETY: the entries are live and dropped once, here; their memory is not this table's.
+        unsafe { ptr::drop_in_place(ptr::slice_from_raw_parts_mut(self.first.as_ptr(), self.len)) }
+    }
 }
 
 /// Deadline-keyed wake registry over a table of entries. Held inside the runtime
@@ -193,6 +237,25 @@ impl TimerQueue {
         ))))
     }
 
+    /// `count` empty entries written at `first`, in memory the table does not own: a deadline
+    /// past them is refused, counted, and none allocates. The entries are dropped where they lie
+    /// with the table.
+    ///
+    /// # Safety
+    /// `first` is aligned and valid for writes of `count` entries, and nothing else uses them
+    /// while the table stands.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) unsafe fn placed(first: NonNull<TimerSlot>, count: usize) -> Self {
+        for at in 0..count {
+            // SAFETY: the caller's: `at` is below `count`, written once here.
+            unsafe { first.as_ptr().add(at).write(TimerSlot::new()) };
+        }
+        Self::over(Slots::Lent(Mutex::new(RefCell::new(LentSlots {
+            first,
+            len: count,
+        }))))
+    }
+
     /// The table of a runtime made for `timers` deadlines at once: a table of no entries for 0,
     /// made with no reservation at all, and [`Self::reserved`] otherwise. Always inlined, so a
     /// runtime whose maker states its count as a constant links only the making of that count: a
@@ -219,6 +282,11 @@ impl TimerQueue {
             },
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             Slots::Owned(owned) => match owned.borrow(cs).try_borrow_mut() {
+                Ok(mut slots) => f(&mut slots),
+                Err(_) => f(&mut []),
+            },
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            Slots::Lent(lent) => match lent.borrow(cs).try_borrow_mut() {
                 Ok(mut slots) => f(&mut slots),
                 Err(_) => f(&mut []),
             },

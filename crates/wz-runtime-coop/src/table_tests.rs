@@ -24,7 +24,11 @@ use std::rc::Rc;
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource};
 
 use crate::executor::{yield_now, Refusals, SpawnRefusal};
-use crate::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
+use crate::kept::Kept;
+use crate::{
+    ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
+};
+use core::ptr::NonNull;
 
 /// The allocator of this test binary: the system's, counting on a thread that asked it to.
 struct Counting;
@@ -797,6 +801,81 @@ fn a_waker_kept_past_the_runtime_still_points_at_a_cell() {
     twin.wake();
     waker.wake_by_ref();
     drop(waker);
+}
+
+/// How many times the memory of a placed runtime's span was given back, in
+/// `a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_holder`.
+static SPAN_GIVEN_BACK: AtomicU32 = AtomicU32::new(0);
+
+/// What the last count of that span's memory does: it records that it ran.
+unsafe fn span_given_back(_kept: NonNull<Kept>) {
+    SPAN_GIVEN_BACK.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A runtime placed in a span of counted memory makes its tables, spawns and polls with nothing of
+/// the heap, and keeps the memory until its last holder lets go: a waker kept past the runtime and
+/// past the memory's own holder keeps it, and the waker's drop gives it back. A span one byte
+/// short of the layout places nothing. Turned red by a placed runtime that allocates, by one that
+/// gives the memory back while a waker still points into it, or by one that never gives it back.
+#[test]
+fn a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_holder() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    let rows = RuntimeRows {
+        tasks: 2,
+        task_bytes: 256,
+        timers: 1,
+    };
+    let form = RuntimeForm::Reserved;
+    let layout = CoopRuntime::<Hand>::placed_layout(rows, form).expect("a span of these rows");
+    // SAFETY: the layout is not of zero bytes: it holds the runtime's state.
+    let span = NonNull::new(unsafe { std::alloc::alloc(layout) }).expect("the host has the memory");
+    let memory = NonNull::from(std::boxed::Box::leak(std::boxed::Box::new(Kept::new(
+        span_given_back,
+    ))));
+    // SAFETY: the span is the layout's bytes, used by nothing else; the memory's count is live.
+    let short = unsafe { RuntimePlace::new(span, layout.size() - 1, memory) };
+    assert!(
+        CoopRuntime::placed(Hand(&NOW), rows, form, short).is_none(),
+        "a span short of the layout places nothing"
+    );
+    let kept: Rc<RefCell<Option<Waker>>> = Rc::new(RefCell::new(None));
+    let stash = Rc::clone(&kept);
+    let ((), allocated) = allocations(|| {
+        // SAFETY: as above; the span is freed only after its memory's count was given back.
+        let place = unsafe { RuntimePlace::new(span, layout.size(), memory) };
+        let runtime = CoopRuntime::placed(Hand(&NOW), rows, form, place).expect("the span fits");
+        assert_eq!(runtime.timers().capacity(), 1, "the entries are the span's");
+        let local = CoopLocalSet::new(&runtime);
+        let handle = local.spawn_local(core::future::poll_fn(move |cx| {
+            *stash.borrow_mut() = Some(cx.waker().clone());
+            Poll::<()>::Pending
+        }));
+        local.run_until_idle();
+        drop(handle);
+        drop(local);
+        drop(runtime);
+    });
+    assert_eq!(allocated, 0, "nothing of the heap");
+    // SAFETY: the memory's own holder lets go of its count, once.
+    unsafe { Kept::release(memory) };
+    assert_eq!(
+        SPAN_GIVEN_BACK.load(Ordering::SeqCst),
+        0,
+        "a waker kept past the runtime keeps the memory"
+    );
+    let waker = kept.borrow_mut().take().expect("the task kept its waker");
+    waker.wake_by_ref();
+    drop(waker);
+    assert_eq!(
+        SPAN_GIVEN_BACK.load(Ordering::SeqCst),
+        1,
+        "the last holder gives the memory back"
+    );
+    // SAFETY: the memory's last count ran; the span and the count are freed once, here.
+    unsafe {
+        std::alloc::dealloc(span.as_ptr(), layout);
+        drop(std::boxed::Box::from_raw(memory.as_ptr()));
+    }
 }
 
 /// A task no handle waits for is over in the pass that polls it: its cell is free when the pass

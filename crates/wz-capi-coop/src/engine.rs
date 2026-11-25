@@ -53,7 +53,7 @@ use crate::arena::{
     SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundGate, RoundRows};
-use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
+use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, TableLender};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::key_arena::KeyRef;
@@ -119,7 +119,9 @@ use wz_runtime_coop::transport::{
     DialWalk, FaceStep, LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
 };
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
-use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
+use wz_runtime_coop::{
+    ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
+};
 #[cfg(any(test, feature = "advanced-cache"))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -679,6 +681,8 @@ struct SessionLent {
     /// The session's round of deliveries, which lies in the arena: after the registry, which
     /// holds a handle of it, and before the arena.
     samples: Placed<Round>,
+    /// The span the session's runtime is placed in, and the count of the arena it is kept by.
+    runtime: RuntimePlace,
     arena: SessionArena,
 }
 
@@ -746,6 +750,7 @@ fn lend_session(
     memory: &'static dyn ArenaMemory,
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
+    runtime_bytes: usize,
 ) -> Result<SessionLent, ArenaRefused> {
     let mut plan = ArenaPlan::vacant();
     match from {
@@ -753,7 +758,7 @@ fn lend_session(
         #[cfg(any(feature = "runtime-plan", test))]
         PlanFrom::Config => plan.count(config, resolve_limits(config))?,
     }
-    lay_out_open(&mut plan, cell_bytes, held)?;
+    lay_out_open(&mut plan, cell_bytes, held, runtime_bytes)?;
     let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
@@ -850,7 +855,11 @@ fn lend_session(
         delivery,
     )
     .map_err(ArenaRefused::Lend)?;
+    let runtime = arena
+        .runtime_place(runtime_bytes)
+        .map_err(ArenaRefused::Lend)?;
     Ok(SessionLent {
+        runtime,
         transport,
         samples,
         router,
@@ -2662,9 +2671,11 @@ pub(crate) fn lay_out_open(
     plan: &mut ArenaPlan,
     cells: LinkCells<usize>,
     held: &HeldPlaces,
+    runtime: usize,
 ) -> Result<(), ArenaRefused> {
     plan.holding_cells(cells)?;
-    plan.holding(held)
+    plan.holding(held)?;
+    plan.holding_runtime(runtime)
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
@@ -2747,31 +2758,51 @@ impl RuntimeTables {
     /// neither joins groups nor listens takes no face beside its dial role's, so its runtime hosts
     /// that one link's task and is made for one (`CoopRuntime::reserved_for_one`), which links no
     /// walk of a table of many cells.
-    pub(crate) fn runtime<C: ClockSource>(self, clock: C) -> CoopRuntime<C> {
-        // The timers are stated as the constant they are, so the making of the timer table is that
-        // of the build's count alone (`CoopRuntime::reserved`).
-        let rows = RuntimeRows {
+    ///
+    /// The runtime is placed in `place`, the span of the session's arena the open lent it
+    /// ([`Self::placed_bytes`]): nothing of it is of the heap. `None` for a span short of it.
+    pub(crate) fn runtime<C: ClockSource>(
+        self,
+        clock: C,
+        place: RuntimePlace,
+    ) -> Option<CoopRuntime<C>> {
+        CoopRuntime::placed(clock, self.rows(), Self::form(self.groups), place)
+    }
+
+    /// The bytes of the span of the session's arena [`Self::runtime`] places the runtime in;
+    /// `None` past the address space.
+    pub(crate) fn placed_bytes<C: ClockSource>(self) -> Option<usize> {
+        CoopRuntime::<C>::placed_layout(self.rows(), Self::form(self.groups))
+            .map(|span| span.size())
+    }
+
+    /// The rows the runtime is made with. The timers are stated as the constant they are, so the
+    /// making of the timer table is that of the build's count alone; a build that joins no group
+    /// adds no cell while its open lasts, and reserves the groups' with the links' (none, as a
+    /// config that names a group is refused by name there).
+    fn rows(self) -> RuntimeRows {
+        let tasks = if cfg!(feature = "group") {
+            self.rows.tasks
+        } else {
+            self.rows.tasks.saturating_add(self.groups)
+        };
+        RuntimeRows {
+            tasks,
             timers: RUNTIME_TIMERS,
             ..self.rows
-        };
-        #[cfg(feature = "group")]
-        {
-            CoopRuntime::opening(clock, rows, self.groups)
         }
-        #[cfg(not(feature = "group"))]
-        {
-            let rows = RuntimeRows {
-                tasks: rows.tasks.saturating_add(self.groups),
-                ..rows
-            };
-            #[cfg(feature = "listen")]
-            {
-                CoopRuntime::reserved(clock, rows)
-            }
-            #[cfg(not(feature = "listen"))]
-            {
-                CoopRuntime::reserved_for_one(clock, rows)
-            }
+    }
+
+    /// The table of the build's runtime, a constant of the build: cells added while the open lasts
+    /// for the `groups` it joins (`group`), every cell reserved (`listen`), or the one cell of
+    /// the dial role's link.
+    const fn form(groups: usize) -> RuntimeForm {
+        if cfg!(feature = "group") {
+            RuntimeForm::Opening { added: groups }
+        } else if cfg!(feature = "listen") {
+            RuntimeForm::Reserved
+        } else {
+            RuntimeForm::ForOne
         }
     }
 }
@@ -4076,6 +4107,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
+        // The runtime's tables are placed in the arena, so its plan holds their span.
+        let tables = RuntimeTables::of::<C>(&config);
+        let runtime_bytes = tables
+            .placed_bytes::<C>()
+            .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?;
         let mut lent = lend_session(
             link_cells::<C>(&links),
             &held,
@@ -4083,6 +4119,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             memory,
             &config,
             &policy,
+            runtime_bytes,
         )
         .map_err(OpenError::Arena)?;
         // The texts of the endpoints, each written once by the source into the row the plan laid
@@ -4101,9 +4138,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if let Some(driver_cells) = lent.transport.cells.driver {
             links.lend_cells(driver_cells);
         }
-        // The task and timer tables, reserved here once: no spawn and no sleep of the session
-        // takes memory after its open (`open_links` seals them).
-        let runtime = RuntimeTables::of::<C>(&config).runtime(clock.clone());
+        // The task and timer tables, placed here once in the arena: no spawn and no sleep of the
+        // session takes memory after its open (`open_links` seals them).
+        let runtime = tables
+            .runtime(clock.clone(), lent.runtime)
+            .ok_or(OpenError::Arena(ArenaRefused::Lend(
+                LendRefused::Exhausted {
+                    asked: Some(runtime_bytes),
+                    left: 0,
+                },
+            )))?;
         let local = CoopLocalSet::new(&runtime);
         let session_time = CoopTime::new(&runtime);
         let wait_room = read_wait_room(&config);
