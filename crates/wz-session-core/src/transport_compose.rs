@@ -154,9 +154,11 @@ pub enum ComposeError {
 /// peer negotiates, the 64-bit one included.
 pub const fn sn_ring_max(code: u8) -> u64 {
     match code {
+        // `io/zenoh-transport/src/common/seq_num.rs` @ `const RES_U16: TransportSn = (u16::MAX >> 2)`:
+        // each ring is the widest number its VLE width holds, seven bits a byte up to the ninth.
         0 => (u8::MAX >> 1) as u64,
-        1 => (u16::MAX >> 1) as u64,
-        2 => (u32::MAX >> 1) as u64,
+        1 => (u16::MAX >> 2) as u64,
+        2 => (u32::MAX >> 4) as u64,
         _ => u64::MAX >> 1,
     }
 }
