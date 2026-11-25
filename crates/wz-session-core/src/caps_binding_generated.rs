@@ -790,6 +790,18 @@ pub const MAX_GROUP_ENDPOINT_LEN: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_RAWETH_ENDPOINT_LEN`] is bound.
+pub const MAX_RAWETH_ENDPOINT_LEN: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_GROUP_MEMBERS`] is bound.
 pub const MAX_GROUP_MEMBERS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
