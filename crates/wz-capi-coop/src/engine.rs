@@ -3214,7 +3214,14 @@ struct LinkMaking<'a> {
     /// Where the registry is lent to each link's dispatch (`Core::registry_lend`).
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     registry_lend: &'a RegistryLend,
-    /// The limits the session was opened with.
+    /// The limits the session was opened with: what a link's gate and its shared key ids are
+    /// sized by.
+    #[cfg(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group",
+        feature = "shared-key-ids"
+    ))]
     limits: &'a SessionLimits,
 }
 

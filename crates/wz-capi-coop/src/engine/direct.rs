@@ -729,6 +729,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let params = core.link_params()?;
         let mut calls = LinkMaking {
             session: &mut core.session,
+            #[cfg(feature = "shared-key-ids")]
             limits: resolve_limits(&core.config),
         };
         let placed = core

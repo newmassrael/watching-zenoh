@@ -12,7 +12,6 @@ use core::cell::Cell;
 #[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 #[cfg(any(
-    test,
     feature = "threads",
     feature = "listen",
     feature = "group",
@@ -20,7 +19,6 @@ use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 ))]
 use wz_session_core::limit_binding::Quota;
 #[cfg(any(
-    test,
     feature = "threads",
     feature = "listen",
     feature = "group",
@@ -97,7 +95,7 @@ const _: () = assert!(core::mem::size_of::<SubscriberCall>() <= core::mem::size_
 /// The most subscribers one record of a session reaches: a sample's, of the `subscribers` it
 /// holds, or a token's, of the `liveliness` subscribers it holds (none in a build without
 /// liveliness), whichever is more.
-#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 const fn most_subscribers(subscribers: usize, liveliness: usize) -> usize {
     let liveliness = if cfg!(feature = "liveliness") {
         liveliness
@@ -113,7 +111,7 @@ const fn most_subscribers(subscribers: usize, liveliness: usize) -> usize {
 
 /// What one record of a session whose limits are `limits` can take of its round ([`ReadRoom`]):
 /// an entry, and a callback for each subscriber it reaches, under the build's `SUBS` and `LIVE`.
-#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) fn read_room<const SUBS: usize, const LIVE: usize>(limits: &SessionLimits) -> ReadRoom {
     let subscribers = limits
         .max_subscriptions()
@@ -129,7 +127,7 @@ pub(crate) fn read_room<const SUBS: usize, const LIVE: usize>(limits: &SessionLi
 
 /// The declaration watches the session's `limits` admit, under the build's: what a record of what a
 /// peer declared owes a callback to at most. None in a build without the watch.
-#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 fn session_watches(limits: &SessionLimits) -> usize {
     #[cfg(any(
         feature = "remote-declaration-watch",
@@ -156,7 +154,6 @@ fn session_watches(limits: &SessionLimits) -> usize {
 /// to at most, and so what the round's callbacks are asked for ([`read_room`]) and a retraction
 /// asks of them.
 #[cfg(any(
-    test,
     feature = "threads",
     feature = "listen",
     feature = "group",
