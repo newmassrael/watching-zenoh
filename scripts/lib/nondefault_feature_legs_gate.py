@@ -138,6 +138,19 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
             ("scripts/pico-c-program.sh", '*-windows-*) host_form="os-windows" ;;'),
         ),
     ),
+    ("wz-capi-pico", "gossip"): Exemption(
+        "gap",
+        "linked and never started: every pico session is opened with no gossip policy, so a build "
+        "with it behaves as one without and no test can read what it changes; the crate's only "
+        "sites refuse it beside a cooperative engine. Q7 makes it a working opt-in there",
+        (
+            ("crates/wz-capi-pico/src/session.rs", "zenoh-pico has no gossip: its peers are introduced"),
+            (
+                "docs/c-abi-engine-and-memory.md",
+                "`gossip` is off in the pico preset's default and becomes a working opt-in",
+            ),
+        ),
+    ),
     # The session's transport state, which the cooperative engine holds in this runtime
     # (`transport::TransportState`), has no test of its own: each feature below is the engine's
     # feature of the same name, forwarded here, and the engine's legs run the tests that read it.
