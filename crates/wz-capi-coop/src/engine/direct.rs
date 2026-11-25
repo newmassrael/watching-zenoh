@@ -337,6 +337,10 @@ pub(super) struct HeldSend<'a, C: ClockSource + 'static> {
     before: Option<&'a HeldSend<'a, C>>,
 }
 
+/// What an operation runs with every face's send place held, then the session's lock
+/// (`CoopEngine::live_on_link`): the session's state, and the places it holds.
+type UnderHeldFaces<'o, L, C> = dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>) + 'o;
+
 /// What an operation holds of the faces' send places, taken before the session's lock
 /// (`CoopEngine::live_on_link`, `CoopEngine::on_faces`): a send to a held face writes the
 /// wire its hold holds; a send to any other face is lent that face's link by a try of its place,
@@ -1365,7 +1369,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &'f self,
         mut faces: impl Iterator<Item = &'f DirectFace<L, C>>,
         before: Option<&HeldSend<'_, C>>,
-        f: &mut dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>),
+        f: &mut UnderHeldFaces<'_, L, C>,
     ) {
         let Some(face) = faces.next() else {
             if let Some(mut core) = self.live() {
