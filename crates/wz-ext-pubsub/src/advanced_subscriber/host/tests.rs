@@ -302,7 +302,7 @@ impl SessionEngine for Script {
         &self,
         _filter: FilterId,
         _keyexpr: &str,
-        _mapping_id: wz_session_core::wire_id::ExprId,
+        _declared: wz_session_core::session_tables::KeyexprRef,
         _payload: &[u8],
         _params: &PlainPutParams,
     ) -> FilteredPut {
@@ -311,7 +311,7 @@ impl SessionEngine for Script {
     fn keep_write_filter_plain(
         &self,
         _filter: FilterId,
-        _plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+        _plain: Option<(PlainPutParams, wz_session_core::session_tables::KeyexprRef)>,
     ) {
     }
     fn publish_filtered(

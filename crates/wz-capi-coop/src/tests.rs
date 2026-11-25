@@ -1755,7 +1755,13 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
         .plain_put_params()
         .expect("a plain put");
     assert_eq!(
-        engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+        engine.put_plain_filtered(
+            filter,
+            "demo/x",
+            wz_session_core::session_tables::KeyexprRef::by_id(0),
+            b"v",
+            &params
+        ),
         FilteredPut::Suppressed,
         "no subscriber yet: the put is held back"
     );
@@ -1773,7 +1779,13 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
         !engine.write_filter_active(filter)
     });
     assert_eq!(
-        engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+        engine.put_plain_filtered(
+            filter,
+            "demo/x",
+            wz_session_core::session_tables::KeyexprRef::by_id(0),
+            b"v",
+            &params
+        ),
         FilteredPut::Sent(Ok(0)),
     );
     until(&engine, "the router to receive the put", || {
@@ -1847,7 +1859,13 @@ fn a_filtered_publish_is_held_back_then_sent() {
         "a row that keeps no plain form sends nothing itself"
     );
     let params = opts.plain_put_params().expect("a plain put");
-    engine.keep_write_filter_plain(filter, Some((params, 0)));
+    engine.keep_write_filter_plain(
+        filter,
+        Some((
+            params,
+            wz_session_core::session_tables::KeyexprRef::by_id(0),
+        )),
+    );
     assert!(matches!(
         engine.publish_filtered(filter, "demo/x", &literal, b"v", None),
         FilteredPut::Sent(Ok(_))

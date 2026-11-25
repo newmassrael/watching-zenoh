@@ -214,7 +214,7 @@ impl WriteFilter {
         &self,
         plain: Option<(
             wz_session_core::publish_options::PlainPutParams,
-            wz_session_core::wire_id::ExprId,
+            wz_session_core::session_tables::KeyexprRef,
         )>,
     ) {
         self.shared.keep_write_filter_plain(self.id, plain);

@@ -3076,11 +3076,11 @@ fn the_tables_bytes_are_the_same_in_a_const_as_at_run_time() {
     assert_eq!(SessionTables::<Calls, Lent>::arena_bytes(&past), None);
 }
 
-/// A plain way kept on a write filter keeps the row of the declaration that names its key, none for
-/// a key that names no declaration, and a key named at that row is named as by the declaration's
-/// id; a row that no longer holds the id is passed over for the search by id, and a retracted
-/// declaration names nothing. Turned red by a kept way that keeps no row, and by a read at a row
-/// that holds another declaration.
+/// A plain way kept on a write filter keeps the row of the declaration that names its key, found
+/// by its id when the holder gave none, and none for a key that names no declaration; a key named
+/// at that row is named as by the declaration's id; a row that no longer holds the id is passed
+/// over for the search by id, and a retracted declaration names nothing. Turned red by a kept way
+/// that keeps no row, and by a read at a row that holds another declaration.
 #[cfg(feature = "alloc")]
 #[test]
 fn a_plain_way_keeps_its_declarations_row_and_a_key_is_named_there() {
@@ -3108,15 +3108,29 @@ fn a_plain_way_keeps_its_declarations_row_and_a_key_is_named_there() {
             .and_then(|row| row.plain())
     };
     assert!(way(&tables).is_none(), "no way kept yet");
-    tables.keep_write_filter_plain(filter, Some((params, declared.id)));
-    let kept = way(&tables).expect("a way kept");
-    assert_eq!(kept.mapping_id, declared.id);
-    assert_eq!(kept.declared_at, Some(declared.handle));
-    tables.keep_write_filter_plain(filter, Some((params, 0)));
-    assert_eq!(way(&tables).unwrap().declared_at, None, "a whole key");
-    tables.keep_write_filter_plain(filter, Some((params, 99)));
+    let at = KeyexprRef {
+        id: declared.id,
+        row: Some(declared.handle),
+    };
+    tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(declared.id))));
+    assert_eq!(way(&tables).expect("a way kept").key, at, "found by its id");
+    tables.keep_write_filter_plain(filter, Some((params, at)));
+    assert_eq!(way(&tables).unwrap().key, at, "the row the holder gave");
+    let stale = KeyexprRef {
+        id: declared.id,
+        row: Some(other.handle),
+    };
+    tables.keep_write_filter_plain(filter, Some((params, stale)));
     assert_eq!(
-        way(&tables).unwrap().declared_at,
+        way(&tables).unwrap().key,
+        at,
+        "a row of another declaration"
+    );
+    tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(0))));
+    assert_eq!(way(&tables).unwrap().key.row, None, "a whole key");
+    tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(99))));
+    assert_eq!(
+        way(&tables).unwrap().key.row,
         None,
         "an id nothing declares"
     );
@@ -3126,33 +3140,32 @@ fn a_plain_way_keeps_its_declarations_row_and_a_key_is_named_there() {
     let id = MappedId::new(declared.id).unwrap();
     let under = Some(WireKey::mapped(id, KeyText::new("y")));
     assert_eq!(
-        tables
-            .named_at("demo/y", declared.id, Some(declared.handle))
-            .map(|named| named.wire()),
+        tables.named_at("demo/y", at).map(|named| named.wire()),
         under
     );
     assert_eq!(
-        tables
-            .named_at("demo/y", declared.id, Some(other.handle))
-            .map(|named| named.wire()),
+        tables.named_at("demo/y", stale).map(|named| named.wire()),
         under,
         "a row of another declaration is passed over"
     );
     assert_eq!(
         tables
-            .named_at("demo/y", declared.id, None)
+            .named_at("demo/y", KeyexprRef::by_id(declared.id))
             .map(|named| named.wire()),
         under
     );
-    assert_eq!(tables.retract_keyexpr(declared.handle), Some(declared.id));
+    assert_eq!(tables.keyexpr_at(KeyexprRef::by_id(0)), None);
     assert_eq!(
-        tables.named_at("demo/y", declared.id, Some(declared.handle)),
-        NamedKey::literal("demo/y")
+        tables.key_form_at(stale, Retraction::ById).prefix,
+        Some(declared.handle)
     );
+    assert_eq!(tables.retract_keyexpr(declared.handle), Some(declared.id));
+    assert_eq!(tables.named_at("demo/y", at), NamedKey::literal("demo/y"));
+    assert_eq!(tables.keyexpr_at(at), None);
 
     // A filter the tables no longer hold keeps nothing, and its row reads as none.
     let _ = tables.undeclare_write_filter(filter, |_, _| {});
-    tables.keep_write_filter_plain(filter, Some((params, other.id)));
+    tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(other.id))));
     assert!(way(&tables).is_none());
 }
 

@@ -53,7 +53,13 @@ fn a_plain_put_through_a_write_filter_takes_the_session_once() {
 
     let before = takes(&engine);
     assert_eq!(
-        engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+        engine.put_plain_filtered(
+            filter,
+            "demo/x",
+            wz_session_core::session_tables::KeyexprRef::by_id(0),
+            b"v",
+            &params
+        ),
         FilteredPut::Suppressed,
         "no subscriber yet: the put is held back"
     );
@@ -66,7 +72,13 @@ fn a_plain_put_through_a_write_filter_takes_the_session_once() {
     let before = takes(&engine);
     for _ in 0..10 {
         assert_eq!(
-            engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+            engine.put_plain_filtered(
+                filter,
+                "demo/x",
+                wz_session_core::session_tables::KeyexprRef::by_id(0),
+                b"v",
+                &params
+            ),
             FilteredPut::Sent(Ok(0))
         );
     }
@@ -114,7 +126,13 @@ fn a_write_filters_answer_is_kept_until_a_face_is_written() {
     let before = looks(&engine);
     for _ in 0..10 {
         assert_eq!(
-            engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+            engine.put_plain_filtered(
+                filter,
+                "demo/x",
+                wz_session_core::session_tables::KeyexprRef::by_id(0),
+                b"v",
+                &params
+            ),
             FilteredPut::Sent(Ok(0))
         );
     }
@@ -126,7 +144,13 @@ fn a_write_filters_answer_is_kept_until_a_face_is_written() {
     });
     let before = looks(&engine);
     assert_eq!(
-        engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+        engine.put_plain_filtered(
+            filter,
+            "demo/x",
+            wz_session_core::session_tables::KeyexprRef::by_id(0),
+            b"v",
+            &params
+        ),
         FilteredPut::Sent(Ok(0))
     );
     assert_eq!(
@@ -136,7 +160,13 @@ fn a_write_filters_answer_is_kept_until_a_face_is_written() {
     );
     for _ in 0..9 {
         assert_eq!(
-            engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+            engine.put_plain_filtered(
+                filter,
+                "demo/x",
+                wz_session_core::session_tables::KeyexprRef::by_id(0),
+                b"v",
+                &params
+            ),
             FilteredPut::Sent(Ok(0))
         );
     }
@@ -180,7 +210,13 @@ fn a_plain_put_through_a_write_filter_marks_its_send_on_each_face() {
         .expect("a plain put");
     let before = face_marks(&engine);
     assert_eq!(
-        engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+        engine.put_plain_filtered(
+            filter,
+            "demo/x",
+            wz_session_core::session_tables::KeyexprRef::by_id(0),
+            b"v",
+            &params
+        ),
         FilteredPut::Sent(Ok(0))
     );
     assert_eq!(

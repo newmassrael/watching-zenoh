@@ -516,7 +516,9 @@ impl DeclaredKeyexpr {
     /// call takes beside the wire key ([`WireKey::names_in`]), so naming it copies nothing.
     pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
         match self.declared_rest(shared) {
-            Some((d, rest)) => WireKey::aliased_tail(d.mapping_id(), rest.len()),
+            Some((d, rest)) => {
+                WireKey::aliased_tail(d.mapping_id(), rest.len()).at_row(d.hold.row())
+            }
             None => WireKey::literal(),
         }
     }

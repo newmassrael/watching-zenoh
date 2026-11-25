@@ -712,6 +712,10 @@ pub struct WireKey {
     /// one besides the one the wire names, `0` for none: the record of the entity holds it too
     /// ([`Self::with_own`]).
     own: wz_session_core::wire_id::ExprId,
+    /// The row of the session's tables the declaration `mapping_id` was found at, by the holder
+    /// that made the key ([`Self::at_row`]): an engine reads the declaration there while the row
+    /// still holds the id, and searches for the id otherwise.
+    row: Option<wz_session_core::session_tables::KeyexprHandle>,
 }
 
 /// The rest of a key past its declared prefix: none, a copy of its own, text that lies in what
@@ -779,6 +783,7 @@ impl core::fmt::Debug for WireKey {
             .field("suffix", &self.suffix)
             .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
             .field("own", &self.own)
+            .field("row", &self.row)
             .finish()
     }
 }
@@ -921,6 +926,7 @@ impl WireKey {
             suffix: suffix.map_or(Suffix::None, Suffix::Owned),
             keeps: Keeps::Nothing,
             own: 0,
+            row: None,
         }
     }
 
@@ -948,6 +954,7 @@ impl WireKey {
             suffix,
             keeps: Keeps::Anchor { _held: kept },
             own: 0,
+            row: None,
         }
     }
 
@@ -964,6 +971,7 @@ impl WireKey {
             },
             keeps: Keeps::Nothing,
             own: 0,
+            row: None,
         }
     }
 
@@ -1015,6 +1023,21 @@ impl WireKey {
     pub fn with_own(mut self, mapping_id: wz_session_core::wire_id::ExprId) -> Self {
         self.own = mapping_id;
         self
+    }
+
+    /// This key, naming its declaration at `row`, the row of the session's tables the holder of
+    /// the declaration took its hold in ([`KeyHold::row`]); `None` for a holder that knows none.
+    pub fn at_row(mut self, row: Option<wz_session_core::session_tables::KeyexprHandle>) -> Self {
+        self.row = row;
+        self
+    }
+
+    /// The declaration the wire names, with the row the holder found it at ([`Self::at_row`]).
+    pub fn declared(&self) -> wz_session_core::session_tables::KeyexprRef {
+        wz_session_core::session_tables::KeyexprRef {
+            id: self.mapping_id,
+            row: self.row,
+        }
     }
 
     /// The declaration of the key of the entity this key announces ([`Self::with_own`]), `0`
@@ -1310,6 +1333,22 @@ mod tests {
         assert_eq!(key.own_declaration(), 5);
         let kept = key.keeping(crate::lodge::Kept::shared(Arc::new(())));
         assert_eq!(kept.own_declaration(), 5);
+    }
+
+    /// A key names its declaration with the row its holder gave, kept through `keeping` and
+    /// `with_own`, and with none when no holder gave one. Turned red by a key that drops the row
+    /// it was given, or by a `declared` that names another id than the wire's.
+    #[test]
+    fn a_key_names_its_declaration_with_the_row_its_holder_gave() {
+        use wz_session_core::session_tables::KeyexprRef;
+        let row = wz_session_core::slot_map::Handle::from_bits(
+            core::num::NonZeroU32::new(0x0003_0002).expect("not zero"),
+        );
+        assert_eq!(WireKey::literal().declared(), KeyexprRef::default());
+        assert_eq!(WireKey::aliased(7, None).declared(), KeyexprRef::by_id(7));
+        let key = WireKey::aliased_tail(7, 0).at_row(row).with_own(5);
+        let kept = key.keeping(crate::lodge::Kept::shared(Arc::new(())));
+        assert_eq!(kept.declared(), KeyexprRef { id: 7, row });
     }
 
     /// A tail is read against the key the wire key is handed with: the end of it, of the length

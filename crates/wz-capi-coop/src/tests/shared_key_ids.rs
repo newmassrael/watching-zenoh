@@ -487,7 +487,13 @@ fn a_filtered_plain_put_names_its_key_as_the_links_form_says() {
     for (key, mapping) in [("lab/rig/alpha", 41), ("lab/mark", 0)] {
         assert!(
             matches!(
-                listener.put_plain_filtered(filter, key, mapping, b"value", &params),
+                listener.put_plain_filtered(
+                    filter,
+                    key,
+                    wz_session_core::session_tables::KeyexprRef::by_id(mapping),
+                    b"value",
+                    &params
+                ),
                 FilteredPut::Sent(Ok(_))
             ),
             "{key} goes plain"

@@ -127,7 +127,9 @@ use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::session_tables::{KeyexprHandle, KeyexprHolds, RowCallbacks, SessionTables};
+use wz_session_core::session_tables::{
+    KeyexprHandle, KeyexprHolds, KeyexprRef, RowCallbacks, SessionTables,
+};
 use wz_session_core::wire_id::{EntityId, ExprId};
 
 #[cfg(feature = "multicast-transport")]
@@ -1390,16 +1392,17 @@ impl RowCallbacks for CoreRows {
 }
 
 /// The declarations an entry the registry records names, each once: the one its key is named by,
-/// and the one of the entity's own key when that is another, the one the ABI states
-/// ([`WireKey::own_declaration`]) or else the one its retraction names; `0` for none.
-fn declarations_named(wire: &WireKey, retraction: Option<RetractionKey>) -> [ExprId; 2] {
+/// at the row the ABI found it at ([`WireKey::declared`]), and the one of the entity's own key when
+/// that is another, the one the ABI states ([`WireKey::own_declaration`]) or else the one its
+/// retraction names; the id `0` for none.
+fn declarations_named(wire: &WireKey, retraction: Option<RetractionKey>) -> [KeyexprRef; 2] {
     let own = match wire.own_declaration() {
         0 => retraction.map_or(0, |key| key.mapping_id),
         stated => stated,
     };
     [
-        wire.mapping_id,
-        if own == wire.mapping_id { 0 } else { own },
+        wire.declared(),
+        KeyexprRef::by_id(if own == wire.mapping_id { 0 } else { own }),
     ]
 }
 
@@ -3296,9 +3299,9 @@ impl SharedSession {
     /// (`NoEntityId`). The rows held, for the entry to keep.
     fn admit_entry(
         guard: &mut Inner,
-        named: [ExprId; 2],
+        named: [KeyexprRef; 2],
     ) -> Result<(EntityId, [Option<KeyexprHandle>; 2]), wz_capi_port::Refusal> {
-        let rows = named.map(|id| guard.tables.keyexpr_by_id(id));
+        let rows = named.map(|declared| guard.tables.keyexpr_at(declared));
         // Every count is read before any is taken, so a refusal has no hold to give back.
         if rows.into_iter().flatten().any(|row| {
             guard

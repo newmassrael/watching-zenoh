@@ -31,9 +31,9 @@ use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::query_sink::ReplyOut;
 use wz_session_core::sample::TimestampHint;
-use wz_session_core::session_tables::KeyexprHandle;
+use wz_session_core::session_tables::{KeyexprHandle, KeyexprRef};
 use wz_session_core::session_zid::SessionZid;
-use wz_session_core::wire_id::{EntityId, ExprId};
+use wz_session_core::wire_id::EntityId;
 
 use crate::cancellation::CancellableFan;
 use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchSink};
@@ -542,13 +542,14 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// Drop write filter `id`.
     fn undeclare_write_filter(&self, id: FilterId);
 
-    /// Send a plain Put through write filter `filter` on the declared key `mapping_id` (or the
-    /// literal `keyexpr` when it is `0`), sent from `params`.
+    /// Send a plain Put through write filter `filter` on the key the declaration `declared` names
+    /// (or the literal `keyexpr` when its id is `0`), sent from `params`. The declaration is read
+    /// at the row it names while that row holds its id.
     fn put_plain_filtered(
         &self,
         filter: FilterId,
         keyexpr: &str,
-        mapping_id: ExprId,
+        declared: KeyexprRef,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut;
@@ -558,7 +559,11 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// or `None` for the general way. Stated once, when the entity is declared; the filter's row
     /// keeps it, so no caller keeps a plain form of its own. Every engine states what it does
     /// with it, so none sends a bare write the general way by omission.
-    fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>);
+    fn keep_write_filter_plain(
+        &self,
+        filter: FilterId,
+        plain: Option<(PlainPutParams, KeyexprRef)>,
+    );
 
     /// Publish what an entity holding write filter `filter` writes: the one entry a declared
     /// entity's put and delete go through. Nothing is sent when the filter holds the write back

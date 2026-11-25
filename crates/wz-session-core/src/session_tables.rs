@@ -868,11 +868,27 @@ pub struct WriteFilterRow<Key> {
 pub struct PlainWay {
     /// The facts the Put is sent from.
     pub params: crate::publish_options::PlainPutParams,
-    /// The declaration that names the entity's key, `0` for none.
-    pub mapping_id: ExprId,
-    /// The row that declaration had when the way was kept: a write reads the declared prefix
-    /// there ([`SessionTables::named_at`]) and does not search the declarations for the id.
-    pub declared_at: Option<KeyexprHandle>,
+    /// The declaration that names the entity's key.
+    pub key: KeyexprRef,
+}
+
+/// A key expression declaration as its holder names it: the id the wire names it by, `0` for
+/// none, and the row of the session's tables the holder found it at, `None` for a holder that
+/// knows only the id. A row is read in place while it still holds the id
+/// ([`SessionTables::keyexpr_at`]), so a holder that kept one never searches the declarations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyexprRef {
+    /// The id the wire names the declaration by.
+    pub id: ExprId,
+    /// The row the holder found it at.
+    pub row: Option<KeyexprHandle>,
+}
+
+impl KeyexprRef {
+    /// The declaration `id` names, at no row known.
+    pub const fn by_id(id: ExprId) -> Self {
+        Self { id, row: None }
+    }
 }
 
 impl<Key: KeyBacking> WriteFilterRow<Key> {
@@ -1768,8 +1784,26 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         Some(id)
     }
 
-    /// The declaration the wire names by `id`: a search of the declarations, which a caller that
-    /// keeps the row it found ([`Self::named_at`]) makes once.
+    /// The declaration `declared` names: its row while that row still holds its id, and the
+    /// declaration the id names otherwise ([`Self::keyexpr_by_id`]), as for a holder that knows no
+    /// row. Ids are minted apart from every declared one, so either way finds the same row. `None`
+    /// for the id `0`, which names no declaration.
+    pub fn keyexpr_at(&self, declared: KeyexprRef) -> Option<KeyexprHandle> {
+        if declared.id == 0 {
+            return None;
+        }
+        declared
+            .row
+            .filter(|&row| {
+                self.keyexprs
+                    .get(row)
+                    .is_some_and(|kept| kept.id == declared.id)
+            })
+            .or_else(|| self.keyexpr_by_id(declared.id))
+    }
+
+    /// The declaration the wire names by `id`: a search of the declarations, which a holder that
+    /// keeps the row it found ([`Self::keyexpr_at`]) does not make.
     pub fn keyexpr_by_id(&self, id: ExprId) -> Option<KeyexprHandle> {
         self.keyexprs
             .iter()
@@ -1781,13 +1815,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// named by that declaration while it stands, which the entity's row then holds, and retracted
     /// naming what `retraction` says beside the id.
     pub fn key_form(&self, mapping_id: ExprId, retraction: Retraction) -> KeyForm {
-        let prefix = if mapping_id == 0 {
-            None
-        } else {
-            self.keyexpr_by_id(mapping_id)
-        };
+        self.key_form_at(KeyexprRef::by_id(mapping_id), retraction)
+    }
+
+    /// [`Self::key_form`] of a key whose declaration its holder names with its row.
+    pub fn key_form_at(&self, declared: KeyexprRef, retraction: Retraction) -> KeyForm {
         KeyForm {
-            prefix,
+            prefix: self.keyexpr_at(declared),
             own: None,
             retraction,
         }
@@ -1893,27 +1927,17 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// the session sends it: named by that declaration while it stands and begins the key, and
     /// whole otherwise. `None` for an empty key.
     pub fn named_by<'k>(&self, key: &'k str, id: ExprId) -> Option<NamedKey<'k>> {
-        self.named_at(key, id, None)
+        self.named_at(key, KeyexprRef::by_id(id))
     }
 
-    /// [`Self::named_by`] for a caller that found the declaration `id` at row `at`: read there
-    /// while that row still holds `id`, and searched for by `id` otherwise, as by a caller that
-    /// found none. Ids are minted apart from every declared one, so the row found either way is
-    /// the same.
-    pub fn named_at<'k>(
-        &self,
-        key: &'k str,
-        id: ExprId,
-        at: Option<KeyexprHandle>,
-    ) -> Option<NamedKey<'k>> {
-        let declared = MappedId::new(id).and_then(|mapped| {
-            let row = at
-                .and_then(|at| self.keyexprs.get(at))
-                .filter(|row| row.id == id)
-                .or_else(|| self.keyexprs.get(self.keyexpr_by_id(id)?))?;
+    /// [`Self::named_by`] for a holder that names the declaration with its row: read there while
+    /// that row still holds the id ([`Self::keyexpr_at`]).
+    pub fn named_at<'k>(&self, key: &'k str, declared: KeyexprRef) -> Option<NamedKey<'k>> {
+        let prefix = MappedId::new(declared.id).and_then(|mapped| {
+            let row = self.keyexprs.get(self.keyexpr_at(declared)?)?;
             Some(Prefix::of(mapped, text(&row.key)))
         });
-        NamedKey::under_or_whole(key, declared)
+        NamedKey::under_or_whole(key, prefix)
     }
 
     // ---- entities --------------------------------------------------------------------------
@@ -2519,13 +2543,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     /// Keep how a write of write filter `filter`'s entity that brings nothing of its own is sent
     /// the plain way, `None` for the general way: the facts it is sent from and the declaration
-    /// `mapping_id` naming its key, with that declaration's row as it stands now. A filter the
-    /// tables do not hold keeps nothing.
+    /// naming its key, at the row it stands at now, found here once for a holder that knows only
+    /// its id. A filter the tables do not hold keeps nothing.
     #[cfg(feature = "alloc")]
     pub fn keep_write_filter_plain(
         &self,
         filter: WriteFilterHandle,
-        plain: Option<(crate::publish_options::PlainPutParams, ExprId)>,
+        plain: Option<(crate::publish_options::PlainPutParams, KeyexprRef)>,
     ) {
         let Some(row) = self
             .kept_write_filters()
@@ -2533,13 +2557,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         else {
             return;
         };
-        row.plain.set(plain.map(|(params, mapping_id)| PlainWay {
+        row.plain.set(plain.map(|(params, key)| PlainWay {
             params,
-            mapping_id,
-            declared_at: if mapping_id == 0 {
-                None
-            } else {
-                self.keyexpr_by_id(mapping_id)
+            key: KeyexprRef {
+                id: key.id,
+                row: self.keyexpr_at(key),
             },
         }));
     }

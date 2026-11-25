@@ -72,8 +72,8 @@ use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
     kind, DeclaredRow, DeclaredTable, InterestHandle, InterestKind, InterestName, InterestRow,
-    KeyexprHandle, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks, SessionTables,
-    SubscriberHandle, Watching, WriteFilterHandle,
+    KeyexprHandle, KeyexprRef, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks,
+    SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 use wz_session_core::slot_observer::ObserverRows;
@@ -5634,7 +5634,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         } = *put;
         // The key as the session's tables name it: by the declaration the ABI named it by while
         // that declaration stands, and whole otherwise. An empty key names nothing a link carries.
-        let Some(named) = tables(&core.session.registry).named_by(keyexpr, wire.mapping_id) else {
+        let Some(named) = tables(&core.session.registry).named_at(keyexpr, wire.declared()) else {
             return (Err(FanoutError::ExceedsCapacity), None);
         };
         let send = wz_session_core::session_actions::SendAs {
@@ -6701,7 +6701,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         open.is_some_and(|open| !open)
     }
 
-    /// A plain Put on `mapping_id` (the literal `keyexpr` when it is `0`) sent from `params` to
+    /// A plain Put on the key `declared` names (the literal `keyexpr` when its id is `0`), read at the
+    /// row `declared` names while that row holds the id, sent from `params` to
     /// every link, once the write filter let it through, as a publish is sent
     /// ([`Self::send_on_links`]): `NotPlain`, with nothing sent, when a subscriber of the session or
     /// a group wants it the general way, or the key names nothing a link carries.
@@ -6709,7 +6710,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         &self,
         core: &Core<L, C>,
         keyexpr: &str,
-        (mapping_id, declared_at): (ExprId, Option<KeyexprHandle>),
+        declared: KeyexprRef,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
@@ -6734,8 +6735,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // The key as the session's tables name it, read at the declaration's row where the caller
         // kept it, and each link as its key-wire form says.
-        let Some(named) = tables(&core.session.registry).named_at(keyexpr, mapping_id, declared_at)
-        else {
+        let Some(named) = tables(&core.session.registry).named_at(keyexpr, declared) else {
             return FilteredPut::NotPlain;
         };
         // A plain put carries its QoS and nothing else of a publication's.
@@ -7202,7 +7202,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let form = core
             .session
             .key_form(
-                wire.mapping_id,
+                wire.declared(),
                 retraction.map_or(Retraction::ById, Retraction::Named),
             )
             .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
@@ -7623,15 +7623,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         &self,
         filter: FilterId,
         keyexpr: &str,
-        mapping_id: ExprId,
+        declared: KeyexprRef,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
-        self.put_through_filter(filter, keyexpr, payload, Some((mapping_id, *params)))
+        self.put_through_filter(filter, keyexpr, payload, Some((declared, *params)))
     }
 
     #[inline(never)]
-    fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>) {
+    fn keep_write_filter_plain(
+        &self,
+        filter: FilterId,
+        plain: Option<(PlainPutParams, KeyexprRef)>,
+    ) {
         let Some(core) = self.live() else {
             return;
         };
@@ -7717,7 +7721,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let form = core
             .session
             .key_form(
-                wire.mapping_id,
+                wire.declared(),
                 retraction.map_or(Retraction::ById, Retraction::Named),
             )
             .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
@@ -8279,7 +8283,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let form = core
                 .session
-                .key_form(wire.mapping_id, named)
+                .key_form(wire.declared(), named)
                 .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
             let declared = tables_mut(&mut core.session.registry).declare_token(keyexpr, form)?;
             core.announce(DeclaredRow::of(declared.handle));
@@ -8368,7 +8372,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         let form = core
             .session
-            .key_form(wire.mapping_id, Retraction::ById)
+            .key_form(wire.declared(), Retraction::ById)
             .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
         let declared = tables_mut(&mut core.session.registry).declare_liveliness_subscriber(
             keyexpr,
@@ -8764,7 +8768,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         filter: FilterId,
         keyexpr: &str,
         payload: &[u8],
-        given: Option<(ExprId, PlainPutParams)>,
+        given: Option<(KeyexprRef, PlainPutParams)>,
     ) -> FilteredPut {
         let Some(core) = self.live() else {
             return FilteredPut::Sent(Ok(0));
@@ -8779,7 +8783,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return FilteredPut::Suppressed;
         }
         let (key, params) = match given {
-            Some((mapping_id, params)) => ((mapping_id, None), params),
+            Some(given) => given,
             None => {
                 let Some(way) = row.and_then(|row| row.plain()) else {
                     return FilteredPut::NotPlain;
@@ -8792,7 +8796,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 {
                     return FilteredPut::NotPlain;
                 }
-                ((way.mapping_id, way.declared_at), way.params)
+                (way.key, way.params)
             }
         };
         self.put_plain_in(core, keyexpr, key, payload, &params)

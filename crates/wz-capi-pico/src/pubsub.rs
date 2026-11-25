@@ -1521,7 +1521,7 @@ impl PlainPublisher {
                     bare.plain_put_params()
                 })
                 .flatten()
-                .map(|params| (params, wire.mapping_id)),
+                .map(|params| (params, wire.declared())),
         );
         Ok(())
     }

@@ -210,7 +210,13 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
         "CONTROL: a filter that does not count it still suppresses"
     );
     assert_eq!(
-        engine.put_plain_filtered(counting_filter, "demo/l/x", 0, b"v", &params),
+        engine.put_plain_filtered(
+            counting_filter,
+            "demo/l/x",
+            wz_session_core::session_tables::KeyexprRef::by_id(0),
+            b"v",
+            &params
+        ),
         FilteredPut::NotPlain,
         "a put the session's own subscriber wants is the general publish's"
     );

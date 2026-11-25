@@ -16,6 +16,7 @@ use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
+use wz_session_core::session_tables::KeyexprRef;
 use wz_session_core::session_zid::SessionZid;
 
 use std::sync::Arc;
@@ -468,19 +469,26 @@ impl SessionEngine for SharedSession {
         &self,
         filter: FilterId,
         keyexpr: &str,
-        mapping_id: wz_session_core::wire_id::ExprId,
+        declared: KeyexprRef,
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
-        SharedSession::put_plain_filtered(self, filter, keyexpr, mapping_id, payload, params)
+        // This engine names a plain put's key on each face from that face's own record of the
+        // session's declarations, which it keys by id: a row of the session's tables is no row of
+        // a face's, so the id is what it reads.
+        SharedSession::put_plain_filtered(self, filter, keyexpr, declared.id, payload, params)
     }
 
     fn keep_write_filter_plain(
         &self,
         filter: FilterId,
-        plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+        plain: Option<(PlainPutParams, KeyexprRef)>,
     ) {
-        SharedSession::keep_write_filter_plain(self, filter, plain)
+        SharedSession::keep_write_filter_plain(
+            self,
+            filter,
+            plain.map(|(params, key)| (params, key.id)),
+        )
     }
 
     fn publish_filtered(
