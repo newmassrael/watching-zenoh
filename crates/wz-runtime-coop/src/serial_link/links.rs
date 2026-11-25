@@ -898,7 +898,7 @@ where
         self.links.open_group(endpoint, group)
     }
 
-    fn share_pump(pump: HeapLink) -> CellRc<dyn SessionDatagramLink> {
+    fn share_pump(pump: HeapLink) -> Option<CellRc<dyn SessionDatagramLink>> {
         S::share_pump(pump)
     }
 }

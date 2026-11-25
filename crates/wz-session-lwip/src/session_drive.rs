@@ -338,7 +338,8 @@ mod tests {
             let socket: SharedSessionSocket = Rc::new(RefCell::new(
                 bind_session_rx(&link, port).expect("bind session rx"),
             ));
-            let driver = CellRc::boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
+            let driver = CellRc::try_boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port))
+                .expect("the heap has room");
 
             let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
@@ -358,7 +359,7 @@ mod tests {
                 &runtime,
                 LwipSessionLink::new(&link, driver.clone()),
                 &actions,
-                SessionEntropy::new(Dry),
+                SessionEntropy::try_new(Dry).expect("the heap has room"),
                 &clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -384,7 +385,8 @@ mod tests {
         let socket: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, session_port).expect("bind session rx"),
         ));
-        let driver = CellRc::boxed(LwipUdpDriver::accepting(socket));
+        let driver =
+            CellRc::try_boxed(LwipUdpDriver::accepting(socket)).expect("the heap has room");
         let session_link = LwipSessionLink::new(&link, driver.clone());
         std::assert_eq!(driver.peer(), None);
 
@@ -477,7 +479,8 @@ mod tests {
             let socket: SharedSessionSocket = Rc::new(RefCell::new(
                 bind_session_rx(&link, port).expect("bind session rx"),
             ));
-            let driver = CellRc::boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
+            let driver = CellRc::try_boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port))
+                .expect("the heap has room");
             let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let driver_sink = driver.clone().into_sink();
@@ -500,7 +503,7 @@ mod tests {
                 &runtime,
                 LwipSessionLink::new(&link, driver.clone()),
                 &actions,
-                SessionEntropy::new(Dry),
+                SessionEntropy::try_new(Dry).expect("the heap has room"),
                 &clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -532,7 +535,7 @@ mod tests {
             &local,
             LwipSessionLink::new(link.clone(), driver.clone()),
             actions,
-            SessionEntropy::new(Dry),
+            SessionEntropy::try_new(Dry).expect("the heap has room"),
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -692,11 +695,12 @@ mod tests {
             ipv4_addr_loopback(),
             7490,
         ));
-        let doors = CellRc::boxed(Doors {
+        let doors = CellRc::try_boxed(Doors {
             inner: lending.clone(),
             by_slot: Default::default(),
             by_bytes: Default::default(),
-        });
+        })
+        .expect("the heap has room");
         push_through(doors.clone().into_sink());
         std::assert_eq!(
             (doors.by_slot.get(), doors.by_bytes.get()),
@@ -712,7 +716,11 @@ mod tests {
             ipv4_addr_loopback(),
             7491,
         ));
-        push_through(CellRc::boxed(NoLend(copying.clone())).into_sink());
+        push_through(
+            CellRc::try_boxed(NoLend(copying.clone()))
+                .expect("the heap has room")
+                .into_sink(),
+        );
         let copied = delivered(&copying);
 
         std::assert_eq!(lent.len(), 1, "one push is one datagram");
@@ -832,11 +840,12 @@ mod tests {
             ipv4_addr_loopback(),
             7492,
         ));
-        let doors = CellRc::boxed(Doors {
+        let doors = CellRc::try_boxed(Doors {
             inner: lending.clone(),
             by_slot: Default::default(),
             by_bytes: Default::default(),
-        });
+        })
+        .expect("the heap has room");
         let before = tx_pool::stats().expect("installed");
         let counts = window(doors.clone().into_sink());
         let after = tx_pool::stats().expect("installed");
@@ -860,7 +869,11 @@ mod tests {
             ipv4_addr_loopback(),
             7493,
         ));
-        let control = window(CellRc::boxed(NoLend(copying.clone())).into_sink());
+        let control = window(
+            CellRc::try_boxed(NoLend(copying.clone()))
+                .expect("the heap has room")
+                .into_sink(),
+        );
         std::assert_eq!(control.heap_no_slot, 1, "CONTROL: the heap stage, counted");
         let copied = delivered(&copying);
 

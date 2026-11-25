@@ -262,7 +262,9 @@ fn run_heap() -> ! {
     let accept_runtime = runtime.clone();
     // The node's one source: every session it accepts or dials draws its handshake's secrets
     // from it, each through a handle on it.
-    let entropy = SessionEntropy::new(ClockSeededXorshift::seeded());
+    let Ok(entropy) = SessionEntropy::try_new(ClockSeededXorshift::seeded()) else {
+        fail("the heap has no room for the node's entropy source");
+    };
     let accept_entropy = entropy.clone();
     let node = AdminNode::new(
         &local,

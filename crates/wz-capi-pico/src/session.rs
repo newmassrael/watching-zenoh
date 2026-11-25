@@ -2349,7 +2349,8 @@ fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
             ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. } | ArenaRefused::Lend(_),
         )
         | OpenError::NoTask(_)
-        | OpenError::NoEngineRow => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        | OpenError::NoEngineRow
+        | OpenError::HeapRefused => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
         _ => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     }
 }
@@ -2383,6 +2384,16 @@ mod coop_open_refusal_tests {
                     left: 0,
                 }
             ))),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+    }
+
+    /// A heap with no room for a link's shared handle answers pico's out of memory. Turned red by
+    /// the refusal answered as a failed transport.
+    #[test]
+    fn a_heap_with_no_room_for_a_link_is_out_of_memory() {
+        assert_eq!(
+            coop_open_refusal(&OpenError::HeapRefused),
             Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
     }

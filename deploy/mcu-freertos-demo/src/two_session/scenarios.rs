@@ -270,7 +270,8 @@ impl TwoSessions {
         let router_cost = before.saturating_sub(heap_free_bytes());
         // The board's one source: both sessions draw their handshake's secrets from it, each
         // through a handle on it.
-        let entropy = SessionEntropy::new(FreertosEntropy);
+        let entropy = SessionEntropy::try_new(FreertosEntropy)
+            .map_err(|_| String::from("the heap has no room for the board's entropy source"))?;
         let router = new_session_actions(
             sink,
             unicast_params(0xa1, &policy, &limits)?,

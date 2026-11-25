@@ -509,7 +509,7 @@ mod tests {
             &local,
             far_pump,
             far_actions.clone(),
-            SessionEntropy::new(Counting(9)),
+            SessionEntropy::try_new(Counting(9)).expect("the heap has room"),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -554,10 +554,10 @@ mod tests {
                 Some((
                     new_session_actions(sink, params(0xb1), CoopTime::new(&accept_runtime))
                         .expect("the heap has room"),
-                    SessionEntropy::new(Counting(1)),
+                    SessionEntropy::try_new(Counting(1)).expect("the heap has room"),
                 ))
             },
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         )
         .expect("a fresh node takes its admin keys");
 
@@ -659,10 +659,10 @@ mod tests {
                 Some((
                     new_session_actions(sink, params(0xb2), CoopTime::new(&accept_runtime))
                         .expect("the heap has room"),
-                    SessionEntropy::new(Witness::new(&LIVES)),
+                    SessionEntropy::try_new(Witness::new(&LIVES)).expect("the heap has room"),
                 ))
             },
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         )
         .expect("a fresh node takes its admin keys");
         let listen_at = core::net::SocketAddr::from(([10, 0, 0, 2], 7531));
@@ -736,10 +736,10 @@ mod tests {
                 Some((
                     new_session_actions(sink, params(0xb3), CoopTime::new(&accept_runtime))
                         .expect("the heap has room"),
-                    SessionEntropy::new(Witness::new(&LIVES)),
+                    SessionEntropy::try_new(Witness::new(&LIVES)).expect("the heap has room"),
                 ))
             },
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         )
         .expect("a fresh node takes its admin keys");
         node.tick(0);
@@ -757,7 +757,7 @@ mod tests {
             &local,
             pump,
             host_actions.clone(),
-            SessionEntropy::new(Counting(3)),
+            SessionEntropy::try_new(Counting(3)).expect("the heap has room"),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -845,10 +845,10 @@ mod tests {
                 Some((
                     new_session_actions(sink, params(0xb4), CoopTime::new(&accept_runtime))
                         .expect("the heap has room"),
-                    SessionEntropy::new(Counting(1)),
+                    SessionEntropy::try_new(Counting(1)).expect("the heap has room"),
                 ))
             },
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         )
         .expect("two places take the config subscriber");
         let mut observer = node.observer().borrow_mut();
@@ -881,10 +881,10 @@ mod tests {
                 Some((
                     new_session_actions(sink, params(0xb5), CoopTime::new(&control_runtime))
                         .expect("the heap has room"),
-                    SessionEntropy::new(Counting(1)),
+                    SessionEntropy::try_new(Counting(1)).expect("the heap has room"),
                 ))
             },
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         )
         .expect("a fresh node takes its admin keys");
         let mut observer = control.observer().borrow_mut();

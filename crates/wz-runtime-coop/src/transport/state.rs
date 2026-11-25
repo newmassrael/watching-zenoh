@@ -705,7 +705,8 @@ impl<T: TransportFaces> TransportState<T> {
     /// pump behind the gates the session puts it behind (`calls`), placed in theirs, and its task
     /// spawned. What the session's tables keep of the link is the session's to do (`LinkCalls`).
     /// [`TransportRefusal::EntropyUnavailable`] when an acceptor's source is dry, since its
-    /// binding would refuse every handshake.
+    /// binding would refuse every handshake; [`TransportRefusal::HeapRefused`] when the heap has
+    /// no room for the link's shared handle.
     // Always inlined: its one caller is never inlined, so what is built here lies in that frame,
     // which has returned before the link's task first runs.
     #[inline(always)]
@@ -744,14 +745,16 @@ impl<T: TransportFaces> TransportState<T> {
         {
             return Err(TransportRefusal::EntropyUnavailable);
         }
+        // One handle to the link, which its gates hold: a stack whose pump is a shared handle
+        // already gives that one (`SessionLinks::share_pump`). Had before the session's tables
+        // learn of the link, so a heap with no room for it leaves them as they were.
+        let pump =
+            <T::Links as SessionLinks>::share_pump(pump).ok_or(TransportRefusal::HeapRefused)?;
         #[cfg(feature = "shared-key-ids")]
         let key_form = Some(self.key_form_of(endpoint));
         #[cfg(not(feature = "shared-key-ids"))]
         let key_form = None;
         calls.link_made(face, &actions, key_form);
-        // One handle to the link, which its gates hold: a stack whose pump is a shared handle
-        // already gives that one (`SessionLinks::share_pump`).
-        let pump = <T::Links as SessionLinks>::share_pump(pump);
         // What the session's read waits on for the link's input and its room, read off it before
         // its gates take it.
         let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());

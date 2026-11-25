@@ -1517,8 +1517,8 @@ impl SessionLinks for AppLinks {
     /// A link of these is shared already: the pump is the handle the sink is a clone of.
     fn share_pump(
         pump: Self::Pump,
-    ) -> crate::link_cells::CellRc<dyn crate::session_drive::SessionDatagramLink> {
-        pump
+    ) -> Option<crate::link_cells::CellRc<dyn crate::session_drive::SessionDatagramLink>> {
+        Some(pump)
     }
 }
 

@@ -788,8 +788,8 @@ where
     }
 
     /// A link of these is shared already: the pump is the handle the sink is a clone of.
-    fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink> {
-        pump
+    fn share_pump(pump: Self::Pump) -> Option<crate::link_cells::CellRc<dyn SessionDatagramLink>> {
+        Some(pump)
     }
 }
 

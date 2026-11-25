@@ -288,7 +288,8 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
         #[cfg(feature = "tx-lend-only")]
         sink: opened.sink,
         pump: opened.pump,
-        entropy: wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+        entropy: wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+            .expect("the heap has room"),
     };
 
     let opened = links
@@ -303,7 +304,8 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
         #[cfg(feature = "tx-lend-only")]
         sink: opened.sink,
         pump: opened.pump,
-        entropy: wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(2)),
+        entropy: wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(2))
+            .expect("the heap has room"),
     };
     (acceptor, initiator)
 }

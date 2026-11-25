@@ -371,7 +371,8 @@ mod tests {
                 &local,
                 acceptor_pump,
                 acceptor_actions.clone(),
-                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+                wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+                    .expect("the heap has room"),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -400,7 +401,8 @@ mod tests {
                 &local,
                 initiator_pump,
                 initiator_actions.clone(),
-                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
+                wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(0))
+                    .expect("the heap has room"),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),

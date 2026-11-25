@@ -255,7 +255,8 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         &local,
         acceptor_pump,
         acceptor_actions.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         config(SessionRole::Acceptor),
         |_| {},
@@ -277,7 +278,8 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         &local,
         initiator_pump,
         initiator_actions.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(0))
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         config(SessionRole::Initiator),
         |_| {},

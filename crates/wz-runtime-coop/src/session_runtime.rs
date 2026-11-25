@@ -98,7 +98,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> ShareVa
     for CoopRuntime<C, D, K>
 {
     fn share<U>(value: U) -> Result<Self::Shared<U>, HeapRefused> {
-        crate::link_cells::CellRc::try_boxed(value).map_err(|_| HeapRefused)
+        crate::link_cells::CellRc::try_boxed(value).ok_or(HeapRefused)
     }
 }
 
@@ -191,7 +191,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     fn wrap_actions<T: TimeSource>(
         actions: SessionLinkActions<Self, T>,
     ) -> Result<Self::ActionsHandle<T>, HeapRefused> {
-        crate::link_cells::CellRc::try_boxed(actions).map_err(|_| HeapRefused)
+        crate::link_cells::CellRc::try_boxed(actions).ok_or(HeapRefused)
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &D {
@@ -230,15 +230,8 @@ pub struct SessionEntropy(crate::link_cells::CellRc<core::cell::RefCell<dyn Entr
 
 #[cfg(not(feature = "session-slot"))]
 impl SessionEntropy {
-    /// The handle on `source`, the session's one source. A heap that refuses its cell ends the
-    /// program; an open that answers a full heap makes it with [`Self::try_new`].
-    pub fn new(source: impl EntropySource + 'static) -> Self {
-        Self::of_cell(crate::link_cells::CellRc::boxed(core::cell::RefCell::new(
-            source,
-        )))
-    }
-
-    /// [`Self::new`], or the bytes of the cell the heap refused, `source` let go of.
+    /// The handle on `source`, the session's one source, or the bytes of the cell the heap
+    /// refused, `source` let go of.
     pub fn try_new<E: EntropySource + 'static>(source: E) -> Result<Self, usize> {
         type SourceCell<S> = crate::link_cells::CellRc<core::cell::RefCell<S>>;
         SourceCell::<E>::in_cells(None, core::cell::RefCell::new(source))
@@ -441,7 +434,7 @@ mod cookie_nonce_draw_tests {
     fn build() -> SessionHandle<StoppedClock> {
         let runtime = CoopRuntime::try_new(StoppedClock).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let driver = crate::link_cells::heap_sink(NullDriver);
+        let driver = crate::link_cells::heap_sink(NullDriver).expect("the heap has room");
         new_session_actions(driver, params(), clock).expect("the heap has room")
     }
 
@@ -457,7 +450,7 @@ mod cookie_nonce_draw_tests {
         assert_eq!(shared, Some(HeapRefused));
 
         let runtime = Rt::try_new(StoppedClock).expect("the heap has room");
-        let driver = crate::link_cells::heap_sink(NullDriver);
+        let driver = crate::link_cells::heap_sink(NullDriver).expect("the heap has room");
         let actions = SessionLinkActions::<Rt, CoopTime<StoppedClock>>::build(
             driver,
             params(),
@@ -478,7 +471,9 @@ mod cookie_nonce_draw_tests {
     fn a_bundle_holds_no_nonce_until_its_binding_draws_one() {
         let actions = build();
         assert_eq!(actions.cookie_nonce(), None, "no source, no nonce");
-        assert!(actions.draw_cookie_nonce(&mut SessionEntropy::new(Counting(0))));
+        assert!(actions.draw_cookie_nonce(
+            &mut SessionEntropy::try_new(Counting(0)).expect("the heap has room")
+        ));
         assert!(actions.cookie_nonce().is_some());
     }
 
@@ -486,7 +481,7 @@ mod cookie_nonce_draw_tests {
     #[test]
     fn two_draws_on_one_bundle_take_two_nonces() {
         let actions = build();
-        let mut entropy = SessionEntropy::new(Counting(0));
+        let mut entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         assert!(
             actions.draw_cookie_nonce(&mut entropy),
             "a live source must draw"
@@ -507,7 +502,9 @@ mod cookie_nonce_draw_tests {
         let mut probe = Counting(0);
         let expected = probe.try_next_u64().unwrap();
         let actions = build();
-        assert!(actions.draw_cookie_nonce(&mut SessionEntropy::new(Counting(0))));
+        assert!(actions.draw_cookie_nonce(
+            &mut SessionEntropy::try_new(Counting(0)).expect("the heap has room")
+        ));
         assert_eq!(actions.cookie_nonce(), Some(expected));
     }
 
@@ -517,7 +514,7 @@ mod cookie_nonce_draw_tests {
     fn the_links_of_a_session_draw_from_its_one_source() {
         let mut probe = Counting(0);
         let (first, second) = (probe.try_next_u64().unwrap(), probe.try_next_u64().unwrap());
-        let session = SessionEntropy::new(Counting(0));
+        let session = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let (a, b) = (build(), build());
         assert!(a.draw_cookie_nonce(&mut session.clone()));
         assert!(b.draw_cookie_nonce(&mut session.clone()));
@@ -528,7 +525,7 @@ mod cookie_nonce_draw_tests {
     }
 
     /// A source whose cell the heap has no room for is no handle, and with room it is the handle
-    /// a session draws from. Turned red by `try_new` made through `CellRc::boxed`, which ends the
+    /// a session draws from. Turned red by `try_new` made through a cell maker that ends the
     /// process on the refusal.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
@@ -547,7 +544,8 @@ mod cookie_nonce_draw_tests {
         // Not "no binding" but "admit no OpenSyn". A fallback to a constant
         // here would be indistinguishable from a working binding.
         let actions = build();
-        assert!(!actions.draw_cookie_nonce(&mut SessionEntropy::new(Dry)));
+        assert!(!actions
+            .draw_cookie_nonce(&mut SessionEntropy::try_new(Dry).expect("the heap has room")));
         assert_eq!(
             actions.cookie_nonce(),
             None,
@@ -575,7 +573,7 @@ mod cookie_nonce_draw_tests {
         }
 
         let actions = build();
-        let mut entropy = SessionEntropy::new(DriesUp(true));
+        let mut entropy = SessionEntropy::try_new(DriesUp(true)).expect("the heap has room");
         assert!(
             actions.draw_cookie_nonce(&mut entropy),
             "the first draw lands"

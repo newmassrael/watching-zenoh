@@ -729,12 +729,16 @@ where
 
     // The same sequence `run_session` runs — one executor pass, then one
     // `step` — with the peer given its turn after every iteration.
-    // A pump the heap has no room for runs no session: the acceptor is never established.
+    // A source or a pump the heap has no room for runs no session: the acceptor is never
+    // established.
+    let Ok(entropy) = wz::runtime_coop::session_runtime::SessionEntropy::try_new(entropy) else {
+        return run.report(false, 0, 0);
+    };
     let Some(mut pump) = SessionPump::try_new(
         runtime.clone(),
         topology.acceptor_link(),
         actions.clone(),
-        wz::runtime_coop::session_runtime::SessionEntropy::new(entropy),
+        entropy,
         clock.clone(),
         SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),

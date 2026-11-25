@@ -557,6 +557,8 @@ pub enum OpenError {
     /// session open at once, [`wz_capi_port::reach`]) holds the engine of a session open now.
     /// Nothing was reserved, bound, joined or dialled.
     NoEngineRow,
+    /// The heap had no room for a link's shared handle. Nothing of the link stays.
+    HeapRefused,
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -581,6 +583,7 @@ impl From<TransportRefusal> for OpenError {
             TransportRefusal::Unreachable(why) => OpenError::Unreachable(why),
             TransportRefusal::EntropyUnavailable => OpenError::EntropyUnavailable,
             TransportRefusal::NoTask(why) => OpenError::NoTask(why),
+            TransportRefusal::HeapRefused => OpenError::HeapRefused,
         }
     }
 }

@@ -302,7 +302,7 @@ impl<A: SessionLinks, B: SessionLinks> SessionLinks for EitherLinks<A, B> {
 
     // Each side shares its pump as its own stack does, so a stack whose pump is already a shared
     // handle hands that handle back and its link stays behind one pointer.
-    fn share_pump(pump: Self::Pump) -> CellRc<dyn SessionDatagramLink> {
+    fn share_pump(pump: Self::Pump) -> Option<CellRc<dyn SessionDatagramLink>> {
         match pump {
             EitherPump::Left(pump) => A::share_pump(pump),
             EitherPump::Right(pump) => B::share_pump(pump),
@@ -361,13 +361,15 @@ mod tests {
         let right: EitherPump<Tagged, Tagged> = EitherPump::Right(Tagged(RIGHT));
         assert_eq!(left.take_rx_dropped(), usize::from(LEFT));
         assert_eq!(right.take_rx_dropped(), usize::from(RIGHT));
-        let shared: SharedPump = CellRc::boxed(Tagged(LEFT)).into_link();
+        let shared: SharedPump = CellRc::try_boxed(Tagged(LEFT))
+            .expect("the heap has room")
+            .into_link();
         assert_eq!(shared.take_rx_dropped(), usize::from(LEFT));
     }
 
     fn opened<P>(pump: P) -> OpenedLink<P> {
         OpenedLink {
-            sink: heap_sink(Null),
+            sink: heap_sink(Null).expect("the heap has room"),
             pump,
         }
     }
@@ -403,17 +405,19 @@ mod tests {
                 return Err(LinkOpenError::Unsupported);
             };
             match ip.proto {
-                crate::session_drive::LinkProto::Udp => {
-                    Ok(opened(CellRc::boxed(Tagged(LEFT)).into_link()))
-                }
+                crate::session_drive::LinkProto::Udp => Ok(opened(
+                    CellRc::try_boxed(Tagged(LEFT))
+                        .expect("the heap has room")
+                        .into_link(),
+                )),
                 _ => Err(LinkOpenError::Unsupported),
             }
         }
         fn link_cell_bytes(&self) -> usize {
             64
         }
-        fn share_pump(pump: SharedPump) -> SharedPump {
-            pump
+        fn share_pump(pump: SharedPump) -> Option<SharedPump> {
+            Some(pump)
         }
     }
 
@@ -538,11 +542,11 @@ mod tests {
             panic!("the first stack's link");
         };
         let before = CellRc::as_ptr(inner);
-        let shared = Both::share_pump(made.pump);
+        let shared = Both::share_pump(made.pump).expect("the heap has room");
         // The first stack hands its handle back: the same link, behind no second pointer.
         assert!(core::ptr::addr_eq(CellRc::as_ptr(&shared), before));
         assert!(shared.holds_input());
-        let other = Both::share_pump(EitherPump::Right(Tagged(RIGHT)));
+        let other = Both::share_pump(EitherPump::Right(Tagged(RIGHT))).expect("the heap has room");
         assert!(
             !other.holds_input(),
             "the second stack's link, shared by its own form"

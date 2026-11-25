@@ -354,7 +354,7 @@ mod tests {
             &local,
             far_pump,
             far_actions.clone(),
-            SessionEntropy::new(Counting(9)),
+            SessionEntropy::try_new(Counting(9)).expect("the heap has room"),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -403,7 +403,7 @@ mod tests {
             &ENDPOINTS,
             SessionTimeouts::from_build(),
             || params(0xb1),
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         let settle = |node: &mut ClientNode<'_, _, _, _>| {
             for _ in 0..64 {
@@ -509,7 +509,7 @@ mod tests {
                 limits: stated,
                 ..params(0xb1)
             },
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         node.subscriber("test/a", sink()).expect("under the quota");
         node.subscriber("test/b", sink()).expect("under the quota");
@@ -536,7 +536,7 @@ mod tests {
             &ENDPOINTS,
             SessionTimeouts::from_build(),
             || params(0xb2),
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         for key in ["test/a", "test/b", "test/c"] {
             control

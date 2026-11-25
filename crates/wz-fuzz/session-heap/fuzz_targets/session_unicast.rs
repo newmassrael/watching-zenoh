@@ -150,7 +150,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let clock = CoopTime::new(&runtime);
-    let sink = wz_runtime_coop::link_cells::heap_sink(Nowhere);
+    let Some(sink) = wz_runtime_coop::link_cells::heap_sink(Nowhere) else {
+        return;
+    };
     let Ok(actions) = new_session_actions(sink, params(), clock.clone()) else {
         return;
     };
@@ -160,7 +162,9 @@ fuzz_target!(|data: &[u8]| {
         role: SessionRole::Initiator,
         max_iters: None,
     };
-    let entropy = wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0));
+    let Ok(entropy) = wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(0)) else {
+        return;
+    };
     let Some(mut pump) = SessionPump::try_new(
         runtime,
         feed.clone(),

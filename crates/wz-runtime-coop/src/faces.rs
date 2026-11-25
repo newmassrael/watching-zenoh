@@ -1621,7 +1621,9 @@ mod tests {
         if finished {
             local.run_until_idle();
         }
-        let link = CellRc::boxed(Quiet { holds }).into_link();
+        let link = CellRc::try_boxed(Quiet { holds })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         Wire::new(session, task, link, input_wait, room_wait)
     }
@@ -1651,7 +1653,9 @@ mod tests {
     /// An established wire over a link waited on by `on`, owing a write when `owes`.
     fn waited_wire(local: &CoopLocalSet<Still>, on: WaitOn, owes: bool) -> Wire<Session> {
         let task = local.spawn_local(async { DriverOutcome::Terminated });
-        let link = CellRc::boxed(Waited { on, owes }).into_link();
+        let link = CellRc::try_boxed(Waited { on, owes })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         Wire::new(session(true, None), task, link, input_wait, room_wait)
     }
@@ -2216,7 +2220,9 @@ mod tests {
         let local = CoopLocalSet::new(&runtime);
         let waited = |session: Session, on: WaitOn| -> TestLink {
             let task = local.spawn_local(async { DriverOutcome::Terminated });
-            let link = CellRc::boxed(Waited { on, owes: false }).into_link();
+            let link = CellRc::try_boxed(Waited { on, owes: false })
+                .expect("the heap has room")
+                .into_link();
             let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
             Link::Up(Wire::new(session, task, link, input_wait, room_wait))
         };

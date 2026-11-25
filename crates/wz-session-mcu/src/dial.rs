@@ -457,7 +457,7 @@ mod tests {
                     stated
                 },
                 quiet,
-                SessionEntropy::new(Counting(3)),
+                SessionEntropy::try_new(Counting(3)).expect("the heap has room"),
             )
             .with_max_iters(1);
             let dialled = dialer.dial("udp/10.0.0.1:7496");
@@ -504,7 +504,7 @@ mod tests {
             &local,
             acceptor_pump,
             acceptor_actions.clone(),
-            SessionEntropy::new(Counting(1)),
+            SessionEntropy::try_new(Counting(1)).expect("the heap has room"),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -520,7 +520,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb1),
             quiet,
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         let mut session = dialer.dial("udp/10.0.0.1:7494").expect("dialable");
         for _ in 0..64 {
@@ -575,7 +575,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xc1),
             quiet,
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         )
         .with_max_iters(8);
         let mut lost = unanswered.dial("udp/10.0.0.1:7495").expect("dialable");
@@ -626,7 +626,7 @@ mod tests {
                 &local,
                 pump,
                 actions.clone(),
-                SessionEntropy::new(Counting(1)),
+                SessionEntropy::try_new(Counting(1)).expect("the heap has room"),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -644,7 +644,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb1),
             quiet,
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         std::assert!(
             verifies_nodes(&dialer),
@@ -723,7 +723,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xd1),
             quiet,
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         std::assert!(matches!(
             dialer.dial("udp/10.0.0.1:7494"),

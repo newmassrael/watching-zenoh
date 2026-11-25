@@ -408,7 +408,8 @@ mod placing_on_the_heap {
         peer: Option<([u8; 4], u16)>,
         zid: u8,
     ) -> (Handle, SessionEntropy, LwipSessionLink<Rc<LwipLink>>) {
-        let driver = wz_runtime_coop::link_cells::CellRc::boxed(driver_over(socket, peer));
+        let driver = wz_runtime_coop::link_cells::CellRc::try_boxed(driver_over(socket, peer))
+            .expect("the heap has room");
         let sink: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver> =
             driver.clone().into_sink();
         let actions = if zid == 0xa1 {
@@ -424,7 +425,7 @@ mod placing_on_the_heap {
         };
         (
             actions,
-            SessionEntropy::new(Counting(zid)),
+            SessionEntropy::try_new(Counting(zid)).expect("the heap has room"),
             LwipSessionLink::new(link.clone(), driver),
         )
     }

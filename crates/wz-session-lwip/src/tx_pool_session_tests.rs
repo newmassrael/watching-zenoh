@@ -142,7 +142,8 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
         &local,
         pump,
         acceptor.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
@@ -167,7 +168,8 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
         &local,
         pump,
         initiator.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(0))
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),

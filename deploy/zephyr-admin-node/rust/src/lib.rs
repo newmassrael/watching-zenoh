@@ -352,7 +352,10 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     let limits = resolve_limits();
     // The node's one source, the board's: every session it accepts or dials draws its
     // handshake's secrets from it, each through a handle on it.
-    let entropy = SessionEntropy::new(ZephyrEntropy);
+    let Ok(entropy) = SessionEntropy::try_new(ZephyrEntropy) else {
+        log(c"wz: FAIL - the heap has no room for the board's entropy source");
+        return 2;
+    };
     let accept_entropy = entropy.clone();
     let node = AdminNode::new(
         &local,
@@ -516,6 +519,10 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
     let zid_hex = zid_to_zenoh_hex(&zid);
     let policy = resolve_policy();
     let limits = resolve_limits();
+    let Ok(entropy) = SessionEntropy::try_new(ZephyrEntropy) else {
+        log(c"wz: FAIL - the heap has no room for the board's entropy source");
+        return 2;
+    };
     let mut node = ClientNode::new(
         &local,
         net.links(),
@@ -524,7 +531,7 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
         move || params(WhatAmI::Client, zid, &key, &policy, &limits),
         // The board's source, which every session the node dials draws its handshake's
         // secrets from.
-        SessionEntropy::new(ZephyrEntropy),
+        entropy,
     );
     if node.queryable(STATUS_KEY, answer(STATUS_BODY)).is_err()
         || node.queryable(CONFIG_KEY, answer(CONFIG_BODY)).is_err()

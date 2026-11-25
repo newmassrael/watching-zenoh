@@ -222,7 +222,8 @@ mod tests {
             &local,
             gate.clone(),
             acceptor.clone(),
-            wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
+            wz_runtime_coop::session_runtime::SessionEntropy::try_new(PosixEntropy)
+                .expect("the heap has room"),
             CoopTime::new(&runtime),
             config(SessionRole::Acceptor),
             dispatch_to(observer, acceptor.clone()),
@@ -238,7 +239,8 @@ mod tests {
             &local,
             pump,
             initiator.clone(),
-            wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
+            wz_runtime_coop::session_runtime::SessionEntropy::try_new(PosixEntropy)
+                .expect("the heap has room"),
             CoopTime::new(&runtime),
             config(SessionRole::Initiator),
             dispatch_to(

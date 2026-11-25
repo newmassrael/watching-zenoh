@@ -454,7 +454,8 @@ fn run_router(
         &local,
         pump,
         actions.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(PosixEntropy)
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
