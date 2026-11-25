@@ -8802,9 +8802,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let lent = lent_key(tables(&core.session.registry), declared.key);
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce(DeclaredRow::of(declared.handle));
-        // So is each group.
+        // So is each group, from the same row, when the session joined one.
         #[cfg(feature = "group")]
-        {
+        if !core.transport.groups.is_empty() {
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.subscribers().get(declared.handle) {
                 let wire = group::wire_key_of(tables.wire_of(row.key()));
@@ -9362,9 +9362,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let lent = lent_key(tables(&core.session.registry), declared.key);
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce(DeclaredRow::of(declared.handle));
-        // So is each group.
+        // So is each group, from the same row, when the session joined one.
         #[cfg(feature = "group")]
-        {
+        if !core.transport.groups.is_empty() {
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.queryables().get(declared.handle) {
                 let wire = group::wire_key_of(tables.wire_of(row.key()));
