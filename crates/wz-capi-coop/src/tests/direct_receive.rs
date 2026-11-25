@@ -39,7 +39,9 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     super::get::settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
-    let seen: Arc<Mutex<Vec<(bool, Vec<u8>)>>> = Arc::default();
+    // Whether each reply's callback found the session free, and the reply's payload.
+    type Seen = Arc<Mutex<Vec<(bool, Vec<u8>)>>>;
+    let seen: Seen = Arc::default();
     let mut session = Some(EngineHold::downgrade(&engine));
     let issued = engine.get_on_wire(
         "demo/g/a",
@@ -88,7 +90,6 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
 #[test]
 fn a_query_is_handed_to_its_queryables_by_the_read_with_the_session_free() {
     use wz_capi_port::QueryableSink;
-    use wz_session_core::query_sink::{QueryView as _, ReplyOut as _};
 
     let router = Router::start(CatchAll::None);
     let engine = open(&router);

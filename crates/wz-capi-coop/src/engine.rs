@@ -5191,14 +5191,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         any(feature = "queryable", feature = "query", feature = "connectivity")
     ))]
     pub(crate) fn plane_places(&self) -> alloc::vec::Vec<*const u8> {
-        let mut places = alloc::vec::Vec::new();
-        #[cfg(feature = "queryable")]
-        places.push(core::ptr::from_ref::<QueryPlane>(&self.plane).cast::<u8>());
-        #[cfg(feature = "query")]
-        places.push(core::ptr::from_ref::<GetPlane>(&self.gets).cast::<u8>());
-        #[cfg(feature = "connectivity")]
-        places.push(core::ptr::from_ref::<FacePlane>(&self.faces).cast::<u8>());
-        places
+        [
+            #[cfg(feature = "queryable")]
+            core::ptr::from_ref::<QueryPlane>(&self.plane).cast::<u8>(),
+            #[cfg(feature = "query")]
+            core::ptr::from_ref::<GetPlane>(&self.gets).cast::<u8>(),
+            #[cfg(feature = "connectivity")]
+            core::ptr::from_ref::<FacePlane>(&self.faces).cast::<u8>(),
+        ]
+        .to_vec()
     }
 
     /// How many cells of the session's table of links' halves hold a link's halves now: `None`
