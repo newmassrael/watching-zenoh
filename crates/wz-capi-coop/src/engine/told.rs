@@ -275,15 +275,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return;
         };
         let id = self.transport.links.next_face_id();
-        let departed = Face {
-            id,
-            link: Link::Idle,
-            // A tomb's life is never opened: it stays idle, and no step moves it.
-            life: UnicastLink::new(self.link_times(), LinkRole::Taken, 0),
-            replay: Replay::idle(),
-            told: FaceTold::departed(apart),
-        };
-        if self.transport.links.place_face(place, departed).is_ok() {
+        let times = self.link_times();
+        // A tomb's life is never opened: it stays idle, and no step moves it. It is built where
+        // the tomb lies (`Face::make_in`).
+        let tomb = self.transport.links.vacant_place(place).and_then(|vacant| {
+            vacant.fill(|slot| Face::make_in(slot, id, Link::Idle, times, LinkRole::Taken, 0))
+        });
+        if let Some(tomb) = tomb {
+            tomb.told = FaceTold::departed(apart);
             self.transport.links.advance_face_id();
         } else {
             self.session.registry.free_kept(place);
@@ -324,7 +323,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Free the place at `at` a departed face kept, in the face table and the registry alike.
     fn let_go_departed(&mut self, at: usize) {
-        self.transport.links.take_face(at);
+        self.transport.links.drop_face(at);
         self.session.registry.free_kept(at);
     }
 

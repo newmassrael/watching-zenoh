@@ -2123,6 +2123,59 @@ impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
     }
 }
 
+#[cfg(any(feature = "listen", feature = "connectivity"))]
+impl<C: ClockSource + 'static, L: SessionLinks> Face<C, L> {
+    /// Build the face numbered `id` that holds `link`, its life of `role` over `endpoints`
+    /// endpoints counted in `times`, in `place`, the free place of the faces' table it keeps
+    /// ([`VacantPlace::fill`]), and lend it: its life, the machine whose engine is the largest
+    /// part of a face, is built where it lies, so no frame of the caller holds it and the face is
+    /// not moved into its place. A face that listeners are told of starts with nothing told.
+    ///
+    /// [`VacantPlace::fill`]: wz_runtime_coop::faces::VacantPlace::fill
+    fn make_in(
+        place: &mut core::mem::MaybeUninit<Self>,
+        id: FaceId,
+        link: Link<LinkSession<C>, L::Dial, FaceEnd>,
+        times: LinkTimes,
+        role: LinkRole,
+        endpoints: usize,
+    ) -> &mut Self {
+        let at = place.as_mut_ptr();
+        // A field added to the face and not written below would be read uninitialised. This names
+        // every field with no `..`, so adding one without naming it here (and so without writing
+        // it below) does not compile.
+        let _every_field_is_written = |face: &Self| {
+            let Self {
+                id: _,
+                link: _,
+                life: _,
+                replay: _,
+                #[cfg(feature = "connectivity")]
+                    told: _,
+            } = face;
+        };
+        // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
+        // pointer to it, the life by `init_in`, which writes it whole (a `MaybeUninit<T>` has the
+        // layout of `T`). The list above names every field, so the face is whole when it is lent,
+        // for as long as `place` is.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).id).write(id);
+            core::ptr::addr_of_mut!((*at).link).write(link);
+            UnicastLink::init_in(
+                &mut *core::ptr::addr_of_mut!((*at).life)
+                    .cast::<core::mem::MaybeUninit<UnicastLink>>(),
+                times,
+                role,
+                endpoints,
+            );
+            core::ptr::addr_of_mut!((*at).replay).write(Replay::idle());
+            #[cfg(feature = "connectivity")]
+            core::ptr::addr_of_mut!((*at).told).write(FaceTold::default());
+            &mut *at
+        }
+    }
+}
+
 /// The times the life of each link of a session opened with `config` is counted in: a dial and
 /// its handshake by the open's timeout, an accepted link's handshake by the acceptor's.
 fn link_times<E>(config: &CoopConfig<E>) -> LinkTimes {
@@ -4254,10 +4307,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if self.keep_departed(at) {
             return;
         }
-        if let Some(face) = self.transport.links.take_face(at) {
-            self.session
-                .registry
-                .remove_face(HeldFace::new(at, face.id));
+        // The face's tables go before the face, which is dropped where it lies.
+        if let Some(id) = self.transport.links.face(at).map(|face| face.id) {
+            self.session.registry.remove_face(HeldFace::new(at, id));
+            self.transport.links.drop_face(at);
         }
     }
 

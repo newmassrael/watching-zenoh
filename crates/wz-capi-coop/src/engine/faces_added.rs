@@ -73,25 +73,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn push_face(
         &mut self,
         held: HeldFace,
-        link: Link<LinkSession<C>, L::Dial>,
+        link: Link<LinkSession<C>, L::Dial, FaceEnd>,
         endpoints: usize,
     ) -> bool {
-        let face = Face {
-            id: held.id(),
-            link,
-            life: UnicastLink::new(self.link_times(), LinkRole::Taken, endpoints),
-            replay: Replay::idle(),
-            #[cfg(feature = "connectivity")]
-            told: FaceTold::default(),
-        };
-        if let Err(face) = self.transport.links.place_face(held.at(), face) {
-            if let Some(wire) = face.link.wire() {
+        let times = self.link_times();
+        let Some(place) = self.transport.links.vacant_place(held.at()) else {
+            if let Some(wire) = link.wire() {
                 wire.abort();
             }
             self.session.registry.remove_face(held);
             return false;
+        };
+        // The face is built in its place, its life where it lies (`Face::make_in`), which lends
+        // the place it was given, so the table holds it.
+        let placed = place
+            .fill(|place| Face::make_in(place, held.id(), link, times, LinkRole::Taken, endpoints))
+            .is_some();
+        if !placed {
+            self.session.registry.remove_face(held);
         }
-        true
+        placed
     }
 }
 
