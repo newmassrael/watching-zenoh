@@ -325,8 +325,19 @@ impl ConfigState {
     }
 
     /// Record `value` under `key` (see [`ConfigEntries::insert`]): `Z_OK`, or
-    /// `Z_ERR_CONFIG_FAILED_INSERT` with the config as it was.
+    /// `Z_ERR_CONFIG_FAILED_INSERT` with the config as it was. A value of the limits key is
+    /// judged as the open will compose it, so a count the build refuses is refused here, with
+    /// `Z_ERR_CONFIG_INVALID_VALUE`, and the config keeps its earlier value: the one place a value
+    /// enters a config, so no door records one unjudged.
     pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
+        if key == crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY {
+            // A constant, so the judgement reads the limits where the build keeps them.
+            const OPENING: wz_session_core::limits::SessionLimits =
+                crate::session::opening_limits();
+            if let Err(code) = crate::config_limits::state_over(Some(value), &OPENING) {
+                return code;
+            }
+        }
         self.entries.insert(key, value)
     }
 
@@ -442,16 +453,6 @@ pub unsafe extern "C" fn zp_config_insert(
         let Some(val) = crate::abi::text_of(CStr::from_ptr(value).to_bytes()) else {
             return Z_ERR_INVALID;
         };
-        // Judged as the open will compose it, so a count the build refuses is refused here and
-        // the config keeps its earlier value.
-        if key == crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY {
-            // A constant, so the judgement reads the limits where the build keeps them.
-            const OPENING: wz_session_core::limits::SessionLimits =
-                crate::session::opening_limits();
-            if let Err(code) = crate::config_limits::state_over(Some(val), &OPENING) {
-                return code;
-            }
-        }
         state.insert(key, val)
     })
 }
@@ -571,6 +572,29 @@ mod tests {
         let state = unsafe { &*(config.0.handle as *const ConfigState) };
         assert_eq!(state.get(Z_CONFIG_MODE_KEY), Some("client"));
         assert_eq!(state.get(Z_CONFIG_CONNECT_KEY), None);
+    }
+
+    /// A value of the limits key the build refuses is refused where it enters the config, through
+    /// the door and through the config's own insert alike, and the value before it stays; one the
+    /// build takes is recorded. Turned red by an insert that records the key unjudged.
+    #[test]
+    fn a_limits_value_the_build_refuses_is_not_recorded() {
+        use crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY as LIMITS;
+        use crate::result::Z_ERR_CONFIG_INVALID_VALUE;
+        let mut config = Config::new();
+        assert_eq!(config.insert(LIMITS, ""), Z_OK);
+        assert_eq!(
+            config.insert(LIMITS, "NO_SUCH_LIMIT=1"),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(config.text(LIMITS).as_deref(), Some(""));
+        // SAFETY: the config is live, holds a `ConfigState` and is borrowed nowhere else.
+        let state = unsafe { &mut *(config.0.handle as *mut ConfigState) };
+        assert_eq!(
+            state.insert(LIMITS, "MAX_SUBSCRIPTIONS"),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(state.get(LIMITS), Some(""));
     }
 
     /// An empty value is its terminator alone: read back empty, and lent as a C string of no
