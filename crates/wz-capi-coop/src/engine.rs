@@ -1090,6 +1090,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The takes of the session's locks on a message's paths, which the tests count.
     #[cfg(test)]
     pub(crate) takes: Takes,
+    #[cfg(any(feature = "query", feature = "queryable", feature = "threads"))]
     this: Weak<Self>,
 }
 
@@ -4395,6 +4396,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The handle's type is named: the engine's handle coerced for the round would otherwise be
         // what infers it.
         Arc::new_cyclic(|this: &Weak<Self>| {
+            // A build with no query, queryable or read task reaches the engine by no handle of
+            // its own: the cyclic handle is offered and not kept.
+            #[cfg(not(any(feature = "query", feature = "queryable", feature = "threads")))]
+            let _ = this;
             // The round hands the queries it holds to their queryables through the engine, which
             // sends what they answer.
             #[cfg(feature = "queryable")]
@@ -4448,6 +4453,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 cache: Mutex::new(cache),
                 #[cfg(test)]
                 takes: Takes::default(),
+                #[cfg(any(feature = "query", feature = "queryable", feature = "threads"))]
                 this: this.clone(),
             }
         })
