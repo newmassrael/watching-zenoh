@@ -880,8 +880,9 @@ fn a_redeclare_inside_the_reads_step_is_told() {
 /// An operation reaches each face that is up through the wire its hold of that face's place
 /// holds, and none by a try: each face's record names its face by the flags its link's end shares
 /// with the read. Turned red by a hold that names another face's flags (`HeldSend::face`), a
-/// `FaceTx::held_of` that compares anything but those flags, or a walk that holds no place
-/// (`CoopEngine::hold_faces_from`).
+/// `FaceTx::held_of` that compares anything but those flags, a walk that holds no place
+/// (`CoopEngine::hold_faces_from`), or, where the dial role's face is the only face, a hold
+/// that hands the operation no wire (`DialHeld::parts`).
 #[cfg(not(wz_round))]
 #[test]
 fn an_operation_reaches_each_face_through_the_wire_it_holds() {
@@ -897,7 +898,9 @@ fn an_operation_reaches_each_face_through_the_wire_it_holds() {
 /// Inside an operation, the place of every face that holds a link is held, so a send to any
 /// face under the session's lock is made through a held wire and never finds a place another
 /// holder has. Turned red by a walk that takes the session's lock before the faces' places, or
-/// that skips a face whose place holds a link (`CoopEngine::hold_faces_from`).
+/// that skips a face whose place holds a link (`CoopEngine::hold_faces_from`), or by a hold of
+/// the dial role's face alone that takes no place (`CoopEngine::hold_dial`) or keeps it past
+/// the operation (`DialHeld`'s drop).
 #[cfg(not(wz_round))]
 #[test]
 fn an_operation_holds_the_place_of_every_face_with_a_link() {
@@ -911,6 +914,27 @@ fn an_operation_holds_the_place_of_every_face_with_a_link() {
     assert!(
         engine.send_place_is_free(),
         "the operation let go of the place it held"
+    );
+}
+
+/// An operation on a closed session runs nothing, and leaves the dial role's send place free:
+/// the hold of the place taken before the session is found closed is let go of with it. Turned
+/// red by a hold that runs the operation on a closed session (`CoopEngine::hold_dial` without
+/// `CoopEngine::live`), or that keeps the place it took.
+#[cfg(not(wz_round))]
+#[test]
+fn an_operation_on_a_closed_session_runs_nothing_and_holds_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert!(
+        engine.an_operation_runs(),
+        "CONTROL: an open session runs it"
+    );
+    SessionDrive::close(&*engine);
+    assert!(!engine.an_operation_runs(), "the closed session ran it");
+    assert!(
+        engine.send_place_is_free(),
+        "the place taken before the session was found closed is let go of"
     );
 }
 
