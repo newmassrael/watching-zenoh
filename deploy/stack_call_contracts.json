@@ -245,9 +245,15 @@
     },
     {
       "id": "record-walk-each-pulled",
-      "where": {"file": "network_message.rs", "anchor": "each.take_record(view.walked())"},
+      "where": {"file": "network_message.rs", "anchor": "each.take_record(B::walked(&body))"},
       "callees": "network_message::EachRecord>::take_record$",
-      "why": "the form that lends every kind pulls each record off the payload (Records, whose next reads it by kind: read_push, read_declare, read_oam and the rest) and hands it to the consumer as record-walk-each does, as the record the walk names"
+      "why": "the form that lends every kind pulls each record off the payload (Records, whose pull hands out its kind and where it lies) and reads its body when it lends it, one lend_pulled per kind (read_push, read_declare, read_oam and the rest), and hands it to the consumer as record-walk-each does, as the record the walk names"
+    },
+    {
+      "id": "record-walk-each-skipped",
+      "where": {"file": "network_message.rs", "anchor": "each.take_record(WalkedRecord::Skipped)"},
+      "callees": "network_message::EachRecord>::take_record$",
+      "why": "a record the pull hands out that no consumer reads (an Oam of a build without the transport counters, the tail of a payload behind a MID with no decoder) is handed to the consumer as record-walk-each-pulled hands the others, once the pull has read past it"
     },
     {
       "id": "own-mapping",
