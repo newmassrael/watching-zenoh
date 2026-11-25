@@ -388,7 +388,8 @@ fn run_router(
     let runtime = CoopRuntime::try_new(PosixClock).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
-    let actions = new_session_actions(sink, init, CoopTime::new(&runtime));
+    let actions =
+        new_session_actions(sink, init, CoopTime::new(&runtime)).expect("the heap has room");
     let observer = std::rc::Rc::new(std::cell::RefCell::new(ApplicationLayerObserver::new()));
     if catch_all == CatchAll::Held {
         let samples = seen.clone();

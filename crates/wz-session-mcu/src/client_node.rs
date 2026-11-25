@@ -346,7 +346,8 @@ mod tests {
         } = far_links
             .open_acceptor(7447)
             .expect("bind the router's end");
-        let far_actions = new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime));
+        let far_actions = new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime))
+            .expect("the heap has room");
         let seen = Rc::new(Seen::default());
         let router_sees = seen.clone();
         let _far = spawn_session(

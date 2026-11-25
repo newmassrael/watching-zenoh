@@ -278,15 +278,17 @@ fn run_heap() -> ! {
         LISTEN_PORT,
         SessionTimeouts::from_build(),
         move || params(&key, &policy, &limits),
+        // A link whose session the heap has no room for is left unaccepted.
         move |sink| {
-            (
+            Some((
                 new_session_actions(
                     sink,
                     params(&key, &policy, &limits),
                     CoopTime::new(&accept_runtime),
-                ),
+                )
+                .ok()?,
                 accept_entropy.clone(),
-            )
+            ))
         },
         entropy,
     );

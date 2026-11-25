@@ -2915,7 +2915,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         link.dropped.set(2);
@@ -2944,7 +2945,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let link = Rc::new(Recording::default());
         let config = || SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
@@ -2984,7 +2986,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         // The session's own clock, whose epoch is its runtime's and not the board's.
         let now_ms = clock.now_monotonic_ms();
@@ -3008,7 +3011,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let now_ms = clock.now_monotonic_ms();
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
@@ -3039,7 +3043,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
@@ -3092,7 +3097,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
@@ -3159,7 +3165,8 @@ mod wake_budget_tests {
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let made = Rc::new(core::cell::Cell::new(0u32));
@@ -3219,7 +3226,8 @@ mod wake_budget_tests {
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let lend = RouterLend::<Router>::new();
@@ -3283,7 +3291,8 @@ mod wake_budget_tests {
             let local = CoopLocalSet::new(&runtime);
             let clock = CoopTime::new(&runtime);
             let sink = crate::link_cells::heap_sink(Null);
-            let actions = new_session_actions(sink, params(), clock.clone());
+            let actions =
+                new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
             let entropy = SessionEntropy::new(Counting(0));
             let made = Rc::new(core::cell::Cell::new(0u32));
             let spawned = spawn_session_with_router(
@@ -3348,7 +3357,8 @@ mod wake_budget_tests {
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let made = Rc::new(core::cell::Cell::new(0u32));
         let before = crate::link_cells::CellRc::handles(&actions);
@@ -3424,7 +3434,8 @@ mod wake_budget_tests {
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let task = spawn_session_with_router(
             &local,
@@ -3485,7 +3496,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let entropy = SessionEntropy::new(Counting(0));
         let now_ms = clock.now_monotonic_ms();
         let config = SessionDriveConfig {
@@ -3646,7 +3658,8 @@ mod wake_budget_tests {
             let clock = CoopTime::new(&runtime);
             let sent = Rc::new(Cell::new(0u32));
             let sink = crate::link_cells::heap_sink(KeepAlivesSent(Rc::clone(&sent)));
-            let actions = new_session_actions(sink, params(), clock.clone());
+            let actions =
+                new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
             assert!(
                 actions.keepalive_interval_ms() + TICK_MS < SPAN_MS,
                 "the span holds a keep-alive interval"

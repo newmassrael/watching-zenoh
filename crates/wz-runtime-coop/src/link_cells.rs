@@ -303,6 +303,12 @@ impl<K> CellRc<K> {
         })
     }
 
+    /// `value` in a cell of its own on the heap: the handle of a link lent no table. `value` back
+    /// when the heap refuses the cell.
+    pub fn try_boxed(value: K) -> Result<Self, K> {
+        Self::in_cells(None, value)
+    }
+
     /// `value` in a cell of its own on the heap: the handle of a link lent no table. A heap that
     /// refuses the cell ends the program, as a `Box` of the value would.
     pub fn boxed(value: K) -> Self {

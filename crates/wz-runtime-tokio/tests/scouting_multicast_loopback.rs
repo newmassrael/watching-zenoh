@@ -566,7 +566,8 @@ mod round2 {
 
         let mut params = fixture_session_init_params();
         params.zid = [0x02; 4].into(); // distinct zid from the initiator
-        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let actions =
+            new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::InboundStart);

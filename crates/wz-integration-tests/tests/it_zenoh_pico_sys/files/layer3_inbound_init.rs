@@ -187,7 +187,8 @@ fn handle_inbound_populates_cookie_slot_from_initack() {
     );
 
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
 
     let pre = actions.fact_inbound_cookie(|slot| slot.clone());
     assert!(pre.is_none(), "cookie slot starts empty");

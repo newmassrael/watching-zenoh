@@ -77,7 +77,8 @@ struct Outcome {
 async fn acceptor_opens(open_syn: impl Fn(&[u8]) -> Vec<u8>) -> Outcome {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
@@ -209,7 +210,8 @@ async fn initiator_answers(
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
     let mut params = fixture_session_init_params();
     params.whatami = whatami;
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     actions.set_south_partition(partition);
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
@@ -240,7 +242,8 @@ async fn initiator_answers(
 async fn acceptor_announces(partition: SouthPartition) -> (Option<Option<Bound>>, bool) {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     actions.set_south_partition(partition);
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});

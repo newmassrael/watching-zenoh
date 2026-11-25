@@ -249,7 +249,8 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         pump: acceptor_pump,
     } = links.open_acceptor(port).expect("bind the acceptor");
     let acceptor_actions =
-        new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime));
+        new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime))
+            .expect("the heap has room");
     let _acceptor = spawn_session(
         &local,
         acceptor_pump,
@@ -270,7 +271,8 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         ))))
         .expect("open the initiator");
     let initiator_actions =
-        Actions::new_generic(initiator_sink, params(0xb1), CoopTime::new(&runtime));
+        Actions::new_generic(initiator_sink, params(0xb1), CoopTime::new(&runtime))
+            .expect("the heap has room");
     let _initiator = spawn_session(
         &local,
         initiator_pump,

@@ -123,7 +123,8 @@ async fn drive_acceptor_to_established(listener: TcpListener) -> (u32, WriterHan
 
     let mut params = fixture_session_init_params();
     params.zid = [0x02; 4].into(); // distinct zid from the initiator
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
@@ -197,7 +198,8 @@ async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, WriterHan
     let (mut inbound, outbound, writer_handle) =
         wire_udp_socket(socket, src, &params.policy, &params.limits);
 
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);

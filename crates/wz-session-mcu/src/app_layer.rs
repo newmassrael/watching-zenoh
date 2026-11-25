@@ -622,7 +622,8 @@ mod tests {
                 sink,
                 params(),
                 clock,
-            );
+            )
+            .expect("the heap has room");
         // The reply leaves as a data send, which a session lets through only once established.
         actions.enter_established();
 
@@ -741,7 +742,8 @@ mod tests {
                     sink,
                     SessionInitParams { policy, ..params() },
                     CoopTime::new(&runtime),
-                );
+                )
+                .expect("the heap has room");
 
             let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
             let other = match value {

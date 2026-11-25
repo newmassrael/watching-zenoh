@@ -368,15 +368,17 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         LISTEN_PORT,
         SessionTimeouts::from_build(),
         move || params(WhatAmI::Peer, zid, &key, &policy, &limits),
+        // A link whose session the heap has no room for is left unaccepted.
         move |sink| {
-            (
+            Some((
                 new_session_actions(
                     sink,
                     params(WhatAmI::Peer, zid, &key, &policy, &limits),
                     CoopTime::new(&accept_runtime),
-                ),
+                )
+                .ok()?,
                 accept_entropy.clone(),
-            )
+            ))
         },
         entropy,
     );

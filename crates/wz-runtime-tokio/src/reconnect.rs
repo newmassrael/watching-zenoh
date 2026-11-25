@@ -931,7 +931,7 @@ pub async fn open_session_with_reconnect(
             wire_dialed_link_with_rx(dialed, link_rx, &params.policy, &params.limits);
         let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();
-        let actions = new_session_actions(sink, params, clock);
+        let actions = new_session_actions(sink, params, clock)?;
         // R311ju — first open routes through the same shared `initiator_open`
         // body every reopen attempt uses (engine build + activation + open loop).
         let opened = initiator_open(

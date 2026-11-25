@@ -34,7 +34,8 @@ fn r55b_engine_drives_link_opening_onentry_script() {
         driver.clone(),
         fixture_session_init_params(),
         TokioTime::new(),
-    );
+    )
+    .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
 

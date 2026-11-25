@@ -245,7 +245,10 @@ mod heap {
             // left to give: that is a failed attempt of this outage, not a refusal.
             let OpenedLink { sink, pump } = self.links.open_initiator(to).map_err(dial_failed)?;
             let runtime = self.local.runtime();
-            let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(runtime));
+            // A bundle the heap has no room for is a session the node cannot afford now, as a
+            // socket it has none of is: a failed attempt of this outage.
+            let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(runtime))
+                .map_err(|_| DialFailed::Exhausted)?;
             if let Some(zid) = expected_zid {
                 actions.expect_peer_zid(zid);
             }
@@ -495,7 +498,8 @@ mod tests {
             acceptor_sink,
             params(0xa1),
             CoopTime::new(&runtime),
-        );
+        )
+        .expect("the heap has room");
         let _acceptor = spawn_session(
             &local,
             acceptor_pump,
@@ -616,7 +620,8 @@ mod tests {
                 sink,
                 params(0xa1),
                 CoopTime::new(&runtime),
-            );
+            )
+            .expect("the heap has room");
             let task = spawn_session(
                 &local,
                 pump,

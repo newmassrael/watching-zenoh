@@ -351,7 +351,8 @@ mod tests {
                     driver_sink,
                     test_params(),
                     clock.clone(),
-                );
+                )
+                .expect("the heap has room");
 
             let outcome = run_session(
                 &runtime,
@@ -485,7 +486,8 @@ mod tests {
                     driver_sink,
                     test_params(),
                     clock.clone(),
-                );
+                )
+                .expect("the heap has room");
             (runtime, clock, driver, actions)
         };
 
@@ -594,7 +596,8 @@ mod tests {
                 sink,
                 test_params(),
                 clock,
-            );
+            )
+            .expect("the heap has room");
         actions.enter_established();
         actions
     }

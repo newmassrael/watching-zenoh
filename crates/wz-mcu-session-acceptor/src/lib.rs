@@ -709,11 +709,14 @@ where
     // `new_session_actions` draws from `getrandom`.
     let mut entropy = entropy;
     let params = acceptor_params(&mut entropy, &resolve_policy(), &resolve_limits());
-    let actions = wz::runtime_coop::session_runtime::new_session_actions(
+    // A bundle the heap has no room for runs no session: the acceptor is never established.
+    let Ok(actions) = wz::runtime_coop::session_runtime::new_session_actions(
         topology.acceptor_sink(),
         params,
         clock.clone(),
-    );
+    ) else {
+        return Run::new(data_mode).report(false, 0, 0);
+    };
 
     // Open the handshake: the initiator's first move. The reactive peer
     // drives OpenSyn + the application data off the acceptor's real replies.

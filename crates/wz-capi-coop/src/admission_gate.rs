@@ -202,7 +202,8 @@ mod tests {
             .open_acceptor(7447)
             .expect("bind the acceptor's end");
         let acceptor =
-            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let into = heard.clone();
@@ -231,7 +232,8 @@ mod tests {
             .open_initiator(Locator::udp(std::net::SocketAddr::from((ACCEPTOR, 7447))))
             .expect("open the initiator's end");
         let initiator =
-            new_session_actions(sink, params(WhatAmI::Client, 0xc1), CoopTime::new(&runtime));
+            new_session_actions(sink, params(WhatAmI::Client, 0xc1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let _initiator_task = spawn_session(
             &local,
             pump,
@@ -289,7 +291,8 @@ mod tests {
             .open_acceptor(7447)
             .expect("bind the acceptor's end");
         let acceptor =
-            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let mut made = None;
         let allocations = crate::tests::redial_heap::counted(|| {
             let gate = AdmissionGate::new(pump, acceptor.clone());
@@ -329,7 +332,8 @@ mod tests {
             .open_acceptor(7447)
             .expect("bind the acceptor's end");
         let acceptor =
-            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let gate = AdmissionGate::new(Dropping(Cell::new(2)), acceptor);
         assert_eq!(gate.take_rx_dropped(), 2, "the link's drops");
         assert_eq!(gate.take_rx_dropped(), 0, "a take empties the count");

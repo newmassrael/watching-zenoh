@@ -359,7 +359,8 @@ impl Pair {
 
         let opened = links.open_acceptor(port).expect("bind the acceptor");
         let acceptor_actions =
-            new_session_actions(opened.sink, params(0xa1), CoopTime::new(&runtime));
+            new_session_actions(opened.sink, params(0xa1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let mut acceptor = SessionPump::try_new(
             runtime.clone(),
             opened.pump,
@@ -382,7 +383,8 @@ impl Pair {
                 opened.sink,
                 params(0xb1),
                 CoopTime::new(&runtime),
-            );
+            )
+            .expect("the heap has room");
         let mut initiator = SessionPump::try_new(
             runtime.clone(),
             opened.pump,

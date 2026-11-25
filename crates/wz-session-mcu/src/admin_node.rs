@@ -78,7 +78,7 @@ where
     L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
-    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> (SessionHandle<C>, SessionEntropy),
+    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Option<(SessionHandle<C>, SessionEntropy)>,
 {
     local: &'a CoopLocalSet<C>,
     links: Rc<L>,
@@ -124,7 +124,7 @@ where
     L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
-    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> (SessionHandle<C>, SessionEntropy),
+    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Option<(SessionHandle<C>, SessionEntropy)>,
 {
     /// A node that listens on `listen_port`, answers as `identity`, applies
     /// writes to `control` and reports through `status`, over the network `links`.
@@ -132,8 +132,9 @@ where
     /// `dial_params` gives each dialled session its parameters. `accept`
     /// builds the action bundle of each acceptor session over the sink it
     /// is given, with the entropy source the session draws its cookies from (a handle on
-    /// the board's one source). `entropy` is the node's source, which its dialled sessions
-    /// draw from.
+    /// the board's one source), or `None` when the heap has no room for them, which leaves that
+    /// link unaccepted and the node listening. `entropy` is the node's source, which its dialled
+    /// sessions draw from.
     ///
     /// The node's observer is every session's, dialled and accepted, so it is held to one
     /// snapshot of the session limits: the `limits` of the parameters `dial_params` gives, which
@@ -305,7 +306,7 @@ where
     fn listen(&mut self) -> Option<(CoopLocalJoinHandle<DriverOutcome>, SessionHandle<C>)> {
         // The peer is whoever speaks first; the link learns it on receive.
         let OpenedLink { sink, pump } = self.links.open_acceptor(self.listen_port).ok()?;
-        let (actions, entropy) = (self.accept)(sink);
+        let (actions, entropy) = (self.accept)(sink)?;
         let on_event = dispatch_to(self.observer.clone(), actions.clone());
         let handle = spawn_session(
             self.local,
@@ -499,7 +500,8 @@ mod tests {
             sink: far_sink,
             pump: far_pump,
         } = far_links.open_acceptor(7522).expect("bind far peer");
-        let far_actions = new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime));
+        let far_actions = new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime))
+            .expect("the heap has room");
         // R2838 — what the peer is told: every Declare the node sends it.
         let declares = Rc::new(core::cell::Cell::new(0usize));
         let seen = declares.clone();
@@ -549,10 +551,11 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb1),
             move |sink| {
-                (
-                    new_session_actions(sink, params(0xb1), CoopTime::new(&accept_runtime)),
+                Some((
+                    new_session_actions(sink, params(0xb1), CoopTime::new(&accept_runtime))
+                        .expect("the heap has room"),
                     SessionEntropy::new(Counting(1)),
-                )
+                ))
             },
             SessionEntropy::new(Counting(2)),
         )
@@ -653,10 +656,11 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb2),
             move |sink| {
-                (
-                    new_session_actions(sink, params(0xb2), CoopTime::new(&accept_runtime)),
+                Some((
+                    new_session_actions(sink, params(0xb2), CoopTime::new(&accept_runtime))
+                        .expect("the heap has room"),
                     SessionEntropy::new(Witness::new(&LIVES)),
-                )
+                ))
             },
             SessionEntropy::new(Counting(2)),
         )
@@ -729,10 +733,11 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb3),
             move |sink| {
-                (
-                    new_session_actions(sink, params(0xb3), CoopTime::new(&accept_runtime)),
+                Some((
+                    new_session_actions(sink, params(0xb3), CoopTime::new(&accept_runtime))
+                        .expect("the heap has room"),
                     SessionEntropy::new(Witness::new(&LIVES)),
-                )
+                ))
             },
             SessionEntropy::new(Counting(2)),
         )
@@ -746,7 +751,8 @@ mod tests {
             ))
             .expect("host link");
         let host_actions =
-            McuActions::<FrozenClock>::new_generic(sink, params(0xc1), CoopTime::new(&runtime));
+            McuActions::<FrozenClock>::new_generic(sink, params(0xc1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let _host = spawn_session(
             &local,
             pump,
@@ -836,10 +842,11 @@ mod tests {
                 ..params(0xb4)
             },
             move |sink| {
-                (
-                    new_session_actions(sink, params(0xb4), CoopTime::new(&accept_runtime)),
+                Some((
+                    new_session_actions(sink, params(0xb4), CoopTime::new(&accept_runtime))
+                        .expect("the heap has room"),
                     SessionEntropy::new(Counting(1)),
-                )
+                ))
             },
             SessionEntropy::new(Counting(2)),
         )
@@ -871,10 +878,11 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb5),
             move |sink| {
-                (
-                    new_session_actions(sink, params(0xb5), CoopTime::new(&control_runtime)),
+                Some((
+                    new_session_actions(sink, params(0xb5), CoopTime::new(&control_runtime))
+                        .expect("the heap has room"),
                     SessionEntropy::new(Counting(1)),
-                )
+                ))
             },
             SessionEntropy::new(Counting(2)),
         )

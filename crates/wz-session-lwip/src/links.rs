@@ -365,7 +365,8 @@ mod tests {
             } = links.open_acceptor(7541).expect("bind acceptor");
             let acceptor_link = acceptor_sink.clone();
             let acceptor_actions =
-                new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime));
+                new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime))
+                    .expect("the heap has room");
             let _acceptor = spawn_session(
                 &local,
                 acceptor_pump,
@@ -393,7 +394,8 @@ mod tests {
                 CoopTime<FrozenClock>,
             >::new_generic(
                 initiator_sink, params(0xb1), CoopTime::new(&runtime)
-            );
+            )
+            .expect("the heap has room");
             let _initiator = spawn_session(
                 &local,
                 initiator_pump,

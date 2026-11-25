@@ -55,7 +55,8 @@ impl BoxedLinkDriver for NoopDriver {
 #[test]
 fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
 
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
@@ -121,7 +122,7 @@ fn r311kb_initack_capture_tightens_negotiated_sn_mask() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
     let mut params = fixture_session_init_params();
     params.seq_num_res = wz_session_core::policy::SnResolution::Bits32; // own advertisement: 28-bit ring
-    let actions = new_session_actions(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new()).expect("the heap has room");
 
     assert_eq!(
         actions.negotiated_sn_mask(),
@@ -324,7 +325,8 @@ fn parse_inbound_decodes_keep_alive_frame() {
 #[test]
 fn handle_inbound_keepalive_updates_last_inbound_at() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
 
     assert!(
         actions.link.fact_last_inbound_at(|slot| *slot).is_none(),
@@ -380,7 +382,8 @@ fn handle_inbound_keepalive_updates_last_inbound_at() {
 #[test]
 fn handle_inbound_stamps_rx_activity_for_a_non_keepalive_frame() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
 
     // A value the monotonic clock cannot return, so "unchanged" and "restamped
     // with an equal value" are distinguishable. The old seed was the clock's
@@ -826,7 +829,8 @@ fn r86_handle_inbound_initsyn_captures_peer_zid() {
     use wz_runtime_tokio::session_glue::InboundFrame;
 
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     assert!(
         actions.fact_inbound_peer_zid(|slot| slot.is_none()),
         "slot starts empty"
@@ -870,7 +874,8 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     use wz_runtime_tokio::session_glue::InboundFrame;
 
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
 
     // Seed the slot to verify InitAck doesn't overwrite it (InitAck
     // is the Initiator side observing the listener; the listener's
@@ -923,7 +928,8 @@ fn r311qh_peer_zid_captures_the_remote_zid_both_directions() {
 
     // ── Accepting side: InitSyn (zid 0xB0..0xB3) ──
     let acc_driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let acc = new_session_actions(acc_driver, fixture_session_init_params(), TokioTime::new());
+    let acc = new_session_actions(acc_driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     assert!(acc.peer_zid().is_none(), "routing zid starts empty");
     let initsyn = vec![
         0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
@@ -948,7 +954,8 @@ fn r311qh_peer_zid_captures_the_remote_zid_both_directions() {
     // ── Initiating side: InitAck (zid 0xC0..0xC3) — the side R86 keeps OUT of
     //    inbound_peer_zid, but which MUST still learn its peer's identity ──
     let ini_driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let ini = new_session_actions(ini_driver, fixture_session_init_params(), TokioTime::new());
+    let ini = new_session_actions(ini_driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let initack = vec![
         0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
         0x09,
@@ -992,7 +999,8 @@ fn r311td_peer_whatami_captures_the_remote_role_both_directions() {
 
     // ── Accepting side: InitSyn, cbyte 0x30 = whatami Router (wire 0), zid_len 4 ──
     let acc_driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let acc = new_session_actions(acc_driver, fixture_session_init_params(), TokioTime::new());
+    let acc = new_session_actions(acc_driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     assert!(acc.peer_whatami_wire().is_none(), "role starts empty");
     let initsyn = vec![
         0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
@@ -1016,7 +1024,8 @@ fn r311td_peer_whatami_captures_the_remote_role_both_directions() {
 
     // ── Initiating side: InitAck, cbyte 0x32 = whatami Client (wire 2), zid_len 4 ──
     let ini_driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let ini = new_session_actions(ini_driver, fixture_session_init_params(), TokioTime::new());
+    let ini = new_session_actions(ini_driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let initack = vec![
         0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
         0x09,
@@ -1062,7 +1071,8 @@ async fn inbound_openack_captures_peer_advertised_lease_ms() {
     use wz_runtime_tokio_test_support::QueueDriver;
 
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(SessionFsmUnicastEvent::OutboundStart);

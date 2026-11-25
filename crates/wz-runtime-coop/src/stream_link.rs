@@ -3090,7 +3090,8 @@ mod tests {
             sink: crate::link_cells::CellRc<dyn wz_session_core::link::BoxedLinkDriver>,
             runtime: &CoopRuntime<Stopped>,
         ) -> crate::session_runtime::SessionHandle<Stopped> {
-            let actions = new_session_actions(sink, params(), CoopTime::new(runtime));
+            let actions = new_session_actions(sink, params(), CoopTime::new(runtime))
+                .expect("the heap has room");
             actions.enter_established();
             actions
         }
@@ -3190,7 +3191,8 @@ mod tests {
                 HeapTx::for_link(0, 0, 1024 + STREAM_BATCH_LENGTH_BYTES),
             ));
             let sink = link.clone().into_sink();
-            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime))
+                .expect("the heap has room");
             assert!(
                 actions.set_qos_offer(true),
                 "the session carries a conduit for each priority"

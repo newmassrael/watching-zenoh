@@ -151,7 +151,9 @@ fuzz_target!(|data: &[u8]| {
     };
     let clock = CoopTime::new(&runtime);
     let sink = wz_runtime_coop::link_cells::heap_sink(Nowhere);
-    let actions = new_session_actions(sink, params(), clock.clone());
+    let Ok(actions) = new_session_actions(sink, params(), clock.clone()) else {
+        return;
+    };
     let feed = Rc::new(Feed::default());
     let config = SessionDriveConfig {
         timeouts: SessionTimeouts::from_build(),

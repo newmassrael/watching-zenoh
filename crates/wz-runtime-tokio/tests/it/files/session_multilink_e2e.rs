@@ -547,6 +547,7 @@ fn outcome_name(o: &JoinOutcome) -> &'static str {
         JoinOutcome::Joined(_) => "Joined",
         JoinOutcome::InvalidPubkey => "InvalidPubkey",
         JoinOutcome::OverLimit => "OverLimit",
+        JoinOutcome::HeapRefused => "HeapRefused",
     }
 }
 
@@ -938,6 +939,7 @@ async fn the_multilink_state_rides_the_cookie_between_init_ack_and_open_syn() {
     let bundle = |zid: u8, driver: &Arc<LifecycleRecordingDriver>| {
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
         new_session_actions(outbound, fixture_params_with_zid(zid), TokioTime::new())
+            .expect("the heap has room")
     };
     let last_send =
         |d: &LifecycleRecordingDriver| d.snapshot().sends.last().expect("a send").0.clone();

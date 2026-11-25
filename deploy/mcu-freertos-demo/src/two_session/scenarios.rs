@@ -275,7 +275,8 @@ impl TwoSessions {
             sink,
             unicast_params(0xa1, &policy, &limits)?,
             CoopTime::new(&runtime),
-        );
+        )
+        .map_err(|_| String::from("the heap has no room for the router's session"))?;
         let router_log = Rc::new(RouterLog::default());
         let log = router_log.clone();
         // The fixture runs for the whole scenario; its handle is never awaited.
@@ -305,7 +306,8 @@ impl TwoSessions {
             sink,
             unicast_params(0xb1, &policy, &limits)?,
             CoopTime::new(&runtime),
-        );
+        )
+        .map_err(|_| String::from("the heap has no room for the client's session"))?;
         let client_task = spawn_session(
             &local,
             pump,

@@ -4922,6 +4922,16 @@ pub enum OpenError {
     SnResolution(
         wz_session_core::policy_binding::OutsideDomain<wz_session_core::policy::SnResolution>,
     ),
+    /// The runtime had no room for the session's action bundle
+    /// ([`wz_session_core::link::HeapRefused`]): the open is refused before its handshake, so
+    /// nothing of the session reaches the wire.
+    HeapRefused,
+}
+
+impl From<wz_session_core::link::HeapRefused> for OpenError {
+    fn from(_: wz_session_core::link::HeapRefused) -> Self {
+        Self::HeapRefused
+    }
 }
 
 /// Build the session action layer + SCE engine for an open path, ready for
@@ -4939,14 +4949,17 @@ fn wire_session_engine(
     outbound: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
     clock: TokioTime,
-) -> (
-    Arc<SessionLinkActions>,
-    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
-) {
-    let actions = new_session_actions(outbound, params, clock);
+) -> Result<
+    (
+        Arc<SessionLinkActions>,
+        Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    ),
+    OpenError,
+> {
+    let actions = new_session_actions(outbound, params, clock)?;
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
-    (actions, engine)
+    Ok((actions, engine))
 }
 
 /// Drive an already-activated session FSM to Established, bounded by the
@@ -5572,7 +5585,7 @@ where
         .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
-    let actions = new_session_actions(outbound, params, clock);
+    let actions = new_session_actions(outbound, params, clock)?;
     install(&actions);
     initiator_open(
         inbound,
@@ -5988,7 +6001,7 @@ where
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
-    let actions = new_session_actions(outbound, with_offered_region(params, &offer), clock);
+    let actions = new_session_actions(outbound, with_offered_region(params, &offer), clock)?;
     // Staged BEFORE the handshake drives, and BEFORE any wire byte: an offer
     // this build cannot honour fails here rather than opening a session whose
     // wire form silently differs from the configuration.
@@ -6226,7 +6239,7 @@ pub async fn accept_and_open_session(
         .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock)?;
 
     // Accepting activation -> AwaitingInitSyn, whose onentry arms
     // `accepting.inactivity_timeout` (the open-deadline this path enforces).
@@ -6272,7 +6285,7 @@ pub async fn accept_and_open_session_with_auth(
         .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock)?;
     actions.install_auth_dispatch(auth);
 
     engine.process_event(E::InboundStart);
@@ -6532,7 +6545,7 @@ where
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) =
-        wire_session_engine(outbound, with_offered_region(params, &offer), clock);
+        wire_session_engine(outbound, with_offered_region(params, &offer), clock)?;
     actions
         .apply_offer(&offer)
         .map_err(OpenError::UnsupportedCapability)?;
@@ -6628,7 +6641,7 @@ pub async fn accept_and_open_session_with_namespace(
         .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock)?;
     actions.set_namespace(namespace);
 
     engine.process_event(E::InboundStart);

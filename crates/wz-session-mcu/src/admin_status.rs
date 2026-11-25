@@ -549,7 +549,8 @@ mod tests {
                     region: None,
                 },
                 clock,
-            );
+            )
+            .expect("the heap has room");
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let mut on_event = dispatch_to(observer.clone(), actions.clone());
 
@@ -667,7 +668,8 @@ mod tests {
                     region: None,
                 },
                 clock,
-            );
+            )
+            .expect("the heap has room");
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let on_event = dispatch_to(observer.clone(), actions.clone());
         status.set_sessions(vec![AdminSession {

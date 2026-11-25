@@ -283,7 +283,8 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
 
     let opened = links.open_acceptor(port).expect("bind the acceptor");
     let acceptor = Side {
-        actions: new_session_actions(opened.sink.clone(), params(0xa1), CoopTime::new(&runtime)),
+        actions: new_session_actions(opened.sink.clone(), params(0xa1), CoopTime::new(&runtime))
+            .expect("the heap has room"),
         #[cfg(feature = "tx-lend-only")]
         sink: opened.sink,
         pump: opened.pump,
@@ -297,7 +298,8 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
         ))))
         .expect("open the initiator");
     let initiator = Side {
-        actions: Actions::new_generic(opened.sink.clone(), params(0xb1), CoopTime::new(&runtime)),
+        actions: Actions::new_generic(opened.sink.clone(), params(0xb1), CoopTime::new(&runtime))
+            .expect("the heap has room"),
         #[cfg(feature = "tx-lend-only")]
         sink: opened.sink,
         pump: opened.pump,

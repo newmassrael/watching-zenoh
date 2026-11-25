@@ -1883,9 +1883,17 @@ impl LinkSubject {
 ///
 /// [`SessionLinkActions`]: crate::session_actions::SessionLinkActions
 pub trait ShareValues: SessionRuntime {
-    /// Wrap `value` in the profile's [`Shared`](SessionRuntime::Shared) pointer.
-    fn share<U>(value: U) -> Self::Shared<U>;
+    /// Wrap `value` in the profile's [`Shared`](SessionRuntime::Shared) pointer, or
+    /// [`HeapRefused`] with `value` let go of when the heap has no room for the pointer's cell.
+    fn share<U>(value: U) -> Result<Self::Shared<U>, HeapRefused>;
 }
+
+/// The heap had no room for a value a runtime keeps behind its pointer
+/// ([`ShareValues::share`], [`SessionRuntime::wrap_actions`]). The same answer from every
+/// runtime: what asked for the value refuses what it was making (an open refuses the session),
+/// and the program goes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapRefused;
 
 /// Runtime-tier extension that owns the per-profile *storage* of a
 /// [`BoxedLinkDriver`]. A session-tier trait (rather than a method on
@@ -2050,7 +2058,8 @@ pub trait SessionRuntime: Runtime + Sized {
     type ActionsHandle<T: TimeSource>: Clone + Deref<Target = SessionLinkActions<Self, T>>;
 
     /// Wrap an owned [`SessionLinkActions`] bundle in the per-profile shared
-    /// handle (tokio `Arc::new`, lwIP `Rc::new`). The sole construction seam
+    /// handle (tokio `Arc::new`, lwIP `Rc::new`), or [`HeapRefused`] with the bundle let
+    /// go of when the heap has no room for the handle's cell. The sole construction seam
     /// [`SessionLinkActions::new_generic`](crate::session_actions::SessionLinkActions::new_generic)
     /// routes through this so generic-`R` code never names the concrete
     /// pointer type.
@@ -2064,7 +2073,9 @@ pub trait SessionRuntime: Runtime + Sized {
         feature = "session-unicast",
         not(feature = "session-slot")
     ))]
-    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T>;
+    fn wrap_actions<T: TimeSource>(
+        actions: SessionLinkActions<Self, T>,
+    ) -> Result<Self::ActionsHandle<T>, HeapRefused>;
 
     /// The type of the link driver the action methods send through. A profile that picks its
     /// driver at build time (the fixed-memory MCU profile: Kconfig names the link) says the

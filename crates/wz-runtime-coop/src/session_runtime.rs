@@ -46,9 +46,9 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::entropy::EntropySource;
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::entropy::EntropyUnavailable;
-#[cfg(not(feature = "session-slot"))]
-use wz_session_core::link::ShareValues;
 use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
+#[cfg(not(feature = "session-slot"))]
+use wz_session_core::link::{HeapRefused, ShareValues};
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::session_actions::SessionLinkActions;
 #[cfg(feature = "session-slot")]
@@ -97,8 +97,8 @@ impl<U> core::ops::Deref for NoShared<U> {
 impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> ShareValues
     for CoopRuntime<C, D, K>
 {
-    fn share<U>(value: U) -> Self::Shared<U> {
-        crate::link_cells::CellRc::boxed(value)
+    fn share<U>(value: U) -> Result<Self::Shared<U>, HeapRefused> {
+        crate::link_cells::CellRc::try_boxed(value).map_err(|_| HeapRefused)
     }
 }
 
@@ -188,8 +188,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     type EntropyDraw = SessionEntropy;
 
     #[cfg(not(feature = "session-slot"))]
-    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
-        crate::link_cells::CellRc::boxed(actions)
+    fn wrap_actions<T: TimeSource>(
+        actions: SessionLinkActions<Self, T>,
+    ) -> Result<Self::ActionsHandle<T>, HeapRefused> {
+        crate::link_cells::CellRc::try_boxed(actions).map_err(|_| HeapRefused)
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &D {
@@ -301,12 +303,14 @@ fn _session_link_actions_composes_on_lwip<C: ClockSource>(
 /// challenges are drawn at each InitAck by the session's handshake binding, from the
 /// session's one source ([`SessionEntropy`]) the pump that builds its engine is handed.
 /// Before that, a bundle holds no nonce (`cookie_nonce` is `None`, fail-closed).
+///
+/// [`HeapRefused`] when the heap has no room for the bundle: the open is refused.
 #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
 pub fn new_session_actions<C>(
     driver: crate::link_cells::CellRc<dyn BoxedLinkDriver>,
     params: wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
-) -> SessionHandle<C>
+) -> Result<SessionHandle<C>, HeapRefused>
 where
     C: ClockSource,
 {
@@ -438,7 +442,34 @@ mod cookie_nonce_draw_tests {
         let runtime = CoopRuntime::try_new(StoppedClock).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let driver = crate::link_cells::heap_sink(NullDriver);
-        new_session_actions(driver, params(), clock)
+        new_session_actions(driver, params(), clock).expect("the heap has room")
+    }
+
+    /// A heap with no room for a shared value's cell, or for the cell of a bundle's handle,
+    /// refuses it, and the value is let go of: the open that asked is refused and the program
+    /// goes on. Turned red by `ShareValues::share` or `wrap_actions` making their cells with a
+    /// maker that ends the program on a refused heap, or answering a handle past the refusal.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_value_the_heap_has_no_room_for_is_refused() {
+        type Rt = CoopRuntime<StoppedClock>;
+        let shared = crate::table_tests::refused(|| <Rt as ShareValues>::share(7u32).err());
+        assert_eq!(shared, Some(HeapRefused));
+
+        let runtime = Rt::try_new(StoppedClock).expect("the heap has room");
+        let driver = crate::link_cells::heap_sink(NullDriver);
+        let actions = SessionLinkActions::<Rt, CoopTime<StoppedClock>>::build(
+            driver,
+            params(),
+            CoopTime::new(&runtime),
+        )
+        .expect("the heap has room");
+        let wrapped = crate::table_tests::refused(|| Rt::wrap_actions(actions).err());
+        assert_eq!(wrapped, Some(HeapRefused));
+        assert!(
+            <Rt as ShareValues>::share(7u32).is_ok(),
+            "a heap with room makes the cell"
+        );
     }
 
     /// The bundle is one link's and keeps no source, so it holds no nonce until a handshake's

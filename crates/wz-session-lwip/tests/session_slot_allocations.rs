@@ -413,12 +413,14 @@ mod placing_on_the_heap {
             driver.clone().into_sink();
         let actions = if zid == 0xa1 {
             new_session_actions(sink, params(zid), CoopTime::new(runtime))
+                .expect("the heap has room")
         } else {
             SessionLinkActions::<Rt, CoopTime<Frozen>>::new_generic(
                 sink,
                 params(zid),
                 CoopTime::new(runtime),
             )
+            .expect("the heap has room")
         };
         (
             actions,

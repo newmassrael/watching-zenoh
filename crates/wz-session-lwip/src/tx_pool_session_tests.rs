@@ -136,7 +136,8 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
     let pool = InstalledPool::install();
 
     let OpenedLink { sink, pump } = links.open_acceptor(7561).expect("bind acceptor");
-    let acceptor = new_session_actions(sink, params(0xa1), CoopTime::new(&runtime));
+    let acceptor = new_session_actions(sink, params(0xa1), CoopTime::new(&runtime))
+        .expect("the heap has room");
     let _acceptor_task = spawn_session(
         &local,
         pump,
@@ -160,7 +161,8 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
         sink,
         params(0xb1),
         CoopTime::new(&runtime),
-    );
+    )
+    .expect("the heap has room");
     let initiator_task = spawn_session(
         &local,
         pump,

@@ -290,7 +290,8 @@ impl TwoSessions {
         let links = test_links(link.clone());
 
         let OpenedLink { sink, pump } = links.open_acceptor(router_port).expect("bind router");
-        let router = new_session_actions(sink, unicast_params(0xa1), CoopTime::new(&runtime));
+        let router = new_session_actions(sink, unicast_params(0xa1), CoopTime::new(&runtime))
+            .expect("the heap has room");
         let router_log = Rc::new(RouterLog::default());
         let log = router_log.clone();
         // The fixture runs for the whole test; its handle is never awaited.
@@ -314,11 +315,13 @@ impl TwoSessions {
                 router_port,
             ))))
             .expect("open client");
-        let client = SessionLinkActions::<CoopRuntime<StepClock>, CoopTime<StepClock>>::new_generic(
-            sink,
-            unicast_params(0xb1),
-            CoopTime::new(&runtime),
-        );
+        let client =
+            SessionLinkActions::<CoopRuntime<StepClock>, CoopTime<StepClock>>::new_generic(
+                sink,
+                unicast_params(0xb1),
+                CoopTime::new(&runtime),
+            )
+            .expect("the heap has room");
         let client_task = spawn_session(
             &local,
             pump,
