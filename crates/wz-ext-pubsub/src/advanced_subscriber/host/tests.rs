@@ -1639,7 +1639,7 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
     assert!(script.events().is_empty(), "nothing was declared");
 }
 
-/// The late-publisher subscription's callback is the engine's raw form over a count of the
+/// The late-publisher subscription's callback is the engine's plain form over a count of the
 /// subscriber, so declaring it takes no closure of its own, and the engine letting it go lets go
 /// of the count.
 #[test]
@@ -1652,8 +1652,8 @@ fn the_late_publisher_callback_is_a_count_of_the_subscriber() {
     let held = Strong::strong_count(&subscriber.shared);
     let sink = script.liveliness.lock().unwrap().remove(0).3;
     assert!(
-        matches!(*sink, LivelinessSink::Raw(_)),
-        "the callback is the raw form, which allocates no closure"
+        matches!(*sink, LivelinessSink::Plain(_)),
+        "the callback is the plain form, which allocates no closure"
     );
     drop(sink);
     assert_eq!(

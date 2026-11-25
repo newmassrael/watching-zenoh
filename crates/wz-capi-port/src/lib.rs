@@ -159,11 +159,9 @@ pub type FilterId = u64;
 /// upstream zenoh's callback is an `Arc<dyn Fn(Sample) + Send + Sync>`. It is let go of once, when
 /// the engine is done with it, after its last call has returned: its drop is the program's.
 pub enum SubscriberSink {
-    /// A closure given as plain functions over one context, with no heap ([`Self::raw`]).
-    Raw(RawSampleCallback),
-    /// A C program's closure as its ABI hands it over: the C function, its context and its C
-    /// drop, with the ABI's marshal and what is let go of after the drop ([`Self::c`]).
-    C(CSampleCallback),
+    /// A closure given as plain functions over one context, with no heap: a C program's as its
+    /// ABI hands it over ([`Self::c`]), or a Rust function's ([`Self::raw`]).
+    Plain(PlainCallback<SampleMarshal>),
     /// A Rust program's closure, shared ([`Self::shared`]).
     Shared(Arc<SharedSampleFn>),
 }
@@ -171,17 +169,6 @@ pub enum SubscriberSink {
 /// A Rust program's subscriber callback, as [`SubscriberSink::Shared`] shares it: upstream zenoh's
 /// `Callback<Sample>` shape.
 pub type SharedSampleFn = dyn Fn(&dyn SampleView) + Send + Sync;
-
-/// The parts of a C program's closure an engine calls ([`SubscriberSink::Raw`]): plain values,
-/// copied where they go; the drop runs once, when the [`SubscriberSink`] holding them is dropped.
-/// It is handed the session's own sample ([`SampleRef`]), whose parts it reads as fields: one
-/// indirect call per delivery, and none through a view.
-#[derive(Clone, Copy)]
-pub struct RawSampleCallback {
-    call: unsafe fn(context: *mut core::ffi::c_void, sample: &SampleRef<'_>),
-    context: *mut core::ffi::c_void,
-    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
-}
 
 /// A C program's callback function as a port holds it, its first argument erased to a pointer:
 /// the ABI's marshal calls it with the ABI's own loaned argument, which an `extern "C"` function
@@ -191,6 +178,14 @@ pub type CCall =
 
 /// A C program's drop of its closure's context.
 pub type CDrop = unsafe extern "C" fn(context: *mut core::ffi::c_void);
+
+/// How a plain subscriber callback is called ([`PlainCallback`]): with the function it holds, its
+/// context, and the session's own sample ([`SampleRef`]), whose parts it reads as fields.
+pub type SampleMarshal =
+    unsafe fn(call: CCall, context: *mut core::ffi::c_void, sample: &SampleRef<'_>);
+
+/// A subscriber callback given as a Rust function over its context ([`SubscriberSink::raw`]).
+type RawSampleFn = unsafe fn(context: *mut core::ffi::c_void, sample: &SampleRef<'_>);
 
 /// What a row lets go of after the C drop of the closure it holds has run: a function and the one
 /// pointer it is called with, for a hold an ABI keeps with the closure (the count of the session a
@@ -214,25 +209,59 @@ impl LetGo {
     }
 }
 
-/// The parts of a C program's closure as its ABI hands them over ([`SubscriberSink::C`]): the C
-/// function, its context and its C drop, held in the row with the ABI's marshal, which makes the
-/// loaned sample the C function reads, and what is let go of after the drop. Plain values; the
-/// drop runs once, when the [`SubscriberSink`] holding them is dropped.
-#[derive(Clone, Copy)]
-pub struct CSampleCallback {
-    marshal: unsafe fn(call: CCall, context: *mut core::ffi::c_void, sample: &SampleRef<'_>),
-    call: Option<CCall>,
+/// The parts of a closure given as plain functions, held in an engine's row with no heap: for each
+/// delivery `marshal` is called with `call` and `context` (one indirect call, and none through a
+/// view), and once, after the last call, the closure is let go of: `drop` with `context`, then
+/// what was held with it. A closure given no function is held with a marshal that calls none, so no
+/// delivery tests whether it was given one.
+pub struct PlainCallback<M> {
+    marshal: M,
+    /// The function `marshal` calls, as it was erased: a C program's, or a Rust function's.
+    call: CCall,
     context: *mut core::ffi::c_void,
     drop: Option<CDrop>,
     then: Option<LetGo>,
 }
 
-/// The one letting go of a C closure's parts: its C drop with its context, then what was held
-/// with it.
+impl<M> PlainCallback<M> {
+    /// `marshal` over `call` when one is given, else `silent`, which calls nothing.
+    fn new(
+        marshal: M,
+        silent: M,
+        call: Option<CCall>,
+        context: *mut core::ffi::c_void,
+        drop: Option<CDrop>,
+        then: Option<LetGo>,
+    ) -> Self {
+        let (marshal, call) = match call {
+            Some(call) => (marshal, call),
+            None => (silent, no_call as CCall),
+        };
+        Self {
+            marshal,
+            call,
+            context,
+            drop,
+            then,
+        }
+    }
+
+    /// Let go of the closure: its drop with its context, then what was held with it.
+    ///
+    /// # Safety
+    /// As the constructor's that took the parts: called once, after the closure's last call.
+    unsafe fn let_go(&self) {
+        // SAFETY: the caller's.
+        unsafe { let_go_c(self.context, self.drop, self.then) };
+    }
+}
+
+/// The one letting go of a plain closure's parts, whatever it is called with: its C drop with its
+/// context, then what was held with it. Apart from [`PlainCallback`]'s marshal type, so every sink
+/// lets go through one body.
 ///
 /// # Safety
-/// As the constructor's that took the parts ([`SubscriberSink::c`]): called once, after the
-/// closure's last call.
+/// As the constructor's that took the parts: called once, after the closure's last call.
 unsafe fn let_go_c(context: *mut core::ffi::c_void, drop: Option<CDrop>, then: Option<LetGo>) {
     if let Some(drop) = drop {
         // SAFETY: the caller's: the drop's one call, after the last call of the closure.
@@ -244,17 +273,35 @@ unsafe fn let_go_c(context: *mut core::ffi::c_void, drop: Option<CDrop>, then: O
     }
 }
 
-// SAFETY: a raw or C callback is made only by `SubscriberSink::raw` or `SubscriberSink::c`,
-// whose caller promises that its function may be called with its context from any thread, at
-// once from several and from inside itself, and its drops once on any thread; the shared one is
+/// The function a plain closure given none holds: never called, as its marshal calls nothing.
+extern "C" fn no_call(_argument: *const core::ffi::c_void, _context: *mut core::ffi::c_void) {}
+
+/// The marshal of a subscriber closure given no function: it calls nothing.
+fn no_sample_call(_call: CCall, _context: *mut core::ffi::c_void, _sample: &SampleRef<'_>) {}
+
+/// The marshal of a subscriber callback given as a Rust function ([`SubscriberSink::raw`]).
+///
+/// # Safety
+/// `call` is a `RawSampleFn` `SubscriberSink::raw` erased, and that constructor's contract
+/// holds for this call.
+unsafe fn raw_sample_call(call: CCall, context: *mut core::ffi::c_void, sample: &SampleRef<'_>) {
+    // SAFETY: the caller's: `call` was erased from this type, and is called only as it.
+    let call = unsafe { core::mem::transmute::<CCall, RawSampleFn>(call) };
+    // SAFETY: the caller's: `SubscriberSink::raw`'s contract.
+    unsafe { call(context, sample) }
+}
+
+// SAFETY: a plain callback is made only by `SubscriberSink::raw` or `SubscriberSink::c`, whose
+// caller promises that its function may be called with its context from any thread, at once from
+// several and from inside itself, and its drops once on any thread; the shared one is
 // `Send + Sync` itself.
 unsafe impl Send for SubscriberSink {}
 // SAFETY: as `Send`.
 unsafe impl Sync for SubscriberSink {}
 
 impl SubscriberSink {
-    /// A C program's closure: `call` with `context` for each sample, and `drop` with `context`
-    /// once, when the engine lets it go.
+    /// A closure given as a Rust function: `call` with `context` for each sample, and `drop` with
+    /// `context` once, when the engine lets it go.
     ///
     /// # Safety
     /// `call` may be called with `context` from any thread, at once from several and from inside
@@ -265,10 +312,15 @@ impl SubscriberSink {
         context: *mut core::ffi::c_void,
         drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
     ) -> Self {
-        Self::Raw(RawSampleCallback {
+        // SAFETY: two function pointers of one size; `raw_sample_call` alone calls it, as the
+        // type it is erased from here.
+        let call = unsafe { core::mem::transmute::<RawSampleFn, CCall>(call) };
+        Self::Plain(PlainCallback::<SampleMarshal> {
+            marshal: raw_sample_call,
             call,
             context,
-            drop,
+            drop: None,
+            then: drop.map(|run| LetGo { run, at: context }),
         })
     }
 
@@ -281,19 +333,20 @@ impl SubscriberSink {
     /// and from inside itself, until `drop` is called; `drop`, when given, may be called with
     /// `context` once, on any thread, after the last call has returned, and `then` after it.
     pub unsafe fn c(
-        marshal: unsafe fn(call: CCall, context: *mut core::ffi::c_void, sample: &SampleRef<'_>),
+        marshal: SampleMarshal,
         call: Option<CCall>,
         context: *mut core::ffi::c_void,
         drop: Option<CDrop>,
         then: Option<LetGo>,
     ) -> Self {
-        Self::C(CSampleCallback {
+        Self::Plain(PlainCallback::<SampleMarshal>::new(
             marshal,
+            no_sample_call,
             call,
             context,
             drop,
             then,
-        })
+        ))
     }
 
     /// A Rust program's closure, shared.
@@ -301,34 +354,24 @@ impl SubscriberSink {
         Self::Shared(Arc::new(call))
     }
 
-    /// Hand `sample` to the callback: a C program's is handed the session's sample read once off
+    /// Hand `sample` to the callback: a plain one is handed the session's sample read once off
     /// the view ([`SampleRef::of`]), for an engine that holds its sample as a view.
     pub fn call(&self, sample: &dyn SampleView) {
         match self {
-            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
-            Self::Raw(raw) => unsafe { (raw.call)(raw.context, &SampleRef::of(sample)) },
-            Self::C(c) => {
-                if let Some(call) = c.call {
-                    // SAFETY: `Self::c`'s contract: the call may be made from here, now.
-                    unsafe { (c.marshal)(call, c.context, &SampleRef::of(sample)) }
-                }
-            }
+            // SAFETY: the constructor's contract: the call may be made from here, now.
+            Self::Plain(plain) => unsafe {
+                (plain.marshal)(plain.call, plain.context, &SampleRef::of(sample))
+            },
             Self::Shared(call) => call(sample),
         }
     }
 
     /// Hand the session's own `sample` to the callback as it lies, for an engine that holds its
-    /// sample so: a C program's reads its parts with no call through a view.
+    /// sample so: a plain one reads its parts with no call through a view.
     pub fn call_ref(&self, sample: &SampleRef<'_>) {
         match self {
-            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
-            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
-            Self::C(c) => {
-                if let Some(call) = c.call {
-                    // SAFETY: `Self::c`'s contract: the call may be made from here, now.
-                    unsafe { (c.marshal)(call, c.context, sample) }
-                }
-            }
+            // SAFETY: the constructor's contract: the call may be made from here, now.
+            Self::Plain(plain) => unsafe { (plain.marshal)(plain.call, plain.context, sample) },
             Self::Shared(call) => call(sample),
         }
     }
@@ -336,27 +379,10 @@ impl SubscriberSink {
 
 impl Drop for SubscriberSink {
     fn drop(&mut self) {
-        match *self {
-            Self::Raw(RawSampleCallback {
-                context,
-                drop: Some(drop),
-                ..
-            }) => {
-                // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call,
-                // since a call borrows the sink and the sink is dropped only once no borrow is
-                // left.
-                unsafe { drop(context) };
-            }
-            Self::C(CSampleCallback {
-                context,
-                drop,
-                then,
-                ..
-            }) => {
-                // SAFETY: `Self::c`'s contract, as the raw one's: once, after the last call.
-                unsafe { let_go_c(context, drop, then) };
-            }
-            Self::Raw(_) | Self::Shared(_) => {}
+        if let Self::Plain(plain) = self {
+            // SAFETY: the constructor's contract: this is its one drop, after its last call, since
+            // a call borrows the sink and the sink is dropped only once no borrow is left.
+            unsafe { plain.let_go() };
         }
     }
 }
@@ -425,12 +451,9 @@ impl<H: Deref<Target: Tickers>> Drop for Ticker<H> {
 /// on the key is a `Put`, each it retracts a `Delete`. Called through a shared borrow, from any
 /// thread and at any depth, and let go of once, after its last call, as [`SubscriberSink`] is.
 pub enum LivelinessSink {
-    /// A C program's closure: its function, its context and its drop, held as they are, with no
-    /// heap ([`Self::raw`]).
-    Raw(RawLivelinessCallback),
-    /// A C program's closure as its ABI hands it over, as a subscriber's
-    /// ([`SubscriberSink::C`]).
-    C(CLivelinessCallback),
+    /// A closure given as plain functions over one context, with no heap, as a subscriber's
+    /// ([`SubscriberSink::Plain`]).
+    Plain(PlainCallback<LivelinessMarshal>),
     /// A Rust program's closure, shared ([`Self::shared`]).
     Shared(Arc<SharedLivelinessFn>),
 }
@@ -438,35 +461,47 @@ pub enum LivelinessSink {
 /// A Rust program's liveliness callback, as [`LivelinessSink::Shared`] shares it.
 pub type SharedLivelinessFn = dyn for<'a> Fn(LivelinessSample<'a>) + Send + Sync;
 
-/// The parts of a C program's closure an engine calls ([`LivelinessSink::Raw`]), as
-/// [`RawSampleCallback`] holds a subscriber's.
-#[derive(Clone, Copy)]
-pub struct RawLivelinessCallback {
-    call: unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
-    context: *mut core::ffi::c_void,
-    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+/// How a plain liveliness callback is called ([`PlainCallback`]), as a subscriber's
+/// ([`SampleMarshal`]).
+pub type LivelinessMarshal =
+    unsafe fn(call: CCall, context: *mut core::ffi::c_void, sample: LivelinessSample<'_>);
+
+/// A liveliness callback given as a Rust function over its context ([`LivelinessSink::raw`]).
+type RawLivelinessFn = unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>);
+
+/// The marshal of a liveliness closure given no function: it calls nothing.
+fn no_liveliness_call(
+    _call: CCall,
+    _context: *mut core::ffi::c_void,
+    _sample: LivelinessSample<'_>,
+) {
 }
 
-/// The parts of a C program's closure as its ABI hands them over ([`LivelinessSink::C`]), as
-/// [`CSampleCallback`] holds a subscriber's.
-#[derive(Clone, Copy)]
-pub struct CLivelinessCallback {
-    marshal: unsafe fn(call: CCall, context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
-    call: Option<CCall>,
+/// The marshal of a liveliness callback given as a Rust function ([`LivelinessSink::raw`]).
+///
+/// # Safety
+/// `call` is a `RawLivelinessFn` `LivelinessSink::raw` erased, and that constructor's
+/// contract holds for this call.
+unsafe fn raw_liveliness_call(
+    call: CCall,
     context: *mut core::ffi::c_void,
-    drop: Option<CDrop>,
-    then: Option<LetGo>,
+    sample: LivelinessSample<'_>,
+) {
+    // SAFETY: the caller's: `call` was erased from this type, and is called only as it.
+    let call = unsafe { core::mem::transmute::<CCall, RawLivelinessFn>(call) };
+    // SAFETY: the caller's: `LivelinessSink::raw`'s contract.
+    unsafe { call(context, sample) }
 }
 
-// SAFETY: as `SubscriberSink`'s: a raw or C callback is made only by `LivelinessSink::raw` or
+// SAFETY: as `SubscriberSink`'s: a plain callback is made only by `LivelinessSink::raw` or
 // `LivelinessSink::c`, whose caller promises what the marker traits ask of it.
 unsafe impl Send for LivelinessSink {}
 // SAFETY: as `Send`.
 unsafe impl Sync for LivelinessSink {}
 
 impl LivelinessSink {
-    /// A C program's closure: `call` with `context` for each change, and `drop` with `context`
-    /// once, when the engine lets it go.
+    /// A closure given as a Rust function: `call` with `context` for each change, and `drop`
+    /// with `context` once, when the engine lets it go.
     ///
     /// # Safety
     /// As [`SubscriberSink::raw`]'s.
@@ -475,10 +510,15 @@ impl LivelinessSink {
         context: *mut core::ffi::c_void,
         drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
     ) -> Self {
-        Self::Raw(RawLivelinessCallback {
+        // SAFETY: two function pointers of one size; `raw_liveliness_call` alone calls it, as the
+        // type it is erased from here.
+        let call = unsafe { core::mem::transmute::<RawLivelinessFn, CCall>(call) };
+        Self::Plain(PlainCallback::<LivelinessMarshal> {
+            marshal: raw_liveliness_call,
             call,
             context,
-            drop,
+            drop: None,
+            then: drop.map(|run| LetGo { run, at: context }),
         })
     }
 
@@ -487,23 +527,20 @@ impl LivelinessSink {
     /// # Safety
     /// As [`SubscriberSink::c`]'s.
     pub unsafe fn c(
-        marshal: unsafe fn(
-            call: CCall,
-            context: *mut core::ffi::c_void,
-            sample: LivelinessSample<'_>,
-        ),
+        marshal: LivelinessMarshal,
         call: Option<CCall>,
         context: *mut core::ffi::c_void,
         drop: Option<CDrop>,
         then: Option<LetGo>,
     ) -> Self {
-        Self::C(CLivelinessCallback {
+        Self::Plain(PlainCallback::<LivelinessMarshal>::new(
             marshal,
+            no_liveliness_call,
             call,
             context,
             drop,
             then,
-        })
+        ))
     }
 
     /// A Rust program's closure, shared.
@@ -514,14 +551,8 @@ impl LivelinessSink {
     /// Hand `sample` to the callback.
     pub fn call(&self, sample: LivelinessSample<'_>) {
         match self {
-            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
-            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
-            Self::C(c) => {
-                if let Some(call) = c.call {
-                    // SAFETY: `Self::c`'s contract: the call may be made from here, now.
-                    unsafe { (c.marshal)(call, c.context, sample) }
-                }
-            }
+            // SAFETY: the constructor's contract: the call may be made from here, now.
+            Self::Plain(plain) => unsafe { (plain.marshal)(plain.call, plain.context, sample) },
             Self::Shared(call) => call(sample),
         }
     }
@@ -529,25 +560,9 @@ impl LivelinessSink {
 
 impl Drop for LivelinessSink {
     fn drop(&mut self) {
-        match *self {
-            Self::Raw(RawLivelinessCallback {
-                context,
-                drop: Some(drop),
-                ..
-            }) => {
-                // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call.
-                unsafe { drop(context) };
-            }
-            Self::C(CLivelinessCallback {
-                context,
-                drop,
-                then,
-                ..
-            }) => {
-                // SAFETY: `Self::c`'s contract: once, after the last call.
-                unsafe { let_go_c(context, drop, then) };
-            }
-            Self::Raw(_) | Self::Shared(_) => {}
+        if let Self::Plain(plain) = self {
+            // SAFETY: the constructor's contract: this is its one drop, after its last call.
+            unsafe { plain.let_go() };
         }
     }
 }
@@ -1703,6 +1718,114 @@ mod tests {
             6,
             "no call with no function"
         );
+    }
+
+    /// A plain sink takes no word of its own beside its parts: the shared form fits around the
+    /// functions a plain one holds, so a row keeps a C program's callback in the bytes of its
+    /// parts. Turned red by a form that adds a tag word to either sink.
+    #[test]
+    fn a_plain_sink_is_as_large_as_its_parts() {
+        assert_eq!(
+            core::mem::size_of::<SubscriberSink>(),
+            core::mem::size_of::<PlainCallback<SampleMarshal>>()
+        );
+        assert_eq!(
+            core::mem::size_of::<LivelinessSink>(),
+            core::mem::size_of::<PlainCallback<LivelinessMarshal>>()
+        );
+    }
+
+    /// A callback given as a Rust function is called with its own context, and its drop runs
+    /// once, with that context, when the sink is let go of. Turned red by a raw function called
+    /// through another marshal, or a drop run twice, with another context, or not at all.
+    #[test]
+    fn a_raw_sink_is_called_with_its_context_and_dropped_once() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::sample::SampleKind;
+        static CALLED: AtomicUsize = AtomicUsize::new(0);
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        unsafe fn note(context: *mut core::ffi::c_void, _sample: &SampleRef<'_>) {
+            CALLED.store(context as usize, Ordering::SeqCst);
+        }
+        unsafe fn dropped(context: *mut core::ffi::c_void) {
+            assert_eq!(context as usize, 0x7a, "the sink's context");
+            DROPPED.fetch_add(1, Ordering::SeqCst);
+        }
+        let context = 0x7a_usize as *mut core::ffi::c_void;
+        // SAFETY: both functions read only what they are handed, from any thread.
+        let sink = unsafe { SubscriberSink::raw(note, context, Some(dropped)) };
+        let sample = SampleRef::new("demo/raw", b"", SampleKind::Put, Reliability::Reliable);
+        sink.call_ref(&sample);
+        assert_eq!(
+            CALLED.load(Ordering::SeqCst),
+            0x7a,
+            "called with its context"
+        );
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 0, "not dropped while held");
+        drop(sink);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1, "dropped once");
+    }
+
+    /// A liveliness closure is called as a subscriber's: a C one through its marshal, not at all
+    /// with no function, and a Rust function with its own context; each let go of once. Turned red
+    /// by a liveliness sink that calls a closure given no function, or drops one twice.
+    #[test]
+    fn a_plain_liveliness_sink_calls_as_its_constructor_said() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
+        static MARSHALLED: AtomicUsize = AtomicUsize::new(0);
+        static RAW: AtomicUsize = AtomicUsize::new(0);
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        unsafe fn marshal(
+            _call: CCall,
+            _context: *mut core::ffi::c_void,
+            sample: LivelinessSample<'_>,
+        ) {
+            MARSHALLED.fetch_add(sample.keyexpr.len(), Ordering::SeqCst);
+        }
+        unsafe extern "C" fn program(
+            _argument: *const core::ffi::c_void,
+            _context: *mut core::ffi::c_void,
+        ) {
+        }
+        unsafe extern "C" fn dropped(_context: *mut core::ffi::c_void) {
+            DROPPED.fetch_add(1, Ordering::SeqCst);
+        }
+        unsafe fn raw(context: *mut core::ffi::c_void, _sample: LivelinessSample<'_>) {
+            RAW.store(context as usize, Ordering::SeqCst);
+        }
+        let sample = LivelinessSample {
+            kind: LivelinessSampleKind::Put,
+            keyexpr: "demo/live",
+            token_id: 1,
+        };
+        let context = 0x4c_usize as *mut core::ffi::c_void;
+        // SAFETY: every function here reads only what it is handed, from any thread.
+        let called =
+            unsafe { LivelinessSink::c(marshal, Some(program), context, Some(dropped), None) };
+        called.call(sample);
+        assert_eq!(MARSHALLED.load(Ordering::SeqCst), 9, "through the marshal");
+        drop(called);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1, "its C drop, once");
+
+        // SAFETY: as above; with no function the marshal is never called.
+        let silent = unsafe { LivelinessSink::c(marshal, None, context, Some(dropped), None) };
+        silent.call(sample);
+        assert_eq!(
+            MARSHALLED.load(Ordering::SeqCst),
+            9,
+            "no call with no function"
+        );
+        drop(silent);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 2, "dropped even so");
+
+        // SAFETY: `raw` reads only what it is handed, from any thread; nothing is dropped.
+        let rust = unsafe { LivelinessSink::raw(raw, context, None) };
+        rust.call(sample);
+        assert_eq!(RAW.load(Ordering::SeqCst), 0x4c, "called with its context");
+        drop(rust);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 2, "no drop was given");
     }
 
     #[test]
