@@ -22,6 +22,7 @@ use wz_runtime_coop::{ClockSource, CoopRuntime};
 #[cfg(not(feature = "session-slot"))]
 use wz_runtime_coop::{CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::group_locator::sent_by_own;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::MulticastTxOffer;
@@ -81,6 +82,20 @@ impl LwipMulticastDriver {
     /// attribution.
     pub fn try_recv(&mut self) -> Option<Datagram<SESSION_MULTICAST_RX_SLOT_SIZE>> {
         self.socket.try_recv()
+    }
+
+    /// Whether `datagram` is one this member sent, come back on the group: from the port its
+    /// socket is bound to and from the address lwIP sends the group's datagrams from, the
+    /// address of the interface it routes the group through (`sent_by_own`). The route is
+    /// looked up only for a datagram from the socket's own port.
+    fn sent_this(&self, datagram: &Datagram<SESSION_MULTICAST_RX_SLOT_SIZE>) -> bool {
+        datagram.src_port == self.socket.local_port()
+            && wz_link_lwip::route_source(self.group).is_some_and(|own| {
+                sent_by_own(
+                    peer_key(own, datagram.src_port),
+                    peer_key(datagram.src_addr, datagram.src_port),
+                )
+            })
     }
 }
 
@@ -157,13 +172,17 @@ impl<L: Deref<Target = LwipLink>, D: BorrowMut<LwipMulticastDriver>> GroupTransp
         let Some(driver) = &mut self.driver else {
             return false;
         };
-        match driver.borrow_mut().try_recv() {
-            Some(dg) => {
+        let driver: &mut LwipMulticastDriver = driver.borrow_mut();
+        // What this member sends comes back on the group while multicast loops back, and is
+        // dropped here, before the session reads or counts it: it is none of the group's
+        // traffic.
+        while let Some(dg) = driver.try_recv() {
+            if !driver.sent_this(&dg) {
                 f(dg.data.as_slice(), peer_key(dg.src_addr, dg.src_port));
-                true
+                return true;
             }
-            None => false,
         }
+        false
     }
 }
 
@@ -640,6 +659,22 @@ mod tests {
         }
     }
 
+    /// Another member's socket on this host, on a port the stack picks: what it sends to the
+    /// group comes from a source of its own, as a member on another node does. A group's link
+    /// drops what came from its own socket.
+    fn other_member(link: &LwipLink) -> wz_link_lwip::LwipUdpSocket {
+        wz_link_lwip::test_bind::bind(link, 0).expect("bind another member's socket")
+    }
+
+    /// A member of the group on `port` of this host, the port a node's group sends to so the
+    /// member reads what it sent: its socket on that port (the node's socket joined the group
+    /// for the host), read through a driver of its own.
+    fn member_on(link: &LwipLink, group: u32, port: u16) -> LwipMulticastDriver {
+        let socket: SessionMulticastRxSocket =
+            wz_link_lwip::test_bind::bind(link, port).expect("bind the member's port");
+        LwipMulticastDriver::new(socket, group, port)
+    }
+
     /// The §3.2 peer key is a stable, collision-free function of the datagram
     /// source: equal `(src_addr, src_port)` -> equal key (so a peer's
     /// successive datagrams attribute to one entry); a differing addr OR port
@@ -653,11 +688,51 @@ mod tests {
         std::assert_ne!(a, peer_key(0x7F00_0001, 7447), "differing port -> distinct");
     }
 
+    /// What a member's socket sends to the group comes back to it while multicast
+    /// loops back, and its link drops it and reads on to another member's datagram
+    /// in the same receive. The CONTROL is that member's datagram, taken with its
+    /// source. Turned red by a link that hands the session its own datagram, or one
+    /// that drops another member's from the same address on another port. A
+    /// distinct port (7463).
+    #[test]
+    fn a_group_link_drops_what_its_own_socket_sent() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7463;
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let other = other_member(&link);
+        let mut transport =
+            LwipGroupTransport::new(&link, LwipMulticastDriver::new(socket, group, port));
+
+        transport.send_to_group(b"own");
+        other.send_to(group, port, b"member").expect("sent");
+        link.poll_loopback();
+
+        let mut seen = None;
+        std::assert!(transport.recv_with(&mut |bytes, from| seen = Some((bytes.to_vec(), from))));
+        std::assert_eq!(
+            seen,
+            Some((
+                b"member".to_vec(),
+                peer_key(wz_link_lwip::ipv4_addr_loopback(), other.local_port())
+            )),
+            "the member's datagram, past the one our own socket sent"
+        );
+        std::assert!(
+            !transport.recv_with(&mut |_, _| panic!("our own datagram was dropped")),
+            "nothing else is queued"
+        );
+
+        drop(transport);
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
     /// R311lu — the drive loop end-to-end over a real lwIP multicast socket: a
     /// peer's JOIN (a zid distinct from ours), injected onto the group, is
     /// delivered by `poll_loopback` to the loop's `try_recv`, classified as
     /// `T_MID_JOIN`, validated, and admitted into the dispatcher's peer table —
-    /// while our own JOIN beacon echoes back and is own-zid-filtered. Shares
+    /// while our own JOIN beacon, which comes back on the group, is dropped by
+    /// the link before the session reads it. Shares
     /// the `lwip_test_link` init-once harness with `session_drive`'s test (one
     /// `lwip_init` per binary). A distinct port (7449) from the scout (7446) /
     /// unicast (7447) / link-tier multicast (7448) tests; the harness mutex
@@ -669,15 +744,16 @@ mod tests {
         let port: u16 = 7449;
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
-        // Inject a PEER's JOIN (distinct zid) onto the group BEFORE wrapping
-        // the socket in the driver — it queues in lwIP, and the loop's first
-        // poll_loopback delivers it to try_recv ahead of our own beacon echo.
+        // Inject a PEER's JOIN (distinct zid) onto the group from a socket of its
+        // own BEFORE wrapping ours in the driver — it queues in lwIP, and the
+        // loop's first poll_loopback delivers it to try_recv.
         let peer = params(&[0x01, 0x02, 0x03, 0x04]);
         let peer_join = encode_join(
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
         );
-        socket
+        let member = other_member(&link);
+        member
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
 
@@ -707,7 +783,7 @@ mod tests {
         std::assert_eq!(
             dispatcher.active_peers(),
             1,
-            "the inbound JOIN admitted the peer (our own beacon is zid-filtered)"
+            "the inbound JOIN admitted the peer (our own beacon is dropped by the link)"
         );
 
         link.leave_multicast_group(group).expect("leave group");
@@ -741,7 +817,8 @@ mod tests {
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
         );
-        socket
+        let member = other_member(&link);
+        member
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
 
@@ -801,15 +878,13 @@ mod tests {
 
     /// R311ly — the multicast TX seam end-to-end over real lwIP: a `z_put` Push
     /// queued on the loop's `next_tx` pull-seam is framed by the shared
-    /// `multicast_tx_emit` SSOT, multicast to the group, and (via multicast
-    /// loopback) delivered back to the loop's own socket. To OBSERVE it as an
-    /// admitted data frame we pre-admit a peer at our own loopback source: a JOIN
-    /// with a DISTINCT zid (so it is not own-zid-filtered), injected from our
-    /// socket, creates a peer entry keyed by (src_addr, src_port); the echoed
-    /// Push Frame (zid-less, attributed by source) then matches that entry,
-    /// passes the SN gate (SN 0 against the JOIN's advertised next_sn 0), and
-    /// fans to `on_event`. Shares the lwip_test_link harness; a distinct port
-    /// (7452) from the peer-admit (7449) / link-tier (7448) tests.
+    /// `multicast_tx_emit` SSOT and multicast to the group, where another member
+    /// reads it: a session of its own on a port of its own (7552), which the node
+    /// sends to, since one host holds one socket on a port. The node's JOIN beacon
+    /// goes first on its first iteration, so the member admits the node, then
+    /// passes its Push (SN 0 against the beacon's advertised next_sn 0) to
+    /// `on_event`. Shares the lwip_test_link harness; a distinct port (7452) from
+    /// the peer-admit (7449) / link-tier (7448) tests.
     #[cfg(feature = "codec-push")]
     #[test]
     fn run_multicast_session_publishes_a_put_over_loopback() {
@@ -820,23 +895,11 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7452;
+        let member_port: u16 = 7552;
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let mut member = member_on(&link, group, member_port);
 
-        // Pre-admit a peer at OUR loopback source: a JOIN with a zid distinct
-        // from ours (so it is admitted, not own-zid-filtered) advertising
-        // next_sn 0 on a fresh ring. Injected before wrapping the socket so the
-        // loop's first poll delivers it ahead of our own beacon / Push echo,
-        // creating the (src_addr, src_port) peer entry the echoed Push matches.
-        let other = params(&[0x01, 0x02, 0x03, 0x04]);
-        let other_join = encode_join(
-            &other,
-            &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
-        );
-        socket
-            .send_to(group, port, &other_join)
-            .expect("inject peer JOIN");
-
-        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut driver = LwipMulticastDriver::new(socket, group, member_port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let runtime = CoopRuntime::new(FrozenClock);
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -846,8 +909,6 @@ mod tests {
         // JOIN). Frozen clock + bounded max_iters keep the round trip
         // deterministic (no-flaky).
         let mut pending = Some(multicast_put_literal("demo/mc", b"tx-half").expect("build put"));
-
-        let mut saw_push = false;
         let outcome = run_multicast_session(
             &mut dispatcher,
             MulticastDriveConfig {
@@ -859,6 +920,25 @@ mod tests {
             &runtime,
             &link,
             &mut driver,
+            |_event| {},
+            || pending.take(),
+        );
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+
+        let mut member_dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let member_params = params(&[0x01, 0x02, 0x03, 0x04]);
+        let mut saw_push = false;
+        let member_outcome = run_multicast_session(
+            &mut member_dispatcher,
+            MulticastDriveConfig {
+                params: &member_params,
+                tick_ms: 5,
+                max_iters: Some(16),
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &link,
+            &mut member,
             |event| {
                 if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) =
                     event
@@ -871,14 +951,19 @@ mod tests {
                     }
                 }
             },
-            || pending.take(),
+            || None,
         );
 
-        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert_eq!(member_outcome, MulticastOutcome::IterationLimit);
+        std::assert_eq!(
+            member_dispatcher.active_peers(),
+            1,
+            "the member admitted the node by its beacon"
+        );
         std::assert!(
             saw_push,
             "the queued Put was framed by multicast_tx_emit, multicast to the \
-             group, echoed back, admitted at our source, and observed as a Push"
+             group, and observed by the member as a Push"
         );
 
         link.leave_multicast_group(group).expect("leave group");
@@ -887,15 +972,14 @@ mod tests {
     /// R311lz — the multicast TX seam is variant-complete: a NON-`codec-push`
     /// item (a liveliness `DeclareReply` — the terminating `DeclFinal` for an
     /// interest) queued on `next_tx` is framed by the SAME shared
-    /// `multicast_tx_emit` SSOT, multicast to the group, and (via multicast
-    /// loopback) observed back as a `Declare(DeclFinal)`. This proves the loop's
-    /// TX gate now reaches every forwarded variant, not just Push — the round's
-    /// union-gate generalisation. Same pre-admit-our-source trick as the Push
-    /// test: a distinct-zid JOIN injected from our socket creates the
-    /// (src_addr, src_port) peer entry the echoed Declare Frame matches, passes
-    /// the SN gate (SN 0 against the JOIN's advertised next_sn 0 — DeclareReply is
-    /// pinned reliable, so it mints on the reliable ring), and fans to `on_event`.
-    /// A distinct port (7453) from the Push (7452) / peer-admit (7449) tests.
+    /// `multicast_tx_emit` SSOT, multicast to the group, and observed by another
+    /// member as a `Declare(DeclFinal)`. This proves the loop's TX gate reaches
+    /// every forwarded variant, not just Push. The same member as the Push test's:
+    /// a session of its own on a port of its own (7553), which the node sends to;
+    /// it admits the node by its first beacon and passes the Declare (SN 0 against
+    /// the beacon's advertised next_sn 0 — DeclareReply is pinned reliable, so it
+    /// mints on the reliable ring) to `on_event`. A distinct port (7453) from the
+    /// Push (7452) / peer-admit (7449) tests.
     #[cfg(feature = "liveliness-token")]
     #[test]
     fn run_multicast_session_publishes_a_declare_reply_over_loopback() {
@@ -906,22 +990,11 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7453;
+        let member_port: u16 = 7553;
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let mut member = member_on(&link, group, member_port);
 
-        // Pre-admit a peer at OUR loopback source (distinct zid -> not
-        // own-filtered), advertising next_sn 0 on a fresh ring; injected before
-        // wrapping the socket so the loop's first poll creates the peer entry the
-        // echoed Declare matches (mirror of the Push round-trip test).
-        let other = params(&[0x01, 0x02, 0x03, 0x04]);
-        let other_join = encode_join(
-            &other,
-            &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
-        );
-        socket
-            .send_to(group, port, &other_join)
-            .expect("inject peer JOIN");
-
-        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut driver = LwipMulticastDriver::new(socket, group, member_port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let runtime = CoopRuntime::new(FrozenClock);
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -935,13 +1008,6 @@ mod tests {
         let mut pending = Some(MulticastTxItem::DeclareReply {
             declare: alloc::boxed::Box::new(declare),
         });
-
-        // The only Declare we emit is this DeclFinal (build_final_reply), so an
-        // observed Declare carrying interest id 9 IS our round-tripped reply —
-        // the variant-body check the AP test does (DeclFinal vs DeclToken) would
-        // need wz-codecs, which this MCU crate does not dep; interest_id is the
-        // correlation the querier matches on regardless, so it suffices here.
-        let mut saw_declare = false;
         let outcome = run_multicast_session(
             &mut dispatcher,
             MulticastDriveConfig {
@@ -953,6 +1019,30 @@ mod tests {
             &runtime,
             &link,
             &mut driver,
+            |_event| {},
+            || pending.take(),
+        );
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+
+        // The only Declare the node emits is this DeclFinal (build_final_reply), so
+        // a Declare the member observes carrying interest id 9 IS the node's reply —
+        // the variant-body check the AP test does (DeclFinal vs DeclToken) would
+        // need wz-codecs, which this MCU crate does not dep; interest_id is the
+        // correlation the querier matches on regardless, so it suffices here.
+        let mut member_dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let member_params = params(&[0x01, 0x02, 0x03, 0x04]);
+        let mut saw_declare = false;
+        let member_outcome = run_multicast_session(
+            &mut member_dispatcher,
+            MulticastDriveConfig {
+                params: &member_params,
+                tick_ms: 5,
+                max_iters: Some(16),
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &link,
+            &mut member,
             |event| {
                 if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) =
                     event
@@ -969,15 +1059,14 @@ mod tests {
                     }
                 }
             },
-            || pending.take(),
+            || None,
         );
 
-        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert_eq!(member_outcome, MulticastOutcome::IterationLimit);
         std::assert!(
             saw_declare,
             "the queued DeclareReply was framed by multicast_tx_emit, multicast to \
-             the group, echoed back, admitted at our source, and observed as a \
-             Declare carrying interest id 9"
+             the group, and observed by the member as a Declare carrying interest id 9"
         );
 
         link.leave_multicast_group(group).expect("leave group");
@@ -994,11 +1083,10 @@ mod tests {
     /// observer staged exactly the two declare replies and the seam drained
     /// both — proving the observer -> sink -> next_tx wiring.
     ///
-    /// It asserts on the DRAINED items, not a loopback echo: observing the echo
-    /// would hit the per-peer SN gate (the injected Interest at SN 0 advances the
-    /// shared source peer entry past our reply mints, so our echoed DeclToken at
-    /// SN 0 would be SN-stale-dropped). The wire emit of a queued DeclareReply is
-    /// separately covered by `run_multicast_session_publishes_a_declare_reply_over_loopback`.
+    /// It asserts on the DRAINED items: the node's own replies come back on the
+    /// group only to be dropped by its link. The wire emit of a queued
+    /// DeclareReply, read by another member, is covered by
+    /// `run_multicast_session_publishes_a_declare_reply_over_loopback`.
     /// Distinct port (7454) from the prior multicast tests.
     #[cfg(feature = "liveliness-token")]
     #[test]
@@ -1012,17 +1100,18 @@ mod tests {
         let port: u16 = 7454;
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
-        // A peer JOIN (distinct zid, advertising next_sn 0) admits the peer at
-        // our loopback source; the liveliness Interest then rides that peer's
+        // A member's JOIN (distinct zid, advertising next_sn 0) admits the member
+        // at its socket's source; the liveliness Interest then rides that member's
         // reliable channel at the advertised SN 0 so the per-peer SN gate admits
-        // it. Both injected before wrapping the socket (delivered ahead of our
-        // own beacon echo by the loop's first polls).
+        // it. Both sent from the member's socket before ours is wrapped
+        // (delivered by the loop's first polls).
         let other = params(&[0x01, 0x02, 0x03, 0x04]);
         let other_join = encode_join(
             &other,
             &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
         );
-        socket
+        let member = other_member(&link);
+        member
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
         // A CURRENT liveliness get for "demo/live", interest id 9, at SN 0
@@ -1032,7 +1121,7 @@ mod tests {
             build_interest_liveliness_get(9, 0, Some("demo/live")).expect("interest fixture"),
             true,
         );
-        socket
+        member
             .send_to(group, port, &interest)
             .expect("inject Interest");
 
@@ -1111,10 +1200,9 @@ mod tests {
     /// staged exactly one `Response` + one `ResponseFinal` and the seam drained
     /// both — proving the queryable observer -> sink -> next_tx wiring.
     ///
-    /// Like the liveliness sibling it asserts on the DRAINED items, not a
-    /// loopback echo (the injected Query at SN 0 advances the shared source peer
-    /// entry past our reply mints, so an echoed `Response` at SN 0 would be
-    /// SN-stale-dropped). Distinct port (7455). Runs only when the queryable
+    /// Like the liveliness sibling it asserts on the DRAINED items: the node's
+    /// own replies come back on the group only to be dropped by its link.
+    /// Distinct port (7455). Runs only when the queryable
     /// registry (`query-queryable`) + both reply codecs are present.
     #[cfg(all(
         feature = "query-queryable",
@@ -1132,15 +1220,16 @@ mod tests {
         let port: u16 = 7455;
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
-        // A peer JOIN (distinct zid, next_sn 0) admits the querier at our
-        // loopback source; the Query then rides that peer's reliable channel at
+        // A member's JOIN (distinct zid, next_sn 0) admits the querier at its
+        // socket's source; the Query then rides that member's reliable channel at
         // the advertised SN 0 so the per-peer SN gate admits it.
         let other = params(&[0x01, 0x02, 0x03, 0x04]);
         let other_join = encode_join(
             &other,
             &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
         );
-        socket
+        let member = other_member(&link);
+        member
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
         // A literal-keyexpr Query for "demo/mc", request id 7, at SN 0.
@@ -1153,7 +1242,7 @@ mod tests {
             .expect("query fixture"),
             true,
         );
-        socket.send_to(group, port, &query).expect("inject Query");
+        member.send_to(group, port, &query).expect("inject Query");
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
@@ -1240,13 +1329,13 @@ mod tests {
     /// oversize `z_put` queued on `next_tx` is split by the shared
     /// `multicast_tx_emit` SSOT into multiple `T_MID_FRAGMENT` datagrams (the
     /// 200-byte payload exceeds the 64-byte batch budget), multicast to the
-    /// group, and (via multicast loopback) reassembled by the loop's R311mf
-    /// Fragment arm back into the SAME single Push the whole-Frame path fans.
-    /// Same pre-admit-our-source trick as the Push round-trip: a distinct-zid
-    /// JOIN injected from our socket creates the (src_addr, src_port) peer entry
-    /// the echoed fragments attribute to; they mint consecutive SNs from the
-    /// JOIN's advertised next_sn 0 on the reliable ring, so the per-peer SN gate
-    /// admits the chain in order. A distinct port (7456) from the prior tests.
+    /// group, and reassembled by another member's R311mf Fragment arm back into
+    /// the SAME single Push the whole-Frame path fans. The member is the Push
+    /// test's: a session of its own on a port of its own (7556), which the node
+    /// sends to; it admits the node by its first beacon, and the fragments mint
+    /// consecutive SNs from the beacon's advertised next_sn on the reliable ring,
+    /// so the per-peer SN gate admits the chain in order. A distinct port (7456)
+    /// from the prior tests.
     #[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
     #[test]
     fn run_multicast_session_reassembles_a_fragmented_put_over_loopback() {
@@ -1257,27 +1346,11 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7456;
+        let member_port: u16 = 7556;
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let mut member = member_on(&link, group, member_port);
 
-        // Pre-admit a peer at OUR loopback source (distinct zid -> not
-        // own-filtered) advertising next_sn 0 on a fresh ring; injected before
-        // wrapping the socket so the loop's first poll creates the peer entry the
-        // echoed fragments attribute to (mirror of the Push round-trip test). Its
-        // advertised batch_size MUST equal ours (64): judge_join admits a JOIN
-        // only when its batch_size matches the receiver's params (multicast_join
-        // §3.2), so a peer on the default 2_048 would be silently rejected and
-        // the echoed fragments would hit an UnknownPeer drop.
-        let mut other = params(&[0x01, 0x02, 0x03, 0x04]);
-        other.batch_size = 64;
-        let other_join = encode_join(
-            &other,
-            &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
-        );
-        socket
-            .send_to(group, port, &other_join)
-            .expect("inject peer JOIN");
-
-        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut driver = LwipMulticastDriver::new(socket, group, member_port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let runtime = CoopRuntime::new(FrozenClock);
         // A 64-byte batch budget forces the 200-byte payload to fragment (the
@@ -1302,13 +1375,8 @@ mod tests {
 
         // One queued Put on the reliable channel; the pull-seam yields it once,
         // then None. Frozen clock + bounded max_iters keep the round trip
-        // deterministic; the fragments are received one-per-iteration in wire
-        // order (lwIP loopback is FIFO), so the strict-in-order SN gate admits
-        // the whole chain.
+        // deterministic.
         let mut pending = Some(multicast_put_literal("demo/mc", &payload).expect("build put"));
-
-        let mut saw_push = false;
-        let mut saw_drop = false;
         let outcome = run_multicast_session(
             &mut dispatcher,
             MulticastDriveConfig {
@@ -1320,6 +1388,33 @@ mod tests {
             &runtime,
             &link,
             &mut driver,
+            |_event| {},
+            || pending.take(),
+        );
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+
+        // The member's batch_size MUST equal the node's (64): judge_join admits a
+        // JOIN only when its batch_size matches the receiver's params
+        // (multicast_join §3.2), so a member on the default 2_048 would reject the
+        // node's beacon and the fragments would hit an UnknownPeer drop. The
+        // fragments are read one per iteration in wire order (lwIP loopback is
+        // FIFO), so the strict-in-order SN gate admits the whole chain.
+        let mut member_dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut member_params = params(&[0x01, 0x02, 0x03, 0x04]);
+        member_params.batch_size = 64;
+        let mut saw_push = false;
+        let mut saw_drop = false;
+        let member_outcome = run_multicast_session(
+            &mut member_dispatcher,
+            MulticastDriveConfig {
+                params: &member_params,
+                tick_ms: 5,
+                max_iters: Some(32),
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &link,
+            &mut member,
             |event| match event {
                 IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                     if messages
@@ -1332,10 +1427,10 @@ mod tests {
                 IterationEvent::ReassemblyDropped(_) => saw_drop = true,
                 _ => {}
             },
-            || pending.take(),
+            || None,
         );
 
-        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert_eq!(member_outcome, MulticastOutcome::IterationLimit);
         std::assert!(
             !saw_drop,
             "the in-order fragment chain reassembles cleanly (no drop)"
@@ -1343,7 +1438,7 @@ mod tests {
         std::assert!(
             saw_push,
             "the fragmented Put was split by multicast_tx_emit, multicast to the \
-             group, echoed back, and reassembled by the Fragment RX arm into one Push"
+             group, and reassembled by the member's Fragment RX arm into one Push"
         );
 
         link.leave_multicast_group(group).expect("leave group");
@@ -1401,15 +1496,16 @@ mod tests {
         let port: u16 = 7457;
         let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
-        // The peer the stop must clear: a distinct zid (so it is not
-        // own-zid-filtered), injected before the socket is wrapped so the loop's
-        // first poll admits it — the peer-admit test's shape.
+        // The peer the stop must clear: a member's JOIN (distinct zid) from a
+        // socket of its own, sent before ours is wrapped so the loop's first poll
+        // admits it — the peer-admit test's shape.
         let peer = params(&[0x01, 0x02, 0x03, 0x04]);
         let peer_join = encode_join(
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
         );
-        socket
+        let member = other_member(&link);
+        member
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
 
@@ -1507,7 +1603,8 @@ mod tests {
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
         );
-        socket
+        let member = other_member(&link);
+        member
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
 
@@ -1726,7 +1823,8 @@ mod tests {
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
         );
-        socket
+        let member = other_member(&link);
+        member
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
 
