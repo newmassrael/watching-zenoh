@@ -116,6 +116,8 @@ mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
 mod engine;
+// The places a session's arena lends for values lodged by counts, given back from any thread.
+mod lodging;
 // The state of a session whose shape the build fixes, one struct the allocator hands zeroed.
 #[cfg(not(feature = "runtime-plan"))]
 pub mod region;

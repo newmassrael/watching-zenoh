@@ -168,6 +168,7 @@ use crate::engine::REGISTRY_LEND_BYTES;
 use crate::engine::ROOM_PLACE_BYTES;
 #[cfg(feature = "runtime-plan")]
 use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
+use crate::lodging::{LodgingRows, LodgingSpan};
 use crate::open_source::EndpointList;
 #[cfg(feature = "runtime-plan")]
 use crate::round::{CoopForm, CALLBACK_BYTES};
@@ -318,6 +319,7 @@ pub enum ArenaPart {
     AdvancedSubscriberPlaces,
     LinkEventsListenerPlaceFlags,
     LinkEventsListenerPlaces,
+    LodgingPlaces,
     ArenaKeep,
     RuntimeState,
     EngineState,
@@ -462,6 +464,7 @@ impl ArenaPart {
             Self::LinkEventsListenerPlaces => {
                 ("link events listener places", "MAX_LINK_EVENTS_LISTENERS")
             }
+            Self::LodgingPlaces => ("lodging places", ""),
             Self::ArenaKeep => ("arena keep", ""),
             Self::RuntimeState => ("runtime state", "MAX_TASKS + MAX_TIMERS"),
             Self::EngineState => ("engine state", ""),
@@ -578,6 +581,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + CELL_ROWS
     + HANDLE_ROWS
     + ENTITY_PLACE_ROWS
+    + LODGING_ROWS
     + CACHE_RING_ROWS
     + FINAL_ROWS
     + RUNTIME_ROWS
@@ -585,6 +589,9 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + PLANE_ROWS
     + ADMISSION_ROWS;
 
+/// The places for values lodged by counts, the ABI's and the engine's, one table of cells that
+/// each carry their own mark ([`ArenaPlan::holding`]).
+const LODGING_ROWS: usize = 1;
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
 const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
@@ -658,6 +665,11 @@ const fn place_parts(kind: EntityKind) -> [ArenaPart; 2] {
 pub struct HeldPlaces {
     handle: Option<Layout>,
     entities: [Option<Layout>; ENTITY_KINDS],
+    /// The bytes and the alignment of each place for a value lodged by counts, the largest asked
+    /// ([`Self::with_lodgings`]), and how many places.
+    lodging_size: usize,
+    lodging_align: usize,
+    lodgings: usize,
 }
 
 /// Where an open's arena comes from and which places of the ABI's it holds beside the session's
@@ -775,14 +787,33 @@ impl HeldPlaces {
     pub const NONE: Self = Self {
         handle: None,
         entities: [None; ENTITY_KINDS],
+        lodging_size: 0,
+        lodging_align: 0,
+        lodgings: 0,
     };
 
     /// A place of `layout` for the ABI's handle of the session, and none for its entities.
     pub const fn handle(layout: Layout) -> Self {
         Self {
             handle: Some(layout),
-            entities: [None; ENTITY_KINDS],
+            ..Self::NONE
         }
+    }
+
+    /// These places, with `count` more places for values lodged by counts that may outlive the
+    /// session ([`wz_capi_port::lodge::Lent::of_bytes`]), each of at least `layout`
+    /// (`Lent::<T>::LAYOUT` for a `T`): one table of them, every place as large and as aligned
+    /// as the largest asked, lent and given back from any thread
+    /// ([`wz_capi_port::PlaceLender::lend_lodging`]). A `const fn`, as [`Self::with_entity`].
+    pub const fn with_lodgings(mut self, layout: Layout, count: usize) -> Self {
+        if layout.size() > self.lodging_size {
+            self.lodging_size = layout.size();
+        }
+        if layout.align() > self.lodging_align {
+            self.lodging_align = layout.align();
+        }
+        self.lodgings = self.lodgings.saturating_add(count);
+        self
     }
 
     /// These places, with a place of `layout` for each row the session keeps of `kind`. A
@@ -1419,6 +1450,8 @@ pub struct PlaceRows {
     /// The kinds of `entity_bytes` the plan holds places of, by their place in
     /// [`EntityKind::ALL`]: what the lend walks.
     held: HeldBits,
+    /// The table of places for values lodged by counts ([`HeldPlaces::with_lodgings`]).
+    lodging: LodgingRows,
 }
 
 /// The places a session's arena lent the ABI ([`PlaceRows::lent_from`]).
@@ -1427,6 +1460,9 @@ pub(crate) struct PlaceTables {
     pub(crate) handle: Option<LentByteCells>,
     /// The places of the ABI's entities, a table of each kind the plan holds places of.
     pub(crate) entities: EntityPlaces,
+    /// The span of the places for values lodged by counts, made a table once the count that keeps
+    /// the arena's memory is known (`LodgingSpan::kept_by`).
+    pub(crate) lodgings: LodgingSpan,
 }
 
 impl PlaceRows {
@@ -1435,6 +1471,7 @@ impl PlaceRows {
         handle_bytes: 0,
         entity_bytes: [0; ENTITY_KINDS],
         held: HeldBits(0),
+        lodging: LodgingRows::NONE,
     };
 
     /// The places, lent by `lend` in the order the plan laid them out: the handle's first, then
@@ -1451,7 +1488,12 @@ impl PlaceRows {
                 *cells = Some(lend.byte_cells(bytes, count));
             }
         }
-        PlaceTables { handle, entities }
+        let lodgings = self.lodging.lent_from(lend);
+        PlaceTables {
+            handle,
+            entities,
+            lodgings,
+        }
     }
 }
 
@@ -2298,10 +2340,11 @@ impl ArenaPlan {
 
     /// Lay out the places `held` names, lent after every other row: the ABI's handle of the
     /// session first, then each kind of entity in the order of [`EntityKind::ALL`], a place for
-    /// each row the session keeps of the kind. What the ABI keeps there takes no memory of its
-    /// own, and an open whose arena cannot hold it reserves nothing, as for any other row. A place
-    /// of no bytes, and a kind the session keeps no row of, take none, and a place the plan holds
-    /// already is not laid out again. Refused as past the address space when a place asks for more
+    /// each row the session keeps of the kind; then one table of places for values lodged by
+    /// counts ([`HeldPlaces::with_lodgings`]), the engine's own among them. What the ABI keeps
+    /// there takes no memory of its own, and an open whose arena cannot hold it reserves nothing,
+    /// as for any other row. A place of no bytes, and a kind the session keeps no row of, take
+    /// none, and a place the plan holds already is not laid out again. Refused as past the address space when a place asks for more
     /// alignment than a span of the arena starts on ([`ARENA_ALIGN`]), or the arena with the
     /// places is. The plan is laid out where it lies; a refused one is no plan to open by.
     pub fn holding(&mut self, held: &HeldPlaces) -> Result<(), ArenaRefused> {
@@ -2338,6 +2381,23 @@ impl ArenaPlan {
                 *bytes = place.size();
                 self.places.held = self.places.held.with(at);
             }
+        }
+        // The engine lodges a watcher of the faces' snapshots for each transport events listener
+        // the session holds (`SessionEngine::watch_faces`), in the ABI's table of lodgings.
+        #[cfg(feature = "connectivity")]
+        let held = &held.with_lodgings(
+            wz_capi_port::lodge::Lent::<wz_capi_port::face_rows::Gathering>::LAYOUT,
+            self.session
+                .entities
+                .of_kind(EntityKind::TransportEventsListener),
+        );
+        if held.lodgings != 0 && held.lodging_size != 0 && self.places.lodging.count() == 0 {
+            let Some(rows) = LodgingRows::of(held.lodging_size, held.lodging_align, held.lodgings)
+            else {
+                return Err(ArenaRefused::TooLarge);
+            };
+            self.places.lodging = rows;
+            self.put(ArenaPart::LodgingPlaces, rows.count(), rows.stride());
         }
         self.settled()
     }

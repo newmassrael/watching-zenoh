@@ -2738,7 +2738,8 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .into_iter()
         .fold(HeldPlaces::handle(place), |held, kind| {
             held.with_entity(kind, place)
-        });
+        })
+        .with_lodgings(place, 1);
     // Faces that share their pools where the build takes faces beside its dial role's, so the
     // table of tokens the faces that went owe is put too.
     let mut plan = ArenaPlan::of(

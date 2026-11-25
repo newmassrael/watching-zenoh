@@ -54,6 +54,7 @@ use crate::arena::{
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::form::{LockForm, StateGuard, StateLock};
+use crate::lodging::LodgingPlaces;
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 use crate::round::LendingLink;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -711,6 +712,7 @@ struct LentApart {
     /// The place the engine is written at.
     engine: EnginePlace,
     handle_place: Option<HandlePlace>,
+    lodgings: LodgingPlaces,
     #[cfg(any(feature = "listen", feature = "group"))]
     handed: HandedTable,
     #[cfg(feature = "advanced-cache")]
@@ -738,6 +740,8 @@ struct SessionLent {
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
+    /// The places for values lodged by counts, each of which keeps the arena's memory while lent.
+    lodgings: LodgingPlaces,
     /// The links the plan holds buffers for: the rows of the session's link admission.
     #[cfg(feature = "listen")]
     links: usize,
@@ -886,6 +890,7 @@ fn lend_session(
     let PlaceTables {
         handle,
         entities: places,
+        lodgings,
     } = plan.places().lent_from(&mut lend, plan.entities());
     #[cfg(feature = "runtime-plan")]
     let room_places: RoomPlaces = lend.table(plan.peers().sets());
@@ -1047,6 +1052,10 @@ fn lend_session(
     let engine = arena
         .engine_place(holds.engine)
         .map_err(ArenaRefused::Lend)?;
+    // SAFETY: the span was lent above to the lodging places alone, and `engine.memory` is the count
+    // of the memory it lies in, held by the session's engine for as long as the engine lends from
+    // the places.
+    let lodgings = unsafe { lodgings.kept_by(engine.memory) };
     Ok(SessionLent {
         runtime,
         engine,
@@ -1065,6 +1074,7 @@ fn lend_session(
         pending_gets,
         handle_place,
         places,
+        lodgings,
         #[cfg(feature = "listen")]
         links: plan.links(),
         #[cfg(feature = "listen")]
@@ -1273,6 +1283,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The place the arena lent the ABI's handle of the session, when the open was asked for one
     /// ([`CoopDrive::handle_place`]).
     handle_place: Option<HandlePlace>,
+    /// The places for values lodged by counts that may outlive the session, the ABI's
+    /// ([`PlaceLender::lend_lodging`]) and the engine's own, lent and given back with no lock.
+    lodgings: LodgingPlaces,
     /// The ring the session's advanced publishers' caches keep their samples in, under a lock of
     /// its own, which nothing that holds the session's lock takes ([`wz_capi_port::CacheBytes`]).
     #[cfg(feature = "advanced-cache")]
@@ -5132,6 +5145,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             router: lent.router,
             engine: lent.engine,
             handle_place: lent.handle_place,
+            lodgings: lent.lodgings,
             #[cfg(any(feature = "listen", feature = "group"))]
             handed: lent.transport.handed,
             #[cfg(feature = "advanced-cache")]
@@ -5153,6 +5167,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             router,
             engine: place,
             handle_place,
+            lodgings,
             #[cfg(any(feature = "listen", feature = "group"))]
             handed,
             #[cfg(feature = "advanced-cache")]
@@ -5248,6 +5263,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 deliveries: Deliveries::new(),
                 arena_bytes,
                 handle_place,
+                lodgings,
                 #[cfg(feature = "advanced-cache")]
                 cache: Mutex::new(cache),
                 #[cfg(test)]
@@ -7727,7 +7743,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     // told each face its rows gather into, gathered in a place of its own.
     #[cfg(feature = "connectivity")]
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Declined> {
-        let place = wz_capi_port::lodge::Lent::try_boxed().map_err(|_| Declined::NoRoom)?;
+        let place = self
+            .lodgings
+            .lend(wz_capi_port::lodge::Lent::<wz_capi_port::face_rows::Gathering>::LAYOUT)
+            .ok_or(Declined::NoRoom)?;
+        let place = wz_capi_port::lodge::Lent::of_bytes(place).map_err(|_| Declined::NoRoom)?;
         SessionEngine::watch_face_rows(
             self,
             wz_capi_port::face_rows::snapshots_of_rows(sink, place),
@@ -9132,6 +9152,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
     /// which the ABI's object of the entity holds off.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
         self.core.lock().0.places.give_back(place)
+    }
+
+    /// Closed or not, with no lock of the session taken: a place's mark is its own, and the
+    /// arena's memory is kept by each place lent until its value's last count lets it go.
+    fn lend_lodging(&self, layout: core::alloc::Layout) -> Option<wz_capi_port::lodge::LentBytes> {
+        self.lodgings.lend(layout)
     }
 }
 

@@ -10,9 +10,10 @@
 //! back with the last of them, by the function its maker named. A weak count reads the value only
 //! by upgrading, which fails once the value is gone.
 
+use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::mem::MaybeUninit;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 
@@ -54,12 +55,31 @@ pub struct Lent<T> {
 }
 
 impl<T> Lent<T> {
+    /// The layout of a place a `T` is lodged in: what a holder that lends places for values it
+    /// does not name lays each of them out by ([`Self::of_bytes`]).
+    pub const LAYOUT: Layout = Layout::new::<MaybeUninit<Lodging<T>>>();
+
+    /// The place `bytes` names, for a `T`: [`NoPlace`], the place given back at once, when it
+    /// is smaller or less aligned than a `T`'s lodging ([`Self::LAYOUT`]).
+    pub fn of_bytes(bytes: LentBytes) -> Result<Self, NoPlace> {
+        if bytes.layout.size() < Self::LAYOUT.size() || bytes.layout.align() < Self::LAYOUT.align()
+        {
+            return Err(NoPlace);
+        }
+        // The place is this lent one's from here, given back by its give-back and not by the
+        // bytes' drop.
+        let bytes = ManuallyDrop::new(bytes);
+        // SAFETY: `LentBytes::new`'s, for a place at least as large and as aligned as a `T`'s
+        // lodging, checked above.
+        Ok(unsafe { Self::new(bytes.place.cast(), bytes.give_back, bytes.context) })
+    }
+
     /// A place in a box of its own, given back to the heap with the last count of what is lodged
     /// there, or at once when dropped unused; [`NoPlace`] when the heap refuses the box. What a
     /// holder with no place of its own to lend hands a maker.
     pub fn try_boxed() -> Result<Self, NoPlace> {
         // Laid out as `Box::new(Lodging::vacant())` lays it out, so `free_box` gives it back.
-        let layout = core::alloc::Layout::new::<MaybeUninit<Lodging<T>>>();
+        let layout = Self::LAYOUT;
         // SAFETY: a lodging has bytes: its counts.
         let place = NonNull::new(unsafe { alloc::alloc::alloc(layout) })
             .ok_or(NoPlace)?
@@ -89,6 +109,49 @@ impl<T> Lent<T> {
 }
 
 impl<T> Drop for Lent<T> {
+    fn drop(&mut self) {
+        // SAFETY: `new`'s: nothing was lodged, so the place goes back now, once.
+        unsafe { (self.give_back)(self.context) };
+    }
+}
+
+/// A place of a layout a holder lent for a value of a type it does not name, with what gives it
+/// back: what a session's memory, laid out by the layouts an ABI stated at its open, hands the ABI,
+/// which lodges its value there as in any lent place ([`Lent::of_bytes`]). Dropped unused, the
+/// place goes back at once.
+pub struct LentBytes {
+    place: NonNull<u8>,
+    layout: Layout,
+    give_back: unsafe fn(*mut c_void),
+    context: *mut c_void,
+}
+
+impl LentBytes {
+    /// The place of `layout` at `place`, which `give_back(context)` gives back once.
+    ///
+    /// # Safety
+    /// As [`Lent::new`]'s, for a place valid for writes of `layout` and aligned to it.
+    pub unsafe fn new(
+        place: NonNull<u8>,
+        layout: Layout,
+        give_back: unsafe fn(*mut c_void),
+        context: *mut c_void,
+    ) -> Self {
+        Self {
+            place,
+            layout,
+            give_back,
+            context,
+        }
+    }
+
+    /// The layout the place holds.
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+}
+
+impl Drop for LentBytes {
     fn drop(&mut self) {
         // SAFETY: `new`'s: nothing was lodged, so the place goes back now, once.
         unsafe { (self.give_back)(self.context) };
@@ -737,5 +800,69 @@ mod tests {
         count.lodging().strong.store(1, Ordering::Relaxed);
         drop(weak);
         drop(count);
+    }
+
+    /// Count a place given back on the counter at `context`.
+    ///
+    /// # Safety
+    /// `context` is a counter that outlives every place it counts.
+    unsafe fn count_given(context: *mut c_void) {
+        // SAFETY: the caller's.
+        unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A place lent by its bytes holds a value whose lodging fits it, and goes back once, with the
+    /// value's last count; one too small for the value's lodging is refused and goes back at once.
+    /// Turned red by an `of_bytes` that takes a place smaller than the lodging, or that gives a
+    /// place back twice or not at all.
+    #[test]
+    fn a_place_lent_by_its_bytes_holds_the_lodgings_it_fits() {
+        let given = AtomicUsize::new(0);
+        let context = core::ptr::from_ref(&given).cast_mut().cast::<c_void>();
+        let mut small = Lodging::<u64>::vacant();
+        // SAFETY: the place is the test's, valid for a `u64`'s lodging and holding none, and the
+        // counter outlives it.
+        let bytes = unsafe {
+            LentBytes::new(
+                NonNull::from(&mut small).cast(),
+                Lent::<u64>::LAYOUT,
+                count_given,
+                context,
+            )
+        };
+        assert_eq!(bytes.layout(), Lent::<u64>::LAYOUT);
+        assert!(
+            Lent::<[u64; 8]>::of_bytes(bytes).is_err(),
+            "a lodging past the place is refused"
+        );
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            1,
+            "the refused place went back"
+        );
+        let mut place = Lodging::<u64>::vacant();
+        // SAFETY: as above.
+        let bytes = unsafe {
+            LentBytes::new(
+                NonNull::from(&mut place).cast(),
+                Lent::<u64>::LAYOUT,
+                count_given,
+                context,
+            )
+        };
+        let lent = Lent::<u32>::of_bytes(bytes).expect("a smaller lodging fits the place");
+        let count = Strong::new_at(lent, 7u32);
+        assert_eq!(*count, 7);
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            1,
+            "the value holds the place"
+        );
+        drop(count);
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            2,
+            "the last count gave the place back"
+        );
     }
 }
