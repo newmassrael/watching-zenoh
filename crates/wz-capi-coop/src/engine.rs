@@ -2134,6 +2134,39 @@ enum ToPublish<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 // only for its text, which nothing writes while the key is held.
 unsafe impl<T> Send for Confined<T> {}
 
+/// What a lend of a link's parts or of its session takes in from the thread that lends them: the
+/// engine and the session's own values, which no lend lets out. Made only to be moved into the
+/// closure of such a lend, which runs on the lending thread and returns before the lend does.
+#[cfg(any(
+    feature = "interest-answer",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+struct OnThisThread<T>(T);
+
+// SAFETY: a carrier is moved only into a closure run by a lend of a link's parts
+// (`FaceHeld::lend`) or of its session (`LendsSession::try_session`), each of which runs its
+// closure on the calling thread and returns before it returns: what is carried in or out never
+// reaches another thread. A handle on a cell of the link made in such a lend is kept in the parts,
+// as the parts' contract asks (`direct::DirectParts`), and what is carried in keeps none of the
+// session's handles it is lent: what leaves a lend in a carrier is the session's own values and
+// the link's waits.
+#[cfg(any(
+    feature = "interest-answer",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+unsafe impl<T> Send for OnThisThread<T> {}
+
+#[cfg(any(
+    feature = "interest-answer",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+impl<T> OnThisThread<T> {
+    /// The value carried, taken whole, so a lend's closure captures the carrier and not a part.
+    fn get(self) -> T {
+        self.0
+    }
+}
+
 /// The network stacks an engine opens its links over: those that serve sessions whose handles are
 /// counted as [`SessionLock`] counts a link's parts ([`LinkCount`]), so the form's choice of lock
 /// reaches every stack the engine is built over.
@@ -4884,9 +4917,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 continue;
             };
             if let Some(wire) = face.up() {
-                let (held, registry) = (HeldFace::new(at, face.id), &mut self.session.registry);
+                let carried =
+                    OnThisThread((HeldFace::new(at, face.id), &mut self.session.registry));
                 // A link another holder has now is settled at its next event, as before this.
-                let _ = wire.try_session(|session| registry.settle(held, &*session.actions));
+                let _ = wire.try_session(move |session| {
+                    let (held, registry) = carried.get();
+                    registry.settle(held, &*session.actions);
+                });
             }
         }
         // A group's stage is written by the thread that put on it outside the group's own step.

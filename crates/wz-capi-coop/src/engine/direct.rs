@@ -412,24 +412,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> SendParts for DirectParts
     }
 }
 
-/// What a lend of the link's parts takes in from the read that lends them: the engine and the
-/// read's own values, which no lend lets out.
-struct OnThisThread<T>(T);
-
-// SAFETY: a lend of the parts runs on the lending thread and returns before the lend does
-// (`FaceHeld::lend`), and the place is reached by the one thread of the session's form
-// (`DirectOwner`): what is carried in or out never reaches another thread. A handle on a cell of
-// the link made in the lend is kept in the parts, as the parts' contract asks (`DirectParts`):
-// what leaves a lend in a carrier is the session's own values and the link's waits.
-unsafe impl<T> Send for OnThisThread<T> {}
-
-impl<T> OnThisThread<T> {
-    /// The value carried, taken whole, so a lend's closure captures the carrier and not a part.
-    fn get(self) -> T {
-        self.0
-    }
-}
-
 /// The one link's life and what its effects are carried out with, behind the face's lock: the
 /// read holds it while it steps the pump.
 pub(super) struct DirectSlot<L: CoopLinks + 'static> {
