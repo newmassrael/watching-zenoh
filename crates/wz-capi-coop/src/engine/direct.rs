@@ -467,17 +467,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             self.drive_link(core, slot, LinkInput::Open, now_us)?;
         }
         while !slot.is_up() {
-            let Some(mut wait) = self.link_wait(slot) else {
-                return Err(OpenError::NoEndpoint);
-            };
-            wait.wait(self.rooms.waits(), sleep_ms);
-            let Some(turn) = self.life_turn(slot, wait) else {
-                return Err(OpenError::NoEndpoint);
-            };
+            let turn = self.link_turn(slot).ok_or(OpenError::NoEndpoint)?;
             if let Some(last) = turn.ended {
                 return Err(last);
             }
-            self.pump_turn(slot, &turn);
         }
         Ok(())
     }
@@ -507,17 +500,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// [`Self::read_direct`] with the face held.
     fn read_held(&self, slot: &mut DirectSlot<L, C>) -> Result<(), SessionClosed> {
-        let mut wait = self.link_wait(slot).ok_or(SessionClosed)?;
-        #[cfg(test)]
-        self.takes.wait(&wait);
-        wait.wait(self.rooms.waits(), sleep_ms);
-        let turn = self.life_turn(slot, wait).ok_or(SessionClosed)?;
+        let turn = self.link_turn(slot).ok_or(SessionClosed)?;
+        self.deliver();
         if turn.ended.is_some() {
-            self.deliver();
             return Err(SessionClosed);
         }
-        self.pump_turn(slot, &turn);
-        self.deliver();
         if let Some(started_ms) = turn.jobs_due_ms {
             self.run_due_tickers(started_ms);
         }
@@ -526,6 +513,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         } else {
             Ok(())
         }
+    }
+
+    /// One turn of the one link, the open's and each read's: the wait for the link's input or the
+    /// next deadline, a look at the link's life, and a step of the pump unless the look ended the
+    /// session. `None` once the session closed. Out of line: the open and the read step the link
+    /// through one body.
+    #[inline(never)]
+    fn link_turn(&self, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
+        let mut wait = self.link_wait(slot)?;
+        #[cfg(test)]
+        self.takes.wait(&wait);
+        wait.wait(self.rooms.waits(), sleep_ms);
+        let turn = self.life_turn(slot, wait)?;
+        if turn.ended.is_none() {
+            self.pump_turn(slot, &turn);
+        }
+        Some(turn)
     }
 
     /// What a read waits for, worked out under the session's lock: the link's input, or the
@@ -662,7 +666,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Tell the link's life `input` at `now_us` and carry out its effects, in the order the life
     /// names them, until it asks for nothing more. `Err` with why the last endpoint came to no
-    /// link when the life ends the session.
+    /// link when the life ends the session. Out of line: the open's first input and each look at
+    /// the life carry the effects out through one body.
+    #[inline(never)]
     fn drive_link(
         &self,
         core: &mut Core<L, C>,
