@@ -259,6 +259,8 @@ fn held_plan(
             planes: crate::engine::SessionPlanes::OF_BUILD,
             #[cfg(feature = "listen")]
             admission: core::mem::size_of::<crate::engine::Admission<PosixClock>>(),
+            #[cfg(not(wz_round))]
+            direct_face: Engine::DIRECT_FACE_BYTES,
         },
     )?;
     Ok(plan)
@@ -3266,4 +3268,38 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
     );
     wz_capi_port::SessionDrive::close(&*engine);
     assert!(!handle.is_open(), "a second close changes nothing");
+}
+
+/// Where each face is read where it lies (no `wz_round`), each face's Router stages its chains
+/// apart: the reassembly table holds one face's share for each place of the face table, and the
+/// faces past the dial role's are laid out a row each, of one face's read slot and send place;
+/// a session of the dial role's face alone has no such row. Turned red by a table of one share
+/// whatever the faces (`ArenaPlan::lay_out`), or by a row for the dial role's face, which lies in
+/// the engine's place (`ArenaPlan::lay_direct_faces`).
+#[cfg(not(wz_round))]
+#[test]
+fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
+    use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
+
+    let config = CoopConfig {
+        max_faces: BESIDE_DIAL,
+        ..client_config()
+    };
+    let plan = host_plan(&config).expect("lays an arena out");
+    let sets = plan.peers().sets();
+    assert_eq!(
+        row(&plan, "reassembly buffers").count,
+        SESSION_CHAIN_BUFFERS * sets
+    );
+    let direct = plan.rows().find(|row| row.part() == "direct faces");
+    if sets > 1 {
+        let direct = direct.expect("a row of the faces past the dial role's");
+        assert_eq!(direct.count, sets - 1);
+        assert_eq!(direct.entry_bytes, Engine::DIRECT_FACE_BYTES);
+    } else {
+        assert!(
+            direct.is_none(),
+            "the dial role's face lies in the engine's place"
+        );
+    }
 }

@@ -737,10 +737,17 @@ impl OpenKeyIds {
 /// place of the ABI's handle, the places of the publishes kept for the session's other faces,
 /// which a publish reaches with the session held by another, and the ring of the advanced
 /// publishers' caches, which the engine locks apart from the state.
-struct LentApart {
-    /// The Router of the one link the read steps itself (`direct`).
+struct LentApart<L: CoopLinks + 'static, C: ClockSource + 'static> {
+    /// The Router of the dial role's link, which the read steps itself (`direct`).
     #[cfg(not(wz_round))]
     router: SessionReassembly,
+    /// The read slots and send places of the faces past the dial role's, made in the rows the
+    /// open lent them (`direct`).
+    #[cfg(not(wz_round))]
+    taken: direct::TakenFaces<L, C>,
+    /// A build whose links run as tasks lends nothing of a face's link apart from the state.
+    #[cfg(wz_round)]
+    _of: core::marker::PhantomData<fn() -> (L, C)>,
     /// The place the engine is written at.
     engine: EnginePlace,
     handle_place: Option<HandlePlace>,
@@ -758,6 +765,10 @@ struct SessionLent {
     /// once into the open's frame and once more into this value.
     transport: TransportTables,
     router: SessionReassembly,
+    /// The rows of the faces past the dial role's the plan laid out for their read slots and send
+    /// places (`ArenaPlan::lay_direct_faces`), which the open lends and makes.
+    #[cfg(not(wz_round))]
+    taken_faces: usize,
     keys: KeySpace,
     registry: RegistryHold,
     /// After the registry, whose dispatch reaches it by a handle that counts nothing.
@@ -1134,6 +1145,8 @@ fn lend_session(
         cache,
         #[cfg(not(feature = "runtime-plan"))]
         state,
+        #[cfg(not(wz_round))]
+        taken_faces: plan.peers().sets().saturating_sub(1),
         arena,
     })
 }
@@ -1231,12 +1244,12 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
 
 /// One session the program steps; see the module doc.
 pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
-    /// The session's one link as the read steps it, apart from the session's state, so that a
-    /// callback the link's records reach takes the state while the link lends them
-    /// (`direct`). Before `core`: dropped first, as the link's session holds handles of the
+    /// The session's faces as the read steps them, apart from the session's state, so that a
+    /// callback a link's records reach takes the state while the link lends them
+    /// (`direct`). Before `core`: dropped first, as a link's session holds handles of the
     /// state's cells.
     #[cfg(not(wz_round))]
-    direct: direct::DirectFace<L, C>,
+    direct: direct::DirectFaces<L, C>,
     core: CoreLock<L, C>,
     /// The waits for room of the faces that are up, asked by a publish that may be dropped while
     /// another holds the session ([`Self::live_to_publish`]), how long it waits
@@ -3997,6 +4010,9 @@ pub(crate) struct OpenHolds<'h> {
     /// The place of the admission the links of a session that listens ask ([`Admission`]).
     #[cfg(feature = "listen")]
     pub(crate) admission: usize,
+    /// The read slot and send place of one face past the dial role's (`direct`).
+    #[cfg(not(wz_round))]
+    pub(crate) direct_face: usize,
 }
 
 /// The admission the links of a session over the clock `C` ask while their handshakes run: owned
@@ -4058,6 +4074,8 @@ pub(crate) fn lay_out_open(
     plan.lay_planes(holds.planes);
     #[cfg(feature = "listen")]
     plan.lay_admission(holds.admission);
+    #[cfg(not(wz_round))]
+    plan.lay_direct_faces(holds.direct_face);
     // Each hold keeps its refusal in the plan, the first one kept, so the plan is asked once,
     // after them all, and answers what the first refused hold would have.
     plan.settled()
@@ -5925,6 +5943,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             planes: SessionPlanes::OF_BUILD,
             #[cfg(feature = "listen")]
             admission: core::mem::size_of::<Admission<C>>(),
+            #[cfg(not(wz_round))]
+            direct_face: Self::DIRECT_FACE_BYTES,
         };
         let mut lent =
             lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
@@ -5951,6 +5971,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
             Ok((wire, entropy, rooms))
         })?;
+        // The read slots and send places of the faces past the dial role's, each with a Router of
+        // its own over the session's chain buffers.
+        #[cfg(not(wz_round))]
+        let taken = {
+            // SAFETY: the handle is held by the faces' rows, which the engine drops first, before
+            // the place's owner, `Core::steps`, which hands out no `&mut` of it.
+            let lend = RouterLend::over(unsafe { lent.steps.router.share() });
+            direct::DirectFaces::<L, C>::taken_in(
+                lent.arena.arena_mut(),
+                lent.taken_faces,
+                &policy,
+                &lent.transport.reassembly,
+                &lend,
+            )
+            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?
+        };
         links.lend_buffers(lent.transport.links);
         #[cfg(feature = "listen")]
         links
@@ -6160,6 +6196,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let apart = LentApart {
             #[cfg(not(wz_round))]
             router: lent.router,
+            #[cfg(not(wz_round))]
+            taken,
+            #[cfg(wz_round)]
+            _of: core::marker::PhantomData,
             engine: lent.engine,
             handle_place: lent.handle_place,
             lodgings: lent.lodgings,
@@ -6176,12 +6216,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// it without holding it ([`EngineHandle`]), with what the open lent apart from the state
     /// (`apart`). Out of line, so the open's measure shows it apart.
     #[inline(never)]
-    fn engine_of(core: Core<L, C>, apart: LentApart, row: RowClaim) -> EngineHold<Self> {
+    fn engine_of(core: Core<L, C>, apart: LentApart<L, C>, row: RowClaim) -> EngineHold<Self> {
         // The place is a span of the arena, aligned as a span starts.
         const { assert!(Shared::<Self>::layout().align() <= wz_session_core::bounded::ARENA_ALIGN) };
         let LentApart {
             #[cfg(not(wz_round))]
             router,
+            #[cfg(not(wz_round))]
+            taken,
+            #[cfg(wz_round)]
+                _of: _,
             engine: place,
             handle_place,
             lodgings,
@@ -6244,10 +6288,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // and the locks are made where they stay.
             unsafe {
                 #[cfg(not(wz_round))]
-                direct::DirectFace::init_at(
+                direct::DirectFaces::init_at(
                     NonNull::new_unchecked(addr_of_mut!((*at).direct)),
                     router,
                     direct_lend,
+                    taken,
                 );
                 CoreLock::init_at(NonNull::new_unchecked(addr_of_mut!((*at).core)), core);
                 addr_of_mut!((*at).rooms).write(rooms);

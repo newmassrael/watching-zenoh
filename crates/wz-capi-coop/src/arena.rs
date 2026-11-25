@@ -257,6 +257,7 @@ pub enum ArenaPart {
     DeliveryRound,
     RegistryLend,
     RouterLend,
+    DirectFaces,
     LinkRooms,
     RoomPlaces,
     ReassemblyFlags,
@@ -369,6 +370,7 @@ impl ArenaPart {
             Self::DeliveryRound => ("delivery round", ""),
             Self::RegistryLend => ("registry lend", ""),
             Self::RouterLend => ("router lend", ""),
+            Self::DirectFaces => ("direct faces", "MAX_FACES"),
             Self::LinkRooms => ("link rooms", ""),
             Self::RoomPlaces => ("room places", "MAX_FACES + 1"),
             Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
@@ -505,6 +507,9 @@ const STEP_LEND_ROWS: usize =
     cfg!(feature = "runtime-plan") as usize * (1 + cfg!(wz_round) as usize);
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
+/// The read slots and send places of the faces past the dial role's, where each face is read where
+/// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none.
+const DIRECT_FACE_ROWS: usize = !cfg!(wz_round) as usize;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
@@ -572,6 +577,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LANE_ROWS
     + STEP_LEND_ROWS
     + REASSEMBLY_ROWS
+    + DIRECT_FACE_ROWS
     + GROUP_RX_ROWS
     + PORT_RX_ROWS
     + HANDED_ROWS
@@ -1073,10 +1079,15 @@ impl FacePeers {
     /// no rows for the dial face of a session that dials nothing, which holds the first place of
     /// the faces as every session's dial face does (`engine::registry::Registry::new`).
     pub const fn sets(&self) -> usize {
-        let sets = if self.dial {
-            self.tables
+        Self::sets_of(self.tables, self.dial)
+    }
+
+    /// [`Self::sets`] of `tables` faces' tables, the first the dial role's face's when `dial`.
+    const fn sets_of(tables: usize, dial: bool) -> usize {
+        let sets = if dial {
+            tables
         } else {
-            self.tables.saturating_add(1)
+            tables.saturating_add(1)
         };
         if sets == 0 {
             1
@@ -1786,6 +1797,20 @@ impl ArenaPlan {
             caps::KEY_ARENA_BYTES,
         );
         let faces = self.sized(shape.faces());
+        // Each face's read stages its chains in a Router of its own (`crate::engine::direct`),
+        // which holds at most its share of them open and keeps one rejoined message: the table
+        // holds every face's share, so the chains of one face never take another's buffers.
+        #[cfg(not(wz_round))]
+        {
+            let sets = FacePeers::sets_of(faces, shape.dial_role());
+            self.transport.reassembly_chains = match SESSION_CHAIN_BUFFERS.checked_mul(sets) {
+                Some(chains) => chains,
+                None => {
+                    self.refuse(ArenaRefused::TooLarge);
+                    0
+                }
+            };
+        }
         // The texts of the endpoints the session dials and listens on, a text a row of one table
         // each, written once when it opens and named by place after
         // (`TransportRows::lent_from`): one row of the plan, the two tables' spans.
@@ -2552,6 +2577,17 @@ impl ArenaPlan {
         #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
         let _ = planes;
+    }
+
+    /// Lay out the read slots and send places of the faces past the dial role's, a row of `bytes`
+    /// for each place of the face table after its first (`crate::engine::direct`): the dial
+    /// role's lies in the engine's place. Laid out once, at the open, the plan not settled.
+    #[cfg(not(wz_round))]
+    pub(crate) fn lay_direct_faces(&mut self, bytes: usize) {
+        let rows = self.session.peers.sets().saturating_sub(1);
+        if rows != 0 {
+            self.put(ArenaPart::DirectFaces, rows, bytes);
+        }
     }
 
     /// Lay out the place of `bytes` the admission of a session that listens lies in, which the
