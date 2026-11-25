@@ -57,14 +57,15 @@ impl Stated {
     /// no machine reads from the snapshot, a count the build's domain leaves out, and a count past
     /// the build's value, the bound the build reserves.
     fn select(&mut self, name: &[u8], count: usize) -> bool {
+        let Some(at) = position_named(statement_id, name) else {
+            return false;
+        };
         #[cfg(wz_process_pools)]
-        {
-            if let Some(admitted) = self.held.select(name, count) {
-                return admitted;
-            }
-        }
-        let at = position_named(session_limit_id, name);
-        let Some(entry) = at.and_then(|at| SESSION_LIMITS.get(at)) else {
+        let at = match at.checked_sub(crate::process_pool::HELD) {
+            Some(at) => at,
+            None => return self.held.select_at(at, count),
+        };
+        let Some(entry) = SESSION_LIMITS.get(at) else {
             return false;
         };
         if let LimitValue::Integer(bound) = entry.value_in(&SessionLimits::BUILD) {
@@ -141,14 +142,22 @@ fn names(id: &str, name: &[u8]) -> bool {
     id.as_bytes() == name
 }
 
-/// The id of the session limit at `at` among [`SESSION_LIMITS`], or `None` past the last.
-fn session_limit_id(at: usize) -> Option<&'static str> {
+/// The id of the statement at `at` among those an item may name, or `None` past the last: the
+/// values a program holds apart from any session first, where the build has process pools
+/// (`crate::process_pool::held_id`), then the session limits ([`SESSION_LIMITS`]). One table, so
+/// an item's name is found by one walk whichever it names.
+fn statement_id(at: usize) -> Option<&'static str> {
+    #[cfg(wz_process_pools)]
+    let at = match at.checked_sub(crate::process_pool::HELD) {
+        Some(at) => at,
+        None => return crate::process_pool::held_id(at),
+    };
     SESSION_LIMITS.get(at).map(LimitEntry::id)
 }
 
 /// The first place, counted from `0`, whose id `id_at` answers is the one `name` spells
-/// ([`names`]), or `None` when `id_at` answers none before its first `None`. One loop every
-/// table a statement's name is found in shares, each id read through the table's own function: a
+/// ([`names`]), or `None` when `id_at` answers none before its first `None`. One loop for any
+/// table a name is found in, each id read through the table's own function: a
 /// short table known when compiled, walked where it is named, is unrolled into a comparison of its
 /// own for each row, and a table handed as an iterator object brings every method of its iterator.
 #[inline(never)]
@@ -330,16 +339,31 @@ mod tests {
         assert_eq!(position_named(|_| None, b"HELD_REPLIES"), None);
     }
 
-    /// The session limits' ids are read in their table's order and end with it. Turned red by a
-    /// reading that skips a row or reads past the last.
+    /// The statements' ids are the held values' in their table's order, where the build has
+    /// process pools, then the session limits' in theirs, and end with the last; no held value is
+    /// spelled as a session limit, which the one walk would find in its place. Turned red by a
+    /// reading that skips a row, reads past the last, or reads the session limits first.
     #[test]
-    fn the_session_limits_ids_are_read_in_order() {
-        use super::session_limit_id;
+    fn the_statements_ids_are_read_in_order() {
+        use super::statement_id;
         use wz_session_core::limits::SESSION_LIMITS;
+        #[cfg(wz_process_pools)]
+        let held = {
+            use crate::process_pool::{held_id, HELD};
+            for at in 0..HELD {
+                let id = held_id(at).expect("a held value's row");
+                assert_eq!(statement_id(at), Some(id));
+                assert!(SESSION_LIMITS.iter().all(|entry| entry.id() != id), "{id}");
+            }
+            assert_eq!(held_id(HELD), None);
+            HELD
+        };
+        #[cfg(not(wz_process_pools))]
+        let held = 0;
         for (at, entry) in SESSION_LIMITS.iter().enumerate() {
-            assert_eq!(session_limit_id(at), Some(entry.id()));
+            assert_eq!(statement_id(held + at), Some(entry.id()));
         }
-        assert_eq!(session_limit_id(SESSION_LIMITS.len()), None);
+        assert_eq!(statement_id(held + SESSION_LIMITS.len()), None);
     }
 
     /// A name spells an id when its bytes are the id's, and no prefix of the id, no longer name

@@ -224,7 +224,7 @@ struct HeldRow {
 }
 
 /// How many values a program holds apart from any session.
-const HELD: usize = 8;
+pub(crate) const HELD: usize = 8;
 
 /// Every value a program holds apart from any session, in the order of [`Held`]'s counts: one
 /// table a statement's name is found in and its count bounded by, so the doors that read one
@@ -347,21 +347,30 @@ impl Held {
         Self(counts)
     };
 
-    /// Set the count of the limit `name` spells to `count`: `None` when `name` spells none of
-    /// these, `Some(false)` with nothing set for a count past the build's value of it.
-    pub(crate) fn select(&mut self, name: &[u8], count: usize) -> Option<bool> {
-        let at = crate::config_limits::position_named(held_id, name)?;
-        let (row, held) = HELD_ROWS.get(at).zip(self.0.get_mut(at))?;
+    /// Set the count of the held value at `at` among [`HELD_ROWS`] to `count`: `false`, with
+    /// nothing set, for a count past the build's value of it or a place past the last row. The
+    /// limits key finds the place by the value's id among every statement's (`held_id`).
+    pub(crate) fn select_at(&mut self, at: usize, count: usize) -> bool {
+        let Some((row, held)) = HELD_ROWS.get(at).zip(self.0.get_mut(at)) else {
+            return false;
+        };
         if count > row.build {
-            return Some(false);
+            return false;
         }
         *held = count;
-        Some(true)
+        true
+    }
+
+    /// [`Self::select_at`] the held value `name` spells: `None` when it spells none of these.
+    #[cfg(test)]
+    pub(crate) fn select(&mut self, name: &[u8], count: usize) -> Option<bool> {
+        let at = crate::config_limits::position_named(held_id, name)?;
+        Some(self.select_at(at, count))
     }
 }
 
 /// The id of the held value at `at` among [`HELD_ROWS`], or `None` past the last.
-fn held_id(at: usize) -> Option<&'static str> {
+pub(crate) fn held_id(at: usize) -> Option<&'static str> {
     HELD_ROWS.get(at).map(|row| row.id)
 }
 
