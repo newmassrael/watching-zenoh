@@ -697,7 +697,7 @@ is the wz preset of that original (`wz_config.py --original-features <original>`
 
 | family | arm P (original) | arm W (wz) | programs | size cells read |
 |---|---|---|---|---|
-| `pico` | vendor/zenoh-pico at its pin, upstream's default cmake build (`zenoh-pico-build-default`, no switch passed), shared library | `wz-capi-pico` for `zenoh-pico_defconfig` | `examples/unix/c11/*.c` of the pin, against the default arm's headers | the shared library |
+| `pico` | vendor/zenoh-pico at its pin, upstream's default cmake build (`zenoh-pico-build-default`, no switch passed), shared library | `wz-capi-pico` for `zenoh-pico_defconfig` in the form the release ships (`perf_matrix.py bench-stdlib`; without `std`: `os-posix` in the place of `engine-coop`, profile `capi-nostd`) unless `PICO_CMP_STDLIB` names the other, built as the size gate builds that form (`perf_matrix.py preset-arm`) | `examples/unix/c11/*.c` of the pin, against the default arm's headers | the shared library |
 | `c` | zenoh-c at the pin of `scripts/zenoh-c-oracle.pin`, built from its source (`install-zenoh-c-arm.sh nounstable`: Release, no unstable API, no shared memory, upstream's pinned toolchain) | `wz-capi-c` for `zenoh-c_defconfig` | `examples/*.c` of that source, against the original's headers | the shared library |
 | `rust` | upstream's `examples` package of the pinned tree over upstream's `zenoh` from the registry | the same package with the family in `[patch.crates-io]` and `wz-capi-core` given the preset's features | `examples/examples/*.rs` of the pin | `z_put` |
 

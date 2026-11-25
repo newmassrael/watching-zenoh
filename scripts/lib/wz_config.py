@@ -84,6 +84,10 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   prints for the same header, the whole drop-in build
     --original-features ORIGINAL  resolve configs/<ORIGINAL>_defconfig alone and print the cargo
                                   arguments of the ABI that original is built through
+    --original-env ORIGINAL       the same defconfig, resolved alone; print what --resolve-env
+                                  prints of it. With --original-features, the whole build the
+                                  defconfig names: a limit its preset switch sets (the pico
+                                  preset's) reaches the build only through this environment
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
                                   sets off its default, WZ_POLICY_<NAME>=<value> for each policy
                                   it sets off upstream's, and WZ_POLICY_<NAME>_ALLOWS_<VALUE>=off
@@ -182,6 +186,7 @@ Usage:
                          | config-schema | rust-feature-bits
     wz_config.py --resolve-features pico|c|core PRESET...
     wz_config.py --resolve-env PRESET...
+    wz_config.py --original-env zenoh-pico|zenoh-c|zenoh
     wz_config.py --conformance-statement pico [--engine coop] CONFIG
     wz_config.py --conformance-statement c HEADER
     wz_config.py --resolve-conformance-statement pico|c|core PRESET...
@@ -2295,6 +2300,23 @@ def cargo_args(decl: dict, abi: str, on: set[str]) -> str:
     return cargo_args_of(features_for(decl, abi, on))
 
 
+def original_features(original: str) -> list[str]:
+    """The feature list of an upstream original's own default build in wz: its defconfig alone,
+    resolved strictly, for the ABI it is built through (`BASE_ABI`). A configuration the
+    resolution refuses raises PresetError."""
+    decl = load_decl()
+    return features_for(decl, BASE_ABI[original], resolved_caps(decl, resolve([], original=original)))
+
+
+def original_env(original: str) -> list[str]:
+    """The other half of that build, which a feature list cannot carry: the `WZ_LIMIT_<NAME>=<n>` and
+    `WZ_POLICY_<NAME>=<value>` lines its defconfig sets, as --resolve-env prints a preset's. A
+    configuration the resolution refuses raises PresetError."""
+    decl = load_decl()
+    kconf = resolve([], original=original)
+    return resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf)
+
+
 def cargo_args_of(feats: list[str]) -> str:
     """The cargo arguments of a build of exactly `feats`."""
     return "--no-default-features" + (f" --features {','.join(feats)}" if feats else "")
@@ -2535,6 +2557,15 @@ def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str
                           f"{'it' if len(lost) == 1 else 'them'} on the tokio engine")
     if stdlib == "std":
         return named
+    return nostd_named_features(named, table)
+
+
+def nostd_named_features(named: list[str], table: dict) -> list[str]:
+    """`named`, the feature list of a cooperative pico build with `std`, as the library without it,
+    `table` the crate's feature table: `BENCH_NOSTD_FEATURE` in the place of `engine-coop` and `std`
+    left out, as the Windows package without `std` is made from its profile's list. A feature that
+    turns `std` on is refused by name rather than built into a library with `std` after all (the
+    crate refuses that build)."""
     bare = [BENCH_NOSTD_FEATURE] + [f for f in named if f not in ("engine-coop", "std")]
     with_std = [f for f in bare if "std" in enabled_features(table, [f])]
     if with_std:
@@ -5776,6 +5807,10 @@ def cmd_selftest() -> int:
            and bench_named_features("coop", [], good, "std") == bench_named_features("coop", [], good))
     expect("a capability that turns std on is refused of a bench without it, by name",
            "clock-source" in refusal_text(lambda: bench_named_features("coop", ["clock-source"], good, "nostd")))
+    expect("a preset's list without std names the host's form in the engine's place and keeps the rest",
+           nostd_named_features(["std", "engine-coop", "peer", "query"], good)
+           == [BENCH_NOSTD_FEATURE, "peer", "query"]
+           and "clock-source" in refusal_text(lambda: nostd_named_features(["engine-coop", "clock-source"], good)))
     if kconfiglib_module() is not None:
         chooses_coop = "CONFIG_WZ_ENGINE_COOP=y" in PACKAGE_PICO_PROFILE.read_text(encoding="utf-8")
         expect("an unnamed bench engine is the one the package's profile chooses",
@@ -7460,6 +7495,13 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
                    resolved_limit_env(decl, resolve([first])) == ["WZ_LIMIT_MAX_TASKS=4"])
             expect("a later preset overrides an earlier one",
                    resolved_limit_env(decl, resolve([first, later])) == ["WZ_LIMIT_MAX_TASKS=6"])
+            declared = {lim["id"]: lim for lim in decl["limits"]}
+            expect("zenoh-pico's defconfig alone gives --original-env every pico preset value "
+                   "that differs from its limit's default",
+                   {f"{declared[lid]['kconfig']}={value}"
+                    for lid, value in limit_presets(decl["limits"]).items()
+                    if value != declared[lid]["default"]}
+                   <= set(resolved_limit_env(decl, resolve([], original="zenoh-pico"))))
             resolved_doc = resolved_statement(decl, "c", resolve([first]),
                                               {"kind": "presets", "inputs": ["first.conf"]})
             expect("a preset's statement states the value its preset gives and the features "
@@ -7640,13 +7682,24 @@ def main(argv: list[str]) -> int:
         # An upstream original's own default build: its defconfig alone, resolved strictly, as the
         # cargo arguments of the ABI it is built through. A lane compares this with the build its
         # interop legs link. It never skips: the lane that asks provisions the interpreter.
-        decl = load_decl()
         try:
-            kconf = resolve([], original=argv[2])
+            print(cargo_args_of(original_features(argv[2])))
         except PresetError as exc:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
-        print(cargo_args(decl, BASE_ABI[argv[2]], resolved_caps(decl, kconf)))
+        return 0
+    if len(argv) == 3 and argv[1] == "--original-env" and argv[2] in BASE_ABI:
+        # The half of an original's build that cargo arguments cannot carry: the limits and
+        # policies its defconfig sets, as --resolve-env prints a preset's. A build of
+        # --original-features alone is the defconfig's capabilities at the host defaults of every
+        # build constant, which the defconfig's conformance statement does not describe.
+        try:
+            lines = original_env(argv[2])
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        for line in lines:
+            print(line)
         return 0
     if len(argv) >= 3 and argv[1] == "--resolve-env":
         decl = load_decl()
