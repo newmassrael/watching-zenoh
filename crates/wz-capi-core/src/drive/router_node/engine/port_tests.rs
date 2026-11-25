@@ -1739,12 +1739,13 @@ fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
 }
 
 /// The node's declaration of a subscription answers its key as the text it keeps for it, naming no
-/// declaration as it declares none.
+/// declaration as it declares none, and its record keeps that text until the subscription is
+/// retracted.
 ///
 /// # Control
 ///
 /// Lending the program's own buffer in place of the node's copy reds the address assertion (that
-/// buffer is let go of before the key is read).
+/// buffer is let go of before the key is read); a record left after the retraction reds the last.
 #[test]
 fn the_node_lends_a_subscriptions_key_as_its_own_literal_until_it_is_retracted() {
     let (router, _peer) = pair();
@@ -1766,7 +1767,22 @@ fn the_node_lends_a_subscriptions_key_as_its_own_literal_until_it_is_retracted()
     let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
     assert_eq!(text, b"wz/port/lent/**");
     assert_eq!(view.own, None, "the node declares no key");
+    let kept = |id: SubId| {
+        router
+            .engine
+            .subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|subscribed| (subscribed.key.as_ptr(), subscribed.key.len()))
+    };
+    assert_eq!(
+        kept(id),
+        Some((view.start, view.len)),
+        "CONTROL: the record keeps the text the declaration lent"
+    );
     engine.undeclare_subscriber(id);
+    assert_eq!(kept(id), None, "retracted, the record and its key are gone");
 }
 
 /// The node lends a queryable's key back as the text it keeps for it, naming no declaration as it

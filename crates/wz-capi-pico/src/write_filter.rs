@@ -318,8 +318,12 @@ impl FilteredKey {
         // The record of the filter holds the declaration: the wire form holds nothing.
         let wire = key.wire();
         let (filter, lent) = WriteFilter::declare(session, plane, keyexpr, &wire, count_local)?;
-        // The door's hold goes with `key`, the record's standing; the key is lent from the record.
+        // The door's hold goes with `key`, the record's standing; the key is lent from the record,
+        // and an engine that keeps none refuses the entity, its filter undeclared.
         drop(key);
+        if lent.is_absent() {
+            return Err(Z_ERR_GENERIC);
+        }
         // SAFETY: the caller's: `at` is room for one, written field by field, once each.
         unsafe {
             core::ptr::addr_of_mut!((*at).filter).write(filter);

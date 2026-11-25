@@ -1758,10 +1758,16 @@ impl DeclaredSubscriber {
 impl SubscriberState {
     /// Point the cached loan at `lent`, the key the session's record of the subscription keeps as
     /// its declaration answered it, once declared and placed.
+    ///
+    /// A subscription already gone when its declaration returned answers no key: no loan is bound,
+    /// and `z_subscriber_keyexpr` lends the empty loan it was filled with.
     fn bind(&mut self, lent: wz_capi_port::KeyView) {
         let Some(declared) = self.declared.as_mut() else {
             return;
         };
+        if lent.is_absent() {
+            return;
+        }
         declared.record = crate::keyexpr::RecordKey::lent(&self.shared, lent.own);
         self.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
     }
@@ -4134,7 +4140,8 @@ mod tests {
     ///
     /// Turned red by a loan bound to a copy the door keeps (the address), a loan that names no
     /// declaration (slot 2, the wire), a copy that takes no hold of its own or gives none back (the
-    /// count), or a copy made past a full count.
+    /// count), a copy made past a full count, or a record whose hold of the declaration outlives
+    /// the retraction.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
     #[test]
     fn a_subscribers_lent_key_is_the_sessions_record_and_a_copy_holds_its_declaration() {
@@ -4177,6 +4184,11 @@ mod tests {
         let loaned = &owned as *const z_owned_subscriber_t as *const z_loaned_subscriber_t;
         let shared = crate::session::EngineHold::as_ref(&engine);
         let own = record.own.expect("the record holds the own declaration");
+        assert_eq!(
+            wz_capi_port::KeyHolds::declared_prefix(shared, own.row, key),
+            Some((own.mapping, own.prefix_len)),
+            "CONTROL: the record's hold keeps the declaration standing"
+        );
         assert_eq!(
             own.prefix_len,
             "demo/lent/sub".len(),
@@ -4232,6 +4244,11 @@ mod tests {
         }
         // SAFETY: the subscriber made above, let go of once here.
         unsafe { free_subscriber(owned.handle) };
+        assert_eq!(
+            wz_capi_port::KeyHolds::declared_prefix(shared, own.row, key),
+            None,
+            "retracted, the record and its hold of the key are gone: the declaration went with them"
+        );
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };

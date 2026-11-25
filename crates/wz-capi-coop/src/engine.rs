@@ -8718,14 +8718,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             "the tables number a row as they said they would"
         );
         // The text is the row's own, which does not move while the row stands. The tables made
-        // the row above; were it gone, the entity is lent the empty key, which no record has to
-        // keep, rather than a refusal that would leave the subscriber standing.
+        // the row above; were it gone, the answer names no key, and the door binds no loan.
         let lent = {
             let tables = tables(&core.session.registry);
             tables
                 .subscribers()
                 .get(declared.handle)
-                .map_or(KeyView::literal(""), |row| {
+                .map_or(KeyView::ABSENT, |row| {
                     let key = row.key();
                     lent_key(tables, key.as_str(), key.named().or(key.prefix()))
                 })
@@ -9090,13 +9089,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         #[cfg(not(feature = "group"))]
         let _ = (spent, wire);
         // The text is the filter's row's own, which does not move while the row stands. The
-        // tables made the row above; were it gone, the entity is lent the empty key, which no
-        // record has to keep, rather than a refusal that would leave the filter standing.
+        // tables made the row above; were it gone, the answer names no key, which the door refuses.
         let tables = tables(&core.session.registry);
         let key = tables
             .write_filters()
             .get(watching.handle)
-            .map_or(KeyView::literal(""), |row| {
+            .map_or(KeyView::ABSENT, |row| {
                 lent_key(tables, row.key(), row.own())
             });
         Ok(Declared { id, key })
@@ -9968,9 +9966,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         let core = &mut guard.0;
         // A subscriber its own history's callback undeclared asks nothing: its row is gone, and so
-        // is its place in the replay's order, and it is lent the empty key, there being no record
-        // left to lend one from. One that stands is lent the row's text, which does not move
-        // while the row stands.
+        // is its place in the replay's order, and its answer names no key, there being no record
+        // left to lend one from, so the door binds no loan, as for a subscriber already gone. One
+        // that stands is lent the row's text, which does not move while the row stands.
         let lent = {
             let tables = tables(&core.session.registry);
             tables
@@ -10000,7 +9998,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         self.deliver();
         Ok(Declared {
             id,
-            key: lent.unwrap_or(KeyView::literal("")),
+            key: lent.unwrap_or(KeyView::ABSENT),
         })
     }
 }

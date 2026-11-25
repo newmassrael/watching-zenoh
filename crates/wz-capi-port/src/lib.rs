@@ -1169,6 +1169,20 @@ unsafe impl Send for KeyView {}
 unsafe impl Sync for KeyView {}
 
 impl KeyView {
+    /// No key: what a declaration answers when the engine's record of the entity is gone before
+    /// the declaration returns (a liveliness subscriber its own history's callback undeclared), so
+    /// there is nothing to lend. A door binds no loan to it.
+    pub const ABSENT: Self = Self {
+        start: core::ptr::null(),
+        len: 0,
+        own: None,
+    };
+
+    /// Whether this is [`Self::ABSENT`]: no record keeps the key.
+    pub fn is_absent(&self) -> bool {
+        self.start.is_null()
+    }
+
     /// `key`, named whole: no declaration of it is held.
     pub fn literal(key: &str) -> Self {
         Self {

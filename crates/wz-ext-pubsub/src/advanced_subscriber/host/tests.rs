@@ -309,10 +309,10 @@ impl SessionEngine for Script {
         _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
     ) -> Result<wz_capi_port::Declared<FilterId>, Refusal> {
-        // The script keeps no write filter's key: it lends the empty one, which outlives it.
+        // The script keeps no write filter's key.
         Ok(wz_capi_port::Declared {
             id: 0,
-            key: wz_capi_port::KeyView::literal(""),
+            key: wz_capi_port::KeyView::ABSENT,
         })
     }
     fn write_filter_active(&self, _id: FilterId) -> bool {
