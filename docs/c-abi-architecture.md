@@ -311,3 +311,177 @@ refuse, is framed through the codec's own vector sink, which refuses no write.
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,
 which guards the unsafe move). Its value form, `Option<T>`, moves the callers in the cooperative
 engine and the entity modules, and is converted with them.
+
+## 8. The read: every face read where it lies, no round
+
+Status: decision of the owner, 2026-11-25. It replaces the round of deliveries and the executor's
+per-message pass in every build, and it is the structure the L0 driver of section 5 step 6 keeps.
+
+### 8.1 What is measured, and why the round goes
+
+The shipped nostd form (the pico preset's `zenoh-pico_defconfig` limits, features `os-posix`,
+`link-udp`, `scout`, `peer`, `multicast-transport`, `query`, `queryable`, `liveliness`,
+`liveliness-get`, `multi-thread`) reads one received message in 6,097 instructions against
+zenoh-pico's 2,941 (2026-11-25, callgrind, exclusive costs). The preset turns `multi-thread` on,
+and with it `threads`, `listen` (`peer`) and `group` (`multicast-transport`): every shipped
+build reads through the round. The executor's pass and the round account for about 1.2 K of the
+3.2 K excess: `run_among`, `poll_erased`, `step_after`, `Core::idle_wait`, `hand_out`,
+`RoundDelivery::deliver_ref`, `Round::writable`, the walk of every holder's deadlines
+(`ManyHolders`, `keepalive_deadlines`) and the wait set gathered again for each message.
+
+The round exists because a read stepped every face of the session under the session's lock as
+tasks of one local set, so a record could not be handed to its callback where it was read: the
+lock was held, and the next face's task was still to run. Once each face is read on its own, under
+a lock of its own, nothing stands between the record and its callback.
+
+### 8.2 The structure
+
+As zenoh-pico's read task per transport (`_zp_unicast_read_task`, `_zp_multicast_read_task`)
+and upstream zenoh's receive task per link, a link's read decodes what the link holds as soon as
+the link is ready and hands each record to its subscribers where it is read: no queue between the
+decode and the callback, and no pass of an executor per message.
+
+- **With `threads`**: every face (the dial role's link, each link a port accepted, each group)
+  has a read task of its own, blocked on that face's link alone and stepping that face's pump.
+  Faces are read in parallel; one face is read by one thread at a time.
+- **Without `threads`**: the program's read waits on one wait set of every face and port, and
+  steps the pump of the face that is ready, at once.
+- Both are one body: the read of a set of faces (`read_faces`), whose set is one face for a face's
+  task and every face for the program's read. There is no second path chosen by configuration at
+  run time and no path kept for a session of one face.
+- **The executor keeps the timers alone**: keep-alive, lease, a get's deadline, the pace of a
+  replay, the periodic jobs and the reassembly sweep. It holds no link task and runs nothing per
+  message. With `threads` its turn is the lease task's (zenoh-pico's `_zp_lease_task`); without,
+  it is the wait set's timeout and the look after the wait.
+
+### 8.3 Who owns each face's read
+
+| face | read slot holds | made | read by (threads / one thread) |
+|---|---|---|---|
+| dial role | the link's pump (receive state, sequence numbers, the Router it stages fragments in), its records, the dial under way | at the open, kept for the session's life | its task / the program's read |
+| accepted | the same, for the accepted link | by the port's accept | its task, started by the accept / the program's read |
+| group | the group's pump (the members' receive order, their leases, the JOIN it reads) | at the join | its task / the program's read |
+| port | the listener | at the open | the port's task / the program's read |
+
+A face is two places: its **read slot** (the pump and the records being read) and its **send
+place** (the wire: the batch being written, the transmit sequence numbers, the link's send half).
+A read holds the slot for the length of one step of the pump; a send holds the send place for the
+length of one write. A record read holds no send place, so a callback that sends on the face it is
+called from finds the send place free.
+
+Each lock is the form's (`LockForm`): the host's or the kernel's mutex with `threads`, a flag
+without. What a face lends its link's session (its link state, its actions) is held under the
+runtime's lock kind (`LockKind`); with `threads` that kind is a lock per value on every target,
+the kernel's where there is no host lock, because a face's read reaches those values without the
+session's lock.
+
+### 8.4 Lock order
+
+```
+read slot  ->  send place  ->  session (Core)  ->  a row's latch
+```
+
+- A thread takes a face's place before the session's lock, never after. A step of a pump holds the
+  read slot, and takes the session's lock once for each record it dispatches, letting it go before
+  the record's callbacks are called.
+- No thread holds two faces' read slots. A publish that reaches several faces takes their send
+  places one at a time, each let go before the next is taken.
+- A callback is called with no lock held but the read slot of the face its record came from.
+
+### 8.5 A callback that calls the session
+
+- **A put, a get, a reply** take send places and the session's lock: never the read slot, so they
+  finish while the read that called the callback holds it.
+- **Another thread's put that waits for something** (a get's reply, a full batch flushed) finishes
+  too: no read slot is held by the thread it waits on, except the one whose callback runs, and that
+  thread holds no session lock.
+- **A read from inside a callback** reads nothing: the slot is held, and the slot's owner word (the
+  thread that holds it) tells a read on the same thread to return at once rather than wait for
+  itself. A read on another thread reads the other faces.
+- **An undeclare** waits for the calls of the row in flight on other threads (the row's latch) and
+  not for the call of its own thread, so an undeclare inside the row's own callback returns, and the
+  row is told gone once: the latch's last release lets the callback go.
+- **A close** ends every face's life under the session's lock and asks each read to stop. A face's
+  read sees the end once its step returns, lets the pump go, and its task ends; the close does not
+  wait for a read on its own thread.
+
+### 8.6 A change of a face's site without a deadlock
+
+A face is added, taken out or given a new link by a thread that may hold the session's lock (an
+accept found while the session settles, a lost link seen by the lease timer). Taking the face's
+place there would invert the order of 8.4. So a change of a site is written into the face table
+under the session's lock as a debt of the face (its ledger), and carried out after the lock is let
+go, by taking the face's place first and the session's lock after it. The read that holds the
+place pays the face's debts when it lets the place go; a read that finds its face ended lets the
+pump go and does not take the session for it. A redeclare told on a face that came up is a debt of
+the same kind: its first lap is the face's to run, and a declaration made before that lap is told
+once, by the lap.
+
+### 8.7 The life of an accepted face
+
+1. The port's read (its task, or the program's read on the port's readiness) accepts the link and,
+   under the session's lock, takes a free row of the face table, which the open reserved; a full
+   table refuses the link and closes it.
+2. The face's read slot and send place are made in that row's place, the face's handshake runs on
+   its read, and the face is told up under the session's lock (its tables, its replay).
+3. With `threads` the accept starts the face's read task from the task table the open reserved
+   (one entry per face); a table with no entry left refuses the link as a full face table does.
+4. When the link is lost or its lease ends, the face's life ends under the session's lock; its read
+   sees the end, lets the pump go and stops; the face's tables go under the face's place and then
+   the session's lock (8.6), and the row is free for the next accept once its last hold went.
+
+### 8.8 The read of a group
+
+A group is one face over one socket shared by many members. Its read slot holds the group's pump:
+each datagram is read whole, its source names the member, the member's receive order and lease are
+the pump's, and each record is dispatched under the session's lock and handed out where it is read,
+as a unicast face's. A JOIN admits a member under the session's lock. What the session sends on the
+group is written through the group's send place by the sending thread, as zenoh-pico's put writes a
+multicast message on its caller's thread; the timers send the JOIN beacon and sweep the members'
+leases.
+
+### 8.9 What the read costs
+
+Per message, a read pays the decode, one take of the session's lock for the dispatch, and the
+callbacks. Per datagram it pays one wait, one reading of the clock (the lease's last-heard time,
+written by the read, read by the lease timer) and nothing else of the timers: no gathering of
+deadlines, no division of a 64-bit number, no executor pass. Shipped nostd adds no runtime symbol.
+
+### 8.10 Tests
+
+Each holds for every form that builds it (`threads`, `listen`, `group`, and their absence):
+
+- a callback in which another thread puts and waits for the put to be sent returns, and both end;
+- a slow callback on one face does not hold up another thread's put on that face or another;
+- an undeclare inside the row's own callback is told to the peer once, and the callback is let go
+  once, after its last call;
+- puts from several threads on one face reach the peer as whole frames, none interleaved;
+- a listening peer delivers what each of its faces received in that face's order;
+- a group's member is read and delivered with no unicast face open;
+- the refusals: an accept past the face table, a read task past the task table, a read from inside
+  a callback (reads nothing), a build without `threads` (the program's read steps every face).
+
+### 8.11 Steps
+
+Each lands on its own, builds and passes its tests:
+
+1. **Locks.** The runtime's lock per value in every `threads` build, the kernel's mutex where there
+   is no host lock; a hold of a place as a value (`HoldKind`) for the read slot and the send place.
+2. **Accepted faces read directly.** The read slot and send place per face row; the port's accept
+   and the face's read task; the site changes of 8.6.
+3. **Groups read directly.**
+4. **`threads` reads directly**: the read task per face; the executor keeps the timers.
+5. **The round goes**: `round.rs`, `HandBack`, `RoundDelivery`'s round, the work form's step and
+   its `cfg` (`wz_round`, `KEEP_THE_ROUND`).
+
+Judged by the shipped form's instructions per message (the executor's and the round's 1.2 K gone),
+its heap after open (none) and its text.
+
+### 8.12 Rejected alternatives
+
+- **A read path chosen at run time by configuration** (direct for one face, the round for more):
+  two paths of delivery, each with its own ordering and reentrancy rules, both shipped.
+- **A fast path for a session of one face**: the shipped preset is a listening peer in a group, and
+  the one-face path would not be the one measured.
+- **Keeping the executor and polling the link tasks less often**: the pass per message is what is
+  measured; its count, not its rate, is the cost.
