@@ -45,6 +45,10 @@ impl MulticastSocket for WindowsUdpSocket {
         WindowsUdpSocket::set_multicast_hops(self, hops)
     }
 
+    fn source_toward(&self, to: SocketAddr) -> Result<SocketAddr, WindowsNetError> {
+        WindowsUdpSocket::source_toward(self, to)
+    }
+
     fn interface_family() -> WindowsNetError {
         WindowsNetError::InterfaceFamily
     }

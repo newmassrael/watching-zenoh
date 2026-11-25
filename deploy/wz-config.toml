@@ -3697,6 +3697,32 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen holds a heartbeat for each of sixteen publishers of a session."
 
 [[limit]]
+id = "GROUP_READS_PER_MOVE"
+kconfig = "WZ_LIMIT_GROUP_READS_PER_MOVE"
+kind = "parameter"
+range = [1, 255]
+default = 16
+storage = "quota"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+# `wire` is timing: what a session sends while a group's burst is read leaves after it.
+wire = "timing"
+help = '''
+How many datagrams of a multicast group in a row a read of the C ABI's
+cooperative engine takes, a step each, before it moves the session's links,
+timers and sweeps again. A group's burst is read as one receive of a link's is:
+the links move once, by the step that finds the group's socket empty or the one
+past this many. A timer, a get's deadline, a sweep and what the program handed
+to the session meanwhile are late by the time this many datagrams take to read,
+at most. At least 1, which moves the links after each datagram.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: zenoh-pico's multicast read task reads one datagram and then looks at its lease, and upstream's group link is read by a task of its own. The bound is the cooperative engine's, which reads a group's input under the session's lock."
+
+[[limit]]
 id = "ADVANCED_CACHE_BYTES"
 kconfig = "WZ_LIMIT_ADVANCED_CACHE_BYTES"
 kind = "bound"

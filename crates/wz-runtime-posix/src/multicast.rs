@@ -24,6 +24,7 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use wz_runtime_coop::group_transport::{GroupInterface, GroupRx, GroupSend, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
+use wz_session_core::group_locator::sent_by_own;
 use wz_session_core::text_out::AddrText;
 
 use crate::group::MulticastSocket;
@@ -862,21 +863,27 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
         let Some(socket) = &self.read else {
             return false;
         };
-        match socket.try_recv(self.rx.as_mut_slice()) {
-            Ok(Some((len, from))) => {
-                f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
-                self.lent = Some((len, from));
-                true
-            }
-            // Nothing queued, or a signal cut the read short: the next step reads again.
-            Ok(None) => false,
-            Err(e) => {
-                log::warn!(
-                    "group {}: its socket failed a receive: {e:?}",
-                    AddrText(self.group)
-                );
-                self.failed = true;
-                false
+        // What the send socket sends comes back on the joined one while the loopback is on, the
+        // system's default, and is dropped here, as zenoh-pico's link drops it too.
+        let own = self.write.as_ref().map(|write| write.local());
+        loop {
+            match socket.try_recv(self.rx.as_mut_slice()) {
+                Ok(Some((_, from))) if own.is_some_and(|own| sent_by_own(own, from)) => {}
+                Ok(Some((len, from))) => {
+                    f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
+                    self.lent = Some((len, from));
+                    return true;
+                }
+                // Nothing queued, or a signal cut the read short: the next step reads again.
+                Ok(None) => return false,
+                Err(e) => {
+                    log::warn!(
+                        "group {}: its socket failed a receive: {e:?}",
+                        AddrText(self.group)
+                    );
+                    self.failed = true;
+                    return false;
+                }
             }
         }
     }
@@ -925,7 +932,9 @@ mod tests {
         let base = buf.raw().0 as usize;
         let mut lent = open(Some(buf));
         assert!(lent.lends_until_next_receive());
-        lent.send_to_group(b"hello");
+        // From a member's socket: what the transport's own sender sends is dropped on receipt.
+        let member = PosixUdpSocket::bind(loopback).expect("a member's socket");
+        member.send_to(lent.group(), b"hello").expect("sent");
         let mut seen = None;
         for _ in 0..100_000 {
             if lent
@@ -943,6 +952,34 @@ mod tests {
         assert_eq!(CELLS.in_use(), 1, "the session holds it until it lets go");
         drop(back);
         assert_eq!(CELLS.in_use(), 0);
+    }
+
+    /// What the group's own send socket sends comes back on the joined socket while the loopback is
+    /// on, and a receive drops it and reads on to a member's datagram in the same call. The
+    /// CONTROL is the member's datagram, taken with its source.
+    #[test]
+    fn a_group_drops_what_its_own_send_socket_sent() {
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let read = PosixUdpSocket::bind(loopback).expect("a reading socket");
+        let write = PosixUdpSocket::bind(loopback).expect("a sending socket");
+        let member = PosixUdpSocket::bind(loopback).expect("a member's socket");
+        let to = read.local();
+        let mut group = HostGroupTransport::new(read, write, to, None);
+        group.send_to_group(b"own");
+        group.send_to_group(b"own again");
+        member.send_to(to, b"member").expect("sent");
+        let mut seen = None;
+        for _ in 0..100_000 {
+            if group.recv_with(&mut |bytes, from| seen = Some((bytes.to_vec(), from))) {
+                break;
+            }
+        }
+        assert_eq!(
+            seen,
+            Some((b"member".to_vec(), member.local())),
+            "the member's datagram, past the two its own sender sent"
+        );
+        assert!(!group.recv_with(&mut |_, _| panic!("its own datagrams were dropped")));
     }
 
     /// A socket option of `socket`, read back into a value of the type it is kept as.

@@ -95,6 +95,18 @@ impl WindowsUdpSocket {
         Ok(this)
     }
 
+    /// The address a datagram this socket sends to `to` leaves from, learned by connecting the
+    /// socket to `to`: the stack picks the source then, as it would for each send, under the
+    /// socket's multicast interface.
+    pub fn source_toward(&self, to: SocketAddr) -> Result<SocketAddr, WindowsNetError> {
+        let peer = RawAddr::of(to);
+        // SAFETY: `peer` is a live socket address of the length passed.
+        if unsafe { ws::connect(self.socket, peer.as_ptr(), peer.size()) } != 0 {
+            return Err(WindowsNetError::Connect(last_error()));
+        }
+        name_of(self.socket, ws::getsockname).map_err(WindowsNetError::SockName)
+    }
+
     /// A socket bound to `at` that other sockets of this host may bind too, as every member of a
     /// multicast group does (zenoh-pico sets the option on its group listener unconditionally).
     pub fn bind_shared(at: SocketAddr) -> Result<Self, WindowsNetError> {

@@ -123,8 +123,8 @@ fn descriptor(on: WaitOn) -> Option<c_int> {
 }
 
 /// One `poll` over what `on` names, in `fds`, for at most `timeout_ms`: how many entries of
-/// `fds` it filled, in the order of `on`, and whether the poll answered. A wake found ready is
-/// made quiet.
+/// `fds` it filled, in the order of `on`, and whether the poll answered. A wake the poll found
+/// ready is made quiet; one it did not look at, or found quiet, is not read.
 fn poll_on(
     on: &[LinkWait],
     timeout_ms: u32,
@@ -155,13 +155,20 @@ fn poll_on(
     // timeout bounds the wait. A failed or interrupted wait is a quiet link: the step that
     // follows reads and reports the error.
     let answered = unsafe { libc::poll(fds.as_mut_ptr(), count as libc::nfds_t, timeout) } >= 0;
-    // A wake found ready is made quiet, so the next wait waits for the next word.
-    if wakes {
+    // A wake found ready is made quiet, so the next wait waits for the next word. The entries are
+    // walked in the order they were filled in, so the next one named is the next of `fds`.
+    if wakes && answered {
+        let mut named = 0;
         for wait in on {
-            if let WaitOn::Wake(handle) = wait.on {
-                if let Ok(fd) = c_int::try_from(handle) {
-                    drain(fd);
-                }
+            let Some(fd) = descriptor(wait.on) else {
+                continue;
+            };
+            let Some(entry) = fds.get(named).filter(|_| named < count) else {
+                break;
+            };
+            named += 1;
+            if matches!(wait.on, WaitOn::Wake(_)) && entry.revents != 0 {
+                drain(fd);
             }
         }
     }
@@ -769,6 +776,14 @@ impl PosixUdpSocket {
     /// unconditionally).
     pub fn bind_shared(at: SocketAddr) -> Result<Self, PosixNetError> {
         Self::open(at, true)
+    }
+
+    /// The address a datagram this socket sends to `to` leaves from, learned by connecting the
+    /// socket to `to`: the kernel picks the source then, as it would for each send, under the
+    /// socket's multicast interface.
+    pub fn source_toward(&self, to: SocketAddr) -> Result<SocketAddr, PosixNetError> {
+        call_at(self.fd, to, libc::connect).map_err(PosixNetError::Connect)?;
+        name_of(self.fd, libc::getsockname).map_err(PosixNetError::SockName)
     }
 
     /// Join `group` on `interface`: an IPv4 group through `IP_ADD_MEMBERSHIP` on the interface
@@ -1563,6 +1578,38 @@ mod tests {
             assert!(
                 started.elapsed() >= Duration::from_millis(40),
                 "the wait that found the wake left it quiet"
+            );
+        }
+
+        /// A wake is read only by a wait that found it ready: one past the set, which the wait
+        /// did not name to the kernel, keeps its word for the next wait, which ends at once.
+        /// CONTROL: the first wait is the bounded look. Turned red by a wait that reads every wake
+        /// it was given, ready or not.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_wake_the_wait_did_not_find_ready_keeps_its_word() {
+            use std::time::{Duration, Instant};
+            use std::vec::Vec;
+
+            let (quiet, _sender) = pair();
+            let wake = PosixWaits.wake().expect("the host makes a wake");
+            let mut set: Vec<LinkWait> = (0..crate::WAIT_SET_SOCKETS)
+                .map(|_| LinkWait::input(quiet.input_wait().expect("a descriptor")))
+                .collect();
+            set.push(LinkWait::input(wake.on));
+            wake.waker.wake_by_ref();
+            let started = Instant::now();
+            PosixWaits.wait(&set, 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(1_000),
+                "CONTROL: a wait past the set is the bounded look"
+            );
+            let started = Instant::now();
+            PosixWaits.wait(&[LinkWait::input(wake.on)], 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(1_000),
+                "the wake the first wait did not look at was left ready, took {:?}",
+                started.elapsed()
             );
         }
     }

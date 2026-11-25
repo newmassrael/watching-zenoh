@@ -2127,6 +2127,55 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
+    /// A burst of a member's datagrams is read by one read, each a step of its own, and the links
+    /// are moved once, by the step that finds the group's socket empty, as one receive of a link's
+    /// is read. Turned red by a step that moves the links after each group datagram (the group's
+    /// `Stepped::Read` return taken out of `CoopEngine::step`): a build of threads then ends the
+    /// read after the first datagram, and one of a single thread moves the links once a datagram.
+    #[test]
+    fn a_burst_of_a_members_datagrams_moves_the_links_once() {
+        const FRAMES: u64 = 8;
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        let heard = subscribe(&session, "demo/burst/**");
+        // The member is admitted, and the session's group running, before the burst.
+        let mut first = beacon(7);
+        first.extend_from_slice(&frame_of_puts(0, &["demo/burst/0"]));
+        hand_in(&network, 1, 7, &first);
+        for _ in 0..200 {
+            if !heard.lock().unwrap().is_empty() {
+                break;
+            }
+            SessionDrive::read(&*session, false).expect("the session reads");
+        }
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1,
+            "CONTROL: the member's first put"
+        );
+        for sn in 1..=FRAMES {
+            hand_in(
+                &network,
+                1,
+                7,
+                &frame_of_puts(sn, &[&format!("demo/burst/{sn}")]),
+            );
+        }
+        let polls = session.link_polls();
+        SessionDrive::read(&*session, false).expect("the session reads");
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1 + FRAMES as usize,
+            "every datagram of the burst, by the one read"
+        );
+        assert_eq!(
+            session.link_polls() - polls,
+            1,
+            "one move of the links for the burst"
+        );
+        SessionDrive::close(&*session);
+    }
+
     /// What a member sends is counted with the session's transports (`transport-stats`): the
     /// datagram's bytes once, its two transport messages (the member's beacon and its frame) and
     /// each record of the frame once, whatever the walks its delivery took.

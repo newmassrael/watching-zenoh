@@ -1928,6 +1928,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// How often the links were moved on ([`Self::poll_links`]), which the tests count.
     #[cfg(test)]
     link_polls: core::cell::Cell<usize>,
+    /// How many steps in a row read a group's datagram and moved nothing, up to
+    /// the deploy `GROUP_READS_PER_MOVE` limit (`CoopEngine::step`).
+    #[cfg(feature = "group")]
+    group_reads: usize,
     /// How often a pass of the session's tasks read the clock to wake its timers
     /// ([`Self::run_tasks`]), which the tests count.
     #[cfg(test)]
@@ -4617,6 +4621,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             clock_reads: core::cell::Cell::new(0),
             #[cfg(test)]
             link_polls: core::cell::Cell::new(0),
+            #[cfg(feature = "group")]
+            group_reads: 0,
             #[cfg(test)]
             task_clock_reads: core::cell::Cell::new(0),
             #[cfg(feature = "ticker")]
@@ -6507,7 +6513,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // reads the last of it, by that step's own reading below. A timer is so late by one
         // receive's reading at most, as zenoh-pico's read task looks at its lease and keep-alive
         // after the batch it read.
-        let going_on = was_idle && core.transport.links.holds_input();
+        // A group's burst goes on the same way, the step before having read one of its datagrams.
+        #[cfg(feature = "group")]
+        let group_going_on = core.group_reads > 0;
+        #[cfg(not(feature = "group"))]
+        let group_going_on = false;
+        let going_on = was_idle && (group_going_on || core.transport.links.holds_input());
         if going_on {
             core.run_tasks_at(None);
         } else {
@@ -6522,9 +6533,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // a message, and batching would save nothing. A round that was not empty took no record (a
         // step from inside a callback, or while another thread hands a round out), and that step
         // moves the links as any other. Only a link's input counts: what it took in one receive
-        // ends, where a group takes a datagram of its socket each step for as long as they come.
-        if was_idle && !self.samples.is_idle() && core.transport.links.holds_input() {
-            return Stepped::Read;
+        // ends. A group takes a datagram of its socket a step for as long as they come, so its
+        // input goes on so up to `GROUP_READS_PER_MOVE` datagrams in a row, and the step that finds
+        // none, or the one past that bound, moves the links.
+        if was_idle && !self.samples.is_idle() {
+            if core.transport.links.holds_input() {
+                return Stepped::Read;
+            }
+            #[cfg(feature = "group")]
+            if core.group_reads < caps::GROUP_READS_PER_MOVE && core.transport.group_holds_input() {
+                core.group_reads += 1;
+                return Stepped::Read;
+            }
+        }
+        #[cfg(feature = "group")]
+        {
+            core.group_reads = 0;
         }
         let now_us = core.now_us();
         // The timers the steps of this receive passed over.
