@@ -456,6 +456,19 @@ pub enum Accepted<P> {
     Broken,
 }
 
+/// Put `wait` in `waits` within the room reserved for it, or say there was none: the buffer is
+/// never grown, so a read after the open allocates nothing.
+fn put_wait(waits: &mut Vec<LinkWait>, wait: LinkWait) -> bool {
+    let len = waits.len();
+    let Some(row) = waits.spare_capacity_mut().first_mut() else {
+        return false;
+    };
+    row.write(wait);
+    // SAFETY: the row past the last one was written just above, and lies within the capacity.
+    unsafe { waits.set_len(len + 1) };
+    true
+}
+
 /// What a read waits for before it steps the session, with nothing of the session held.
 pub enum IdleWait {
     /// Nothing: a link holds input already, or its own loop waits for it.
@@ -748,17 +761,20 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
 {
     /// The faces of a session over `links`, `dial` the dial role's at the first place: `places`
     /// places in all (one at least, the dial role's), each face with a dial under way at most, and
-    /// `waits` waits a read makes at once, reserved now. The ports are the open's, taken as it
-    /// listens ([`Self::listen`]). Faces taken after are numbered from 1.
-    pub fn new(links: L, dial: F, places: usize, waits: usize) -> Self {
-        Self {
+    /// `waits` waits a read makes at once, reserved now; `None` when the heap refuses that room,
+    /// which an open answers as it answers an arena that cannot be reserved. The ports are the
+    /// open's, taken as it listens ([`Self::listen`]). Faces taken after are numbered from 1.
+    pub fn new(links: L, dial: F, places: usize, waits: usize) -> Option<Self> {
+        let mut room = Vec::new();
+        room.try_reserve_exact(waits).ok()?;
+        Some(Self {
             links,
             faces: P::with_dial(dial, places),
             listeners: Vec::new(),
-            waits: Some(Vec::with_capacity(waits)),
+            waits: Some(room),
             next_face: 1,
             records: core::marker::PhantomData,
-        }
+        })
     }
 
     /// The network the links are opened on.
@@ -1079,9 +1095,10 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
                 IdleWait::None
             };
         };
-        // Past the room the open reserved, a push would grow the buffer after the open.
-        let room = waits.capacity();
         let mut holds = false;
+        // A wait past the room the open reserved is not made: the read looks again at once rather
+        // than grow the buffer after the open.
+        let mut look_again = false;
         let mut own_loop = false;
         let mut dial_left_ms: Option<u64> = None;
         let mut now = None;
@@ -1100,11 +1117,12 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
                         // Its input waits in the stack until another link gives a receive
                         // buffer back, which that link's own input wakes the read for.
                     } else if let Some(on) = wire.input {
-                        if wire.link.owes_write() {
-                            waits.push(LinkWait::input_or_room(on));
+                        let wait = if wire.link.owes_write() {
+                            LinkWait::input_or_room(on)
                         } else {
-                            waits.push(LinkWait::input(on));
-                        }
+                            LinkWait::input(on)
+                        };
+                        look_again |= !put_wait(&mut waits, wait);
                     } else {
                         own_loop = true;
                     }
@@ -1121,16 +1139,17 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             self.waits = Some(waits);
             return IdleWait::None;
         }
-        let mut look_again = false;
         // Asked at each wait: a listener whose own work is under way (a WebSocket handshake) or
         // that takes no connection now gives no wait on its port until that changes.
         for listening in &self.listeners {
             match listening.listener.input_wait() {
-                Some(on) => waits.push(LinkWait::input(on)),
+                Some(on) => look_again |= !put_wait(&mut waits, LinkWait::input(on)),
                 None => look_again = true,
             }
         }
-        waits.extend(others);
+        for other in others {
+            look_again |= !put_wait(&mut waits, other);
+        }
         let most = match dial_left_ms {
             Some(left) => u32::try_from(left).map_or(most, |left| left.min(most)),
             None => most,
@@ -1150,13 +1169,10 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             _ => None,
         };
         // A sleep a wake beside it ends is a wait on the wake.
-        if ms.is_some() {
-            waits.extend(beside);
+        if let (Some(_), Some(wake)) = (ms, beside) {
+            // Refused, the wait still ends at its bound, which is no longer than the sleep.
+            put_wait(&mut waits, wake);
         }
-        debug_assert!(
-            waits.capacity() == room,
-            "a read waited on more than the open reserved room for ({room})"
-        );
         match ms {
             Some(ms) if !waits.is_empty() => IdleWait::Input { on: waits, ms },
             // A wait that takes no buffer leaves it here.
@@ -1447,6 +1463,7 @@ mod tests {
 
     fn supervisor(link: TestLink, faces: usize) -> LinkSupervisor<Net, TestFace> {
         LinkSupervisor::new(Net, TestFace { id: 100, link }, faces, 2)
+            .expect("the heap holds two waits")
     }
 
     /// A dial answers what its network answered once, and names the endpoint it reaches.
@@ -1611,7 +1628,8 @@ mod tests {
         #[cfg(not(feature = "listen"))]
         let link = Link::Waiting { at_us: 0 };
         let mut faces: LinkSupervisor<Net, TestFace, OneFace<TestFace>> =
-            LinkSupervisor::new(Net, TestFace { id: 100, link }, 2, 2);
+            LinkSupervisor::new(Net, TestFace { id: 100, link }, 2, 2)
+                .expect("the heap holds two waits");
         assert!(!faces.takes_faces());
         assert!(
             supervisor(Link::Waiting { at_us: 0 }, 2).takes_faces(),
@@ -1944,6 +1962,33 @@ mod tests {
                     assert_eq!(ms, 10);
                 }
                 _ => panic!("a wait on the link and the group"),
+            }
+        }
+    }
+
+    /// A read with more to wait on than the open reserved room for waits on what fits and looks
+    /// again at once, and the buffer is not grown: what did not fit is looked at after a bound of
+    /// a millisecond, not missed for the whole wait. CONTROL: the same read with room for both
+    /// waits on both for as long as it was asked. Turned red by a wait past the room that grows the
+    /// buffer, or by one dropped without bounding the wait.
+    #[test]
+    fn a_read_past_its_reserved_room_looks_again_and_grows_nothing() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let first = LinkWait::input(WaitOn::Socket(3));
+        let group = LinkWait::input(WaitOn::Socket(9));
+        for (room, waited, ms) in [(2, vec![first, group], 10), (1, vec![first], 1)] {
+            let link = Link::Up(waited_wire(&local, WaitOn::Socket(3), false));
+            let mut faces: LinkSupervisor<Net, TestFace> =
+                LinkSupervisor::new(Net, TestFace { id: 100, link }, 1, room)
+                    .expect("the heap holds the waits");
+            match faces.idle_wait(10, &mut || 0u64, [group], None) {
+                IdleWait::Input { on, ms: bound } => {
+                    assert_eq!(on, waited, "room {room}");
+                    assert_eq!(bound, ms, "room {room}");
+                    assert_eq!(on.capacity(), room, "the buffer is not grown");
+                }
+                _ => panic!("a wait on the link, room {room}"),
             }
         }
     }

@@ -4258,6 +4258,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let face_rows = face_event_rows(config.max_faces, config.groups.len());
         // The faces' links keep the places the registry lends their tables at: one table of them.
         let places = lent.registry.places();
+        // A place for each face the registry lent a set for, each face with its dial, and the waits
+        // a read makes at once, reserved here: none grows after.
+        let supervised = LinkSupervisor::new(
+            links,
+            Face {
+                id: DIAL_FACE,
+                link: Link::Waiting { at_us: u64::MAX },
+                replay: Replay::idle(),
+                #[cfg(feature = "connectivity")]
+                told: FaceTold::default(),
+            },
+            places,
+            wait_room,
+        )
+        .ok_or(OpenError::Arena(ArenaRefused::Lend(
+            LendRefused::Exhausted {
+                asked: Some(wait_room.saturating_mul(core::mem::size_of::<
+                    wz_runtime_coop::session_drive::LinkWait,
+                >())),
+                left: 0,
+            },
+        )))?;
         // Each field is made in the order its makers need: the config and policy are read before
         // they are moved.
         let core = Core {
@@ -4267,20 +4289,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             transport: TransportState {
                 #[cfg(feature = "listen")]
                 tx_pool_short: lent.tx_pool_short,
-                // A place for each face the registry lent a set for, each face with its dial, and
-                // the waits a read makes at once, reserved here: none grows after.
-                links: LinkSupervisor::new(
-                    links,
-                    Face {
-                        id: DIAL_FACE,
-                        link: Link::Waiting { at_us: u64::MAX },
-                        replay: Replay::idle(),
-                        #[cfg(feature = "connectivity")]
-                        told: FaceTold::default(),
-                    },
-                    places,
-                    wait_room,
-                ),
+                links: supervised,
                 endpoints: lent.transport.endpoints,
                 #[cfg(feature = "group")]
                 groups: Vec::new(),
