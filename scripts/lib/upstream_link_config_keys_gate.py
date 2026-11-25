@@ -40,10 +40,12 @@ are exactly three such blocks at the pin — udp (`iface`, `join`, `ttl`), seria
     DIFFERENT artifact than the first:
       READ    — wz declares it as a locator config key, i.e. some
                 `crates/**/src/**.rs` carries `const <NAME>: &str = "<key>";`.
-                That is wz's own spelling for "this key has a reader"
-                (`LOCATOR_MCAST_TTL_KEY`, `SERIAL_BAUDRATE_KEY`,
-                `LOCATOR_FILE_MASK_KEY`), and it is a declaration rather than a
-                mention, so a key named only in a doc comment does not count.
+                That is wz's own spelling for "this key has a reader":
+                `TTL_KEY`, which the group locator parser (`parse_group_locator`)
+                reads off a group endpoint, `SERIAL_BAUDRATE_KEY`, and
+                `UNIXPIPE_FILE_MASK_KEY`, which the locator grammar reads for the
+                unixpipe link. It is a declaration rather than a mention, so a key
+                named only in a doc comment does not count.
       NAMED   — the atom `transport-link-<scheme>` NAMES the key in its live
                 reason in the atomic store. That is the register admitting the
                 gap, which is the honest state for a key wz has not built.
