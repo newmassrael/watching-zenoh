@@ -630,10 +630,223 @@ impl SceSink for Head {
     }
 }
 
+/// The bytes of a plain Put on a key a declaration names whole, up to the payload's length: what
+/// [`write_plain_put`] writes before that length for `(mapping_id, None, qos)`, written by that
+/// writer once, when a publisher's plain way is stated, so a put copies the head and writes only
+/// the length and the payload. The room is the longest such head: the header, a three-byte id,
+/// the QoS extension's header and its two-byte value, and the Put's header.
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PutHead {
+    bytes: [u8; PUT_HEAD_ROOM],
+    len: u8,
+    id: crate::wire_id::ExprId,
+    qos: crate::sample::QosLevel,
+}
+
+/// The room of a [`PutHead`].
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+const PUT_HEAD_ROOM: usize = 8;
+
+/// The room a [`PutHead`] and the longest length of a payload take together: the head's eight
+/// bytes and a `u32`'s five.
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+const PUT_ROOM: usize = 13;
+
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+impl PutHead {
+    /// The head of a plain Put on declaration `mapping_id` with `qos`; `None` for the id `0`,
+    /// which is the literal key, whose text a head does not hold.
+    pub fn new(mapping_id: crate::wire_id::ExprId, qos: crate::sample::QosLevel) -> Option<Self> {
+        if mapping_id == 0 {
+            return None;
+        }
+        // A byte that rides no extension is sent as the default one, which is what the send then
+        // reads its congestion control and conduit from.
+        let qos = if qos_rides(qos) {
+            qos
+        } else {
+            crate::sample::QosLevel::DEFAULT
+        };
+        let mut written = Head::default();
+        write_push(
+            &mut written,
+            mapping_id,
+            None,
+            true,
+            &[],
+            qos,
+            &BodyParts::NONE,
+        )
+        .ok()?;
+        // The empty payload's length closes what the writer wrote, one zero byte.
+        let (&length, head) = written.0.split_last()?;
+        if length != 0 {
+            return None;
+        }
+        let mut bytes = [0u8; PUT_HEAD_ROOM];
+        bytes.get_mut(..head.len())?.copy_from_slice(head);
+        Some(Self {
+            bytes,
+            len: u8::try_from(head.len()).ok()?,
+            id: mapping_id,
+            qos,
+        })
+    }
+
+    /// The declaration the head names its key by.
+    pub fn id(&self) -> crate::wire_id::ExprId {
+        self.id
+    }
+
+    /// The QoS byte of the Put, the default one when it carries none.
+    pub fn qos(&self) -> crate::sample::QosLevel {
+        self.qos
+    }
+
+    /// Whether this is the head of a Put on `key`: the head's declaration with nothing after it.
+    pub fn names(&self, key: crate::wire_key::WireKey<'_>) -> bool {
+        matches!(key, crate::wire_key::WireKey::Id(id) if id.get() == self.id)
+    }
+
+    /// The bytes [`Self::write`] writes for `value`.
+    pub fn len_with(&self, value: &[u8]) -> usize {
+        usize::from(self.len)
+            .saturating_add(vle_len(value.len() as u64))
+            .saturating_add(value.len())
+    }
+
+    /// The Put carrying `value` into `sink`: the head and the payload's length in one write, then
+    /// the payload, the bytes [`write_plain_put`] writes for the head's key and QoS. A payload past
+    /// the protocol's `u32` length is refused with `LengthOutOfRange` before a byte is written, as
+    /// that writer refuses it.
+    pub fn write<S: SceSink>(&self, sink: &mut S, value: &[u8]) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
+        let length = u32::try_from(value.len()).map_err(|_| CodecError::LengthOutOfRange)?;
+        let head_len = usize::from(self.len);
+        let mut out = [0u8; PUT_ROOM];
+        if let (Some(to), Some(from)) = (out.get_mut(..head_len), self.bytes.get(..head_len)) {
+            to.copy_from_slice(from);
+        }
+        let length_len = out.get_mut(head_len..).map_or(0, |rest| {
+            wz_codecs::vle::encode_zint(rest, u64::from(length))
+        });
+        sink.write_bytes(
+            out.get(..head_len.saturating_add(length_len))
+                .unwrap_or(&out),
+        )?;
+        sink.write_bytes(value)?;
+        Ok(())
+    }
+}
+
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::push_build::build_push_literal;
+
+    /// A Put written from its head is the Put the direct writer writes for the head's key and QoS:
+    /// for ids of every VLE width, QoS bytes that ride and the one that does not, and payloads
+    /// whose lengths take one, two and three VLE bytes; and the length it states is what it
+    /// writes. Turned red by a head that differs from the writer's in a byte, or by a payload
+    /// length written another way.
+    #[test]
+    fn a_put_written_from_its_head_is_the_direct_writers_bytes() {
+        let mut compared = 0usize;
+        for id in [1u16, 127, 128, 300, 16_383, 16_384, 65_535] {
+            for raw in [
+                0x05u8,
+                0x1a,
+                0x00,
+                0xff,
+                crate::sample::QosLevel::DEFAULT.raw,
+            ] {
+                let qos = crate::sample::QosLevel::from_raw(raw);
+                let head = PutHead::new(id, qos).expect("an id that is not the literal's");
+                for payload in [
+                    &b""[..],
+                    &b"x"[..],
+                    &[7u8; 127][..],
+                    &[9u8; 300][..],
+                    &[1u8; 20_000][..],
+                ] {
+                    let mut want = alloc::vec::Vec::new();
+                    write_plain_put(
+                        &mut sce_forge_runtime::codec::VecSink::new(&mut want),
+                        id,
+                        None,
+                        payload,
+                        qos,
+                    )
+                    .expect("a Vec grows");
+                    let mut got = alloc::vec::Vec::new();
+                    head.write(
+                        &mut sce_forge_runtime::codec::VecSink::new(&mut got),
+                        payload,
+                    )
+                    .expect("a Vec grows");
+                    assert_eq!(
+                        got,
+                        want,
+                        "id {id} qos {raw:#04x} {} payload bytes",
+                        payload.len()
+                    );
+                    assert_eq!(head.len_with(payload), got.len(), "the stated length");
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 7 * 5 * 5);
+    }
+
+    /// The literal key has no head, and a head names its own declaration alone: not that
+    /// declaration with a suffix after it, not another declaration, not the literal. Turned red by
+    /// a head that would be written for a key it does not name.
+    #[test]
+    fn a_head_names_its_own_declaration_alone() {
+        fn under(
+            text: &'static str,
+            id: u16,
+            literal: &'static str,
+        ) -> crate::wire_key::WireKey<'static> {
+            let id = crate::wire_key::MappedId::new(id).expect("not zero");
+            crate::named_key::NamedKey::under(text, crate::named_key::Prefix::of(id, literal))
+                .expect("a key under its declaration")
+                .wire()
+        }
+        let qos = crate::sample::QosLevel::DEFAULT;
+        assert_eq!(PutHead::new(0, qos), None, "the literal key has no head");
+        let head = PutHead::new(7, qos).expect("a declared id");
+        assert_eq!(head.id(), 7);
+        assert!(head.names(under("demo/x", 7, "demo/x")));
+        assert!(
+            !head.names(under("demo/x/y", 7, "demo/x")),
+            "a suffix after it"
+        );
+        assert!(
+            !head.names(under("demo/x", 8, "demo/x")),
+            "another declaration"
+        );
+        let literal = crate::named_key::NamedKey::literal("demo/x").expect("a key");
+        assert!(!head.names(literal.wire()), "the literal");
+    }
+
+    /// The QoS byte a head states is the one its Put carries: a byte that rides its extension is
+    /// kept, and without `pubsub-qos` no extension rides, so it is the default one. Turned red by a
+    /// head whose send would read a congestion control its bytes do not carry.
+    #[test]
+    fn a_heads_qos_is_the_byte_its_put_carries() {
+        let riding = crate::sample::QosLevel::from_raw(0x1a);
+        let head = PutHead::new(7, riding).expect("a declared id");
+        #[cfg(feature = "pubsub-qos")]
+        assert_eq!(head.qos(), riding);
+        #[cfg(not(feature = "pubsub-qos"))]
+        assert_eq!(head.qos(), crate::sample::QosLevel::DEFAULT);
+        let plain = PutHead::new(7, crate::sample::QosLevel::DEFAULT).expect("a declared id");
+        assert_eq!(plain.qos(), crate::sample::QosLevel::DEFAULT);
+    }
 
     /// The worked-out length of a VLE is the bytes the codec's writer writes, at the edges of
     /// every width: one byte up to seven bits, one more for each seven after, and nine past 56.

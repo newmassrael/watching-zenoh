@@ -31,8 +31,9 @@
 //! The pacer wakes a little after the loop's own keepalive deadline and, if the
 //! line is still idle, emits through the same
 //! [`wz_session_core::drive::check_keepalive_deadline`] the loop uses. That function needs no engine and
-//! takes the idleness from `last_outbound_at`, so the two emitters cannot send
-//! twice for one idle window: whichever runs first re-stamps the window. The
+//! ends the keepalive tick it judges under the link's stamps' lock, so the two
+//! emitters cannot send twice for one tick: whichever ends it first answers
+//! for it, and the other finds it ended. The
 //! slack is what makes the loop the normal emitter and this one the backstop; a
 //! healthy session sees no frame from here.
 //!
@@ -111,8 +112,9 @@ fn step(weak: &Weak<SessionLinkActions>, clock: &TokioTime, generation: u64) -> 
         if now < backstop {
             return Some(backstop - now);
         }
-        // Past the backstop, so `now >= due` and the check either emits or
-        // finds the transport gone; it cannot answer `WithinInterval`.
+        // Past the backstop, so `now >= due`: the check ends the tick, or finds
+        // it ended by the loop, or finds the transport gone. Either of the first
+        // two moves the next deadline on, so the loop sleeps at its head.
         if check_keepalive_timed(&actions, now) == KeepAliveCheckOutcome::Inactive {
             return None;
         }

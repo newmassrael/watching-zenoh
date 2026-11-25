@@ -3076,6 +3076,50 @@ fn the_tables_bytes_are_the_same_in_a_const_as_at_run_time() {
     assert_eq!(SessionTables::<Calls, Lent>::arena_bytes(&past), None);
 }
 
+/// A plain way kept on a write filter carries the Put's head for the declaration that names its
+/// key, written for the QoS the way is sent with, and none for the whole key. Turned red by a way
+/// that keeps no head, or one written for another id or another QoS byte than the way's.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+#[test]
+fn a_plain_way_carries_the_head_of_its_declaration() {
+    use crate::lent_push::PutHead;
+    use crate::publish_options::PlainPutParams;
+    use crate::sample::QosLevel;
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/x").unwrap();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "demo/x", false)
+        .unwrap()
+        .handle;
+    let head = |tables: &Tables| {
+        tables
+            .write_filters()
+            .get(filter)
+            .and_then(|row| row.plain())
+            .expect("a way kept")
+            .head
+    };
+    let riding = QosLevel::from_raw(0x1a);
+    for qos in [None, Some(riding)] {
+        let params = PlainPutParams {
+            destination: Locality::Any,
+            qos,
+            reliable: true,
+            express: false,
+            priority: crate::qos::Priority::DEFAULT,
+        };
+        tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(declared.id))));
+        assert_eq!(
+            head(&tables),
+            PutHead::new(declared.id, qos.unwrap_or(QosLevel::DEFAULT)),
+            "the head of the declaration, qos {qos:?}"
+        );
+        assert!(head(&tables).is_some(), "a declared id has a head");
+        tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(0))));
+        assert_eq!(head(&tables), None, "the whole key has none");
+    }
+}
+
 /// A plain way kept on a write filter keeps the row of the declaration that names its key, found
 /// by its id when the holder gave none, and none for a key that names no declaration; a key named
 /// at that row is named as by the declaration's id; a row that no longer holds the id is passed

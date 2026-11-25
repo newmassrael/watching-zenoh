@@ -105,8 +105,8 @@ pub enum LeaseCheckOutcome {
 }
 
 /// R311kx — outcome of a single keepalive TX deadline check
-/// ([`crate::drive::check_keepalive_deadline`]) against the
-/// `last_outbound_at` / `established_at` baseline stamps. The TX twin of
+/// ([`crate::drive::check_keepalive_deadline`]) at the end of the link's
+/// keepalive tick. The TX twin of
 /// [`LeaseCheckOutcome`]: that enum reports whether the PEER's silence
 /// expired the session; this one reports whether OUR silence warranted a
 /// KeepAlive emit. Ungated (like [`LeaseCheckOutcome`]) so the
@@ -121,14 +121,14 @@ pub enum KeepAliveCheckOutcome {
     /// transport (spawned after `_z_open`, suspended on RECONNECTING,
     /// retired on CLOSED).
     Inactive,
-    /// The line spoke within the session's keepalive interval
-    /// (`SessionLinkActions::keepalive_interval_ms`; the `last_outbound_at`
-    /// stamp is fresh) — no emit, the
-    /// pico `_transmitted == true` suppression arm.
+    /// No emit: the tick has not run out
+    /// (`SessionLinkActions::keepalive_interval_ms`), the line spoke in the
+    /// tick that ended (the pico `_transmitted == true` suppression arm), or
+    /// another check of the same tick ended it first.
     WithinInterval,
-    /// The idle window elapsed: a KeepAlive was emitted through
-    /// [`crate::session_actions::SessionLinkActions::send_keep_alive`]
-    /// (which re-stamps `last_outbound_at`, opening the next window).
+    /// A tick the line was silent in ended: a KeepAlive was emitted through
+    /// [`crate::session_actions::SessionLinkActions::send_keep_alive`],
+    /// and the next tick starts at the check.
     Emitted,
 }
 
