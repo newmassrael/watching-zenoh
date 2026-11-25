@@ -459,14 +459,15 @@ pub unsafe extern "C" fn z_closure_matching_status_call(
 
 // --- matching-listener ownership family ------------------------------------
 
+// A listener's drop is its undeclaration, a door of its own.
+crate::abi::impl_type_facts!(z_owned_matching_listener_t, None);
+
 /// Null an owned matching listener (pico `z_internal_matching_listener_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_matching_listener_null(
     listener: *mut z_owned_matching_listener_t,
 ) {
-    if !listener.is_null() {
-        *listener = z_owned_matching_listener_t::null_value();
-    }
+    crate::abi::obj_null(listener.cast(), <z_owned_matching_listener_t>::facts());
 }
 
 /// Whether an owned matching listener is live (pico
@@ -475,7 +476,7 @@ pub unsafe extern "C" fn z_internal_matching_listener_null(
 pub unsafe extern "C" fn z_internal_matching_listener_check(
     listener: *const z_owned_matching_listener_t,
 ) -> bool {
-    !listener.is_null() && !(*listener).handle.is_null()
+    crate::abi::obj_check(listener.cast())
 }
 
 /// Borrow an owned matching listener (pico `z_matching_listener_loan`).
@@ -509,14 +510,15 @@ pub unsafe extern "C" fn z_matching_listener_take(
     listener: *mut z_owned_matching_listener_t,
     src: *mut z_moved_matching_listener_t,
 ) -> ZResult {
-    guarded(|| {
-        if listener.is_null() || src.is_null() {
-            return Z_ERR_NULL;
-        }
-        *listener =
-            core::mem::replace(&mut (*src)._this, z_owned_matching_listener_t::null_value());
-        Z_OK
-    })
+    if listener.is_null() || src.is_null() {
+        return Z_ERR_NULL;
+    }
+    crate::abi::obj_move(
+        listener.cast(),
+        src.cast(),
+        <z_owned_matching_listener_t>::facts(),
+    );
+    Z_OK
 }
 
 /// Release a matching listener without retracting the watch (pico

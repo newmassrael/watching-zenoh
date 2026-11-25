@@ -1338,6 +1338,26 @@ mod tests {
             core::mem::size_of::<z_owned_keyexpr_t>()
         );
         assert_eq!(bytes_of(&CLOSURE), 3 * core::mem::size_of::<usize>());
+        {
+            use crate::matching::z_owned_matching_listener_t;
+            use crate::string_array::z_owned_string_array_t;
+            assert_eq!(
+                bytes_of(z_owned_string_array_t::facts()),
+                core::mem::size_of::<z_owned_string_array_t>()
+            );
+            assert_eq!(
+                bytes_of(z_owned_matching_listener_t::facts()),
+                core::mem::size_of::<z_owned_matching_listener_t>()
+            );
+        }
+        #[cfg(all(feature = "unstable-api", feature = "query"))]
+        {
+            use crate::cancellation::z_owned_cancellation_token_t;
+            assert_eq!(
+                bytes_of(z_owned_cancellation_token_t::facts()),
+                core::mem::size_of::<z_owned_cancellation_token_t>()
+            );
+        }
         #[cfg(feature = "liveliness")]
         {
             use crate::liveliness::z_owned_liveliness_token_t;
