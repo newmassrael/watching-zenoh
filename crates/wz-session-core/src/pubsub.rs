@@ -3583,7 +3583,7 @@ impl<P: Storage> PeerNaming<P> {
             <PeerAliases<P> as PeerIds<KeyText<P>, P::Keys>>::lend(
                 &mut self.aliases,
                 &self.keys,
-                crate::peer_tables::PeerSlot::Aliases,
+                crate::row_pool::PeerSlot::Aliases,
             )
         }
     }
@@ -3596,7 +3596,7 @@ impl<P: Storage> PeerNaming<P> {
             crate::id_map::PairedIds::new(
                 &self.aliases,
                 &self.keys,
-                crate::peer_tables::PeerSlot::Aliases,
+                crate::row_pool::PeerSlot::Aliases,
             )
         }
     }
@@ -3609,7 +3609,7 @@ impl<P: Storage> PeerNaming<P> {
             <PeerAliases<P> as PeerIds<KeyText<P>, P::Keys>>::release(
                 &mut self.aliases,
                 &self.keys,
-                crate::peer_tables::PeerSlot::Aliases,
+                crate::row_pool::PeerSlot::Aliases,
             );
         }
     }
@@ -4101,7 +4101,7 @@ impl<P: Storage> InterestSide<P> {
             <InterestTable<P> as PeerSeq<InboundSubInterest<P>, P::Keys>>::lend(
                 rows,
                 keys,
-                crate::peer_tables::PeerSlot::Interests,
+                crate::row_pool::PeerSlot::Interests,
             )
         }
     }
@@ -4113,7 +4113,7 @@ impl<P: Storage> InterestSide<P> {
             <InterestTable<P> as PeerSeq<InboundSubInterest<P>, P::Keys>>::lend_ref(
                 &self.rows,
                 &self.keys,
-                crate::peer_tables::PeerSlot::Interests,
+                crate::row_pool::PeerSlot::Interests,
             )
         }
     }
@@ -4126,7 +4126,7 @@ impl<P: Storage> InterestSide<P> {
             <InterestTable<P> as PeerSeq<InboundSubInterest<P>, P::Keys>>::release(
                 &mut self.rows,
                 &self.keys,
-                crate::peer_tables::PeerSlot::Interests,
+                crate::row_pool::PeerSlot::Interests,
             );
         }
     }

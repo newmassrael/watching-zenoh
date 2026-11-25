@@ -134,8 +134,10 @@ storage-profile = []
 # or for a session of one face in spans of each table's own (`peer_tables::PeerPools`). Named by
 # an engine that holds faces besides its dial (`wz-capi-coop`'s `listen` and `group`). Off, a
 # build that holds one face (pico's client), those tables are inline at one peer's bound in the
-# face's tables, as the static policy's are, and none of the pools' code is in its text.
-peer-row-pools = []
+# face's tables, as the static policy's are, and none of the pools' code is in its text. The
+# directory of where those rows lie is the peer tables' (`peer_tables`), so it takes the storage
+# profile they are compiled under.
+peer-row-pools = ["storage-profile"]
 
 # `bounded-heapless` selects the FIXED-CAPACITY backing for
 # `bounded::BoundedVec` / `bounded::BoundedString` while `alloc` stays on: every

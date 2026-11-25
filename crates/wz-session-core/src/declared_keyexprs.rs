@@ -30,7 +30,7 @@ use alloc::string::String;
 use crate::bounded::{CapacityFull, KeyBacking, KeyMaker, KeyUnkept, Profile, Storage};
 use crate::caps;
 use crate::id_map::{IdMap, IdRead, KeyText, PeerIds};
-use crate::peer_tables::PeerSlot;
+use crate::row_pool::PeerSlot;
 use crate::wire_id::ExprId;
 use crate::wireexpr_resolve::{KeyexprOut, OwnMappingSpace};
 

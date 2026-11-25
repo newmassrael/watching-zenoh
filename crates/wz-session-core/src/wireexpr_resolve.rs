@@ -58,7 +58,7 @@ use hashbrown::HashMap;
 use crate::bounded::{BoundedString, InlineKeys, KeyBacking, Static, Storage};
 use crate::caps;
 use crate::id_map::{IdRead, PairedIds, PeerAliases};
-use crate::peer_tables::PeerSlot;
+use crate::row_pool::PeerSlot;
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
 use sce_forge_runtime::codec::Lent;

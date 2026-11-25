@@ -29,7 +29,7 @@ use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap, IdRead, KeyText, PeerIds};
 #[cfg(feature = "storage-profile")]
-use crate::peer_tables::PeerSlot;
+use crate::row_pool::PeerSlot;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::transport_profile::owned::DeclareOwnedVariant;

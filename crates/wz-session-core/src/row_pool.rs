@@ -2093,21 +2093,15 @@ pub trait PeerSeq<T, H>: Default {
     /// # Safety
     /// `keys` is the handle of the owner that holds this sequence, and `slot` the one it attached
     /// the sequence's rows to: the owner lends each of its tables the one space it attached it to.
-    unsafe fn lend<'a>(
-        &'a mut self,
-        keys: &'a H,
-        slot: crate::peer_tables::PeerSlot,
-    ) -> Self::Mut<'a>;
+    unsafe fn lend<'a>(&'a mut self, keys: &'a H, slot: crate::row_pool::PeerSlot)
+        -> Self::Mut<'a>;
 
     /// The sequence lent `keys` for its slot `slot`, to read.
     ///
     /// # Safety
     /// As [`Self::lend`]'s.
-    unsafe fn lend_ref<'a>(
-        &'a self,
-        keys: &'a H,
-        slot: crate::peer_tables::PeerSlot,
-    ) -> Self::Ref<'a>;
+    unsafe fn lend_ref<'a>(&'a self, keys: &'a H, slot: crate::row_pool::PeerSlot)
+        -> Self::Ref<'a>;
 
     /// Give back the rows the sequence holds where they lie apart from it, through `keys`: what its
     /// owner does before it drops the sequence or changes its handle. Nothing for a sequence that keeps
@@ -2115,7 +2109,7 @@ pub trait PeerSeq<T, H>: Default {
     ///
     /// # Safety
     /// As [`Self::lend`]'s.
-    unsafe fn release(&mut self, keys: &H, slot: crate::peer_tables::PeerSlot) {
+    unsafe fn release(&mut self, keys: &H, slot: crate::row_pool::PeerSlot) {
         let _ = (keys, slot);
     }
 }
@@ -2134,11 +2128,11 @@ impl<T, const N: usize, P: Storage, H> PeerSeq<T, H> for BoundedVec<T, N, P> {
         H: 'a,
         T: 'a;
 
-    unsafe fn lend<'a>(&'a mut self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a mut Self {
+    unsafe fn lend<'a>(&'a mut self, _: &'a H, _: crate::row_pool::PeerSlot) -> &'a mut Self {
         self
     }
 
-    unsafe fn lend_ref<'a>(&'a self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a Self {
+    unsafe fn lend_ref<'a>(&'a self, _: &'a H, _: crate::row_pool::PeerSlot) -> &'a Self {
         self
     }
 }
@@ -2158,9 +2152,9 @@ impl<T, const N: usize> PeerSeq<T, crate::key_arena::LentKeys> for PooledRows<Se
     unsafe fn lend<'a>(
         &'a mut self,
         keys: &'a crate::key_arena::LentKeys,
-        slot: crate::peer_tables::PeerSlot,
+        slot: crate::row_pool::PeerSlot,
     ) -> LentRows<'a, Seq<T>, N> {
-        let space = crate::peer_tables::lent_space::<Seq<T>>(keys, slot);
+        let space = crate::row_pool::lent_space::<Seq<T>>(keys, slot);
         // SAFETY: the caller's contract: the space the owner's handle names for the slot is the one
         // this table was attached to.
         unsafe { PooledRows::lend(self, &space) }
@@ -2169,9 +2163,9 @@ impl<T, const N: usize> PeerSeq<T, crate::key_arena::LentKeys> for PooledRows<Se
     unsafe fn lend_ref<'a>(
         &'a self,
         keys: &'a crate::key_arena::LentKeys,
-        slot: crate::peer_tables::PeerSlot,
+        slot: crate::row_pool::PeerSlot,
     ) -> LentRowsRef<'a, Seq<T>, N> {
-        let space = crate::peer_tables::lent_space::<Seq<T>>(keys, slot);
+        let space = crate::row_pool::lent_space::<Seq<T>>(keys, slot);
         // SAFETY: as `lend`'s.
         unsafe { PooledRows::lend_ref(self, &space) }
     }
@@ -2179,9 +2173,9 @@ impl<T, const N: usize> PeerSeq<T, crate::key_arena::LentKeys> for PooledRows<Se
     unsafe fn release(
         &mut self,
         keys: &crate::key_arena::LentKeys,
-        slot: crate::peer_tables::PeerSlot,
+        slot: crate::row_pool::PeerSlot,
     ) {
-        let space = crate::peer_tables::lent_space::<Seq<T>>(keys, slot);
+        let space = crate::row_pool::lent_space::<Seq<T>>(keys, slot);
         // SAFETY: as `lend`'s.
         unsafe { PooledRows::lend(self, &space) }.clear();
     }
@@ -2221,6 +2215,46 @@ impl<T, const N: usize> RowList<T> for LentRows<'_, Seq<T>, N> {
     fn clear(&mut self) {
         LentRows::clear(self);
     }
+}
+
+/// Which of a face's tables a peer writes a table is: what names the space its owner lends it for
+/// each operation ([`crate::id_map::PeerIds::lend`], [`crate::row_pool::PeerSeq::lend`]). Each
+/// owner passes the slot of each of its tables, the one it attached that table's rows to. It is the
+/// row layer's vocabulary, so it lives here, compiled wherever a table can be lent a space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerSlot {
+    /// The peer's keyexpr aliases.
+    Aliases,
+    /// The subscribers the peer declared.
+    Subscribers,
+    /// The queryables the peer declared.
+    Queryables,
+    /// The tokens the peer declared.
+    Tokens,
+    /// The repeats of the peer's subscribers.
+    SubRepeats,
+    /// The repeats of the peer's queryables.
+    QueryableRepeats,
+    /// The peer's subscriber interests.
+    Interests,
+}
+
+/// The space the session's directory names for `slot`, as rows of `K`, reached through `keys`, the
+/// handle of the table's owner: none where the owner was handed no key arena, the session lent no
+/// rows of the peers, or the build keeps them inline.
+pub(crate) fn lent_space<K: RowKind>(
+    keys: &crate::key_arena::LentKeys,
+    slot: PeerSlot,
+) -> RowSpace<K> {
+    #[cfg(feature = "peer-row-pools")]
+    if let Some(space) = keys
+        .space()
+        .and_then(|keys| keys.peer_rows(|spaces| spaces.space::<K>(slot)))
+    {
+        return space;
+    }
+    let _ = (keys, slot);
+    RowSpace::none()
 }
 
 #[cfg(test)]

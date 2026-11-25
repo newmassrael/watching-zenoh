@@ -483,26 +483,8 @@ const fn decl_end(rows: usize) -> Option<usize> {
     }
 }
 
-/// Which of a face's tables a peer writes a table is: what names the space its owner lends it for
-/// each operation ([`crate::id_map::PeerIds::lend`], [`crate::row_pool::PeerSeq::lend`]). Each
-/// owner passes the slot of each of its tables, the one it attached that table's rows to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PeerSlot {
-    /// The peer's keyexpr aliases.
-    Aliases,
-    /// The subscribers the peer declared.
-    Subscribers,
-    /// The queryables the peer declared.
-    Queryables,
-    /// The tokens the peer declared.
-    Tokens,
-    /// The repeats of the peer's subscribers.
-    SubRepeats,
-    /// The repeats of the peer's queryables.
-    QueryableRepeats,
-    /// The peer's subscriber interests.
-    Interests,
-}
+/// Which of a face's tables a peer writes a table is (the row layer's, [`crate::row_pool::PeerSlot`]).
+pub use crate::row_pool::PeerSlot;
 
 /// Where the rows of every kind the peers of a session write lie: the session's directory of them,
 /// written in its arena once, at its open ([`PeerPools::lent`]), and reached through the session's
@@ -527,7 +509,7 @@ pub(crate) struct PeerSpaces {
 impl PeerSpaces {
     /// The space of `slot` as rows of kind `K`: none for a slot this build keeps no rows of, or
     /// whose rows are not of `K`'s layout.
-    fn space<K: crate::row_pool::RowKind>(&self, slot: PeerSlot) -> RowSpace<K> {
+    pub(crate) fn space<K: crate::row_pool::RowKind>(&self, slot: PeerSlot) -> RowSpace<K> {
         match slot {
             PeerSlot::Aliases => self.aliases.as_kind(),
             PeerSlot::Subscribers => self.subscribers.as_kind(),
@@ -545,24 +527,6 @@ impl PeerSpaces {
             PeerSlot::Interests => RowSpace::none(),
         }
     }
-}
-
-/// The space the session's directory names for `slot`, as rows of `K`, reached through `keys`, the
-/// handle of the table's owner: none where the owner was handed no key arena, the session lent no
-/// rows of the peers, or the build keeps them inline.
-pub(crate) fn lent_space<K: crate::row_pool::RowKind>(
-    keys: &LentKeys,
-    slot: PeerSlot,
-) -> crate::row_pool::RowSpace<K> {
-    #[cfg(feature = "peer-row-pools")]
-    if let Some(space) = keys
-        .space()
-        .and_then(|keys| keys.peer_rows(|spaces| spaces.space::<K>(slot)))
-    {
-        return space;
-    }
-    let _ = (keys, slot);
-    crate::row_pool::RowSpace::none()
 }
 
 /// Where the tables of the faces of a session keep what their peers write by their own choice:

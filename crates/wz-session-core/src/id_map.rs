@@ -473,21 +473,15 @@ pub trait PeerIds<V, H>: Default {
     /// # Safety
     /// `keys` is the handle of the owner that holds this table, and `slot` the one it attached the
     /// table's rows to: the owner lends each of its tables the one space it attached it to.
-    unsafe fn lend<'a>(
-        &'a mut self,
-        keys: &'a H,
-        slot: crate::peer_tables::PeerSlot,
-    ) -> Self::Mut<'a>;
+    unsafe fn lend<'a>(&'a mut self, keys: &'a H, slot: crate::row_pool::PeerSlot)
+        -> Self::Mut<'a>;
 
     /// The table lent `keys` for its slot `slot`, to read.
     ///
     /// # Safety
     /// As [`Self::lend`]'s.
-    unsafe fn lend_ref<'a>(
-        &'a self,
-        keys: &'a H,
-        slot: crate::peer_tables::PeerSlot,
-    ) -> Self::Ref<'a>;
+    unsafe fn lend_ref<'a>(&'a self, keys: &'a H, slot: crate::row_pool::PeerSlot)
+        -> Self::Ref<'a>;
 
     /// Give back the rows the table holds where they lie apart from it, through `keys`: what its
     /// owner does before it drops the table or changes its handle. Nothing for a table that keeps
@@ -495,7 +489,7 @@ pub trait PeerIds<V, H>: Default {
     ///
     /// # Safety
     /// As [`Self::lend`]'s.
-    unsafe fn release(&mut self, keys: &H, slot: crate::peer_tables::PeerSlot) {
+    unsafe fn release(&mut self, keys: &H, slot: crate::row_pool::PeerSlot) {
         let _ = (keys, slot);
     }
 }
@@ -514,11 +508,11 @@ impl<V, const N: usize, H> PeerIds<V, H> for FixedIdMap<V, N> {
         H: 'a,
         V: 'a;
 
-    unsafe fn lend<'a>(&'a mut self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a mut Self {
+    unsafe fn lend<'a>(&'a mut self, _: &'a H, _: crate::row_pool::PeerSlot) -> &'a mut Self {
         self
     }
 
-    unsafe fn lend_ref<'a>(&'a self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a Self {
+    unsafe fn lend_ref<'a>(&'a self, _: &'a H, _: crate::row_pool::PeerSlot) -> &'a Self {
         self
     }
 }
@@ -538,11 +532,11 @@ impl<V, H> PeerIds<V, H> for GrowableIdMap<V> {
         H: 'a,
         V: 'a;
 
-    unsafe fn lend<'a>(&'a mut self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a mut Self {
+    unsafe fn lend<'a>(&'a mut self, _: &'a H, _: crate::row_pool::PeerSlot) -> &'a mut Self {
         self
     }
 
-    unsafe fn lend_ref<'a>(&'a self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a Self {
+    unsafe fn lend_ref<'a>(&'a self, _: &'a H, _: crate::row_pool::PeerSlot) -> &'a Self {
         self
     }
 }
@@ -562,9 +556,9 @@ impl<V, const N: usize> PeerIds<V, crate::key_arena::LentKeys> for PooledIdMap<V
     unsafe fn lend<'a>(
         &'a mut self,
         keys: &'a crate::key_arena::LentKeys,
-        slot: crate::peer_tables::PeerSlot,
+        slot: crate::row_pool::PeerSlot,
     ) -> LentIds<'a, V, N> {
-        let space = crate::peer_tables::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
+        let space = crate::row_pool::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
         // SAFETY: the caller's contract: the space the owner's handle names for the slot is the one
         // this table was attached to.
         unsafe { PooledIdMap::lend(self, &space) }
@@ -573,9 +567,9 @@ impl<V, const N: usize> PeerIds<V, crate::key_arena::LentKeys> for PooledIdMap<V
     unsafe fn lend_ref<'a>(
         &'a self,
         keys: &'a crate::key_arena::LentKeys,
-        slot: crate::peer_tables::PeerSlot,
+        slot: crate::row_pool::PeerSlot,
     ) -> LentIdsRef<'a, V, N> {
-        let space = crate::peer_tables::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
+        let space = crate::row_pool::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
         // SAFETY: as `lend`'s.
         unsafe { PooledIdMap::lend_ref(self, &space) }
     }
@@ -583,9 +577,9 @@ impl<V, const N: usize> PeerIds<V, crate::key_arena::LentKeys> for PooledIdMap<V
     unsafe fn release(
         &mut self,
         keys: &crate::key_arena::LentKeys,
-        slot: crate::peer_tables::PeerSlot,
+        slot: crate::row_pool::PeerSlot,
     ) {
-        let space = crate::peer_tables::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
+        let space = crate::row_pool::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
         // SAFETY: as `lend`'s.
         unsafe { PooledIdMap::lend(self, &space) }.reset();
     }
@@ -602,7 +596,7 @@ impl<V, const N: usize> PeerIds<V, crate::key_arena::LentKeys> for PooledIdMap<V
 pub struct PairedIds<'a, T, H> {
     table: &'a T,
     keys: &'a H,
-    slot: crate::peer_tables::PeerSlot,
+    slot: crate::row_pool::PeerSlot,
 }
 
 impl<T, H> Clone for PairedIds<'_, T, H> {
@@ -619,7 +613,7 @@ impl<'a, T: 'a, H: 'a> PairedIds<'a, T, H> {
     /// # Safety
     /// As [`PeerIds::lend`]'s, for as long as `'a`: `keys` is the handle of the owner that holds
     /// `table`, and `slot` the one it attached the table's rows to.
-    pub unsafe fn new(table: &'a T, keys: &'a H, slot: crate::peer_tables::PeerSlot) -> Self {
+    pub unsafe fn new(table: &'a T, keys: &'a H, slot: crate::row_pool::PeerSlot) -> Self {
         Self { table, keys, slot }
     }
 
@@ -960,7 +954,7 @@ impl<P: Storage> DeclaredAliases<P> {
     pub unsafe fn lend<'a>(
         &'a mut self,
         keys: &'a P::Keys,
-        slot: crate::peer_tables::PeerSlot,
+        slot: crate::row_pool::PeerSlot,
     ) -> LentAliases<'a, P> {
         // SAFETY: the caller's contract.
         LentAliases(unsafe { crate::row_pool::PeerSeq::lend(&mut self.0, keys, slot) })
@@ -974,7 +968,7 @@ impl<P: Storage> DeclaredAliases<P> {
     pub unsafe fn lend_ref<'a>(
         &'a self,
         keys: &'a P::Keys,
-        slot: crate::peer_tables::PeerSlot,
+        slot: crate::row_pool::PeerSlot,
     ) -> LentAliasesRef<'a, P> {
         // SAFETY: the caller's contract.
         LentAliasesRef(unsafe { crate::row_pool::PeerSeq::lend_ref(&self.0, keys, slot) })
@@ -987,7 +981,7 @@ impl<P: Storage> DeclaredAliases<P> {
     /// # Safety
     /// As [`Self::lend`]'s.
     #[inline]
-    pub unsafe fn release(&mut self, keys: &P::Keys, slot: crate::peer_tables::PeerSlot) {
+    pub unsafe fn release(&mut self, keys: &P::Keys, slot: crate::row_pool::PeerSlot) {
         // SAFETY: the caller's contract.
         unsafe { crate::row_pool::PeerSeq::release(&mut self.0, keys, slot) }
     }
@@ -1068,7 +1062,7 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn static_aliases_hold_as_many_as_the_declarations() {
-        use crate::peer_tables::PeerSlot;
+        use crate::row_pool::PeerSlot;
         let ids = caps::MAX_REMOTE_DECLS as u64;
         let mut table = DeclaredAliases::<Static>::new_static();
         let keys = crate::bounded::InlineKeys;
@@ -1154,7 +1148,7 @@ mod tests {
         let mut table = DeclaredAliases::<crate::bounded::Lent>::default();
         let keys = crate::key_arena::LentKeys::default();
         // SAFETY: without `peer-row-pools` the aliases keep their rows inline: no space is lent.
-        let mut aliases = unsafe { table.lend(&keys, crate::peer_tables::PeerSlot::SubRepeats) };
+        let mut aliases = unsafe { table.lend(&keys, crate::row_pool::PeerSlot::SubRepeats) };
         aliases.insert(3, 1);
         assert_eq!(aliases.told_as(3), Some(1));
         assert_eq!(aliases.remove(3), Some(1));

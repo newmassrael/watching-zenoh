@@ -106,9 +106,9 @@ use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::keyexpr_intersects;
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
-#[cfg(feature = "storage-profile")]
-use crate::peer_tables::PeerSlot;
 use crate::registry_error::RegisterError;
+#[cfg(feature = "storage-profile")]
+use crate::row_pool::PeerSlot;
 use crate::sink::RowAccess;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr_into;
