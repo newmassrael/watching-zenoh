@@ -651,6 +651,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> Drop for DirectSlot<L, C>
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> {
+    /// The id of the face whose row the slot is: read off the face's record, or, where the dial
+    /// role's face is the only face, that face's own, which the build knows.
+    fn face_id(&self, core: &Core<L, C>) -> Option<FaceId> {
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            core.transport.links.face(self.at()).map(|face| face.id)
+        }
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        {
+            debug_assert!(
+                core.transport
+                    .links
+                    .face(0)
+                    .is_some_and(|face| face.id == DIAL_FACE),
+                "the dial role's face keeps its row and its id"
+            );
+            Some(DIAL_FACE)
+        }
+    }
+
     /// What the link brings to its life at this look: a handshake completed, a pump that ended or
     /// was asked to, a dial the network answered, or only the time.
     fn next_input(&mut self, core: &Core<L, C>, end: &EndFlags) -> LinkInput {
@@ -1257,8 +1277,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 .face(slot.at())
                 .and_then(|face| face.life.wake_at(now_us))
                 .unwrap_or(u64::MAX);
-            face.note_due(slot);
-            core.link_due_us = self.faces_due_us();
+            // Noted outside the slot for the other faces' reads; the one face's due is the read's
+            // own, noted as its turn ends.
+            #[cfg(any(feature = "listen", feature = "group"))]
+            {
+                face.note_due(slot);
+                core.link_due_us = self.faces_due_us();
+            }
+            #[cfg(not(any(feature = "listen", feature = "group")))]
+            {
+                core.link_due_us = slot.due_us();
+            }
             core.settle_ledger();
         }
         let jobs_due_ms = core.jobs_due_at(now_us);
@@ -1393,7 +1422,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 if let Some(zid) = peer {
                     let _ended = slot.router.abort_peer(zid.as_slice());
                 }
-                if let Some(id) = core.transport.links.face(slot.at()).map(|face| face.id) {
+                if let Some(id) = slot.face_id(core) {
                     core.lose_face_link(slot.at(), id);
                 }
                 slot.drop_link(&face.site);
@@ -1511,12 +1540,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         drop(face.site.hold(parts));
         let params = core.link_params()?;
         // The face's record at the slot's row names the face its link's session dispatches to.
-        let face_id = core
-            .transport
-            .links
-            .face(slot.at())
-            .map(|face| face.id)
-            .ok_or(OpenError::NoEndpoint)?;
+        let face_id = slot.face_id(core).ok_or(OpenError::NoEndpoint)?;
         let end = face.end_handle();
         // The link's session is made under the session's lock, its pump in the slot's place, which
         // the read that makes it holds.
