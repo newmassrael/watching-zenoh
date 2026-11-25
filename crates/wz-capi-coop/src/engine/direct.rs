@@ -415,6 +415,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> SendParts for DirectParts
 /// face's lock: the read holds it while it steps the pump. The pump is made in its place here, at
 /// the engine's fixed place, and stays there until it is dropped.
 pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
+    /// The face's row in the session's table of faces, which its life and its link lie at.
+    at: usize,
+    /// The id the session's tables know the face by.
+    id: FaceId,
     /// The pump of the link, written while `records` is held.
     pump: MaybeUninit<DirectPump<L, C>>,
     /// What each step of the pump is handed, held exactly while the pump is written.
@@ -485,7 +489,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
         let linked = core
             .transport
             .links
-            .face(0)
+            .face(self.at)
             .filter(|face| face.link.wire().is_some());
         if let Some(face) = linked {
             let established = matches!(face.life.phase(), LinkPhase::Handshaking { .. })
@@ -569,8 +573,8 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
-    /// The face of a session whose Router is `router`, lent through `lend`, with no link yet,
-    /// made in `at` with its lock.
+    /// The dial role's face of a session whose Router is `router`, lent through `lend`, with no
+    /// link yet, made in `at` with its lock.
     ///
     /// # Safety
     /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
@@ -588,6 +592,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                 NonNull::new_unchecked(addr_of_mut!((*at).slot)),
                 |slot| {
                     slot.write(Confined(DirectSlot {
+                        at: 0,
+                        id: DIAL_FACE,
                         pump: MaybeUninit::uninit(),
                         records: None,
                         router,
@@ -664,7 +670,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let now_us = core.now_us();
             self.drive_link(core, slot, LinkInput::Open, now_us)?;
         }
-        while !self.link_is_up() {
+        while !self.link_is_up(slot.at) {
             let turn = self.link_turn(slot).ok_or(OpenError::NoEndpoint)?;
             if let Some(last) = turn.ended {
                 return Err(last);
@@ -746,8 +752,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // The turn goes through the link's wire, its place taken before the session's lock as
             // every operation's send takes it, so the look's lock is let go of first. A turn that
             // ended the link has the life looked at by the next read, at once.
+            let at = slot.at;
             if turn.replays
-                && self.live_on_link(|core, tx| self.turn_replay(core, turn.now_us, tx))
+                && self.live_on_link(|core, tx| self.turn_replay(core, at, turn.now_us, tx))
                     == Some(TurnEnd::EndsLink)
             {
                 slot.life_due_us = turn.now_us;
@@ -844,7 +851,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             slot.life_due_us = core
                 .transport
                 .links
-                .face(0)
+                .face(slot.at)
                 .and_then(|face| face.life.wake_at(now_us))
                 .unwrap_or(u64::MAX);
             core.link_due_us = slot.life_due_us.min(slot.pump_due_us);
@@ -935,7 +942,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> Result<(), OpenError> {
         let (mut input, mut now_us) = (input, now_us);
         loop {
-            let Some(face) = core.transport.links.face_mut(0) else {
+            let Some(face) = core.transport.links.face_mut(slot.at) else {
                 return Ok(());
             };
             let was = face.life.phase();
@@ -961,13 +968,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     LinkPhase::Handshaking { row, .. } => row,
                     _ => 0,
                 };
-                let why = core.transport.end_handshake(0);
+                let why = core.transport.end_handshake(slot.at);
                 slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
                     core.transport.endpoints.dial_text(row),
                     why,
                 )));
                 slot.drop_link(&self.direct.site);
-                core.transport.links.put_link(0, Link::Idle);
+                core.transport.links.put_link(slot.at, Link::Idle);
             }
             if effects.lose() {
                 // The lost peer's chains end with its link: the next link's fragments would be
@@ -975,13 +982,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let peer = core
                     .transport
                     .links
-                    .face(0)
+                    .face(slot.at)
                     .and_then(|face| face.facts.as_ref())
                     .and_then(|facts| facts.peer);
                 if let Some(zid) = peer {
                     let _ended = slot.router.abort_peer(zid.as_slice());
                 }
-                core.lose_face_link(0, DIAL_FACE);
+                core.lose_face_link(slot.at, slot.id);
                 slot.drop_link(&self.direct.site);
                 if effects.ends_session() {
                     slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
@@ -991,7 +998,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
             }
             if effects.bring_up() {
-                core.bring_up(0, now_us);
+                core.bring_up(slot.at, now_us);
                 slot.brought_up = true;
             }
             // The dial under way, if any, was taken above.
@@ -1096,7 +1103,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 &mut calls,
                 opened,
                 OpenedAs {
-                    face: DIAL_FACE,
+                    face: slot.id,
                     role: SessionRole::Initiator,
                     endpoint: Some(endpoint),
                 },
@@ -1139,44 +1146,50 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // the engine stands (its drop ends the links before the face goes), and the handle does
         // nothing in its own drop.
         let wire = unsafe { FaceAt::new(&self.direct.site, self.direct.end_handle(), input, room) };
-        core.transport.links.put_link(0, Link::Wire(wire));
+        core.transport.links.put_link(slot.at, Link::Wire(wire));
         Ok(())
     }
 
-    /// The turn of the replay a look at the life owed the link that is up (`LinkTurn::replays`),
-    /// told through the link's wire `tx` at `now_us`: the next turn of a paced replay when one is
+    /// The turn of the replay a look at the life owed the link of the face at `at` that is up
+    /// (`LinkTurn::replays`), told through the link's wire `tx` at `now_us`: the next turn of a paced replay when one is
     /// due, else the whole of it in one lap, which a look owes only the link it brought up. What
     /// the turn left of the link: a turn the replay is given up on ends the link, as a build whose
     /// links are tasks ends it.
-    fn turn_replay(&self, core: &mut Core<L, C>, now_us: u64, tx: LinkTx<'_, C>) -> TurnEnd {
+    fn turn_replay(
+        &self,
+        core: &mut Core<L, C>,
+        at: usize,
+        now_us: u64,
+        tx: LinkTx<'_, C>,
+    ) -> TurnEnd {
         if core
             .transport
             .links
-            .face(0)
+            .face(at)
             .and_then(|face| face.up())
             .is_none()
         {
             return TurnEnd::Kept;
         }
         let end = if ReplayPacing::REACHABLE {
-            core.replay_turn(0, now_us / 1000, tx)
+            core.replay_turn(at, now_us / 1000, tx)
         } else {
-            core.tell_in_one_lap(0, tx)
+            core.tell_in_one_lap(at, tx)
         };
         if end == TurnEnd::EndsLink {
-            core.transport.links.abort_link(0);
+            core.transport.links.abort_link(at);
         }
         end
     }
 
-    /// Whether the one link is up, as the life of the face's record says.
-    fn link_is_up(&self) -> bool {
+    /// Whether the link of the face at `at` is up, as the life of the face's record says.
+    fn link_is_up(&self, at: usize) -> bool {
         self.core
             .lock()
             .0
             .transport
             .links
-            .face(0)
+            .face(at)
             .is_some_and(|face| face.life.phase() == LinkPhase::Up)
     }
 
