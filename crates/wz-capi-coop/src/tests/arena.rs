@@ -615,13 +615,30 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     );
 
     let dialling = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
-    assert_eq!(row(&dialling, "link port datagram slots").count, 0);
-    assert_eq!(
-        Some(row(&dialling, "udp port peers").entry_bytes),
-        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(0),
-        "a session that listens on nothing keeps no peer row"
+    assert!(
+        dialling.rows().all(|row| !PORT_PARTS.contains(&row.part())),
+        "a session that listens on nothing lays out no row of the ports: {dialling:?}"
+    );
+    let mut session =
+        SessionArena::reserve(&dialling, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let tables = dialling.transport().links_from(&mut lend);
+    lend.finish().expect("the plan lays the links out");
+    assert!(
+        tables.port_rx().is_none(),
+        "a session that listens on nothing is lent no table for ports"
     );
 }
+
+/// The parts of an arena that only a session that listens lays out: the slots its udp ports read
+/// their datagrams into, and the ports' books of their peers and of the datagrams waiting.
+#[cfg(feature = "listen")]
+const PORT_PARTS: [&str; 4] = [
+    "link port datagram flags",
+    "link port datagram slots",
+    "udp port peers",
+    "udp port queue",
+];
 
 /// A session that joins groups is lent a receive buffer for each group it may join, of the largest
 /// batch a group it names sends, under the build's multicast batch, with the links' tables: the
@@ -2430,9 +2447,23 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     if let Some(row) = owed.first() {
         assert_eq!(row.count, peer.peers().pools.remote_decls);
     }
+    // The ports' rows are the peer's alone: the client listens on nothing.
+    let ports: Vec<_> = peer
+        .rows()
+        .filter(|row| PORT_PARTS.contains(&row.part()))
+        .map(|row| row.part())
+        .collect();
+    assert_eq!(
+        ports, PORT_PARTS,
+        "the peer lays out every row of its ports"
+    );
+    assert!(
+        client.rows().all(|row| !PORT_PARTS.contains(&row.part())),
+        "the client lays out no row of a port"
+    );
     let rows: Vec<_> = peer
         .rows()
-        .filter(|row| row.part() != "owed tokens")
+        .filter(|row| row.part() != "owed tokens" && !PORT_PARTS.contains(&row.part()))
         .collect();
     assert_eq!(rows.len(), client.rows().count());
     for (theirs, ours) in rows.into_iter().zip(client.rows()) {

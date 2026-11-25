@@ -1354,6 +1354,10 @@ impl TransportRows {
         lend: &mut TableLender<'_>,
     ) -> LinkTables<LinkCellFlag> {
         let (slots, bytes) = self.port_rx;
+        // A plan that listens on nothing laid no table of them out.
+        if slots == 0 {
+            return tables;
+        }
         tables.with_port_rx(lend.byte_cells_of(bytes, slots))
     }
 
@@ -1866,16 +1870,15 @@ impl ArenaPlan {
         // The slots the udp ports of a session that listens read their datagrams into and hold
         // them in until the links of their peers take them, lent with the links' tables
         // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
-        // session that listens on nothing holds none.
+        // session that listens on nothing holds none, and its plan lays none of their rows out,
+        // as one that joins no group lays out no group's buffers.
         #[cfg(feature = "listen")]
-        {
+        if shape.listens > 0 {
             let slots = self.lent(
                 ArenaLimit::UdpPortSlots,
                 Quota::at_most(limits.udp_port_slots()),
                 caps::UDP_PORT_SLOTS,
             );
-            let listens = shape.listens > 0;
-            let slots = if listens { slots } else { 0 };
             self.transport.port_rx = (slots, link_bytes);
             self.put_table(
                 [
@@ -1888,9 +1891,8 @@ impl ArenaPlan {
             // The ports' book of their peers, a row for each link the session may hold, and of
             // the datagrams sorted for them, a row for each slot a datagram holds while it waits
             // (`TransportRows::lent_from`).
-            let peers = if listens { links } else { 0 };
-            self.transport.port_peers = peers;
-            let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(peers));
+            self.transport.port_peers = links;
+            let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(links));
             self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
             let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
             self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
