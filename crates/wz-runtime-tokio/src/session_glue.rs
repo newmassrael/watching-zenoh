@@ -4288,12 +4288,16 @@ mod negotiated_mtu_tests {
         actions.handle_inbound(&wire).expect("parse InitAck");
         actions.enter_established();
         assert_eq!(
-            actions.negotiated_tx_limits_for(Reliability::Reliable).0,
-            BATCH - length
+            actions
+                .negotiated_tx_limits_for(Reliability::Reliable)
+                .map(|(budget, _)| budget),
+            Some(BATCH - length)
         );
         assert_eq!(
-            actions.negotiated_tx_limits_for(Reliability::BestEffort).0,
-            COMPANION
+            actions
+                .negotiated_tx_limits_for(Reliability::BestEffort)
+                .map(|(budget, _)| budget),
+            Some(COMPANION)
         );
         assert_eq!(actions.batch_envelope_bytes_for(Reliability::BestEffort), 0);
         assert_eq!(actions.batch_envelope_bytes(), length);
@@ -4334,9 +4338,11 @@ mod negotiated_mtu_tests {
             crate::test_fixtures::recording_actions_length_prefixed(fixture_session_init_params());
         plain.handle_inbound(&wire).expect("parse InitAck");
         plain.enter_established();
+        let reliable = plain.negotiated_tx_limits_for(Reliability::Reliable);
+        assert!(reliable.is_some(), "established, the limits are settled");
         assert_eq!(
             plain.negotiated_tx_limits_for(Reliability::BestEffort),
-            plain.negotiated_tx_limits_for(Reliability::Reliable),
+            reliable,
             "a link without a companion sizes both classes the same"
         );
     }

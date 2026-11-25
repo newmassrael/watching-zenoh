@@ -251,8 +251,10 @@ async fn compression_put_rides_a_batch_header_not_a_bare_frame() {
     let batch = both.init_actions.negotiated_batch_mtu();
     for _ in 0..2 {
         assert_eq!(
-            both.init_actions.negotiated_tx_limits().0,
-            batch - BATCH_HEADER_BYTES,
+            both.init_actions
+                .negotiated_tx_limits()
+                .map(|(budget, _)| budget),
+            Some(batch - BATCH_HEADER_BYTES),
             "a compressing session's frame budget is the batch less its BatchHeader"
         );
     }
