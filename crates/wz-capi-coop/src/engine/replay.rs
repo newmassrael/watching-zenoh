@@ -371,9 +371,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The declaration at `index` of `table`'s slot order was removed: tell `retract`
     /// ([`Self::retract_at`]). `index` is where it lay, and the tables before it in the replay's
     /// order are as they were.
-    pub(super) fn retract(&mut self, table: DeclaredTable, index: usize, retract: Retract<'_>) {
+    pub(super) fn retract(
+        &mut self,
+        table: DeclaredTable,
+        index: usize,
+        retract: Retract<'_>,
+        tx: super::LinkTx<'_, C>,
+    ) {
         let place = self.place(table, index);
-        self.retract_at(place, Some(retract));
+        self.retract_at(place, Some(retract), tx);
     }
 
     /// The Interest `interest`, which a write filter or a matching listener held last, ended:
@@ -381,23 +387,34 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// it stood ([`Self::retract`]). Nothing when either is `None`.
     // Out of line: the filter's and the listener's undeclarations end their Interest alike.
     #[inline(never)]
-    pub(super) fn end_interest(&mut self, interest: Option<EntityId>, rank: Option<usize>) {
+    pub(super) fn end_interest(
+        &mut self,
+        interest: Option<EntityId>,
+        rank: Option<usize>,
+        tx: super::LinkTx<'_, C>,
+    ) {
         if let (Some(interest), Some(at)) = (interest, rank) {
             self.retract(
                 DeclaredTable::Interests,
                 at,
                 Retract::Interest(u64::from(interest)),
+                tx,
             );
         }
     }
 
     /// The declaration that lay at `place` in the replay's order was removed: tell `retract`,
-    /// when there is one, to each face that is up and whose peer was told of it, and move every
-    /// face's replay past it. Call it once, after the row went, with the place read while it
-    /// stood: a send then finds none of the session's tables borrowed, and nothing is kept to send
-    /// later.
+    /// when there is one, to each face that is up and whose peer was told of it, through `tx`
+    /// ([`tell_on`]), and move every face's replay past it. Call it once, after the row went,
+    /// with the place read while it stood: a send then finds none of the session's tables
+    /// borrowed, and nothing is kept to send later.
     #[inline(never)]
-    pub(super) fn retract_at(&mut self, place: usize, retract: Option<Retract<'_>>) {
+    pub(super) fn retract_at(
+        &mut self,
+        place: usize,
+        retract: Option<Retract<'_>>,
+        tx: super::LinkTx<'_, C>,
+    ) {
         for face in self.transport.links.faces_mut() {
             // The wire and the replay are fields apart: the replay's cursor moves while the wire
             // is held.
@@ -411,7 +428,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let told = !ReplayPacing::REACHABLE
                 || matches!(face.replay.cursor.removed(place), Removal::Retract);
             if let Some(retract) = retract.filter(|_| told) {
-                tell_retract(wire, retract);
+                tell_on(wire, tx, retract);
             }
         }
     }
@@ -593,6 +610,32 @@ impl Retract<'_> {
             Self::Token { id, names } => super::liveliness::retract_token(actions, id, names),
         }
     }
+}
+
+/// Tell `retract` to the peer of the one link, whose record names it by `_wire`, through its wire
+/// `tx`, which the caller holds with the link's place, taken before the session's lock
+/// (`CoopEngine::live_on_link`): the send neither waits nor is owed, so the retraction is told
+/// as it is made. Nothing while the place holds no wire.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+fn tell_on<C: ClockSource + 'static>(
+    _wire: &impl LendsSession<Session = super::LinkSession<C>>,
+    tx: super::LinkTx<'_, C>,
+    retract: Retract<'_>,
+) {
+    if let Some(wire) = tx {
+        retract.tell(&wire.actions);
+    }
+}
+
+/// Tell `retract` over the link `wire` holds, through the face's record, which the session's
+/// lock alone reaches where each record holds its link ([`tell_retract`]).
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+fn tell_on<C: ClockSource + 'static>(
+    wire: &impl LendsSession<Session = super::LinkSession<C>>,
+    _tx: super::LinkTx<'_, C>,
+    retract: Retract<'_>,
+) {
+    tell_retract(wire, retract);
 }
 
 /// Tell `retract` over the link `wire` holds, as every send of the session on a face is made

@@ -1146,6 +1146,47 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .is_some_and(|face| face.life.phase() == LinkPhase::Up)
     }
 
+    /// The session's state for an operation that sends on the one link, with the link's wire it
+    /// sends through (`LinkTx`), taken inside the link's place, in the order the read takes
+    /// them: the place first, through the seat the read's step stands in when this is a callback
+    /// of it, else by a lend that waits for whatever holds it now, then the session's lock. A
+    /// send under both neither waits nor is owed, and the session's lock is never held while the
+    /// place is waited for. Where the place holds no link, or the call is made inside a send
+    /// through the seat, the session's lock alone is taken and `f` is handed no wire. `None`
+    /// once the session is closed.
+    pub(super) fn live_on_link<U>(
+        &self,
+        f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
+    ) -> Option<U> {
+        let mut f = Some(f);
+        let mut answer = None;
+        self.live_in_place(&mut |core, tx| {
+            if let Some(f) = f.take() {
+                answer = Some(f(core, tx));
+            }
+        });
+        answer
+    }
+
+    /// [`Self::live_on_link`] over `f` by reference.
+    // Out of line and over `dyn`: one body takes the place and the lock for every operation.
+    #[inline(never)]
+    fn live_in_place(&self, f: &mut dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>)) {
+        let carried = OnThisThread((self, &mut *f));
+        let lent = self.direct.site.send(move |tx| {
+            let (engine, f) = carried.get();
+            if let Some(mut guard) = engine.live() {
+                f(&mut guard.0, tx.as_ref());
+            }
+        });
+        if lent.is_some() {
+            return;
+        }
+        if let Some(mut guard) = self.live() {
+            f(&mut guard.0, None);
+        }
+    }
+
     /// Let go of the one link's session at the close, unless a read steps it now: that read lets
     /// it go once it has returned from the pump.
     pub(super) fn let_go_link(&self) {

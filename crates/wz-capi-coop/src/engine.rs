@@ -2144,8 +2144,9 @@ unsafe impl<T> Send for Confined<T> {}
 struct OnThisThread<T>(T);
 
 // SAFETY: a carrier is moved only into a closure run by a lend of a link's parts
-// (`FaceHeld::lend`) or of its session (`LendsSession::try_session`), each of which runs its
-// closure on the calling thread and returns before it returns: what is carried in or out never
+// (`FaceHeld::lend`, and `FaceSite::send`, which runs it through this thread's seat or such a
+// lend) or of its session (`LendsSession::try_session`), each of which runs its closure on the
+// calling thread and returns before it returns: what is carried in or out never
 // reaches another thread. A handle on a cell of the link made in such a lend is kept in the parts,
 // as the parts' contract asks (`direct::DirectParts`), and what is carried in keeps none of the
 // session's handles it is lent: what leaves a lend in a carrier is the session's own values and
@@ -2842,6 +2843,18 @@ impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<
 
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
 type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
+
+/// What an operation that holds the one link's place sends through under the session's lock,
+/// taken inside that place (`CoopEngine::live_on_link`): the link's wire, while the place holds
+/// one.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+type LinkTx<'a, C> = Option<&'a Wire<C>>;
+
+/// What an operation sends through where each face's record holds its link: nothing beside the
+/// record, which the session's lock alone reaches. That form goes with the record that holds a
+/// link, and this with it.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+type LinkTx<'a, C> = core::marker::PhantomData<&'a Wire<C>>;
 
 /// What a face holds of its link while the link is up or in its handshake: the link's session
 /// itself where each link runs as a task, or a handle on the face's place that holds the session
@@ -4919,8 +4932,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// owes its Interests ([`Registry::settle`]) now: the reconcile that stages it otherwise runs
     /// at the next event of the link's session, a record or a keep-alive, up to a keep-alive
     /// interval later, and not at all while the program does not step the session.
+    ///
+    /// `holding` is what the caller holds of the one link, taken with its place before the
+    /// session's lock (`CoopEngine::live_on_link`), through which the link is settled; `None`
+    /// where the caller holds no link's place, and each link is tried.
     #[cfg(feature = "interest-answer")]
-    fn settle_faces(&mut self) {
+    fn settle_faces(&mut self, holding: Option<LinkTx<'_, C>>) {
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        let _ = holding;
         for at in 0..self.transport.links.places() {
             let Some(face) = self.transport.links.face(at) else {
                 continue;
@@ -4928,11 +4947,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             if let Some(wire) = face.up() {
                 let carried =
                     OnThisThread((HeldFace::new(at, face.id), &mut self.session.registry));
-                // A link another holder has now is settled at its next event, as before this.
-                let _ = wire.try_session(move |session| {
+                let settle = move |actions: &LinkActions<C>| {
                     let (held, registry) = carried.get();
-                    registry.settle(held, &*session.actions);
-                });
+                    registry.settle(held, actions);
+                };
+                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+                if let Some(tx) = holding {
+                    if let Some(link) = tx {
+                        settle(&*link.actions);
+                    }
+                    continue;
+                }
+                // A link another holder has now is settled at its next event, as before this.
+                let _ = wire.try_session(move |session| settle(&*session.actions));
             }
         }
         // A group's stage is written by the thread that put on it outside the group's own step.
@@ -5188,11 +5215,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// tables let it go: what its last holder's going sends, after the rows went, so a send never
     /// finds the tables borrowed.
     #[inline(never)]
-    fn retract_keyexpr(&mut self, place: Option<usize>, mapping_id: Option<ExprId>) {
+    fn retract_keyexpr(
+        &mut self,
+        place: Option<usize>,
+        mapping_id: Option<ExprId>,
+        tx: LinkTx<'_, C>,
+    ) {
         let (Some(place), Some(mapping_id)) = (place, mapping_id) else {
             return;
         };
-        self.retract_at(place, Some(Retract::Keyexpr(mapping_id)));
+        self.retract_at(place, Some(Retract::Keyexpr(mapping_id)), tx);
         #[cfg(feature = "group")]
         for group in &self.transport.groups {
             group.retract_keyexpr(mapping_id);
@@ -6719,6 +6751,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(wz_round)]
             lane: &self.samples,
         })
+    }
+
+    /// The session's state for an operation that sends on the faces, with what it sends through
+    /// (`LinkTx`): the session's lock alone, where each face's record holds its link and is
+    /// reached under it. `None` once the session is closed.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    fn live_on_link<U>(&self, f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U) -> Option<U> {
+        let mut guard = self.live()?;
+        Some(f(&mut guard.0, core::marker::PhantomData))
     }
 
     /// The session's state for a publish's leg to its links. A publish that may not be dropped
@@ -8729,15 +8770,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Key
     fn release_keyexpr(&self, row: KeyexprHandle) {
         #[cfg(test)]
         self.takes.holds.fetch_sub(1, Ordering::Relaxed);
-        let Some(mut core) = self.live() else {
-            return;
-        };
-        let core = &mut core.0;
-        // A row that went names nothing, whichever declaration took its slot or its id since.
-        let place = core.prefix_retraction(Some(row));
-        let retracted = tables_mut(&mut core.session.registry).undeclare_keyexpr(row);
-        // The row went before the links are told: a send never finds the table borrowed.
-        core.retract_keyexpr(place, retracted);
+        let _ = self.live_on_link(|core, tx| {
+            // A row that went names nothing, whichever declaration took its slot or its id since.
+            let place = core.prefix_retraction(Some(row));
+            let retracted = tables_mut(&mut core.session.registry).undeclare_keyexpr(row);
+            // The row went before the links are told: a send never finds the table borrowed.
+            core.retract_keyexpr(place, retracted, tx);
+        });
     }
 
     #[inline(never)]
@@ -9145,7 +9184,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         // What it owes the Interests the peers asked goes now, after the declaration itself.
         #[cfg(feature = "interest-answer")]
-        core.settle_faces();
+        core.settle_faces(None);
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
@@ -9161,31 +9200,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // A liveliness subscriber's id is one of these too (the port's one id space): its row goes
         // and its Interest ends.
         #[cfg(feature = "liveliness")]
-        let live = self.live().and_then(|mut core| {
-            let core = &mut core.0;
-            let (rank, handle, prefix) = tables(&core.session.registry)
-                .liveliness_subscribers()
-                .iter()
-                .enumerate()
-                .find(|(_, (_, row))| row.id() == id)
-                .map(|(rank, (handle, row))| (rank, handle, row.key().prefix()))?;
-            // The links are asked while the rows stand, which are their places in the replay's
-            // order: the subscriber's, ranked by the walk that found it, then the declaration's
-            // its key is named by.
-            let place = core.place(DeclaredTable::LivelinessSubscribers, rank);
-            let keyexpr_place = core.prefix_retraction(prefix);
-            // The groups asked for it are told the asking ended.
-            #[cfg(feature = "group")]
-            for group in &core.transport.groups {
-                group.end_liveliness_ask(id);
-            }
-            let undeclared =
-                tables_mut(&mut core.session.registry).undeclare_liveliness_subscriber(handle)?;
-            // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, Some(Retract::Interest(u64::from(id))));
-            core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
-            Some((handle, undeclared.taken))
-        });
+        let live = self
+            .live_on_link(|core, tx| {
+                let (rank, handle, prefix) = tables(&core.session.registry)
+                    .liveliness_subscribers()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (_, row))| row.id() == id)
+                    .map(|(rank, (handle, row))| (rank, handle, row.key().prefix()))?;
+                // The links are asked while the rows stand, which are their places in the replay's
+                // order: the subscriber's, ranked by the walk that found it, then the declaration's
+                // its key is named by.
+                let place = core.place(DeclaredTable::LivelinessSubscribers, rank);
+                let keyexpr_place = core.prefix_retraction(prefix);
+                // The groups asked for it are told the asking ended.
+                #[cfg(feature = "group")]
+                for group in &core.transport.groups {
+                    group.end_liveliness_ask(id);
+                }
+                let undeclared = tables_mut(&mut core.session.registry)
+                    .undeclare_liveliness_subscriber(handle)?;
+                // The rows went before the links are told: a send never finds the tables borrowed.
+                core.retract_at(place, Some(Retract::Interest(u64::from(id))), tx);
+                core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
+                Some((handle, undeclared.taken))
+            })
+            .flatten();
         // The row, and its callback with it, is let go of here with no lock held; one a call of
         // which runs is let go of by the call that ends last.
         #[cfg(feature = "liveliness")]
@@ -9199,54 +9239,56 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // The row is taken out of the tables under the lock and let go of after it: what its key
         // kept may reach the session as it goes (`KeyAnchor`). One a call of which runs is
         // let go of once that call ends (`Self::wait_for_release`).
-        let undeclared = self.live().and_then(|mut core| {
-            let core = &mut core.0;
-            // The declaration its key is named by goes with it when it is the last that holds it;
-            // what the links are told is read while the row stands.
-            let found = {
-                let tables = tables(&core.session.registry);
-                let found = tables
-                    .subscribers()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (_, row))| row.id() == id)
-                    .map(|(rank, (handle, row))| {
-                        (
-                            rank,
-                            handle,
-                            row.key().holds(),
-                            // Read against the key, held past the row.
-                            tables
-                                .retraction_of(row.key())
-                                .map(|names| (names, row.key().backing().clone())),
-                        )
-                    });
-                found
-            };
-            let (rank, handle, (prefix, named), retraction) = found?;
-            // The links are asked while the rows stand, which are their places in the replay's
-            // order: the subscriber's, ranked by the walk that found it, then the declaration's,
-            // which comes before every subscriber.
-            let place = core.place(DeclaredTable::Subscribers, rank);
-            let keyexpr_place = core.prefix_retraction(prefix);
-            let named_place = core.prefix_retraction(named);
-            #[cfg(feature = "group")]
-            core.transport.retract_from_groups(id);
-            let undeclared = tables_mut(&mut core.session.registry).undeclare_subscriber(handle)?;
-            let row = undeclared.taken;
-            // The rows went before the links are told: a send never finds the tables borrowed.
-            let names = retraction.as_ref().map(|(names, key)| names.names(key));
-            core.retract_at(place, Some(Retract::Subscriber { id, names }));
-            core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
-            core.retract_keyexpr(named_place, undeclared.named);
-            // An aggregate answer it alone stood for is retracted now, as it was declared.
-            #[cfg(feature = "interest-answer")]
-            core.settle_faces();
-            // One that counted it may now match no more.
-            #[cfg(feature = "local-subscriber")]
-            self.read_matching(core);
-            Some((handle, row))
-        });
+        let undeclared = self
+            .live_on_link(|core, tx| {
+                // The declaration its key is named by goes with it when it is the last that holds
+                // it; what the links are told is read while the row stands.
+                let found = {
+                    let tables = tables(&core.session.registry);
+                    let found = tables
+                        .subscribers()
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (_, row))| row.id() == id)
+                        .map(|(rank, (handle, row))| {
+                            (
+                                rank,
+                                handle,
+                                row.key().holds(),
+                                // Read against the key, held past the row.
+                                tables
+                                    .retraction_of(row.key())
+                                    .map(|names| (names, row.key().backing().clone())),
+                            )
+                        });
+                    found
+                };
+                let (rank, handle, (prefix, named), retraction) = found?;
+                // The links are asked while the rows stand, which are their places in the
+                // replay's order: the subscriber's, ranked by the walk that found it, then the
+                // declaration's, which comes before every subscriber.
+                let place = core.place(DeclaredTable::Subscribers, rank);
+                let keyexpr_place = core.prefix_retraction(prefix);
+                let named_place = core.prefix_retraction(named);
+                #[cfg(feature = "group")]
+                core.transport.retract_from_groups(id);
+                let undeclared =
+                    tables_mut(&mut core.session.registry).undeclare_subscriber(handle)?;
+                let row = undeclared.taken;
+                // The rows went before the links are told: a send never finds the tables borrowed.
+                let names = retraction.as_ref().map(|(names, key)| names.names(key));
+                core.retract_at(place, Some(Retract::Subscriber { id, names }), tx);
+                core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
+                core.retract_keyexpr(named_place, undeclared.named, tx);
+                // An aggregate answer it alone stood for is retracted now, as it was declared.
+                #[cfg(feature = "interest-answer")]
+                core.settle_faces(Some(tx));
+                // One that counted it may now match no more.
+                #[cfg(feature = "local-subscriber")]
+                self.read_matching(core);
+                Some((handle, row))
+            })
+            .flatten();
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
         // which runs is let go of by the call that ends last.
         match undeclared {
@@ -9375,25 +9417,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     }
 
     fn undeclare_matching_listener(&self, id: MatchId) {
-        let gone = self.live().and_then(|mut core| {
-            let core = &mut core.0;
-            let handle = row_of(id)?;
-            let place = {
-                let tables = tables(&core.session.registry);
-                let row = tables.matching_listeners().get(handle)?;
-                // A listener declared on a key ends the Interest of the filter it owns; one declared
-                // on an entity's filter ends none.
-                let owned = row.owns_filter().then_some(row.filter());
-                let interest =
-                    owned.and_then(|filter| tables.write_filters().get(filter)?.interest());
-                interest_rank(tables, interest)
-            };
-            let unwatched =
-                tables_mut(&mut core.session.registry).undeclare_matching_listener(handle)?;
-            // The row went before the links are told: a send never finds the tables borrowed.
-            core.end_interest(unwatched.interest_final, place);
-            unwatched.row
-        });
+        let gone = self
+            .live_on_link(|core, tx| {
+                let handle = row_of(id)?;
+                let place = {
+                    let tables = tables(&core.session.registry);
+                    let row = tables.matching_listeners().get(handle)?;
+                    // A listener declared on a key ends the Interest of the filter it owns; one
+                    // declared on an entity's filter ends none.
+                    let owned = row.owns_filter().then_some(row.filter());
+                    let interest =
+                        owned.and_then(|filter| tables.write_filters().get(filter)?.interest());
+                    interest_rank(tables, interest)
+                };
+                let unwatched =
+                    tables_mut(&mut core.session.registry).undeclare_matching_listener(handle)?;
+                // The row went before the links are told: a send never finds the tables borrowed.
+                core.end_interest(unwatched.interest_final, place, tx);
+                unwatched.row
+            })
+            .flatten();
         // Nothing it was owed is handed, its row being gone; its callback is let go of here, with
         // no lock held.
         drop(gone);
@@ -9488,27 +9531,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let Some(handle) = row_of(id) else {
             return;
         };
-        let Some(mut core) = self.live() else {
-            return;
-        };
-        let core = &mut core.0;
-        let place = {
-            let tables = tables(&core.session.registry);
-            let Some(row) = tables.write_filters().get(handle) else {
+        let _ = self.live_on_link(|core, tx| {
+            let place = {
+                let tables = tables(&core.session.registry);
+                let Some(row) = tables.write_filters().get(handle) else {
+                    return;
+                };
+                interest_rank(tables, row.interest())
+            };
+            let Some(last_held) = unwatch_filter(tables_mut(&mut core.session.registry), handle)
+            else {
                 return;
             };
-            interest_rank(tables, row.interest())
-        };
-        let Some(last_held) = unwatch_filter(tables_mut(&mut core.session.registry), handle) else {
-            return;
-        };
-        // The row went before the links are told: a send never finds the tables borrowed.
-        core.end_interest(last_held, place);
-        // The groups it asked are told the asking ended.
-        #[cfg(feature = "group")]
-        for group in &core.transport.groups {
-            group.end_filter(id);
-        }
+            // The row went before the links are told: a send never finds the tables borrowed.
+            core.end_interest(last_held, place, tx);
+            // The groups it asked are told the asking ended.
+            #[cfg(feature = "group")]
+            for group in &core.transport.groups {
+                group.end_filter(id);
+            }
+        });
     }
 
     fn put_plain_filtered(
@@ -10122,51 +10164,53 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // kept may reach the session as it goes (`KeyAnchor`). One a call of which is owed,
         // a query queued for it or handed to its callback now, is let go of once that call ends
         // (`Self::wait_for_queryable_release`), and a query queued before is answered by nothing.
-        let undeclared = self.live().and_then(|mut core| {
-            let core = &mut core.0;
-            // The declaration its key is named by goes with it when it is the last that holds it;
-            // what the links are told is read while the row stands.
-            let found = {
-                let tables = tables(&core.session.registry);
-                let found = tables
-                    .queryables()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (_, row))| row.id() == id)
-                    .map(|(rank, (handle, row))| {
-                        (
-                            rank,
-                            handle,
-                            row.key().holds(),
-                            // Read against the key, held past the row.
-                            tables
-                                .retraction_of(row.key())
-                                .map(|names| (names, row.key().backing().clone())),
-                        )
-                    });
-                found
-            };
-            let (rank, handle, (prefix, named), retraction) = found?;
-            // The links are asked while the rows stand, which are their places in the replay's
-            // order: the queryable's, ranked by the walk that found it, then the declaration's,
-            // which comes before every queryable.
-            let place = core.place(DeclaredTable::Queryables, rank);
-            let keyexpr_place = core.prefix_retraction(prefix);
-            let named_place = core.prefix_retraction(named);
-            #[cfg(feature = "group")]
-            core.transport.retract_from_groups(id);
-            let undeclared = tables_mut(&mut core.session.registry).undeclare_queryable(handle)?;
-            let row = undeclared.taken;
-            // The rows went before the links are told: a send never finds the tables borrowed.
-            let names = retraction.as_ref().map(|(names, key)| names.names(key));
-            core.retract_at(place, Some(Retract::Queryable { id, names }));
-            core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
-            core.retract_keyexpr(named_place, undeclared.named);
-            // One that counted it may now match no more.
-            #[cfg(feature = "local-queryable")]
-            self.read_matching(core);
-            Some((handle, row))
-        });
+        let undeclared = self
+            .live_on_link(|core, tx| {
+                // The declaration its key is named by goes with it when it is the last that holds
+                // it; what the links are told is read while the row stands.
+                let found = {
+                    let tables = tables(&core.session.registry);
+                    let found = tables
+                        .queryables()
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (_, row))| row.id() == id)
+                        .map(|(rank, (handle, row))| {
+                            (
+                                rank,
+                                handle,
+                                row.key().holds(),
+                                // Read against the key, held past the row.
+                                tables
+                                    .retraction_of(row.key())
+                                    .map(|names| (names, row.key().backing().clone())),
+                            )
+                        });
+                    found
+                };
+                let (rank, handle, (prefix, named), retraction) = found?;
+                // The links are asked while the rows stand, which are their places in the replay's
+                // order: the queryable's, ranked by the walk that found it, then the declaration's,
+                // which comes before every queryable.
+                let place = core.place(DeclaredTable::Queryables, rank);
+                let keyexpr_place = core.prefix_retraction(prefix);
+                let named_place = core.prefix_retraction(named);
+                #[cfg(feature = "group")]
+                core.transport.retract_from_groups(id);
+                let undeclared =
+                    tables_mut(&mut core.session.registry).undeclare_queryable(handle)?;
+                let row = undeclared.taken;
+                // The rows went before the links are told: a send never finds the tables borrowed.
+                let names = retraction.as_ref().map(|(names, key)| names.names(key));
+                core.retract_at(place, Some(Retract::Queryable { id, names }), tx);
+                core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
+                core.retract_keyexpr(named_place, undeclared.named, tx);
+                // One that counted it may now match no more.
+                #[cfg(feature = "local-queryable")]
+                self.read_matching(core);
+                Some((handle, row))
+            })
+            .flatten();
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
         // which is owed is let go of by the call that ends last.
         match undeclared {
@@ -10221,45 +10265,41 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
 
     #[cfg(feature = "liveliness")]
     fn undeclare_liveliness_token(&self, id: TokenId) {
-        let Some(mut core) = self.live() else {
-            return;
-        };
-        let core = &mut core.0;
-        let retracted = {
-            let tables = tables(&core.session.registry);
-            let found =
-                tables
-                    .tokens()
-                    .iter()
-                    .find(|(_, row)| row.id() == id)
-                    .map(|(handle, row)| {
-                        // What its retraction names, read while the declaration stands.
-                        let names = tables.retraction_of(row.key());
-                        (handle, names, row.key().prefix())
-                    });
-            found
-        };
-        let Some((handle, names, prefix)) = retracted else {
-            return;
-        };
-        // The links are asked while the rows stand, which are their places in the replay's order:
-        // the token's, then the declaration's, which comes before every token.
-        let token_place = core.place_of(DeclaredRow::of(handle));
-        let keyexpr_place = core.prefix_retraction(prefix);
-        let Some(undeclared) = tables_mut(&mut core.session.registry).undeclare_token(handle)
-        else {
-            return;
-        };
-        #[cfg(feature = "group")]
-        core.transport.retract_from_groups(id);
-        // The rows went before the links are told: a send never finds the tables borrowed.
-        let key = undeclared.taken.as_ref().map(|row| row.key().as_str());
-        let retract = key.map(|key| Retract::Token {
-            id,
-            names: names.map(|names| names.names(key)),
+        let _ = self.live_on_link(|core, tx| {
+            let retracted =
+                {
+                    let tables = tables(&core.session.registry);
+                    let found = tables.tokens().iter().find(|(_, row)| row.id() == id).map(
+                        |(handle, row)| {
+                            // What its retraction names, read while the declaration stands.
+                            let names = tables.retraction_of(row.key());
+                            (handle, names, row.key().prefix())
+                        },
+                    );
+                    found
+                };
+            let Some((handle, names, prefix)) = retracted else {
+                return;
+            };
+            // The links are asked while the rows stand, which are their places in the replay's
+            // order: the token's, then the declaration's, which comes before every token.
+            let token_place = core.place_of(DeclaredRow::of(handle));
+            let keyexpr_place = core.prefix_retraction(prefix);
+            let Some(undeclared) = tables_mut(&mut core.session.registry).undeclare_token(handle)
+            else {
+                return;
+            };
+            #[cfg(feature = "group")]
+            core.transport.retract_from_groups(id);
+            // The rows went before the links are told: a send never finds the tables borrowed.
+            let key = undeclared.taken.as_ref().map(|row| row.key().as_str());
+            let retract = key.map(|key| Retract::Token {
+                id,
+                names: names.map(|names| names.names(key)),
+            });
+            core.retract_at(token_place, retract, tx);
+            core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
         });
-        core.retract_at(token_place, retract);
-        core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
     }
 
     #[cfg(feature = "liveliness")]
