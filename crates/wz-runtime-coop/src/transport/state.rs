@@ -15,6 +15,7 @@
 use alloc::boxed::Box;
 #[cfg(any(feature = "group", feature = "connectivity"))]
 use alloc::vec::Vec;
+use core::mem::MaybeUninit;
 use core::ops::Deref;
 
 use wz_session_core::byte_cells::LentByteCells;
@@ -57,8 +58,8 @@ use crate::locator_text::parse_listen_locator;
 use crate::locator_text::parse_locator;
 use crate::reassembly_rx::SessionReassembly;
 use crate::session_drive::{
-    spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink, PumpFields,
-    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    place_session_with_router, spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink,
+    PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump, SessionRole,
 };
 use crate::session_runtime::{SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
@@ -68,6 +69,17 @@ use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTim
 /// values it lends the session.
 type LinkRuntime<T> =
     CoopRuntime<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
+
+/// The session of a link over the transport of `T` whose pump its owner holds and steps itself
+/// ([`TransportState::place_link`]): it stages its fragments in the session's one Router, lent
+/// through the place the link holds, as a task's pump does.
+pub type LinkPump<T, P> = SessionPump<
+    <T as TransportFaces>::Clock,
+    P,
+    dyn BoxedLinkDriver,
+    RouterLend<SessionReassembly, <T as TransportFaces>::RouterPlace>,
+    <T as TransportFaces>::Lock,
+>;
 
 /// The handle on the actions of a link's session over the transport of `T`.
 type LinkHandle<T> =
@@ -467,6 +479,25 @@ impl<T: TransportFaces> TransportState<T> {
     {
         spawn_session_with_router(local, fields, self.lend.clone(), dispatch)
             .map_err(TransportRefusal::NoTask)
+    }
+
+    /// [`Self::spawn_link`] with no task: the link's session built in `place`, which its owner
+    /// holds, steps itself and drops once no step of it is under way
+    /// ([`place_session_with_router`]). The session's Router is lent to it through the place the
+    /// link holds, as to a task's pump, for the steps its owner lends the Router around. `None`
+    /// when the Router was not built in its place.
+    // Always inlined: its one caller holds these values in its own frame.
+    #[inline(always)]
+    pub fn place_link<'p, P>(
+        &self,
+        place: &'p mut MaybeUninit<LinkPump<T, P>>,
+        runtime: CoopRuntime<T::Clock, dyn BoxedLinkDriver, T::Lock>,
+        fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
+    ) -> Option<&'p mut LinkPump<T, P>>
+    where
+        P: SessionDatagramLink + 'static,
+    {
+        place_session_with_router(place, runtime, fields, self.lend.clone())
     }
 
     /// Open the link of the group `endpoint` names (`group`), read here once for every stack

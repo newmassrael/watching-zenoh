@@ -204,6 +204,9 @@ use deliveries::Deliveries;
 mod hold;
 pub use hold::{EngineHandle, EngineHold};
 
+mod ledger;
+use ledger::{Ledger, Seen};
+
 #[cfg(not(feature = "threads"))]
 mod one_thread_lock;
 
@@ -1137,7 +1140,8 @@ enum Stepped {
     /// left the links, the clock and the gets as they stood: the step that reads the last of it
     /// moves them.
     Read,
-    /// The step moved the links on by this reading of the session's clock, in microseconds.
+    /// The step ran to its end at this reading of the session's clock, in microseconds, and moved
+    /// the links on by it when they owed a move.
     Moved(u64),
 }
 
@@ -1940,6 +1944,11 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     released: bool,
     /// The links as the last move left them, when it left them settled ([`Self::move_links`]).
     links_settled: Option<LinksSettled>,
+    /// When the step's bookkeeping is owed next ([`Self::owes_bookkeeping`]).
+    ledger: Ledger,
+    /// How often the step's bookkeeping ran (`CoopEngine::service`), which the tests count.
+    #[cfg(test)]
+    services: core::cell::Cell<usize>,
     /// How often a read's wait and its step read the session's clock ([`Self::now_us`]), which the
     /// tests count.
     #[cfg(test)]
@@ -1947,6 +1956,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// How often the links were moved on ([`Self::poll_links`]), which the tests count.
     #[cfg(test)]
     link_polls: core::cell::Cell<usize>,
+    /// How often the session's links were let go of ([`Self::end_links`]), which the tests count:
+    /// once by the close, whatever calls it and from where.
+    #[cfg(test)]
+    links_let_go: core::cell::Cell<usize>,
     /// How many steps in a row read a group's datagram and moved nothing, up to
     /// the deploy `GROUP_READS_PER_MOVE` limit (`CoopEngine::step`).
     #[cfg(feature = "group")]
@@ -3580,6 +3593,57 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         })
     }
 
+    /// The counts of the changes the step's bookkeeping follows, as they stand.
+    fn seen(&self) -> Seen {
+        Seen {
+            moves: self.transport.links.moves(),
+            written: self.session.registry.faces_written(),
+        }
+    }
+
+    /// Whether the step's bookkeeping has anything to do at `now_us`: the ledger's deadline
+    /// passed or a count it follows moved, the Router holds a chain past its deadline, or a face's
+    /// link ended. The Router's chains and a link's end come with the input the step's tasks
+    /// read, so they are read as they stand and not kept in the ledger.
+    fn owes_bookkeeping(&self, now_us: u64) -> bool {
+        let links = &self.transport.links;
+        self.ledger.owes(now_us, self.seen())
+            || self.session_time.ms_at(now_us) >= self.transport.router.due_ms()
+            || links
+                .faces()
+                .any(|face| face.link.wire().is_some_and(|wire| wire.finished()))
+    }
+
+    /// Settle the ledger after the bookkeeping ran: due at the earliest of the links' due time
+    /// and the gets' deadlines, and owed at once while the links are not settled or a liveliness
+    /// snapshot is pending, each of which a step moves on by what it reads.
+    fn settle_ledger(&mut self) {
+        #[cfg(feature = "query")]
+        let gets_due_us = self
+            .session
+            .next_get_deadline_ms()
+            .map_or(u64::MAX, |due_ms| due_ms.saturating_mul(1000));
+        #[cfg(not(feature = "query"))]
+        let gets_due_us = u64::MAX;
+        // A snapshot's replies end it as they come, and the table of ended ones is drained by
+        // the sweep, which a pending snapshot so owes at every step.
+        #[cfg(all(feature = "query", feature = "liveliness-get"))]
+        let snapshots =
+            self.session.registry.all_gets().any(|gets| {
+                !gets.liveliness_gets.is_empty() || gets.liveliness_gets.has_finalized()
+            });
+        #[cfg(not(all(feature = "query", feature = "liveliness-get")))]
+        let snapshots = false;
+        let links_due_us = self
+            .links_settled
+            .map_or(u64::MAX, |settled| settled.due_us);
+        let seen = self.seen();
+        self.ledger.settle(links_due_us.min(gets_due_us), seen);
+        if self.links_settled.is_none() || snapshots {
+            self.ledger.owe();
+        }
+    }
+
     /// Move every face's link on, after the session was stepped, against the step's reading of the
     /// clock, `now_us`; see [`Self::poll_face`]. `Err` when the session ends, which only the dial
     /// role's face can bring about, the reason in `last`.
@@ -4402,6 +4466,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// End every face's link, whatever it is doing, telling an established peer so. The dial
     /// role's face stays, with no link and no redial; the others go.
     fn end_links(&mut self) {
+        #[cfg(test)]
+        self.links_let_go.set(self.links_let_go.get() + 1);
         // A dial under way is let go of: its connection is not made. The ports are let go of
         // first, so no connection is taken while the faces are ended.
         self.transport.links.end_dials_and_ports();
@@ -4774,10 +4840,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             policy,
             released: false,
             links_settled: None,
+            ledger: Ledger::new(),
+            #[cfg(test)]
+            services: core::cell::Cell::new(0),
             #[cfg(test)]
             clock_reads: core::cell::Cell::new(0),
             #[cfg(test)]
             link_polls: core::cell::Cell::new(0),
+            #[cfg(test)]
+            links_let_go: core::cell::Cell::new(0),
             #[cfg(feature = "group")]
             group_reads: 0,
             #[cfg(test)]
@@ -5219,6 +5290,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.task_clock_reads.get()
     }
 
+    /// How often the step's bookkeeping ran since the open (`Self::service`): what a test of the
+    /// cost of a stream of input counts. Read under the lock.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn services(&self) -> usize {
+        self.core.lock().0.services.get()
+    }
+
     /// Run `f` on the session's one reassembly Router with the time now on the epoch its chains
     /// are staged on: what a test of the chains the session's step ends stages its chain in and
     /// reads them by. Under the lock, uncounted as a take and as a reading of the session's clock.
@@ -5254,6 +5332,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Whether the session's state could be taken now: what a callback of a test asks to tell
+    /// that its read handed it out with the session free.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn session_is_free(&self) -> bool {
+        self.core.try_lock().is_some()
+    }
+
+    /// How often the session's links were let go of since the open ([`Core::end_links`]).
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn links_let_go(&self) -> usize {
+        self.core.lock().0.links_let_go.get()
     }
 
     /// How many rounds of deliveries were handed out since the open: what a test of the cost of
@@ -6741,6 +6832,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 now_us
             }
         };
+        // The bookkeeping, only when a deadline of it passed or something it follows changed
+        // since it last ran: a stream of input that changes neither runs none of it.
+        if core.owes_bookkeeping(now_us) {
+            return self.service(core, now_us);
+        }
+        Stepped::Moved(now_us)
+    }
+
+    /// The step's bookkeeping at `now_us`, the step's reading of the clock: the sweeps of the
+    /// Router's chains and of the gets, the move of the links, a group's ask and the read of the
+    /// matching listeners, each where its own deadline or count says, and the ledger settled
+    /// after them ([`Core::settle_ledger`]). `Stepped::Closed` when the move of the links ends
+    /// the session.
+    fn service(&self, core: &mut Core<L, C>, now_us: u64) -> Stepped {
+        #[cfg(test)]
+        core.services.set(core.services.get() + 1);
         // A link's receive sweeps nothing, so the session ends the chains of its one reassembly
         // Router past their deadline here, once a step and by its reading, whichever link's task
         // ran; on the epoch its links staged them on, which is not the clock's own.
@@ -6798,6 +6905,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if core.session.matching.moved(written) {
             self.read_matching(core);
         }
+        core.settle_ledger();
         Stepped::Moved(now_us)
     }
 
@@ -8154,6 +8262,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let rid = actions.alloc_next_request_id();
             // One Final: the face's peer's. Held before the request goes out, so no answer can
             // arrive before its entry.
+            // Its deadline may come before the one the step's bookkeeping is due at.
+            core.ledger.owe();
             match self.hold_leg(
                 core.clock.now_us(),
                 &mut core.session.registry,
@@ -8257,6 +8367,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // A request id the group allocates, so a member's answer names it on this face.
             let rid = group.alloc_request_id();
             // Held before the query is queued, as a link's leg is before it is sent.
+            // Its deadline may come before the one the step's bookkeeping is due at.
+            core.ledger.owe();
             match self.hold_leg(
                 core.clock.now_us(),
                 &mut core.session.registry,
@@ -8313,6 +8425,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let core = &mut guard.0;
             let rid = own.rid();
+            // Its deadline may come before the one the step's bookkeeping is due at.
+            core.ledger.owe();
             match self.hold_leg(
                 core.clock.now_us(),
                 &mut core.session.registry,
@@ -8440,6 +8554,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 self.end_leg_now(leg_id);
                 continue;
             }
+            // Its deadline may come before the one the step's bookkeeping is due at.
+            core.ledger.owe();
             // The Interest names the key as the link's own key-wire form says, as a query does.
             let wire = on_link(&actions, keyexpr, wire);
             let (mapping_id, suffix) = if wire.is_literal() {
