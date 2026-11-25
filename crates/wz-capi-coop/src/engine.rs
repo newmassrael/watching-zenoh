@@ -117,6 +117,7 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
+use wz_runtime_coop::sync::ConfinedOwner;
 use wz_runtime_coop::transport::{
     DialWalk, FaceStep, LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
 };
@@ -149,7 +150,7 @@ use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 #[cfg(feature = "listen")]
 use wz_session_core::session_actions::Probed;
-use wz_session_core::session_actions::{LinkState, SessionCore};
+use wz_session_core::session_actions::{LinkState, SessionCore, SessionLinkActions};
 use wz_session_core::session_init_params::{
     CookieKey, HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
     ZidError,
@@ -164,7 +165,6 @@ use wz_session_core::timestamp_visibility::exposed_by;
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_core::WhatAmI;
-use wz_session_mcu::dial::McuActions;
 #[cfg(feature = "queryable")]
 use {
     query::{CoopHolder, Onward, QueryPlane, QueryableRow},
@@ -1558,6 +1558,40 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 // only for its text, which nothing writes while the key is held.
 unsafe impl<T> Send for Confined<T> {}
 
+/// The owner of the values the session's runtime lends its links' sessions: [`CoreLock`], under
+/// which alone they are reached, so they take no lock of their own ([`SessionLock`]).
+enum UnderCoreLock {}
+
+// SAFETY: the values a runtime of `Confined<UnderCoreLock>` lends are the state of the session's
+// links (their actions, link states and kernels), all owned by the `Core` inside a `Confined` and
+// reached by one thread at a time on the ground the `Send` above states: every path to them holds
+// the session's `CoreLock` (the links' tasks run in `Core::run_tasks`, under `&mut Core`), the
+// engine's drop reaches them with the lock's value owned (`CoreLock::dropping`), and no handle of
+// them is handed out of the lock.
+unsafe impl ConfinedOwner for UnderCoreLock {}
+
+/// How the session's runtime holds what it lends a link's session: in no lock of its own, the
+/// session's one lock keeping each to one thread at a time.
+type SessionLock = wz_runtime_coop::sync::Confined<UnderCoreLock>;
+
+/// The runtime a link's session runs on, read under [`SessionLock`].
+type LinkRuntime<C> = CoopRuntime<C, dyn wz_session_core::link::BoxedLinkDriver, SessionLock>;
+
+/// The actions of one link's session.
+type LinkActions<C> = SessionLinkActions<LinkRuntime<C>, CoopTime<C>>;
+
+/// The handle on the actions of one link's session.
+type LinkHandle<C> = SessionHandle<C, dyn wz_session_core::link::BoxedLinkDriver, SessionLock>;
+
+/// What a link's session is lent its values in: the value alone, with no lock of its own. Named so
+/// that a runtime of another lock type fails the build here; its leading `_` keeps it out of the
+/// dead-code lint.
+fn _a_link_session_lends_its_values_unlocked<C: ClockSource>(
+    held: <LinkRuntime<C> as wz_session_core::link::SessionRuntime>::Mutex<u8>,
+) -> wz_runtime_coop::sync::OwnerHeld<u8, UnderCoreLock> {
+    held
+}
+
 /// What the rows of the session's one table set hold of a program: the engine's whole record of
 /// each of its subscribers and queryables. The engine's kinds move onto the tables one at a time
 /// (`docs/c-abi-l3-tables.md`, section 6), and a kind not moved yet, or one the build has not, is
@@ -1915,7 +1949,7 @@ impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
 /// One link's half of the session: the actions that send over it. The task that runs the link,
 /// the link itself and its owner's waits for it are the driver's ([`Wire`]).
 struct LinkSession<C: ClockSource + 'static> {
-    actions: SessionHandle<C>,
+    actions: LinkHandle<C>,
     /// The link's gates, whose admission is granted when the face is brought up (`bring_up`);
     /// until then the link gives the session nothing past its handshake, so the watchers hear the
     /// face come up before anything its link carried.
@@ -1957,8 +1991,8 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
     }
 }
 
-impl<C: ClockSource + 'static> TransportSession<C> for LinkSession<C> {
-    fn actions(&self) -> &SessionHandle<C> {
+impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<C> {
+    fn actions(&self) -> &LinkHandle<C> {
         &self.actions
     }
 
@@ -2032,7 +2066,7 @@ impl SubscriberRow {
     fn declare<C: ClockSource + 'static>(
         id: SubId,
         key: NamedKey<'_>,
-        actions: &McuActions<C>,
+        actions: &LinkActions<C>,
     ) -> bool {
         actions
             .send_declare_subscriber(id, key_on_link(actions, key))
@@ -2045,7 +2079,7 @@ impl SubscriberRow {
     fn retract<C: ClockSource + 'static>(
         id: SubId,
         names: Option<(ExprId, &str)>,
-        actions: &McuActions<C>,
+        actions: &LinkActions<C>,
     ) {
         match names {
             Some((mapping, suffix)) => {
@@ -2255,7 +2289,7 @@ impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for 
     any(feature = "query", feature = "liveliness", feature = "liveliness-get")
 ))]
 fn on_link<'w, C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     keyexpr: &str,
     wire: &'w WireKey,
 ) -> wz_capi_port::LinkKey<'w> {
@@ -2269,7 +2303,7 @@ fn on_link<'w, C: ClockSource + 'static>(
 /// form keeps `key` as the session names it (`shared-key-ids`).
 #[cfg(feature = "shared-key-ids")]
 fn key_on_link<'k, C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     key: NamedKey<'k>,
 ) -> NamedKey<'k> {
     actions.named_on_link(key)
@@ -2279,7 +2313,7 @@ fn key_on_link<'k, C: ClockSource + 'static>(
 #[cfg(not(feature = "shared-key-ids"))]
 #[inline(always)]
 fn key_on_link<'k, C: ClockSource + 'static>(
-    _actions: &McuActions<C>,
+    _actions: &LinkActions<C>,
     key: NamedKey<'k>,
 ) -> NamedKey<'k> {
     key
@@ -2292,7 +2326,7 @@ fn key_on_link<'k, C: ClockSource + 'static>(
 ))]
 #[inline(always)]
 fn on_link<'w, C: ClockSource + 'static>(
-    _actions: &McuActions<C>,
+    _actions: &LinkActions<C>,
     _keyexpr: &str,
     wire: &'w WireKey,
 ) -> wz_capi_port::LinkKey<'w> {
@@ -2305,7 +2339,7 @@ fn on_link<'w, C: ClockSource + 'static>(
 /// (`shared-key-ids`).
 #[cfg(feature = "shared-key-ids")]
 fn interest_on_link<C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     keyexpr: &str,
     aggregate: bool,
 ) -> Option<InterestForm> {
@@ -2322,7 +2356,7 @@ fn interest_on_link<C: ClockSource + 'static>(
 #[cfg(not(feature = "shared-key-ids"))]
 #[inline(always)]
 fn interest_on_link<C: ClockSource + 'static>(
-    _actions: &McuActions<C>,
+    _actions: &LinkActions<C>,
     _keyexpr: &str,
     _aggregate: bool,
 ) -> Option<InterestForm> {
@@ -2333,7 +2367,7 @@ fn interest_on_link<C: ClockSource + 'static>(
 /// declared later, naming its key as the link's key-wire form says: whether the link took it.
 fn send_interest<K: KeyBacking, C: ClockSource + 'static>(
     row: &InterestRow<K>,
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
 ) -> bool {
     let linked = interest_on_link(actions, row.key(), row.aggregate());
     let (mapping_id, suffix) = match &linked {
@@ -2390,7 +2424,7 @@ fn counts_own(plane: FilterPlane, count_local: bool) -> bool {
 /// the links that asks each is one loop: with the step's match inlined in it, the compiler writes
 /// the walk out once per step.
 #[inline(never)]
-fn batch_link<C: ClockSource + 'static>(actions: &McuActions<C>, step: BatchStep) -> bool {
+fn batch_link<C: ClockSource + 'static>(actions: &LinkActions<C>, step: BatchStep) -> bool {
     match step {
         BatchStep::Start => actions.batch_start(),
         BatchStep::Flush => actions.batch_flush(),
@@ -2399,13 +2433,13 @@ fn batch_link<C: ClockSource + 'static>(actions: &McuActions<C>, step: BatchStep
     .is_ok()
 }
 
-fn undeclare_kexpr<C: ClockSource + 'static>(mapping_id: ExprId) -> impl Fn(&McuActions<C>) {
+fn undeclare_kexpr<C: ClockSource + 'static>(mapping_id: ExprId) -> impl Fn(&LinkActions<C>) {
     move |actions| actions.send_undeclare_kexpr(mapping_id)
 }
 
 /// What tells a link that the Interest `id` ends, one closure type for every caller as
 /// [`undeclare_kexpr`] is.
-fn interest_final<C: ClockSource + 'static>(id: u64) -> impl Fn(&McuActions<C>) {
+fn interest_final<C: ClockSource + 'static>(id: u64) -> impl Fn(&LinkActions<C>) {
     move |actions| actions.send_interest_final(id)
 }
 
@@ -2578,7 +2612,7 @@ pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     registry: RegistryLend,
     /// The face the link serves, its set found by its place for every frame and not looked for.
     face: HeldFace,
-    actions: SessionHandle<C>,
+    actions: LinkHandle<C>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
@@ -2677,7 +2711,7 @@ trait LinkGates {
 
 impl<C: ClockSource + 'static> LinkGates for C {
     #[cfg(feature = "listen")]
-    type Gate = RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink>, C>>;
+    type Gate = RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink>, C, SessionLock>>;
     #[cfg(not(feature = "listen"))]
     type Gate = RoundGate<CellRc<dyn SessionDatagramLink>>;
 }
@@ -2689,8 +2723,8 @@ type LinkGate<C> = <C as LinkGates>::Gate;
 /// places together in the link's cell of its table (`TransportState::halves_cells`): the link's
 /// own state and the session's kernel.
 type LinkHalves<C> = (
-    LinkState<CoopRuntime<C>>,
-    SessionCore<CoopRuntime<C>, CoopTime<C>>,
+    LinkState<LinkRuntime<C>>,
+    SessionCore<LinkRuntime<C>, CoopTime<C>>,
 );
 
 /// The bytes of each link's cells a session over `links` on the clock `C` lays out: a cell for
@@ -2700,7 +2734,7 @@ pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl SessionLinks) ->
     LinkCells {
         driver: links.link_cell_bytes(),
         gate: CellRc::<LinkGate<C>>::cell_bytes(),
-        actions: CellRc::<McuActions<C>>::cell_bytes(),
+        actions: CellRc::<LinkActions<C>>::cell_bytes(),
         halves: CellRc::<LinkHalves<C>>::cell_bytes(),
     }
 }
@@ -2732,6 +2766,7 @@ pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
         RouterLend<SessionReassembly, RouterPlace>,
         RouterLend<SessionReassembly, RouterPlace>,
         FaceDispatch<C>,
+        SessionLock,
     >()
 }
 
@@ -2841,17 +2876,12 @@ struct LinkMaking<'a> {
     limits: &'a SessionLimits,
 }
 
-impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
+impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
     type Gate = LinkGate<C>;
     type Dispatch = FaceDispatch<C>;
     type Session = LinkSession<C>;
 
-    fn link_made(
-        &mut self,
-        face: FaceId,
-        actions: &SessionHandle<C>,
-        key_form: Option<KeyWireForm>,
-    ) {
+    fn link_made(&mut self, face: FaceId, actions: &LinkHandle<C>, key_form: Option<KeyWireForm>) {
         // The session keeps its declarations in its one table set and names each key it sends
         // itself, so the link keeps none and reads none; what the peer sends by the session's
         // ids is read from the same tables, which the dispatch of every face reads.
@@ -2882,11 +2912,7 @@ impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
         let _ = key_form;
     }
 
-    fn gate(
-        &self,
-        pump: CellRc<dyn SessionDatagramLink>,
-        actions: &SessionHandle<C>,
-    ) -> LinkGate<C> {
+    fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, actions: &LinkHandle<C>) -> LinkGate<C> {
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it:
         // the link gives the session nothing between its handshake and the face table's decision
@@ -2921,7 +2947,7 @@ impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
     fn wire_parts(
         &self,
         face: FaceId,
-        actions: SessionHandle<C>,
+        actions: LinkHandle<C>,
         gate: &CellRc<LinkGate<C>>,
     ) -> (FaceDispatch<C>, LinkSession<C>) {
         #[cfg(feature = "queryable")]
@@ -6925,7 +6951,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let undeclared = tables_mut(&mut core.session.registry).undeclare_subscriber(handle)?;
             let row = undeclared.taken;
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions: &McuActions<C>| {
+            core.retract_at(place, &|actions: &LinkActions<C>| {
                 let names = retraction.as_ref().map(|(names, key)| names.names(key));
                 SubscriberRow::retract(id, names, actions);
             });
@@ -6984,7 +7010,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let place = core.place_of(DeclaredRow::of(declared.handle));
         let taken = core.announce_or_undo_at(
             place,
-            &|actions: &McuActions<C>| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
+            &|actions: &LinkActions<C>| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
             &undeclare_kexpr::<C>(id),
         );
         if !taken {
@@ -7813,7 +7839,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let undeclared = tables_mut(&mut core.session.registry).undeclare_queryable(handle)?;
             let row = undeclared.taken;
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions: &McuActions<C>| {
+            core.retract_at(place, &|actions: &LinkActions<C>| {
                 let names = retraction.as_ref().map(|(names, key)| names.names(key));
                 QueryableRow::retract(id, names, actions);
             });
@@ -7911,7 +7937,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         core.transport.retract_from_groups(id);
         // The rows went before the links are told: a send never finds the tables borrowed.
         let key = undeclared.taken.as_ref().map(|row| row.key().as_str());
-        core.retract_at(token_place, &|actions: &McuActions<C>| {
+        core.retract_at(token_place, &|actions: &LinkActions<C>| {
             if let Some(key) = key {
                 retract_token(actions, id, names.map(|names| names.names(key)));
             }

@@ -76,6 +76,7 @@ use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
 use crate::session_runtime::{SessionEntropy, SessionHandle};
+use crate::sync::LockKind;
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
 /// What the drive loop needs from a network stack: advance its input path,
@@ -1327,11 +1328,12 @@ pub struct PumpFields<
     C: ClockSource,
     L,
     D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+    K: LockKind = crate::sync::Shared,
 > {
     /// The link the session reads and writes.
     pub link: L,
     /// The link's actions.
-    pub actions: SessionHandle<C, D>,
+    pub actions: SessionHandle<C, D, K>,
     /// The session's entropy source, which the engine's handshake binding holds.
     pub entropy: SessionEntropy,
     /// The session's clock.
@@ -1360,17 +1362,20 @@ pub struct PumpFields<
 ///
 /// `R` is the reassembly Router the session's receive stages its fragments in ([`RxReassembly`]):
 /// the one the pump builds for itself ([`DefaultRouter`]), or one its maker hands it.
+///
+/// `K` is how the runtime locks the values it lends the session ([`LockKind`]).
 pub struct SessionPump<
     C: ClockSource,
     L: SessionDatagramLink,
     D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
     R = DefaultRouter,
+    K: LockKind = crate::sync::Shared,
 > {
-    runtime: CoopRuntime<C, D>,
+    runtime: CoopRuntime<C, D, K>,
     link: L,
-    actions: SessionHandle<C, D>,
+    actions: SessionHandle<C, D, K>,
     clock: CoopTime<C>,
-    engine: SessionEngine<CoopRuntime<C, D>, CoopTime<C>>,
+    engine: SessionEngine<CoopRuntime<C, D, K>, CoopTime<C>>,
     /// The session's own timers: the pump asks them how long its link may wait and hands them
     /// the time, and keeps no deadline of its own.
     timers: TransportTimers,
@@ -1392,8 +1397,12 @@ pub struct SessionPump<
     max_iters: Option<usize>,
 }
 
-impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'static>
-    SessionPump<C, L, D>
+impl<
+        C: ClockSource,
+        L: SessionDatagramLink,
+        D: BoxedLinkDriver + ?Sized + 'static,
+        K: LockKind,
+    > SessionPump<C, L, D, DefaultRouter, K>
 {
     /// Build the engine, activate the configured role, and arm the
     /// handshake deadline tracker — everything `run_session` does before
@@ -1425,9 +1434,9 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
     #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
     #[inline(never)]
     pub fn new(
-        runtime: CoopRuntime<C, D>,
+        runtime: CoopRuntime<C, D, K>,
         link: L,
-        actions: SessionHandle<C, D>,
+        actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
@@ -1460,9 +1469,9 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
     #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
     #[inline(never)]
     pub fn with_reassembly_arena(
-        runtime: CoopRuntime<C, D>,
+        runtime: CoopRuntime<C, D, K>,
         link: L,
-        actions: SessionHandle<C, D>,
+        actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
@@ -1486,7 +1495,8 @@ impl<
         L: SessionDatagramLink,
         D: BoxedLinkDriver + ?Sized + 'static,
         R: RxReassembly,
-    > SessionPump<C, L, D, R>
+        K: LockKind,
+    > SessionPump<C, L, D, R, K>
 {
     /// The pump `SessionPump::new` builds, over a reassembly Router its maker built: one whose
     /// chains stage into buffers the session's arena lent, so the session's fragments cost the
@@ -1495,9 +1505,9 @@ impl<
     #[cfg(feature = "reassembly")]
     #[inline(never)]
     pub fn with_router(
-        runtime: CoopRuntime<C, D>,
+        runtime: CoopRuntime<C, D, K>,
         link: L,
-        actions: SessionHandle<C, D>,
+        actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
@@ -1519,8 +1529,8 @@ impl<
     #[cfg(feature = "reassembly")]
     pub fn with_router_in(
         place: &mut MaybeUninit<Self>,
-        runtime: CoopRuntime<C, D>,
-        fields: PumpFields<C, L, D>,
+        runtime: CoopRuntime<C, D, K>,
+        fields: PumpFields<C, L, D, K>,
         make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
     ) -> Option<&mut Self> {
         let at = place.as_mut_ptr();
@@ -1540,9 +1550,9 @@ impl<
     /// [`Self::build_in`] in a place of its own.
     #[inline(always)]
     fn build(
-        runtime: CoopRuntime<C, D>,
+        runtime: CoopRuntime<C, D, K>,
         link: L,
-        actions: SessionHandle<C, D>,
+        actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
@@ -1589,8 +1599,8 @@ impl<
     #[inline(never)]
     unsafe fn build_in(
         place: &mut MaybeUninit<Self>,
-        runtime: CoopRuntime<C, D>,
-        fields: PumpFields<C, L, D>,
+        runtime: CoopRuntime<C, D, K>,
+        fields: PumpFields<C, L, D, K>,
         write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
     ) {
         let PumpFields {
@@ -1614,7 +1624,7 @@ impl<
             // The engine is made in its field (`MaybeUninit<T>` has the layout of `T`).
             let engine = new_session_engine_in(
                 &mut *core::ptr::addr_of_mut!((*at).engine)
-                    .cast::<MaybeUninit<SessionEngine<CoopRuntime<C, D>, CoopTime<C>>>>(),
+                    .cast::<MaybeUninit<SessionEngine<CoopRuntime<C, D, K>, CoopTime<C>>>>(),
                 &actions,
                 entropy,
             );
@@ -1647,7 +1657,7 @@ impl<
     /// Borrow the runtime this session was built against. The synchronous
     /// driver uses it to take the executor pass that [`Self::step`] does
     /// not.
-    pub fn runtime(&self) -> &CoopRuntime<C, D> {
+    pub fn runtime(&self) -> &CoopRuntime<C, D, K> {
         &self.runtime
     }
 
@@ -1973,9 +1983,9 @@ impl<D, H> MakeRouter<wz_session_core::unicast_rx::RouterLend<D, H>>
 /// Out of line: the task's future is built here, apart from the frame and body of the caller.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 #[inline(never)]
-pub fn spawn_session_with_router<C, L, R, M, F>(
+pub fn spawn_session_with_router<C, L, R, M, F, K>(
     local: &CoopLocalSet<C>,
-    fields: PumpFields<C, L>,
+    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
     make_router: M,
     on_event: F,
 ) -> Result<CoopLocalJoinHandle<DriverOutcome>, crate::executor::SpawnRefusal>
@@ -1985,9 +1995,11 @@ where
     R: RxReassembly + 'static,
     M: MakeRouter<R> + 'static,
     F: EventSink + 'static,
+    K: LockKind,
 {
-    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F>>()?;
-    let runtime = local.runtime().clone();
+    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F, K>>()?;
+    // The local set's runtime, read under the lock type of the session's values.
+    let runtime: CoopRuntime<C, dyn BoxedLinkDriver, K> = local.runtime().retyped();
     let at = task.as_mut_ptr();
     // SAFETY: the place is this claim's alone, long enough and aligned for the task. Every field of
     // the task is written in it here, once, before the task starts: the parts whole, in the place
@@ -2009,14 +2021,15 @@ where
 /// opens. It builds the session's pump in its own memory at its first poll, then steps the session
 /// once each poll and yields, as a loop of [`SessionPump::step`] and [`yield_now`] does.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub struct RouterSessionTask<C, L, R, M, F>
+pub struct RouterSessionTask<C, L, R, M, F, K = crate::sync::Shared>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
+    K: LockKind,
 {
     /// What the pump is made of until the task first runs, and then the pump, in the same bytes.
-    place: TaskPlace<C, L, R, M>,
+    place: TaskPlace<C, L, R, M, K>,
     on_event: F,
     /// The pump is built in `place` and points into itself: the task stays where it is polled.
     _pinned: core::marker::PhantomPinned,
@@ -2024,24 +2037,26 @@ where
 
 /// The place a [`RouterSessionTask`] holds its pump's parts in, and then its pump.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-type TaskPlace<C, L, R, M> = Becomes<PumpParts<C, L, M>, SessionPump<C, L, dyn BoxedLinkDriver, R>>;
+type TaskPlace<C, L, R, M, K> =
+    Becomes<PumpParts<C, L, M, K>, SessionPump<C, L, dyn BoxedLinkDriver, R, K>>;
 
 /// What a [`RouterSessionTask`] builds its pump of.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-struct PumpParts<C: ClockSource + 'static, L, M> {
-    runtime: CoopRuntime<C>,
-    fields: PumpFields<C, L>,
+struct PumpParts<C: ClockSource + 'static, L, M, K: LockKind> {
+    runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
+    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
     make_router: M,
 }
 
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-impl<C, L, R, M, F> core::future::Future for RouterSessionTask<C, L, R, M, F>
+impl<C, L, R, M, F, K> core::future::Future for RouterSessionTask<C, L, R, M, F, K>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
     M: MakeRouter<R>,
     F: EventSink,
+    K: LockKind,
 {
     type Output = DriverOutcome;
 
@@ -2080,15 +2095,16 @@ where
 /// gives its cells, so that a layer that grows is a number that follows and not a spawn that is
 /// refused ([`crate::executor::SpawnRefusal::TooLarge`]).
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub const fn router_session_task_bytes<C, L, R, M, F>() -> usize
+pub const fn router_session_task_bytes<C, L, R, M, F, K>() -> usize
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
     M: MakeRouter<R>,
     F: EventSink,
+    K: LockKind,
 {
-    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F>>()
+    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F, K>>()
 }
 
 /// The bytes a task's pump is built in, which hold what the pump is made of until it is: the parts

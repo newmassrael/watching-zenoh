@@ -49,6 +49,7 @@ use wz_capi_port::os::{self, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{HeldQueryId, KeyAnchor, QblId, QueryHolder, QueryableSink, Refusal};
 
+use super::LinkActions;
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::named_key::NamedKey;
@@ -62,7 +63,6 @@ use wz_session_core::row_callback::RowCallback;
 use wz_session_core::sample::QosLevel;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::sample::{EncodingHint, SourceInfo};
-use wz_session_mcu::dial::McuActions;
 
 use crate::round::{CoopCalls, Latch};
 
@@ -114,7 +114,7 @@ impl QueryableRow {
         id: QblId,
         key: NamedKey<'_>,
         complete: bool,
-        actions: &McuActions<C>,
+        actions: &LinkActions<C>,
     ) -> bool {
         actions
             .send_declare_queryable(id, key_on_link(actions, key), complete)
@@ -127,7 +127,7 @@ impl QueryableRow {
     pub(super) fn retract<C: ClockSource + 'static>(
         id: QblId,
         names: Option<(wz_session_core::wire_id::ExprId, &str)>,
-        actions: &McuActions<C>,
+        actions: &LinkActions<C>,
     ) {
         match names {
             Some((mapping, suffix)) => {
