@@ -63,12 +63,16 @@ use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ptr::{addr_of_mut, NonNull};
 
-#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+#[cfg(any(
+    all(test, feature = "std"),
+    all(not(feature = "std"), not(feature = "os-sys"))
+))]
 use crate::lodge::StaticPlaces;
 use crate::lodge::{NoPlace, Strong};
 use crate::os::{Condvar, Mutex, MutexGuard};
 use crate::reach::ReachEngine;
 use crate::sync::Lock;
+use wz_session_core::caps;
 
 /// The token's state, under one lock so "cancel has started", "the fans are off the list" and
 /// "no registration can land" are one fact rather than three.
@@ -515,10 +519,15 @@ pub fn register_fan(token: &Strong<CancellationToken>) -> Option<Arc<Cancellable
     unsafe { fan.register(TokenRef::shared(token.clone())) }.then_some(fan)
 }
 
-/// How many tokens a kernel's build holds at once: a program that cancels its gets holds one per
-/// group of gets it cancels together, and one more is refused, as a full heap refuses pico's.
-#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
-pub const TOKEN_PLACES: usize = 4;
+/// How many tokens a kernel's build holds at once, read off the build's limits: a token is held to
+/// cancel gets, and a process has at most this many gets pending at once, each of its engines'
+/// rows ([`caps::ENGINE_ROWS`]) as many as its session's tables admit, queries and a querier's
+/// queries in one ([`caps::MAX_PENDING_QUERIES`]) and liveliness gets in the other
+/// ([`caps::MAX_PENDING_LIVELINESS_GETS`]). A program holding a token for each get it has pending
+/// is never refused one; the next past them is, as a full heap refuses pico's. Moved as those
+/// limits are, by the build's configuration.
+pub const TOKEN_PLACES: usize = caps::ENGINE_ROWS
+    .saturating_mul(caps::MAX_PENDING_QUERIES.saturating_add(caps::MAX_PENDING_LIVELINESS_GETS));
 
 /// The process's places for tokens in a kernel's build.
 #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
@@ -532,7 +541,23 @@ static TOKENS: StaticPlaces<CancellationToken, TOKEN_PLACES> = StaticPlaces::new
 unsafe fn lodge_token(
     make: impl FnOnce(NonNull<CancellationToken>),
 ) -> Result<Strong<CancellationToken>, NoPlace> {
-    let lent = TOKENS.lend().ok_or(NoPlace)?;
+    // SAFETY: the caller's.
+    unsafe { lodge_in_table(&TOKENS, make) }
+}
+
+/// The token `make` writes, in a place of `table`, or [`NoPlace`] when every one is held.
+///
+/// # Safety
+/// As [`lodge_token`].
+#[cfg(any(
+    all(test, feature = "std"),
+    all(not(feature = "std"), not(feature = "os-sys"))
+))]
+unsafe fn lodge_in_table<const N: usize>(
+    table: &'static StaticPlaces<CancellationToken, N>,
+    make: impl FnOnce(NonNull<CancellationToken>),
+) -> Result<Strong<CancellationToken>, NoPlace> {
+    let lent = table.lend().ok_or(NoPlace)?;
     // SAFETY: the caller's.
     Ok(unsafe { Strong::lodge_at(lent, make) })
 }
@@ -689,6 +714,43 @@ mod tests {
             engine.taken(),
             vec![(key, "cancel")],
             "a cancelled fan is not over again at its drop"
+        );
+    }
+
+    /// The kernel's table of tokens holds as many tokens as the build's limits let a process have
+    /// gets pending, refuses the next, and takes a token's place back with its last count.
+    ///
+    /// # Control
+    ///
+    /// Every place up to the bound is the control. A table sized apart from the limits, or one
+    /// that lends a held place, reds the count or the refusal.
+    #[test]
+    fn the_table_of_tokens_holds_one_per_pending_get_and_refuses_the_next() {
+        static TABLE: StaticPlaces<CancellationToken, TOKEN_PLACES> = StaticPlaces::new();
+        assert_eq!(
+            TOKEN_PLACES,
+            caps::ENGINE_ROWS * (caps::MAX_PENDING_QUERIES + caps::MAX_PENDING_LIVELINESS_GETS),
+            "the bound is the gets a process can have pending"
+        );
+        let make = |place: NonNull<CancellationToken>| {
+            // SAFETY: the place is its lodging's, valid for one token, holding none, never moved.
+            unsafe { CancellationToken::init_in(place) }
+        };
+        let mut held = Vec::new();
+        for _ in 0..TOKEN_PLACES {
+            // SAFETY: `make` makes the whole token.
+            let token = unsafe { lodge_in_table(&TABLE, make) };
+            held.push(token.expect("CONTROL: a place up to the bound"));
+        }
+        // SAFETY: as above.
+        let past = unsafe { lodge_in_table(&TABLE, make) };
+        assert_eq!(past.err(), Some(NoPlace), "one past the bound is refused");
+        drop(held.pop());
+        // SAFETY: as above.
+        let again = unsafe { lodge_in_table(&TABLE, make) };
+        assert!(
+            again.is_ok(),
+            "a token's place goes back with its last count"
         );
     }
 }
