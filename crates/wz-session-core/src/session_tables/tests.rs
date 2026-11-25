@@ -3166,6 +3166,62 @@ fn a_plain_way_carries_the_head_of_its_declaration() {
     }
 }
 
+/// A plain way is planned at an epoch only for its key named by its head's declaration alone, and
+/// its put is read back at that epoch alone, named by that declaration and written from the way's
+/// head. A way stated again is planned again. Turned red by a plan kept for a key the head does not
+/// name (the literal, or a key past the declaration), by a plan read at another epoch, or by a way
+/// stated again that keeps its plan.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+#[test]
+fn a_plain_way_is_planned_at_one_epoch_for_its_heads_key_alone() {
+    use crate::named_key::NamedKey;
+    use crate::publish_options::PlainPutParams;
+    use crate::wire_key::{MappedId, WireKey};
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/x").unwrap();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "demo/x", false)
+        .unwrap()
+        .handle;
+    let params = PlainPutParams {
+        destination: Locality::Any,
+        qos: None,
+        reliable: true,
+        express: false,
+        priority: crate::qos::Priority::DEFAULT,
+    };
+    let at = KeyexprRef::by_id(declared.id);
+    tables.keep_write_filter_plain(filter, Some((params, at)));
+    let row = tables.write_filters().get(filter).unwrap();
+    assert!(row.planned_put(7).is_none(), "no plan yet");
+    assert!(
+        !row.keep_plan(7, NamedKey::literal("demo/x").unwrap()),
+        "the literal is not the key the head names"
+    );
+    assert!(row.planned_put(7).is_none());
+    let past = tables.named_at("demo/x/y", at).expect("a key");
+    assert!(
+        !row.keep_plan(7, past),
+        "a key past the declaration is not the filter's key"
+    );
+    let named = tables.named_at("demo/x", at).expect("a key");
+    assert!(row.keep_plan(7, named));
+    let planned = row.planned_put(7).expect("planned at 7");
+    assert_eq!(planned.key().text(), "demo/x");
+    assert_eq!(
+        planned.key().wire(),
+        WireKey::Id(MappedId::new(declared.id).unwrap())
+    );
+    assert_eq!(Some(planned.head()), row.plain().and_then(|way| way.head));
+    assert!(row.planned_put(8).is_none(), "another epoch");
+    tables.keep_write_filter_plain(filter, Some((params, at)));
+    let row = tables.write_filters().get(filter).unwrap();
+    assert!(
+        row.planned_put(7).is_none(),
+        "a way stated again is planned again"
+    );
+}
+
 /// A plain way kept on a write filter keeps the row of the declaration that names its key, found
 /// by its id when the holder gave none, and none for a key that names no declaration; a key named
 /// at that row is named as by the declaration's id; a row that no longer holds the id is passed
