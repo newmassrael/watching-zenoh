@@ -2588,7 +2588,8 @@ fn decode_oam(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> 
 //    workspace as a hard `E0277` on `panic!("{other:?}")`, so the gap was
 //    a compile error for every consumer that wanted to log, assert on, or
 //    view a decode. ──
-#[cfg(all(test, feature = "reassembly"))]
+// It decodes a fragment, which the heap profile reads (`InboundFrame::Fragment`, `alloc`).
+#[cfg(all(test, feature = "reassembly", feature = "alloc"))]
 mod debug_surface_tests {
     use super::*;
     use alloc::format;
@@ -2767,7 +2768,8 @@ mod mandatory_ext_tests {
 //    reads a capture through, and it reported every multicast peer
 //    announcement as `Unknown { mid: 0x07 }` — a successful parse, which is
 //    why nothing downstream noticed. ──
-#[cfg(all(test, feature = "codec-join"))]
+// `InboundFrame::Join` is the heap profile's (`alloc`).
+#[cfg(all(test, feature = "codec-join", feature = "alloc"))]
 mod join_tests {
     use super::*;
 
@@ -2975,7 +2977,7 @@ mod kind_name_tests {
         #[cfg(feature = "codec-keep-alive")]
         cases.push((alloc::vec![wire_const::T_MID_KEEP_ALIVE], "KeepAlive"));
 
-        #[cfg(feature = "codec-frame")]
+        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         cases.push((
             alloc::vec![
                 wire_const::T_MID_FRAME | wire_const::FLAG_T_FRAME_R,
@@ -2985,7 +2987,7 @@ mod kind_name_tests {
             "Frame",
         ));
 
-        #[cfg(feature = "reassembly")]
+        #[cfg(all(feature = "alloc", feature = "reassembly"))]
         cases.push((
             alloc::vec![
                 wire_const::T_MID_FRAGMENT | wire_const::FLAG_T_FRAME_R,
@@ -2995,7 +2997,7 @@ mod kind_name_tests {
             "Fragment",
         ));
 
-        #[cfg(feature = "codec-join")]
+        #[cfg(all(feature = "alloc", feature = "codec-join"))]
         {
             let join = wz_codecs::join::Join {
                 version: 0x09,
@@ -3047,11 +3049,11 @@ mod kind_name_tests {
         want.push("Close");
         #[cfg(feature = "codec-keep-alive")]
         want.push("KeepAlive");
-        #[cfg(feature = "codec-frame")]
+        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         want.push("Frame");
-        #[cfg(feature = "reassembly")]
+        #[cfg(all(feature = "alloc", feature = "reassembly"))]
         want.push("Fragment");
-        #[cfg(feature = "codec-join")]
+        #[cfg(all(feature = "alloc", feature = "codec-join"))]
         want.push("Join");
         want.push("Unknown");
         want

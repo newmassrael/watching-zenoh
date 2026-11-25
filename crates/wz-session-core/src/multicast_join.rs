@@ -531,6 +531,7 @@ mod tests {
     /// Both rules refuse a member whose batch size is not the node's own, and say why: zenoh's
     /// 8,192-byte multicast batch and zenoh-pico's 2,048 are not read by each other.
     #[test]
+    #[cfg(feature = "alloc")]
     fn a_join_of_another_batch_size_is_refused_by_either_rule() {
         let zid = [0x01, 0x02, 0x03, 0x04];
         let mut theirs = params(&zid);
@@ -560,6 +561,7 @@ mod tests {
     /// it, zenoh-pico's has no such rule and admits it, and a node that offers them admits it
     /// under either.
     #[test]
+    #[cfg(feature = "alloc")]
     fn a_qos_join_to_a_node_without_qos_is_refused_by_zenohs_rule_only() {
         let zid = [0x01, 0x02, 0x03, 0x04];
         let bytes = encode_join(
@@ -588,6 +590,7 @@ mod tests {
     /// are one and several VLE bytes wide. A sink one byte short is REFUSED, never
     /// cut, and every datagram fits [`JOIN_MAX_BYTES`].
     #[test]
+    #[cfg(feature = "alloc")]
     fn encode_join_into_writes_the_datagram_encode_join_writes() {
         use sce_forge_runtime::codec::SliceSink;
         let mut compared = 0usize;
@@ -713,6 +716,7 @@ mod tests {
     /// what it gives back is the datagram a plain group sends.
     #[cfg(feature = "transport-compression")]
     #[test]
+    #[cfg(feature = "alloc")]
     fn a_compressing_groups_beacon_is_the_plain_beacon_as_a_batch() {
         let plain = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
         let squeezing = MulticastParams {
@@ -731,12 +735,18 @@ mod tests {
     }
 
     /// A fresh announcer's JOIN datagram (both advertised next SNs = 0) —
-    /// the wire-shape fixtures only need SOME valid beacon.
+    /// the wire-shape fixtures only need SOME valid beacon. Written by the
+    /// encoder every build has (into an array of [`JOIN_MAX_BYTES`]), so the
+    /// fixtures run in a build without the heap encoder too.
     fn join0(p: &MulticastParams) -> Vec<u8> {
-        encode_join(
+        let mut out = [0u8; JOIN_MAX_BYTES];
+        let len = encode_join_into_slice(
             p,
             &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
+            &mut out,
         )
+        .expect("a JOIN fits its bound");
+        out[..len].to_vec()
     }
 
     /// A params bundle at the PROTOCOL defaults (8192 / 0x02 / 0x02) —
@@ -757,6 +767,7 @@ mod tests {
     /// QoS SNs where it offers per-priority conduits, then the patch level where
     /// it emits fragment chains with their markers.
     #[test]
+    #[cfg(feature = "alloc")]
     fn a_beacon_is_the_bytes_both_references_lay_out() {
         let qos = cfg!(feature = "transport-qos");
         let patch = cfg!(feature = "transport-fragmentation");
@@ -1041,6 +1052,7 @@ mod tests {
     /// chain behind an entry of another id reads as the beacon does.
     #[cfg(feature = "transport-qos")]
     #[test]
+    #[cfg(feature = "alloc")]
     fn a_joins_extensions_are_read_wherever_the_chain_holds_them() {
         use crate::qos::Priority;
         let mut p = params(&[0x01, 0x02, 0x03, 0x04]);
@@ -1187,6 +1199,7 @@ mod tests {
     /// A JOIN whose zid is zero is no JOIN: it is refused where it is read, and the same
     /// JOIN naming a zid is read with that zid as the member's identity.
     #[test]
+    #[cfg(feature = "alloc")]
     fn a_join_naming_a_zero_zid_is_refused_where_it_is_read() {
         let p = params(&[0x01]);
         let named = encode_join(
@@ -1213,6 +1226,7 @@ mod tests {
     /// pairs exactly. A non-qos JOIN clears Z and carries no qos ext.
     #[cfg(feature = "transport-qos")]
     #[test]
+    #[cfg(feature = "alloc")]
     fn encode_join_qos_round_trips_per_priority_sns() {
         use crate::qos::Priority;
         let mut p = params(&[0x01, 0x02, 0x03, 0x04]);
@@ -1351,6 +1365,7 @@ mod tests {
     /// across the settings that change its shape.
     #[cfg(feature = "alloc")]
     #[test]
+    #[cfg(feature = "alloc")]
     fn every_join_written_here_is_the_join_the_document_reads() {
         use wz_codecs::transport_join::TransportJoinView;
         let mut compared = 0usize;

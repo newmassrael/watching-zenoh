@@ -618,7 +618,7 @@ impl MulticastTxConduits {
     /// emit only ever [`Self::mint`]s). Gated on `transport-fragmentation` — its
     /// sole consumer is the oversize-fragment re-frame test, which itself needs
     /// the fragmentation codec.
-    #[cfg(all(test, feature = "transport-fragmentation"))]
+    #[cfg(all(test, feature = "transport-fragmentation", feature = "alloc"))]
     pub(crate) fn default_conduit_mut(&mut self) -> &mut TxSn {
         self.select_mut(crate::qos::Priority::DEFAULT)
     }

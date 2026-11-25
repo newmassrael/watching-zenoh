@@ -1590,7 +1590,11 @@ pub(crate) fn is_transport_mid(mid: u8) -> bool {
 /// stops it after that record, and is the walk's answer. What a receive path
 /// needs when handing a record over can itself fail (the owned extension chain
 /// of the `Frame` it came in, made only when an owned record needs it).
-#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+// Its test readers are the record walk's, which are the heap profile's (`record_walk_tests`).
+#[cfg(all(
+    feature = "codec-frame",
+    any(all(test, feature = "alloc"), feature = "session-unicast")
+))]
 pub(crate) fn try_for_each_record<'f>(
     payload: &'f [u8],
     record: &mut RecordBuf,

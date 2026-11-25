@@ -16,7 +16,11 @@
 //! not a counter that cannot see a vector.
 //!
 //! Only the allocations of the calling thread are counted.
-#![cfg(all(feature = "session-multicast", feature = "codec-join"))]
+#![cfg(all(
+    feature = "session-multicast",
+    feature = "codec-join",
+    feature = "alloc"
+))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
