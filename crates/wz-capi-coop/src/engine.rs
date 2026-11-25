@@ -92,7 +92,7 @@ use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
-#[cfg(feature = "listen")]
+#[cfg(all(feature = "listen", wz_round))]
 use crate::admission_gate::AdmissionGate;
 use wz_capi_port::os::{self, Mutex, MutexGuard};
 #[cfg(feature = "threads")]
@@ -2845,7 +2845,7 @@ struct LinkSession<C: ClockSource + 'static> {
     /// until then the link gives the session nothing past its handshake, so the watchers hear the
     /// face come up before anything its link carried. A session of several links tells them what
     /// each wait found in the link's stack (`input_seen`).
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(any(feature = "listen", feature = "group"), wz_round))]
     gate: CellRc<LinkGate<C>, LinkCount>,
     /// The link's generation, which the queries it carries are answered under (`query`).
     #[cfg(feature = "queryable")]
@@ -2882,7 +2882,9 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
         self.actions.close_reason()
     }
 
-    #[cfg(any(feature = "listen", feature = "group"))]
+    // What a wait found is the round's to know, which steps the links as tasks of one set: a read
+    // that steps each face where it lies reads what it waited for at once.
+    #[cfg(all(any(feature = "listen", feature = "group"), wz_round))]
     fn input_seen(&self, ready: bool) {
         self.gate.input_seen(ready);
     }
@@ -3993,10 +3995,10 @@ trait LinkGates {
 }
 
 impl<C: ClockSource + 'static> LinkGates for C {
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", wz_round))]
     type Gate =
         RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink, LinkCount>, C, SessionLock>>;
-    #[cfg(all(not(feature = "listen"), any(feature = "threads", feature = "group")))]
+    #[cfg(all(not(feature = "listen"), wz_round))]
     type Gate = RoundGate<CellRc<dyn SessionDatagramLink, LinkCount>>;
     // The read steps the one link itself and hands each record out as it is read, so nothing
     // holds the link back from its session, and it keeps no round to tell where the datagram it
@@ -4417,13 +4419,13 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let _ = gate;
         // The wire keeps a handle on the gates to admit the link through them, and to tell them
         // what each wait found in the link's stack.
-        #[cfg(all(feature = "threads", not(any(feature = "listen", feature = "group"))))]
+        #[cfg(all(wz_round, not(any(feature = "listen", feature = "group"))))]
         let _ = gate;
         (
             dispatch,
             LinkSession {
                 actions,
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(any(feature = "listen", feature = "group"), wz_round))]
                 gate: gate.clone(),
                 #[cfg(feature = "queryable")]
                 generation,
@@ -5133,7 +5135,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Lend::Lent(facts) => facts,
             Lend::Held | Lend::Empty => return,
         };
-        #[cfg(feature = "listen")]
+        // The work form's task reads nothing of an accepted link before its admission is granted;
+        // a read that steps each face where it lies is given the face once it is admitted.
+        #[cfg(all(feature = "listen", wz_round))]
         wire.gate.pump().grant();
         // A publish goes to the links that are up, so theirs are the rooms it asks.
         if let Some(on) = wire.room_wait() {
@@ -5480,7 +5484,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Take the connections that wait on the ports the session listens on, each as a face of its
     /// own. A port that had no socket or buffer for one just now is looked at again on the next
     /// step, and one that is broken for good is let go of.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", wz_round))]
     fn accept_links(&mut self) {
         let mut at = 0;
         while let Some((opened, endpoint)) = self.transport.next_accepted(&mut at) {
