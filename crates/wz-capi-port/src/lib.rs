@@ -1066,7 +1066,7 @@ impl KeyHold {
             // SAFETY: `session` is the session this hold was taken of, standing for the call.
             match unsafe { self.head() } {
                 Some(head) => {
-                    let taken = Self::retained_at(head, self.mapping_id);
+                    let taken = Self::retained_at(head, row, self.mapping_id);
                     if taken.is_ok() {
                         session.counted_at_row(1);
                     }
@@ -1087,15 +1087,22 @@ impl KeyHold {
         })
     }
 
-    /// One more hold of `id` taken at the row `head` heads, as the engine's count answers it.
+    /// One more hold of `id` in `row` taken at the row `head` heads, as the engine's count
+    /// answers it.
     fn retained_at(
         head: &wz_session_core::session_tables::KeyexprHead,
+        row: wz_session_core::session_tables::KeyexprHandle,
         id: wz_session_core::wire_id::ExprId,
     ) -> Result<(), HoldRefused> {
-        head.retain(id).map_err(|refused| match refused {
+        head.retain(row, id).map_err(Self::refused_at_row)
+    }
+
+    /// What a refusal at the row's address is to the holder.
+    fn refused_at_row(refused: wz_session_core::session_tables::RowHoldRefused) -> HoldRefused {
+        match refused {
             wz_session_core::session_tables::RowHoldRefused::Full => HoldRefused::Full,
             wz_session_core::session_tables::RowHoldRefused::Released => HoldRefused::Gone,
-        })
+        }
     }
 
     /// A copy of a hold whose session is gone, which holds nothing.
@@ -1115,7 +1122,7 @@ impl KeyHold {
             return;
         };
         // SAFETY: `session` is the session this hold was taken of, standing for the call.
-        if unsafe { self.head() }.is_some_and(|head| head.release_shared(self.mapping_id)) {
+        if unsafe { self.head() }.is_some_and(|head| head.release_shared(row, self.mapping_id)) {
             session.counted_at_row(-1);
             return;
         }
