@@ -5739,7 +5739,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             meta: &meta,
         };
         let (outcome, stuck) = self.fan_out_in(&mut core.0, &put, None, begin.pass);
-        // The clock is read only for a fan-out that stopped at a face, whose wait it bounds.
+        // The clock is read only for a fan-out that stopped at a face, whose wait it bounds. Only
+        // a send that waits for no slot stops one, which a build that listens on nothing never
+        // makes: there the fan-out is done, and neither the clock nor the wait is read.
+        debug_assert!(
+            stuck.is_none() || cfg!(feature = "listen"),
+            "a fan-out stops at a face only where a send waits for no slot"
+        );
+        let stuck = stuck.filter(|_| cfg!(feature = "listen"));
         let fanned = run.fanned(stuck, || core.0.now_us());
         #[cfg(feature = "listen")]
         let waits = match fanned.then {
