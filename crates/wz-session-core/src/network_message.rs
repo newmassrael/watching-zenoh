@@ -3288,7 +3288,7 @@ pub fn reply_parts_stats_class(
     feature = "transport-stats",
     any(
         feature = "codec-push",
-        feature = "codec-request",
+        all(feature = "codec-request", feature = "request-put-del"),
         feature = "codec-response"
     )
 ))]
@@ -3365,7 +3365,7 @@ fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, eid:
     feature = "transport-stats",
     any(
         feature = "codec-push",
-        feature = "codec-request",
+        all(feature = "codec-request", feature = "request-put-del"),
         feature = "codec-response"
     )
 ))]
@@ -3383,7 +3383,7 @@ fn put_payload_size<S: wz_codecs::msg_put::MsgPutStorage>(
     feature = "transport-stats",
     any(
         feature = "codec-push",
-        feature = "codec-request",
+        all(feature = "codec-request", feature = "request-put-del"),
         feature = "codec-response"
     )
 ))]
@@ -3399,7 +3399,7 @@ fn del_payload_size(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>) ->
     feature = "transport-stats",
     any(
         feature = "codec-push",
-        feature = "codec-request",
+        all(feature = "codec-request", feature = "request-put-del"),
         feature = "codec-response"
     )
 ))]
@@ -3487,27 +3487,43 @@ where
     // Every Request is a `query` to the registry whatever its body: upstream
     // labels by the network message, and its `Request` arm names one kind
     // (`commons/zenoh-stats/src/labels.rs` @ `NetworkBodyRef::Request(_) => MessageLabel::Query,`).
-    match &request.body {
-        V::CodecZenohMsgPut(b) => put_stats_class(MessageLabel::Query, StatMessage::Put, space, b),
-        V::CodecZenohMsgDel(b) => stats_data_class(
-            MessageLabel::Query,
-            StatMessage::Del,
-            space,
-            del_payload_size(b.extensions.entries()),
-            b.extensions.entries(),
-        ),
-        // The marker that precedes a Query's value is its own extension, not a
-        // Put's (`ext_header::body_ext_id::QUERY_SHM`), and upstream's `is_shm`
-        // for a Request reads it off the Query's value body.
-        V::CodecZenohQuery(b) | V::Default { body: b, .. } => stats_class_marked(
-            MessageLabel::Query,
-            StatMessage::Query,
-            space,
-            query_payload_size(b.extensions.entries()),
-            b.extensions.entries(),
-            crate::ext_header::body_ext_id::QUERY_SHM,
-        ),
-    }
+    let query = match &request.body {
+        #[cfg(feature = "request-put-del")]
+        V::CodecZenohMsgPut(b) => {
+            return put_stats_class(MessageLabel::Query, StatMessage::Put, space, b);
+        }
+        #[cfg(feature = "request-put-del")]
+        V::CodecZenohMsgDel(b) => {
+            return stats_data_class(
+                MessageLabel::Query,
+                StatMessage::Del,
+                space,
+                del_payload_size(b.extensions.entries()),
+                b.extensions.entries(),
+            );
+        }
+        V::CodecZenohQuery(b) => b,
+        // An unknown tag carries a Query's body. Anything else is a Put or a Del arm the codec
+        // builds for another crate of the graph where this build names neither, so it has no
+        // class here; the binding keeps the match exhaustive whichever arms the codec has.
+        other => {
+            let V::Default { body, .. } = other else {
+                return crate::stats::NetworkStatsClass::undecoded();
+            };
+            body
+        }
+    };
+    // The marker that precedes a Query's value is its own extension, not a
+    // Put's (`ext_header::body_ext_id::QUERY_SHM`), and upstream's `is_shm`
+    // for a Request reads it off the Query's value body.
+    stats_class_marked(
+        MessageLabel::Query,
+        StatMessage::Query,
+        space,
+        query_payload_size(query.extensions.entries()),
+        query.extensions.entries(),
+        crate::ext_header::body_ext_id::QUERY_SHM,
+    )
 }
 
 /// R2825 (open-debt item 820) — a Query's payload SIZE as upstream counts it:
@@ -4213,21 +4229,29 @@ fn request_body_class(
     body: &wz_codecs::request::RequestViewVariant<'_>,
     space: crate::stats::StatSpace,
 ) -> crate::stats::NetworkStatsClass {
-    use wz_codecs::request::RequestViewVariant as V;
-    if let V::CodecZenohQuery(query) | V::Default { body: query, .. } = body {
-        return query_view_class(space, query);
-    }
     #[cfg(feature = "request-put-del")]
-    {
-        use crate::stats::{MessageLabel, StatMessage};
-        if let V::CodecZenohMsgPut(put) = body {
+    use crate::stats::{MessageLabel, StatMessage};
+    use wz_codecs::request::RequestViewVariant as V;
+    let query = match body {
+        #[cfg(feature = "request-put-del")]
+        V::CodecZenohMsgPut(put) => {
             return put_view_class(MessageLabel::Query, StatMessage::Put, space, put);
         }
-        if let V::CodecZenohMsgDel(del) = body {
+        #[cfg(feature = "request-put-del")]
+        V::CodecZenohMsgDel(del) => {
             return del_view_class(MessageLabel::Query, StatMessage::Del, space, del);
         }
-    }
-    crate::stats::NetworkStatsClass::undecoded()
+        V::CodecZenohQuery(query) => query,
+        // As in `request_stats_class`: an unknown tag carries a Query's body, and a Put or a Del
+        // arm this build does not name has no class.
+        other => {
+            let V::Default { body: query, .. } = other else {
+                return crate::stats::NetworkStatsClass::undecoded();
+            };
+            query
+        }
+    };
+    query_view_class(space, query)
 }
 
 /// The class of a Query read as its view: its value without the encoding in front of it, inline
