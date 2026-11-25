@@ -564,13 +564,15 @@ mod against_the_open {
         }
     }
 
-    /// A dial the open refuses before any link: a scheme the engine has no link for, a host name
-    /// it has no resolver for, a port it cannot dial, and a config pair pico's reading refuses.
+    /// A dial the open refuses before any link: a scheme the engine has no link for, a text that
+    /// names neither an address nor a host, a port it cannot dial, and a config pair pico's
+    /// reading refuses. A host name is not among them on a host: the open resolves it, and what
+    /// the network answers comes after the door (`a_host_named_locator_requires_the_resolver`).
     #[test]
     fn a_dial_the_open_refuses_is_refused_with_its_code() {
         for endpoint in [
             "quic/127.0.0.1:7447",
-            "tcp/router.example:7447",
+            "tcp/router_1:7447",
             "udp/127.0.0.1:0",
             "tcp/127.0.0.1:7447#tout",
         ] {
