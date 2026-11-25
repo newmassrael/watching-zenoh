@@ -182,7 +182,7 @@ use wz_session_core::driver_loop::EventSink;
 use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
 #[cfg(feature = "reassembly")]
 use wz_session_core::multicast_rx::{
-    dispatch_multicast_inbound_kept, sweep_multicast_reassembling, GroupResume,
+    dispatch_multicast_inbound_kept, sweep_multicast_kept, GroupResume,
 };
 // R311ly/R311lz — the shared TX emit SSOT (the AP loop calls the same).
 // `MulticastTxOffer` is the unconditional pull-seam item type of the build's
@@ -1715,10 +1715,12 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         // cadence (idempotent; sweeping more often only sharpens eviction).
         // R311mh — under `reassembly` the deadline-reclaim + evict-with-chain-
         // abort tail is the shared multicast_rx sweep SSOT (the AP loop calls
-        // the same); a non-reassembly loop calls the bare sweep.
+        // its whole-datagram twin), retracting what an expired member held in
+        // the form the kept walk above hands records; a non-reassembly loop
+        // calls the bare sweep.
         if now >= *next_sweep_ms {
             #[cfg(feature = "reassembly")]
-            sweep_multicast_reassembling(dispatcher, reasm, now, on_event);
+            sweep_multicast_kept(dispatcher, reasm, now, on_event);
             #[cfg(not(feature = "reassembly"))]
             dispatcher.sweep_with(
                 now,

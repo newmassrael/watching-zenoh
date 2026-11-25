@@ -2227,8 +2227,9 @@ mod in_place {
     /// Below the engine: the group's receive over a datagram its transport keeps. A host with room
     /// for no other stops the walk before the next message, and with room for one record stops it
     /// before the next record; each walk goes on from where the last stopped, the frame admitted
-    /// by its sequence number once, until the datagram is read whole.
-    #[cfg(not(feature = "transport-stats"))]
+    /// by its sequence number once, until the datagram is read whole. A build with the transport
+    /// counters walks it lent too, and counts each transport message and each record once, against
+    /// the member that sent it, however many walks it took.
     #[test]
     fn a_kept_group_datagram_is_read_on_from_where_the_host_stopped() {
         use core::net::SocketAddr;
@@ -2260,6 +2261,35 @@ mod in_place {
                 self.room > 0
             }
         }
+
+        /// The transport messages it was told of, and the member each lent record came from.
+        #[cfg(feature = "transport-stats")]
+        #[derive(Default)]
+        struct Counted {
+            transport: core::cell::Cell<usize>,
+            records: core::cell::RefCell<Vec<Vec<u8>>>,
+        }
+
+        #[cfg(feature = "transport-stats")]
+        impl wz_session_core::multicast_stats::MulticastStatsRecorder for Counted {
+            fn transport_message_received(&self) {
+                self.transport.set(self.transport.get() + 1);
+            }
+
+            fn network_record_received(
+                &self,
+                zid: &[u8],
+                _priority: wz_session_core::qos::Priority,
+                _class: &wz_session_core::stats::NetworkStatsClass,
+            ) {
+                self.records.borrow_mut().push(zid.to_vec());
+            }
+        }
+
+        #[cfg(feature = "transport-stats")]
+        let counted = &Counted::default();
+        #[cfg(not(feature = "transport-stats"))]
+        let counted = &();
 
         let keys = ["demo/kept/a", "demo/kept/b", "demo/kept/c"];
         let mut datagram = beacon(9);
@@ -2296,7 +2326,7 @@ mod in_place {
                     may_stop: true,
                 },
                 host,
-                &(),
+                counted,
             )
         };
         let stopped = walk(&mut host, None);
@@ -2321,6 +2351,19 @@ mod in_place {
         let stopped = walk(&mut host, stopped);
         assert_eq!(stopped, None, "read whole");
         assert_eq!(host.keys, keys);
+        #[cfg(feature = "transport-stats")]
+        {
+            assert_eq!(
+                counted.transport.get(),
+                3,
+                "the beacon, the keep-alive and the frame, the frame once over its three walks"
+            );
+            assert_eq!(
+                *counted.records.borrow(),
+                [[9u8; 4]; 3],
+                "each Put lent once, against the member that sent it"
+            );
+        }
 
         // CONTROL: a transport that keeps nothing has its datagram read whole at once.
         let (mut dispatcher, mut reasm) = group();
@@ -2328,6 +2371,8 @@ mod in_place {
             keys: Vec::new(),
             room: 0,
         };
+        #[cfg(feature = "transport-stats")]
+        let counted = &Counted::default();
         let stopped = dispatch_multicast_inbound_kept(
             &mut dispatcher,
             &mut reasm,
@@ -2342,10 +2387,15 @@ mod in_place {
                 may_stop: false,
             },
             &mut whole,
-            &(),
+            counted,
         );
         assert_eq!(stopped, None);
         assert_eq!(whole.keys, keys);
+        #[cfg(feature = "transport-stats")]
+        {
+            assert_eq!(counted.transport.get(), 3);
+            assert_eq!(counted.records.borrow().len(), 3, "each Put lent once");
+        }
     }
 }
 

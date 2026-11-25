@@ -498,6 +498,17 @@ impl MulticastStatsRecorder for MulticastTransportStats {
         });
     }
 
+    /// A record the group's walk lent, classified off the record by the rules the owned message
+    /// above is classified by.
+    fn network_record_received(
+        &self,
+        zid: &[u8],
+        priority: wz_session_core::qos::Priority,
+        class: &wz_session_core::stats::NetworkStatsClass,
+    ) {
+        self.with(|inner| inner.metrics.received_network_message(zid, priority, class));
+    }
+
     /// A peer whose JOIN named a role this node does not recognize opens no
     /// partition: upstream's decoder refuses that JOIN outright, so there is no
     /// upstream partition to mirror, and its messages go uncounted as any

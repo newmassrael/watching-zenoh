@@ -97,6 +97,19 @@ pub trait MulticastStatsRecorder {
     #[cfg(feature = "alloc")]
     fn network_message_received(&self, _zid: &[u8], _msg: &NetworkMessage) {}
 
+    /// The admitted peer `zid` sent a record of `class` on `priority` that the walk lent where
+    /// its datagram lies, read off the record as the owned message of the same bytes is read: the
+    /// lent form of [`Self::network_message_received`], so a record counts the same whichever
+    /// form the group handed it in.
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+    fn network_record_received(
+        &self,
+        _zid: &[u8],
+        _priority: crate::qos::Priority,
+        _class: &crate::stats::NetworkStatsClass,
+    ) {
+    }
+
     /// A peer was admitted to the group.
     fn peer_arrived(&self, _arrived: &MulticastPeerArrived) {}
 
@@ -163,6 +176,18 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
     fn network_message_received(&self, zid: &[u8], msg: &NetworkMessage) {
         if let Some(inner) = self {
             inner.network_message_received(zid, msg);
+        }
+    }
+
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+    fn network_record_received(
+        &self,
+        zid: &[u8],
+        priority: crate::qos::Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        if let Some(inner) = self {
+            inner.network_record_received(zid, priority, class);
         }
     }
 
@@ -264,6 +289,16 @@ impl<R: MulticastStatsRecorder + ?Sized, C: Fn() -> u32> MulticastStatsRecorder
     #[cfg(feature = "alloc")]
     fn network_message_received(&self, zid: &[u8], msg: &NetworkMessage) {
         self.inner.network_message_received(zid, msg);
+    }
+
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+    fn network_record_received(
+        &self,
+        zid: &[u8],
+        priority: crate::qos::Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        self.inner.network_record_received(zid, priority, class);
     }
 
     fn peer_arrived(&self, arrived: &MulticastPeerArrived) {
