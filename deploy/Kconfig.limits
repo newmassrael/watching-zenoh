@@ -239,6 +239,18 @@ config WZ_LIMIT_HELD_SESSIONS
 	  the pool of sessions the library reserves at its first object when the
 	  program reserved none (object-pool). One more is refused at its open.
 
+config WZ_LIMIT_CALLBACK_THREADS
+	int "CALLBACK_THREADS"
+	default 8
+	help
+	  How many threads may be inside the program's callbacks at once in a pico C
+	  ABI library built without std and with threads: the entries of the table
+	  that marks each such thread, since the library has no thread-local storage.
+	  A thread delivers as a session's read task, or as a program thread whose
+	  call delivers in place. A callback a thread past it would run is not run
+	  and is counted (wz_ext_callbacks_refused). The single-threaded arm holds
+	  one entry whatever this says, as one thread calls the library at a time.
+
 config WZ_LIMIT_HELD_SAMPLES
 	int "HELD_SAMPLES"
 	default 5 if WZ_LIMITS_ZENOH_PICO
