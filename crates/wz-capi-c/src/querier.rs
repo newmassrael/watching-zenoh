@@ -134,7 +134,7 @@ pub struct z_querier_get_options_t {
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 unsafe fn querier_get_token(
     options: *mut z_querier_get_options_t,
-) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+) -> Option<crate::get::CancelToken> {
     // SAFETY: the caller's contract.
     unsafe { crate::cancellation::take_moved_cancellation_token((*options).cancellation_token) }
 }
@@ -146,7 +146,7 @@ unsafe fn querier_get_token(
 #[cfg(feature = "zenoh-c-no-unstable-api")]
 unsafe fn querier_get_token(
     _options: *mut z_querier_get_options_t,
-) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+) -> Option<crate::get::CancelToken> {
     None
 }
 

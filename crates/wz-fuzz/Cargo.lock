@@ -1164,6 +1164,7 @@ version = "0.1.0"
 dependencies = [
  "wz-abi-stamp",
  "wz-capi-core",
+ "wz-capi-port",
  "wz-capture",
  "wz-cdylib-build",
  "wz-conformance-build",

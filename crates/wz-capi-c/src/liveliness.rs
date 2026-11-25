@@ -540,7 +540,7 @@ pub struct z_liveliness_get_options_t {
 #[cfg(all(feature = "liveliness-get", not(feature = "zenoh-c-no-unstable-api")))]
 unsafe fn liveliness_get_token(
     options: *mut z_liveliness_get_options_t,
-) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+) -> Option<crate::get::CancelToken> {
     if options.is_null() {
         return None;
     }
@@ -555,7 +555,7 @@ unsafe fn liveliness_get_token(
 #[cfg(all(feature = "liveliness-get", feature = "zenoh-c-no-unstable-api"))]
 unsafe fn liveliness_get_token(
     _options: *mut z_liveliness_get_options_t,
-) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+) -> Option<crate::get::CancelToken> {
     None
 }
 
@@ -733,14 +733,9 @@ pub(crate) unsafe fn liveliness_get_on(
         // R2949 — registered BEFORE the first face is issued, as for `z_get`
         // (`crate::get::issue_get`); a token whose cancel has started fails the
         // snapshot with `Z_EGENERIC`, upstream's answer to the same refusal.
-        let fan = match &token {
-            None => None,
-            Some(token) => {
-                let Some(fan) = wz_capi_core::cancellation::register_fan(token) else {
-                    return crate::result::Z_EGENERIC;
-                };
-                Some(fan)
-            }
+        let fan = match crate::get::register_on(token.as_ref()) {
+            Ok(fan) => fan,
+            Err(refusal) => return refusal,
         };
 
         // Each leg owns its share of the closure, the gate and the fan (the get's registration on
@@ -780,16 +775,11 @@ fn liveliness_get_on_node(
     node: &wz_capi_core::drive::RouterState,
     keyexpr: &str,
     closure: Arc<crate::get::CReplyClosure>,
-    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
+    token: Option<crate::get::CancelToken>,
 ) -> ZResult {
-    let _registration = match &token {
-        None => None,
-        Some(token) => {
-            let Some(fan) = wz_capi_core::cancellation::register_fan(token) else {
-                return crate::result::Z_EGENERIC;
-            };
-            Some(fan)
-        }
+    let _registration = match crate::get::register_on(token.as_ref()) {
+        Ok(fan) => fan,
+        Err(refusal) => return refusal,
     };
     let gate = crate::get::ReplyGate {
         query_keyexpr: keyexpr.to_owned(),
