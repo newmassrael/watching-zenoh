@@ -781,3 +781,77 @@ fn a_liveliness_gets_interest_follows_the_links_form() {
     let (declared, keys) = interest_keys_under(None, KeyWireForm::Declared, alive_by);
     assert_eq!(keys, [(declared, None)], "CONTROL: upstream's form");
 }
+
+/// A publisher's bare put on a session that holds the dictionary goes the plain way: where its one
+/// link is stated `declared`, which names the key by the session's declaration, the put is written
+/// from the head and, once planned, from the plan; where it is stated `literal`, the put is written
+/// from its parts, the whole key on that link, and is never planned. The client, which holds no
+/// dictionary, hears every put either way. Turned red by a session with the dictionary that sends
+/// the bare put the general way (`NotPlain`), by a plan never taken over a link that names the
+/// key by the declaration, or by a head or a plan taken over one that names it whole.
+#[test]
+fn a_publishers_bare_put_is_planned_where_its_link_names_its_key_by_the_declaration() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for (stated, by_head) in [(KeyWireForm::Declared, true), (KeyWireForm::Literal, false)] {
+        let at_open = KeyIdsAtOpen {
+            ids: Some(dictionary()),
+            links: vec![(LISTEN.to_owned(), stated)],
+        };
+        let (listener, endpoint) = listener_with(OpenKeyIds::new(at_open), KeyWireForm::Declared);
+        let client = dialler_with(
+            &listener,
+            &endpoint,
+            OpenKeyIds::none(),
+            KeyWireForm::Declared,
+        );
+        let heard = hear(&client, "lab/**", WireKey::literal());
+        let hold = listener
+            .acquire_keyexpr("lab/p")
+            .expect("a session with ids left declares");
+        let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
+        let filter = listener
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "lab/p",
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
+        eventually("the client's subscriber to open the filter", || {
+            !listener.write_filter_active(filter)
+        });
+        let params = PublishOptions::put()
+            .plain_put_params()
+            .expect("a plain put");
+        listener.keep_write_filter_plain(filter, Some((params, wire.declared())));
+        let (plans, heads) = (
+            listener.takes.plans.load(SeqCst),
+            listener.takes.planned.load(SeqCst),
+        );
+        for _ in 0..4 {
+            assert!(
+                matches!(
+                    listener.publish_filtered(filter, "lab/p", &wire, b"v", None),
+                    FilteredPut::Sent(Ok(_))
+                ),
+                "the bare put goes plain"
+            );
+        }
+        let (plans, heads) = (
+            listener.takes.plans.load(SeqCst) - plans,
+            listener.takes.planned.load(SeqCst) - heads,
+        );
+        if by_head {
+            assert_eq!(heads, 4, "a declared link is sent every put from the head");
+            assert!(plans >= 1, "and a put after the first from the plan");
+        } else {
+            assert_eq!(heads, 0, "a literal link is sent the put's parts");
+            assert_eq!(plans, 0, "and no plan names the key its way");
+        }
+        eventually("the client to hear every put", || {
+            heard.lock().unwrap().len() == 4
+        });
+        assert!(heard.lock().unwrap().iter().all(|key| key == "lab/p"));
+    }
+}

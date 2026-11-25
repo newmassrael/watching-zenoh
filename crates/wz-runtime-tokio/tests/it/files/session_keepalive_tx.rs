@@ -4,17 +4,16 @@
 //! R311kw / R311kx — keepalive TX track tests.
 //!
 //! R311kw: every production TX path funnels through the
-//! `SessionLinkActions::send_wire` seam, which stamps the
-//! `last_outbound_at` slot — the deadline-model equivalent of
-//! zenoh-pico's `_z_transport_common_t._transmitted` flag (set on
+//! `SessionLinkActions::send_wire` seam, which marks the link's `spoke`
+//! bit — zenoh-pico's `_z_transport_common_t._transmitted` flag (set on
 //! every send in common/tx.c:98/153, consumed by the keepalive tasks
 //! in unicast/lease.c:183/196 to suppress a KeepAlive when the line
-//! already spoke). The stamp tests pin that behaviour for the direct
+//! already spoke). The mark tests pin that behaviour for the direct
 //! primitive path AND the FSM action path.
 //!
-//! R311kx: the keepalive TX emitter rides the stamp —
+//! R311kx: the keepalive TX emitter ends the link's keepalive tick —
 //! `check_keepalive_deadline` emits a bare MID 0x04 KeepAlive when the
-//! line has been idle for `adopted_lease / LEASE_EXPIRE_FACTOR`
+//! line was silent for a whole tick of `adopted_lease / LEASE_EXPIRE_FACTOR`
 //! (zenoh-pico `_zp_unicast_keep_alive_task_fn`, unicast/lease.c:172).
 //! The checker tests pin the Inactive / WithinInterval / Emitted
 //! verdicts and the adopted-min cadence; the loop test pins the
@@ -46,46 +45,66 @@ fn fresh_setup() -> (
     (actions, engine)
 }
 
-/// The slot starts empty: no wire emit has happened at construction,
-/// so the keepalive emitter's baseline falls back to `established_at`
-/// (and pre-Established it has no baseline at all).
+/// Nothing has spoken at construction and no tick has ended: the
+/// keepalive emitter's first tick counts from `established_at` (and
+/// pre-Established there is no tick at all).
+#[cfg(feature = "transport-keepalive")]
 #[test]
-fn last_outbound_at_starts_empty() {
+fn the_line_has_not_spoken_at_construction() {
     let (actions, _engine) = fresh_setup();
     assert!(
-        actions.link.fact_last_outbound_at(|slot| *slot).is_none(),
+        !actions
+            .link
+            .spoke
+            .load(core::sync::atomic::Ordering::Relaxed),
         "no TX has happened at construction"
     );
+    assert_eq!(actions.link.fact_keepalive_tick_at(|slot| *slot), None);
 }
 
 /// The direct wire primitive (`send_close_with_reason`, the same
 /// `send_wire` seam every Frame / Fragment / batch-flush emit routes
-/// through) stamps the slot.
-#[cfg(feature = "codec-close")]
+/// through) marks the line as spoken, and stamps nothing.
+#[cfg(all(feature = "codec-close", feature = "transport-keepalive"))]
 #[test]
-fn close_emit_stamps_last_outbound_at() {
+fn close_emit_marks_the_line_spoken() {
     use wz_runtime_tokio::session_glue::CloseReason;
     let (actions, _engine) = fresh_setup();
     actions.send_close_with_reason(CloseReason::Generic);
     assert!(
-        actions.link.fact_last_outbound_at(|slot| *slot).is_some(),
-        "CLOSE emit must stamp the outbound slot (pico sets _transmitted on every t_msg send)"
+        actions
+            .link
+            .spoke
+            .load(core::sync::atomic::Ordering::Relaxed),
+        "CLOSE emit must mark the line (pico sets _transmitted on every t_msg send)"
+    );
+    assert_eq!(
+        actions.link.fact_keepalive_tick_at(|slot| *slot),
+        None,
+        "a frame ends no tick"
     );
 }
 
 /// The FSM action path (SentInitSyn.onentry -> `send_init_syn`)
-/// stamps the slot too — handshake t_msg emits count as line
+/// marks the line too — handshake t_msg emits count as line
 /// activity exactly as pico's common/tx.c seam records them.
-#[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
+#[cfg(all(
+    feature = "codec-init-body",
+    feature = "session-unicast-open",
+    feature = "transport-keepalive"
+))]
 #[test]
-fn handshake_emit_stamps_last_outbound_at() {
+fn handshake_emit_marks_the_line_spoken() {
     let (actions, mut engine) = fresh_setup();
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
     assert_eq!(engine.get_current_state(), S::SentInitSyn);
     assert!(
-        actions.link.fact_last_outbound_at(|slot| *slot).is_some(),
-        "InitSyn emit must stamp the outbound slot"
+        actions
+            .link
+            .spoke
+            .load(core::sync::atomic::Ordering::Relaxed),
+        "InitSyn emit must mark the line"
     );
 }
 
@@ -138,9 +157,11 @@ mod keepalive_emitter {
         );
     }
 
-    /// The idle window (`adopted_lease / 3`) elapsing emits exactly one
-    /// bare-header KeepAlive; the emit re-stamps `last_outbound_at`, so
-    /// a re-check inside the fresh window reports `WithinInterval`.
+    /// A silent tick (`adopted_lease / 3`) ending emits exactly one
+    /// bare-header KeepAlive, and the next tick starts at the check, so a
+    /// re-check inside it reports `WithinInterval`. The handshake spoke on
+    /// the line before the session was established and is no speech in the
+    /// first tick: the worker's start clears the mark it left.
     ///
     /// `now_ms` is parameterised (the R77 comparator-test convention), so
     /// idle time is simulated by passing a FUTURE check instant — the
@@ -167,8 +188,8 @@ mod keepalive_emitter {
             "KeepAlive = bare MID 0x04 header, zero-byte body (pico parity)"
         );
         assert_eq!(actions.trace_snapshot().send_keep_alive, 1);
-        // The emit re-stamped the slot at the REAL clock instant: a check
-        // right after it (inside the fresh window) suppresses.
+        // The next tick started at the check, which is later than the REAL
+        // clock instant: a check now is inside it and suppresses.
         assert_eq!(
             check_keepalive_deadline(&actions, actions.clock.now_monotonic_ms()),
             KeepAliveCheckOutcome::WithinInterval
@@ -353,10 +374,10 @@ mod keepalive_emitter {
     }
 
     /// A frame handed to a link that has a queue is not line activity: only the
-    /// writer's own report of a finished write moves the keepalive baseline. A
-    /// non-control emit (CLOSE, at background priority) must leave the stamp
-    /// empty on such a link, where the same emit stamps it on an inline link
-    /// (`close_emit_stamps_last_outbound_at`).
+    /// writer's own report of a finished write moves the keepalive deadline. A
+    /// non-control emit (CLOSE, at background priority) must leave the line
+    /// unmarked on such a link, where the same emit marks it on an inline link
+    /// (`close_emit_marks_the_line_spoken`).
     #[cfg(feature = "codec-close")]
     #[test]
     fn a_handover_to_a_queued_link_does_not_stamp_the_line() {
@@ -364,7 +385,10 @@ mod keepalive_emitter {
         let (_driver, actions, _engine) = queued_setup(None);
         actions.send_close_with_reason(CloseReason::Generic);
         assert!(
-            actions.link.fact_last_outbound_at(|slot| *slot).is_none(),
+            !actions
+                .link
+                .spoke
+                .load(core::sync::atomic::Ordering::Relaxed),
             "a frame still in the writer's queue has not spoken on the line"
         );
     }
@@ -440,10 +464,10 @@ mod keepalive_emitter {
     }
 
     /// The companion is kept alive by its own clock, as upstream's companion link
-    /// writes its own KeepAlive: a control frame that just left on the link's
-    /// streams defers the link's keepalive and not the companion's, whose
-    /// keepalive goes with its own class and leaves the link's line stamp as it
-    /// was. Once the link is idle too, each gets one.
+    /// writes its own KeepAlive: a control frame on the link's streams in the tick
+    /// holds back the link's keepalive and not the companion's, whose keepalive
+    /// goes with its own class and is no speech on the link's line. Once the link
+    /// is silent for a tick too, each gets one.
     #[test]
     fn a_companion_is_kept_alive_by_its_own_clock() {
         use wz_runtime_tokio::Reliability;
@@ -458,11 +482,12 @@ mod keepalive_emitter {
         drive_to_established(&mut engine);
 
         // Past the 10_000/3 interval from establishment, with a control frame on
-        // the streams at that very instant.
+        // the streams in the tick that ends.
         let idle_check = actions.clock.now_monotonic_ms() + 4_000;
         actions
             .link
-            .fact_last_outbound_at(|slot| *slot = Some(idle_check));
+            .spoke
+            .store(true, core::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             check_keepalive_deadline(&actions, idle_check),
             KeepAliveCheckOutcome::Emitted
@@ -473,13 +498,14 @@ mod keepalive_emitter {
             "the companion's keepalive alone, on the companion"
         );
         assert_eq!(
-            actions.link.fact_last_outbound_at(|slot| *slot),
+            actions.link.fact_keepalive_tick_at(|slot| *slot),
             Some(idle_check),
-            "the companion's keepalive is not the link's line speaking"
+            "the link's tick ended at the check, without a keepalive"
         );
         assert_eq!(actions.trace_snapshot().send_keep_alive, 1);
 
-        // An interval past the control frame both lines are idle: one each.
+        // A tick later both lines were silent: one each, so the companion's
+        // keepalive was no speech on the link's line.
         assert_eq!(
             check_keepalive_deadline(&actions, idle_check + 4_000),
             KeepAliveCheckOutcome::Emitted

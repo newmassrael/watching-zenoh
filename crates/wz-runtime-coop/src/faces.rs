@@ -822,6 +822,11 @@ pub struct LinkSupervisor<L: SessionLinks<N>, F, P = ManyFaces<F>, N: CountKind 
     /// session that moved its links on compares, to move them again only once one may have
     /// changed ([`Self::moves`]). Wraps; only its change is read.
     moves: u32,
+    /// How often a face's link was put in, brought up or ended, or a face placed or taken out:
+    /// equal at two reads, the faces whose links are up and how each names what it sends are as
+    /// they were ([`Self::generation`]). A reach of a face to change what the session keeps of
+    /// it, which each step makes, does not count. Wraps; only its change is read.
+    generation: u64,
     /// The record each face is kept as: the table `P` holds it, the supervisor names it.
     records: core::marker::PhantomData<fn() -> F>,
 }
@@ -848,6 +853,7 @@ impl<
             waits: Some(room),
             next_face: 1,
             moves: 0,
+            generation: 0,
             records: core::marker::PhantomData,
         })
     }
@@ -915,6 +921,18 @@ impl<
         self.moves = self.moves.wrapping_add(1);
     }
 
+    /// The count of the changes of the faces' links since the session began: what a send planned
+    /// over the links that were up reads to know the plan still holds. Equal at two reads, no
+    /// face's link was put in, brought up or ended, and no face placed or taken out, between them.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Count one change of the faces' links ([`Self::generation`]).
+    fn regenerated(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// Whether a port is to be asked for a connection at the next step: one asked at every step,
     /// or one a wait found ready ([`Self::accept_at`]).
     pub fn ports_to_ask(&self) -> bool {
@@ -942,6 +960,7 @@ impl<
     /// the dial role's place, at a place another face holds, and past the table.
     pub fn place_face(&mut self, at: usize, face: F) -> Result<(), F> {
         self.moved();
+        self.regenerated();
         self.faces.put(at, face)
     }
 
@@ -949,6 +968,7 @@ impl<
     /// first, is never taken. No other face moves.
     pub fn take_face(&mut self, at: usize) -> Option<F> {
         self.moved();
+        self.regenerated();
         self.faces.take(at)
     }
 
@@ -1011,6 +1031,7 @@ impl<
 
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
     pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial, F::End, N>) {
+        self.regenerated();
         if let Some(face) = self.face_mut(at) {
             *face.link_mut() = link;
         }
@@ -1029,6 +1050,7 @@ impl<
 
     /// The face at `at`, whose handshake completed, holds its link up.
     pub fn establish(&mut self, at: usize) {
+        self.regenerated();
         let Some(face) = self.face_mut(at) else {
             return;
         };
@@ -1380,6 +1402,7 @@ impl<
     /// `each` is shown the face. The dial role's face stays, with no link and no redial; the
     /// others go.
     pub fn end_faces(&mut self, mut each: impl FnMut(&mut F)) {
+        self.regenerated();
         for face in self.faces_mut() {
             each(face);
             let link = core::mem::replace(face.link_mut(), Link::Waiting { at_us: u64::MAX });
@@ -1775,6 +1798,44 @@ mod tests {
         assert_ne!(put, before, "a link put in is a change");
         assert!(faces.face_mut(0).is_some());
         assert_ne!(faces.moves(), put, "a reach to change a face is a change");
+    }
+
+    /// The links' generation moves at each change of a face's link and of the faces held, and at
+    /// nothing else: not at a reach of a face to change what the session keeps of it, nor at the
+    /// read of a face each step makes. Turned red by a generation that moves at `face_mut`,
+    /// `faces_mut` or `read_face`, or one that stays at `put_link`, `establish`, `place_face`,
+    /// `take_face` or `end_faces`.
+    #[test]
+    fn the_links_generation_moves_at_a_change_of_a_link_alone() {
+        let mut faces = supervisor(Link::Waiting { at_us: 5 }, 2);
+        let start = faces.generation();
+        assert!(faces.face_mut(0).is_some());
+        assert_eq!(faces.faces_mut().count(), 1);
+        let _ = faces.read_face(0, 100, &mut None);
+        assert_eq!(
+            faces.generation(),
+            start,
+            "a reach and a read change no link"
+        );
+        let mut seen = start;
+        let mut moved = |faces: &LinkSupervisor<Net, TestFace>, what: &str| {
+            assert_ne!(faces.generation(), seen, "{what} is a change");
+            seen = faces.generation();
+        };
+        faces.put_link(0, Link::Waiting { at_us: 9 });
+        moved(&faces, "a link put in");
+        faces.establish(0);
+        moved(&faces, "a link brought up");
+        let other = TestFace {
+            id: 1,
+            link: Link::Waiting { at_us: 0 },
+        };
+        assert!(faces.place_face(1, other).is_ok());
+        moved(&faces, "a face placed");
+        assert!(faces.take_face(1).is_some());
+        moved(&faces, "a face taken out");
+        faces.end_faces(|_| {});
+        moved(&faces, "the links ended");
     }
 
     /// A dial answers what its network answered once, and names the endpoint it reaches.

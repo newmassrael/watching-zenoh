@@ -1055,6 +1055,61 @@ mod lent_frame_refusal {
         );
     }
 
+    /// A put written from the head its publisher's plain way made leaves as the frame its parts
+    /// make, for a QoS byte that rides and the one that does not; and a head that does not name the
+    /// key (another declaration) is not written, so the frame is still the key's own. Turned red by
+    /// a head written for a key it does not name, or by a head whose bytes differ from the writer's.
+    #[test]
+    fn a_put_written_from_its_head_is_the_frame_its_parts_make() {
+        let send = super::super::SendAs {
+            reliable: true,
+            express: false,
+            priority: Priority::DEFAULT,
+        };
+        let id = crate::wire_key::MappedId::new(7).expect("not zero");
+        let key = crate::named_key::NamedKey::under(
+            "home/head",
+            crate::named_key::Prefix::of(id, "home/head"),
+        )
+        .expect("a key under its declaration");
+        // The one frame a fresh session sends for `put`.
+        let frame = |put: &dyn Fn(
+            &SessionLinkActions<PlainRuntime, StillClock>,
+        ) -> Option<Result<(), SendWireError>>| {
+            let link = DryLink::of_width(512, true);
+            let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+            let actions = SessionLinkActions::<PlainRuntime, StillClock>::new_generic(
+                sink,
+                params(),
+                StillClock,
+            );
+            assert_eq!(put(&actions), Some(Ok(())));
+            let mut sent = link.sent.lock().expect("the sends");
+            assert_eq!(sent.len(), 1, "one frame");
+            sent.remove(0)
+        };
+        for qos in [
+            crate::sample::QosLevel::DEFAULT,
+            crate::sample::QosLevel::from_raw(0x1a),
+        ] {
+            let parts = frame(&|actions| actions.send_plain_put_qos(key, b"v", Some(qos), send));
+            let own = crate::lent_push::PutHead::new(7, qos).expect("a declared id");
+            assert_eq!(
+                frame(&|actions| actions.send_put_with_head(key, b"v", &own, send)),
+                parts,
+                "the head of the key, qos {:#04x}",
+                qos.raw
+            );
+            let other = crate::lent_push::PutHead::new(8, qos).expect("a declared id");
+            assert_eq!(
+                frame(&|actions| actions.send_put_with_head(key, b"v", &other, send)),
+                parts,
+                "the head of another declaration is not written, qos {:#04x}",
+                qos.raw
+            );
+        }
+    }
+
     /// A frame sent whole asks its link for the whole batch budget, as a window does: nothing
     /// measures the message before it is written into the slot. Turned red by a send that asks
     /// for a size it counted first (`open_frame_lent` asking for anything but `emit.mtu`).
@@ -1705,7 +1760,7 @@ mod link_stamps {
         let (actions, _link) = bundle();
         actions.link.fact_established_at(|slot| *slot = Some(1));
         actions.link.fact_last_inbound_at(|slot| *slot = Some(2));
-        actions.link.fact_last_outbound_at(|slot| *slot = Some(3));
+        actions.link.fact_keepalive_tick_at(|slot| *slot = Some(3));
         let mut stamps = LinkStamps::default();
         let holds = holds_in(|| stamps = actions.link.stamps());
         assert_eq!(holds, 1, "the row is read in one hold");
@@ -1714,7 +1769,7 @@ mod link_stamps {
             LinkStamps {
                 established_at: Some(1),
                 last_inbound_at: Some(2),
-                last_outbound_at: Some(3),
+                keepalive_tick_at: Some(3),
             }
         );
     }
@@ -1818,7 +1873,7 @@ mod link_stamps {
         );
     }
 
-    /// The keepalive deadline counts from the later of the establishment and the last emit, and
+    /// The keepalive deadline counts from the later of the establishment and the tick's start, and
     /// reads the two in one hold. Turned red by a deadline that reads each stamp in a hold of its
     /// own.
     #[cfg(feature = "transport-keepalive")]
@@ -1830,7 +1885,9 @@ mod link_stamps {
             .keepalive_armed
             .store(true, core::sync::atomic::Ordering::SeqCst);
         actions.link.fact_established_at(|slot| *slot = Some(300));
-        actions.link.fact_last_outbound_at(|slot| *slot = Some(200));
+        actions
+            .link
+            .fact_keepalive_tick_at(|slot| *slot = Some(200));
         let interval = actions.keepalive_interval_ms();
         let mut deadline = None;
         let holds = holds_in(|| deadline = crate::drive::keepalive_wake_deadline(&*actions));
@@ -1855,10 +1912,164 @@ mod link_stamps {
             *stamps = LinkStamps {
                 established_at: Some(1),
                 last_inbound_at: Some(2),
-                last_outbound_at: Some(3),
+                keepalive_tick_at: Some(3),
             }
         });
         actions.reset_for_reopen();
         assert_eq!(actions.link.stamps(), LinkStamps::default());
+    }
+
+    /// An established bundle whose keepalive worker runs, as the machine's `Established` entry
+    /// leaves it, and the session's keepalive interval. The still clock stands at 0, the
+    /// establishment with it, so the first tick ends at the interval.
+    #[cfg(feature = "transport-keepalive")]
+    fn keeping_alive() -> (
+        alloc::sync::Arc<super::SessionLinkActions<super::PlainRuntime, super::StillClock>>,
+        alloc::sync::Arc<super::CountingLink>,
+        u64,
+    ) {
+        let (actions, link) = bundle();
+        actions.enter_established();
+        actions.link.arm_keepalive();
+        let interval = actions.keepalive_interval_ms();
+        (actions, link, interval)
+    }
+
+    /// A tick the line was silent in ends in one keepalive, at its end and not before, and that
+    /// keepalive is no speech in the next tick, which ends in one too: an idle line sends one per
+    /// interval. Turned red by a judge that leaves its own keepalive's mark standing (no second
+    /// keepalive), or by one that sends before the tick ends.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn an_idle_tick_ends_in_one_keepalive_and_so_does_the_next() {
+        use crate::lease::KeepAliveCheckOutcome as K;
+        let (actions, link, interval) = keeping_alive();
+        let written = || link.written.load(core::sync::atomic::Ordering::SeqCst);
+        let check = |now_ms| crate::drive::check_keepalive_deadline(&*actions, now_ms);
+        let before = written();
+        assert_eq!(check(interval - 1), K::WithinInterval, "the tick runs");
+        assert_eq!(written(), before, "nothing before the tick ends");
+        assert_eq!(check(interval), K::Emitted, "the first tick was silent");
+        assert_eq!(written(), before + 1, "one keepalive for it");
+        assert_eq!(
+            actions.link.stamps().keepalive_tick_at,
+            Some(interval),
+            "the next tick starts at the check"
+        );
+        assert_eq!(
+            check(2 * interval - 1),
+            K::WithinInterval,
+            "the next tick runs"
+        );
+        assert_eq!(
+            check(2 * interval),
+            K::Emitted,
+            "the keepalive was no speech in the next tick"
+        );
+        assert_eq!(written(), before + 2, "one keepalive for each silent tick");
+    }
+
+    /// A frame holds back the keepalive of its own tick and of no other: the next tick, silent,
+    /// ends in one, so a line that spoke once just after a tick began is silent for two intervals
+    /// at most, which is inside the lease. The frame takes no stamp, so it reads no clock and no
+    /// lock of the stamps. Turned red by a frame that does not mark its tick (a keepalive at the
+    /// first end), by a mark that outlives the tick (none at the second), or by a frame that
+    /// writes the tick's stamp.
+    #[cfg(all(
+        feature = "transport-keepalive",
+        feature = "codec-push",
+        not(feature = "tx-lend-only")
+    ))]
+    #[test]
+    fn a_frame_holds_back_the_keepalive_of_its_tick_alone() {
+        use crate::lease::KeepAliveCheckOutcome as K;
+        let (actions, link, interval) = keeping_alive();
+        let key = crate::named_key::NamedKey::literal("home/tick").expect("a key");
+        let put = actions.send_plain_put_qos(
+            key,
+            b"v",
+            None,
+            super::super::SendAs {
+                reliable: true,
+                express: false,
+                priority: crate::qos::Priority::DEFAULT,
+            },
+        );
+        assert_eq!(put, Some(Ok(())), "CONTROL: the put left");
+        assert_eq!(
+            actions.link.stamps().keepalive_tick_at,
+            None,
+            "a frame writes no stamp"
+        );
+        let written = || link.written.load(core::sync::atomic::Ordering::SeqCst);
+        let check = |now_ms| crate::drive::check_keepalive_deadline(&*actions, now_ms);
+        let before = written();
+        assert_eq!(
+            check(interval),
+            K::WithinInterval,
+            "the line spoke in the first tick"
+        );
+        assert_eq!(written(), before, "no keepalive for that tick");
+        assert_eq!(
+            check(2 * interval),
+            K::Emitted,
+            "the second tick was silent"
+        );
+        assert_eq!(written(), before + 1, "one keepalive for it");
+        assert!(
+            2 * interval < actions.adopted_lease_ms(),
+            "two silent intervals are inside the lease"
+        );
+    }
+
+    /// Two judges that read the same deadlines (the tokio pacer beside the drive loop) end the
+    /// tick once and send one keepalive for it. Turned red by a judge that ends a tick another
+    /// has already ended.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn a_tick_ends_once_whoever_judges_it() {
+        use crate::lease::KeepAliveCheckOutcome as K;
+        let (actions, link, interval) = keeping_alive();
+        let read = crate::drive::keepalive_deadlines(&*actions).expect("the worker runs");
+        let before = link.written.load(core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            crate::drive::judge_keepalive(&*actions, interval, read),
+            K::Emitted
+        );
+        assert_eq!(
+            crate::drive::judge_keepalive(&*actions, interval, read),
+            K::WithinInterval,
+            "the second judge finds the tick ended"
+        );
+        assert_eq!(
+            link.written.load(core::sync::atomic::Ordering::SeqCst),
+            before + 1,
+            "one keepalive for the tick"
+        );
+    }
+
+    /// What the link sent before its keepalive worker started, the handshake, is no speech in the
+    /// worker's first tick, which ends in a keepalive when the line says nothing after. Turned red
+    /// by a worker that starts with the mark an earlier frame left.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn what_the_link_sent_before_its_worker_is_no_speech_in_the_first_tick() {
+        use crate::lease::KeepAliveCheckOutcome as K;
+        let (actions, _link) = bundle();
+        actions.enter_established();
+        actions.send_keep_alive();
+        assert!(
+            actions
+                .link
+                .spoke
+                .load(core::sync::atomic::Ordering::Relaxed),
+            "CONTROL: a frame on a link that writes inline marks the line"
+        );
+        actions.link.arm_keepalive();
+        let interval = actions.keepalive_interval_ms();
+        assert_eq!(
+            crate::drive::check_keepalive_deadline(&*actions, interval),
+            K::Emitted
+        );
     }
 }

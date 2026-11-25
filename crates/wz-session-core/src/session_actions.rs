@@ -3020,21 +3020,15 @@ pub struct LinkStamps {
     /// from `std::time::Instant`); the lease comparator subtracts
     /// them as pure `u64` arithmetic.
     pub established_at: Option<u64>,
-    /// R311kw — monotonic timestamp in milliseconds of the most recent
-    /// outbound wire emit on this link. Stamped by the
-    /// `SessionLinkActions::send_wire` seam every TX path funnels through
-    /// (handshake t_msg, CLOSE, Frame / Fragment, batch flush), the
-    /// deadline-model equivalent of zenoh-pico's
-    /// `_z_transport_common_t._transmitted` flag (transport.h:176; set on
-    /// every send in common/tx.c:98/153, consumed by the keepalive tasks in
-    /// unicast/lease.c:183/196 + multicast/lease.c:171 to suppress a
-    /// KeepAlive when the line already spoke). pico resets the flag each
-    /// `lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR` tick; wz stores the stamp and
-    /// the keepalive emitter compares `now - stamp >= lease/factor` — the
-    /// same store-raw / compare-at-check split as the R311ks multicast
-    /// per-peer sweep. `None` until the first emit; storage form and clock
-    /// epoch match `last_inbound_at` (u64 ms, R294 scale).
-    pub last_outbound_at: Option<u64>,
+    /// The instant the link's current keepalive tick began: `None` until the first tick ends,
+    /// when the establishment stamp is the tick's start. A tick lasts the session's keepalive
+    /// interval and ends at its judge (`crate::drive::check_keepalive_deadline`), which sends a
+    /// KeepAlive only if the line did not speak in it, as zenoh-pico's keep-alive task does with
+    /// its `_transmitted` flag (`src/transport/unicast/lease.c`), and starts the next tick at
+    /// its own time. What a frame sets is the link's `spoke` bit, not this stamp, so a frame
+    /// takes neither the clock nor this lock. Storage form and clock epoch match
+    /// `last_inbound_at` (u64 ms).
+    pub keepalive_tick_at: Option<u64>,
 }
 
 /// R311y205 (transport-multilink IMPL-2a) — the PER-LINK state: exactly the 5
@@ -3135,6 +3129,13 @@ pub struct LinkState<R: SessionRuntime> {
     /// session in `Closing` sends nothing after its Close frame.
     #[cfg(feature = "transport-keepalive")]
     pub keepalive_armed: core::sync::atomic::AtomicBool,
+    /// Whether the line spoke in the keepalive tick that runs: set by every frame this link
+    /// hands its driver as the line's speech (`SessionLinkActions::emit_on_link`) and read and
+    /// cleared where the tick ends, which sends a KeepAlive only when it is clear. A bit and not a
+    /// stamp: zenoh-pico's `_transmitted` flag (`src/transport/common/tx.c`), so the send path
+    /// writes one word and reads no clock.
+    #[cfg(feature = "transport-keepalive")]
+    pub spoke: core::sync::atomic::AtomicBool,
     /// Whether this link's lease monitor runs: set by the FSM's
     /// `start_lease_monitor` on `Established` entry and cleared by
     /// `stop_lease_monitor` on its exit (and by
@@ -3465,10 +3466,20 @@ macro_rules! link_stamp_doors {
 link_stamp_doors! {
     fact_established_at => established_at,
     fact_last_inbound_at => last_inbound_at,
-    fact_last_outbound_at => last_outbound_at,
+    fact_keepalive_tick_at => keepalive_tick_at,
 }
 
 impl<R: SessionRuntime> LinkState<R> {
+    /// Start this link's keepalive worker. Its first tick counts from the establishment, and
+    /// nothing the link sent before (the handshake) is speech in it.
+    #[cfg(feature = "transport-keepalive")]
+    pub(crate) fn arm_keepalive(&self) {
+        self.spoke
+            .store(false, core::sync::atomic::Ordering::Relaxed);
+        self.keepalive_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Resolve the runtime-owned link sink (`R::LinkSink`) to the pure
     /// `&dyn BoxedLinkDriver` write seam. `R::LinkSink` is opaque in
     /// generic-`R` code — the tokio profile binds it to `Arc<dyn
@@ -5338,6 +5349,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 tx_limits: TxLimits::new(),
                 #[cfg(feature = "transport-keepalive")]
                 keepalive_armed: core::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "transport-keepalive")]
+                spoke: core::sync::atomic::AtomicBool::new(false),
                 lease_armed: core::sync::atomic::AtomicBool::new(false),
                 close_reason: R::new_mutex(None),
                 #[cfg(feature = "transport-multilink")]
@@ -7161,8 +7174,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
     }
 
-    /// R311kw — the one wire-emit seam: stamp [`LinkState::fact_last_outbound_at`]
-    /// and forward to the link driver. Every production TX path routes
+    /// R311kw — the one wire-emit seam: mark the link's line as spoken in its
+    /// keepalive tick and forward to the link driver. Every production TX path routes
     /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
     /// batch flush) so the keepalive emitter's idle window sees EVERY
     /// send — zenoh-pico parity: `_z_transport_tx_send_t_msg` /
@@ -7249,8 +7262,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R311y205 (transport-multilink IMPL-2b-iii) — emit a wire batch on ONE
-    /// specific link: stamp THAT link's `last_outbound_at` (per-link keepalive
-    /// suppression baseline), apply compression, and hand the bytes to its
+    /// specific link: mark THAT link's line as spoken (per-link keepalive
+    /// suppression), apply compression, and hand the bytes to its
     /// driver. The single seam both the reliability-routed [`Self::send_wire`]
     /// (data) and the per-link [`Self::send_wire_this_link`] (keepalive / close)
     /// funnel through, so every TX path stamps the link it actually used. At N=1
@@ -7305,25 +7318,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Some(slot) => slot.as_slice(),
             None => bytes,
         };
-        // The keepalive baseline is the time the LINE last spoke. A driver that writes inline
-        // spoke at the hand-over, so every frame stamps. A driver with a queue speaks later,
+        // The keepalive asks whether the LINE spoke in its tick. A driver that writes inline
+        // spoke at the hand-over, so every frame marks it. A driver with a queue speaks later,
         // when its writer gets to the frame, and says so itself
         // ([`BoxedLinkDriver::ms_since_wire_write`], which `keepalive_wake_deadline` reads):
-        // only a control frame stamps here, which is what keeps the emitter to one keepalive
-        // per interval while the writer is behind, and a data frame waiting in the queue is
-        // not activity the peer can hear.
+        // only a control frame marks here, and a data frame waiting in the queue is not activity
+        // the peer can hear.
         //
         // A frame of a class the link carries apart ([`BoxedLinkDriver::carries_apart`]) is
         // not the link's line speaking: the peer leases that carriage on its own, the driver
-        // reports its writes per class, and a stamp here would hold the link's own keepalive
+        // reports its writes per class, and a mark here would hold the link's own keepalive
         // back while its streams are silent.
-        let driver = link.link_driver();
-        if !driver.carries_apart(reliability)
-            && (priority == Priority::Control || !driver.reports_wire_writes())
+        #[cfg(feature = "transport-keepalive")]
         {
-            // Read only for a frame that stamps: a driver with a queue stamps none of its data.
-            let now = self.clock.now_monotonic_ms();
-            link.fact_last_outbound_at(|slot| *slot = Some(now));
+            let driver = link.link_driver();
+            if !driver.carries_apart(reliability)
+                && (priority == Priority::Control || !driver.reports_wire_writes())
+            {
+                link.spoke
+                    .store(true, core::sync::atomic::Ordering::Relaxed);
+            }
         }
 
         // R2371 (`transport-stats`) — charge ONE wire write to the counters, on
@@ -16056,6 +16070,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// message. That is a fact about the session and not the build, as the receive side's
     /// [`Self::plain_put_lane_open`] is: a build that can carry a namespace keeps this send for
     /// every session that has none.
+    ///
+    /// `head` is the Put's head its publisher's plain way wrote at its declare
+    /// ([`crate::lent_push::PutHead`]): the Put is written from it when it is the head of this
+    /// Put, the key's declaration alone with the same QoS byte, and from its parts otherwise.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
     fn send_plain_put_at(
         &self,
@@ -16064,6 +16082,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         send: SendAs,
+        head: Option<&crate::lent_push::PutHead>,
     ) -> Option<Result<Dispatched, SendWireError>> {
         let SendAs {
             reliable,
@@ -16081,6 +16100,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::sample::QosLevel::DEFAULT
         };
         let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
+        let head = head.filter(|head| head.names(key.wire()) && head.qos() == qos);
         #[cfg(feature = "transport-stats")]
         let class = self.stats_keys_of(
             crate::network_message::named_put_stats_class(key.text(), value.len()),
@@ -16092,15 +16112,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // payload's bound is a u32 length), and the link lends a slot of this size, which the
         // writer below fills in its one pass. A Put the writer refuses is zero, and the encoder
         // below refuses it with the same error, which the dispatch reports.
-        let size = size_hint(|| crate::lent_push::plain_put_len(mapping_id, suffix, value, qos));
+        let size = size_hint(|| match head {
+            Some(head) => head.len_with(value),
+            None => crate::lent_push::plain_put_len(mapping_id, suffix, value, qos),
+        });
         let sent = self.dispatch_network_message_at(
             stage,
             Conduit { priority, reliable },
             qos,
             size,
             class,
-            as_encoder(&|sink| {
-                crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
+            as_encoder(&|sink| match head {
+                Some(head) => head.write(sink, value),
+                None => crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos),
             }),
         );
         let sent = match sent {
@@ -16126,8 +16150,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         qos: Option<crate::sample::QosLevel>,
         send: SendAs,
     ) -> Option<Result<(), SendWireError>> {
-        self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send)
+        self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send, None)
             .map(|sent| sent.map(|_| ()))
+    }
+
+    /// [`Self::send_plain_put_qos`] of a Put whose head its publisher's plain way wrote at its
+    /// declare ([`crate::lent_push::PutHead`]), with the QoS byte the head carries: the Put is the
+    /// head, the payload's length and the payload, with nothing of it written again. A key the
+    /// head does not name is written from its parts, so the bytes on the wire are the same either
+    /// way.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    pub fn send_put_with_head(
+        &self,
+        key: crate::named_key::NamedKey<'_>,
+        value: &[u8],
+        head: &crate::lent_push::PutHead,
+        send: SendAs,
+    ) -> Option<Result<(), SendWireError>> {
+        self.send_plain_put_at(
+            DispatchStage::Fresh,
+            key,
+            value,
+            Some(head.qos()),
+            send,
+            Some(head),
+        )
+        .map(|sent| sent.map(|_| ()))
     }
 
     /// [`Self::send_plain_put_qos`] that does not wait for a slot: a link whose pool has none for
@@ -16142,12 +16190,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         qos: Option<crate::sample::QosLevel>,
         send: SendAs,
     ) -> Option<Result<Probed, SendWireError>> {
-        let probed = self.send_plain_put_at(DispatchStage::Probe, key, value, qos, send);
+        let probed = self.send_plain_put_at(DispatchStage::Probe, key, value, qos, send, None);
         // No room for a reason the link's own stack answers is the caller's own send, which waits
         // for that stack as the queue profile says; only a pool with no slot is left the caller's.
         let probed = match probed {
             Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => {
-                self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send)
+                self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send, None)
             }
             other => other,
         };
@@ -19022,8 +19070,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// header, zenoh-pico `_zp_unicast_send_keep_alive` /
     /// `_z_t_msg_make_keep_alive`). The wire primitive behind the
     /// keepalive TX cadence ([`crate::drive::check_keepalive_deadline`]);
-    /// routing through `Self::send_wire` re-stamps `last_outbound_at`,
-    /// so each emit opens the next idle window by construction.
+    /// The emit marks the line as spoken like any frame; the judge that sent
+    /// it clears that mark, so a keepalive never holds back the next one.
     ///
     /// R311jp — transport-message order parity (zenoh-pico tx.c
     /// `_z_transport_tx_send_t_msg_inner` flushes an active batch before
@@ -19064,7 +19112,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.note_action(|t| t.send_keep_alive = t.send_keep_alive.saturating_add(1));
         let bytes = crate::handshake_encode::encode_keep_alive();
         // R311y205 (transport-multilink) — a keepalive is PER-LINK: it must ride the physical
-        // link this drive loop monitors (so that link's `last_outbound_at` is stamped and its
+        // link this drive loop monitors (so that it is that link's line that speaks and its
         // peer's lease stays fresh), not the reliability-routed data link. R2919 — at
         // `Priority::Control`, ahead of any queued data, as zenoh's tx task writes its
         // keepalive. And not queued behind the data in a lane either: the keepalive is the one
@@ -20759,10 +20807,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 t.start_keepalive_worker = t.start_keepalive_worker.saturating_add(1)
             });
             // The worker is the drive loops' keepalive deadline and the AP
-            // pacer; both emit only while this is set.
-            self.link()
-                .keepalive_armed
-                .store(true, core::sync::atomic::Ordering::SeqCst);
+            // pacer; both emit only while it is armed.
+            self.link().arm_keepalive();
         }
     }
 

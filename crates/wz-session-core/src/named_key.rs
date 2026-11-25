@@ -84,6 +84,17 @@ impl<'a> NamedKey<'a> {
             .or_else(|| Self::literal(text))
     }
 
+    /// `text` named by the declaration `head` writes its Put for, with nothing after it: for a
+    /// write filter's row that found the session names its key so
+    /// ([`crate::session_tables::WriteFilterRow::keep_plan`]). `None` for an empty text.
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
+    pub(crate) fn by_head(text: &'a str, head: &crate::lent_push::PutHead) -> Option<Self> {
+        Some(Self {
+            text: KeyText::new(text)?,
+            wire: WireKey::Id(MappedId::new(head.id())?),
+        })
+    }
+
     /// The whole text.
     pub const fn text(self) -> &'a str {
         self.text.as_str()

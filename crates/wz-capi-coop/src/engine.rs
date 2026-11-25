@@ -1186,6 +1186,12 @@ pub(crate) struct Takes {
     pub(crate) polls: core::sync::atomic::AtomicUsize,
     /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
     pub(crate) face_marks: core::sync::atomic::AtomicUsize,
+    /// The sends on a face of a plain put written from the head its publisher's plain way made.
+    pub(crate) planned: core::sync::atomic::AtomicUsize,
+    /// The plain puts of a write filter's own way written from its plan, with nothing asked again.
+    pub(crate) plans: core::sync::atomic::AtomicUsize,
+    /// The keys the session's tables named for a plain put through a write filter.
+    pub(crate) namings: core::sync::atomic::AtomicUsize,
     /// The walks of the tables for rows whose last call ended, made only when a call said one
     /// may wait.
     pub(crate) walks: core::sync::atomic::AtomicUsize,
@@ -1625,6 +1631,10 @@ struct Publication<'a> {
     payload: &'a [u8],
     opts: &'a PublishOptions<'a>,
     meta: &'a PushMetadata<'a>,
+    /// The write filter of the publisher whose publish this is, whose row keeps the plan its
+    /// declare made: a plain put is written from that plan's head on each link that names the key
+    /// by the plan's declaration. `None` for a publish no publisher made.
+    plan: Option<FilterId>,
 }
 
 /// One put as each of the session's links is sent it ([`CoopEngine::send_on_links`]): the key as
@@ -1635,6 +1645,13 @@ struct LinkLeg<'a> {
     kind: SampleKind,
     meta: &'a PushMetadata<'a>,
     send: wz_session_core::session_actions::SendAs,
+    /// The Put's head its publisher's plain way wrote at its declare, which a link that names the
+    /// key by that declaration is sent it from: a plain put through a write filter's alone.
+    head: Option<wz_session_core::lent_push::PutHead>,
+    /// Whether every link names the key as `named` does, by the head's declaration alone, which
+    /// a put's plan found at the session's send epoch (`CoopEngine::put_planned`): no link is
+    /// asked how it names the key, and each is sent the head.
+    planned: bool,
 }
 
 /// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
@@ -4413,6 +4430,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.clock.now_us()
     }
 
+    /// The session's send epoch: equal at two reads, the links that are up and how each names
+    /// what it sends, what the peers declared and the session's own subscribers are as they were,
+    /// so a put planned at the one (`WriteFilterRow::planned_put`) is sent as planned at the
+    /// other. Each count it adds up moves by one at a time and never back, so the sum moves
+    /// whenever any of them does.
+    fn send_epoch(&self) -> u64 {
+        let registry = &self.session.registry;
+        self.transport
+            .links
+            .generation()
+            .wrapping_add(registry.faces_written())
+            .wrapping_add(wz_session_core::pubsub::LocalSubscribers::epoch(tables(
+                registry,
+            )))
+    }
+
     /// The milliseconds of `now_us`, a step's reading of the clock, when a periodic job is due
     /// by it: what the read runs its jobs against once its delivery is done.
     #[cfg(feature = "ticker")]
@@ -5893,6 +5926,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         wire: &WireKey,
         payload: &[u8],
         opts: &PublishOptions,
+        plan: Option<FilterId>,
     ) -> Result<usize, FanoutError> {
         if !opts.allowed_destination.allows_remote() {
             return Ok(0);
@@ -5952,6 +5986,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             payload,
             opts,
             meta: &meta,
+            plan,
         };
         let (outcome, stuck) = self.fan_out_in(&mut core.0, &put, None, begin.pass);
         // The clock is read only for a fan-out that stopped at a face, whose wait it bounds.
@@ -5978,6 +6013,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(not(feature = "listen"))]
             Then::WaitForSlots { .. } => outcome,
         }
+    }
+
+    /// A publish to the session's links and its own subscribers
+    /// (`SessionEngine::publish_on_wire_all`), of the publisher whose write filter is `plan` when
+    /// one made it ([`Publication::plan`]).
+    #[inline(never)]
+    fn publish_everywhere(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+        plan: Option<FilterId>,
+    ) -> Result<usize, FanoutError> {
+        // This engine numbers none of its links, offers no frame without waiting and reserves
+        // none, so a publish that states a set of links, a retry or the all-or-none form is
+        // refused by name before anything is sent, to a link or to a subscriber of the session.
+        StatementNotHonoured::of_publish(opts)?;
+        // The link first, then the session's own subscribers, as zenoh-pico's `_z_write` does,
+        // and nothing local when the link refused it.
+        let sent = self.publish_to_link(keyexpr, wire, payload, opts, plan)?;
+        #[cfg(feature = "local-subscriber")]
+        let sent = sent.saturating_add(self.publish_to_subscribers(keyexpr, payload, opts)?);
+        Ok(sent)
     }
 
     /// Send `put` on from the face whose link found every outbound slot of the session held, and
@@ -6066,6 +6125,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             payload,
             opts,
             meta,
+            plan,
         } = *put;
         // The key as the session's tables name it: by the declaration the ABI named it by while
         // that declaration stands, and whole otherwise. An empty key names nothing a link carries.
@@ -6077,12 +6137,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             express: meta.is_express(),
             priority: opts.priority_band(),
         };
+        // A plain put of a publisher is written from the head of the plan its declare made, as its
+        // put through its write filter is: each link's send takes the head where the link names
+        // the key by the plan's declaration and the put carries the plan's QoS, and the parts
+        // otherwise.
+        let head = plan
+            .filter(|_| opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos())
+            .and_then(row_of)
+            .and_then(|handle| tables(&core.session.registry).write_filters().get(handle))
+            .and_then(|row| row.plain())
+            .and_then(|way| way.head);
         let link_leg = LinkLeg {
             named,
             payload,
             kind: opts.kind,
             meta,
             send,
+            head,
+            planned: false,
         };
         let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass);
         if stuck.is_some() {
@@ -6137,6 +6209,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             kind,
             meta,
             send,
+            head,
+            planned,
         } = *leg;
         let wz_session_core::session_actions::SendAs {
             reliable,
@@ -6164,7 +6238,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // Each link names the key as its own key-wire form says. A publication is written from
             // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
             // own shorter writer, unless the session or the build leaves it to the owned send below.
-            let key = key_on_link(actions, named);
+            // A planned put's key was named on every link when it was planned.
+            let key = if planned {
+                named
+            } else {
+                key_on_link(actions, named)
+            };
             let plain = kind == SampleKind::Put && meta.is_plain_apart_from_qos();
             // A send that may not wait is told apart from one whose link has room: one with none
             // ends the fan-out at this face, and a chain of fragments, which such a send does not
@@ -6214,16 +6293,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
             }
             let lent = if plain {
-                actions.send_plain_put_qos(
-                    key,
-                    payload,
-                    meta.qos,
-                    wz_session_core::session_actions::SendAs {
-                        reliable,
-                        express,
-                        priority,
-                    },
-                )
+                let send = wz_session_core::session_actions::SendAs {
+                    reliable,
+                    express,
+                    priority,
+                };
+                // A link that names the key by the declaration the head was written for is sent
+                // the head, the payload's length and the payload; any other is sent the Put's parts.
+                match head.filter(|head| planned || head.names(key.wire())) {
+                    Some(head) => {
+                        #[cfg(test)]
+                        self.takes.planned.fetch_add(1, Ordering::Relaxed);
+                        actions.send_put_with_head(key, payload, &head, send)
+                    }
+                    None => actions.send_plain_put_qos(key, payload, meta.qos, send),
+                }
             } else {
                 actions.send_publication_qos(
                     key,
@@ -6352,6 +6436,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                         payload: leg.payload(),
                         opts: &opts,
                         meta: &meta,
+                        plan: None,
                     },
                     Some(leg.dropped_on()),
                 );
@@ -7219,6 +7304,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         declared: KeyexprRef,
         payload: &[u8],
         params: &PlainPutParams,
+        head: Option<wz_session_core::lent_push::PutHead>,
     ) -> FilteredPut {
         // A put one of the session's own subscribers wants is not plain: the general publish
         // sends it and delivers it there.
@@ -7241,9 +7327,47 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         // The key as the session's tables name it, read at the declaration's row where the caller
         // kept it, and each link as its key-wire form says.
+        #[cfg(test)]
+        self.takes.namings.fetch_add(1, Ordering::Relaxed);
         let Some(named) = tables(&core.session.registry).named_at(keyexpr, declared) else {
             return FilteredPut::NotPlain;
         };
+        self.send_plain(core, named, payload, params, head, false)
+    }
+
+    /// The plain put its write filter's row planned at the session's send epoch
+    /// (`WriteFilterRow::planned_put`): sent to every link from the plan's head, with the
+    /// filter's answer, the key's naming and each link's form of it taken as the plan found them.
+    fn put_planned(
+        &self,
+        core: &Core<L, C>,
+        planned: &wz_session_core::session_tables::PlannedPut<'_>,
+        payload: &[u8],
+    ) -> FilteredPut {
+        #[cfg(test)]
+        self.takes.plans.fetch_add(1, Ordering::Relaxed);
+        self.send_plain(
+            core,
+            planned.key(),
+            payload,
+            &planned.params(),
+            Some(planned.head()),
+            true,
+        )
+    }
+
+    /// A plain Put on `named`, sent from `params` to every link ([`Self::send_on_links`]), the
+    /// head written for it where a link names the key by the head's declaration, and on every link
+    /// when `planned`.
+    fn send_plain(
+        &self,
+        core: &Core<L, C>,
+        named: NamedKey<'_>,
+        payload: &[u8],
+        params: &PlainPutParams,
+        head: Option<wz_session_core::lent_push::PutHead>,
+        planned: bool,
+    ) -> FilteredPut {
         // A plain put carries its QoS and nothing else of a publication's.
         let meta = PushMetadata {
             qos: params.qos,
@@ -7259,6 +7383,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 express: params.express,
                 priority: params.priority,
             },
+            head,
+            planned,
         };
         // Marked as a publish for as long as it holds the session, as the general publish is.
         let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
@@ -7665,16 +7791,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        // This engine numbers none of its links, offers no frame without waiting and reserves
-        // none, so a publish that states a set of links, a retry or the all-or-none form is
-        // refused by name before anything is sent, to a link or to a subscriber of the session.
-        StatementNotHonoured::of_publish(opts)?;
-        // The link first, then the session's own subscribers, as zenoh-pico's `_z_write` does,
-        // and nothing local when the link refused it.
-        let sent = self.publish_to_link(keyexpr, wire, payload, opts)?;
-        #[cfg(feature = "local-subscriber")]
-        let sent = sent.saturating_add(self.publish_to_subscribers(keyexpr, payload, opts)?);
-        Ok(sent)
+        self.publish_everywhere(keyexpr, wire, payload, opts, None)
     }
 
     #[inline(never)]
@@ -8161,7 +8278,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             if self.write_filter_holds_back(filter) {
                 return FilteredPut::Suppressed;
             }
-            return FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts));
+            // The publisher's plan writes the put where it is a plain one on the plan's key.
+            return FilteredPut::Sent(self.publish_everywhere(
+                keyexpr,
+                wire,
+                payload,
+                opts,
+                Some(filter),
+            ));
         }
         // A write that brings nothing of its own goes in the plain form its filter's row keeps.
         self.put_through_filter(filter, keyexpr, payload, None)
@@ -9297,31 +9421,65 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let core = &core.0;
         let registry = &core.session.registry;
-        // The filter's row is looked up once, for its answer and for the plain way it keeps.
+        // The filter's row is looked up once, for its plan, its answer and the plain way it keeps.
         let row = row_of(filter).and_then(|handle| tables(registry).write_filters().get(handle));
+        // A write that brings nothing of its own, at the send epoch its way was planned at, is
+        // sent as planned: what the filter's answer, the key's naming and each link's form of it
+        // are read from is as it was then. A group the session joined since is sent it the
+        // general way, which no epoch counts.
+        let epoch = core.send_epoch();
+        #[cfg(feature = "group")]
+        let groups_left = core.transport.groups.is_empty();
+        #[cfg(not(feature = "group"))]
+        let groups_left = true;
+        if given.is_none() && groups_left {
+            if let Some(planned) = row.and_then(|row| row.planned_put(epoch)) {
+                return self.put_planned(core, &planned, payload);
+            }
+        }
         if !Self::filters_left_unasked(core)
             && row.is_some_and(|row| !tables(registry).write_filter_row_open(row, registry))
         {
             return FilteredPut::Suppressed;
         }
-        let (key, params) = match given {
-            Some(given) => given,
+        let planning = given.is_none();
+        // The plain way a publisher's declare stated carries the Put's head it wrote then. A way
+        // the caller gives is written from that head too, on each link where the head names the
+        // way's key and carries its QoS, which the send checks, and from its parts elsewhere.
+        let (key, params, head) = match given {
+            Some((key, params)) => (
+                key,
+                params,
+                row.and_then(|row| row.plain()).and_then(|way| way.head),
+            ),
+            // Each link is sent the key as its own form names it (`key_on_link`), and the head
+            // only where that is the head's declaration alone.
             None => {
                 let Some(way) = row.and_then(|row| row.plain()) else {
                     return FilteredPut::NotPlain;
                 };
-                // A link that names keys its own way is sent the general way, which names the key
-                // as its form says: no declared id goes to every link at once.
-                #[cfg(feature = "shared-key-ids")]
-                if core.session.key_ids.is_some()
-                    || core.transport.key_forms.departs_from_declared()
-                {
-                    return FilteredPut::NotPlain;
-                }
-                (way.key, way.params)
+                (way.key, way.params, way.head)
             }
         };
-        self.put_plain_in(core, keyexpr, key, payload, &params)
+        let sent = self.put_plain_in(core, keyexpr, key, payload, &params, head);
+        // The row's own way, sent plain to the peers of a filter that counts subscribers, is
+        // planned at this epoch when every link names the filter's key as the session does, by
+        // the head's declaration alone: the epoch counts the session's own subscribers, the
+        // queryables none, and a way kept from the peers sends nothing a plan could.
+        if let (true, Some(row), FilteredPut::Sent(_)) = (planning, row, sent) {
+            if row.plane() == Plane::Subscribers && params.destination.allows_remote() {
+                if let Some(named) = tables(registry).named_at(row.key(), key) {
+                    if core
+                        .transport
+                        .ups()
+                        .all(|actions| key_on_link(actions, named).wire() == named.wire())
+                    {
+                        row.keep_plan(epoch, named);
+                    }
+                }
+            }
+        }
+        sent
     }
 
     /// The session `engine` holds as the C handle's drive: one of the engine's holders, so the
