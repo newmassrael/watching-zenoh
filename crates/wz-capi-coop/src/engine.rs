@@ -268,9 +268,12 @@ use wz_session_core::replay_pacing::ReplayPacing;
     feature = "declarations-synced-event"
 ))]
 mod decl_watch;
-#[cfg(any(
-    feature = "remote-declaration-watch",
-    feature = "declarations-synced-event"
+#[cfg(all(
+    any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ),
+    any(feature = "threads", feature = "listen", feature = "group")
 ))]
 pub(crate) use decl_watch::WatchCall;
 #[cfg(any(
@@ -4421,9 +4424,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Hold in the round what the declaration watches are owed and it has room for now
     /// (`DeclWatches::tell_owed`): each new watch's catch-up from the peers of the links up now,
     /// each declaration named as its link's peer, and the events a watch lost.
-    #[cfg(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        any(feature = "threads", feature = "listen", feature = "group")
     ))]
     fn tell_decl_watches_owed(&self) {
         let registry = &self.session.registry;
@@ -4439,6 +4445,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         };
         // SAFETY: `Core` is reached under the session's lock alone, the round writer's lock.
         unsafe { registry.decl_watches.tell_owed(faces) };
+    }
+
+    /// The next call a declaration watch is owed (`DeclWatches::next_call`), its event copied
+    /// into `told`: what the dispatch of the last record held, the events a watch lost, then each
+    /// new watch's catch-up from the peers of the links up now, each declaration named as its
+    /// link's peer.
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn next_decl_watch_call(&self, told: &mut decl_watch::Told) -> Option<decl_watch::WatchCall> {
+        let registry = &self.session.registry;
+        let links = &self.transport.links;
+        let faces = move || {
+            links.faces().filter_map(move |face| {
+                let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
+                    return None;
+                };
+                let peer = decl_watch::named(|| wire.actions.peer_session_zid());
+                Some((registry.tables_of(face.id)?, peer))
+            })
+        };
+        registry.decl_watches.next_call(faces, told)
     }
 
     /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
@@ -5800,9 +5832,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // catch-up of a watch declared while a round was handed out, the events a watch lost),
         // held now the round is handed out, each round sealed as the session is let go of and
         // handed out in turn.
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "threads", feature = "listen", feature = "group")
         ))]
         while self.decl_watches.owes() {
             let Some(core) = self.live() else {
@@ -5813,6 +5848,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             if !self.hand_out() {
                 break;
             }
+        }
+        // What a read that steps its one link itself held for the declaration watches as it
+        // dispatched the record, and the catch-up a watch is owed, a call at a time; what their
+        // sinks queue is handed out after them.
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            not(any(feature = "threads", feature = "listen", feature = "group"))
+        ))]
+        if self.hand_decl_watches() {
+            handed = true;
+            while self.hand_out() {}
         }
         // The tokens of a lost link the round had no room for, retracted now the round is handed
         // out, each round sealed as the session is let go of and handed out in turn.
@@ -5844,6 +5893,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
             // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
+        }
+        handed
+    }
+
+    /// Hand each declaration watch what it is owed (`DeclWatches::next_call`), a call at a time:
+    /// the row pinned under the session's lock and its sink called with no lock held, so a sink may
+    /// reach back into the session. Whether any was handed.
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn hand_decl_watches(&self) -> bool {
+        let mut told = decl_watch::Told::default();
+        let mut handed = false;
+        while self.decl_watches.owes() {
+            let call = {
+                let Some(core) = self.live() else {
+                    break;
+                };
+                core.0.next_decl_watch_call(&mut told)
+            };
+            let Some(call) = call else {
+                break;
+            };
+            call.hand(told.event());
+            call.end();
+            handed = true;
         }
         handed
     }
@@ -7694,7 +7773,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     /// The watch is told first what each link's peer holds now, then what the links' dispatch
     /// holds for it from here on (`decl_watch`): at once when the round takes the catch-up, or by
     /// the next round when it is handed out now, as it is to a watch declared from inside a
-    /// callback. A refused sink is let go of with no lock held.
+    /// callback; where the read steps its one link itself, by this call, or by the delivery a
+    /// callback that declares it runs in. A refused sink is let go of with no lock held.
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -7722,7 +7802,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 return Err(refused);
             }
         };
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         core.tell_decl_watches_owed();
+        // The catch-up is handed now, before the link is read again; a declare from inside a
+        // callback has it handed by the delivery the callback runs in, as the call returns.
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        {
+            drop(guard);
+            self.deliver();
+        }
         Ok(id)
     }
 

@@ -41,9 +41,12 @@ use crate::engine::LivelinessCall;
 #[cfg(feature = "queryable")]
 use crate::engine::QueryableCall;
 use crate::engine::SubscriberCall;
-#[cfg(any(
-    feature = "remote-declaration-watch",
-    feature = "declarations-synced-event"
+#[cfg(all(
+    any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ),
+    any(feature = "threads", feature = "listen", feature = "group")
 ))]
 use crate::engine::WatchCall;
 #[cfg(feature = "query")]
@@ -183,14 +186,20 @@ impl RoundCalls for CoopCalls {
     type Queryable = QueryableCall;
     #[cfg(not(feature = "queryable"))]
     type Queryable = core::convert::Infallible;
-    #[cfg(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        any(feature = "threads", feature = "listen", feature = "group")
     ))]
     type Watch = WatchCall;
-    #[cfg(not(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
+    #[cfg(not(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        any(feature = "threads", feature = "listen", feature = "group")
     )))]
     type Watch = core::convert::Infallible;
     #[cfg(feature = "query")]
@@ -213,14 +222,20 @@ impl RoundCalls for CoopCalls {
     type Queries = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "queryable"))]
     type Queries = wz_session_core::session_tables::Absent;
-    #[cfg(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        any(feature = "threads", feature = "listen", feature = "group")
     ))]
     type Watches = wz_session_core::session_tables::Present;
-    #[cfg(not(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
+    #[cfg(not(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        any(feature = "threads", feature = "listen", feature = "group")
     )))]
     type Watches = wz_session_core::session_tables::Absent;
     #[cfg(feature = "local-subscriber")]
@@ -311,9 +326,12 @@ impl RoundCall for QueryableCall {
     }
 }
 
-#[cfg(any(
-    feature = "remote-declaration-watch",
-    feature = "declarations-synced-event"
+#[cfg(all(
+    any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ),
+    any(feature = "threads", feature = "listen", feature = "group")
 ))]
 impl RoundCall for WatchCall {
     fn end(self) -> bool {
@@ -321,9 +339,12 @@ impl RoundCall for WatchCall {
     }
 }
 
-#[cfg(any(
-    feature = "remote-declaration-watch",
-    feature = "declarations-synced-event"
+#[cfg(all(
+    any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ),
+    any(feature = "threads", feature = "listen", feature = "group")
 ))]
 impl wz_session_core::round::WatchCall for WatchCall {
     fn same_row(&self, other: &Self) -> bool {

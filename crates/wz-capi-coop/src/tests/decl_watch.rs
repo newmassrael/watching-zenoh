@@ -497,4 +497,69 @@ mod watched {
         });
         assert_eq!(*order.lock().unwrap(), ["declared", "sample"]);
     }
+
+    /// A watch's sink is called with the session let go of: it undeclares its own watch from inside
+    /// its call, is told nothing more, and its sink is let go of as the call returns. The CONTROL
+    /// is a watch kept beside it, which is told the declaration the undeclared one is not. Turned
+    /// red by a call made with the session held, which the undeclare inside it waits on.
+    #[test]
+    fn a_watch_undeclared_from_inside_its_call_is_told_nothing_more() {
+        use crate::EngineHold;
+
+        let router = Router::start(CatchAll::None);
+        let engine = open(&router);
+        let kept = Log::new();
+        watch(&engine, DeclPlane::Subscribers, &kept);
+        let own: Arc<Mutex<Option<u64>>> = Arc::default();
+        let undeclared: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let told: Arc<Mutex<Vec<Seen>>> = Arc::default();
+        let sink: SharedCall = {
+            let session = EngineHold::downgrade(&engine);
+            let own = Arc::clone(&own);
+            let undeclared = Arc::clone(&undeclared);
+            let told = Arc::clone(&told);
+            Arc::new(move |event: DeclWatchEvent<'_>| {
+                let DeclWatchEvent::Declared { id, keyexpr, .. } = event else {
+                    return;
+                };
+                told.lock()
+                    .unwrap()
+                    .push(Seen::Declared(id, keyexpr.to_owned()));
+                let Some(engine) = session.upgrade() else {
+                    return;
+                };
+                if let Some(own) = own.lock().unwrap().take() {
+                    undeclared
+                        .lock()
+                        .unwrap()
+                        .push(engine.undeclare_decl_watch(own));
+                }
+            })
+        };
+        let id = engine
+            .declare_decl_watch(
+                DeclPlane::Subscribers,
+                DeclWatchSink::Shared(Arc::clone(&sink)),
+            )
+            .expect("a watch of subscribers");
+        *own.lock().unwrap() = Some(id);
+
+        router.send(Command::DeclareSubscriber(3, "demo/w/first"));
+        until(&engine, "the undeclare from inside the call", || {
+            !undeclared.lock().unwrap().is_empty()
+        });
+        router.send(Command::DeclareSubscriber(4, "demo/w/second"));
+        let second = Seen::Declared(4, "demo/w/second".to_owned());
+        until(&engine, "CONTROL: the kept watch's second event", || {
+            kept.has(&second)
+        });
+        settle(&engine);
+        assert_eq!(*undeclared.lock().unwrap(), [true]);
+        assert_eq!(
+            *told.lock().unwrap(),
+            [Seen::Declared(3, "demo/w/first".to_owned())],
+            "told nothing after its undeclare"
+        );
+        assert_eq!(Arc::strong_count(&sink), 1, "the engine let go of the sink");
+    }
 }
