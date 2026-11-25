@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The lock, the condition variable and the reader-writer lock in their own bytes: a word or two
-//! of their owner's over [`RawLock`]'s parking place, so making, taking, waiting on and notifying
+//! of their owner's, each waited on where it lies, so making, taking, waiting on and notifying
 //! one takes no memory, and a value that is one may move while no thread holds it. A build without
 //! `std` holds these, and so does a build with `std` on a host whose `std` lock is a pthread
 //! object, which `std` boxes the first time it is taken (the crate root's names).
@@ -19,10 +19,10 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::addr_of_mut;
 #[cfg(feature = "std")]
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
-use crate::{monotonic_ns, park_while, unpark_all, RawCondvar, RawLock, SPINS};
+use crate::{monotonic_ns, sys, RawCondvar, RawLock};
 
 /// A value behind a [`RawLock`], reached through a guard: the shape of `std::sync::Mutex`, whose
 /// poisoning it keeps as a flag beside a value it still hands out.
@@ -258,17 +258,26 @@ impl fmt::Debug for Condvar {
 }
 
 /// [`RwLock`]'s word: a writer holds it.
-const WRITER: usize = 1 << (usize::BITS - 1);
+const WRITER: u32 = 1 << 31;
 /// [`RwLock`]'s word: a writer waits for it, so a reader that comes now waits behind the writer.
-const WRITER_WAITING: usize = 1 << (usize::BITS - 2);
+const WRITER_WAITING: u32 = 1 << 30;
+/// [`RwLock`]'s word: a reader waits for it, behind a writer that holds it or waits for it.
+const READERS_WAITING: u32 = 1 << 29;
 /// [`RwLock`]'s word: how many readers hold it.
-const READERS: usize = WRITER_WAITING - 1;
+const READERS: u32 = READERS_WAITING - 1;
+/// [`RwLock`]'s word: a thread may sleep on it, so the release that ends the wait wakes them.
+const WAITING: u32 = WRITER_WAITING | READERS_WAITING;
 
 /// A value many threads read at once or one writes, behind one word: the shape of
 /// `std::sync::RwLock`. A writer that waits holds off the readers that come after it, so a stream
 /// of readers does not keep it waiting for good.
+///
+/// A thread that waits marks the word and sleeps on it; the marks stay until a release leaves the
+/// word with no holder, which wakes every thread asleep on it, and each marks the word again if it
+/// waits again. A writer takes the word with the marks it finds, since a thread that set one may
+/// still be asleep, and its release is the one that wakes it.
 pub struct RwLock<T> {
-    state: AtomicUsize,
+    state: AtomicU32,
     value: UnsafeCell<T>,
 }
 
@@ -281,59 +290,69 @@ impl<T> RwLock<T> {
     /// `value`, behind a lock no thread holds.
     pub const fn new(value: T) -> Self {
         Self {
-            state: AtomicUsize::new(0),
+            state: AtomicU32::new(0),
             value: UnsafeCell::new(value),
         }
     }
 
     /// Wait until no writer holds the lock or waits for it, and read.
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
-        let mut spins = 0;
+        let mut state = self.state.load(Ordering::Relaxed);
         loop {
-            let state = self.state.load(Ordering::Relaxed);
-            if state & (WRITER | WRITER_WAITING) == 0 {
-                if self
-                    .state
-                    .compare_exchange_weak(
-                        state,
-                        state.wrapping_add(1),
-                        Ordering::Acquire,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    return RwLockReadGuard { lock: self };
+            // A count at its top waits as behind a writer, so it never runs into the marks.
+            if state & (WRITER | WRITER_WAITING) == 0 && state & READERS != READERS {
+                match self.state.compare_exchange_weak(
+                    state,
+                    state + 1,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return RwLockReadGuard { lock: self },
+                    Err(now) => state = now,
                 }
-            } else if spins < SPINS {
-                spins += 1;
-                core::hint::spin_loop();
             } else {
-                park_while(|| self.state.load(Ordering::SeqCst) & (WRITER | WRITER_WAITING) != 0);
+                state = self.wait_marked(state, READERS_WAITING);
             }
         }
     }
 
     /// Wait until no thread holds the lock, and write.
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-        let mut spins = 0;
+        let mut state = self.state.load(Ordering::Relaxed);
         loop {
-            let state = self.state.load(Ordering::Relaxed);
-            if state & !WRITER_WAITING == 0 {
-                if self
-                    .state
-                    .compare_exchange_weak(state, WRITER, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    return RwLockWriteGuard { lock: self };
+            if state & (WRITER | READERS) == 0 {
+                match self.state.compare_exchange_weak(
+                    state,
+                    state | WRITER,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return RwLockWriteGuard { lock: self },
+                    Err(now) => state = now,
                 }
-            } else if spins < SPINS {
-                spins += 1;
-                core::hint::spin_loop();
             } else {
-                self.state.fetch_or(WRITER_WAITING, Ordering::SeqCst);
-                park_while(|| self.state.load(Ordering::SeqCst) & !WRITER_WAITING != 0);
+                state = self.wait_marked(state, WRITER_WAITING);
             }
         }
+    }
+
+    /// Mark the word, read as `state`, with `mark` and sleep while it reads so: the word as it
+    /// reads after, for the caller to try again. A word that moved before the mark was set is
+    /// answered at once.
+    fn wait_marked(&self, state: u32, mark: u32) -> u32 {
+        let marked = state | mark;
+        if marked != state {
+            if let Err(now) = self.state.compare_exchange_weak(
+                state,
+                marked,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                return now;
+            }
+        }
+        sys::wait(&self.state, marked, None);
+        self.state.load(Ordering::Relaxed)
     }
 
     /// The value, through the only reference there is.
@@ -374,9 +393,11 @@ impl<T> Deref for RwLockReadGuard<'_, T> {
 
 impl<T> Drop for RwLockReadGuard<'_, T> {
     fn drop(&mut self) {
-        // The last reader out wakes the writer that waits for none to be left.
-        if self.lock.state.fetch_sub(1, Ordering::SeqCst) & READERS == 1 {
-            unpark_all();
+        // The last reader out wakes the threads that wait for none to be left. The marks stay, so
+        // a waiting writer still comes before a reader that comes now.
+        let state = self.lock.state.fetch_sub(1, Ordering::Release);
+        if state & READERS == 1 && state & WAITING != 0 {
+            sys::wake_all(&self.lock.state);
         }
     }
 }
@@ -403,9 +424,11 @@ impl<T> DerefMut for RwLockWriteGuard<'_, T> {
 
 impl<T> Drop for RwLockWriteGuard<'_, T> {
     fn drop(&mut self) {
-        // A writer that waits keeps its mark, so the readers that wait behind it still do.
-        self.lock.state.fetch_and(!WRITER, Ordering::SeqCst);
-        unpark_all();
+        // Every mark goes with the write, and every thread asleep on the word is woken: each that
+        // still has to wait marks the word again.
+        if self.lock.state.swap(0, Ordering::Release) & WAITING != 0 {
+            sys::wake_all(&self.lock.state);
+        }
     }
 }
 

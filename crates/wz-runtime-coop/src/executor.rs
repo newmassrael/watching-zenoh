@@ -582,8 +582,8 @@ fn give_back_fitted(cells: &[TaskCell]) {
 /// `ExecutorState::opening` make, so a runtime whose table is reserved links none of it.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 trait TakesMemory: Send + Sync {
-    /// The cell at `index` among these cells.
-    fn cell_at(&self, index: usize) -> Option<&'static TaskCell>;
+    /// The cell at `index` among these cells, read inside the section `cs` the caller holds.
+    fn cell_at(&self, index: usize, cs: CriticalSection<'_>) -> Option<&'static TaskCell>;
 
     /// How many of these cells there are.
     fn count(&self) -> usize;
@@ -630,18 +630,16 @@ impl Taking {
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl TakesMemory for Taking {
-    fn cell_at(&self, index: usize) -> Option<&'static TaskCell> {
-        crate::cs::with(|cs| {
-            let mut left = index;
-            for chunk in self.chunks.borrow(cs).borrow().iter() {
-                let cells = chunk.cells();
-                if let Some(cell) = cells.get(left) {
-                    return Some(cell);
-                }
-                left = left.checked_sub(cells.len())?;
+    fn cell_at(&self, index: usize, cs: CriticalSection<'_>) -> Option<&'static TaskCell> {
+        let mut left = index;
+        for chunk in self.chunks.borrow(cs).borrow().iter() {
+            let cells = chunk.cells();
+            if let Some(cell) = cells.get(left) {
+                return Some(cell);
             }
-            None
-        })
+            left = left.checked_sub(cells.len())?;
+        }
+        None
     }
 
     fn count(&self) -> usize {
@@ -909,6 +907,10 @@ pub struct ExecutorState {
     /// (`pool-monitor`), so the state is the size it was.
     #[cfg(feature = "session-slot")]
     high: Mutex<Cell<wz_session_core::pool_gauge::HighWater>>,
+    /// The table is reached only under the lock of the engine that owns it ([`Self::confine`]),
+    /// so a pass over it takes no section of the process.
+    #[cfg(feature = "host-lock")]
+    confined: AtomicBool,
 }
 
 /// The bytes of a task cell that holds a future of type `F` and its output: what a spawn of it
@@ -1039,6 +1041,32 @@ impl ExecutorState {
             refused: Mutex::new(Cell::new(Refusals::default())),
             #[cfg(feature = "session-slot")]
             high: Mutex::new(Cell::new(wz_session_core::pool_gauge::HighWater::new())),
+            #[cfg(feature = "host-lock")]
+            confined: AtomicBool::new(false),
+        }
+    }
+
+    /// From now on the table is reached only under one lock of the engine that owns it, as the
+    /// caller of `CoopRuntime::confine_tasks` states under that function's contract: a
+    /// pass over its cells, and a look for the cell at a place, take no section of the process,
+    /// which on a host is a lock every session of the program shares. A waker, which only raises
+    /// a cell's flag, may still be woken from anywhere.
+    #[cfg(feature = "host-lock")]
+    pub(crate) fn confine(&self) {
+        self.confined.store(true, Ordering::Relaxed);
+    }
+
+    /// Run `f` inside a section of the process, or with none on a host where the table is
+    /// confined to its owner's lock ([`Self::confine`]), which keeps its cells to one thread.
+    #[inline(always)]
+    fn section<R>(&self, f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
+        #[cfg(feature = "host-lock")]
+        {
+            crate::cs::with_unless(self.confined.load(Ordering::Relaxed), f)
+        }
+        #[cfg(not(feature = "host-lock"))]
+        {
+            crate::cs::with(f)
         }
     }
 
@@ -1170,7 +1198,8 @@ impl ExecutorState {
     /// The cell at `index` among those the table took memory for.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn taken_at(&self, index: usize) -> Option<&'static TaskCell> {
-        self.taking.as_deref()?.cell_at(index)
+        let taking = self.taking.as_deref()?;
+        self.section(|cs| taking.cell_at(index, cs))
     }
 
     /// A `static` table takes no memory.
@@ -1472,9 +1501,9 @@ impl ExecutorState {
         if !cell.wake.load(Ordering::Acquire) && !cell.cancel.load(Ordering::Acquire) {
             return;
         }
-        let act = crate::cs::with(|cs| Self::classify(cell, cs));
+        let act = self.section(|cs| Self::classify(cell, cs));
         if let Some(left) = Self::carry_act(cell, act) {
-            crate::cs::with(|cs| Self::settle(cell, left, cs)).carry_out();
+            self.section(|cs| Self::settle(cell, left, cs)).carry_out();
         }
     }
 
@@ -1531,7 +1560,7 @@ impl ExecutorState {
                 }
                 continue;
             }
-            let (settled, mut act) = crate::cs::with(|cs| {
+            let (settled, mut act) = self.section(|cs| {
                 let settled = match owed {
                     Some((cell, left)) => Self::settle(cell, left, cs),
                     None => Settled::default(),
@@ -1550,7 +1579,7 @@ impl ExecutorState {
             // section looked at before it was woken: it is looked at again, so it is polled in
             // this pass, as it was when each cell was settled before the next was looked at.
             if woke && matches!(act, Act::Nothing) && cell.wake.load(Ordering::Acquire) {
-                act = crate::cs::with(|cs| Self::classify(cell, cs));
+                act = self.section(|cs| Self::classify(cell, cs));
             }
             owed = Self::carry_act(cell, act).map(|left| (cell, left));
         }
@@ -1934,6 +1963,53 @@ impl<T> Drop for TaskJoin<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A table confined to its owner's lock.
+    #[cfg(all(
+        feature = "host-lock",
+        feature = "alloc",
+        not(feature = "session-slot")
+    ))]
+    mod confined {
+        extern crate std;
+
+        use crate::atomic::{AtomicBool, Ordering};
+        use crate::executor::ExecutorState;
+
+        /// A confined table runs a pass while another thread holds the process's section: the
+        /// pass takes none. Turned red by a pass that still takes the section (it waits for the
+        /// holder, which lets go only after its three seconds, so the pass ends after it).
+        #[test]
+        fn a_confined_tables_pass_takes_no_section_of_the_process() {
+            static POLLED: AtomicBool = AtomicBool::new(false);
+            let state = ExecutorState::reserved(1, 64);
+            assert!(
+                state
+                    .spawn(async { POLLED.store(true, Ordering::SeqCst) }, 0)
+                    .is_ok(),
+                "CONTROL: the one cell takes the task"
+            );
+            state.confine();
+            let (inside_tx, inside_rx) = std::sync::mpsc::channel::<()>();
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            let holder = std::thread::spawn(move || {
+                crate::cs::with(|_| {
+                    inside_tx.send(()).expect("the test is listening");
+                    done_rx
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .is_ok()
+                })
+            });
+            inside_rx.recv().expect("the holder is inside the section");
+            state.run_until_idle();
+            let _ = done_tx.send(());
+            assert!(
+                holder.join().expect("the holder ran"),
+                "the pass ended while the section was held"
+            );
+            assert!(POLLED.load(Ordering::SeqCst), "the pass polled the task");
+        }
+    }
 
     /// A size rounds up to the next multiple of its alignment; one with no multiple below
     /// `usize::MAX`, or an alignment of none, reads `usize::MAX`, which no cell holds.

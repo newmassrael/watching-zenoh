@@ -1652,7 +1652,9 @@ enum UnderCoreLock {}
 // reached by one thread at a time on the ground the `Send` above states: every path to them holds
 // the session's `CoreLock` (the links' tasks run in `Core::run_tasks`, under `&mut Core`), the
 // engine's drop reaches them with the lock's value owned (`CoreLock::dropping`), and no handle of
-// them is handed out of the lock.
+// them is handed out of the lock. The session's runtime is confined to the lock the same way (the
+// open's `confine_tasks`): it and its local set are the `Core`'s, its tasks are spawned and run
+// and their handles held by the `Core` alone, and the group's pace holds the set in an `Rc`.
 unsafe impl ConfinedOwner for UnderCoreLock {}
 
 /// How the session's runtime holds what it lends a link's session: in no lock of its own, the
@@ -4475,6 +4477,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                         left: 0,
                     },
                 )))?;
+        // SAFETY: the runtime is the session's alone: it and its local set go into the `Core` made
+        // below and into no other value, the opening frame owns them until the `Core` is behind
+        // its `CoreLock`, and from then on every spawn, pass and handle of its tasks is reached
+        // under that lock (`UnderCoreLock`'s `ConfinedOwner`); this handle is dropped here.
+        unsafe { runtime.confine_tasks::<UnderCoreLock>() };
         let session_time = CoopTime::new(&runtime);
         let wait_room = read_wait_room(&config);
         #[cfg(feature = "time-base")]
@@ -4837,10 +4844,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.transport.admission
     }
 
-    /// The session's local set, for a test that spawns a task of the session's.
+    /// Run `f` on the session's local set under the session's lock, for a test that spawns a
+    /// task of the session's: the runtime is confined to that lock (`confine_tasks`), so the set
+    /// is used under it and a handle of it taken out is used only once the engine has gone.
     #[cfg(all(test, feature = "listen"))]
-    pub(crate) fn local_set(&self) -> CoopLocalSet<C> {
-        self.core.lock().0.local.clone()
+    pub(crate) fn with_local_set<R>(&self, f: impl FnOnce(&CoopLocalSet<C>) -> R) -> R {
+        f(&self.core.lock().0.local)
     }
 
     /// How many places of `kind` the ABI holds now, and how many the session's arena lends at

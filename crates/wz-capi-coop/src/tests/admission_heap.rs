@@ -130,21 +130,25 @@ impl Drop for Dropped {
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_sessions_tasks_go_with_its_engine_though_a_handle_of_its_set_is_kept() {
     let engine = open_with(listening());
-    let set = engine.local_set();
     let dropped = Arc::new(AtomicBool::new(false));
     let guard = Dropped(Arc::clone(&dropped));
     let lease = LinkLease::placed(engine.link_admission(), false);
-    let kept = set.clone();
-    let task = set.spawn_local(async move {
-        let _kept = kept;
-        let _lease = lease;
-        let _guard = guard;
-        core::future::pending::<()>().await;
+    // The session's runtime is confined to its lock, so the set is used under it while the engine
+    // stands; the handles taken out are read once it has gone.
+    let (set, task) = engine.with_local_set(|set| {
+        let kept = set.clone();
+        let task = set.spawn_local(async move {
+            let _kept = kept;
+            let _lease = lease;
+            let _guard = guard;
+            core::future::pending::<()>().await;
+        });
+        assert!(
+            !task.is_finished(),
+            "CONTROL: a cell of the session's table took the task"
+        );
+        (set.clone(), task)
     });
-    assert!(
-        !task.is_finished(),
-        "CONTROL: a cell of the session's table took the task"
-    );
     assert!(
         !dropped.load(Ordering::Relaxed),
         "CONTROL: the task stays while the session stands"

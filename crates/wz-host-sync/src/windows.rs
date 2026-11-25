@@ -1,80 +1,51 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The Windows host's calls: the slim reader/writer lock and condition variable of the parking
-//! place, the threads, and the sleep.
+//! The Windows host's calls: the wait on an address that the locks, the condition variables and
+//! the parker sleep on, the clocks, the threads, and the sleep.
 
-use core::cell::UnsafeCell;
 use core::ffi::c_void;
+use core::sync::atomic::AtomicU32;
 
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{
-    AcquireSRWLockExclusive, CreateThread, GetCurrentThreadId, ReleaseSRWLockExclusive, Sleep,
-    SleepConditionVariableSRW, WaitForSingleObject, WakeAllConditionVariable, CONDITION_VARIABLE,
-    CONDITION_VARIABLE_INIT, INFINITE, SRWLOCK, SRWLOCK_INIT,
+    CreateThread, GetCurrentThreadId, Sleep, WaitForSingleObject, WaitOnAddress, WakeByAddressAll,
+    WakeByAddressSingle, INFINITE,
 };
 
-/// The parking place's lock, held exclusively.
-pub(crate) struct ParkLock(UnsafeCell<SRWLOCK>);
-
-// SAFETY: a slim reader/writer lock is made to be shared between threads; it is reached only
-// through the calls below.
-unsafe impl Sync for ParkLock {}
-
-impl ParkLock {
-    pub(crate) const fn new() -> Self {
-        Self(UnsafeCell::new(SRWLOCK_INIT))
-    }
-
-    pub(crate) fn lock(&self) {
-        // SAFETY: an initialised lock that never moves.
-        unsafe { AcquireSRWLockExclusive(self.0.get()) };
-    }
-
-    /// # Safety
-    /// The calling thread holds it.
-    pub(crate) unsafe fn unlock(&self) {
-        ReleaseSRWLockExclusive(self.0.get());
+/// Sleep while `word` reads `expected`, until a wake on it or, with a deadline, until the
+/// performance counter reads `deadline_ns`. It may end sooner: the caller reads the word again.
+/// The wait takes the milliseconds left, rounded up so that it does not end before the deadline.
+pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
+    let ms = deadline_ns.map_or(INFINITE, |deadline| {
+        deadline
+            .saturating_sub(monotonic_ns())
+            .div_ceil(1_000_000)
+            .min(u64::from(INFINITE - 1)) as u32
+    });
+    // SAFETY: the word and `expected` are live 32-bit integers, which the wait compares.
+    unsafe {
+        WaitOnAddress(
+            core::ptr::from_ref(word).cast(),
+            core::ptr::from_ref(&expected).cast(),
+            core::mem::size_of::<u32>(),
+            ms,
+        );
     }
 }
 
-/// The parking place's condition variable, waited on with [`ParkLock`].
-pub(crate) struct ParkCond(UnsafeCell<CONDITION_VARIABLE>);
+/// Wake one thread asleep on `word`.
+pub(crate) fn wake_one(word: &AtomicU32) {
+    // SAFETY: a wake reads no memory; the address only names the threads asleep on it.
+    unsafe { WakeByAddressSingle(core::ptr::from_ref(word).cast()) };
+}
 
-// SAFETY: as for `ParkLock`.
-unsafe impl Sync for ParkCond {}
-
-impl ParkCond {
-    pub(crate) const fn new() -> Self {
-        Self(UnsafeCell::new(CONDITION_VARIABLE_INIT))
-    }
-
-    /// # Safety
-    /// The calling thread holds `lock` exclusively.
-    pub(crate) unsafe fn wait(&self, lock: &ParkLock) {
-        SleepConditionVariableSRW(self.0.get(), lock.0.get(), INFINITE, 0);
-    }
-
-    /// Wait until notified or until the performance counter reads `deadline_ns`: the wait takes
-    /// the milliseconds left, rounded up so that it does not end before the deadline.
-    ///
-    /// # Safety
-    /// The calling thread holds `lock` exclusively.
-    pub(crate) unsafe fn wait_until(&self, lock: &ParkLock, deadline_ns: u64) {
-        let left_ms = deadline_ns
-            .saturating_sub(monotonic_ns())
-            .div_ceil(1_000_000)
-            .min(u64::from(INFINITE - 1));
-        SleepConditionVariableSRW(self.0.get(), lock.0.get(), left_ms as u32, 0);
-    }
-
-    /// # Safety
-    /// The calling thread holds the parking place's lock.
-    pub(crate) unsafe fn notify_all(&self) {
-        WakeAllConditionVariable(self.0.get());
-    }
+/// Wake every thread asleep on `word`.
+pub(crate) fn wake_all(word: &AtomicU32) {
+    // SAFETY: as in `wake_one`.
+    unsafe { WakeByAddressAll(core::ptr::from_ref(word).cast()) };
 }
 
 /// The hundreds of nanoseconds from 1601-01-01, where a `FILETIME` counts from, to the Unix epoch.
