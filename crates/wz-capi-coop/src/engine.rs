@@ -1608,6 +1608,10 @@ struct Publication<'a> {
     payload: &'a [u8],
     opts: &'a PublishOptions<'a>,
     meta: &'a PushMetadata<'a>,
+    /// The write filter of the publisher whose publish this is, whose row keeps the plan its
+    /// declare made: a plain put is written from that plan's head on each link that names the key
+    /// by the plan's declaration. `None` for a publish no publisher made.
+    plan: Option<FilterId>,
 }
 
 /// One put as each of the session's links is sent it ([`CoopEngine::send_on_links`]): the key as
@@ -5618,6 +5622,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         wire: &WireKey,
         payload: &[u8],
         opts: &PublishOptions,
+        plan: Option<FilterId>,
     ) -> Result<usize, FanoutError> {
         if !opts.allowed_destination.allows_remote() {
             return Ok(0);
@@ -5677,6 +5682,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             payload,
             opts,
             meta: &meta,
+            plan,
         };
         let (outcome, stuck) = self.fan_out_in(&mut core.0, &put, None, begin.pass);
         // The clock is read only for a fan-out that stopped at a face, whose wait it bounds.
@@ -5703,6 +5709,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(not(feature = "listen"))]
             Then::WaitForSlots { .. } => outcome,
         }
+    }
+
+    /// A publish to the session's links and its own subscribers
+    /// (`SessionEngine::publish_on_wire_all`), of the publisher whose write filter is `plan` when
+    /// one made it ([`Publication::plan`]).
+    #[inline(never)]
+    fn publish_everywhere(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+        plan: Option<FilterId>,
+    ) -> Result<usize, FanoutError> {
+        // This engine numbers none of its links, offers no frame without waiting and reserves
+        // none, so a publish that states a set of links, a retry or the all-or-none form is
+        // refused by name before anything is sent, to a link or to a subscriber of the session.
+        StatementNotHonoured::of_publish(opts)?;
+        // The link first, then the session's own subscribers, as zenoh-pico's `_z_write` does,
+        // and nothing local when the link refused it.
+        let sent = self.publish_to_link(keyexpr, wire, payload, opts, plan)?;
+        #[cfg(feature = "local-subscriber")]
+        let sent = sent.saturating_add(self.publish_to_subscribers(keyexpr, payload, opts)?);
+        Ok(sent)
     }
 
     /// Send `put` on from the face whose link found every outbound slot of the session held, and
@@ -5791,6 +5821,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             payload,
             opts,
             meta,
+            plan,
         } = *put;
         // The key as the session's tables name it: by the declaration the ABI named it by while
         // that declaration stands, and whole otherwise. An empty key names nothing a link carries.
@@ -5802,13 +5833,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             express: meta.is_express(),
             priority: opts.priority_band(),
         };
+        // A plain put of a publisher is written from the head of the plan its declare made, as its
+        // put through its write filter is: each link's send takes the head where the link names
+        // the key by the plan's declaration and the put carries the plan's QoS, and the parts
+        // otherwise.
+        let head = plan
+            .filter(|_| opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos())
+            .and_then(row_of)
+            .and_then(|handle| tables(&core.session.registry).write_filters().get(handle))
+            .and_then(|row| row.plain())
+            .and_then(|way| way.head);
         let link_leg = LinkLeg {
             named,
             payload,
             kind: opts.kind,
             meta,
             send,
-            head: None,
+            head,
         };
         let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass);
         if stuck.is_some() {
@@ -6084,6 +6125,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                         payload: leg.payload(),
                         opts: &opts,
                         meta: &meta,
+                        plan: None,
                     },
                     Some(leg.dropped_on()),
                 );
@@ -7370,16 +7412,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        // This engine numbers none of its links, offers no frame without waiting and reserves
-        // none, so a publish that states a set of links, a retry or the all-or-none form is
-        // refused by name before anything is sent, to a link or to a subscriber of the session.
-        StatementNotHonoured::of_publish(opts)?;
-        // The link first, then the session's own subscribers, as zenoh-pico's `_z_write` does,
-        // and nothing local when the link refused it.
-        let sent = self.publish_to_link(keyexpr, wire, payload, opts)?;
-        #[cfg(feature = "local-subscriber")]
-        let sent = sent.saturating_add(self.publish_to_subscribers(keyexpr, payload, opts)?);
-        Ok(sent)
+        self.publish_everywhere(keyexpr, wire, payload, opts, None)
     }
 
     #[inline(never)]
@@ -7866,7 +7899,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             if self.write_filter_holds_back(filter) {
                 return FilteredPut::Suppressed;
             }
-            return FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts));
+            // The publisher's plan writes the put where it is a plain one on the plan's key.
+            return FilteredPut::Sent(self.publish_everywhere(
+                keyexpr,
+                wire,
+                payload,
+                opts,
+                Some(filter),
+            ));
         }
         // A write that brings nothing of its own goes in the plain form its filter's row keeps.
         self.put_through_filter(filter, keyexpr, payload, None)
@@ -8994,10 +9034,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         {
             return FilteredPut::Suppressed;
         }
-        // The plain way a publisher's declare stated carries the Put's head it wrote then; a way
-        // the caller gives brings none.
+        // The plain way a publisher's declare stated carries the Put's head it wrote then. A way
+        // the caller gives is written from that head too, on each link where the head names the
+        // way's key and carries its QoS, which the send checks, and from its parts elsewhere.
         let (key, params, head) = match given {
-            Some((key, params)) => (key, params, None),
+            Some((key, params)) => (
+                key,
+                params,
+                row.and_then(|row| row.plain()).and_then(|way| way.head),
+            ),
             None => {
                 let Some(way) = row.and_then(|row| row.plain()) else {
                     return FilteredPut::NotPlain;
