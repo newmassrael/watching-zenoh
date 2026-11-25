@@ -249,10 +249,8 @@ mod tests {
     #[cfg(feature = "app-transport")]
     #[test]
     fn a_stack_of_the_session_locks_count_is_an_engines_stack() {
-        fn opens_over<L: crate::CoopLinks>() -> bool {
-            true
-        }
-        assert!(opens_over::<crate::app_link::AppLinks<super::LinkCount>>());
+        fn opens_over<L: crate::CoopLinks>(_: PhantomData<L>) {}
+        opens_over(PhantomData::<crate::app_link::AppLinks<super::LinkCount>>);
     }
 
     /// The form in force is the one the build's `threads` names: other threads call in exactly
