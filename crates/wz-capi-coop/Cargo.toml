@@ -365,7 +365,7 @@ declarations-synced-event = []
 # The lend-only send (`wz-session-core`'s `tx-lend-only`): every frame is encoded into a slot the
 # link lends from the session's arena, and a send that finds every slot out is refused and counted
 # (`SessionLinkActions::tx_refusals`), never built on the heap. A SELECTOR, off by default, named by
-# the C library's final build (`--features wz-capi-coop/tx-lend-only` beside `engine-coop`) and by
+# the C library's final build (`--features wz-capi-coop/tx-lend-only` beside `os-host`) and by
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]

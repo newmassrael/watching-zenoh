@@ -1139,8 +1139,7 @@ def cmd_preset_arm(out: pathlib.Path, original: str, stdlib: str) -> int:
         if engine != "coop":
             raise Refused(f"configs/{original}_defconfig builds the {engine} engine, and arm W is built in a "
                           "form of the cooperative one")
-        if stdlib == "nostd":
-            named = wz_config.nostd_named_features(named, table)
+        wz_config.engine_stdlib(engine, stdlib)
         case = bench_case("W", engine, stdlib, named)
         env, _ = cost.build_env()
         plan = cost.case_build(case, env)

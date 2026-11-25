@@ -235,7 +235,7 @@ pub fn of_build(
         panic!(
             "a pico build names one engine: `engine-tokio` beside {named:?} is refused; build \
              the cooperative library with `--no-default-features`, or the tokio engine's \
-             without the cooperative feature (`tls-mbedtls` names `engine-coop`)"
+             without the cooperative feature (`tls-mbedtls` names `os-host`)"
         );
     }
     let platform = if abi == "pico" {
@@ -395,35 +395,23 @@ mod tests {
     fn the_engine_and_the_platform_are_read_from_the_pico_crate_s_features() {
         let tokio = of_build("pico", |id| id == "engine-tokio", |_| None);
         assert_eq!((tokio.engine, tokio.platform), ("tokio", "host"));
-        let coop = of_build("pico", |id| id == "engine-coop", |_| None);
+        let coop = of_build("pico", |id| id == "os-host", |_| None);
         assert_eq!((coop.engine, coop.platform), ("coop", "host"));
         assert_ne!(
             coop.digest(),
             tokio.digest(),
             "the engine alone moves the digest"
         );
-        let no_std_host = of_build("pico", |id| id == "os-posix", |_| None);
-        assert_eq!(
-            (no_std_host.engine, no_std_host.platform),
-            ("coop", "host"),
-            "a host library without `std` runs the cooperative engine"
-        );
-        assert_eq!(
-            no_std_host.digest(),
-            coop.digest(),
-            "the form is not the statement's: the same capabilities on the same engine and host"
-        );
-        let no_std_windows = of_build("pico", |id| id == "os-windows", |_| None);
-        assert_eq!(
-            (no_std_windows.engine, no_std_windows.platform),
-            ("coop", "host"),
-            "a Windows library without `std` runs the cooperative engine"
-        );
-        assert_eq!(
-            no_std_windows.digest(),
-            coop.digest(),
-            "the form is not the statement's: the same capabilities on the same engine and host"
-        );
+        // The host's one cooperative form is `os-host`: a name the crate no longer has selects no
+        // engine, so a stale list of cooperative features cannot state a build as cooperative.
+        for gone in ["engine-coop", "os-posix", "os-windows"] {
+            let stale = of_build("pico", |id| id == gone, |_| None);
+            assert_eq!(
+                (stale.engine, stale.platform),
+                ("tokio", "host"),
+                "`{gone}` is no feature of the pico crate"
+            );
+        }
         let zephyr = of_build("pico", |id| id == "os-zephyr", |_| None);
         assert_eq!((zephyr.engine, zephyr.platform), ("coop", "zephyr"));
         assert_ne!(
@@ -431,7 +419,7 @@ mod tests {
             coop.digest(),
             "the platform alone moves the digest"
         );
-        let c = of_build("c", |id| id == "engine-coop" || id == "os-zephyr", |_| None);
+        let c = of_build("c", |id| id == "os-host" || id == "os-zephyr", |_| None);
         assert_eq!((c.engine, c.platform), ("tokio", "host"));
     }
 
@@ -442,7 +430,7 @@ mod tests {
     fn a_pico_build_that_names_both_engines_is_refused() {
         let _ = of_build(
             "pico",
-            |id| id == "engine-tokio" || id == "engine-coop",
+            |id| id == "engine-tokio" || id == "os-host",
             |_| None,
         );
     }
