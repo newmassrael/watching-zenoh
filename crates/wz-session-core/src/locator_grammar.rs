@@ -14,8 +14,65 @@ use crate::text_out::TextOut;
 
 /// zenoh's locator separators (`zenoh-protocol/src/core/endpoint.rs:22-24`),
 /// mirrored by pico (`include/zenoh-pico/link/endpoint.h:49,71`).
-pub(crate) const LOCATOR_METADATA_SEPARATOR: char = '?';
-pub(crate) const LOCATOR_CONFIG_SEPARATOR: char = '#';
+/// Each is one ASCII byte, as every separator of this grammar is: the text is cut where a byte
+/// search finds it, so a cut is a char boundary and no character searcher is linked to find one.
+pub(crate) const LOCATOR_METADATA_SEPARATOR: u8 = b'?';
+pub(crate) const LOCATOR_CONFIG_SEPARATOR: u8 = b'#';
+/// The separator of the pairs of a `key=value;...` span, and of a pair's key from its value.
+const PAIR_SEPARATOR: u8 = b';';
+const KEY_SEPARATOR: u8 = b'=';
+
+/// Where the first `byte`, an ASCII byte, lies in `text`.
+fn find_byte(text: &str, byte: u8) -> Option<usize> {
+    text.bytes().position(|at| at == byte)
+}
+
+/// `text` before and after its first `byte`, an ASCII byte; `None` when it holds none.
+fn split_once_byte(text: &str, byte: u8) -> Option<(&str, &str)> {
+    let at = find_byte(text, byte)?;
+    Some((text.get(..at)?, text.get(at.saturating_add(1)..)?))
+}
+
+/// The pieces of `text` between each `byte`, an ASCII byte, as `str::split` gives them: one empty
+/// piece for an empty text.
+fn split_byte(text: &str, byte: u8) -> BytePieces<'_> {
+    BytePieces {
+        rest: Some(text),
+        byte,
+    }
+}
+
+/// The iterator [`split_byte`] answers.
+struct BytePieces<'a> {
+    /// What is left to split; `None` once the last piece is given.
+    rest: Option<&'a str>,
+    byte: u8,
+}
+
+impl<'a> Iterator for BytePieces<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        let rest = self.rest?;
+        match split_once_byte(rest, self.byte) {
+            Some((piece, after)) => {
+                self.rest = Some(after);
+                Some(piece)
+            }
+            None => {
+                self.rest = None;
+                Some(rest)
+            }
+        }
+    }
+}
+
+/// The config span of an endpoint: everything after its first `#`, empty when it has none, as
+/// zenoh's `config()` reads it (endpoint.rs:49-54). The span [`split_locator_parts`] answers as
+/// `config` for the endpoint's body, read without splitting the rest.
+pub fn endpoint_config(endpoint: &str) -> &str {
+    split_once_byte(endpoint, LOCATOR_CONFIG_SEPARATOR).map_or("", |(_, config)| config)
+}
 
 /// R311y469 — the three spans of a locator BODY (everything after the
 /// `<proto>/` separator) under zenoh's canon form
@@ -52,8 +109,8 @@ pub(crate) struct LocatorParts<'a> {
 /// which agrees with zenoh byte-for-byte on every string zenoh accepts and
 /// keeps `address` / `config` equal to its accessors on the rest.
 pub(crate) fn split_locator_parts(body: &str) -> LocatorParts<'_> {
-    let midx = body.find(LOCATOR_METADATA_SEPARATOR);
-    let cidx = body.find(LOCATOR_CONFIG_SEPARATOR);
+    let midx = find_byte(body, LOCATOR_METADATA_SEPARATOR);
+    let cidx = find_byte(body, LOCATOR_CONFIG_SEPARATOR);
     let address_end = match (midx, cidx) {
         (Some(m), Some(c)) => m.min(c),
         (Some(m), None) => m,
@@ -198,9 +255,7 @@ pub enum SerialTextError<'a> {
 /// uses (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c`
 /// @ `dot = strchr(address, '.');`).
 pub fn read_serial_locator(locator: &str) -> Result<SerialLocatorText<'_>, SerialTextError<'_>> {
-    let (scheme, rest) = locator
-        .split_once('/')
-        .ok_or(SerialTextError::NotSerialScheme)?;
+    let (scheme, rest) = split_once_byte(locator, b'/').ok_or(SerialTextError::NotSerialScheme)?;
     if scheme != SERIAL_SCHEME {
         return Err(SerialTextError::NotSerialScheme);
     }
@@ -210,7 +265,7 @@ pub fn read_serial_locator(locator: &str) -> Result<SerialLocatorText<'_>, Seria
     }
     let baudrate = baudrate(parts.config)?;
     let options = options(parts.config);
-    let address = match parts.address.split_once('.') {
+    let address = match split_once_byte(parts.address, b'.') {
         Some((tx, rx)) => SerialAddress::Pins {
             tx: positive_u32(tx)?,
             rx: positive_u32(rx)?,
@@ -297,8 +352,8 @@ const fn bool_text(flag: bool) -> &'static str {
 /// zenoh has an opinion, wz takes zenoh's.
 fn options(config: &str) -> SerialOptions {
     let mut options = SerialOptions::UPSTREAM;
-    for pair in config.split(';') {
-        let Some((key, value)) = pair.split_once('=') else {
+    for pair in split_byte(config, PAIR_SEPARATOR) {
+        let Some((key, value)) = split_once_byte(pair, KEY_SEPARATOR) else {
             continue;
         };
         match key {
@@ -325,14 +380,10 @@ fn options(config: &str) -> SerialOptions {
 /// 9600 because someone typed `baudrate=115.200` is a misconfiguration this tree
 /// refuses to paper over.
 fn baudrate(config: &str) -> Result<u32, SerialTextError<'_>> {
-    for pair in config.split(';') {
-        if let Some((key, value)) = pair.split_once('=') {
-            if key == SERIAL_BAUDRATE_KEY {
-                return positive_u32(value);
-            }
-        }
+    match config_value(config, SERIAL_BAUDRATE_KEY) {
+        Some(value) => positive_u32(value),
+        None => Ok(SERIAL_DEFAULT_BAUDRATE),
     }
-    Ok(SERIAL_DEFAULT_BAUDRATE)
 }
 
 /// A positive `u32` config value (baud rate or pin). Pico's `_z_serial_parse_u32`
@@ -388,9 +439,8 @@ pub enum UnixpipeTextError<'a> {
 pub fn read_unixpipe_locator(
     locator: &str,
 ) -> Result<UnixpipeLocatorText<'_>, UnixpipeTextError<'_>> {
-    let (scheme, rest) = locator
-        .split_once('/')
-        .ok_or(UnixpipeTextError::NotUnixpipeScheme)?;
+    let (scheme, rest) =
+        split_once_byte(locator, b'/').ok_or(UnixpipeTextError::NotUnixpipeScheme)?;
     if scheme != UNIXPIPE_SCHEME {
         return Err(UnixpipeTextError::NotUnixpipeScheme);
     }
@@ -410,7 +460,7 @@ pub fn read_unixpipe_locator(
 /// reader of the key, for a locator's config span and for the span upstream renders out of
 /// `transport/link/unixpipe/file_access_mask` alike.
 pub fn unixpipe_file_mask(config: &str) -> Result<Option<u32>, UnixpipeTextError<'_>> {
-    match first_value(config, UNIXPIPE_FILE_MASK_KEY) {
+    match config_value(config, UNIXPIPE_FILE_MASK_KEY) {
         None | Some("") => Ok(None),
         Some(value) => value
             .parse::<u32>()
@@ -436,8 +486,10 @@ pub fn write_unixpipe_path_with_config<W: TextOut + ?Sized>(
     }
 }
 
-/// The first value a `key=value;...` span gives `key`, as upstream's `Parameters::get` reads it.
-fn first_value<'a>(config: &'a str, key: &'a str) -> Option<&'a str> {
+/// The first value a `key=value;...` span gives `key`, as upstream's `Parameters::get` reads it;
+/// `None` when no pair names it. The one reader of a key of a span, for this grammar's leaves and
+/// for a reader of an endpoint's config elsewhere ([`endpoint_config`]).
+pub fn config_value<'a>(config: &'a str, key: &'a str) -> Option<&'a str> {
     config_values(config, key).next()
 }
 
@@ -447,9 +499,8 @@ pub(crate) fn config_values<'a>(
     config: &'a str,
     key: &'a str,
 ) -> impl Iterator<Item = &'a str> + 'a {
-    config
-        .split(';')
-        .filter_map(|pair| pair.split_once('='))
+    split_byte(config, PAIR_SEPARATOR)
+        .filter_map(|pair| split_once_byte(pair, KEY_SEPARATOR))
         .filter(move |(k, _)| *k == key)
         .map(|(_, value)| value)
 }
@@ -474,8 +525,7 @@ pub fn parse_dscp_value(value: &str) -> Option<u32> {
             s.parse::<u32>().ok()
         }
     }
-    value
-        .split('|')
+    split_byte(value, b'|')
         .map(part)
         .reduce(|a, b| Some(a? | b?))
         .flatten()
@@ -489,6 +539,49 @@ mod tests {
         SerialTextError, UnixpipeLocatorText, UnixpipeTextError, SERIAL_DEFAULT_BAUDRATE,
     };
     use crate::text_out::FixedText;
+
+    /// A byte split gives the pieces `str::split` gives at the same ASCII byte, an empty piece for
+    /// each empty run and one for an empty text. Turned red by a split that drops an empty piece
+    /// or the last one.
+    #[test]
+    fn a_byte_split_gives_the_pieces_a_split_at_the_character_gives() {
+        for text in ["", ";", "a", "a;b", ";a;;b;", "é;ü=1;;", "iface=lo;ttl=1"] {
+            let by_byte: alloc::vec::Vec<&str> = super::split_byte(text, b';').collect();
+            let by_char: alloc::vec::Vec<&str> = text.split(';').collect();
+            assert_eq!(by_byte, by_char, "{text:?}");
+            assert_eq!(
+                super::split_once_byte(text, b';'),
+                text.split_once(';'),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// An endpoint's config span is all after its first `#`, and a key of it is the first pair
+    /// whose text before its first `=` is the key: a key only contained in a pair, a later `#`
+    /// or the metadata span names nothing. Turned red by a span cut at a later `#`, or a key
+    /// found inside another pair.
+    #[test]
+    fn a_config_key_is_read_from_the_span_after_the_first_hash() {
+        use super::{config_value, endpoint_config};
+        assert_eq!(endpoint_config("udp/224.0.0.224:7447"), "");
+        assert_eq!(endpoint_config("udp/224.0.0.224:7447#"), "");
+        assert_eq!(endpoint_config("udp/a?rel=0#iface=lo#x"), "iface=lo#x");
+        fn value(endpoint: &str) -> Option<&str> {
+            config_value(endpoint_config(endpoint), "iface")
+        }
+        assert_eq!(value("udp/224.0.0.224:7447#iface=lo"), Some("lo"));
+        assert_eq!(
+            value("udp/224.0.0.224:7447#ttl=1;iface=lo;iface=eth0"),
+            Some("lo")
+        );
+        assert_eq!(value("udp/224.0.0.224:7447#iface="), Some(""));
+        assert_eq!(value("udp/224.0.0.224:7447#iface"), None);
+        assert_eq!(value("udp/224.0.0.224:7447#xiface=lo"), None);
+        assert_eq!(value("udp/224.0.0.224:7447#ttl=iface=lo"), None);
+        assert_eq!(value("udp/224.0.0.224:7447#ttl#iface=lo"), None);
+        assert_eq!(value("udp/224.0.0.224:7447?iface=lo"), None);
+    }
 
     /// The address and config a locator's parts are written as, after `serial/`.
     fn written(read: &SerialLocatorText<'_>) -> FixedText<128> {
