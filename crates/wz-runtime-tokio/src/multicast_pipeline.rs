@@ -2128,6 +2128,35 @@ mod tests {
         );
     }
 
+    /// The flush of a deferred push waits for room on a full lane as the push would have, under
+    /// the lock that orders the group's queued pushes: a lock held across a wait for an event,
+    /// under which the lock-order check of a debug build lets a thread wait for room (under any
+    /// other lock it refuses the wait). The lane is held full until the flush waits on it, so the
+    /// order of the two threads is fixed and no clock is read.
+    #[test]
+    fn a_flush_waits_for_room_on_a_full_lane_and_pushes_once_there_is_some() {
+        let mut long = params(false);
+        long.tx_queue.wait_before_close_us = 3_600_000_000;
+        let (producer, mut tap) = MulticastTxTap::attach(&long);
+        let (defers, _) = deferring(&producer);
+        assert_eq!(producer.push(final_of(1)), Ok(PushOutcome::Pushed));
+        defers.store(false, std::sync::atomic::Ordering::SeqCst);
+        let full = tap.hold_full(Priority::DEFAULT);
+        let flushing = producer.clone();
+        let flushed = std::thread::spawn(move || flushing.flush_deferred_sends());
+        tap.await_a_waiting_push();
+        assert!(finals_read(&mut tap).is_empty(), "nothing was pushed yet");
+        drop(full);
+        flushed
+            .join()
+            .expect("the flush waited for room, holding no lock a wait is refused under");
+        assert_eq!(
+            finals_read(&mut tap),
+            [1],
+            "the flush pushed it once the lane was let go"
+        );
+    }
+
     /// A lane the tap holds full holds a push that may not be dropped until the hold goes, and the
     /// tap reads that the push waits without reading a clock: what a test of a sender held by a
     /// full group stands on.

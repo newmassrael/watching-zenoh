@@ -83,6 +83,11 @@ pub struct DeferredSends<R: SessionRuntime, S: Send + 'static> {
     /// Held by whoever sends the queue, and by any send made while the queue is not empty, for
     /// the whole of its send: it is what puts every such send in one order. Never taken by a
     /// thread that defers, which only adds to `queue`.
+    ///
+    /// A send held here may wait for room on its link, up to `wait_before_close`, so it is made
+    /// as a lock held across a wait for an event (`Runtime::new_mutex_held_across_waits`), as a
+    /// sender's conduit is: a lock-order check of a debug build refuses a wait for room under
+    /// any other lock.
     order: R::Mutex<()>,
 }
 
@@ -100,7 +105,7 @@ impl<R: SessionRuntime, S: Send + 'static> DeferredSends<R, S> {
             busy: AtomicBool::new(false),
             deferral: R::new_mutex(None),
             queue: R::new_mutex(VecDeque::new()),
-            order: R::new_mutex(()),
+            order: R::new_mutex_held_across_waits(()),
         }
     }
 
