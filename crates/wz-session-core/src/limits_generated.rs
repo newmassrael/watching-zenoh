@@ -102,7 +102,7 @@ impl LimitSpec for MaxSubscriptions {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_SUBSCRIPTIONS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -210,7 +210,7 @@ impl LimitSpec for MaxQueryables {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_QUERYABLES);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -231,7 +231,7 @@ impl LimitSpec for MaxPendingQueries {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_QUERIES);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -275,7 +275,7 @@ impl LimitSpec for MaxDeclObservers {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_DECL_OBSERVERS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -295,7 +295,7 @@ impl LimitSpec for MaxLivelinessSubscriptions {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_LIVELINESS_SUBSCRIPTIONS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -316,7 +316,7 @@ impl LimitSpec for MaxLocalTokens {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_LOCAL_TOKENS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -337,7 +337,7 @@ impl LimitSpec for MaxPublishers {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PUBLISHERS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -358,7 +358,7 @@ impl LimitSpec for MaxQueriers {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_QUERIERS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -379,7 +379,7 @@ impl LimitSpec for MaxMatchingListeners {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_MATCHING_LISTENERS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -400,7 +400,7 @@ impl LimitSpec for MaxDeclWatches {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_DECL_WATCHES);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -421,7 +421,7 @@ impl LimitSpec for MaxTransportEventsListeners {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_TRANSPORT_EVENTS_LISTENERS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -443,7 +443,7 @@ impl LimitSpec for MaxLinkEventsListeners {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_LINK_EVENTS_LISTENERS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -465,7 +465,7 @@ impl LimitSpec for MaxDeclaredKeyexprs {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_DECLARED_KEYEXPRS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -486,7 +486,7 @@ impl LimitSpec for MaxPendingLivelinessGets {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_LIVELINESS_GETS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -509,7 +509,7 @@ impl LimitSpec for MaxPendingDeclares {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_DECLARES);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -531,7 +531,7 @@ impl LimitSpec for MaxInboundSubInterests {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_INBOUND_SUB_INTERESTS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -617,7 +617,7 @@ impl LimitSpec for MaxPendingReplies {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_REPLIES);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -638,7 +638,7 @@ impl LimitSpec for MaxPendingFinals {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_FINALS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -724,7 +724,7 @@ impl LimitSpec for MaxAdvancedPublishers {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_ADVANCED_PUBLISHERS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -747,7 +747,7 @@ impl LimitSpec for MaxAdvancedSubscribers {
     const DRIVEN: Option<Driven> = Some(Driven::Local);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_ADVANCED_SUBSCRIBERS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -810,7 +810,7 @@ impl LimitSpec for MaxFaces {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_FACES);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -831,7 +831,7 @@ impl LimitSpec for MaxAcceptPending {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_ACCEPT_PENDING);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -896,7 +896,7 @@ impl LimitSpec for SessionMaxPeerKeyexprAliases {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::SESSION_MAX_PEER_KEYEXPR_ALIASES);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -919,7 +919,7 @@ impl LimitSpec for SessionMaxRemoteDecls {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::SESSION_MAX_REMOTE_DECLS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
@@ -942,7 +942,7 @@ impl LimitSpec for SessionMaxInboundSubInterests {
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::SESSION_MAX_INBOUND_SUB_INTERESTS);
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
