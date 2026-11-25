@@ -3123,7 +3123,10 @@ mod tests {
     /// count held to no bound, or an id the declaration does not spell.
     #[test]
     fn a_held_count_is_stated_up_to_the_builds_value() {
-        for HeldRow { id, build: bound } in HELD_ROWS {
+        for HeldRow {
+            id, build: bound, ..
+        } in HELD_ROWS
+        {
             assert!(
                 wz_session_core::limits::CAPACITY_LIMITS.contains(&id),
                 "{id}"
