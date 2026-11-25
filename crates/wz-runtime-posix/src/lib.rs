@@ -187,6 +187,8 @@ pub mod net;
 pub mod raweth;
 // The host's ttys as the lines of the cooperative engine's serial links, on Linux and Android
 // (documented from inside, so its links resolve in the module).
+// A host name handed to the host's resolver and its answer kept, for `net` and `windows`.
+mod resolve;
 #[cfg(feature = "serial")]
 pub mod serial;
 #[cfg(feature = "session-slot")]

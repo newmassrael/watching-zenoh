@@ -743,6 +743,75 @@ impl RawAddr {
     }
 }
 
+/// The addresses the host's resolver (`getaddrinfo`) answers for `host`, each at `port`,
+/// written to the front of `found` in its order, each once: how many, `0` when it answers none or
+/// fails. Of every family the host has, as zenoh-pico asks for a locator's host
+/// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `hints.ai_family = PF_UNSPEC`), and
+/// of the stream kind alone, so that an address is answered once and not once for each kind.
+pub(crate) fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
+    let Some(name) = crate::resolve::terminated(host) else {
+        return 0;
+    };
+    // SAFETY: an all-zero `addrinfo` is a valid value of it: no flags, no family, null pointers.
+    let mut hints: libc::addrinfo = unsafe { core::mem::zeroed() };
+    hints.ai_family = libc::AF_UNSPEC;
+    hints.ai_socktype = libc::SOCK_STREAM;
+    let mut answers: *mut libc::addrinfo = core::ptr::null_mut();
+    // SAFETY: `name` ends in a 0 byte, `hints` is live for the call, and the call writes
+    // `answers`, which is freed below once read.
+    let failed = unsafe {
+        libc::getaddrinfo(
+            name.as_ptr().cast(),
+            core::ptr::null(),
+            &hints,
+            &mut answers,
+        )
+    } != 0;
+    if failed {
+        return 0;
+    }
+    let mut count = 0;
+    let mut next = answers.cast_const();
+    // SAFETY: each answer of the list is the resolver's, live until the list is freed.
+    while let Some(answer) = unsafe { next.as_ref() } {
+        next = answer.ai_next.cast_const();
+        let Some(at) = answered_address(answer, port) else {
+            continue;
+        };
+        match crate::resolve::keep(found, count, at) {
+            Some(kept) => count = kept,
+            None => break,
+        }
+    }
+    // SAFETY: `answers` is the list the call made, freed once, and nothing read of it is held.
+    unsafe { libc::freeaddrinfo(answers) };
+    count
+}
+
+/// The address of one answer of the resolver, at `port`; `None` for a family other than the two.
+fn answered_address(answer: &libc::addrinfo, port: u16) -> Option<SocketAddr> {
+    if answer.ai_addr.is_null() {
+        return None;
+    }
+    let mut raw = RawAddr::empty();
+    let len = usize::try_from(answer.ai_addrlen)
+        .ok()?
+        .min(size_of::<libc::sockaddr_storage>());
+    // SAFETY: the answer's address holds `ai_addrlen` bytes, and `len` is no more than those nor
+    // than the storage's room.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            answer.ai_addr.cast_const().cast::<u8>(),
+            raw.as_mut_ptr().cast::<u8>(),
+            len,
+        );
+    }
+    *raw.size_mut() = len as libc::socklen_t;
+    let mut at = raw.to_socket_addr()?;
+    at.set_port(port);
+    Some(at)
+}
+
 /// Bind or connect `fd` to `at`: `call` is `libc::bind` or `libc::connect`, handed `at` in the
 /// kernel's form. The `errno` when the call fails. The one way a socket here is given an address,
 /// so each opener calls it and carries no conversion of its own.
@@ -1026,6 +1095,12 @@ impl PosixUdpSocket {
 impl DatagramSocket for PosixUdpSocket {
     type Error = PosixNetError;
 
+    const RESOLVES: bool = true;
+
+    fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
+        resolve(host, port, found)
+    }
+
     fn bind(at: SocketAddr) -> Result<Self, PosixNetError> {
         Self::open(at, false)
     }
@@ -1122,6 +1197,36 @@ impl Drop for PosixUdpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host's resolver answers `localhost` with its loopback addresses, each at the port the
+    /// dial reaches and each once, and the answer is cut at the room it is given; a text no name
+    /// is (a 0 byte inside) and an answer given no room are none. Turned red by an address answered at the wrong port, twice, past the
+    /// room, or by a resolver not asked.
+    #[test]
+    fn the_host_resolver_answers_a_name_with_its_addresses() {
+        let unset = SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut found = [unset; 4];
+        let count = resolve("localhost", 7447, &mut found);
+        assert!(count >= 1, "localhost resolves");
+        let answered = found.get(..count).expect("the count is within the room");
+        for at in answered {
+            assert!(at.ip().is_loopback(), "{at}");
+            assert_eq!(at.port(), 7447, "{at}");
+        }
+        for (place, at) in answered.iter().enumerate() {
+            assert!(
+                !answered
+                    .get(..place)
+                    .is_some_and(|before| before.contains(at)),
+                "{at} once"
+            );
+        }
+        let mut one = [unset; 1];
+        assert_eq!(resolve("localhost", 7447, &mut one), 1);
+        assert_eq!(one.first().map(SocketAddr::port), Some(7447));
+        assert_eq!(resolve("local\0host", 7447, &mut found), 0);
+        assert_eq!(resolve("localhost", 7447, &mut []), 0);
+    }
 
     /// Only `fe80::/10` is a unicast link-local address, the one a source needs its zone for;
     /// a site-local multicast group, the loopback and a global address are not. Turned red by a

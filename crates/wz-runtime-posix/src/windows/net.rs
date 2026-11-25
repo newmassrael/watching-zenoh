@@ -310,6 +310,12 @@ impl WindowsUdpSocket {
 impl DatagramSocket for WindowsUdpSocket {
     type Error = WindowsNetError;
 
+    const RESOLVES: bool = true;
+
+    fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
+        super::resolve(host, port, found)
+    }
+
     fn bind(at: SocketAddr) -> Result<Self, WindowsNetError> {
         Self::open(at, false)
     }
