@@ -609,7 +609,8 @@ async fn a_publish_refused_before_it_left_gives_its_sequence_number_back() {
     );
     // `put()` is reliable, so it draws from the channel this reads. The mask is
     // the whole word: the counter is read as it is, with no ring to wrap past.
-    let next = || actions.next_outbound_frame_sn(Priority::DEFAULT, true, u64::MAX);
+    let next =
+        || actions.next_outbound_frame_sn(Priority::DEFAULT, true, wz_session_core::sn::Sn::MAX);
 
     // The size limit: a message past it is refused with nothing sent.
     actions.set_max_reassembly_bytes(100);

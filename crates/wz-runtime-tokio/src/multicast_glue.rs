@@ -4801,10 +4801,12 @@ mod tests {
     #[cfg(all(feature = "codec-push", feature = "transport-qos"))]
     fn data_conduit_advertised(join: &[u8]) -> u64 {
         // A QoS JOIN's base `next_sn` is a decoy; its SNs ride the `ext_qos`.
-        wz_session_core::multicast_join::decode_join_qos(join)
-            .expect("a QoS group's JOIN carries its per-priority SNs")
-            [wz_session_core::qos::Priority::DEFAULT as usize]
-            .reliable
+        wz_session_core::sn::to_wire(
+            wz_session_core::multicast_join::decode_join_qos(join)
+                .expect("a QoS group's JOIN carries its per-priority SNs")
+                [wz_session_core::qos::Priority::DEFAULT as usize]
+                .reliable,
+        )
     }
 
     #[cfg(all(feature = "codec-push", feature = "transport-qos"))]

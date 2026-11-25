@@ -342,10 +342,14 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
 
     let mask = i_actions.negotiated_sn_mask();
     let priority = wz_session_core::qos::Priority::DEFAULT;
-    let reliable = i_actions.next_outbound_frame_sn(priority, true, mask);
-    let best_effort = i_actions.next_outbound_frame_sn(priority, false, mask);
+    // The SNs as the Frames below carry them and the records read them back.
+    let next = |reliable| {
+        wz_session_core::sn::to_wire(i_actions.next_outbound_frame_sn(priority, reliable, mask))
+    };
+    let reliable = next(true);
+    let best_effort = next(false);
     // Taken from the session rather than added to: an SN wraps at the negotiated resolution.
-    let best_effort_next = i_actions.next_outbound_frame_sn(priority, false, mask);
+    let best_effort_next = next(false);
     let before = DECLARED.load(Ordering::SeqCst);
     let declared = || {
         (
