@@ -370,7 +370,7 @@ pub struct IpLinks<U, D, L = NoDial, G = NoGroups, N: CountKind = OneTask> {
     /// The rows every udp port of these links keeps its peers in, when the session lent some
     /// ([`SessionLinks::lend_port_rows`]); a port of links lent none keeps rows of its own.
     #[cfg(feature = "udp-listen")]
-    ports: Option<crate::udp_link::SharedBook<N>>,
+    ports: Option<crate::udp_link::SharedBook<N::Shared>>,
     datagrams: core::marker::PhantomData<fn() -> U>,
 }
 
@@ -734,7 +734,7 @@ where
         let datagram = CellRc::<UdpDriver<U, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes();
         #[cfg(feature = "udp-listen")]
         let datagram = datagram.max(CellRc::<
-            UdpDriver<PortPeer<U, N>, RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
+            UdpDriver<PortPeer<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
         >::cell_bytes());
         datagram
             .max(CellRc::<
@@ -758,7 +758,7 @@ where
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
     ) {
-        self.ports = Some(crate::udp_link::shared_book::<N>(Some(rows)));
+        self.ports = Some(crate::udp_link::shared_book::<N::Shared>(Some(rows)));
     }
 
     /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
@@ -814,7 +814,7 @@ where
                 let book = self
                     .ports
                     .clone()
-                    .unwrap_or_else(|| crate::udp_link::shared_book::<N>(None));
+                    .unwrap_or_else(|| crate::udp_link::shared_book::<N::Shared>(None));
                 let port = match self.shape.lent.and_then(|tables| tables.port_rx()) {
                     Some(table) => UdpPort::lent_in_book(socket, table, &book)
                         .ok_or(LinkOpenError::Exhausted)?,
@@ -956,7 +956,9 @@ impl<P: StreamSocket + 'static, N: CountKind> PendingDial<HeapLink<N>, N> for Pe
 /// each peer are the heap's either way.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 struct IpUdpListener<U: DatagramSocket, N: CountKind> {
-    port: CellRc<UdpPort<U, N>, N>,
+    /// The port, shared by the listener and every peer's link, which may be held by faces on
+    /// several threads: counted as what the links share is.
+    port: CellRc<UdpPort<U, N::Shared>, N::Shared>,
     shape: LinkShape<N>,
 }
 

@@ -100,8 +100,12 @@ type HalvesHeld<T> = (
 );
 
 /// How the handles on the parts of a link over the transport of `T` are counted: as the lock kind
-/// of the values its session is lent counts them (`LockKind::Count`).
-type CountOf<T> = <<T as TransportFaces>::Lock as LockKind>::Count;
+/// of the values its session is lent counts them (`LockKind::LinkCount`).
+type CountOf<T> = <<T as TransportFaces>::Lock as LockKind>::LinkCount;
+
+/// How the handles on what the links over the transport of `T` share are counted (the session's
+/// entropy): as the lock kind counts them (`LockKind::SharedCount`).
+type SharedOf<T> = <<T as TransportFaces>::Lock as LockKind>::SharedCount;
 
 /// What a session's transport is made of: the session's clock, the network its links are opened
 /// on, and the engine's records of the session's half of a link, of a face and of a group it
@@ -112,15 +116,15 @@ pub trait TransportFaces {
     /// How the session's runtime locks the values it lends each link's session.
     type Lock: LockKind;
     /// The network the session's links, ports and groups are opened on.
-    type Links: SessionLinks<<Self::Lock as LockKind>::Count> + 'static;
+    type Links: SessionLinks<<Self::Lock as LockKind>::LinkCount> + 'static;
     /// The session's half of one link.
     type Session: TransportSession<Self::Clock, Self::Lock>;
     /// The engine's record of one face.
     type Face: FaceRecord<
-        <Self::Lock as LockKind>::Count,
+        <Self::Lock as LockKind>::LinkCount,
         Session = Self::Session,
-        Pump = <Self::Links as SessionLinks<<Self::Lock as LockKind>::Count>>::Pump,
-        Dial = <Self::Links as SessionLinks<<Self::Lock as LockKind>::Count>>::Dial,
+        Pump = <Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Pump,
+        Dial = <Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Dial,
     >;
     /// The table the engine keeps its faces in by their places: one face alone for a session that
     /// only dials, a place for each face for one that takes faces beside it.
@@ -829,7 +833,7 @@ impl<T: TransportFaces> TransportState<T> {
         opened: OpenedLink<PumpOf<T>, CountOf<T>>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-        making: WireMaking<'_, T::Clock, CountOf<T>>,
+        making: WireMaking<'_, T::Clock, SharedOf<T>>,
     ) -> Result<Wire<K::Session, TaskEnd, CountOf<T>>, TransportRefusal>
     where
         K::Dispatch: EventSink + 'static,
@@ -857,7 +861,7 @@ impl<T: TransportFaces> TransportState<T> {
         calls: &mut K,
         opened: OpenedLink<PumpOf<T>, CountOf<T>>,
         opened_as: OpenedAs<'_>,
-        making: WireMaking<'_, T::Clock, CountOf<T>>,
+        making: WireMaking<'_, T::Clock, SharedOf<T>>,
         place: PumpPlace<'p, T, E>,
     ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal> {
         let runtime = making.local.runtime().retyped();
@@ -895,7 +899,7 @@ impl<T: TransportFaces> TransportState<T> {
         opened: OpenedLink<PumpOf<T>, CountOf<T>>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-        making: WireMaking<'_, T::Clock, CountOf<T>>,
+        making: WireMaking<'_, T::Clock, SharedOf<T>>,
     ) -> Result<WireBuilt<T, K::Dispatch, K::Session>, TransportRefusal> {
         let OpenedLink { sink, pump } = opened;
         let WireMaking {

@@ -128,11 +128,19 @@ pub trait LockKind: 'static {
         f: impl FnOnce(&mut T) -> U,
     ) -> Option<U>;
 
-    /// How the handles on what a session of this kind shares are counted: for one task at a
-    /// time, or across threads. Its table flag is [`Self::Flag`], so a handle of either kind
-    /// is placed in a cell of a table the session lends.
+    /// How the handles on the parts of one link of a session of this kind are counted (its pump,
+    /// its actions, its sink): each such handle is held by its face alone, so they are counted for
+    /// one task even where several threads drive the session's faces, whose parts then move
+    /// between threads only whole (`crate::link_cells::FaceHeld`). Its table flag is
+    /// [`Self::Flag`], and what the links share is counted as [`Self::SharedCount`].
     #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
-    type Count: crate::link_cells::CountKind<Flag = Self::Flag>
+    type LinkCount: crate::link_cells::CountKind<Flag = Self::Flag, Shared = Self::SharedCount>;
+
+    /// How the handles on what a session's faces share are counted (the session's entropy, a
+    /// port several links read from): for one task, or across threads where several threads
+    /// drive the faces. Its table flag is [`Self::Flag`].
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    type SharedCount: crate::link_cells::CountKind<Flag = Self::Flag>
         + crate::session_runtime::EntropyCount;
 
     /// A flag the session's holders write without a lock, and the flag of a table's cell
@@ -168,7 +176,9 @@ pub trait LockKind: 'static {
 macro_rules! one_task_holders {
     () => {
         #[cfg(not(feature = "session-slot"))]
-        type Count = crate::link_cells::OneTask;
+        type LinkCount = crate::link_cells::OneTask;
+        #[cfg(not(feature = "session-slot"))]
+        type SharedCount = crate::link_cells::OneTask;
         type Flag = core::cell::Cell<bool>;
         type Word = core::cell::Cell<u64>;
         type Local<T>
@@ -301,8 +311,9 @@ impl<O: ConfinedOwner> LockKind for Confined<O> {
 }
 
 /// Several threads of a host, each reaching a session's values on its own: each value has its own
-/// lock ([`crate::cs::HostMutex`]), the handles on what the session shares are counted as an
-/// `Arc`'s are, and its flags and words are atomics. What an engine whose sessions are driven by
+/// lock ([`crate::cs::HostMutex`]), the handles on what the session's faces share are counted as
+/// an `Arc`'s are, a face's own link handles for one task and moved with the face whole, and its
+/// flags and words are atomics. What an engine whose sessions are driven by
 /// several threads at once lends, where [`Shared`] stays the kind of a single-core build, whose
 /// one task holds its handles and pays no atomic instruction for them.
 #[cfg(all(
@@ -344,7 +355,9 @@ impl LockKind for ManyThreads {
     }
 
     #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
-    type Count = crate::link_cells::Atomic;
+    type LinkCount = crate::link_cells::OneFace;
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    type SharedCount = crate::link_cells::Atomic;
     #[cfg(feature = "session-unicast")]
     type Flag = core::sync::atomic::AtomicBool;
     #[cfg(feature = "session-unicast")]
@@ -634,25 +647,31 @@ mod many_threads_tests {
         assert!(flag.load(core::sync::atomic::Ordering::Acquire));
     }
 
-    /// The handles of a session of several threads are counted as an `Arc`'s are. Turned red by
-    /// a kind that counts them for one task.
+    /// What the faces of a session of several threads share is counted as an `Arc`'s is, and a
+    /// face's own link handles are counted for one task, their cells given back to tables of
+    /// atomic flags. Turned red by a kind that counts the shared handles for one task, or a link's
+    /// handles atomically.
     #[cfg(not(feature = "session-slot"))]
     #[test]
-    fn a_session_of_several_threads_counts_its_handles_atomically() {
-        use crate::link_cells::{Atomic, CellRc};
-        let handle: CellRc<u32, <Kind as LockKind>::Count> = CellRc::<u32, Atomic>::shared(5);
+    fn a_session_of_several_threads_counts_shared_handles_atomically() {
+        use crate::link_cells::{Atomic, CellRc, OneFace};
+        let handle: CellRc<u32, <Kind as LockKind>::SharedCount> = CellRc::<u32, Atomic>::shared(5);
         assert_eq!(*handle, 5);
+        let link: CellRc<u32, <Kind as LockKind>::LinkCount> = CellRc::<u32, OneFace>::on_heap(6);
+        assert_eq!(*link, 6);
     }
 
-    /// What a session runtime of several threads shares is a handle counted as an `Arc`'s is,
-    /// so a shared value is let go of on another thread and the count stays whole. Turned red by
-    /// a runtime whose `SessionRuntime::Shared` is counted for one task (`session_runtime`).
+    /// What a session runtime of several threads shares between a link's parts is a handle of
+    /// the link's face, held with the face's parts and moved with them whole, so the parts' clones
+    /// keep one count; the session's entropy, which every face draws from, is counted as an
+    /// `Arc`'s is. Turned red by a runtime whose `SessionRuntime::Shared` is not counted as
+    /// [`LockKind::LinkCount`], or whose entropy is not counted across threads (`session_runtime`).
     #[cfg(not(feature = "session-slot"))]
     #[test]
-    fn a_runtime_of_several_threads_shares_by_atomic_handles() {
+    fn a_runtime_of_several_threads_shares_a_links_parts_within_its_face() {
         extern crate std;
-        use crate::link_cells::{Atomic, CellRc};
-        use wz_session_core::link::{BoxedLinkDriver, ShareValues};
+        use crate::link_cells::{Atomic, CellRc, FaceHeld, FaceParts, OneFace};
+        use wz_session_core::link::{BoxedLinkDriver, SessionRuntime, ShareValues};
 
         struct Still;
 
@@ -662,15 +681,29 @@ mod many_threads_tests {
             }
         }
 
+        /// A link's two parts that share one value.
+        struct Halves(CellRc<u32, OneFace>, CellRc<u32, OneFace>);
+
+        // SAFETY: both handles on the cell are the two halves, and nothing is bound to a thread.
+        unsafe impl FaceParts for Halves {}
+
         type Runtime = crate::CoopRuntime<Still, dyn BoxedLinkDriver, Kind>;
-        let shared: CellRc<u32, Atomic> = <Runtime as ShareValues>::share(7);
-        let other = shared.clone();
-        assert_eq!(CellRc::handles(&shared), 2);
-        std::thread::spawn(move || assert_eq!(*other, 7))
-            .join()
-            .expect("the other thread read the shared value");
-        assert_eq!(CellRc::handles(&shared), 1);
-        assert_eq!(*shared, 7);
+        let mut face = FaceHeld::gather(|| {
+            let shared: CellRc<u32, OneFace> = <Runtime as ShareValues>::share(7);
+            Halves(shared.clone(), shared)
+        });
+        let read = std::thread::spawn(move || {
+            let read = face.lend(|halves| (*halves.0, CellRc::handles(&halves.1)));
+            drop(face);
+            read
+        })
+        .join()
+        .expect("the other thread read the face's value");
+        assert_eq!(read, (7, 2));
+        fn crosses<T: Send + Sync>() {}
+        crosses::<<Runtime as SessionRuntime>::EntropyDraw>();
+        let _: core::marker::PhantomData<crate::session_runtime::SessionEntropy<Atomic>> =
+            core::marker::PhantomData::<<Runtime as SessionRuntime>::EntropyDraw>;
     }
 }
 

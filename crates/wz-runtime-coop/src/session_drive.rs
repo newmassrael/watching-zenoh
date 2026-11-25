@@ -1032,7 +1032,7 @@ pub struct OpenedLink<P, N: crate::link_cells::CountKind = crate::link_cells::On
 /// Absent under `session-slot`, with [`OpenedLink`] (see there).
 ///
 /// `N` is how the handles on a link's parts are counted (`crate::link_cells::CountKind`): a
-/// stack serves the sessions whose lock kind counts them so (`LockKind::Count`).
+/// stack serves the sessions whose lock kind counts them so (`LockKind::LinkCount`).
 #[cfg(not(feature = "session-slot"))]
 pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
     /// What the drive loop pumps for a link this stack opened.

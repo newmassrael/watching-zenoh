@@ -114,9 +114,9 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
 
     // The sink is a counted handle on the cell the link's driver lives in, lent from the session's
     // arena or, for a link no table lends one, on the heap (`crate::link_cells`), counted as the
-    // lock kind counts what its session's holders share (`LockKind::Count`).
+    // lock kind counts the parts of one link (`LockKind::LinkCount`).
     #[cfg(not(feature = "session-slot"))]
-    type LinkSink = crate::link_cells::CellRc<D, K::Count>;
+    type LinkSink = crate::link_cells::CellRc<D, K::LinkCount>;
 
     // Fixed-memory step S5 — under `session-slot` the sink is a reference to the
     // driver the session's own slot holds (`wz_session_core::session_slot`), not
@@ -130,7 +130,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     // writes a link's halves in one of them (`CellRc::halves_in`), and the same type names halves
     // on the heap (`ShareValues::share`).
     #[cfg(not(feature = "session-slot"))]
-    type Shared<U> = crate::link_cells::CellRc<U, K::Count>;
+    type Shared<U> = crate::link_cells::CellRc<U, K::LinkCount>;
 
     // Fixed-memory step S9c -- the slot profile holds no shared pointer: the bundle
     // is one value in its slot, with its kernel and its link as its own fields
@@ -180,7 +180,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     // (`CellRc::place`) and the same type names a bundle on the heap.
     #[cfg(not(feature = "session-slot"))]
     type ActionsHandle<T: TimeSource> =
-        crate::link_cells::CellRc<SessionLinkActions<Self, T>, K::Count>;
+        crate::link_cells::CellRc<SessionLinkActions<Self, T>, K::LinkCount>;
 
     // Fixed-memory step S5 — under `session-slot` the handle is a counted
     // reference to the session in its slot, which the slot table hands out and
@@ -188,9 +188,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     #[cfg(feature = "session-slot")]
     type ActionsHandle<T: TimeSource> = SlotRef<Self, T>;
 
-    // The session's one entropy source, as each of its links' bindings holds it.
+    // The session's one entropy source, as each of its links' bindings holds it: counted as what
+    // the session's faces share is (`LockKind::SharedCount`).
     #[cfg(not(feature = "session-slot"))]
-    type EntropyDraw = SessionEntropy<K::Count>;
+    type EntropyDraw = SessionEntropy<K::SharedCount>;
     #[cfg(feature = "session-slot")]
     type EntropyDraw = SessionEntropy;
 
@@ -311,8 +312,8 @@ fn held_by_one_task<S: EntropySource + 'static>(source: S) -> CellRc<dyn DrawsEn
 /// The session's one entropy source, as this profile's [`SessionRuntime::EntropyDraw`]: a counted
 /// handle on it, cloned to each of the session's links, whose bindings draw every InitAck's cookie
 /// nonce and challenges from it. The board supplies its source once, as a TYPE, and a link's
-/// bundle keeps none. `N` counts the handles as the session's lock kind counts its own
-/// (`LockKind::Count`): one task's need no atomics and take any source ([`Self::new`]); handles
+/// bundle keeps none. `N` counts the handles as the session's lock kind counts what its faces
+/// share (`LockKind::SharedCount`): one task's need no atomics and take any source ([`Self::new`]); handles
 /// that cross threads take a source that is `Send` ([`Self::held`]).
 #[cfg(not(feature = "session-slot"))]
 pub struct SessionEntropy<N: EntropyCount = OneTask>(CellRc<N::Held, N>);

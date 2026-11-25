@@ -53,7 +53,9 @@ use crate::arena::{
     EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
-use crate::form::{LockForm, SessionCount, SessionLock, StateGuard, StateLock, UnderCoreLock};
+use crate::form::{
+    LinkCount, LockForm, SessionLock, SharedCount, StateGuard, StateLock, UnderCoreLock,
+};
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundRows};
@@ -952,7 +954,7 @@ fn session_zid(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
     endpoints: &EndpointTexts,
-    entropy: &mut SessionEntropy<SessionCount>,
+    entropy: &mut SessionEntropy<SharedCount>,
 ) -> Result<SessionZid, OpenError> {
     match (&config.zid, policy.zid_derivation()) {
         (Some(zid), _) => Ok(wire_form(*zid)),
@@ -1660,11 +1662,11 @@ enum ToPublish<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 unsafe impl<T> Send for Confined<T> {}
 
 /// The network stacks an engine opens its links over: those that serve sessions whose handles are
-/// counted as [`SessionLock`] counts them ([`SessionCount`]), so the form's choice of lock reaches
-/// every stack the engine is built over.
-pub trait CoopLinks: SessionLinks<SessionCount> {}
+/// counted as [`SessionLock`] counts a link's parts ([`LinkCount`]), so the form's choice of lock
+/// reaches every stack the engine is built over.
+pub trait CoopLinks: SessionLinks<LinkCount> {}
 
-impl<L: SessionLinks<SessionCount> + ?Sized> CoopLinks for L {}
+impl<L: SessionLinks<LinkCount> + ?Sized> CoopLinks for L {}
 
 /// The runtime a link's session runs on, read under [`SessionLock`].
 type LinkRuntime<C> = CoopRuntime<C, dyn wz_session_core::link::BoxedLinkDriver, SessionLock>;
@@ -1935,7 +1937,7 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The session's one entropy source, which every draw of the session goes through: its zid,
     /// the cookie key of each dial and, through each link's handshake binding (a handle on it,
     /// cloned per link), the cookie nonce and challenges of each handshake it accepts.
-    entropy: SessionEntropy<SessionCount>,
+    entropy: SessionEntropy<SharedCount>,
     /// The config the session opened with, which counts its endpoints: their texts are the
     /// session's rows (`endpoints`).
     config: CoopConfig<Counted>,
@@ -4739,7 +4741,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // lie in the row the plan laid out for them, a handle at each place a face may hold, the
         // dial role's and each group's among them.
         let (wire, entropy, rooms) = written.and_then(|()| {
-            let mut entropy = SessionEntropy::<SessionCount>::held(entropy);
+            let mut entropy = SessionEntropy::<SharedCount>::held(entropy);
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
             let rooms = lent
                 .arena

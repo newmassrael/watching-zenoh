@@ -66,6 +66,11 @@ pub trait CountKind: 'static {
     /// go gives the cell back by it, on whichever thread a handle of this kind may be let go of.
     type Flag: CellFlag;
 
+    /// How the handles on a value that several links of this kind share (a port their peers
+    /// read from, the session's entropy) are counted: such a value outlives any one link's
+    /// holder, so its handles are counted for every thread a link's handles may be on.
+    type Shared: CountKind<Flag = Self::Flag>;
+
     /// The word as it stands.
     fn read(word: &CountWord) -> usize;
 
@@ -96,6 +101,7 @@ pub enum OneTask {}
 
 impl CountKind for OneTask {
     type Flag = Cell<bool>;
+    type Shared = OneTask;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -140,6 +146,7 @@ pub enum Atomic {}
 #[cfg(target_has_atomic = "8")]
 impl CountKind for Atomic {
     type Flag = AtomicBool;
+    type Shared = Atomic;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -195,6 +202,49 @@ impl CountKind for Atomic {
                     .map(|mut value| f(&mut value))
             })
         }
+    }
+}
+
+/// Counted as [`OneTask`] counts, for the handles of one face's link held together: every handle
+/// on such a cell lies in the one value a face keeps its link's parts in, which moves between
+/// threads whole and is reached by one thread at a time ([`FaceHeld`]), so the word is
+/// written by plain loads and stores as one task's is. The cell goes back to a table that the
+/// faces held on other threads claim cells of at the same time, so its flag is an atomic, given
+/// back by an ordered store, and what the links share is counted as an `Arc`'s is
+/// ([`Atomic`]). Its handles are not `Send`: only the face's value, as a whole, crosses threads.
+#[cfg(target_has_atomic = "8")]
+pub enum OneFace {}
+
+#[cfg(target_has_atomic = "8")]
+impl CountKind for OneFace {
+    type Flag = AtomicBool;
+    type Shared = Atomic;
+
+    #[inline]
+    fn read(word: &CountWord) -> usize {
+        OneTask::read(word)
+    }
+
+    #[inline]
+    fn update(word: &CountWord, f: impl FnMut(usize) -> Option<usize>) -> usize {
+        OneTask::update(word, f)
+    }
+
+    type Local<T> = core::cell::RefCell<T>;
+
+    #[inline]
+    fn new_local<T>(value: T) -> Self::Local<T> {
+        OneTask::new_local(value)
+    }
+
+    #[inline]
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        OneTask::with_local(local, f)
+    }
+
+    #[inline]
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        OneTask::try_with_local(local, f)
     }
 }
 
@@ -811,6 +861,60 @@ impl<T: ?Sized, N: CountKind> Drop for CellRc<T, N> {
         // SAFETY: the handle names its cell, whose value was placed and not dropped, and is let
         // go of here once.
         unsafe { let_go::<N>(self.head) }
+    }
+}
+
+/// A kind of value one face keeps its link's parts in (its pump, its actions, its sink), whose
+/// handles are counted for one task ([`OneFace`]) and so are not `Send` one by one: what
+/// [`FaceHeld`] moves between threads whole.
+///
+/// # Safety
+///
+/// A value of the type is not `Send` only because of handles, cells and counts whose every other
+/// holder is a part of the same value: it holds nothing bound to the thread it was made on (a
+/// guard of a lock, a value a thread-local names), and the drop of any of its parts may run on
+/// any thread once the whole value has moved there.
+pub unsafe trait FaceParts: 'static {}
+
+/// The parts of one face's link, held together: every handle on a cell of the link that any code
+/// holds is a part of [`Self`], so the whole moves to another thread with nothing left behind
+/// that names what it moved. Its parts are reached only while it is lent ([`Self::lend`]), and a
+/// lend neither takes a value that is not `Send` in nor answers one out, so a clone of a handle
+/// made in a lend stays in the parts, and no handle made outside them comes in. What a face's lock
+/// holds (`crate::sync::FacePlace`) where several threads drive a session's faces.
+pub struct FaceHeld<X: FaceParts> {
+    parts: X,
+}
+
+// SAFETY: every handle on the cells of the parts is a part of `parts` (`gather` takes the parts
+// from a `Send` closure, which captures no handle made elsewhere, and `lend` takes and answers
+// only `Send` values, which no handle counted for one task is), and nothing of them is bound to a
+// thread (`FaceParts`' contract). So the counts and cells that are not atomic are reached by the
+// thread that holds the whole value alone, as one task's are, wherever it moved.
+unsafe impl<X: FaceParts> Send for FaceHeld<X> {}
+
+impl<X: FaceParts> FaceHeld<X> {
+    /// The parts `make` makes, held together. `make` is `Send`, so it captures no handle of a
+    /// link made outside it, and what it keeps of the handles it makes is what it answers.
+    pub fn gather(make: impl FnOnce() -> X + Send) -> Self {
+        Self { parts: make() }
+    }
+
+    /// `parts` made outside a [`Self::gather`], held together.
+    ///
+    /// # Safety
+    ///
+    /// No handle on a cell of `parts` lives outside `parts`: the caller let go of every clone it
+    /// made of one while it built them.
+    pub unsafe fn gathered(parts: X) -> Self {
+        Self { parts }
+    }
+
+    /// Lend the parts to `f`, and answer what it answers. `f` and its answer are `Send`, so no
+    /// handle on a cell of the parts leaves them and none comes into them.
+    #[inline]
+    pub fn lend<U: Send>(&mut self, f: impl FnOnce(&mut X) -> U + Send) -> U {
+        f(&mut self.parts)
     }
 }
 
@@ -1481,5 +1585,81 @@ mod tests {
         );
         drop(second);
         assert_eq!((drops.get(), cells.in_use()), (2, 0));
+    }
+
+    /// The parts of a face in the tests below: two handles on one value.
+    #[cfg(target_has_atomic = "8")]
+    struct Parts {
+        first: CellRc<DropsOnce, OneFace>,
+        second: CellRc<DropsOnce, OneFace>,
+    }
+
+    // SAFETY: the parts are two handles on one cell, which no other value holds, and nothing
+    // bound to a thread.
+    #[cfg(target_has_atomic = "8")]
+    unsafe impl FaceParts for Parts {}
+
+    /// A handle counted for one face does not cross threads alone, so a lend, whose closure and
+    /// answer do, neither takes one in nor answers one out; the parts held together do cross.
+    /// Turned red, at build, by a `Send` handle of one face (the call below is then ambiguous),
+    /// or by held parts that are not `Send`.
+    #[cfg(target_has_atomic = "8")]
+    #[test]
+    fn a_faces_handle_crosses_threads_only_with_the_parts_it_is_held_in() {
+        trait AmbiguousIfSend<A> {
+            fn some_item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+        <CellRc<u32, OneFace> as AmbiguousIfSend<_>>::some_item();
+        fn crosses<T: Send>() {}
+        crosses::<FaceHeld<Parts>>();
+    }
+
+    /// Parts placed in a table of atomic flags move to another thread whole: a clone made in a
+    /// lend counts with the parts' handles and goes with the lend, and the last handle, let go of
+    /// on that thread, drops the value once and gives the cell back to the table. Turned red by a
+    /// handle of the parts that outlives them, or a last let go that does not clear the cell's flag.
+    #[cfg(target_has_atomic = "8")]
+    #[test]
+    fn a_faces_parts_move_whole_and_their_handles_stay_in_them() {
+        extern crate std;
+        let cells = table_of::<AtomicBool>(CellRc::<DropsOnce>::cell_bytes());
+        let drops = alloc::sync::Arc::new(AtomicUsize::new(0));
+        let mut held = FaceHeld::gather(|| {
+            let Ok(first) =
+                CellRc::<DropsOnce, OneFace>::in_cells_of(Some(&cells), DropsOnce(drops.clone()))
+            else {
+                panic!("a free cell of the table");
+            };
+            let second = first.clone();
+            Parts { first, second }
+        });
+        assert_eq!(held.lend(|parts| CellRc::handles(&parts.first)), 2);
+        assert_eq!(cells.in_use(), 1);
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let counted = held.lend(|parts| {
+                    let third = parts.first.clone();
+                    CellRc::handles(&third)
+                });
+                assert_eq!(
+                    counted, 3,
+                    "a clone made in a lend counts with the parts' handles"
+                );
+                assert_eq!(
+                    held.lend(|parts| CellRc::handles(&parts.second)),
+                    2,
+                    "and went with the lend"
+                );
+                drop(held);
+            });
+        });
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "dropped once, on the other thread"
+        );
+        assert_eq!(cells.in_use(), 0, "the cell is back in the table");
     }
 }

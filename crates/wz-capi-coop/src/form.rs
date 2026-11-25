@@ -148,9 +148,13 @@ unsafe impl ConfinedOwner for UnderCoreLock {}
 /// ([`LockForm::SessionLock`]), made here once for the engine.
 pub(crate) type SessionLock = <CoopForm as LockForm>::SessionLock;
 
-/// How the handles on what a link's session shares are counted under [`SessionLock`]: the
+/// How the handles on the parts of one link are counted under [`SessionLock`]: the stacks the
+/// engine opens its links over serve sessions counted so.
+pub(crate) type LinkCount = <SessionLock as LockKind>::LinkCount;
+
+/// How the handles on what the session's faces share are counted under [`SessionLock`]: the
 /// session's entropy handle is counted so.
-pub(crate) type SessionCount = <SessionLock as LockKind>::Count;
+pub(crate) type SharedCount = <SessionLock as LockKind>::SharedCount;
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
@@ -189,14 +193,14 @@ mod tests {
 
     /// A stack that serves the sessions the form's lock counts is a stack the engine opens its
     /// links over, whichever form is in force. Turned red by an engine bound that does not follow
-    /// the count of `SessionLock`.
+    /// the link count of `SessionLock`.
     #[cfg(feature = "app-transport")]
     #[test]
     fn a_stack_of_the_session_locks_count_is_an_engines_stack() {
         fn opens_over<L: crate::CoopLinks>() -> bool {
             true
         }
-        assert!(opens_over::<crate::app_link::AppLinks<super::SessionCount>>());
+        assert!(opens_over::<crate::app_link::AppLinks<super::LinkCount>>());
     }
 
     /// The form in force is the one the build's `threads` names: other threads call in exactly
