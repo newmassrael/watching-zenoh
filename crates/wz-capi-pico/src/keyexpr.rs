@@ -260,8 +260,12 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 /// key is named by its length, read against the key's text that goes with it
 /// ([`WireKey::names_in`]).
 ///
+/// Out of line: a put or a delete, a get and a subscriber's announce each name the caller's key
+/// here, and each copy inlined carried the read of every kind of loan.
+///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
+#[inline(never)]
 pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
     match lent_of(ke) {
         LentKey::Kept(declared) => declared.wire(shared),
