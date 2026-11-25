@@ -1175,7 +1175,6 @@ dependencies = [
 name = "wz-capi-coop"
 version = "0.1.0"
 dependencies = [
- "log",
  "portable-atomic",
  "sce-forge-runtime",
  "wz-capi-port",
@@ -1284,7 +1283,6 @@ version = "0.1.0"
 dependencies = [
  "foldhash",
  "hashbrown 0.15.5",
- "log",
  "wz-capi-port",
  "wz-host-sync",
  "wz-node-time",
@@ -1432,7 +1430,6 @@ name = "wz-runtime-posix"
 version = "0.1.0"
 dependencies = [
  "libc",
- "log",
  "windows-sys 0.61.2",
  "wz-runtime-coop",
  "wz-session-core",

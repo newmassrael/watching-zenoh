@@ -670,7 +670,9 @@ impl CacheStore {
         timestamp: TimestampHint,
     ) {
         if self.check_room(&body).is_err() {
-            log::warn!("AdvancedCache{{}} a sample longer than the ring is not kept");
+            wz_session_core::diag_warn!(
+                "AdvancedCache{{}} a sample longer than the ring is not kept"
+            );
             return;
         }
         let evicted = lock_or_panic(&self.ring, RING_POISONED).keep(body, source_info, timestamp);
@@ -829,7 +831,7 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
         // next, as upstream's does (`zenoh-ext/src/advanced_cache.rs`
         // @ `Error replying to query`).
         if let Err(e) = staged {
-            log::warn!("AdvancedCache{{}} Error replying to query: {}", e);
+            wz_session_core::diag_warn!("AdvancedCache{{}} Error replying to query: {}", e);
         }
     });
 }

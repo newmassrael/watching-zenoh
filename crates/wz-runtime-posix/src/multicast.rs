@@ -239,7 +239,7 @@ fn v6_of(address: IpAddr) -> Option<Ipv6Addr> {
 /// The warning of an `#iface=` this host cannot resolve: the socket is left on the system's
 /// interface, as a locator with no key is, and the key is never silently dropped.
 fn unresolved(iface: &str) {
-    log::warn!(
+    wz_session_core::diag_warn!(
         "wz: locator #iface={iface} ignored for multicast \
          (interface resolution unavailable on this platform)"
     );
@@ -551,7 +551,7 @@ impl Plan {
                     match socket.join_group(IpAddr::V4(*g), GroupInterface::V4(on)) {
                         Ok(()) => {}
                         Err(e) if skip_refused_v4 => {
-                            log::warn!(
+                            wz_session_core::diag_warn!(
                                 "wz: unable to join multicast group {} on interface {}: {e:?}",
                                 AddrText(IpAddr::V4(*g)),
                                 AddrText(IpAddr::V4(on))
@@ -707,7 +707,7 @@ pub fn bind_sender<S: MulticastSocket>(
 /// whose socket of this family has no such option warns and sends unmarked, as upstream does.
 pub fn mark_traffic_class<S: MulticastSocket>(socket: &S, dscp: u32) -> Result<(), S::Error> {
     if !socket.set_traffic_class(dscp)? {
-        log::warn!(
+        wz_session_core::diag_warn!(
             "{} DSCP is unsupported on this platform",
             if socket.local().is_ipv4() {
                 "IPv4"
@@ -822,7 +822,7 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
             Ok(()) => GroupSend::Sent,
             Err(e) if S::found_no_room(&e) => GroupSend::Full,
             Err(e) => {
-                log::warn!(
+                wz_session_core::diag_warn!(
                     "group {}: its socket failed a send: {e:?}",
                     AddrText(self.group)
                 );
@@ -871,7 +871,7 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
             // Nothing queued, or a signal cut the read short: the next step reads again.
             Ok(None) => false,
             Err(e) => {
-                log::warn!(
+                wz_session_core::diag_warn!(
                     "group {}: its socket failed a receive: {e:?}",
                     AddrText(self.group)
                 );

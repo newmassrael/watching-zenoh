@@ -94,7 +94,7 @@ impl<S: DatagramSocket> ScoutMembers<S> {
         }
         members.extend(ask);
         let this = Self { members, cursor: 0 };
-        log::debug!(
+        wz_session_core::diag_debug!(
             "scout: asking on {} socket(s); fell back to the group socket: {fell_back_to_group}",
             this.askers()
         );
@@ -118,7 +118,10 @@ impl<S: DatagramSocket> ScoutMembers<S> {
             match member.socket.send_to(member.peer, scout) {
                 Ok(()) => sent = true,
                 Err(error) => {
-                    log::debug!("scout: a Scout did not leave by {}: {error:?}", member.peer)
+                    wz_session_core::diag_debug!(
+                        "scout: a Scout did not leave by {}: {error:?}",
+                        member.peer
+                    )
                 }
             }
         }
@@ -141,7 +144,7 @@ impl<S: DatagramSocket> ScoutMembers<S> {
                     }
                     Ok(None) => break,
                     Err(error) => {
-                        log::debug!("scout: a member was lost: {error:?}");
+                        wz_session_core::diag_debug!("scout: a member was lost: {error:?}");
                         gone.push(at);
                         break;
                     }

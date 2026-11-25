@@ -843,7 +843,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
                     own_sink(&shared, on_heartbeat::<E>),
                 )?)
             } else {
-                log::warn!(
+                wz_session_core::diag_warn!(
                     "advanced subscriber on '{base}': heartbeat recovery was REQUESTED \
                      but its derived keyexpr '{keyexpr}' is refused by the outbound pico-safety \
                      gate, so the channel is DEGRADED; the live subscription is unaffected"
