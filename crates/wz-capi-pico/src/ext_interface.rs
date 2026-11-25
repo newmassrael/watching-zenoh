@@ -284,9 +284,8 @@ pub unsafe extern "C" fn wz_ext_interface_bytes_view(
 /// wait would be for the callback that is waiting.
 ///
 /// Returns `Z_OK` once `body` has returned; `Z_ERR_NULL` for no `body`, which runs nothing;
-/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, running nothing, when the build counts the threads in callbacks
-/// in a table of fixed room (no `std`) and [`wz_session_core::caps::CALLBACK_THREADS`] other
-/// threads are in one.
+/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, running nothing, when the build marks the threads in callbacks
+/// in a table of fixed room (no `std`) and other threads fill it (`wz_ext_callbacks_refused`).
 ///
 /// # Safety
 /// `body` is null or safe to call with `context`.

@@ -361,6 +361,14 @@ impl InCallback {
     }
 }
 
+/// How many of the program's callbacks the library did not run because the table that marks the
+/// threads inside one was full (`InCallback::enter` answered `None`); 0 in a build with `std`,
+/// which marks every thread and so runs every callback.
+#[no_mangle]
+pub extern "C" fn wz_ext_callbacks_refused() -> usize {
+    callback_depth::refused()
+}
+
 /// How many of the program's callbacks each thread is running: a thread-local count on a host,
 /// whose callbacks are on the hot path of every delivery.
 #[cfg(feature = "std")]
@@ -383,6 +391,10 @@ mod callback_depth {
         IN_CALLBACK.with(|depth| depth.get()) > 0
     }
 
+    pub(super) fn refused() -> usize {
+        0
+    }
+
     impl Drop for Entered {
         fn drop(&mut self) {
             // This callback entered, so the count is one or more.
@@ -400,15 +412,28 @@ mod callback_depth {
 mod callback_table {
     use wz_capi_port::os;
     use wz_capi_port::sync::Lock;
+    #[cfg(feature = "multi-thread")]
     use wz_session_core::caps;
 
-    static IN_CALLBACK: Lock<Threads<{ caps::CALLBACK_THREADS }>> = Lock::new(Threads::new());
+    /// The threads that may be inside callbacks at once: in the multi-threaded arm the read tasks
+    /// and the program's threads, as many as the build states.
+    #[cfg(feature = "multi-thread")]
+    const ROOM: usize = caps::CALLBACK_THREADS;
+    /// In the single-threaded arm the program calls the library from one thread at a time, as
+    /// zenoh-pico's arm without threads asks, and no task of the library's runs a callback, so one
+    /// thread at most is inside callbacks, however deep they nest.
+    #[cfg(not(feature = "multi-thread"))]
+    const ROOM: usize = 1;
+
+    static IN_CALLBACK: Lock<Threads<ROOM>> = Lock::new(Threads::new());
 
     /// The threads running one of the program's callbacks: the first `len` of `entries`, each a
-    /// thread's word ([`os::current_word`], never 0) and how many callbacks it runs, nested.
+    /// thread's word ([`os::current_word`], never 0) and how many callbacks it runs, nested, and
+    /// how many callbacks a thread past the room did not run.
     pub(super) struct Threads<const N: usize> {
         entries: [(usize, usize); N],
         len: usize,
+        refused: usize,
     }
 
     impl<const N: usize> Threads<N> {
@@ -416,6 +441,7 @@ mod callback_table {
             Self {
                 entries: [(0, 0); N],
                 len: 0,
+                refused: 0,
             }
         }
 
@@ -433,11 +459,16 @@ mod callback_table {
                 return true;
             }
             let Some(free) = self.entries.get_mut(len) else {
+                self.refused = self.refused.saturating_add(1);
                 return false;
             };
             *free = (thread, 1);
             self.len = len + 1;
             true
+        }
+
+        pub(super) fn refused(&self) -> usize {
+            self.refused
         }
 
         pub(super) fn here(&self, thread: usize) -> bool {
@@ -494,6 +525,10 @@ mod callback_table {
         IN_CALLBACK.with(|threads| threads.here(thread))
     }
 
+    pub(super) fn refused() -> usize {
+        IN_CALLBACK.with(|threads| threads.refused())
+    }
+
     impl Drop for Entered {
         #[inline(never)]
         fn drop(&mut self) {
@@ -524,6 +559,7 @@ mod tests {
         assert!(callback_table::here(), "the outer callback still runs");
         drop(outer);
         assert!(!callback_table::here());
+        assert_eq!(callback_table::refused(), 0, "no callback was refused");
     }
 
     #[test]
@@ -536,6 +572,7 @@ mod tests {
             "a third thread is refused while two run callbacks"
         );
         assert!(!threads.here(3), "the refused thread is not counted");
+        assert_eq!(threads.refused(), 1, "the callback not run is counted");
         assert!(
             threads.enter(1),
             "a nested callback takes no entry of its own"

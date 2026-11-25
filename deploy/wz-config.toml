@@ -2784,16 +2784,18 @@ binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The threads that run the program's callbacks at once in a pico C ABI
-library built without std, which marks each such thread in a table of this
-room since it has no thread-local storage: a session's read task and each
-program thread whose call delivers in place. A callback a thread past it
-would run is not run, and wz_ext_interface_run_in_callback is refused.
+How many threads may be inside the program's callbacks at once in a pico C
+ABI library built without std and with threads: the entries of the table
+that marks each such thread, since the library has no thread-local storage.
+A thread delivers as a session's read task, or as a program thread whose
+call delivers in place. A callback a thread past it would run is not run
+and is counted (wz_ext_callbacks_refused). The single-threaded arm holds
+one entry whatever this says, as one thread calls the library at a time.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the threads in callbacks, and zenoh-pico keeps no record of them; eight holds the read task of each of the default four sessions and one program thread beside each."
+reason = "No key of upstream's configuration bounds the threads inside callbacks at once, and zenoh-pico keeps no record of them. Eight is the read task of each of the HELD_SESSIONS default four sessions, the threads that deliver on their own, and one program thread beside each that delivers in place (a put to its own subscriber, a get of its own queryable)."
 
 [[limit]]
 id = "HELD_SAMPLES"
