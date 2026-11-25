@@ -1016,7 +1016,7 @@ mod plain_put_tests {
     /// the lent encoding and the attachment back as they were lent, the holder's own bytes, and
     /// keep an encoding of their own. The CONTROL is the copy `into_owned_parts` makes of the same
     /// lent encoding.
-    #[cfg(feature = "pubsub-encoding")]
+    #[cfg(all(feature = "pubsub-encoding", feature = "pubsub-attachment"))]
     #[test]
     fn options_kept_with_their_lent_parts_copy_nothing_and_keep_their_own_encoding() {
         let schema = *b"held/schema";
@@ -1061,7 +1061,7 @@ mod plain_put_tests {
     /// Options read apart from where they lie copy their fixed fields and lend both the encoding,
     /// their own one included, and the attachment where they lie: the copy holds neither. Turned red
     /// by an owned encoding cloned into the copy, or a copy that drops a field it keeps.
-    #[cfg(feature = "pubsub-encoding")]
+    #[cfg(all(feature = "pubsub-encoding", feature = "pubsub-attachment"))]
     #[test]
     fn options_read_apart_lend_their_encoding_and_attachment_where_they_lie() {
         let own = EncodingHint {

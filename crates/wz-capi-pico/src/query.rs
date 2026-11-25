@@ -1531,19 +1531,18 @@ pub(crate) fn declare_queryable_on(
     sink: QueryableSink,
 ) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
     let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.engine, keyexpr, existing)?;
-    let id = session
-        .engine
-        .declare_queryable_on_wire(
-            keyexpr,
-            key.wire_holding_declaration(Arc::as_ref(&session.engine)),
-            complete,
-            allowed_origin,
-            // A peer or router-hat session retracts the queryable naming its key
-            // (`_z_undeclare_queryable`) — the announced one, for a queryable.
-            key.retraction_naming_in(session.mode, Arc::as_ref(&session.engine)),
-            sink,
-        )
-        .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
+    let id = wz_capi_port::SessionEngine::declare_queryable_on_wire(
+        &*session.engine,
+        keyexpr,
+        key.wire_holding_declaration(Arc::as_ref(&session.engine)),
+        complete,
+        allowed_origin,
+        // A peer or router-hat session retracts the queryable naming its key
+        // (`_z_undeclare_queryable`) — the announced one, for a queryable.
+        key.retraction_naming_in(session.mode, Arc::as_ref(&session.engine)),
+        sink,
+    )
+    .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
     Ok((id, key))
 }
 
