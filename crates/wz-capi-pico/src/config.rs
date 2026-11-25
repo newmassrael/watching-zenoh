@@ -445,8 +445,8 @@ pub unsafe extern "C" fn zp_config_insert(
         // Judged as the open will compose it, so a count the build refuses is refused here and
         // the config keeps its earlier value.
         if key == crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY {
-            let mut limits = crate::session::opening_limits();
-            if let Err(code) = crate::config_limits::state_over(val, &mut limits) {
+            let mut stated = crate::config_limits::Stated::over(crate::session::opening_limits());
+            if let Err(code) = crate::config_limits::state_over(val, &mut stated) {
                 return code;
             }
         }

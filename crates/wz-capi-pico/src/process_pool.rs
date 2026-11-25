@@ -28,18 +28,28 @@
 //!
 //! # Reserving
 //!
-//! The pools are reserved once, by the first object the program makes, from the build's limits
-//! (`docs/c-abi-engine-and-memory.md`, decision Q1), in one allocation: an existing program runs
-//! unchanged, and a pico program's first object is the config it opens its first session from, so
-//! the reservation is made before any session opens. The build's counts are `HELD_SESSIONS`
+//! The pools are reserved in stages, each by the door that first needs it and in one allocation
+//! of its own ([`Stage`]): the configs' at the first config, a program's first object
+//! (`z_config_default`); the kept hellos' at the first hello; every other pool at the first
+//! `z_open`, from the limits and the `HELD_*` counts its config states
+//! (`crate::config_limits`). That open reserves each stage not reserved yet and fixes the pools:
+//! nothing is reserved after it, so a program that opened makes no allocation for them while it
+//! runs, as its sessions make none after their open. A later open whose config states more of a
+//! held value than the pools hold is refused as one that finds no memory is, and so is a take
+//! from a full pool. An object of a stage taken before any open reserves that stage from the
+//! build's counts. The build's counts are `HELD_SESSIONS`
 //! sessions, each holding as many entities as the session limits the library opens under admit
 //! within the build's values (`MAX_PUBLISHERS`, `MAX_SUBSCRIPTIONS`, `MAX_QUERYABLES`,
 //! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`, and for the gets it holds pending
 //! `MAX_PENDING_QUERIES` and `MAX_PENDING_LIVELINESS_GETS`), `HELD_SAMPLES`, `HELD_REPLIES`,
 //! `HELD_QUERIES` and `HELD_ENCODINGS` of the values it holds, `HELD_CONFIGS`
 //! configs, `HELD_HELLOS` kept hellos, and `HELD_SMALL_PAYLOAD_BLOCKS`,
-//! `HELD_MEDIUM_PAYLOAD_BLOCKS` and `HELD_LARGE_PAYLOAD_BLOCKS` payload blocks. A program that
-//! states its own counts reserves them before its first object through the doors instead.
+//! `HELD_MEDIUM_PAYLOAD_BLOCKS` and `HELD_LARGE_PAYLOAD_BLOCKS` payload blocks. The first open's
+//! counts are the same with the limits and the `HELD_*` counts its config states in place of the
+//! build's. An open's refusal is judged by the held values alone: a session's own objects that
+//! still lie here (its declared keys) are held to the first open's count per session at each
+//! take, as a pool holds any object. A program that states its own counts reserves them before
+//! its first object through the doors instead, all stages in one.
 //!
 //! # The counts and the limits of a session
 //!
@@ -171,6 +181,169 @@ pub(crate) struct Counts {
     pub(crate) advanced_subscribers: usize,
     /// Link events listeners of each session.
     pub(crate) link_events_listeners: usize,
+}
+
+impl Counts {
+    /// No object at all.
+    const NONE: Self = Self {
+        sessions: 0,
+        publishers: 0,
+        subscribers: 0,
+        queryables: 0,
+        liveliness_tokens: 0,
+        liveliness_subscribers: 0,
+        samples: 0,
+        replies: 0,
+        queries: 0,
+        configs: 0,
+        hellos: 0,
+        queriers: 0,
+        keyexprs: 0,
+        payload_blocks: [0; PAYLOAD_CLASSES],
+        encodings: 0,
+        gets: 0,
+        liveliness_gets: 0,
+        matching_listeners: 0,
+        decl_watches: 0,
+        transport_events_listeners: 0,
+        advanced_publishers: 0,
+        advanced_subscribers: 0,
+        link_events_listeners: 0,
+    };
+
+    /// The values of these a program holds apart from any session, which an open after the first
+    /// is judged by.
+    const fn held_values(&self) -> Self {
+        Self {
+            samples: self.samples,
+            replies: self.replies,
+            queries: self.queries,
+            encodings: self.encodings,
+            hellos: self.hellos,
+            payload_blocks: self.payload_blocks,
+            ..Self::NONE
+        }
+    }
+}
+
+/// The counts of the values a program holds apart from any session, each a `HELD_*` limit the
+/// first open's config may state (`crate::config_limits`): the build's value where it states
+/// none, and the most a statement may ask, the build reserving memory for no more. The configs'
+/// count is not among them: the first config is made before any open states anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Held {
+    samples: usize,
+    replies: usize,
+    queries: usize,
+    encodings: usize,
+    hellos: usize,
+    /// Small, middle and largest, as [`Counts::payload_blocks`].
+    payload_blocks: [usize; PAYLOAD_CLASSES],
+}
+
+impl Held {
+    /// The build's values.
+    pub(crate) const BUILD: Self = Self {
+        samples: caps::HELD_SAMPLES,
+        replies: caps::HELD_REPLIES,
+        queries: caps::HELD_QUERIES,
+        encodings: caps::HELD_ENCODINGS,
+        hellos: caps::HELD_HELLOS,
+        payload_blocks: [
+            caps::HELD_SMALL_PAYLOAD_BLOCKS,
+            caps::HELD_MEDIUM_PAYLOAD_BLOCKS,
+            caps::HELD_LARGE_PAYLOAD_BLOCKS,
+        ],
+    };
+
+    /// Each limit's id as its declaration spells it, the one a config states it by.
+    #[cfg(test)]
+    pub(crate) const IDS: [&'static str; 8] = [
+        "HELD_SAMPLES",
+        "HELD_REPLIES",
+        "HELD_QUERIES",
+        "HELD_ENCODINGS",
+        "HELD_HELLOS",
+        "HELD_SMALL_PAYLOAD_BLOCKS",
+        "HELD_MEDIUM_PAYLOAD_BLOCKS",
+        "HELD_LARGE_PAYLOAD_BLOCKS",
+    ];
+
+    /// The count of the limit `id`, or `None` when `id` names none of these.
+    fn count_mut(&mut self, id: &str) -> Option<&mut usize> {
+        let [small, middle, largest] = &mut self.payload_blocks;
+        Some(match id {
+            "HELD_SAMPLES" => &mut self.samples,
+            "HELD_REPLIES" => &mut self.replies,
+            "HELD_QUERIES" => &mut self.queries,
+            "HELD_ENCODINGS" => &mut self.encodings,
+            "HELD_HELLOS" => &mut self.hellos,
+            "HELD_SMALL_PAYLOAD_BLOCKS" => small,
+            "HELD_MEDIUM_PAYLOAD_BLOCKS" => middle,
+            "HELD_LARGE_PAYLOAD_BLOCKS" => largest,
+            _ => return None,
+        })
+    }
+
+    /// Set the count of the limit `id` to `count`: `None` when `id` names none of these,
+    /// `Some(false)` with nothing set for a count past the build's value of it.
+    pub(crate) fn select(&mut self, id: &str, count: usize) -> Option<bool> {
+        let mut build = Self::BUILD;
+        let bound = *build.count_mut(id)?;
+        let held = self.count_mut(id)?;
+        if count > bound {
+            return Some(false);
+        }
+        *held = count;
+        Some(true)
+    }
+}
+
+/// The stages the pools are reserved in, each by the door that first needs it: a program's first
+/// object is a config, made before any open states a count, and a scout may keep hellos before
+/// any open, so each of those takes memory of its own and the rest waits for the first open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Config = 0,
+    Hello = 1,
+    Open = 2,
+}
+
+/// How many stages there are.
+const STAGES: usize = 3;
+
+impl Stage {
+    /// Every stage, each at its own number.
+    const ALL: [Stage; STAGES] = [Stage::Config, Stage::Hello, Stage::Open];
+
+    /// The stage whose pools hold the objects of `kind`.
+    const fn of(kind: Kind) -> Self {
+        match kind {
+            Kind::Config => Stage::Config,
+            #[cfg(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu")))]
+            Kind::Hello => Stage::Hello,
+            _ => Stage::Open,
+        }
+    }
+
+    /// The objects of `objects` this stage's pools hold.
+    const fn part(self, objects: &Counts) -> Counts {
+        match self {
+            Stage::Config => Counts {
+                configs: objects.configs,
+                ..Counts::NONE
+            },
+            Stage::Hello => Counts {
+                hellos: objects.hellos,
+                ..Counts::NONE
+            },
+            Stage::Open => Counts {
+                configs: 0,
+                hellos: 0,
+                ..*objects
+            },
+        }
+    }
 }
 
 /// The bytes of each slot of size class `class`.
@@ -952,53 +1125,156 @@ impl Drop for Pools {
     }
 }
 
-/// The pools reserved now, if any are.
-struct Reserved(Option<Pools>);
+/// The pools reserved now: each stage's, in [`Stage::ALL`]'s order, or every pool in the open
+/// stage's place when a program's door reserved them all at once.
+struct Reserved {
+    stages: [Option<Pools>; STAGES],
+    /// A program's door reserved every pool, in the open stage's place.
+    whole: bool,
+    /// The first open has reserved its stages, and nothing is reserved after it.
+    fixed: bool,
+}
 
 impl Reserved {
-    /// The pools reserved now, the first plan's ([`first_plan`]) reserved here when none are;
-    /// `None` when the counts make no pool or the heap has not the memory. One body for every caller, and
-    /// the pools are laid where they are held rather than returned and copied in.
+    /// None reserved.
+    const NONE: Self = Self {
+        stages: [None, None, None],
+        whole: false,
+        fixed: false,
+    };
+
+    /// The pools that hold the objects of `stage`, reserved here from [`first_plan`] when none
+    /// are and no open has fixed the pools; `None` when the stage holds no pool, or when the heap
+    /// has not the memory. One body for every caller.
     #[inline(never)]
-    fn built(&mut self) -> Option<&mut Pools> {
-        if self.0.is_none() {
-            let plan = first_plan()?;
-            let (base, layout) = heap_memory(&plan)?;
-            let pools = self.0.insert(Pools::unlaid(base, Origin::Heap(layout)));
-            // SAFETY: the pools are unlaid, over an allocation of this layout's, aligned to the
-            // slot, as long as the plan and no one else's.
-            unsafe { pools.lay(&plan) };
+    fn stage(&mut self, stage: Stage) -> Option<&mut Pools> {
+        let at = if self.whole { Stage::Open } else { stage };
+        let fixed = self.fixed;
+        let held = self.stages.get_mut(at as usize)?;
+        if held.is_none() && !fixed {
+            return lay_stage(held, &first_plan(at)?);
         }
-        self.0.as_mut()
+        held.as_mut()
     }
+
+    /// The first open's reservation: each stage not reserved yet, from the counts `reserve`
+    /// makes, after which the pools are fixed. `false`, and the pools not fixed, when the heap
+    /// has not the memory for a stage; `false` too when the pools hold fewer of a held value than
+    /// `asked` states, which an open fixed before or an object taken before it reserved.
+    fn at_open(&mut self, reserve: &Counts, asked: &Counts) -> bool {
+        if !self.whole {
+            for (stage, held) in Stage::ALL.iter().zip(self.stages.iter_mut()) {
+                if held.is_some() {
+                    continue;
+                }
+                match Plan::of(&stage.part(reserve)) {
+                    Ok(plan) => {
+                        if lay_stage(held, &plan).is_none() {
+                            return false;
+                        }
+                    }
+                    // A stage of no object in this build holds no pool.
+                    Err(Unplanned::Empty) => {}
+                    Err(_) => return false,
+                }
+            }
+        }
+        if !self.holds(&asked.held_values()) {
+            return false;
+        }
+        self.fixed = true;
+        true
+    }
+
+    /// Whether every pool `objects` make has at least as many slots in the pools reserved now.
+    fn holds(&self, objects: &Counts) -> bool {
+        let plan = match Plan::of(objects) {
+            Ok(plan) => plan,
+            Err(Unplanned::Empty) => return true,
+            Err(_) => return false,
+        };
+        let mut slots = [0usize; POOLS];
+        for pools in self.stages.iter().flatten() {
+            for (count, pool) in slots.iter_mut().zip(pools.pools.iter()) {
+                *count = count.saturating_add(pool.slots);
+            }
+        }
+        plan.slots
+            .iter()
+            .zip(slots.iter())
+            .all(|(asked, held)| asked <= held)
+    }
+}
+
+/// Reserve the pools of `plan` from the heap in `held`, laid where they are held rather than
+/// returned and copied in; `None`, and `held` left empty, when the heap has not the memory.
+fn lay_stage<'a>(held: &'a mut Option<Pools>, plan: &Plan) -> Option<&'a mut Pools> {
+    let (base, layout) = heap_memory(plan)?;
+    let pools = held.insert(Pools::unlaid(base, Origin::Heap(layout)));
+    // SAFETY: the pools are unlaid, over an allocation of this layout's, aligned to the slot, as
+    // long as the plan and no one else's.
+    unsafe { pools.lay(plan) };
+    Some(pools)
 }
 
 // SAFETY: the memory of the pools is reached only through the lock this is held behind, by one
 // thread at a time, and no pointer into it is handed out except to the slot's own object.
 unsafe impl Send for Reserved {}
 
-static RESERVED: Lock<Reserved> = Lock::new(Reserved(None));
+static RESERVED: Lock<Reserved> = Lock::new(Reserved::NONE);
 
-/// A slot for a `T` of `kind`, from that kind's pool, or `None` when it has none free. The first
-/// object a program makes reserves the build's pools when it reserved none ([`Reserved::built`]);
-/// when they cannot be reserved either, every object is refused and the next asks again.
+/// A slot for a `T` of `kind`, from that kind's pool, or `None` when it has none free. The
+/// first object of a stage reserves that stage's pools when none are and no open has fixed them
+/// ([`Reserved::stage`]); when they cannot be reserved, every object of the stage is refused and
+/// the next asks again.
 pub(crate) fn take<T>(kind: Kind) -> Option<NonNull<u8>> {
     take_slot(kind, const { slot_size::<T>() })
 }
 
 /// [`take`] for a slot of `size` bytes. Not generic and never inlined: every door that places an
-/// object calls this one body, which holds the lock, the first reservation and the pool's count.
+/// object calls this one body, which holds the lock, the stage's reservation and the pool's count.
 #[inline(never)]
 fn take_slot(kind: Kind, size: usize) -> Option<NonNull<u8>> {
-    RESERVED.with(|reserved| reserved.built()?.take(kind, size))
+    RESERVED.with(|reserved| reserved.stage(Stage::of(kind))?.take(kind, size))
 }
 
-/// The counts of the build's pools: `HELD_SESSIONS` sessions, each holding as many of each entity
-/// as the limits the library opens a session under admit within the build's value of the limit,
-/// and the held values' own limits. Refused only by a build whose counts are past the address
-/// space.
+/// Reserve at an open under `limits` that states `held` every stage of the pools not reserved
+/// yet, from that open's counts ([`counts_of`]), and fix the pools, so nothing is reserved after
+/// it. `false`, the open to be refused as one that finds no memory, when the heap has not the
+/// memory, or when the pools, fixed by an earlier open or reserved by an object taken before
+/// this one, hold fewer of a held value than `held` states.
+pub(crate) fn reserve_at_open(limits: &SessionLimits, held: &Held) -> bool {
+    let Ok(asked) = counts_of(limits, held) else {
+        return false;
+    };
+    let reserve = open_reservation(&asked);
+    RESERVED.with(|reserved| reserved.at_open(&reserve, &asked))
+}
+
+/// The counts the first open reserves its stages from: its own.
+#[cfg(not(test))]
+fn open_reservation(asked: &Counts) -> Counts {
+    *asked
+}
+
+/// The counts the first open of this crate's unit-test binary reserves its stages from: the
+/// build's once for each test the runner runs at once ([`first_plan`]), whichever test opens
+/// first, as each test is a program of its own and the binary one process.
+#[cfg(test)]
+fn open_reservation(_asked: &Counts) -> Counts {
+    test_counts().unwrap_or(Counts::NONE)
+}
+
+/// The counts of the build's pools: [`counts_of`] the limits the library opens a session under
+/// and the build's held values. Refused only by a build whose counts are past the address space.
 const fn built_counts() -> Result<Counts, Unplanned> {
-    let limits = session_limits();
+    counts_of(&session_limits(), &Held::BUILD)
+}
+
+/// The counts of the pools of an open under `limits` that states `held`: `HELD_SESSIONS`
+/// sessions, each holding as many of each entity as `limits` admit within the build's value of
+/// the limit, and the held values. Refused only by counts past the address space.
+const fn counts_of(limits: &SessionLimits, held: &Held) -> Result<Counts, Unplanned> {
     let bounds = Bounds {
         subscribers: each::<{ caps::MAX_SUBSCRIPTIONS }>(limits.max_subscriptions()),
         queryables: each::<{ caps::MAX_QUERYABLES }>(limits.max_queryables()),
@@ -1040,20 +1316,16 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         queryables: 0,
         liveliness_tokens: 0,
         liveliness_subscribers: 0,
-        samples: caps::HELD_SAMPLES,
-        replies: caps::HELD_REPLIES,
-        queries: caps::HELD_QUERIES,
+        samples: held.samples,
+        replies: held.replies,
+        queries: held.queries,
         configs: caps::HELD_CONFIGS,
-        hellos: caps::HELD_HELLOS,
+        hellos: held.hellos,
         // At the bound of their limits, as the entities above.
         queriers: 0,
         keyexprs: 0,
-        payload_blocks: [
-            caps::HELD_SMALL_PAYLOAD_BLOCKS,
-            caps::HELD_MEDIUM_PAYLOAD_BLOCKS,
-            caps::HELD_LARGE_PAYLOAD_BLOCKS,
-        ],
-        encodings: caps::HELD_ENCODINGS,
+        payload_blocks: held.payload_blocks,
+        encodings: held.encodings,
         gets: 0,
         liveliness_gets: 0,
         matching_listeners: 0,
@@ -1095,31 +1367,55 @@ fn reserve_from_heap(plan: &Plan) -> Option<Pools> {
     Some(unsafe { Pools::over(base, plan, Origin::Heap(layout)) })
 }
 
-/// The plan of the build's pools ([`built_counts`]), worked out when the library is compiled: the
-/// counts are the build's constants and the limits it opens sessions under, so nothing of it is
-/// left to the first object a program makes.
+/// The plan of the build's pools ([`built_counts`]), every stage together, worked out when the
+/// library is compiled.
+#[cfg(test)]
 const BUILT_PLAN: Result<Plan, Unplanned> = match built_counts() {
     Ok(objects) => Plan::of(&objects),
     Err(unplanned) => Err(unplanned),
 };
 
-/// The plan the first object reserves when no pools are: the build's ([`BUILT_PLAN`]).
-#[cfg(not(test))]
-fn first_plan() -> Option<Plan> {
-    BUILT_PLAN.ok()
+/// The plan of `stage`'s pools at the build's counts.
+const fn built_stage(stage: Stage) -> Result<Plan, Unplanned> {
+    match built_counts() {
+        Ok(objects) => Plan::of(&stage.part(&objects)),
+        Err(unplanned) => Err(unplanned),
+    }
 }
 
-/// The plan the first object of this crate's unit-test binary reserves: the build's counts once
-/// for each test the runner runs at once. Each test is a program of its own, which may hold what
-/// the build's counts admit, but the runner runs them on its threads in one process, which has
-/// one reservation: held to one program's counts, the tests that each hold a config while their
-/// open reads it would, started together, find the pool of configs empty, though none of them
-/// holds more than a program may.
+/// The plan of each stage's pools at the build's counts, in [`Stage::ALL`]'s order, worked out
+/// when the library is compiled: the counts are the build's constants and the limits it opens
+/// sessions under, so nothing of it is left to the first object a program makes.
+#[cfg(not(test))]
+const BUILT_STAGES: [Result<Plan, Unplanned>; STAGES] = [
+    built_stage(Stage::Config),
+    built_stage(Stage::Hello),
+    built_stage(Stage::Open),
+];
+
+/// The plan an object of `stage` taken before any open reserves the stage's pools from: the
+/// build's ([`BUILT_STAGES`]).
+#[cfg(not(test))]
+fn first_plan(stage: Stage) -> Option<Plan> {
+    BUILT_STAGES.get(stage as usize).copied()?.ok()
+}
+
+/// The plan a stage of this crate's unit-test binary reserves ([`test_counts`]).
 #[cfg(test)]
-fn first_plan() -> Option<Plan> {
+fn first_plan(stage: Stage) -> Option<Plan> {
+    Plan::of(&stage.part(&test_counts()?)).ok()
+}
+
+/// The counts of this crate's unit-test binary: the build's once for each test the runner runs
+/// at once. Each test is a program of its own, which may hold what the build's counts admit, but
+/// the runner runs them on its threads in one process, which has one reservation: held to one
+/// program's counts, the tests that each hold a config while their open reads it would, started
+/// together, find the pool of configs empty, though none of them holds more than a program may.
+#[cfg(test)]
+fn test_counts() -> Option<Counts> {
     let objects = built_counts().ok()?;
     let programs = crate::test_heap::uncounted(test_runner::threads);
-    Plan::of(&objects.times(programs)).ok()
+    Some(objects.times(programs))
 }
 
 #[cfg(test)]
@@ -1221,9 +1517,10 @@ mod test_runner {
 pub(crate) fn lies_in_pools(place: NonNull<u8>) -> bool {
     RESERVED.with(|reserved| {
         reserved
-            .0
-            .as_ref()
-            .is_some_and(|pools| pools.lies_in(place))
+            .stages
+            .iter()
+            .flatten()
+            .any(|pools| pools.lies_in(place))
     })
 }
 
@@ -1232,9 +1529,10 @@ pub(crate) fn lies_in_pools(place: NonNull<u8>) -> bool {
 pub(crate) fn lies_in_payloads(place: NonNull<u8>) -> bool {
     RESERVED.with(|reserved| {
         reserved
-            .0
-            .as_ref()
-            .is_some_and(|pools| pools.lies_in_payloads(place))
+            .stages
+            .iter()
+            .flatten()
+            .any(|pools| pools.lies_in_payloads(place))
     })
 }
 
@@ -1242,18 +1540,19 @@ pub(crate) fn lies_in_payloads(place: NonNull<u8>) -> bool {
 pub(crate) fn give_back(place: NonNull<u8>) -> bool {
     RESERVED.with(|reserved| {
         reserved
-            .0
-            .as_mut()
-            .is_some_and(|pools| pools.give_back(place))
+            .stages
+            .iter_mut()
+            .flatten()
+            .any(|pools| pools.give_back(place))
     })
 }
 
 /// A payload block of at least `bytes` bytes, aligned to 16, and the bytes it has: one of the
 /// smallest pool of payload blocks that holds them and has one free; `None`, counted, when none
-/// has. Given back as any slot is ([`give_back`]). The first block reserves the build's pools when
-/// none are, as the first object does ([`take`]).
+/// has. Given back as any slot is ([`give_back`]). The blocks lie in the open stage's pools,
+/// which a block taken before any open reserves, as an object of a stage does ([`take`]).
 pub(crate) fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
-    RESERVED.with(|reserved| reserved.built()?.take_payload(bytes))
+    RESERVED.with(|reserved| reserved.stage(Stage::Open)?.take_payload(bytes))
 }
 
 /// The limits every session of this ABI opens under before its config states any: the snapshot
@@ -1289,10 +1588,17 @@ pub(crate) fn plan_of(stated: &Counts) -> Result<Plan, Unplanned> {
 #[cfg(feature = "object-pool")]
 unsafe fn install(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Result<(), Refused> {
     let refused = RESERVED.with(|reserved| {
-        if reserved.0.is_some() {
+        if reserved.stages.iter().any(Option::is_some) {
             return true;
         }
-        reserved.0.insert(Pools::unlaid(base, origin)).lay(plan);
+        let Some(held) = reserved.stages.get_mut(Stage::Open as usize) else {
+            return true;
+        };
+        held.insert(Pools::unlaid(base, origin)).lay(plan);
+        // The program stated every count at once: nothing is reserved after it, the first open
+        // included, which is judged against what it holds.
+        reserved.whole = true;
+        reserved.fixed = true;
         false
     });
     if refused {
@@ -1325,12 +1631,22 @@ pub(crate) unsafe fn place(base: NonNull<u8>, plan: &Plan) -> Result<(), Refused
 /// The pools of size class `class` together; with none reserved, the class's slot size alone.
 #[cfg(feature = "object-pool")]
 pub(crate) fn report(class: usize) -> ClassReport {
-    RESERVED.with(|reserved| match reserved.0.as_ref() {
-        Some(pools) => pools.report(class),
-        None => ClassReport {
+    RESERVED.with(|reserved| {
+        let mut report = ClassReport {
             slot_bytes: slot_bytes(class),
             ..Default::default()
-        },
+        };
+        // Each kind lies in one stage, so what is in use adds up; the stages' high-water marks,
+        // each reached at a moment of its own, add up to at most the most held at once.
+        for pools in reserved.stages.iter().flatten() {
+            let stage = pools.report(class);
+            report.slots = report.slots.saturating_add(stage.slots);
+            report.bytes = report.bytes.saturating_add(stage.bytes);
+            report.in_use = report.in_use.saturating_add(stage.in_use);
+            report.high_water = report.high_water.saturating_add(stage.high_water);
+            report.refused = report.refused.saturating_add(stage.refused);
+        }
+        report
     })
 }
 
@@ -1338,10 +1654,15 @@ pub(crate) fn report(class: usize) -> ClassReport {
 #[cfg(feature = "object-pool")]
 pub(crate) fn release() -> bool {
     let (released, kept) = RESERVED.with(|reserved| {
-        if reserved.0.as_ref().is_some_and(|pools| pools.held() > 0) {
+        if reserved
+            .stages
+            .iter()
+            .flatten()
+            .any(|pools| pools.held() > 0)
+        {
             (None, true)
         } else {
-            (reserved.0.take(), false)
+            (Some(core::mem::replace(reserved, Reserved::NONE)), false)
         }
     });
     // Freed after the lock, as nothing let go under it may take it again.
@@ -1378,8 +1699,8 @@ mod tests {
         let programs = crate::test_heap::uncounted(test_runner::threads);
         assert!(programs >= 1, "a runner runs one test at least");
         let built = BUILT_PLAN.expect("the build's counts make pools");
-        let first = first_plan().expect("the test binary's counts make pools");
         for kind in [Kind::Config, Kind::Sample, Kind::Keyexpr, Kind::Encoding] {
+            let first = first_plan(Stage::of(kind)).expect("the test binary's counts make pools");
             assert_eq!(
                 first.slots[kind as usize],
                 built.slots[kind as usize].saturating_mul(programs),
@@ -2175,10 +2496,12 @@ mod tests {
     /// lays a plan other than the one the first object reserves.
     #[test]
     fn the_builds_pools_are_laid_where_they_are_held_and_once() {
-        let plan = first_plan().expect("the test binary's counts make pools");
+        let plan = first_plan(Stage::Open).expect("the test binary's counts make pools");
         let aside = reserve_from_heap(&plan).expect("the test's heap has the memory");
-        let mut reserved = Reserved(None);
-        let pools = reserved.built().expect("the test's heap has the memory");
+        let mut reserved = Reserved::NONE;
+        let pools = reserved
+            .stage(Stage::Open)
+            .expect("the test's heap has the memory");
         let base = pools.base;
         assert_eq!(pools.bytes, aside.bytes);
         assert_eq!(pools.ends, aside.ends);
@@ -2189,7 +2512,10 @@ mod tests {
             );
         }
         assert_eq!(pools.held(), 0);
-        assert_eq!(reserved.built().map(|pools| pools.base), Some(base));
+        assert_eq!(
+            reserved.stage(Stage::Open).map(|pools| pools.base),
+            Some(base)
+        );
     }
 
     /// The build's default pools hold what a pico program holds when the largest channel zenoh-pico's
@@ -2553,5 +2879,196 @@ mod tests {
             ..Counts::default()
         };
         assert_eq!(Plan::of(&too_many), Err(Unplanned::TooLarge));
+    }
+
+    /// The counts of an open under the limits a session opens with, stating `held`.
+    fn opened_with(held: &Held) -> Counts {
+        counts_of(&session_limits(), held).expect("the counts make pools")
+    }
+
+    /// The bytes of a slot of `kind` in the pools `objects` make.
+    fn slot_of(objects: &Counts, kind: Kind) -> usize {
+        Plan::of(objects).expect("the counts make pools").sizes[kind as usize]
+    }
+
+    /// Each stage's pools at the build's counts are the build's pools cut by stage: every pool
+    /// of the build lies in one stage, the configs' alone in the first and the kept hellos' alone
+    /// in the second. Turned red by a stage that holds another's kind, or a kind no stage holds.
+    #[test]
+    fn the_stages_part_the_builds_pools() {
+        let built = BUILT_PLAN.expect("the build's counts make pools");
+        let mut parted = [0usize; POOLS];
+        for stage in Stage::ALL {
+            let Ok(plan) = built_stage(stage) else {
+                continue;
+            };
+            for (at, slots) in plan.slots.iter().enumerate() {
+                parted[at] += slots;
+                if *slots > 0 {
+                    match stage {
+                        Stage::Config => assert_eq!(at, Kind::Config as usize),
+                        Stage::Hello => assert!(at != Kind::Config as usize && at < KINDS),
+                        Stage::Open => assert_ne!(at, Kind::Config as usize),
+                    }
+                }
+            }
+        }
+        assert_eq!(parted, built.slots);
+        assert_eq!(Stage::of(Kind::Config), Stage::Config);
+        assert_eq!(Stage::of(Kind::Sample), Stage::Open);
+        assert_eq!(Stage::of(Kind::Keyexpr), Stage::Open);
+    }
+
+    /// A program's first object, its config, reserves the configs' stage and no other: the
+    /// samples, keys and payload blocks wait for the open that states their counts. Turned red by
+    /// a first object that reserves every pool, as one reservation did.
+    #[test]
+    fn the_first_config_reserves_the_configs_stage_alone() {
+        let mut reserved = Reserved::NONE;
+        let pools = reserved
+            .stage(Stage::Config)
+            .expect("the test's heap has the memory");
+        assert_eq!(pools.pools[Kind::Sample as usize].slots, 0);
+        assert_eq!(pools.pools[Kind::Keyexpr as usize].slots, 0);
+        assert!(pools.pools.iter().skip(KINDS).all(|pool| pool.slots == 0));
+        assert!(reserved.stages[Stage::Open as usize].is_none());
+        assert!(!reserved.fixed, "a config fixes nothing");
+    }
+
+    /// The first open reserves as many of a held value as its config states, and a take past
+    /// them is refused. Turned red by an open that reserves the build's count whatever its config
+    /// states.
+    #[test]
+    fn the_first_open_reserves_the_held_values_its_config_states() {
+        let stated = caps::HELD_SAMPLES.min(3);
+        let mut held = Held::BUILD;
+        assert_eq!(held.select("HELD_SAMPLES", stated), Some(true));
+        let asked = opened_with(&held);
+        assert_eq!(asked.samples, stated);
+        let mut reserved = Reserved::NONE;
+        assert!(reserved.at_open(&asked, &asked));
+        let size = slot_of(&asked, Kind::Sample);
+        let pools = reserved
+            .stage(Stage::Open)
+            .expect("the open reserved its stage");
+        let taken: alloc::vec::Vec<_> = (0..stated)
+            .map(|_| pools.take(Kind::Sample, size))
+            .collect();
+        assert!(taken.iter().all(Option::is_some), "each stated one is held");
+        assert!(
+            pools.take(Kind::Sample, size).is_none(),
+            "one past the stated count is refused"
+        );
+        for slot in taken.into_iter().flatten() {
+            assert!(pools.give_back(slot));
+        }
+    }
+
+    /// After the first open nothing is reserved: an open that states as much again opens, one
+    /// that states more of a held value is refused, and a stage that open left without pools
+    /// stays without them. Turned red by pools that grow for a later open, or a stage reserved
+    /// after the open.
+    #[test]
+    fn the_pools_are_fixed_by_the_first_open() {
+        if caps::HELD_SAMPLES == 0 {
+            return;
+        }
+        let mut fewer = Held::BUILD;
+        assert_eq!(
+            fewer.select("HELD_SAMPLES", caps::HELD_SAMPLES - 1),
+            Some(true)
+        );
+        let first = opened_with(&fewer);
+        let mut reserved = Reserved::NONE;
+        assert!(reserved.at_open(&first, &first));
+        assert!(reserved.fixed);
+        assert!(reserved.at_open(&first, &first), "as much again opens");
+        let more = opened_with(&Held::BUILD);
+        assert!(
+            !reserved.at_open(&more, &more),
+            "one more sample than the first open reserved is refused"
+        );
+
+        let mut fixed = Reserved {
+            fixed: true,
+            ..Reserved::NONE
+        };
+        assert!(
+            fixed.stage(Stage::Config).is_none(),
+            "a fixed reservation reserves no stage"
+        );
+    }
+
+    /// An object taken before any open reserves its stage from the build's counts, and the first
+    /// open is then judged against that stage: one that states more is refused, one that states
+    /// as much or fewer opens. Turned red by an open that skips the judgement for a stage reserved
+    /// before it.
+    #[test]
+    fn an_open_is_judged_against_a_stage_reserved_before_it() {
+        let mut reserved = Reserved::NONE;
+        assert!(reserved.stage(Stage::Open).is_some());
+        let built = test_counts().expect("the test's counts make pools");
+        let mut more = Held::BUILD;
+        more.samples = built.samples.saturating_add(1);
+        let asked = opened_with(&more);
+        assert!(!reserved.at_open(&asked, &asked));
+        assert!(!reserved.fixed, "a refused open fixes nothing");
+        let as_built = opened_with(&Held::BUILD);
+        assert!(reserved.at_open(&as_built, &as_built));
+    }
+
+    /// Once the first open reserved its stages, a take of every stage and a payload block take
+    /// no memory: with every allocation refused they are still made. Turned red by a stage the
+    /// open leaves to be reserved at its first take.
+    #[test]
+    fn nothing_is_allocated_after_the_first_open() {
+        let built = built_counts().expect("the build's counts make pools");
+        let mut reserved = Reserved::NONE;
+        assert!(reserved.at_open(&built, &built));
+        crate::test_heap::refused(|| {
+            if built.configs > 0 {
+                let size = slot_of(&built, Kind::Config);
+                let pools = reserved.stage(Stage::Config).expect("reserved at the open");
+                let slot = pools.take(Kind::Config, size).expect("a config is held");
+                assert!(pools.give_back(slot));
+            }
+            if built.samples > 0 {
+                let size = slot_of(&built, Kind::Sample);
+                let pools = reserved.stage(Stage::Open).expect("reserved at the open");
+                let slot = pools.take(Kind::Sample, size).expect("a sample is held");
+                assert!(pools.give_back(slot));
+            }
+            if built.payload_blocks.iter().any(|blocks| *blocks > 0) {
+                let pools = reserved.stage(Stage::Open).expect("reserved at the open");
+                let (block, _) = pools.take_payload(1).expect("a block is held");
+                assert!(pools.give_back(block));
+            }
+        });
+    }
+
+    /// A held value's count is set to what is stated up to the build's value of it, a count past
+    /// that is refused and sets nothing, and an id that is no held value's is not one. Each id
+    /// is a limit the declaration holds. Turned red by a count held to no bound.
+    #[test]
+    fn a_held_count_is_stated_up_to_the_builds_value() {
+        for id in Held::IDS {
+            assert!(
+                wz_session_core::limits::RUNTIME_LIMITS
+                    .iter()
+                    .any(|entry| entry.id() == id),
+                "{id}"
+            );
+            let mut held = Held::BUILD;
+            assert_eq!(held.select(id, 0), Some(true), "{id}");
+            let mut build = Held::BUILD;
+            let bound = *build.count_mut(id).expect("an id of a held value");
+            let mut past = Held::BUILD;
+            assert_eq!(past.select(id, bound + 1), Some(false), "{id}");
+            assert_eq!(past, Held::BUILD, "{id}: nothing set");
+        }
+        let mut held = Held::BUILD;
+        assert_eq!(held.select("HELD_CONFIGS", 1), None);
+        assert_eq!(held.select("MAX_SUBSCRIPTIONS", 1), None);
+        assert_eq!(held, Held::BUILD);
     }
 }

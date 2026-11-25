@@ -354,16 +354,20 @@ pub(crate) fn resolve_snapshots(
 }
 
 /// The snapshots `z_open` opens `cfg` under: [`resolve_snapshots`] of its doors' statements, and
-/// over them the counts its [`WZ_EXT_CONFIG_LIMITS_KEY`] states, which every build reads;
+/// over them the counts its [`WZ_EXT_CONFIG_LIMITS_KEY`] states, which every build reads, the
+/// held values the process pools reserve at the first open among them;
 /// `Z_ERR_CONFIG_INVALID_VALUE` when the build refuses any of it.
 ///
 /// [`WZ_EXT_CONFIG_LIMITS_KEY`]: crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY
-pub(crate) fn resolve_open(cfg: &ConfigState) -> Result<(SessionPolicy, SessionLimits), ZResult> {
-    let (policy, mut limits) = resolve_snapshots(&cfg.policies)?;
+pub(crate) fn resolve_open(
+    cfg: &ConfigState,
+) -> Result<(SessionPolicy, crate::config_limits::Stated), ZResult> {
+    let (policy, limits) = resolve_snapshots(&cfg.policies)?;
+    let mut stated = crate::config_limits::Stated::over(limits);
     if let Some(text) = cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY) {
-        crate::config_limits::state_over(text, &mut limits)?;
+        crate::config_limits::state_over(text, &mut stated)?;
     }
-    Ok((policy, limits))
+    Ok((policy, stated))
 }
 
 /// The limits a session of this ABI opens under before its config states any: zenoh-pico's, as
@@ -1175,7 +1179,17 @@ unsafe fn open_request(
     // comes back on another locator is found there and not here. The scout runs under the
     // snapshot of the open it finds a node for, and a config whose policies or limits the
     // build refuses opens nothing and scouts for nothing.
-    let (policy, limits) = resolve_open(cfg)?;
+    let (policy, stated) = resolve_open(cfg)?;
+    // The first open reserves the process pools it has not found reserved and fixes them, so
+    // nothing of the process is reserved after an open; a later open that states more of a held
+    // value than they hold is refused here, before it takes anything.
+    #[cfg(wz_process_pools)]
+    {
+        if !crate::process_pool::reserve_at_open(&stated.limits, &stated.held) {
+            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        }
+    }
+    let limits = stated.limits;
     // The key-wire form, judged for the engine the session opens on, and the key ids every
     // node shares that the config states (`crate::key_ids`).
     #[cfg(feature = "shared-key-ids")]
