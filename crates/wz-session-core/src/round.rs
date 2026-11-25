@@ -38,6 +38,12 @@
 //! an entry, and a callback for each subscriber. What finds no room is counted
 //! ([`RoundCounts`]): apart when its congestion control holds its sender, which a record the gate
 //! let through never does (a debug build stops there).
+//!
+//! [`Round::end_rejoined`]: crate::round::Round::end_rejoined
+//! [`RoundCounts::unplaced`]: crate::round::RoundCounts::unplaced
+//! [`Round::seal`]: crate::round::Round::seal
+//! [`ReadRoom`]: crate::round::ReadRoom
+//! [`RoundCounts`]: crate::round::RoundCounts
 
 use alloc::sync::{Arc, Weak};
 use core::cell::{OnceCell, UnsafeCell};
@@ -2095,7 +2101,7 @@ impl<C: RoundCalls> Round<C> {
     /// no longer read: the counts of the session's key arena they hold and the rejoined buffer kept
     /// for them. A delivery hands the records out with no lock of the session held, and both are
     /// let go of under that lock alone, so the lock holder does it: before it writes the next
-    /// record ([`Self::writable`]) and before the gate lets a link be read (the engine's gate on each link).
+    /// record (`Self::writable`) and before the gate lets a link be read (the engine's gate on each link).
     ///
     /// # Safety
     /// The caller holds the session's lock, and holds no borrow of the table.

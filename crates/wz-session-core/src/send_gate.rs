@@ -12,6 +12,9 @@
 //! a lock gives beyond them (two readers in turn, or a read and a write as one step) is used.
 //! No total order across the two flags is relied on either: a send reads both, and either one
 //! closed refuses it.
+//!
+//! [`SendGate`]: crate::send_gate::SendGate
+//! [`Latch`]: crate::send_gate::Latch
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

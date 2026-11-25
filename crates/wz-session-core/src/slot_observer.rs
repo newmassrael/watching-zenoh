@@ -437,7 +437,7 @@ pub trait ObserverSinks {
     /// The context a matched row is delivered through, handed to the dispatch
     /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples,
     /// its queries and its tokens go to. `()` for rows that deliver themselves ([`SampleSink`],
-    /// [`crate::query::ResponderSink`], [`LivelinessSampleSink`]). How each kind's rows are told
+    /// `crate::query::ResponderSink`, [`LivelinessSampleSink`]). How each kind's rows are told
     /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`].
     type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>;
     /// The application's tables, of storage `P`, as one bundle: the registries of the storage

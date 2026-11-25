@@ -789,7 +789,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableRegistry<D, U, P> {
         &self.peer
     }
 
-    /// The two halves apart: the application's RemoteQueryableTable<D, U, P> and the peer's RemoteQueryablePeer<P>, for a caller
+    /// The two halves apart: the application's `RemoteQueryableTable<D, U, P>` and the peer's `RemoteQueryablePeer<P>`, for a caller
     /// that hands the second to a method of the first, as a session whose application half is
     /// shared with other faces must.
     pub fn split_mut(
@@ -1592,7 +1592,7 @@ impl RemoteQueryableTable<BoxedDeclSink, BoxedUndeclSink> {
 // R311gb (Track 2) — test gate now explicit (was inherited from the
 // module's `codec-declare` gate); exercises `dispatch_declare` +
 // `has_matching`, now `all(codec-declare, alloc)`-gated.
-#[cfg(all(test, feature = "codec-declare"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-declare"))]
 mod tests {
     //! R311ds — wider behavioural tests migrated here from the
     //! wz-runtime-tokio `declare/queryable.rs` shell (R311dr-wider-tests

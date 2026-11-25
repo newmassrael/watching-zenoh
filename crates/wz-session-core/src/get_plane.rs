@@ -26,6 +26,14 @@
 //! and by a thread that captured it. Each is a copy of the row's place ([`LegId`]), so no holder
 //! shares the callback by allocation, and the last count given back hands the callback out of the
 //! row, to be dropped where no lock is held.
+//!
+//! [`LegSink`]: crate::get_plane::LegSink
+//! [`PlaneCalls::LocalAnswers`]: crate::round::PlaneCalls::LocalAnswers
+//! [`LegHold`]: crate::get_plane::LegHold
+//! [`EndedLegs`]: crate::get_plane::EndedLegs
+//! [`GetPlane::forget_end`]: crate::get_plane::GetPlane::forget_end
+//! [`LegRows`]: crate::get_plane::LegRows
+//! [`LegId`]: crate::get_plane::LegId
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;

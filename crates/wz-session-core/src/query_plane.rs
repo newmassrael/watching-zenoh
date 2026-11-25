@@ -35,6 +35,12 @@
 //! held and answered under the generation of the link it came in on, and a reply or a Final goes
 //! out only while that link is the session's: a router that asked on a link since lost will never
 //! read the answer, and a new router never asked.
+//!
+//! [`Round::offer_query`]: crate::round::Round::offer_query
+//! [`FinalHolds`]: crate::query_plane::FinalHolds
+//! [`PlaneCalls::LocalAnswers`]: crate::round::PlaneCalls::LocalAnswers
+//! [`QueryPlane::take_asked`]: crate::query_plane::QueryPlane::take_asked
+//! [`QueryPlane::next_generation`]: crate::query_plane::QueryPlane::next_generation
 
 use core::sync::atomic::{AtomicBool, Ordering};
 // The split `round` uses: the host profile has the native atomics, the `no_std` profile gets the

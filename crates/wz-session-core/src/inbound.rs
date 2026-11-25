@@ -336,7 +336,7 @@ pub enum InboundFrame {
     /// to its end by its document's view, with the refusals the observer's decode answers, and
     /// refused whatever it says, so nothing of it is copied out of the unit
     /// ([`parse_inbound_consuming_into`]). The observer's read keeps the message whole
-    /// ([`Self::Join`], [`Self::Oam`]).
+    /// (`Self::Join`, [`Self::Oam`]).
     #[cfg(feature = "alloc")]
     Refused { mid: u8 },
     /// A network body on a negotiated lowlatency link, without a Frame or SN.
@@ -710,7 +710,7 @@ pub trait ExtChainRead: Copy + core::fmt::Debug {
     );
 
     /// The remote bound an Open's chain announces ([`crate::extbound::peer_remote_bound_in`]),
-    /// answered as [`Self::patch_and_region`] is.
+    /// answered as `Self::patch_and_region` is.
     #[cfg(feature = "codec-open-body")]
     fn remote_bound(self) -> Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound>;
 }
@@ -878,7 +878,7 @@ impl<'f> Iterator for ReadEntries<'f> {
 
 /// The extension chain of a handshake message read where it lies (`ControlRead`): the view its
 /// document read it as, walked again by a reader that takes every entry, and what the one walk of
-/// the read found for the readers every build links ([`ChainAnswers`]), which no reader walks it
+/// the read found for the readers every build links (`ChainAnswers`), which no reader walks it
 /// again for.
 #[cfg(all(
     feature = "alloc",
@@ -2716,7 +2716,12 @@ mod debug_surface_tests {
 //    Measured against the real `libzenohpico.so`: eighteen generated strings
 //    were messages wz named and pico refused, and every one of them carried a
 //    mandatory extension nothing defines. ──
-#[cfg(all(test, feature = "session-unicast", feature = "codec-frame"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "session-unicast",
+    feature = "codec-frame"
+))]
 mod mandatory_ext_tests {
     use super::*;
     use crate::ext_admit::ExtAdmission;
@@ -3260,7 +3265,7 @@ mod kind_name_tests {
 // `pub type QoS = zextz64!(0x1, true);`), matched by `iext::eid`
 // (`commons/zenoh-codec/src/transport/frame.rs` @ `ext::QoS::ID => {`). The
 // same id with the mandatory bit clear is an unknown extension there.
-#[cfg(all(test, feature = "codec-frame"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-frame"))]
 mod frame_qos_identity_tests {
     use super::*;
     use crate::ext_header::{lookalike_headers, network_eid, EXT_FLAG_Z};

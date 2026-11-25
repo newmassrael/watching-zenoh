@@ -491,7 +491,12 @@ mod interest_tests {
 
 /// The setters of a `Push`'s and a `Request`'s `ext_qos`: what is set is what is read back, the
 /// other entries of the chain stay, and the default removes the entry and its header bit.
-#[cfg(all(test, feature = "codec-push", feature = "codec-request"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-request"
+))]
 mod overwrite_tests {
     use super::*;
     use crate::ext_nodeid::MESSAGE_FLAG_Z;
@@ -529,7 +534,7 @@ mod overwrite_tests {
     }
 }
 
-#[cfg(all(test, feature = "codec-declare"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-declare"))]
 mod tests {
     use super::*;
     use crate::declare_build::{build_declare_kexpr, build_declare_subscriber};

@@ -2704,7 +2704,12 @@ fn decode_one_record(
 //    whichever layer enforces it; that they still pass with the seam gone is
 //    the measurement that the codec took the work over, rather than an
 //    inspection of the emit. ──
-#[cfg(all(test, feature = "codec-frame", feature = "codec-push"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "codec-push"
+))]
 mod chain_saturation_tests {
     use super::*;
 
@@ -4251,7 +4256,7 @@ fn lent_response_class<'f>(response: &wz_codecs::response::ResponseView<'f>) -> 
 // The record-at-a-time walk against the batch decode it must agree with, and
 // the one place it is meant to differ: a failure ends it AFTER the records
 // before it were handed over.
-#[cfg(all(test, feature = "codec-frame"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-frame"))]
 mod record_walk_tests {
     use super::*;
     use alloc::vec;
@@ -4959,7 +4964,7 @@ mod record_walk_tests {
     }
 }
 
-#[cfg(all(test, feature = "codec-frame"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-frame"))]
 mod best_effort_batch_tests {
     use super::*;
     use alloc::vec;
@@ -5269,7 +5274,12 @@ mod best_effort_batch_tests {
 //    encode-then-decode round trip could not reach the arm under test. These
 //    bytes are what a peer with one extension more than this revision knows
 //    about puts on the wire. ──
-#[cfg(all(test, feature = "codec-frame", feature = "codec-declare"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "codec-declare"
+))]
 mod declare_body_ext_chain_tests {
     use super::*;
 

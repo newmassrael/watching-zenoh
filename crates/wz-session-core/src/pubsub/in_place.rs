@@ -524,7 +524,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
 // deliver what the copying path delivers and be counted, and the self-echo rule
 // must hold on both. The allocation count of the path is the lwIP harness's
 // (`wz-session-lwip/tests/rx_frame_allocations.rs`), which runs it end to end.
-#[cfg(all(test, feature = "pubsub-put"))]
+#[cfg(all(test, feature = "alloc", feature = "pubsub-put"))]
 mod tests {
     use super::*;
     use crate::driver_loop::IterationEvent;

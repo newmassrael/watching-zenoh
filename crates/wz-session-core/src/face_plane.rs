@@ -14,6 +14,9 @@
 //! program that watches only after the open is told its faces with nothing allocated. A row that
 //! finds every row held is not kept, and the queue does not grow for it: the rows lost are counted
 //! on the last row kept ([`FaceLinkRow::lost_after`]), which tells each watcher of them once.
+//!
+//! [`FacePlane::happened`]: crate::face_plane::FacePlane::happened
+//! [`FaceLinkRow::lost_after`]: crate::face::FaceLinkRow::lost_after
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;

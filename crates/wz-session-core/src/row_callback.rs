@@ -16,6 +16,13 @@
 //! Two forms implement [`RowCallback`]: the three values of a C closure, called where the row lies
 //! ([`CClosure`]), and, in a heap build, a Rust closure shared with the calls of it
 //! (`ArcCallback`).
+//!
+//! [`RowCallback::begin`]: crate::row_callback::RowCallback::begin
+//! [`RowCallback::end`]: crate::row_callback::RowCallback::end
+//! [`RowCallback::retire`]: crate::row_callback::RowCallback::retire
+//! [`CallLatch`]: crate::row_callback::CallLatch
+//! [`RowCallback`]: crate::row_callback::RowCallback
+//! [`CClosure`]: crate::row_callback::CClosure
 
 use core::ffi::c_void;
 use core::ptr::NonNull;

@@ -507,7 +507,7 @@ impl SerialHandshake {
     /// emits nothing until it observes the peer's INIT. Also the
     /// re-drive entry point after a [`HandshakeStep::Throttle`]. The
     /// `Option` expresses ONLY that role asymmetry: the INIT is a frame of
-    /// fixed bytes ([`INIT_FRAME`]), so there is no encode failure to alias
+    /// fixed bytes (`INIT_FRAME`), so there is no encode failure to alias
     /// with "responder is silent".
     pub fn open(&self) -> Option<Vec<u8>> {
         match self.role {

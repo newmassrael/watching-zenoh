@@ -203,7 +203,7 @@ impl TxBuf for SliceTxBuf<'_> {
 /// A [`TxBuf`] that keeps no byte and counts the ones written to it.
 ///
 /// What a send finds a message's length with when it holds the encoder its dispatch then runs
-/// into the lent slot ([`encoded_len`]): the count and the write are then one compiled encoder,
+/// into the lent slot (`encoded_len`): the count and the write are then one compiled encoder,
 /// where the codec's `measure` compiles the same field walk a second time over a sink of its
 /// own type. It holds nothing to send, so [`TxBuf::as_slice`] is empty and it hands out no
 /// window; it is never given to a link.
