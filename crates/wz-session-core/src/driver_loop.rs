@@ -1080,7 +1080,7 @@ pub struct InPlaceRecord<'a, 'f> {
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -1092,7 +1092,7 @@ pub struct InPlaceRecord<'a, 'f> {
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -1230,7 +1230,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
                 feature = "codec-declare",
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")
@@ -1242,7 +1242,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
                 feature = "codec-declare",
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")
@@ -1453,7 +1453,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
             feature = "codec-declare",
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -1467,7 +1467,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
             feature = "codec-declare",
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -1484,7 +1484,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -1503,7 +1503,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -1521,7 +1521,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -1832,7 +1832,9 @@ pub(crate) fn report_lent_record(
 ///
 /// The multicast receive path of a build with no allocator, and of a heap build whose every
 /// record is lent (`rx-lent-control`) and that reads a unicast frame where it lies, whose readers
-/// this walk shares; any other heap build decodes a batch owned (`multicast_rx`).
+/// this walk shares; any other heap build decodes a batch owned (`multicast_rx`). A build with the
+/// counters of `transport-stats` lends here only the datagrams its transport keeps, and hands
+/// `counted` each record it lends, as the unicast walk does.
 #[cfg(all(
     feature = "codec-frame",
     feature = "session-multicast",
@@ -1842,7 +1844,7 @@ pub(crate) fn report_lent_record(
             feature = "session-unicast",
             feature = "alloc",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -1856,6 +1858,9 @@ pub(crate) fn walk_lent_payload(
     priority: crate::qos::Priority,
     may_stop: bool,
     on_event: &mut dyn EventSink,
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))] counted: &mut dyn FnMut(
+        &crate::network_message::RecordClass<'_>,
+    ),
 ) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
     use crate::network_message::{new_record_buf, try_for_each_record_while, RecordForm};
     let mut record = new_record_buf();
@@ -1876,6 +1881,8 @@ pub(crate) fn walk_lent_payload(
             }
             Ok(())
         },
+        #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+        counted,
     )?;
     if !dispatched {
         #[cfg(feature = "alloc")]

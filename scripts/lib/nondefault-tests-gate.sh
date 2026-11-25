@@ -761,9 +761,14 @@ transport-link-ws|"
     # its members' tokens, which a member answers from the tokens its session holds. Each of the
     # four runs the module's own tests too, a JOIN asked between two beacons among them.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
-    # And with `transport-stats` (`tests::group::congested::`): what a group's queue drops for
-    # congestion is the transport's `tx.n_dropped`, as the tokio engine's group counts it.
-    "wz-capi-coop|hook|app-transport,group,transport-stats|tests::group::congested::"
+    # And with `transport-stats`: what a group's queue drops for congestion is the transport's
+    # `tx.n_dropped`, as the tokio engine's group counts it (`tests::group::congested::`), and a
+    # member's datagram is still read where it lies and its records lent, each counted once against
+    # the member and in the session's `transport_stats` (`tests::group::in_place::`), with the
+    # module's other tests, a get and its answer
+    # among them. The second row adds the members' keyexprs read member by member.
+    "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|tests::group::"
+    "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable,transport-stats|tests::group::"
     # And with the lent-only receive the C library's final build selects (the session core's
     # `rx-lent-only`): a member's datagram is read where it lies and its records lent, its
     # declarations scoped by the member and its departure's retractions lent, and no table is handed
@@ -1551,6 +1556,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
     # `codec-push` the items; the row above is the slot profile, where none of this is built.
     "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
+    # And with `transport-stats`: what the pump receives and what it and the stage send are counted
+    # into the counters the holder attached, as the socket takes or hands in each datagram.
+    "wz-session-mcu|hook|codec-push,transport-multicast,transport-stats|group_drive::"
     # A node that declares liveliness tokens (`declare-token`): its tokens are declared after its
     # documents, mirrors and subscriptions, and more of them than the node declares stop it; without
     # the feature a token is refused by name. `slot_node` is built with `client-slot`.

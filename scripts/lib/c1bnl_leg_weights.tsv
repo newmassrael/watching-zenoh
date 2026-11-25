@@ -93,7 +93,6 @@ wz-capi-coop:tests::group:::65bc6508 15  # wz-capi-coop --features <2> tests::gr
 wz-capi-coop:tests::group:::5925a59e 19  # wz-capi-coop --features <4> tests::group::
 wz-capi-coop:tests::group:::7d3386d5 13  # wz-capi-coop --features <3> tests::group::
 wz-capi-coop:tests::group:::fe4785fc 17  # wz-capi-coop --features <3> tests::group::
-wz-capi-coop:tests::group::congested:::df68c142 10  # wz-capi-coop --features <3> tests::group::congested::
 wz-capi-coop:host_group:::ca30cd31 14  # wz-capi-coop --features <1> host_group::
 wz-capi-coop:clock_moves_tests:::0a17fd74 11  # wz-capi-coop --features <1> clock_moves_tests::
 wz-capi-coop:engine::decl_watch:::6863d900 14  # wz-capi-coop --features <3> engine::decl_watch::
