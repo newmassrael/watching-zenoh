@@ -17,8 +17,9 @@ use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables, RUNTIME_TIME
 use crate::CoopConfig;
 
 /// The runtime `tables` are for, placed as an open places it: in a span of an arena that holds
-/// that span alone, which the runtime keeps until its last holder lets go.
-fn placed_runtime(tables: RuntimeTables) -> CoopRuntime<PosixClock> {
+/// that span alone, which the runtime keeps until its last holder lets go, with the set of the
+/// session's tasks it runs.
+fn placed_runtime(tables: RuntimeTables) -> (CoopRuntime<PosixClock>, CoopLocalSet<PosixClock>) {
     let bytes = tables
         .placed_bytes::<PosixClock>()
         .expect("a span of the tables' rows");
@@ -87,7 +88,7 @@ fn a_sessions_runtime_reserves_timers_only_for_a_task_that_sleeps() {
         max_faces: 0,
         ..client_config()
     });
-    let runtime = placed_runtime(tables);
+    let (runtime, _set) = placed_runtime(tables);
     assert_eq!(runtime.timers().capacity(), RUNTIME_TIMERS);
     assert_eq!(runtime.timers().next_deadline_us(), None);
     assert_eq!(
@@ -136,7 +137,7 @@ fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
         ..client_config()
     });
     assert_eq!(dialling.rows.tasks, 11, "the dial role's and ten faces");
-    let runtime = placed_runtime(tables);
+    let (runtime, _set) = placed_runtime(tables);
     let local = CoopLocalSet::new(&runtime);
     let sessions: Vec<_> = (0..10u8)
         .map(|at| {
@@ -172,7 +173,7 @@ fn a_dial_only_runtime_runs_one_task_at_a_time_whatever_faces_the_config_states(
         max_faces: 3,
         ..client_config()
     });
-    let runtime = placed_runtime(tables);
+    let (runtime, _set) = placed_runtime(tables);
     let local = CoopLocalSet::new(&runtime);
     let first = local
         .try_spawn_local(async { 1u8 })
@@ -217,7 +218,7 @@ fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger
         max_faces: 0,
         ..client_config()
     });
-    let runtime = placed_runtime(tables);
+    let (runtime, _set) = placed_runtime(tables);
     let local = CoopLocalSet::new(&runtime);
     let large = [7u8; LARGER];
     let refused = local

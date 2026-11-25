@@ -12,7 +12,6 @@ use std::sync::Arc;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchSink, Refusal, SessionEngine};
 
 use super::{open, CatchAll, Router};
-use crate::EngineHold;
 
 /// A Rust closure a watch's sink shares, so a test reads from its count whether the engine still
 /// holds the sink.
@@ -411,6 +410,8 @@ mod watched {
     #[cfg(any(feature = "query", feature = "queryable"))]
     #[test]
     fn a_watch_declared_inside_a_call_is_told_what_the_peer_held_by_the_next_round() {
+        use crate::EngineHold;
+
         let router = Router::start(CatchAll::None);
         let engine = open(&router);
         let first = Log::new();

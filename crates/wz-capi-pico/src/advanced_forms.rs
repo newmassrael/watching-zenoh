@@ -35,8 +35,6 @@
 //! declaration stands for as long as some face still holds an entity on it and
 //! is retracted with the last — which is when pico lets go of a key it counted.
 
-#[cfg(test)]
-use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
@@ -324,6 +322,7 @@ impl DeclarationForms for PicoSubscriberForms {
 #[cfg(all(test, feature = "engine-tokio"))]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
 
     use wz_capi_core::faces::SharedSession;
     use wz_capi_core::runtime::runtime_impl::TokioTime;

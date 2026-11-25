@@ -9,8 +9,6 @@
 //! must keep alive while the keyexpr is used (the pico contract). `z_put` /
 //! `z_declare_*` read the borrowed UTF-8 back via `keyexpr_str`.
 
-#[cfg(test)]
-use alloc::sync::Arc;
 use core::ffi::{c_char, c_void, CStr};
 use core::mem::ManuallyDrop;
 
@@ -1919,6 +1917,7 @@ mod door_reading_tests {
 #[cfg(all(test, feature = "engine-tokio"))]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
 
     /// A registry with no face, read back through its own key table.
     fn session() -> Arc<wz_capi_core::faces::SharedSession> {
