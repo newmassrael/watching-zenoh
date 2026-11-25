@@ -289,6 +289,49 @@ alone_on_starve = "retry"
 alone_starve_backoff = "15m"
 alone_starve_cycles = 4
 
+# What one operation costs in instructions (`opprofile`: put, get with its queryable, declare and undeclare,
+# open and close, the paced loop), and the host side of the parity matrix for each family
+# (docs/upstream-parity.md section 5b, 24 boots of each arm). callgrind counts instructions and is not disturbed
+# by a neighbour, but its runs pace by the clock and a starved run is late; the parity's figures are times. Both
+# hold the machine as the measurements above do. A run of the parity matrix with its no-drop search takes hours:
+# the caller gives `bx --timeout`. Run through ad hoc words (`bx -- bash scripts/pico-compare.sh parity ...`) a
+# measurement shares the machine, and the parity run of 2026-11-25 lost most of its timed workloads that way.
+[commands.pico-opprofile]
+run = "bash scripts/pico-compare.sh opprofile"
+alone = true
+alone_uncovered = { wait_s = 900 }
+alone_quiet_within = "15m"
+alone_on_starve = "retry"
+alone_starve_backoff = "15m"
+alone_starve_cycles = 4
+
+[commands.pico-parity-pico]
+run = "bash scripts/pico-compare.sh parity pico 24"
+alone = true
+alone_uncovered = { wait_s = 900 }
+alone_quiet_within = "15m"
+alone_on_starve = "retry"
+alone_starve_backoff = "15m"
+alone_starve_cycles = 4
+
+[commands.pico-parity-c]
+run = "bash scripts/pico-compare.sh parity c 24"
+alone = true
+alone_uncovered = { wait_s = 900 }
+alone_quiet_within = "15m"
+alone_on_starve = "retry"
+alone_starve_backoff = "15m"
+alone_starve_cycles = 4
+
+[commands.pico-parity-rust]
+run = "bash scripts/pico-compare.sh parity rust 24"
+alone = true
+alone_uncovered = { wait_s = 900 }
+alone_quiet_within = "15m"
+alone_on_starve = "retry"
+alone_starve_backoff = "15m"
+alone_starve_cycles = 4
+
 # Regenerating the committed `out/**` from the SCXML sources (`scripts/regen-codegen.sh`): it builds
 # the pinned `sce-codegen` and then the xtask, which compiles `wz-session-core`, so it is a heavy
 # build that used to be refused a build machine because it writes the tree. Declared as an action,
