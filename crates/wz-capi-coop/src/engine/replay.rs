@@ -319,58 +319,46 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             })
     }
 
-    /// A declaration takes `place` in the replay's order: tell the peer of each
-    /// face that is up of it with `send`, unless it is not to be told now, and say whether it was
-    /// taken. It is not told to a face that is not up, which declares it when it comes up, and
+    /// Tell each face that is up of the declaration `declared` names, from its row, unless it is
+    /// not to be told now, and say whether it was taken: the tables stored it before any link is
+    /// told of it. It is not told to a face that is not up, which declares it when it comes up, and
     /// when that face's replay has not reached its place, which sends it in its turn; both count
     /// as taken. A refusal is answered as `on_refusal` says: [`OnRefusal::Forget`] counts what
     /// was refused as told, and [`OnRefusal::Undo`] makes the declaration over, putting every
     /// face's replay back as it was and taking back, with `undo`, what the faces that took it
     /// were told. Call it once for each declaration.
-    fn announce_with(
+    // Out of line: every kind's declaration announces through it, and the message of each kind
+    // is built in `told` alone, whether the declaration may be undone or not.
+    #[inline(never)]
+    fn announce_row(
         &mut self,
-        place: usize,
+        declared: DeclaredRow,
         on_refusal: OnRefusal,
-        send: &dyn SendTo<C>,
         undo: &dyn TellTo<C>,
     ) -> bool {
-        announce_on(
-            self.transport.links.places_mut(),
-            place,
-            on_refusal,
-            send,
-            undo,
-        )
-    }
-
-    /// Tell each face that is up of the declaration `declared` names, as [`Self::announce_with`]
-    /// tells one: its row is the declaration itself, so the tables stored it before any link is
-    /// told of it, each link is told from the row, and a refusal leaves it stored.
-    // Out of line: every kind's declaration announces through it.
-    #[inline(never)]
-    pub(super) fn announce(&mut self, declared: DeclaredRow) {
         let place = self.place_of(declared);
         let registry = &self.session.registry;
         announce_on(
             self.transport.links.places_mut(),
             place,
-            OnRefusal::Forget,
+            on_refusal,
             &|actions: &LinkActions<C>| tell(super::tables(registry), actions, declared),
-            &undo_nothing::<C>,
-        );
+            undo,
+        )
     }
 
-    /// [`Self::announce_with`] for a declaration stored at `place` that is not made when a link
-    /// refuses it: whether it was made.
-    // Out of line: the key expression and entity declarations that may be undone announce through it.
+    /// Tell each face that is up of the declaration `declared` names ([`Self::announce_row`]):
+    /// a refusal leaves it stored.
+    // Out of line: one body for every caller of a declaration that is not undone.
     #[inline(never)]
-    pub(super) fn announce_or_undo_at(
-        &mut self,
-        place: usize,
-        send: &dyn SendTo<C>,
-        undo: &dyn TellTo<C>,
-    ) -> bool {
-        self.announce_with(place, OnRefusal::Undo, send, undo)
+    pub(super) fn announce(&mut self, declared: DeclaredRow) {
+        self.announce_row(declared, OnRefusal::Forget, &undo_nothing::<C>);
+    }
+
+    /// [`Self::announce_row`] for a declaration that is not made when a link refuses it, `undo`
+    /// taking it back from the links that took it: whether it was made.
+    pub(super) fn announce_or_undo(&mut self, declared: DeclaredRow, undo: &dyn TellTo<C>) -> bool {
+        self.announce_row(declared, OnRefusal::Undo, undo)
     }
 
     /// The declaration at `index` of `table`'s slot order was removed: retract it with `send`
@@ -502,7 +490,7 @@ fn told<C: ClockSource + 'static>(
     })
 }
 
-/// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
+/// [`Core::announce_row`] over `faces` alone, so a caller can read another part of the session
 /// (a row of the session core's tables) in `send` while the faces are written. One body for every
 /// kind of declaration: `send` and `undo` are handed by reference, not as types of their own.
 ///
