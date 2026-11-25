@@ -6379,7 +6379,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// the putting thread is inside of is called again from inside itself, as pico's is, so a put a
     /// callback makes on its own subscriber's key reaches it at once, at any depth.
     /// The number of subscribers reached.
-    #[cfg(feature = "local-subscriber")]
+    #[cfg(all(
+        feature = "local-subscriber",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     fn publish_to_subscribers(
         &self,
         keyexpr: &str,

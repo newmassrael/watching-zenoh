@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The delivery of a Push read where its frame lies, one subscriber at a time, in a session whose
-//! read steps its one link itself (`direct`).
+//! The delivery of a sample to the session's subscribers one at a time, in a session whose read
+//! steps its one link itself (`direct`): a Push read where its frame lies, and a put of the
+//! session's own.
 //!
 //! The record is read into its sample under the session's lock, and the first subscriber its key
 //! reaches is pinned there: a call begun on its row. The lock is let go of, the sample is handed
@@ -62,21 +63,60 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return;
         };
         let mut fan = PinnedFanOut::new(sample.keyexpr);
-        let mut next = tables(&held.0.session.registry).pin_next_subscriber(&mut fan);
-        drop(held);
+        let reached = self.hand_row_by_row(held, &sample, &mut fan);
         #[cfg(test)]
-        if next.is_some() {
+        if reached > 0 {
             self.takes.pinned_samples.fetch_add(1, Ordering::Relaxed);
             if lent {
                 self.takes.pinned_lent.fetch_add(1, Ordering::Relaxed);
             }
         }
-        // A callback that delivers (a put to the session's own subscribers) leaves what it would
-        // hand out to the delivery after this record, so no callback runs inside another.
+        #[cfg(not(test))]
+        let _ = reached;
+    }
+
+    /// A publish's leg to the session's own subscribers, when its destination admits them: each
+    /// subscriber whose origin admits the session's own messages is handed it here, inside the put
+    /// as zenoh-pico's does (`vendor/zenoh-pico/src/session/subscription.c` @
+    /// `_z_trigger_subscriptions_impl`), one row at a time with the session let go of, so a put a
+    /// callback makes on its own subscriber's key reaches it at once, at any depth. The number of
+    /// subscribers reached.
+    #[cfg(feature = "local-subscriber")]
+    fn publish_to_subscribers(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        if !opts.allowed_destination.allows_local() {
+            return Ok(0);
+        }
+        let Some(held) = self.live() else {
+            return Ok(0);
+        };
+        let sample = opts.loopback_sample(keyexpr, payload);
+        let mut fan = PinnedFanOut::local(keyexpr);
+        Ok(self.hand_row_by_row(held, &SampleRef::of(&sample), &mut fan))
+    }
+
+    /// Hand `sample` to each subscriber `fan` reaches, the first pinned under `held`, one call at
+    /// a time with the session let go of: how many were handed it. A row undeclared by an earlier
+    /// call is passed, and one whose last call this was is let go of with no lock held.
+    fn hand_row_by_row(
+        &self,
+        held: LiveCore<'_, L, C>,
+        sample: &SampleRef<'_>,
+        fan: &mut PinnedFanOut<'_>,
+    ) -> usize {
+        let mut next = tables(&held.0.session.registry).pin_next_subscriber(fan);
+        drop(held);
+        let mut reached = 0;
+        // A read a callback makes reads nothing, so no record is handed out inside another's call.
         self.deliveries.within(|_| {
             while let Some(call) = next.take() {
                 let call = SubscriberCall::new(call);
-                call.hand(&sample);
+                call.hand(sample);
+                reached += 1;
                 if call.end() {
                     self.let_go_of_drained(|tables, cursor| {
                         tables
@@ -84,11 +124,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                             .map(|row| row.into_callback())
                     });
                 }
-                next = self.live().and_then(|held| {
-                    tables(&held.0.session.registry).pin_next_subscriber(&mut fan)
-                });
+                next = self
+                    .live()
+                    .and_then(|held| tables(&held.0.session.registry).pin_next_subscriber(fan));
             }
         });
+        reached
     }
 }
 

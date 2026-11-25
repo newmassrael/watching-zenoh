@@ -1012,7 +1012,10 @@ impl<H: Holders> RegistryOf<H> {
 
     /// Hand `sample`, which the session itself published, to each of its subscribers that hears
     /// the session's own messages: how many.
-    #[cfg(feature = "local-subscriber")]
+    #[cfg(all(
+        feature = "local-subscriber",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(super) fn local_publish(
         &mut self,
         sample: &dyn wz_session_core::sink::SampleView,

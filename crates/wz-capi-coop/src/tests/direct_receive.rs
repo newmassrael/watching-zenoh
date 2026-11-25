@@ -361,6 +361,58 @@ fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
     );
 }
 
+/// A put of the session's own hands each subscriber it reaches the sample with the session free,
+/// one row at a time: a row the first callback undeclared before the put reached it is handed
+/// nothing, and the put counts the first alone. The CONTROL is the first subscriber, handed the
+/// sample. Turned red by a put that begins a call on every row it reaches under one lock before
+/// the first callback runs.
+#[cfg(all(
+    feature = "local-subscriber",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let seen: Arc<Mutex<Vec<(u8, bool)>>> = Arc::default();
+    let later: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    engine
+        .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
+            let (seen, later) = (seen.clone(), later.clone());
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    seen.lock().unwrap().push((1, engine.session_is_free()));
+                    let id = later.lock().unwrap().take();
+                    if let Some(id) = id {
+                        engine.undeclare_subscriber(id);
+                    }
+                }
+            })
+        })
+        .expect("the session declares the first subscriber");
+    let id = engine
+        .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
+            let seen = seen.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                seen.lock().unwrap().push((2, true));
+            })
+        })
+        .expect("the session declares the second subscriber");
+    *later.lock().unwrap() = Some(id);
+    let own = PublishOptions::put().with_locality(Locality::SessionLocal);
+    assert_eq!(
+        engine.publish_on_wire_all("demo/own", &WireKey::literal(), b"v", &own),
+        Ok(1),
+        "the put reached the row undeclared before it got there"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, true)],
+        "the first callback ran with the session held, or the undeclared row was handed the put"
+    );
+}
+
 /// A session whose lease is short, read without a pause while the router streams samples at it
 /// for several of its leases: the read sends the keep-alive the router's lease of it needs on
 /// time, so the session is still the router's peer at the end and its last sample arrives. Turned
