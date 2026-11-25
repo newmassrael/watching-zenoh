@@ -67,6 +67,15 @@ pub fn find_by_eid<E: ExtEntryView>(extensions: &[E], eid: u8) -> Option<&E> {
     extensions.iter().find(|ext| ext.eid() == eid)
 }
 
+/// The last entry of `extensions` whose identity is `eid`: how a reader of a received
+/// handshake chain picks an establishment extension. Upstream's establishment decoders assign
+/// each entry an extension's arm meets, so a repeated extension is read by its last entry
+/// (`commons/zenoh-codec/src/transport/init.rs` @ `ext_auth = Some(a);`), and a `session-slot`
+/// build keeps that entry alone (`crate::ext_chain::RECEIVED_EXT_KINDS`).
+pub fn last_by_eid<E: ExtEntryView>(extensions: &[E], eid: u8) -> Option<&E> {
+    extensions.iter().rev().find(|ext| ext.eid() == eid)
+}
+
 /// A reference to an entry answers as the entry does, so that a reader written over the entries a
 /// chain YIELDS (`impl IntoIterator<Item: ExtEntryView>`) is the same reader for a slice
 /// (`slice.iter()` yields references) and for a chain read where its frame lies (a

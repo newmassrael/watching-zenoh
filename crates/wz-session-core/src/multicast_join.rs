@@ -342,17 +342,17 @@ fn join_chain<'e>(
 /// ([`crate::join_decode::read_join`], under the depth bound a node reads of a
 /// transport chain), walked entry by entry where it lies and never owned, so a
 /// build with no allocator reads it too; each entry is matched by
-/// [`crate::extpatch::patch_of_entry`], the rule [`crate::extpatch::peer_patch`]
-/// applies to an owned Init chain. The Init and Join halves of one wire fact are
-/// read by one rule each way.
+/// [`crate::extpatch::peer_patch_in`], the rule [`crate::extpatch::peer_patch`]
+/// applies to an owned Init chain, so a beacon that carries the patch level twice
+/// announces its last entry's, as upstream's decoder reads it
+/// (`commons/zenoh-codec/src/transport/join.rs` @ `ext_patch = p;`). The Init and
+/// Join halves of one wire fact are read by one rule each way.
 #[cfg(feature = "reassembly")]
 pub fn decode_join_patch(bytes: &[u8]) -> u8 {
     let Some((join, _)) = crate::join_decode::read_join(bytes) else {
         return crate::extpatch::NO_PATCH;
     };
-    crate::ext_view::walked(join.extensions.as_ref())
-        .find_map(|entry| crate::extpatch::patch_of_entry(&entry))
-        .unwrap_or(crate::extpatch::NO_PATCH)
+    crate::extpatch::peer_patch_in(crate::ext_view::walked(join.extensions.as_ref()))
 }
 
 /// R311y227 — the announcer's per-priority next-SN pairs from a JOIN's QoS-SN

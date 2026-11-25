@@ -457,12 +457,11 @@ pub fn encode_shm_zbuf_ext(body: &[u8]) -> Result<ExtEntryOwned, CodecError> {
 
 /// Read the `Shm` ZBuf body out of an ext chain, matching on the full extension
 /// IDENTITY so wz's own UNIT offer at the same id is never mistaken for it.
-/// Which PHASE the body belongs to is decided by which chain was passed in.
+/// Which PHASE the body belongs to is decided by which chain was passed in. A
+/// repeated one is read by its last entry ([`crate::ext_view::last_by_eid`]).
 #[cfg(feature = "session-extshm")]
 pub fn peer_shm_zbuf_body(extensions: &[ExtEntryOwned]) -> Option<&[u8]> {
-    extensions
-        .iter()
-        .find(|e| crate::ext_header::ext_eid(e.header) == SHM_ZBUF_EXT_HEADER)
+    crate::ext_view::last_by_eid(extensions, crate::ext_header::ext_eid(SHM_ZBUF_EXT_HEADER))
         .and_then(|e| match &e.body {
             ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => Some(z.value.as_slice()),
             _ => None,

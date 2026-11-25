@@ -26,18 +26,6 @@ pub enum InboundParseError {
     /// The body codec rejected the wire (truncated, VLE overflow,
     /// etc.).
     Codec(CodecError),
-    /// A received handshake chain repeats an extension a `session-slot`
-    /// build reads, past the one entry per extension such a build holds.
-    ///
-    /// The length of a chain is not refused: a chain is read to the entry
-    /// whose `Z` flag is clear, as zenoh's reader
-    /// (`commons/zenoh-codec/src/transport/init.rs` @ `while has_ext {`) and
-    /// zenoh-pico's (`vendor/zenoh-pico/src/protocol/codec/ext.c` @
-    /// `while (has_next && ret == _Z_RES_OK) {`) both read it, and an entry no
-    /// build reads is judged by its header and not kept. A chain that never
-    /// terminates runs into the end of its frame and is refused as a
-    /// truncated wire ([`Self::Codec`]).
-    ExtChainOverflow,
     /// The header selected a body encoding the wire spec RESERVES, so the
     /// message has no shape to read and no length to skip.
     ///
@@ -123,10 +111,6 @@ impl fmt::Display for InboundParseError {
         match self {
             Self::Empty => write!(f, "inbound frame was empty (no transport header)"),
             Self::Codec(e) => write!(f, "inbound body codec rejected wire: {:?}", e),
-            Self::ExtChainOverflow => write!(
-                f,
-                "inbound handshake ext chain repeats an extension past the one entry held for it"
-            ),
             Self::ReservedEncoding => {
                 write!(f, "inbound header selected a reserved body encoding")
             }

@@ -561,20 +561,104 @@ fn a_refused_entry_past_eight_others_is_judged() {
     assert_eq!(frame.ext_admission(), ExtAdmission::Admissible);
 }
 
-/// A build that keeps one entry for each extension it reads refuses a chain
-/// that repeats one past the entries it holds: the one refusal of a chain that
-/// is not about its wire.
-#[cfg(feature = "session-slot")]
+/// A chain that carries the patch level, or the remote bound, twice (two entries
+/// of id 0x7) is read by its last entry, as upstream's decoders read it: each arm
+/// assigns the entry it meets (`commons/zenoh-codec/src/transport/init.rs` @
+/// `ext_patch = p;`, `commons/zenoh-codec/src/transport/open.rs` @
+/// `ext_remote_bound = Some(q);`), and neither refuses the repetition. Every
+/// build reads it so, the one that keeps the whole chain and the one that keeps
+/// one entry per identity. A last bound that is invalid refuses, as upstream's
+/// receive arm refuses the one value its decoder left.
 #[test]
-fn a_slot_build_refuses_a_chain_repeating_an_extension_it_reads() {
-    let patch = crate::extpatch::encode_patch_ext_at(1).header & !0x80;
-    let mut wire = vec![wire_const::T_MID_KEEP_ALIVE | 0x80];
-    for _ in 0..crate::ext_chain::RECEIVED_EXT_KINDS {
-        wire.extend_from_slice(&[patch | 0x80, 0x01]);
+fn a_repeated_patch_level_or_remote_bound_is_read_by_its_last_entry() {
+    #[cfg(feature = "codec-init-body")]
+    {
+        let patch = crate::extpatch::encode_patch_ext_at(1).header;
+        for (first, last) in [(1u8, 2u8), (2, 1)] {
+            // The InitAck above, its chain two patch levels.
+            let mut wire = UPSTREAM_INIT_ACK[..12].to_vec();
+            wire.extend_from_slice(&[patch | wire_const::FLAG_T_Z, first, patch, last]);
+            assert_init_read_alike(&wire);
+            let Ok(InboundFrame::Init { extensions, .. }) = parse_inbound(&wire) else {
+                panic!("the decoder here reads an InitAck with two patch levels");
+            };
+            assert_eq!(crate::extpatch::peer_patch(&extensions), last);
+        }
     }
-    wire.extend_from_slice(&[patch, 0x01]);
-    assert_eq!(
-        parse_inbound(&wire).err(),
-        Some(InboundParseError::ExtChainOverflow)
-    );
+    #[cfg(feature = "codec-open-body")]
+    {
+        use crate::extbound::{Bound, InvalidBound, REMOTE_BOUND_EXT_HEADER as BOUND};
+        for (first, last, read) in [
+            (2u8, 1u8, Ok(Some(Bound::South))),
+            (1, 2, Err(InvalidBound(2))),
+        ] {
+            // The OpenAck above, its chain two remote bounds.
+            let mut wire = UPSTREAM_OPEN_ACK[..4].to_vec();
+            wire.extend_from_slice(&[BOUND | wire_const::FLAG_T_Z, first, BOUND, last]);
+            assert_open_read_alike(&wire);
+            let Ok(InboundFrame::Open { extensions, .. }) = parse_inbound(&wire) else {
+                panic!("the decoder here reads an OpenAck with two remote bounds");
+            };
+            assert_eq!(crate::extbound::peer_remote_bound(&extensions), read);
+        }
+    }
+}
+
+/// A build that keeps only the entries of the extensions it reads holds one place
+/// per identity its keeper keeps (`RECEIVED_EXT_KINDS`): a chain of every such
+/// identity once fills its places exactly, and the same chain twice over holds
+/// the same identities, each by the entry of the second copy, and is refused for
+/// nothing. The identities are the keeper's own (`reads_received_ext`), read
+/// over every identity a header can carry.
+#[cfg(all(feature = "session-slot", feature = "codec-keep-alive"))]
+#[test]
+fn a_slot_build_holds_the_last_entry_of_each_identity_it_reads_in_one_place() {
+    use crate::ext_chain::{reads_received_ext, RECEIVED_EXT_KINDS};
+    use crate::ext_header::{ext_eid, EXT_ENC_MASK, EXT_ENC_UNIT, EXT_ENC_Z64, EXT_FLAG_Z};
+    use crate::ext_view::ExtEntryView;
+
+    let kept: Vec<u8> = (0..EXT_FLAG_Z)
+        .filter(|&identity| reads_received_ext(identity))
+        .collect();
+    assert_eq!(kept.len(), RECEIVED_EXT_KINDS);
+
+    // One entry of `identity`, whose body says `copy` where its encoding has one.
+    let entry = |identity: u8, copy: u8| -> Vec<u8> {
+        match identity & EXT_ENC_MASK {
+            EXT_ENC_UNIT => vec![identity],
+            EXT_ENC_Z64 => vec![identity, copy],
+            _ => vec![identity, 0x01, copy],
+        }
+    };
+    for copies in [&[1u8][..], &[1, 2][..]] {
+        let entries: Vec<Vec<u8>> = copies
+            .iter()
+            .flat_map(|&copy| kept.iter().map(move |&identity| entry(identity, copy)))
+            .collect();
+        let mut wire = vec![wire_const::T_MID_KEEP_ALIVE | wire_const::FLAG_T_Z];
+        let last = entries.len() - 1;
+        for (at, mut bytes) in entries.into_iter().enumerate() {
+            if at < last {
+                bytes[0] |= EXT_FLAG_Z;
+            }
+            wire.extend(bytes);
+        }
+        assert_keep_alive_read_alike(&wire);
+        let Ok(InboundFrame::KeepAlive { extensions, .. }) = parse_inbound(&wire) else {
+            panic!("the decoder here reads the chain");
+        };
+        let held: Vec<u8> = extensions.iter().map(|held| ext_eid(held.header)).collect();
+        assert_eq!(
+            held, kept,
+            "one place per identity, in the order of its last entry"
+        );
+        let copy = *copies.last().expect("a copy");
+        for held in extensions.iter() {
+            match held.header & EXT_ENC_MASK {
+                EXT_ENC_UNIT => {}
+                EXT_ENC_Z64 => assert_eq!(held.zint(), Some(u64::from(copy))),
+                _ => assert_eq!(held.plain_zbuf(), Some(&[copy][..])),
+            }
+        }
+    }
 }
