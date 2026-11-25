@@ -267,11 +267,62 @@ fn kept_metadata(metadata: &str) -> Result<(), GroupLocatorError> {
     }
 }
 
+/// Whether a datagram a group link read from `from` is one this member sent from `own`, the
+/// address its datagrams leave from: the address, the port and, for IPv6, the scope, as
+/// upstream's link compares the source with the address its send socket is bound to
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `if self.unicast_addr == addr {`). A
+/// link drops such a datagram before its session reads or counts it: it is none of the group's
+/// traffic. An unspecified `own` names no source a datagram has.
+#[inline]
+pub fn sent_by_own(own: SocketAddr, from: SocketAddr) -> bool {
+    match (own, from) {
+        (SocketAddr::V6(own), SocketAddr::V6(from)) => {
+            own.ip() == from.ip() && own.port() == from.port() && own.scope_id() == from.scope_id()
+        }
+        (SocketAddr::V4(own), SocketAddr::V4(from)) => own == from,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::string::String;
     use core::net::{Ipv4Addr, Ipv6Addr};
+
+    /// A source is a member's own when the address, the port and an IPv6 scope are its own; a
+    /// different port, address, scope or family is another member's.
+    #[test]
+    fn a_source_is_the_members_own_only_by_address_port_and_scope() {
+        use core::net::SocketAddrV6;
+        let own = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 40_000));
+        assert!(sent_by_own(own, own));
+        assert!(!sent_by_own(
+            own,
+            SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 40_001))
+        ));
+        assert!(!sent_by_own(
+            own,
+            SocketAddr::from((Ipv4Addr::new(10, 0, 0, 6), 40_000))
+        ));
+        let link_local: Ipv6Addr = "fe80::5".parse().expect("an address");
+        let v6 = |scope| SocketAddr::V6(SocketAddrV6::new(link_local, 40_000, 0, scope));
+        assert!(sent_by_own(v6(2), v6(2)));
+        assert!(
+            !sent_by_own(v6(2), v6(3)),
+            "the same address on another interface"
+        );
+        assert!(
+            sent_by_own(
+                v6(2),
+                SocketAddr::V6(SocketAddrV6::new(link_local, 40_000, 7, 2))
+            ),
+            "the flow label is no part of the source"
+        );
+        assert!(!sent_by_own(own, v6(0)), "another family");
+        let wildcard = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 40_000));
+        assert!(!sent_by_own(wildcard, own), "a wildcard names no source");
+    }
 
     fn udp(endpoint: &str) -> UdpGroup {
         match parse_group_locator(endpoint) {

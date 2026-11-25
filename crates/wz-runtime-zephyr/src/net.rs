@@ -45,6 +45,7 @@ pub use wz_runtime_coop::link_storage::TxStore;
 use wz_runtime_coop::udp_link::Received;
 pub use wz_runtime_coop::udp_link::{DatagramSocket, SERVICE_WAIT_MS, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
+use wz_session_core::group_locator::sent_by_own;
 use zephyr_sys::socket::{
     bind, getsockname, poll, recvfrom, sendto, setsockopt, socket, IpMreqn, PollFd, SockLen,
     Sockaddr, SockaddrIn, SockaddrIn6, SockaddrStorage, AF_INET, AF_INET6, IPPROTO_IP, IPPROTO_UDP,
@@ -1034,18 +1035,52 @@ impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
         let Some(socket) = &self.socket else {
             return false;
         };
-        match socket.try_recv(&mut self.rx) {
-            Ok(Some((len, from))) => {
-                f(&self.rx[..len], from);
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                self.rx_error = Some(e);
-                false
+        let group = self.group;
+        loop {
+            match socket.try_recv(&mut self.rx) {
+                // The board's address is asked only of a datagram from the group's port, the one
+                // this member's own come from.
+                Ok(Some((_, from)))
+                    if from.port() == group.port()
+                        && own_source(board_address(&group), group)
+                            .is_some_and(|own| sent_by_own(own, from)) => {}
+                Ok(Some((len, from))) => {
+                    f(&self.rx[..len], from);
+                    return true;
+                }
+                Ok(None) => return false,
+                Err(e) => {
+                    self.rx_error = Some(e);
+                    return false;
+                }
             }
         }
     }
+}
+
+/// The board's address of `group`'s family now, `None` while it has none or its stack lacks the
+/// family.
+fn board_address(group: &SocketAddr) -> Option<IpAddr> {
+    match group {
+        #[cfg(wz_net_ipv4)]
+        SocketAddr::V4(_) => board_ipv4().map(|octets| IpAddr::V4(Ipv4Addr::from(octets))),
+        #[cfg(not(wz_net_ipv4))]
+        SocketAddr::V4(_) => None,
+        #[cfg(wz_net_ipv6)]
+        SocketAddr::V6(_) => board_ipv6().map(IpAddr::V6),
+        #[cfg(not(wz_net_ipv6))]
+        SocketAddr::V6(_) => None,
+    }
+}
+
+/// The source every datagram this member sends to `group` carries: its one socket is bound to the
+/// group's port, and a datagram leaves from the board's address `board` of the group's family.
+/// What comes back from there is its own, which the receive drops as upstream's link drops what
+/// its send socket sent.
+fn own_source(board: Option<IpAddr>, group: SocketAddr) -> Option<SocketAddr> {
+    board
+        .filter(|ip| ip.is_ipv4() == group.is_ipv4())
+        .map(|ip| SocketAddr::new(ip, group.port()))
 }
 
 impl<const RX: usize> Drop for ZephyrGroupTransport<RX> {
@@ -1060,6 +1095,27 @@ impl<const RX: usize> Drop for ZephyrGroupTransport<RX> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A member's own source is the board's address of the group's family on the group's port;
+    /// a board with none, or with one of the other family only, names none. A member of another
+    /// board on the same port is not this one.
+    #[test]
+    fn a_members_own_source_is_the_boards_address_on_the_groups_port() {
+        let group = SocketAddr::from((Ipv4Addr::new(224, 0, 0, 224), 7446));
+        let board = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5));
+        let own = own_source(Some(board), group).expect("a source");
+        assert_eq!(own, SocketAddr::new(board, 7446));
+        assert!(sent_by_own(own, SocketAddr::new(board, 7446)));
+        assert!(!sent_by_own(
+            own,
+            SocketAddr::from((Ipv4Addr::new(192, 0, 2, 6), 7446))
+        ));
+        assert_eq!(own_source(None, group), None);
+        assert_eq!(
+            own_source(Some(IpAddr::V6(Ipv6Addr::LOCALHOST)), group),
+            None
+        );
+    }
 
     /// Whether a stack of `S` opens IPv6 sockets, through a function so that the assertion is on
     /// its answer and not on a constant.

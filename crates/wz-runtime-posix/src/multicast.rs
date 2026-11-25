@@ -24,6 +24,7 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use wz_runtime_coop::group_transport::{GroupInterface, GroupRx, GroupSend, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
+use wz_session_core::group_locator::sent_by_own;
 use wz_session_core::text_out::AddrText;
 
 use crate::group::MulticastSocket;
@@ -719,13 +720,6 @@ pub fn mark_traffic_class<S: MulticastSocket>(socket: &S, dscp: u32) -> Result<(
     Ok(())
 }
 
-/// Whether a datagram whose source is `from` is one the socket bound at `own` sent: the address and
-/// the port, as zenoh-pico compares them. The scope an IPv6 source carries is not compared, since
-/// one host holds an address on one interface.
-fn sent_from(own: SocketAddr, from: SocketAddr) -> bool {
-    own.port() == from.port() && own.ip() == from.ip()
-}
-
 /// One group joined on the host's sockets: a session's [`GroupTransport`]. The joined socket is
 /// read, the send socket writes, and a datagram is taken only when one is queued.
 pub struct HostGroupTransport<S: MulticastSocket> {
@@ -870,15 +864,11 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
             return false;
         };
         // What the send socket sends comes back on the joined one while the loopback is on, the
-        // system's default. It is none of the group's traffic: the link drops it here, before the
-        // session steps or counts it, as upstream's link does
-        // (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `if self.unicast_addr == addr {`)
-        // and zenoh-pico's. A send socket bound to the wildcard names no source a datagram has, and
-        // drops nothing.
+        // system's default, and is dropped here, as zenoh-pico's link drops it too.
         let own = self.write.as_ref().map(|write| write.local());
         loop {
             match socket.try_recv(self.rx.as_mut_slice()) {
-                Ok(Some((_, from))) if own.is_some_and(|own| sent_from(own, from)) => {}
+                Ok(Some((_, from))) if own.is_some_and(|own| sent_by_own(own, from)) => {}
                 Ok(Some((len, from))) => {
                     f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
                     self.lent = Some((len, from));

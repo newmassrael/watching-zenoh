@@ -778,6 +778,14 @@ impl PosixUdpSocket {
         Self::open(at, true)
     }
 
+    /// The address a datagram this socket sends to `to` leaves from, learned by connecting the
+    /// socket to `to`: the kernel picks the source then, as it would for each send, under the
+    /// socket's multicast interface.
+    pub fn source_toward(&self, to: SocketAddr) -> Result<SocketAddr, PosixNetError> {
+        call_at(self.fd, to, libc::connect).map_err(PosixNetError::Connect)?;
+        name_of(self.fd, libc::getsockname).map_err(PosixNetError::SockName)
+    }
+
     /// Join `group` on `interface`: an IPv4 group through `IP_ADD_MEMBERSHIP` on the interface
     /// that holds an address, an IPv6 one through `IPV6_JOIN_GROUP` (MLD) on the interface of an
     /// index, either on the one the kernel's routing picks for [`GroupInterface::Routing`]. An

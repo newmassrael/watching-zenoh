@@ -28,6 +28,7 @@ use core::net::{IpAddr, SocketAddr};
 use core::ffi::c_int;
 use wz_runtime_coop::group_transport::{GroupInterface, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket, SERVICE_WAIT_MS};
+use wz_session_core::group_locator::sent_by_own;
 
 #[cfg(unix)]
 use crate::net::{PosixNetError, PosixUdpSocket};
@@ -49,6 +50,11 @@ pub trait MulticastSocket: DatagramSocket {
 
     /// The hop limit of the multicast datagrams this socket sends, in the option of its family.
     fn set_multicast_hops(&self, hops: u8) -> Result<(), Self::Error>;
+
+    /// The address a datagram this socket sends to `to` leaves from, as the system's routing
+    /// picks it under the socket's multicast interface: the socket is connected to `to` to learn
+    /// it, so it is asked of a socket that sends nothing after.
+    fn source_toward(&self, to: SocketAddr) -> Result<SocketAddr, Self::Error>;
 
     /// The error of an interface named in the other family than the group's, which is answered
     /// before any socket is opened.
@@ -122,15 +128,24 @@ fn wildcard(group: &SocketAddr, port: u16) -> SocketAddr {
     SocketAddr::new(unspecified_like(group.ip()), port)
 }
 
-/// The sender of a group: a socket of its family on a port the system picks, sending out of
-/// `interface`, with the hop limit `hops` when one is stated and the system's own otherwise (no
-/// option is set then).
+/// The sender of a group: a socket on a port the system picks, bound to the unicast address its
+/// datagrams leave `interface` from, as upstream's link binds its send socket
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `let ucast_sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))`),
+/// so the source of every datagram it sends is one the receiver can tell as its own. It sends with
+/// the hop limit `hops` when one is stated and the system's own otherwise (no option is set then).
+/// A routing that names no source for the group sends nothing either, and the sender then binds
+/// the wildcard.
 fn sender<S: MulticastSocket>(
     group: &SocketAddr,
     interface: GroupInterface,
     hops: Option<u8>,
 ) -> Result<S, S::Error> {
-    let egress = S::bind(wildcard(group, 0))?;
+    let probe = S::bind(wildcard(group, 0))?;
+    probe.set_multicast_interface(interface)?;
+    let mut local = probe.source_toward(*group).unwrap_or(wildcard(group, 0));
+    drop(probe);
+    local.set_port(0);
+    let egress = S::bind(local)?;
     egress.set_multicast_interface(interface)?;
     if let Some(hops) = hops {
         egress.set_multicast_hops(hops)?;
@@ -249,6 +264,10 @@ impl MulticastSocket for PosixUdpSocket {
         PosixUdpSocket::set_multicast_hops(self, hops)
     }
 
+    fn source_toward(&self, to: SocketAddr) -> Result<SocketAddr, PosixNetError> {
+        PosixUdpSocket::source_toward(self, to)
+    }
+
     fn interface_family() -> PosixNetError {
         PosixNetError::InterfaceFamily
     }
@@ -333,15 +352,21 @@ impl<S: MulticastSocket, const RX: usize> GroupTransport for GroupSockets<S, RX>
         let Some(socket) = &self.ingress else {
             return false;
         };
-        match socket.try_recv(&mut self.rx) {
-            Ok(Some((len, from))) => {
-                f(&self.rx[..len], from);
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                self.rx_error = Some(e);
-                false
+        // What the sender sends comes back on the receiver while the loopback is on, and is
+        // dropped here.
+        let own = self.egress.as_ref().map(DatagramSocket::local);
+        loop {
+            match socket.try_recv(&mut self.rx) {
+                Ok(Some((_, from))) if own.is_some_and(|own| sent_by_own(own, from)) => {}
+                Ok(Some((len, from))) => {
+                    f(&self.rx[..len], from);
+                    return true;
+                }
+                Ok(None) => return false,
+                Err(e) => {
+                    self.rx_error = Some(e);
+                    return false;
+                }
             }
         }
     }
@@ -496,6 +521,51 @@ mod tests {
             get_int(other.fd(), libc::IPPROTO_IP, libc::IP_MULTICAST_TTL),
             1
         );
+    }
+
+    /// A sender binds the address its datagrams leave from, which the routing names on a socket
+    /// connected toward the group: the loopback address for a destination on the loopback. A
+    /// wildcard sender would name no source its datagrams carry.
+    #[test]
+    fn the_sender_binds_the_source_its_datagrams_leave_from() {
+        let toward = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
+        let egress =
+            sender::<PosixUdpSocket>(&toward, GroupInterface::Routing, None).expect("a sender");
+        assert_eq!(egress.local().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_ne!(egress.local().port(), 0);
+    }
+
+    /// What the group's own sender sends comes back on its receiver while the loopback is on, and
+    /// a receive drops it and reads on to a member's datagram in the same call. The CONTROL is the
+    /// member's datagram, taken with its source.
+    #[test]
+    fn a_group_drops_what_its_own_sender_sent() {
+        let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let ingress = PosixUdpSocket::bind(loopback).expect("a receiver");
+        let egress = PosixUdpSocket::bind(loopback).expect("a sender");
+        let member = PosixUdpSocket::bind(loopback).expect("a member's socket");
+        let group = ingress.local();
+        let mut transport = PosixGroupTransport::<64> {
+            ingress: Some(ingress),
+            egress: Some(egress),
+            group,
+            rx: [0; 64],
+            rx_error: None,
+        };
+        transport.send_to_group(b"own");
+        member.send_to(group, b"member").expect("sent");
+        let mut seen = None;
+        for _ in 0..100_000 {
+            if transport.recv_with(&mut |bytes, src| seen = Some((bytes.to_vec(), src))) {
+                break;
+            }
+        }
+        assert_eq!(
+            seen,
+            Some((b"member".to_vec(), member.local())),
+            "the member's datagram, past the one its own sender sent"
+        );
+        assert!(!transport.recv_with(&mut |_, _| panic!("its own datagram was dropped")));
     }
 
     #[test]
