@@ -843,6 +843,16 @@ mod tests {
         source_info: Option<ExtEntryView<'f>>,
     }
 
+    /// The entries of a body's chain other than the shared-memory marker, walked from the frame
+    /// they lie in, for as long as the frame. A function of its own because the trait's method,
+    /// handed to `Option::map` by path, is asked for every borrow of the list at once, which holds
+    /// the list to outlive all of them and the frame with it.
+    fn entries_of<'f>(
+        rest: &Without<ListView<'f, ExtEntryWalk, 0>>,
+    ) -> impl Iterator<Item = ExtEntryView<'f>> {
+        sce_forge_runtime::codec::Entries::entries(rest)
+    }
+
     impl<'f> DeliveryExts<'f> {
         /// What the reader kept in `exts` as it decoded each entry.
         fn kept(exts: &PushExts<'f>) -> Self {
@@ -899,11 +909,7 @@ mod tests {
                             extensions.as_ref().map(|chain| chain.inner())
                         }
                     };
-                    let body = || {
-                        crate::ext_view::walked_from(
-                            chain.map(sce_forge_runtime::codec::Entries::entries),
-                        )
-                    };
+                    let body = || crate::ext_view::walked_from(chain.map(entries_of));
                     (
                         last_by_eid_in(body(), body_eid::PUT_ATTACHMENT),
                         last_by_eid_in(body(), body_eid::SOURCE_INFO),
