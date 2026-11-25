@@ -165,11 +165,11 @@ core = ["rx-busy-poll", "open-plan"]
 # allocator), which the crate's default names first. It is not a capability: no plane comes or
 # goes with it, every host engine selects it, and only a Zephyr image builds the layer without it
 # (`os-zephyr`), from a manifest of its own.
-# `engine-tokio`: the engine a pico build runs its sessions on (docs/capi-pico-on-coop-engine.md),
-# with the two switches of its drive. A configuration that chooses the cooperative engine on the
-# global axis `engine` (below) is resolved from the same list with every feature that selects the
-# tokio engine left out and `engine-coop` named (`wz_config.py` `engine_features`).
-pico = ["std", "engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
+# `engine-coop`: the engine a pico build runs its sessions on (docs/c-abi-engine-and-memory.md, E1
+# and P1). A configuration that chooses the tokio engine on the global axis `engine` (below) is
+# resolved from the same list with `engine-coop` replaced by that option's `features`, the engine
+# and the two switches of its drive (`wz_config.py` `engine_features`).
+pico = ["std", "engine-coop"]
 c = []
 
 # The operating-system facilities every HOST build asks for whatever its capabilities
@@ -1114,6 +1114,9 @@ os_needs = []
 upstream_on = ["zenoh", "zenoh-c"]
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico", "c"]
+# Off in the pico preset (decision Q7 of docs/c-abi-engine-and-memory.md): zenoh-pico has no such
+# plane, and the pico ABI runs it on the tokio engine alone until the cooperative engine starts it.
+default_off_abis = ["pico"]
 implies = ["peer"]
 help = "A session told of a node by one it holds a link to dials it."
 
@@ -1473,6 +1476,24 @@ abis = ["core", "pico"]
 implies = ["unstable-api", "message-catalog"]
 help = "The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (wz_ext_payload_schema_*, wz_ext_message_payload_*, wz-own doors)."
 
+# The doors that read a payload's schema from the `.proto` text a program hands over when it runs,
+# beside the message payloads and the instance keys, over wz-app-frame's text reader (its tokenizer,
+# parser and linker). Without it those doors read a schema only from the FileDescriptorSet protoc
+# compiled the files into when the program was built, and no text reader is linked. Off by default
+# and off in the release package: neither zenoh-pico nor zenoh-c has such doors, and a device
+# program compiles its schema. A build that reads the text a person hands over turns it on. The
+# pico ABI's doors are wz_ext_* and part of its unstable surface; it turns neither capability whose
+# doors it adds on.
+[[capability]]
+id = "proto-text"
+kconfig = "WZ_CAP_PROTO_TEXT"
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "The message payload and instance key doors that read a schema from .proto text at run time (wz_ext_payload_schema_new, wz_ext_instance_keyer_new, wz-own doors); without it a schema is read only from the FileDescriptorSet protoc compiled."
+
 [[capability]]
 id = "app-transport"
 kconfig = "WZ_CAP_APP_TRANSPORT"
@@ -1622,6 +1643,20 @@ upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["config-policy"]
 help = "wz_ext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own)."
+
+[[capability]]
+id = "device-requires"
+kconfig = "WZ_CAP_DEVICE_REQUIRES"
+# On in a build that names nothing, which has had the door beside the unstable API, and off in the
+# zenoh-pico preset, as wz's other doors are. The door is part of the unstable surface, so it
+# implies unstable-api; unstable-api alone is pico's own unstable API and carries no door of wz's,
+# so a build that asks for pico's unstable API does not pay for this one. The host-peer-ext preset
+# turns it on with the other wz doors.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "wz_ext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own)."
 
 [[capability]]
 id = "transport_compression"
@@ -2738,6 +2773,31 @@ value = 2
 reason = "zenoh-pico bounds its sessions by no count; each of its examples opens one, and its API tests hold two at once, the two ends of what they check (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `assert_ok(z_open(&s2, z_config_move(&c2), NULL));`). Every entity pool is sized for these sessions, so the preset holds the entities of two."
 
 [[limit]]
+id = "CALLBACK_THREADS"
+kconfig = "WZ_LIMIT_CALLBACK_THREADS"
+kind = "bound"
+driven = "local"
+default = 8
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+How many threads may be inside the program's callbacks at once in a pico C
+ABI library built without std and with threads: the entries of the table
+that marks each such thread, since the library has no thread-local storage.
+A thread delivers as a session's read task, or as a program thread whose
+call delivers in place. A callback a thread past it would run is not run
+and is counted (wz_ext_callbacks_refused). The single-threaded arm holds
+one entry whatever this says, as one thread calls the library at a time.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the threads inside callbacks at once, and zenoh-pico keeps no record of them. Eight is the read task of each of the HELD_SESSIONS default four sessions, the threads that deliver on their own, and one program thread beside each that delivers in place (a put to its own subscriber, a get of its own queryable)."
+
+[[limit]]
 id = "HELD_SAMPLES"
 kconfig = "WZ_LIMIT_HELD_SAMPLES"
 kind = "bound"
@@ -2895,37 +2955,138 @@ value = 1
 reason = "zenoh-pico bounds its kept hellos by no count; none of its examples or API tests clones a hello, its scout reading each where the callback lends it (`vendor/zenoh-pico/examples/unix/c11/z_scout.c` @ `void callback(z_loaned_hello_t *hello, void *context) {`). One keeps z_hello_clone answering for a program that keeps the hello it found."
 
 [[limit]]
-id = "HELD_PAYLOAD_BYTES"
-kconfig = "WZ_LIMIT_HELD_PAYLOAD_BYTES"
-kind = "bound"
-driven = "local"
-default = 131072
+id = "PAYLOAD_SMALL_BLOCK_BYTES"
+kconfig = "WZ_LIMIT_PAYLOAD_SMALL_BLOCK_BYTES"
+kind = "parameter"
+range = [32, 1073741824]
+default = 64
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The bytes the owned payloads, strings and slices a program of the pico C ABI
-holds carry at once, and the keys and parameters of the queries it keeps
-past their callbacks: the payloads' area the library reserves at its first
-object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
-smallest that holds its bytes and a 16-byte head. A payload no free block
-holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
+The bytes of each block of the smallest of the three pools of payload blocks a
+program of the pico C ABI holds the bytes of its owned payloads, strings and
+slices in, and the keys and parameters of the queries it keeps, a 16-byte head
+of each block included and rounded up to 16. A payload takes a block of the
+smallest of the three pools whose blocks hold it and its head and that has one
+free. At least 32.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap with no constant; 131,072 is a block of 4,096 bytes, the size of PICO_FRAG_MAX_BYTES's default, for each of HELD_PAYLOADS's thirty-two payloads."
+reason = "No key of upstream's configuration sizes the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap at its own length. Sixty-four bytes hold a 16-byte head and 48 bytes: the default payloads of zenoh-pico's latency and throughput examples (`vendor/zenoh-pico/examples/unix/c11/z_ping.c` @ `#define DEFAULT_PKT_SIZE 8`), and the key texts and parameters of the queries its examples keep, each a few tens of bytes."
+
+[[limit]]
+id = "PAYLOAD_MEDIUM_BLOCK_BYTES"
+kconfig = "WZ_LIMIT_PAYLOAD_MEDIUM_BLOCK_BYTES"
+kind = "parameter"
+range = [32, 1073741824]
+default = 1040
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes of each block of the middle one of the three pools of payload blocks
+a program of the pico C ABI holds the bytes of its owned payloads, strings and
+slices in, a 16-byte head of each block included and rounded up to 16. The
+largest pool's blocks are not stated: each holds the largest message a session
+of the build delivers (the larger of PICO_FRAG_MAX_BYTES,
+PICO_UNICAST_BATCH_BYTES and PICO_MULTICAST_BATCH_BYTES) and its head, so a
+payload a session hands a program always has a block that holds it. At least
+32.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration sizes the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap at its own length. 1,040 bytes hold a 16-byte head and a payload of 1,024 bytes, MAX_REPLY_PAYLOAD_BYTES's default, so a reply's payload a program keeps takes one of these blocks and no block of the largest."
+
+[[limit]]
+id = "HELD_SMALL_PAYLOAD_BLOCKS"
+kconfig = "WZ_LIMIT_HELD_SMALL_PAYLOAD_BLOCKS"
+kind = "bound"
+driven = "local"
+default = 256
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The blocks of PAYLOAD_SMALL_BLOCK_BYTES bytes a program of the pico C ABI
+holds payload bytes in at once: the smallest of the three pools of payload
+blocks the library reserves at its first object. A payload whose bytes no free
+block of a pool that holds them takes is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. 256 blocks of 64 bytes are 16 KiB, an eighth of the 128 KiB the three pools of the default hold together: eight short payloads, strings or kept query texts for each of HELD_PAYLOADS's thirty-two payloads."
 
 [limit.pico_preset]
-value = 32768
-reason = "zenoh-pico bounds its payloads' bytes by no count. The largest payload a program or test of the preset builds is twice its FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`), the one the fragmentation test puts past the receiving ceiling (`crates/wz-capi-pico/tests/it/files/fragmentation_roundtrip.rs` @ `const TOO_BIG: usize = 2 * CEILING;`): 8,192 bytes and a 16-byte head take a block of 16,384. The other half holds what the held samples, replies, queries and strings of its examples carry, each a few tens of bytes. A program that builds a payload larger than a block of the area is refused where zenoh-pico would allocate it, as zenoh-pico is on a heap that small."
+value = 128
+reason = "zenoh-pico bounds its payloads by no count. 128 blocks of 64 bytes are 8 KiB, a quarter of the 32 KiB the three pools of the preset hold together: the held samples, replies and queries of its examples (HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES) and their key texts carry a few tens of bytes each."
 
-# The pico preset is counted from zenoh-pico's own tests and examples: at most one encoding with a
-# schema is alive at once in any of them (z_api_encoding_test.c, z_api_alignment_test.c,
-# z_pub_attachment.c, z_get_attachment.c, z_queryable_attachment.c); the clones z_api_admin_space_test.c
-# keeps carry no schema. A declared publisher's is the second.
+[[limit]]
+id = "HELD_MEDIUM_PAYLOAD_BLOCKS"
+kconfig = "WZ_LIMIT_HELD_MEDIUM_PAYLOAD_BLOCKS"
+kind = "bound"
+driven = "local"
+default = 32
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The blocks of PAYLOAD_MEDIUM_BLOCK_BYTES bytes a program of the pico C ABI
+holds payload bytes in at once: the middle one of the three pools of payload
+blocks the library reserves at its first object. A payload whose bytes no free
+block of a pool that holds them takes is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Thirty-two blocks are one for each of HELD_PAYLOADS's thirty-two payloads, about a quarter of the 128 KiB the three pools of the default hold together."
+
+[limit.pico_preset]
+value = 8
+reason = "zenoh-pico bounds its payloads by no count. Eight blocks of 1,040 bytes are 8 KiB, a quarter of the 32 KiB the three pools of the preset hold together: the three payloads its examples hold at once (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), the encodings they keep and the samples they take out of a channel."
+
+[[limit]]
+id = "HELD_LARGE_PAYLOAD_BLOCKS"
+kconfig = "WZ_LIMIT_HELD_LARGE_PAYLOAD_BLOCKS"
+kind = "bound"
+driven = "local"
+default = 20
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The blocks a program of the pico C ABI holds its largest payloads in at once:
+the largest of the three pools of payload blocks the library reserves at its
+first object, each block holding the largest message a session of the build
+delivers (the larger of PICO_FRAG_MAX_BYTES, PICO_UNICAST_BATCH_BYTES and
+PICO_MULTICAST_BATCH_BYTES) and a 16-byte head. A payload larger than such a
+block, or one no free block of a pool that holds it takes, is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Twenty blocks of the default's 4,112 bytes (PICO_FRAG_MAX_BYTES's 4,096 and the head) are about 80 KiB, which with the two smaller pools makes the 128 KiB the default held for its payloads before the pools of blocks, a whole message for each of HELD_SAMPLES's eighteen samples and two more."
+
+[limit.pico_preset]
+value = 4
+reason = "zenoh-pico bounds its payloads by no count; the largest it holds is a whole message of FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`). Four blocks of 4,112 bytes are 16 KiB, half of the 32 KiB the three pools of the preset hold together, as the half the preset held for one such payload before the pools of blocks."
+
 [[limit]]
 id = "HELD_ENCODINGS"
 kconfig = "WZ_LIMIT_HELD_ENCODINGS"
@@ -3475,8 +3636,10 @@ help = '''
 The most timers a runtime holds: a ceiling on the timer table a
 fixed-memory image declares, checked as the task ceiling is, and the entries
 of the timer table a session of the C ABI's cooperative engine reserves when
-it opens. A sleep past them is refused an entry and counted, and ends by
-polling.
+it opens in a build with a feature whose task sleeps on the session's runtime.
+A session keeps its own deadlines, and no feature of that engine spawns a task
+that sleeps, so its sessions reserve no entry. A sleep past them is refused an
+entry and counted, and ends by polling.
 '''
 
 [limit.upstream]
@@ -3722,6 +3885,34 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the length of an endpoint, and zenoh-pico keeps an endpoint's text on the heap with no constant; wz bounds it to size the row a group member's link is reported in."
 
 [[limit]]
+id = "MAX_RAWETH_ENDPOINT_LEN"
+kconfig = "WZ_LIMIT_MAX_RAWETH_ENDPOINT_LEN"
+kind = "bound"
+driven = "local"
+default = 160
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The longest raweth group endpoint, in bytes, a session joins by, its
+interface, ethertype, mapping table and whitelist included (for example
+reth/30:03:8c:c8:00:a2#iface=lo;mapping=a#aa:bb:cc:dd:ee:01#). A longer
+one is refused when the group is joined, never cut short. Apart from
+MAX_GROUP_ENDPOINT_LEN because a raweth endpoint carries a table: the
+rows of its mapping, the length of a mapping key, the addresses of its
+whitelist and its interface name are each sized from this value, so a
+table that fits the endpoint fits its rows. Read only by a build with the
+raweth transport. The default holds an endpoint that states all four keys
+with two mapping entries and one whitelisted address (141 bytes).
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "zenoh-pico reads a raweth endpoint's four keys (`vendor/zenoh-pico/src/transport/raweth/link.c` @ `#define RAWETH_CONFIG_ARGC 4`) off text it keeps on the heap with no bound on its length, and its own raweth test joins by an endpoint of 60 bytes (`vendor/zenoh-pico/tests/raweth.py` @ `whitelist=30:03:8c:c8:00:a1,`); wz bounds the endpoint to size the mapping, whitelist and interface rows of a raweth group."
+
+[[limit]]
 id = "MAX_GROUP_MEMBERS"
 kconfig = "WZ_LIMIT_MAX_GROUP_MEMBERS"
 kind = "bound"
@@ -3743,6 +3934,34 @@ held, and is heard again once a member is lost.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the rows of a group's members: its multicast transport keeps each peer on the heap, and the count a profile states for a group's sessions is a quota within these rows, not their capacity; the default is the member table the cooperative engine's group session already held."
+
+[[limit]]
+id = "MAX_MEMBER_KEYEXPRS"
+kconfig = "WZ_LIMIT_MAX_MEMBER_KEYEXPRS"
+kind = "bound"
+driven = "remote"
+default = 16
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# dropped.
+wire = "none"
+help = '''
+The key expressions one member of a multicast group may have declared to
+this session at a time, to name them by a short id of its own. Each member
+holds its own, and they are let go of when it leaves. One more is refused
+and counted, and a message that names it is dropped, as one naming an
+undeclared id is. The group's face reserves this many aliases for each of
+its MAX_GROUP_MEMBERS members when the session opens. The default is
+MAX_PEER_KEYEXPR_ALIASES, one peer's.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh holds the key ids a peer declared in a map of its face that grows with each declaration, and zenoh-pico keeps the resources each member of a group declared in a list of that peer with no count, dropped with the peer (`vendor/zenoh-pico/src/transport/peer.c` @ `_z_resource_slist_free(&src->_remote_resources);`)."
+cite = ["`zenoh/src/net/routing/dispatcher/face.rs` @ `pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,`"]
 
 [[limit]]
 id = "MAX_CONNECTIVITY_REPLAY_EVENTS"
@@ -4660,9 +4879,10 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
-# Read from the build: the keyer is no entity of a session. `wz_ext_instance_keyer_new` and the
-# catalog read a description with no session, and a program makes a keyer before it opens one; no
-# SessionLimits is in reach.
+# Read from the build: the keyer is no entity of a session. The doors that make a keyer
+# (`wz_ext_instance_keyer_from_descriptor_set`, `wz_ext_instance_keyer_new`) and the catalog read a
+# description with no session, and a program makes a keyer before it opens one; no SessionLimits is
+# in reach.
 read = "build"
 wire = "none"
 help = '''
@@ -4690,9 +4910,10 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
-# Read from the build: the keyer is no entity of a session. `wz_ext_instance_keyer_new` and the
-# catalog read a description with no session, and a program makes a keyer before it opens one; no
-# SessionLimits is in reach.
+# Read from the build: the keyer is no entity of a session. The doors that make a keyer
+# (`wz_ext_instance_keyer_from_descriptor_set`, `wz_ext_instance_keyer_new`) and the catalog read a
+# description with no session, and a program makes a keyer before it opens one; no SessionLimits is
+# in reach.
 read = "build"
 wire = "none"
 help = '''
@@ -5542,6 +5763,7 @@ id = "sn-resolution"
 kind = "choice"
 kconfig = "WZ_POLICY_SN_RESOLUTION"
 choices = ["bits-32", "bits-8", "bits-16", "bits-64"]
+wire_codes = { bits-32 = 2, bits-8 = 0, bits-16 = 1, bits-64 = 3 }
 default = "bits-32"
 upstream = "Advertises the 32-bit sequence-number resolution in its InitSyn and in the Join of a group unless its configuration states another: zenoh reads `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and zenoh-pico builds in `Z_SN_RESOLUTION 0x02` with no setting for another."
 scope = "session"
@@ -6190,11 +6412,12 @@ by default.
 id = "engine"
 kconfig = "WZ_ENGINE"
 prompt = "The engine a pico ABI build runs its sessions on"
-default = "tokio"
+default = "coop"
 help = '''
-The tokio engine runs every capability of the pico ABI; the cooperative engine is the one
-sans-I/O engine the C ABI presets move to, and runs every capability but those of the tokio
-engine's own drive (its drive thread, its busy read) and the planes not yet ported to it.
+The cooperative engine is the one sans-I/O engine the C ABI presets run on, and the base of the
+pico ABI names it; it runs every capability but those of the tokio engine's own drive (its drive
+thread, its busy read) and the planes not yet ported to it. The tokio engine runs those until
+it leaves the C library (phase P5).
 '''
 
 [[axis_option]]
@@ -6202,9 +6425,11 @@ id = "tokio"
 axis = "engine"
 kconfig = "WZ_ENGINE_TOKIO"
 prompt = "The tokio engine: each session on a runtime of its own"
+# What the base's `engine-coop` is replaced by in a build that chooses this option.
+features = ["engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
 help = '''
 `engine-tokio` with the two switches of its drive (`serial-drive-own-thread`, `rx-busy-poll`),
-as the base of the pico ABI names them.
+named in the place of the base's `engine-coop`.
 '''
 
 [[axis_option]]
@@ -6215,9 +6440,8 @@ prompt = "The cooperative engine: each session stepped by the program or its rea
 help = '''
 `engine-coop`: a session is stepped by the program's own calls (zp_read, zp_spin_once) in
 zenoh-pico's single-threaded arm, and by the read task the program starts in its multi-threaded
-arm, as zenoh-pico's are. The base's tokio switches are left out of the build; a configuration
-that also turns on a capability only the tokio engine runs is refused when it is resolved, by the
-capability's name.
+arm, as zenoh-pico's are. It is the base's engine; a configuration that also turns on a
+capability only the tokio engine runs is refused when it is resolved, by the capability's name.
 '''
 
 [[image]]

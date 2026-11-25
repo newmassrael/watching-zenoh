@@ -422,7 +422,7 @@ impl E2eJudging {
             (None, None) => return None,
         };
         let profile = self.rules.segment_for(covering)?;
-        let piece = profile.recognise(sample.payload)?;
+        let piece = crate::segment_profile::recognise(profile, sample.payload)?;
         let verdict = self.pieces.receive(
             profile,
             &piece,

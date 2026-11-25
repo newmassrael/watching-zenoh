@@ -455,7 +455,7 @@ fn issue_history_query<R, T>(
     pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     sample_depth: Option<usize>,
-    max_age: Option<f64>,
+    max_age: Option<core::time::Duration>,
     dest: Locality,
     timeout_ms: u32,
 ) where
@@ -521,7 +521,7 @@ fn issue_late_publisher_query<R, T>(
     zid: Vec<u8>,
     eid: u32,
     sample_depth: Option<usize>,
-    max_age: Option<f64>,
+    max_age: Option<core::time::Duration>,
     dest: Locality,
     timeout_ms: u32,
 ) where
@@ -594,7 +594,7 @@ fn issue_timestamped_late_publisher_query<R, T>(
     token_keyexpr: &str,
     zid: Vec<u8>,
     sample_depth: Option<usize>,
-    max_age: Option<f64>,
+    max_age: Option<core::time::Duration>,
     dest: Locality,
     timeout_ms: u32,
 ) where
@@ -656,7 +656,7 @@ fn issue_unidentified_late_publisher_query<R, T>(
     base_keyexpr: &str,
     token_keyexpr: &str,
     sample_depth: Option<usize>,
-    max_age: Option<f64>,
+    max_age: Option<core::time::Duration>,
     dest: Locality,
     timeout_ms: u32,
 ) where
@@ -713,7 +713,7 @@ fn on_late_publisher_detected<R, T>(
     sample_kind: LivelinessSampleKind,
     sample_keyexpr: &str,
     sample_depth: Option<usize>,
-    max_age: Option<f64>,
+    max_age: Option<core::time::Duration>,
     dest: Locality,
     timeout_ms: u32,
 ) where
@@ -1710,7 +1710,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                     knob: "max_samples",
                 });
             }
-            if history.max_age == Some(0.0) {
+            if history.max_age == Some(core::time::Duration::ZERO) {
                 return Err(AdvancedSubscribeError::HistoryBoundZero { knob: "max_age" });
             }
         }

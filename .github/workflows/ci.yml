@@ -5528,6 +5528,11 @@ jobs:
       # `feature-gates-peel` now; C1bm, the pico half, stays.)
       - name: Layer C1bm — pico unixpipe/quic --listen admit (R311y413)
         run: bash scripts/run-ci.sh --layer C1bm
+      # wz-capi-pico's default build is the cooperative engine, which Layer C1's workspace graph
+      # cannot hold beside the tokio runtime (nostd_workspace_members.py derives it out): its tests
+      # and clippy run here, on the default build and on the tokio engine's until phase P5.
+      - name: Layer C1pc — wz-capi-pico on each engine
+        run: bash scripts/run-ci.sh --layer C1pc
 
       # R311y454 — Layer C1bd (`locator-iface`, the `#iface=` HONOR) belongs in this
       # job's genre: an off-default feature subset no other job composes. It had the

@@ -58,6 +58,7 @@ use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_slot::{SlotClaim, SlotRef, SlotSink};
 
 use crate::runtime_impl::CoopRuntime;
+use crate::sync::LockKind;
 use crate::time::{ClockSource, CoopTime};
 
 /// What [`SessionRuntime::Shared`] is on the slot profile: a pointer that cannot
@@ -96,13 +97,17 @@ impl<U> core::ops::Deref for NoShared<U> {
 // The slot profile has no pointer to share a value behind (its `Shared` has no value): the
 // bundle owns its kernel and its link, so the profile shares nothing and does not implement this.
 #[cfg(not(feature = "session-slot"))]
-impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> ShareValues for CoopRuntime<C, D> {
+impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> ShareValues
+    for CoopRuntime<C, D, K>
+{
     fn share<U>(value: U) -> Self::Shared<U> {
         crate::link_cells::CellRc::boxed(value)
     }
 }
 
-impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for CoopRuntime<C, D> {
+impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> SessionRuntime
+    for CoopRuntime<C, D, K>
+{
     // The driver is the runtime's own `D`: the trait object for the profile that picks its link at
     // run time (the default), the driver's own type where the build names it, which makes every
     // call the session makes through the link a direct one.
@@ -141,6 +146,31 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     // the kernel carries this as an associated type rather than as something it
     // could name itself.
     type IterationWork = ();
+
+    // The session's holders are one task at a time: its handles are not `Send`, and an engine
+    // that hands a session to another thread does so behind a lock of its own. So what they write
+    // without a lock is a cell (no atomic instruction, and none of 64 bits that an ARMv6-M or a
+    // Cortex-M7 lacks), and what they reach one at a time needs no lock either.
+    type Flag = core::cell::Cell<bool>;
+    type Word = core::cell::Cell<u64>;
+    type Local<T>
+        = core::cell::RefCell<T>
+    where
+        T: Send + 'static;
+
+    fn new_local<T>(value: T) -> Self::Local<T>
+    where
+        T: Send + 'static,
+    {
+        core::cell::RefCell::new(value)
+    }
+
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static,
+    {
+        f(&mut *local.borrow_mut())
+    }
 
     // R311ja — the MCU action handle is counted without atomics, not an `Arc`:
     // the single-task sync drive loop shares the bundle only with its own FSM
@@ -184,9 +214,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
 /// The handle to a session, as this profile holds it: a counted handle on the bundle, or
 /// under `session-slot` a counted reference to the slot that holds it. The type
 /// the drive loop, the FSM's action binding and the application layer each take,
-/// written once so the two spellings are one name.
-pub type SessionHandle<C, D = dyn BoxedLinkDriver> =
-    <CoopRuntime<C, D> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
+/// written once so the two spellings are one name. `K` is how the runtime locks what it lends the
+/// session ([`LockKind`]).
+pub type SessionHandle<C, D = dyn BoxedLinkDriver, K = crate::sync::Shared> =
+    <CoopRuntime<C, D, K> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
 
 /// The session's one entropy source, as this profile's [`SessionRuntime::EntropyDraw`]: a counted
 /// handle on it, cloned to each of the session's links, whose bindings draw every InitAck's cookie
@@ -364,7 +395,7 @@ mod cookie_nonce_draw_tests {
         SessionInitParams {
             whatami: wz_session_core::WhatAmI::Peer,
             zid: [0x0A, 0x0B, 0x0C, 0x0D].into(),
-            seq_num_res: 2,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size: 1024,
             lease_ms: 10_000,
@@ -378,7 +409,10 @@ mod cookie_nonce_draw_tests {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
             limits: wz_session_core::limits::SessionLimits::BUILD,
-            cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+            cookie_signing_key: SigningKey::new(vec![7u8; 32])
+                .expect(">=32-byte key")
+                .into(),
+            region: None,
         }
     }
 

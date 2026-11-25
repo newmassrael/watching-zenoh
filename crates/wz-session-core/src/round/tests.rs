@@ -51,9 +51,9 @@ impl RoundCall for Call {
 }
 
 impl SampleCall for Call {
-    fn hand(&self, sample: &dyn SampleView) {
+    fn hand(&self, sample: &SampleRef<'_>) {
         self.log
-            .note(format!("{} sample {}", self.row, sample.keyexpr()));
+            .note(format!("{} sample {}", self.row, sample.keyexpr));
     }
 }
 
@@ -114,6 +114,7 @@ impl RoundCalls for Kept {
     type Group = Present;
     type Locks = StdLocks;
     type Tally = Counted;
+    type Form = crate::row_callback::Threads;
 }
 
 /// A round that keeps samples alone, offered calls of every other kind all the same.
@@ -134,6 +135,49 @@ impl RoundCalls for Lean {
     type Group = Absent;
     type Locks = StdLocks;
     type Tally = ();
+    type Form = crate::row_callback::Threads;
+}
+
+/// [`Lean`] in a build whose calls all run on the thread that steps the session.
+enum Single {}
+
+impl RoundCalls for Single {
+    type Subscriber = Call;
+    type Liveliness = Call;
+    type Queryable = Call;
+    type Watch = Call;
+    type Leg = u32;
+    type ReplyCallback = ();
+    type Tokens = Absent;
+    type Replies = Absent;
+    type Queries = Absent;
+    type Watches = Absent;
+    type Capture = Absent;
+    type Group = Absent;
+    type Locks = StdLocks;
+    type Tally = ();
+    type Form = crate::row_callback::OneThread;
+}
+
+/// [`Kept`] in a build whose calls all run on the thread that steps the session.
+enum KeptSingle {}
+
+impl RoundCalls for KeptSingle {
+    type Subscriber = Call;
+    type Liveliness = Call;
+    type Queryable = Call;
+    type Watch = Call;
+    type Leg = u32;
+    type ReplyCallback = ();
+    type Tokens = Present;
+    type Replies = Present;
+    type Queries = Present;
+    type Watches = Present;
+    type Capture = Present;
+    type Group = Present;
+    type Locks = StdLocks;
+    type Tally = Counted;
+    type Form = crate::row_callback::OneThread;
 }
 
 /// One block of an arena's memory, aligned as an arena's spans start.
@@ -141,15 +185,15 @@ impl RoundCalls for Lean {
 #[repr(C, align(16))]
 struct Block([u8; ARENA_ALIGN]);
 
-/// A round of a few records, its tables lent from an arena over memory the test process leaks,
-/// so it outlives the round.
-pub(crate) fn round<C: RoundCalls>() -> Arc<Round<C>> {
+/// A round of a few records, placed with its tables in an arena over memory the test process
+/// leaks, so the memory outlives the round, which its owner drops.
+pub(crate) fn round<C: RoundCalls>() -> Placed<Round<C>> {
     round_of(4, 4)
 }
 
 /// A round of `records` records owing `callbacks` callbacks at most, each no more than the build's
 /// bound, as [`round`] makes one.
-fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Arc<Round<C>> {
+fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Placed<Round<C>> {
     let counts = RoundRowCounts {
         records: caps::DELIVERY_LANE_EVENTS.min(records),
         callbacks: caps::DELIVERY_LANE_CALLBACKS.min(callbacks),
@@ -158,7 +202,8 @@ fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Arc<Round<C>> {
     let bytes: usize = [
         Arena::table_bytes::<Entry<C>>(counts.records),
         Arena::table_bytes::<Owed<C>>(counts.callbacks),
-        Arena::table_bytes::<u8>(counts.key_bytes()),
+        Arena::table_bytes::<u8>(counts.key_bytes::<C::Form>()),
+        Arena::table_bytes::<Round<C>>(1),
     ]
     .into_iter()
     .map(|bytes| bytes.expect("in the address space"))
@@ -166,9 +211,47 @@ fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Arc<Round<C>> {
     let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
     let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
     // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least `bytes`
-    // bytes, and is leaked, so nothing else uses it and it outlives every lent table.
+    // bytes, and is leaked, so nothing else uses it and it outlives the round and its tables.
     let mut arena = unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) };
-    Round::shared_over(RoundRows::lent(&mut arena, counts).expect("the arena has the rows"))
+    let rows = RoundRows::lent(&mut arena, counts).expect("the arena has the rows");
+    Round::placed_over(&mut arena, rows).expect("the arena has the round")
+}
+
+/// A round placed in its session's arena is built there whole: nothing owed and no datagram lent,
+/// beside the rows it reads. Turned red by a placed round whose fields are not all written, or one
+/// placed past what the arena has.
+#[test]
+fn a_round_placed_in_an_arena_is_built_there_whole() {
+    let counts = RoundRowCounts {
+        records: caps::DELIVERY_LANE_EVENTS.min(4),
+        callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),
+        longest_key: caps::MAX_KEYEXPR_BYTES,
+    };
+    let bytes: usize = [
+        Arena::table_bytes::<Entry<Kept>>(counts.records),
+        Arena::table_bytes::<Owed<Kept>>(counts.callbacks),
+        Arena::table_bytes::<u8>(counts.key_bytes::<<Kept as RoundCalls>::Form>()),
+        Arena::table_bytes::<Round<Kept>>(1),
+    ]
+    .into_iter()
+    .map(|bytes| bytes.expect("in the address space"))
+    .sum();
+    let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+    let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+    let base = NonNull::from(region).cast::<u8>();
+    // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least `bytes`
+    // bytes, and is leaked, so nothing else uses it and it outlives the round and its rows.
+    let mut arena = unsafe { Arena::over(base, bytes) };
+    let rows = RoundRows::lent(&mut arena, counts).expect("the arena has the rows");
+    let round = Round::<Kept>::placed_over(&mut arena, rows).expect("the arena has the round");
+    assert!(!round.owes(), "nothing owed");
+    assert!(!round.lends_a_datagram(), "no datagram lent");
+    let start = base.as_ptr() as usize;
+    let at = core::ptr::from_ref::<Round<Kept>>(&round) as usize;
+    assert!(
+        (start..start + bytes).contains(&at),
+        "the round lies in the session's arena"
+    );
 }
 
 /// A sample on `key` with no payload.
@@ -377,6 +460,42 @@ fn a_token_is_held_where_tokens_are_kept_and_refused_where_they_are_not() {
     );
 }
 
+/// A round of one thread holds one record at a time: once a record is written the gate reads
+/// nothing more until it was handed out, so what the peer sent after it is read after its
+/// callbacks returned. The CONTROL is the round of threads, which takes the next record while it
+/// has the room; both take one again once handed out.
+#[test]
+fn a_round_of_one_thread_takes_one_record_at_a_time() {
+    let room = ReadRoom { callbacks: 1 };
+    let log = Arc::new(Log::default());
+    let threads = round::<Lean>();
+    let single = round::<Single>();
+    // SAFETY (each block): the test is each round's one writer, as a holder of the session's lock
+    // is.
+    unsafe {
+        assert!(single.has_room(room), "an empty round takes a record");
+        fan_out(&threads, &[1], &Sample("k/1"), &log);
+        fan_out(&single, &[2], &Sample("k/2"), &log);
+        assert!(
+            threads.has_room(room),
+            "CONTROL: a round of threads takes the next while it has room"
+        );
+        assert!(
+            !single.has_room(room),
+            "a round of one thread holds one record"
+        );
+        threads.seal();
+        single.seal();
+    }
+    assert!(threads.deliver() && single.deliver());
+    assert_eq!(log.handed(), ["1 sample k/1", "2 sample k/2"]);
+    // SAFETY: as above.
+    assert!(
+        unsafe { single.has_room(room) },
+        "handed out, the next is read"
+    );
+}
+
 /// The session's own put is handed the calls of the subscribers it reaches where the round hands
 /// them out; where it does not, the sample is held for them as any other.
 #[test]
@@ -506,9 +625,7 @@ fn a_sample_with_no_room_or_no_place_is_refused_and_its_call_ended() {
 fn a_reply_is_held_where_replies_are_kept_and_refused_where_they_are_not() {
     let log = Arc::new(Log::default());
     let mut kept = round::<Kept>();
-    Arc::get_mut(&mut kept)
-        .expect("not shared yet")
-        .calls_legs_of(Arc::new(OneLeg(log.clone())));
+    kept.get_mut().calls_legs_of(Arc::new(OneLeg(log.clone())));
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     unsafe {
         kept.offer_reply(4, &Reply("r/1"));
@@ -523,9 +640,7 @@ fn a_reply_is_held_where_replies_are_kept_and_refused_where_they_are_not() {
     );
 
     let mut lean = round::<Lean>();
-    Arc::get_mut(&mut lean)
-        .expect("not shared yet")
-        .calls_legs_of(Arc::new(OneLeg(log.clone())));
+    lean.get_mut().calls_legs_of(Arc::new(OneLeg(log.clone())));
     // SAFETY: as above.
     unsafe {
         lean.offer_reply(4, &Reply("r/2"));
@@ -944,4 +1059,194 @@ fn a_captured_fan_out_hands_every_call_in_order() {
     }
     assert_eq!(log.ended(), 3);
     assert!(log.handed().is_empty(), "the put hands the sample itself");
+}
+
+// The arena lends a round of one thread no record, and a round of threads its records: the
+// two rounds the test below compares.
+const _: () = assert!(
+    RoundRows::<Single>::RECORD_BYTES == 0,
+    "the arena lends a round of one thread no record"
+);
+const _: () = assert!(
+    RoundRows::<Lean>::RECORD_BYTES > 0,
+    "CONTROL: a round of threads is lent its records"
+);
+
+/// A round of one thread keeps the records of one message in itself: two, as a token held for its
+/// liveliness subscribers and for the declaration watches makes, and a third finds no room and is
+/// counted; its arena lends it no row of records (held at compile time above). The CONTROL is the
+/// round of threads, whose lent rows take the third. Turned red by a round of one thread that
+/// keeps its records in lent rows.
+#[test]
+fn a_round_of_one_thread_keeps_two_records_in_itself_and_refuses_a_third() {
+    let log = Arc::new(Log::default());
+    let threads = round::<Lean>();
+    let single = round::<Single>();
+    // SAFETY (each block): the test is each round's one writer, as a holder of the session's lock
+    // is.
+    unsafe {
+        assert!(single.has_room_for(ONE_THREAD_RECORDS, 1));
+        assert!(
+            !single.has_room_for(ONE_THREAD_RECORDS + 1, 0),
+            "no room for more records than one message makes"
+        );
+        for (row, key) in [(1, "k/1"), (2, "k/2"), (3, "k/3")] {
+            fan_out(&threads, &[row], &Sample(key), &log);
+            fan_out(&single, &[row + 10], &Sample(key), &log);
+        }
+        threads.seal();
+        single.seal();
+    }
+    assert_eq!(
+        threads.counts(),
+        RoundCounts::default(),
+        "CONTROL: the round of threads took all three"
+    );
+    assert_eq!(single.counts().dropped, 1, "the third found no room");
+    assert!(threads.deliver() && single.deliver());
+    assert_eq!(
+        log.handed(),
+        [
+            "1 sample k/1",
+            "2 sample k/2",
+            "3 sample k/3",
+            "11 sample k/1",
+            "12 sample k/2"
+        ]
+    );
+}
+
+/// A round of one thread is lent one of the session's longest keys, a round of threads two. The
+/// records of the one message a round of one thread takes share its key, as a token held for its
+/// liveliness subscribers and for the declaration watches does, so both are held; a second key of
+/// that length finds no place, where the round of threads (the CONTROL) places it. Turned red by a
+/// round of one thread lent a key for each record it holds.
+#[test]
+fn a_round_of_one_thread_holds_one_longest_key_its_records_share() {
+    use crate::row_callback::{OneThread, Threads};
+
+    let counts = RoundRowCounts {
+        records: 0,
+        callbacks: 0,
+        longest_key: 40,
+    };
+    assert_eq!(counts.key_bytes::<OneThread>(), 40);
+    assert_eq!(counts.key_bytes::<Threads>(), 80, "CONTROL: two keys");
+    let (first_key, second_key) = (
+        "a".repeat(caps::MAX_KEYEXPR_BYTES),
+        "b".repeat(caps::MAX_KEYEXPR_BYTES),
+    );
+    let (first, second) = (first_key.as_str(), second_key.as_str());
+    let log = Arc::new(Log::default());
+    let call = |row: u32| Call {
+        row,
+        log: log.clone(),
+    };
+    let declared = |keyexpr| DeclEvent {
+        kind: DeclEventKind::Declared,
+        id: 7,
+        keyexpr,
+        peer: None,
+    };
+    let token = LivelinessSample {
+        kind: LivelinessSampleKind::Put,
+        keyexpr: first,
+        token_id: 7,
+    };
+    let shared = round::<KeptSingle>();
+    let single = round::<KeptSingle>();
+    let threads = round::<Kept>();
+    // SAFETY (each block): the test is each round's one writer, as a holder of the session's lock
+    // is.
+    unsafe {
+        shared.offer_liveliness(call(1), &token, None);
+        assert!(
+            shared.offer_decl_watch(call(2), declared(first), None),
+            "the watch's record shares the token's key"
+        );
+        assert!(single.offer_decl_watch(call(3), declared(first), None));
+        assert!(
+            !single.offer_decl_watch(call(4), declared(second), None),
+            "a second longest key finds no place"
+        );
+        assert!(threads.offer_decl_watch(call(5), declared(first), None));
+        assert!(
+            threads.offer_decl_watch(call(6), declared(second), None),
+            "CONTROL: a round of threads places a second longest key"
+        );
+        shared.seal();
+        single.seal();
+        threads.seal();
+    }
+    assert_eq!(shared.counts(), RoundCounts::default());
+    assert_eq!(
+        single.counts(),
+        RoundCounts {
+            dropped: 1,
+            held_over: 0,
+            unplaced: 1
+        },
+        "refused as unplaced, which is counted with what was dropped"
+    );
+    assert_eq!(threads.counts(), RoundCounts::default());
+    assert!(shared.deliver() && single.deliver() && threads.deliver());
+    let rows: Vec<u32> = log
+        .handed()
+        .iter()
+        .map(|what| what.split(' ').next().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(rows, [1, 2, 3, 5, 6]);
+    assert_eq!(log.ended(), 6, "the refused event's call is ended too");
+}
+
+/// The queryables one query reaches owe calls of one record, in the order they were reached: a
+/// round of one record holds the query for both, and refuses the next query, which is another
+/// record. Turned red by a query written as a record for each queryable.
+#[test]
+fn a_query_for_two_queryables_is_one_record_owing_both() {
+    let log = Arc::new(Log::default());
+    let kept = round_of::<Kept>(1, 4);
+    let answers: Arc<dyn AnswersQueries<Kept>> = Arc::new(Answers(log.clone()));
+    kept.answer_queries_with(Arc::downgrade(&answers));
+    let call = |row| Call {
+        row,
+        log: log.clone(),
+    };
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    let taken = unsafe {
+        let taken = [
+            kept.offer_query(call(3), &Query("q/1"), 9),
+            kept.offer_query(call(4), &Query("q/1"), 9),
+            kept.offer_query(call(5), &Query("q/1"), 8),
+        ];
+        kept.seal();
+        taken
+    };
+    assert_eq!(
+        taken,
+        [true, true, false],
+        "the second queryable joins the record; another link's query is a record of its own"
+    );
+    assert_eq!(kept.counts().held_over, 1);
+    assert!(kept.deliver());
+    assert_eq!(log.handed(), ["3 query q/1 9", "4 query q/1 9"]);
+    assert_eq!(
+        log.ended(),
+        3,
+        "every call is ended, the refused one at once"
+    );
+}
+
+/// Each source the gate does not hold back owes apart: one that no longer owes leaves the links
+/// held while the other still does. Turned red by one flag both sources write.
+#[test]
+fn a_source_that_owes_no_more_leaves_the_links_held_while_another_owes() {
+    let round = round::<Lean>();
+    assert!(!round.owes());
+    round.owe(Owing::Retractions, true);
+    round.owe(Owing::CatchUp, true);
+    round.owe(Owing::Retractions, false);
+    assert!(round.owes(), "the catch-up still owes");
+    round.owe(Owing::CatchUp, false);
+    assert!(!round.owes(), "CONTROL: none owes");
 }

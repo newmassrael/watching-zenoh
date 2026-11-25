@@ -2632,14 +2632,7 @@ mod tests {
 
     #[cfg(feature = "interest-answer")]
     impl ResponseSink for Bursts {
-        #[cfg(all(feature = "codec-response", feature = "alloc"))]
-        fn send_response(&self, _response: crate::wire::ResponseOwned) {}
-
-        #[cfg(all(
-            feature = "codec-response",
-            feature = "storage-profile",
-            not(feature = "alloc")
-        ))]
+        #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
         fn send_reply_parts(&self, _parts: crate::reply_stage::ReplyParts<'_>) {}
 
         #[cfg(feature = "codec-response-final")]

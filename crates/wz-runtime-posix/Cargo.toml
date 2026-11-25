@@ -10,7 +10,8 @@
 # toolchain's refusal to link a program that allocates anywhere proves, as for the kit's image.
 #
 # Not the host profile of the C ABI (`wz-capi-c`, tokio, threads, a heap): that one is the drop-in
-# for zenoh-c. This one is the same session code the MCU images run, at a Linux socket.
+# for zenoh-c. This one is the same session code the MCU images run, at a POSIX host's socket
+# (Linux, Android, QNX Neutrino, macOS).
 #
 # On Windows the same seams are the system's own calls (`src/windows/`): the clock, entropy, wall
 # clock and Winsock sockets the pico C ABI's cooperative engine is opened over there.
@@ -95,6 +96,23 @@ session-slot = ["wz-runtime-coop/session-slot"]
 # on, and a scouting window's sockets, one for each interface that can carry multicast
 # (`scouting`). The heap profile's: the table and the members are lists the host sizes.
 host-multicast = ["alloc", "dep:log"]
+# The host's ttys as the lines of the cooperative engine's `serial/` links (`serial`:
+# `PosixSerialLine`, set as zenoh-pico's POSIX tty sets one, on Linux and Android). The heap
+# profile's, as the engine's serial links are.
+serial = ["alloc", "wz-runtime-coop/serial"]
+# The host's TCP connections, clock and entropy as what the cooperative engine's `ws/` links open
+# with (`ws`: `PosixWsOpen` on a POSIX host, `windows::ws::WindowsWsOpen` on Windows). The heap
+# profile's, as the engine's WebSocket links are.
+ws = ["alloc", "wz-runtime-coop/ws"]
+
+# The host's named FIFOs as the ends of the cooperative engine's `unixpipe/` links (`unixpipe`:
+# `PosixFifo`, opened and locked as zenoh's unixpipe link opens its own, on Linux and Android).
+# The heap profile's, as the engine's unixpipe links are.
+unixpipe = ["alloc", "wz-runtime-coop/unixpipe"]
+# The host's raw packet sockets as the devices of the cooperative engine's `reth/` groups
+# (`raweth`: `PosixRawEth`, an `AF_PACKET` socket bound to the endpoint's interface, as zenoh-pico
+# opens its raweth socket, on Linux). The heap profile's, as the engine's groups are.
+raweth = ["alloc", "wz-runtime-coop/raweth"]
 
 [lints]
 workspace = true

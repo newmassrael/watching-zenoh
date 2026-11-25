@@ -9193,14 +9193,14 @@ mod stock_config_tests {
         assert_eq!(tuned.sn_resolution, SnResolution::Bits16);
         let params = demo_session_init_params(NodeKind::Initiator, vec![0x0a], &tuned)
             .expect("OS entropy for the cookie signing key");
-        assert_eq!(params.seq_num_res, SnResolution::Bits16.wire_code());
+        assert_eq!(params.seq_num_res, SnResolution::Bits16);
         let stock_peer = PeerInitCaps {
             seq_num_res: SnResolution::Bits32.wire_code(),
             req_id_res: 2,
             batch_size: 65535,
         };
         assert_eq!(
-            PeerInitCaps::negotiated_seq_num_res(params.seq_num_res, Some(stock_peer)),
+            PeerInitCaps::negotiated_seq_num_res(params.seq_num_res.wire_code(), Some(stock_peer)),
             SnResolution::Bits16.wire_code(),
             "the session settles on the width the file offered"
         );
@@ -11426,7 +11426,7 @@ pub(crate) fn session_init_params_for(
         whatami,
         zid,
         // The width the operator offered, which the session negotiates down to the peer's.
-        seq_num_res: tuning.sn_resolution.wire_code(),
+        seq_num_res: tuning.sn_resolution,
         // Upstream exposes no key for the request-id width: its half of `Resolution` is always
         // the width of a `u32` request id.
         req_id_res: 2,
@@ -11456,12 +11456,15 @@ pub(crate) fn session_init_params_for(
         // The node's snapshot, which the queue and the width above were made from.
         policy: tuning.policy,
         limits: wz::runtime_tokio::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
-            std::io::Error::other(format!(
-                "no OS entropy for the cookie signing key ({e}); refusing to open a \
+        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)
+            .map_err(|e| {
+                std::io::Error::other(format!(
+                    "no OS entropy for the cookie signing key ({e}); refusing to open a \
                  session whose anti-amplification cookie anybody could forge"
-            ))
-        })?,
+                ))
+            })?
+            .into(),
+        region: None,
     })
 }
 

@@ -337,10 +337,14 @@ where
     /// as it was moved on its way into the slot. `make` writes its place exactly when it answers
     /// `Ok`.
     ///
-    /// `make` runs whether or not a slot is free, and first: a link that cannot be made is
-    /// refused as such before the table is touched or counted, and a table with no slot counts
-    /// its refusal after the link was made and gives it back (drops it), as `claim` does with the
-    /// values it is handed.
+    /// The free slot is found first and `make` runs only once there is one: a table with no slot
+    /// free counts its refusal and drops `make` unrun, so a full table binds no socket and has
+    /// no place to build a driver it would only drop. A link that cannot be made into the free
+    /// slot is refused as such, takes no slot and is not counted.
+    ///
+    /// The order is the contract a refusal is read by: when the table is full and the link
+    /// could not have been made either (a dial with its socket pool dry too), the refusal is
+    /// the table's, [`ClaimRefused::Full`], counted here, and the link's maker is never asked.
     #[inline(never)]
     pub fn claim_with<Err>(
         &'static self,
@@ -348,32 +352,13 @@ where
         entropy: E,
     ) -> Result<SlotClaim<R, T, D, E>, ClaimRefused<Err>> {
         let Some(cell) = self.free_cell() else {
-            return Err(self.refuse_made(make));
+            self.refused.set(self.refused.get().saturating_add(1));
+            return Err(ClaimRefused::Full);
         };
         // SAFETY: the slot is free, so nothing refers into its driver, and it is `Claimed` only
         // once `make` wrote it.
         make(unsafe { &mut *cell.driver.get() }).map_err(ClaimRefused::Link)?;
         Ok(self.occupy_driven(cell, entropy))
-    }
-
-    /// The claim of a table with no slot free: the link is made all the same, and first, so a
-    /// link that cannot be made is answered as such; once made it is dropped and the refusal
-    /// counted. Out of line, so the place this makes it in is no part of the frame of a claim
-    /// that found a slot.
-    #[cold]
-    #[inline(never)]
-    fn refuse_made<Err>(
-        &self,
-        make: impl FnOnce(&mut MaybeUninit<D>) -> Result<(), Err>,
-    ) -> ClaimRefused<Err> {
-        let mut spare = MaybeUninit::uninit();
-        if let Err(why) = make(&mut spare) {
-            return ClaimRefused::Link(why);
-        }
-        // SAFETY: `make` answered `Ok`, so it wrote `spare`, which is dropped once.
-        unsafe { spare.assume_init_drop() };
-        self.refused.set(self.refused.get().saturating_add(1));
-        ClaimRefused::Full
     }
 
     /// The first slot that is free, if there is one.
@@ -419,13 +404,13 @@ where
     }
 }
 
-/// Why [`SessionSlots::claim_with`] gave no slot.
+/// Why [`SessionSlots::claim_with`] gave no slot. The table is asked first, so a claim that
+/// both finds the table full and could not have made its link is [`Full`](Self::Full).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ClaimRefused<Err> {
-    /// The link could not be made; no table was touched.
+    /// The link could not be made into the free slot: no slot was taken and nothing counted.
     Link(Err),
-    /// The link was made and the table had no slot free: it counted the refusal and dropped the
-    /// link.
+    /// The table had no slot free: it counted the refusal, and the link was not made.
     Full,
 }
 

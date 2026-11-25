@@ -60,7 +60,7 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami,
         zid: [zid; 4].into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -74,7 +74,8 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
         link_rx: LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
+        cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key").into(),
+        region: None,
     }
 }
 
@@ -102,6 +103,9 @@ enum Command {
     /// router's space with no suffix, undeclare the id, and push `.1` on it again, which the
     /// receiver can no longer resolve.
     PushAliasThenUndeclare(wz_session_core::wire_id::ExprId, &'static [u8]),
+    /// In one batch window, so that one frame carries both: push `.2` on the key `.1`, then
+    /// retract subscriber `.0` of the router's.
+    PushThenUndeclareSubscriber(u64, &'static str, &'static [u8]),
     /// Send the final of the initial declarations, as a peer does once it has declared what it
     /// held when the link came up.
     #[cfg(any(
@@ -168,6 +172,8 @@ enum Command {
 #[derive(Default)]
 struct Seen {
     declares: usize,
+    /// The id of each subscriber the router was declared, in the order the declarations arrived.
+    subscribers: Vec<u64>,
     interests: usize,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
@@ -458,7 +464,15 @@ fn run_router(
                 let mut seen = counted.lock().unwrap();
                 for m in messages {
                     match m {
-                        NetworkMessage::Declare(_) => seen.declares += 1,
+                        NetworkMessage::Declare(declare) => {
+                            seen.declares += 1;
+                            if let wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+                                subscriber,
+                            ) = &declare.body
+                            {
+                                seen.subscribers.push(subscriber.id);
+                            }
+                        }
                         NetworkMessage::Interest(_interest) => {
                             seen.interests += 1;
                             #[cfg(all(
@@ -513,8 +527,13 @@ fn run_router(
             // Counted as their owned forms are, and dropped on the same rules.
             if let IterationEvent::InPlace(record) = event {
                 let mut seen = counted.lock().unwrap();
-                if record.declare().is_some() {
+                if let Some(declare) = record.declare() {
                     seen.declares += 1;
+                    if let wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) =
+                        &declare.body
+                    {
+                        seen.subscribers.push(subscriber.id);
+                    }
                 }
                 if let Some(_interest) = record.interest() {
                     seen.interests += 1;
@@ -658,6 +677,12 @@ fn run_router(
                     true,
                     false,
                 );
+            }
+            Ok(Command::PushThenUndeclareSubscriber(id, key, value)) => {
+                let _ = actions.batch_start();
+                let _ = actions.send_push_literal(key, value, true);
+                actions.send_undeclare_subscriber(id);
+                let _ = actions.batch_stop();
             }
             Ok(Command::PushAliasThenUndeclare(id, value)) => {
                 let aliased = || {
@@ -1317,6 +1342,111 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
     );
 }
 
+/// A Push and, after it in the same batch, the retraction of the router's subscriber that opened a
+/// write filter. In a build of one thread the retraction is applied after the Push's callback
+/// returned, so the callback sees the filter still open, as zenoh-pico calls each callback while
+/// it reads the batch (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
+/// `_z_handle_network_message`); a build of threads reads the batch whole before its callbacks,
+/// which see the filter shut. Turned red by a round of one thread that takes the next record while
+/// it has room (`Round::has_room`).
+#[test]
+fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() {
+    use wz_session_core::row_callback::ThreadForm;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let ask = Some(InterestAsk {
+        mapping_id: 0,
+        suffix: Some("demo/o"),
+        aggregate: false,
+    });
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/o",
+            &WireKey::literal(),
+            ask,
+            false,
+        )
+        .expect("a session with ids left declares");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the filter to open", || {
+        !engine.write_filter_active(filter)
+    });
+    let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let session = Arc::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/o", WireKey::literal(), Locality::Any, None, {
+            let seen = seen.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    seen.lock()
+                        .unwrap()
+                        .push(engine.write_filter_active(filter));
+                }
+            })
+        })
+        .expect("declared");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::PushThenUndeclareSubscriber(1, "demo/o", b"v"));
+    until(&engine, "the push and the retraction after it", || {
+        !seen.lock().unwrap().is_empty() && engine.write_filter_active(filter)
+    });
+    let threads = <crate::round::CoopForm as ThreadForm>::OTHER_THREADS;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [threads],
+        "the callback saw the filter shut only where the batch is read whole before it"
+    );
+}
+
+/// The samples of one batch are handed in the read that hands the first of them, in a build of one
+/// thread as in one of threads: a round of one thread takes one record at a time, and the read
+/// steps on while the link still holds the rest of the batch it read, which the round's gate tells
+/// the read (`holds_input`). Turned red by a read that ends after the first record while the link
+/// holds the rest.
+#[test]
+fn the_samples_of_one_batch_are_handed_in_the_read_that_hands_the_first() {
+    const SAMPLES: u8 = 3;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = got.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            }),
+        )
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::PushBatch("demo/batch", SAMPLES));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while got.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "timed out waiting for the batch");
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    let sent: Vec<Vec<u8>> = (0..SAMPLES).map(|index| vec![index]).collect();
+    assert_eq!(
+        *got.lock().unwrap(),
+        sent,
+        "the whole batch, in order, by the read that handed its first sample"
+    );
+}
+
 /// A peer's sample that reaches three subscribers is handed to each of them once, in the same order
 /// for every sample, each sample after the one before it, with the session's lock let go: one
 /// callback steps the session and publishes from inside itself, and the router receives what it
@@ -1416,6 +1546,8 @@ fn a_sample_for_three_subscribers_is_handed_to_each_in_order_with_the_session_fr
 /// the step, blocked, and is sent once the step lets go: the holder holds no send, so the publish
 /// is no congestion drop, and it does not spin on the session while it waits. The CONTROL is the
 /// time it took: no less than the step held the session.
+// Two threads on one session at once, which a build of one thread does not have.
+#[cfg(feature = "threads")]
 #[test]
 fn a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent() {
     use wz_session_core::qos::CongestionControl;
@@ -1469,6 +1601,8 @@ fn a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent() {
 /// its wait tries the session again, spinning, rather than blocking on its lock, and is sent once
 /// the read lets go: the read holds no send and lets go within its take. The CONTROL is the read
 /// step's hold above, which the same publish waits for blocked, with no spin.
+// Two threads on one session at once, which a build of one thread does not have.
+#[cfg(feature = "threads")]
 #[test]
 fn a_droppable_publish_behind_a_read_working_out_its_wait_spins_and_is_sent() {
     use wz_session_core::qos::CongestionControl;
@@ -2051,6 +2185,8 @@ fn reads_in(engine: &Engine, span: Duration) -> u32 {
 /// the config says, and the read task wakes the moment a push arrives. The CONTROL is the count:
 /// a read that waited in the link's own loop took one millisecond, so the same span held hundreds
 /// of reads, and a read task woke a thousand times a second.
+// The read task's wait, which a build of one thread does not start.
+#[cfg(feature = "threads")]
 #[test]
 fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
     let router = Router::start(CatchAll::None);
@@ -2095,6 +2231,7 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
 /// A system that gives no thread for the read task is answered, not panicked on: the start answers
 /// `NoThread`, the task is not running, the session is still open, and a start once the system
 /// gives a thread starts it. zenoh-pico answers its task creation's error the same way.
+#[cfg(feature = "threads")]
 #[test]
 fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
     use wz_capi_port::ReadTaskStartRefused;
@@ -2120,6 +2257,7 @@ fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
 /// handed to the system's spawn, and the stop moves the engine's run of tasks, so no box and no
 /// word is made for either. A system that gives no thread is the start's every step but the
 /// thread. Turned red by a body boxed for the spawn or a stop word shared with the task.
+#[cfg(feature = "threads")]
 #[test]
 fn starting_the_read_task_makes_nothing_of_the_heap_of_its_own() {
     use wz_capi_port::ReadTaskStartRefused;
@@ -2198,6 +2336,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::handle(layout),
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("the session opens");
@@ -2272,6 +2411,7 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
             crate::arena::OpenStorage {
                 memory: &AllocatorMemory,
                 held,
+                plan: crate::arena::PlanFrom::Config,
             },
         )
         .expect("the session opens")
@@ -2358,6 +2498,7 @@ fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
         OpenStorage {
             memory: &AllocatorMemory,
             held,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("the session opens");
@@ -2443,7 +2584,8 @@ fn a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered() {
 
     let id = engine
         .acquire_keyexpr("demo/named")
-        .expect("a key expression the link takes");
+        .expect("a key expression the link takes")
+        .mapping_id();
     let seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let record = seen.clone();
     let declares_before = router.seen(|s| s.declares);
@@ -2710,6 +2852,86 @@ fn a_key_wire_form_but_declared_is_refused_in_a_build_without_shared_key_ids() {
     assert_eq!(open(KeyWireForm::Declared), Some(OpenError::NoEndpoint));
 }
 
+/// A width of sequence numbers the build's `sn-resolution` domain leaves out is refused at the
+/// open, before anything is reserved or dialled, and a width it holds goes on to the endpoints.
+#[test]
+fn a_width_outside_the_sn_resolution_domain_is_refused_at_the_open() {
+    use crate::OpenError;
+    use wz_session_core::policy::SnResolution;
+    use wz_session_core::policy_binding::{OutsideDomain, PolicyValue};
+
+    for width in SnResolution::WIDTHS {
+        let mut config = client_config();
+        config.sn_resolution = width;
+        let refused = Engine::open(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            config,
+        )
+        .err();
+        let want = if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+            OpenError::NoEndpoint
+        } else {
+            OpenError::SnResolution(OutsideDomain { value: width })
+        };
+        assert_eq!(refused, Some(want), "{}", width.id());
+    }
+}
+
+/// A group whose width of sequence numbers the build's `sn-resolution` domain leaves out is
+/// refused at the open with that width, before the group is looked at, whether or not the build
+/// has groups; a width the domain holds is not refused for its width.
+#[test]
+fn a_group_of_a_width_outside_the_sn_resolution_domain_is_refused_at_the_open() {
+    use crate::OpenError;
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+    use wz_session_core::policy::SnResolution;
+    use wz_session_core::policy_binding::{OutsideDomain, PolicyValue};
+
+    for width in SnResolution::WIDTHS {
+        let refused = Engine::open(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            CoopConfig {
+                groups: vec![GroupJoin {
+                    endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+                    profile: GroupProfile {
+                        lease_ms: 10_000,
+                        join_interval_ms: 2_500,
+                        max_sessions: None,
+                        seq_num_res: width,
+                        req_id_res: 0x02,
+                        batch_size: 2_048,
+                        is_qos: false,
+                        compression: false,
+                        join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+                    },
+                    is_shm: false,
+                    declarations: GroupDeclarations::Entities,
+                }],
+                ..client_config()
+            },
+        )
+        .err();
+        if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+            assert!(
+                !matches!(refused, Some(OpenError::SnResolution(_))),
+                "{}: a held width is not refused for its width",
+                width.id()
+            );
+        } else {
+            assert_eq!(
+                refused,
+                Some(OpenError::SnResolution(OutsideDomain { value: width })),
+                "{}",
+                width.id()
+            );
+        }
+    }
+}
+
 /// A build without groups refuses a session that names one by name, before it dials anything,
 /// and opens no group instead of it: the session would be missing the group it was told to join.
 #[cfg(not(feature = "group"))]
@@ -2729,7 +2951,7 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
                     lease_ms: 10_000,
                     join_interval_ms: 2_500,
                     max_sessions: None,
-                    seq_num_res: 0x02,
+                    seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                     req_id_res: 0x02,
                     batch_size: 2_048,
                     is_qos: false,
@@ -2868,7 +3090,7 @@ fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
     );
     let refused = open_with_result(CoopConfig {
         listen: vec![long.clone()],
-        max_faces: 1,
+        max_faces: 0,
         accept_pending: 1,
         ..config(&router)
     });
@@ -2943,6 +3165,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::NONE,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .err();
@@ -2987,6 +3210,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
             held: crate::arena::HeldPlaces::NONE,
+            plan: crate::arena::PlanFrom::Config,
         },
     )
     .expect("a listener opens once it is bound");
@@ -3054,14 +3278,23 @@ mod face_table;
 mod faces;
 #[cfg(feature = "query")]
 mod get;
-#[cfg(all(feature = "group", feature = "app-transport"))]
+// Each member is stepped by its read task.
+#[cfg(all(feature = "group", feature = "app-transport", feature = "threads"))]
 mod group;
+#[cfg(all(feature = "group", feature = "app-transport"))]
+mod group_stack;
 mod held_keys;
 #[cfg(feature = "group-host")]
 mod host_group;
 mod in_place;
 mod link_sets;
-#[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
+// Every session of these is stepped by its read task (`listen::Stepped`).
+#[cfg(all(
+    feature = "listen",
+    feature = "query",
+    feature = "queryable",
+    feature = "threads"
+))]
 mod listen;
 #[cfg(feature = "liveliness")]
 mod liveliness;
@@ -3069,8 +3302,23 @@ mod liveliness;
 mod local;
 #[cfg(feature = "local-queryable")]
 mod local_query;
-#[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
+#[cfg(all(
+    feature = "listen",
+    feature = "query",
+    feature = "queryable",
+    feature = "threads"
+))]
 mod one_face;
+// Every session of these is opened, called and read on a thread of its own (`OwnThread`).
+#[cfg(all(
+    not(feature = "threads"),
+    any(
+        feature = "listen",
+        feature = "group-host",
+        all(feature = "group", feature = "app-transport")
+    )
+))]
+mod one_thread;
 mod plain_put;
 mod program_clock;
 #[cfg(feature = "queryable")]
@@ -3084,7 +3332,8 @@ mod runtime_tables;
     feature = "shared-key-ids",
     feature = "listen",
     feature = "query",
-    feature = "queryable"
+    feature = "queryable",
+    feature = "threads"
 ))]
 mod shared_key_ids;
 #[cfg(feature = "liveliness-get")]

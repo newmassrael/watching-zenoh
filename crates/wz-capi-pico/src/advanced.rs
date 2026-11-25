@@ -579,11 +579,11 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         } else {
             &(*options).publisher_options
         });
-        // The same outbound canon gate every declare in this crate hoists, so a
-        // key no peer could take is refused with the code a plain publisher
-        // gives it before anything is declared.
-        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_ERR_INVALID;
+        // The same outbound gate every declare in this crate hoists, so a key
+        // no peer could take is refused with the code a plain publisher gives
+        // it before anything is declared.
+        if let Err(code) = crate::keyexpr::outbound_key(&ke) {
+            return code;
         }
         let session = PicoSession::of(handle);
         // The publisher's source identity is the session's own zid, the one its
@@ -1282,7 +1282,10 @@ unsafe fn hand_adv_sample(context: *mut c_void, sample: Delivery<'_>) {
     let kept = unsafe {
         &*crate::object_slot::kept_at::<AdvSubState, AdvSubKept>(context.cast::<AdvSubState>())
     };
-    crate::pubsub::hand_sample(&kept.sample.closure, sample.view());
+    crate::pubsub::hand_sample(
+        &kept.sample.closure,
+        &wz_session_core::sink::SampleRef::of(sample.view()),
+    );
 }
 
 /// The host let go of the sample callback, after its last call: the C closure is taken out of the
@@ -1366,10 +1369,10 @@ unsafe fn advanced_subscriber_options(
         // field, which is exactly why it carries the attribute.
         let mut cfg = HistoryConfig::default();
         cfg.sample_depth = (history.max_samples > 0).then_some(history.max_samples);
-        // pico carries an age in MILLISECONDS; wz's `_time=` selector bound is
-        // in SECONDS. Converting rather than passing the number through is the
-        // whole reason this is not a field copy.
-        cfg.max_age = (history.max_age_ms > 0).then(|| history.max_age_ms as f64 / 1000.0);
+        // pico carries an age in MILLISECONDS, built into the `Duration` the
+        // selector is written from without passing through seconds as `f64`.
+        cfg.max_age =
+            (history.max_age_ms > 0).then(|| core::time::Duration::from_millis(history.max_age_ms));
         cfg.detect_late_publishers = history.detect_late_publishers;
         out.history = Some(cfg);
     }
@@ -1450,7 +1453,7 @@ unsafe fn declare_subscriber_state(
     // A key the caller did not declare is kept in the session's key arena, as any object of the
     // session keeps its key, so the subscriber's entities share its block and copy no text.
     let base = match declared_of(keyexpr) {
-        Some(declared) => declared.share(),
+        Some(declared) => declared.share()?,
         None => DeclaredKeyexpr::literal_of_session(engine, ke)?,
     };
     let session = crate::session::session_count(zs);
@@ -1577,7 +1580,9 @@ fn fire_miss(slot: &MissRooms, miss: &Miss) {
             return;
         };
         let ctx = closure.context.0;
-        let _in_callback = crate::ffi::InCallback::enter();
+        let Some(_in_callback) = crate::ffi::InCallback::enter() else {
+            return;
+        };
         // A panic unwinding out of the C callback across this `extern "C"`
         // boundary is UB and would tear down the drive thread.
         let _ = crate::ffi::catch(|| unsafe {
@@ -2873,7 +2878,7 @@ mod tests {
         rooms.each(|listener| {
             called.push(listener.context.0);
             // As `fire_miss` marks the thread while it calls the program.
-            let _in_callback = crate::ffi::InCallback::enter();
+            let _in_callback = crate::ffi::InCallback::enter().expect("a thread is marked");
             rooms.remove(second, false);
             rooms.remove(first, false);
             assert_eq!(

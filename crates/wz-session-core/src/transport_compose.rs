@@ -66,7 +66,7 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{Bounded, BoundedIter, CodecError, SceSink, VecSink};
+use sce_forge_runtime::codec::{Bounded, BoundedIter, CodecError, VecSink};
 use wz_codecs::close::CloseParts;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant, ExtEntrySource};
 use wz_codecs::ext_unit::ExtUnit;
@@ -361,14 +361,11 @@ impl Framing {
     }
 }
 
-/// The length of a VLE-encoded `value` in bytes, as the codec writes it.
-///
-/// Measured by writing it: the codec is the definition, and a second formula
-/// would be a second opinion about where the 9-byte bucket starts.
+/// The length of a VLE-encoded `value` in bytes, as the codec writes it: the codec crate's one
+/// count ([`wz_codecs::vle::zint_len`]), which its tests hold to the bytes the encoder writes and
+/// to pico's, so there is no second opinion about where the 9-byte bucket starts.
 pub fn vle_width(value: u64) -> usize {
-    let mut count = sce_forge_runtime::codec::CountSink::new();
-    infallible(count.write_vle_u64(value));
-    count.len()
+    wz_codecs::vle::zint_len(value)
 }
 
 /// A write to a sink that cannot refuse: its error type has no value.

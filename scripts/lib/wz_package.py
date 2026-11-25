@@ -18,6 +18,11 @@ describe what was built.
 it re-measures every artifact the manifest names and compares, so a manifest that no longer says
 what the files are is a finding.
 
+`--cargo-profile release` (the default) is the build a deployer receives: an artifact of the crates
+workspace is built with its shipping profile (`SHIP_PROFILE`, fat LTO, one codegen unit) and not
+with `release`, that workspace's thin-LTO build of daily work; a node, a package of a workspace of
+its own, with that workspace's `release`. `debug` is the dev profile.
+
 ## Fixtures (step 7)
 
 `deploy/fixtures/manifests/` is a conformance corpus a consumer's reader and `--verify` are both held
@@ -88,6 +93,10 @@ import wz_node  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST_NAME = "wz-target-manifest.json"
+# The profile of the crates workspace a package's release build is made with (crates/Cargo.toml: fat
+# LTO, one codegen unit), and not `release`, that workspace's thin-LTO build of daily work. A node
+# is a package of a workspace of its own, whose `release` is already its shipping build.
+SHIP_PROFILE = "ship"
 # `bundled` (the libraries copied from the SDK, T5) was added within schema 1: an added key changes
 # the meaning of none, and a reader ignores a key it does not know (T7).
 MANIFEST_SCHEMA = 1
@@ -1065,7 +1074,7 @@ def cargo_argv(platform: dict, cross: bool, row: dict, cargo_profile: str,
     else:
         argv = ["cargo", "build", "-p", row["package"], "--message-format=json-render-diagnostics"]
     if cargo_profile == "release":
-        argv.append("--release")
+        argv += ["--release"] if row.get("input") == "node" else ["--profile", SHIP_PROFILE]
     if cross:
         argv += ["--target", platform["triple"]]
         if platform.get("std") == "build-std":
@@ -2053,6 +2062,17 @@ def _selftest() -> int:
                                   True, demo_row, "release"))
     expect("a native build is not, whatever its std row says",
            "-Z" not in cargo_argv(qnx_plat, False, demo_row, "release"))
+    shipped = cargo_argv(qnx_plat, False, demo_row, "release")
+    expect("a release build of the crates workspace is made by its shipping profile",
+           shipped[shipped.index("--profile") + 1] == SHIP_PROFILE and "--release" not in shipped)
+    expect("a debug build names no profile",
+           not {"--profile", "--release"} & set(cargo_argv(qnx_plat, False, demo_row, "debug")))
+    node_release = cargo_argv(platform, False, node_row, "release", None, {"features": ["declared"]})
+    expect("a node's release build is its own workspace's release",
+           "--release" in node_release and "--profile" not in node_release)
+    expect("the shipping profile is one crates/Cargo.toml defines",
+           re.search(rf"^\[profile\.{re.escape(SHIP_PROFILE)}\]$",
+                     (ROOT / "crates" / "Cargo.toml").read_text(encoding="utf-8"), re.M) is not None)
     expect("a native build has no SDK identity", sdk_identity(platform, False) is None)
     refuses("a cross platform that names no sdk kind", "names no sdk_kind",
             lambda: sdk_identity({"id": "x", "triple": "t-1"}, True))

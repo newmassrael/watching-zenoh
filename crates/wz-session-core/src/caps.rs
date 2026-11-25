@@ -264,6 +264,11 @@ pub const MAX_DECLARED_KEYEXPRS: usize = generated::MAX_DECLARED_KEYEXPRS;
 /// sessions, reserved at the library's first object when the program reserved none.
 pub const HELD_SESSIONS: usize = generated::HELD_SESSIONS;
 
+/// How many threads may be inside the program's callbacks at once in a C ABI library without
+/// `std` and with threads: the entries of the table that marks each one, which has no
+/// thread-local storage to do it. A callback a thread past it would run is not run, and counted.
+pub const CALLBACK_THREADS: usize = generated::CALLBACK_THREADS;
+
 /// The owned samples a program holds through the C ABI at once: the slots of the process's pool of
 /// samples, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_SAMPLES: usize = generated::HELD_SAMPLES;
@@ -288,11 +293,27 @@ pub const HELD_CONFIGS: usize = generated::HELD_CONFIGS;
 /// hellos, each holding [`SCOUT_HELLO_LOCATORS`] locators, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
 
-/// The bytes the owned payloads, strings and slices a program holds through the C ABI carry at
-/// once, and the keys and parameters of the queries it keeps past their callbacks: the payloads'
-/// area of the process's pools, blocks of power-of-two sizes each the smallest that holds its
-/// bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
-pub const HELD_PAYLOAD_BYTES: usize = generated::HELD_PAYLOAD_BYTES;
+/// The bytes of each block of the smallest pool of payload blocks of the C ABI, its head
+/// included: the owned payloads, strings and slices a program holds and the keys and parameters of
+/// the queries it keeps take a block of the smallest pool that holds them and has one free.
+pub const PAYLOAD_SMALL_BLOCK_BYTES: usize = generated::PAYLOAD_SMALL_BLOCK_BYTES;
+
+/// The bytes of each block of the middle pool of payload blocks of the C ABI, its head included.
+/// The largest pool's blocks are no limit: each holds the largest message a session delivers.
+pub const PAYLOAD_MEDIUM_BLOCK_BYTES: usize = generated::PAYLOAD_MEDIUM_BLOCK_BYTES;
+
+/// The blocks of [`PAYLOAD_SMALL_BLOCK_BYTES`] a program holds payload bytes in at once, reserved
+/// as [`HELD_SESSIONS`]'s pool is.
+pub const HELD_SMALL_PAYLOAD_BLOCKS: usize = generated::HELD_SMALL_PAYLOAD_BLOCKS;
+
+/// The blocks of [`PAYLOAD_MEDIUM_BLOCK_BYTES`] a program holds payload bytes in at once, reserved
+/// as [`HELD_SESSIONS`]'s pool is.
+pub const HELD_MEDIUM_PAYLOAD_BLOCKS: usize = generated::HELD_MEDIUM_PAYLOAD_BLOCKS;
+
+/// The blocks of the largest pool of payload blocks a program holds payload bytes in at once, each
+/// holding the largest message a session delivers and its head, reserved as [`HELD_SESSIONS`]'s
+/// pool is.
+pub const HELD_LARGE_PAYLOAD_BLOCKS: usize = generated::HELD_LARGE_PAYLOAD_BLOCKS;
 
 /// The encodings a program holds through the C ABI at once: the slots of the process's pool of
 /// encodings, each with room for a schema of [`MAX_ENCODING_SCHEMA_BYTES`], reserved as
@@ -360,11 +381,6 @@ const _: () = assert!(
 const _: () = assert!(
     CONFIG_ENTRIES >= 1 && CONFIG_ENTRIES <= 255 && CONFIG_TEXT_BYTES >= 1,
     "a config holds at least one key, at most one row for each key but one, and some text"
-);
-
-const _: () = assert!(
-    HELD_PAYLOAD_BYTES <= 1 << 30,
-    "the payloads' area names its blocks by 32-bit offsets and its largest block is 1 GiB"
 );
 
 /// Maximum number of concurrently-outstanding pending liveliness GET
@@ -568,7 +584,9 @@ pub const MAX_TASKS: usize = generated::MAX_TASKS;
 /// The most timers a fixed-memory machine's runtime may hold (the deploy
 /// `session_pool.process.max_timers` key): the ceiling on an image's `RuntimeCell`
 /// `TIMERS`, held the same way as [`MAX_TASKS`]; and the entries of the timer table a session
-/// of the C ABI's cooperative engine reserves when it opens.
+/// of the C ABI's cooperative engine reserves when it opens in a build with a feature whose task
+/// sleeps on the session's runtime, which none of that engine's features is, so its sessions
+/// reserve none.
 pub const MAX_TIMERS: usize = generated::MAX_TIMERS;
 
 /// The periodic jobs a session of the C ABI's cooperative engine runs at once (the deploy
@@ -599,10 +617,22 @@ pub const MAX_LOCATOR_LEN: usize = generated::MAX_LOCATOR_LEN;
 /// row.
 pub const MAX_GROUP_ENDPOINT_LEN: usize = generated::MAX_GROUP_ENDPOINT_LEN;
 
+/// The longest raweth group endpoint, its mapping table and whitelist included, a session joins
+/// by. The rows a raweth endpoint is read into (its mapping entries, a mapping key, its
+/// whitelist and its interface name) are sized from it, so a table that fits the endpoint fits
+/// them; a longer endpoint is refused when it is joined. Read only by the raweth transport.
+pub const MAX_RAWETH_ENDPOINT_LEN: usize = generated::MAX_RAWETH_ENDPOINT_LEN;
+
 /// The members a session holds of each multicast group it joined: the rows a connectivity reader
 /// reads a member's transport from, with nothing allocated, and the group session's member table.
 /// A JOIN from one more is not admitted while every row is held.
 pub const MAX_GROUP_MEMBERS: usize = generated::MAX_GROUP_MEMBERS;
+
+/// The keyexpr ids one member of a multicast group may hold declared to a session whose group
+/// lends its records: the rows each member's are noted in, so that what it declared is unbound when
+/// it leaves. A declaration of one more new id is refused and counted as one past the alias table's
+/// room is, and a key the member names by it is dropped, as one naming an undeclared id is.
+pub const MAX_MEMBER_KEYEXPRS: usize = generated::MAX_MEMBER_KEYEXPRS;
 
 /// The transport or link events a connectivity listener declared with history holds while its
 /// history is replayed. Past them, the rest of the replay's window is told by comparing the

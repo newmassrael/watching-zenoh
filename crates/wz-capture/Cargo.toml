@@ -305,8 +305,14 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # at `crate::proto_schema` and `crate::proto_decode`, the nanopb options and
 # integer ranges re-exported at `crate::proto_nanopb` and `crate::proto_range`,
 # and the one protobuf wire writer the value writer (`crate::proto_encode`)
-# writes through.
-wz-app-frame = { path = "../wz-app-frame", features = ["proto"] }
+# writes through. The schema documents carry the `.proto` text a person hands
+# over, so the text reader (`proto-text`) is on.
+wz-app-frame = { path = "../wz-app-frame", features = ["proto", "proto-text"] }
+
+# The schema reader under `wz-app-frame`'s `proto`, named here only to keep the comments `protoc`
+# attaches to a message and a field (`docs`), which the schema description (`crate::proto_describe`)
+# shows and no node that only reads payloads keeps.
+wz-app-schema = { path = "../wz-app-schema", features = ["docs"] }
 
 # `filter-regex`'s engine, and only it: see that feature. `alloc` without `std`,
 # the meta engine and the Unicode tables a pattern's classes read.

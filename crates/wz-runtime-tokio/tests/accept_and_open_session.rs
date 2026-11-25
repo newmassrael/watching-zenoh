@@ -199,3 +199,50 @@ async fn silent_peer_surfaces_accept_terminal() {
     }
     client.abort();
 }
+
+/// A width of sequence numbers the build's `sn-resolution` domain leaves out is refused by both
+/// opens before the link is wired, so the opener is told and the peer is sent nothing. A build
+/// whose domain holds every width has no such width, and the loop asks nothing of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_width_outside_the_sn_resolution_domain_is_refused_by_both_opens() {
+    use wz_session_core::policy::SnResolution;
+    use wz_session_core::policy_binding::{OutsideDomain, PolicyValue};
+
+    for width in SnResolution::WIDTHS {
+        if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+            continue;
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let dialled = TcpStream::connect(addr).await.expect("connect");
+        let (accepted, _peer) = listener.accept().await.expect("accept");
+        let mut params = fixture_session_init_params();
+        params.seq_num_res = width;
+        let opened = initiate_and_open_session(
+            DialedLink::Tcp(dialled),
+            params.clone(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await;
+        assert!(
+            matches!(opened, Err(OpenError::SnResolution(OutsideDomain { value })) if value == width),
+            "the initiator, {}",
+            width.id()
+        );
+        let accepted = accept_and_open_session(
+            DialedLink::Tcp(accepted),
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await;
+        assert!(
+            matches!(accepted, Err(OpenError::SnResolution(OutsideDomain { value })) if value == width),
+            "the acceptor, {}",
+            width.id()
+        );
+    }
+}

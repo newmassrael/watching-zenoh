@@ -115,9 +115,9 @@ pub fn ref_from_bytes(s: &[u8]) -> EncodingRef<'_> {
     let named = |prefix: &[u8]| core::str::from_utf8(prefix).ok().and_then(lookup_id);
     match s.windows(sep.len()).position(|w| w == sep) {
         Some(pos) => {
-            let (prefix, rest) = s.split_at(pos);
-            if let Some(id) = named(prefix) {
-                return ref_from_schema_bytes(id, rest.get(sep.len()..).unwrap_or_default());
+            if let Some(id) = s.get(..pos).and_then(named) {
+                let schema = s.get(pos..).and_then(|rest| rest.get(sep.len()..));
+                return ref_from_schema_bytes(id, schema.unwrap_or_default());
             }
         }
         None => {

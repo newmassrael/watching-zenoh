@@ -29,6 +29,7 @@ use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::query_sink::ReplyOut;
 use wz_session_core::sample::TimestampHint;
+use wz_session_core::session_tables::KeyexprHandle;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
 
@@ -40,9 +41,9 @@ use crate::os::Mutex;
 use crate::peers::PeerIdentity;
 use crate::told::{ToldKey, ToldLedger, ToldPlane};
 use crate::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, LinksNotHonoured,
-    LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId,
-    SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HoldRefused, KeyHold,
+    LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink, Refusal,
+    ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -58,16 +59,22 @@ pub enum RedeclareRefusal {
 /// engine's own count of the declaration's holders. Apart from [`SessionEngine`], so a hold names
 /// its session by these two operations alone, and a build whose doors reach the engine as its own
 /// type makes no table of every operation of the session for it.
+///
+/// A hold names the declaration by its row, generation and all, not by its id: a declaration
+/// retracted whatever held it leaves its id to a later one once the ids wrap, and a hold of the
+/// first is then no hold of the second.
 pub trait KeyHolds: Send + Sync {
-    /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
-    fn release_keyexpr(&self, mapping_id: ExprId);
+    /// Let go of one hold on the declaration in row `row`; the last one retracts it. A row that
+    /// went, whatever row took its slot since, is let go of by nothing.
+    fn release_keyexpr(&self, row: KeyexprHandle);
 
-    /// Take one more hold on declaration `mapping_id`, which a holder already holds, so it stays
-    /// declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on the
-    /// wire. The engine's count is the one count of a declaration's holders. A declaration no
-    /// longer held takes none. Every engine states it: one that held a declaration and did not
-    /// count this would retract it before its last holder let go.
-    fn retain_keyexpr(&self, mapping_id: ExprId);
+    /// Take one more hold on the declaration in row `row`, which a holder already holds, so it
+    /// stays declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on
+    /// the wire. The engine's count is the one count of a declaration's holders. Refused, taking
+    /// none, when the count holds as many as it can ([`HoldRefused::Full`]), or when the row went
+    /// or the session is closed ([`HoldRefused::Gone`]). Every engine states it: one that held a
+    /// declaration and did not count this would retract it before its last holder let go.
+    fn retain_keyexpr(&self, row: KeyexprHandle) -> Result<(), HoldRefused>;
 }
 
 /// The periodic jobs a session runs ([`crate::Ticker`]). Apart from [`SessionEngine`] for the
@@ -413,11 +420,11 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// Retract subscriber `id`. Retracting one already retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
 
-    /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: its mapping id.
-    /// Refused when the session has no id left to give ([`Refusal::NoEntityId`]), no row or key
-    /// room left, or is closed; and with [`Refusal::NotBuilt`] by an engine that names every key
-    /// whole and holds no declaration.
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<ExprId, Refusal>;
+    /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
+    /// names its mapping id and its row. Refused when the session has no id left to give
+    /// ([`Refusal::NoEntityId`]), no row or key room left, or is closed; and with
+    /// [`Refusal::NotBuilt`] by an engine that names every key whole and holds no declaration.
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<KeyHold, Refusal>;
     /// Where the C ABI's objects keep their keys when the session keeps a key arena: each text
     /// once, in a block every holder counts, shared with any key of the same text the arena keeps.
     /// `None`, the provided answer, from an engine that keeps none, whose callers keep a copy of
@@ -491,7 +498,9 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
 
     /// [`Self::declare_matching_listener`] of what write filter `filter` counts, on its key and with
     /// its count of the session's own, as the engine keeps them for the filter, so the filter's
-    /// holder keeps no copy of them. The listener does not go with the filter: its holder stops it.
+    /// holder keeps no copy of them. An engine that keeps the filter's answer reads it for the
+    /// listener and asks the peers nothing more, as zenoh-pico's listener is a callback of its
+    /// entity's filter; the holder stops its listeners before the filter.
     /// [`Refusal::Closed`] when `filter` names no filter, as for anything of a closed session.
     fn declare_filter_matching_listener(
         &self,

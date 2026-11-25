@@ -899,26 +899,16 @@ pub fn encode_frame_with_push_qos(
 // reassembly dispatcher requires the chunk SNs to be consecutive (it aborts a
 // chain on `fragment.ooo`), so the caller draws the SN block atomically.
 
-/// Base-128 VLE byte width of `sn` — the offset math the fragmentation
-/// body-slice uses to locate a FRAME's network-message tail behind the
-/// 1-byte header + `VLE(sn)` prefix that [`encode_frame_envelope`] wrote.
-/// Mirrors the encoder's emit loop exactly; it IS the wire format, not
-/// consumer-tunable logic.
-///
-/// cfg = fragmentation only (R311ko): the codec-agnostic
-/// [`multicast_frame_or_fragments`] body-slice joined the unicast
-/// `emit_frame_or_fragments` as a consumer, so the former wire-emit
-/// codec union (R311jq) no longer bounds where the symbol is live —
-/// any fragmentation build slices.
+// Base-128 VLE byte width of an SN: the offset math the fragmentation body-slice uses to locate
+// a FRAME's network-message tail behind the 1-byte header + `VLE(sn)` prefix that
+// `encode_frame_envelope` wrote, by the codec crate's one count of the encoder's bytes.
+//
+// cfg = fragmentation only (R311ko): the codec-agnostic `multicast_frame_or_fragments`
+// body-slice joined the unicast `emit_frame_or_fragments` as a consumer, so the former
+// wire-emit codec union (R311jq) no longer bounds where the symbol is live: any fragmentation
+// build slices.
 #[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
-fn vle_width(sn: u64) -> usize {
-    let (mut width, mut v) = (1usize, sn);
-    while v >= 0x80 {
-        v >>= 7;
-        width = width.saturating_add(1);
-    }
-    width
-}
+use wz_codecs::vle::zint_len as vle_width;
 
 /// R311kq — the network-message body of an already-encoded outbound
 /// `T_MID_FRAME`: the tail behind the 1-byte header + `VLE(sn)` prefix
@@ -1063,8 +1053,8 @@ pub fn fragment_body(
     body: &[u8],
     reliable: bool,
     mtu: usize,
-    base_sn: u64,
-    sn_mask: u64,
+    base_sn: crate::sn::Sn,
+    sn_mask: crate::sn::Sn,
     ext_qos: Option<Priority>,
 ) -> Vec<Vec<u8>> {
     let chain = FragmentChain::new(body, reliable, mtu, base_sn, sn_mask, ext_qos);
@@ -1118,8 +1108,8 @@ impl<'a> FragmentChain<'a> {
         body: &'a [u8],
         reliable: bool,
         mtu: usize,
-        base_sn: u64,
-        sn_mask: u64,
+        base_sn: crate::sn::Sn,
+        sn_mask: crate::sn::Sn,
         ext_qos: Option<Priority>,
     ) -> Self {
         Self {
@@ -1149,7 +1139,7 @@ impl<'a> FragmentChain<'a> {
     /// its SN would make the NEXT message unreadable to a real zenohd. That
     /// divergence from upstream is invisible there only because upstream's
     /// marker never reaches the wire at all (item 575).
-    pub fn next_sn(&self) -> u64 {
+    pub fn next_sn(&self) -> crate::sn::Sn {
         self.plan.next_sn()
     }
 }
@@ -1161,7 +1151,7 @@ impl Iterator for FragmentChain<'_> {
     fn next(&mut self) -> Option<Vec<u8>> {
         let span = self.plan.next_span()?;
         Some(build_fragment_wire(
-            span.sn,
+            crate::sn::to_wire(span.sn),
             self.body.get(span.start..span.end)?,
             self.reliable,
             span.more,
@@ -1192,8 +1182,8 @@ pub struct FragmentPlan {
     len: usize,
     off: usize,
     chunk: usize,
-    sn: u64,
-    sn_mask: u64,
+    sn: crate::sn::Sn,
+    sn_mask: crate::sn::Sn,
     done: bool,
 }
 
@@ -1205,7 +1195,7 @@ pub struct FragmentPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FragmentSpan {
     /// The fragment's SN.
-    pub sn: u64,
+    pub sn: crate::sn::Sn,
     /// First byte of the message this fragment carries.
     pub start: usize,
     /// One past its last byte.
@@ -1222,7 +1212,7 @@ pub struct FragmentSpan {
 impl FragmentSpan {
     /// The stop fragment at `sn`: no payload, M set, the `0x3 Drop` marker
     /// (the shape `build_fragment_drop_wire` writes).
-    pub fn stop(sn: u64) -> Self {
+    pub fn stop(sn: crate::sn::Sn) -> Self {
         Self {
             sn,
             start: 0,
@@ -1251,8 +1241,8 @@ impl FragmentPlan {
     pub fn new(
         len: usize,
         mtu: usize,
-        base_sn: u64,
-        sn_mask: u64,
+        base_sn: crate::sn::Sn,
+        sn_mask: crate::sn::Sn,
         ext_qos: Option<Priority>,
     ) -> Self {
         // A QoS chain shrinks every chunk by the per-fragment ext_qos width;
@@ -1289,7 +1279,7 @@ impl FragmentPlan {
 
     /// The SN the next transport message on this conduit carries (see
     /// [`FragmentChain::next_sn`]).
-    pub fn next_sn(&self) -> u64 {
+    pub fn next_sn(&self) -> crate::sn::Sn {
         self.sn
     }
 
@@ -1361,7 +1351,7 @@ pub fn write_fragment(
 ) -> Result<(), CodecError> {
     write_fragment_head(
         buf,
-        span.sn,
+        crate::sn::to_wire(span.sn),
         reliable,
         span.more,
         span.first,
@@ -1769,7 +1759,7 @@ pub fn build_frame_wire(
 #[cfg(feature = "alloc")]
 pub fn multicast_frame_or_fragments(
     frame: Vec<u8>,
-    sn: u64,
+    sn: crate::sn::Sn,
     reliable: bool,
     mtu: usize,
     tx_sn: &mut crate::sn::MulticastTxConduits,
@@ -1786,7 +1776,7 @@ pub fn multicast_frame_or_fragments(
     // single conduit and `mint` ignores the priority.
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
-        let body = frame_wire_body(&frame, sn, ext_qos);
+        let body = frame_wire_body(&frame, crate::sn::to_wire(sn), ext_qos);
         // `fragment_count` / `fragment_body` size chunks against the per-fragment
         // ext_qos width iff a qos chain; `ext_qos.is_some()` is that flag, and it
         // is always false without `transport-qos` (the emit passes `None`).
@@ -2499,7 +2489,7 @@ mod fragment_tests {
     fn fragment_body_round_trips_through_parse_inbound() {
         let body: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
         let mtu = 64usize;
-        let base_sn = 7u64;
+        let base_sn: crate::sn::Sn = 7;
 
         let frames = fragment_body(
             &body,
@@ -2537,7 +2527,7 @@ mod fragment_tests {
             assert!(reliable, "R flag must be set on a reliable chain");
             assert_eq!(
                 sn,
-                base_sn + i as u64,
+                crate::sn::to_wire(base_sn) + i as u64,
                 "fragment SNs must be consecutive from the base",
             );
             let is_last = i + 1 == frames.len();
@@ -2566,7 +2556,7 @@ mod fragment_tests {
     fn fragment_body_marks_only_the_first_fragment() {
         let body: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
         let mtu = 64usize;
-        let base_sn = 7u64; // VLE width 1 -> the ext byte lands at wire[2].
+        let base_sn: crate::sn::Sn = 7; // VLE width 1 -> the ext byte lands at wire[2].
         let frames = fragment_body(
             &body,
             true,
@@ -2733,7 +2723,7 @@ mod fragment_tests {
         let body: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
         let mtu = 64usize;
         let mask = crate::sn::mask_from_res(0x02);
-        let base_sn = 7u64;
+        let base_sn: crate::sn::Sn = 7;
 
         let whole = fragment_body(&body, true, mtu, base_sn, mask, None);
         let streamed: Vec<Vec<u8>> =
@@ -2841,8 +2831,13 @@ mod fragment_tests {
         let mut tx_sn = crate::sn::MulticastTxConduits::new(crate::sn::mask_from_res(0x02));
         let sn = tx_sn.mint(Priority::DEFAULT, true);
         let mut frame = Vec::new();
-        super::begin_frame(&mut frame, sn, super::frame_flags(true), None)
-            .expect("a Vec grows, so its sink is infallible");
+        super::begin_frame(
+            &mut frame,
+            crate::sn::to_wire(sn),
+            super::frame_flags(true),
+            None,
+        )
+        .expect("a Vec grows, so its sink is infallible");
         frame.extend_from_slice(&[0xCD; 16]);
         let after_mint = tx_sn.clone();
         // DEFAULT / non-qos re-frame: ext_qos = None, byte-identical to pre-qos.
@@ -2867,8 +2862,13 @@ mod fragment_tests {
         let sn = tx_sn.mint(Priority::DEFAULT, true);
         let body: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
         let mut frame = Vec::new();
-        super::begin_frame(&mut frame, sn, super::frame_flags(true), None)
-            .expect("a Vec grows, so its sink is infallible");
+        super::begin_frame(
+            &mut frame,
+            crate::sn::to_wire(sn),
+            super::frame_flags(true),
+            None,
+        )
+        .expect("a Vec grows, so its sink is infallible");
         frame.extend_from_slice(&body);
 
         let mask = tx_sn.mask();
@@ -2877,7 +2877,7 @@ mod fragment_tests {
         assert!(frames.len() > 1, "200 bytes at mtu 64 must fragment");
         assert_eq!(
             tx_sn.advertise_default().next_reliable,
-            (sn + frames.len() as u64) & mask,
+            (sn + frames.len() as crate::sn::Sn) & mask,
             "the chain consumes count SNs total (frame mint + count-1 follow-ons)",
         );
         assert_eq!(
@@ -2940,7 +2940,7 @@ mod qos_wire_tests {
         let mut frame = Vec::new();
         super::begin_frame(
             &mut frame,
-            sn,
+            crate::sn::to_wire(sn),
             super::frame_flags(true),
             Some(Priority::RealTime),
         )
@@ -2959,7 +2959,7 @@ mod qos_wire_tests {
         // Follow-on SNs minted on the RealTime conduit; DEFAULT conduit untouched.
         assert_eq!(
             tx.advertise_per_priority()[Priority::RealTime as usize].next_reliable,
-            (sn + frames.len() as u64) & mask,
+            (sn + frames.len() as crate::sn::Sn) & mask,
             "the chain's follow-on mints ride the RealTime conduit"
         );
         assert_eq!(
@@ -3282,7 +3282,7 @@ mod qos_wire_tests {
             body,
             true,
             mtu,
-            sn,
+            crate::sn::from_wire(sn),
             crate::sn::mask_from_res(0x02),
             Some(priority),
         );

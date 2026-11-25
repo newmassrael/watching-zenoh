@@ -153,20 +153,28 @@ compile_error!(
      `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
      cooperative feature"
 );
+// The cooperative engine's `reth/` groups run over the host's raw packet sockets
+// (`wz-runtime-posix`'s `raweth`), which it opens on Linux, where pico has the transport; another
+// host, and a Zephyr image, which has no raw packet socket, are refused by name rather than by the
+// missing opener of `src/coop_host.rs`.
 #[cfg(all(
     feature = "raweth-transport",
     any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
+        all(
+            any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            not(target_os = "linux")
+        ),
+        all(
+            feature = "os-zephyr",
+            not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
+        )
     )
 ))]
 compile_error!(
-    "wz-capi-pico: `raweth-transport` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `raweth-transport` on the cooperative engine opens the host's raw packet \
+     sockets, which `wz-runtime-posix` opens on Linux only, and a Zephyr image has no raw packet \
+     socket in src/coop_host.rs: drop the feature from this library, or give that file the \
+     target's sockets"
 );
 #[cfg(all(
     feature = "rx-busy-poll",
@@ -213,20 +221,27 @@ compile_error!(
      `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
      cooperative feature"
 );
+// The cooperative engine's serial lines are the host's ttys (`wz-runtime-posix`'s `serial`), which
+// it opens on Linux and Android; a host without them, and a Zephyr image, whose UARTs no module
+// opens yet, are refused by name rather than by the missing opener of `src/coop_host.rs`.
 #[cfg(all(
     feature = "transport-link-serial",
     any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
+        all(
+            any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            not(any(target_os = "linux", target_os = "android"))
+        ),
+        all(
+            feature = "os-zephyr",
+            not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
+        )
     )
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-serial` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-serial` on the cooperative engine opens the host's ttys, \
+     which `wz-runtime-posix` opens on Linux and Android only, and a Zephyr image has no serial \
+     line in src/coop_host.rs: drop the feature from this library, or give that file the \
+     target's serial lines"
 );
 #[cfg(all(
     feature = "transport-link-tls",
@@ -243,37 +258,40 @@ compile_error!(
      `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
      cooperative feature"
 );
-// The unixpipe link is built on a Unix host alone, so elsewhere the feature names nothing to refuse.
+// The cooperative engine's unixpipe links are the host's named FIFOs (`wz-runtime-posix`'s
+// `unixpipe`), which it opens on Linux and Android; another host, and a Zephyr image, which has no
+// named FIFO, are refused by name rather than by the missing opener of `src/coop_host.rs`.
 #[cfg(all(
     feature = "transport-link-unixpipe",
-    unix,
     any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
+        all(
+            any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            not(any(target_os = "linux", target_os = "android"))
+        ),
+        all(
+            feature = "os-zephyr",
+            not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
+        )
     )
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-unixpipe` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-unixpipe` on the cooperative engine opens the host's named \
+     FIFOs, which `wz-runtime-posix` opens on Linux and Android only, and a Zephyr image has no \
+     named FIFO in src/coop_host.rs: drop the feature from this library, or give that file the \
+     target's FIFOs"
 );
+// The cooperative engine's WebSocket links run over the host's TCP (`wz-runtime-posix`'s `ws`,
+// on a POSIX host and on Windows); a Zephyr image has no opener in `src/coop_host.rs` yet and is
+// refused by name rather than by the missing opener.
 #[cfg(all(
     feature = "transport-link-ws",
-    any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
-    )
+    feature = "os-zephyr",
+    not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-ws` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-ws` on the cooperative engine opens WebSocket links over the \
+     host's TCP, and a Zephyr image has no WebSocket link in src/coop_host.rs: drop the feature \
+     from this library, or give that file the target's opener"
 );
 #[cfg(all(
     feature = "engine-tokio",
@@ -285,21 +303,18 @@ compile_error!(
     ),
     not(any(
         feature = "gossip",
-        feature = "raweth-transport",
         feature = "rx-busy-poll",
         feature = "serial-drive-own-thread",
         feature = "transport-link-quic",
-        feature = "transport-link-serial",
-        feature = "transport-link-tls",
-        feature = "transport-link-unixpipe",
-        feature = "transport-link-ws"
+        feature = "transport-link-tls"
     ))
 ))]
 compile_error!(
     "wz-capi-pico: a library has one engine, and this build names `engine-tokio` beside a \
-     cooperative one (`engine-coop`, `os-posix`, `os-windows` or `os-zephyr`): build the \
-     cooperative library with `--no-default-features` and its features, or the tokio engine's \
-     without the cooperative feature (`tls-mbedtls` names `engine-coop`)"
+     cooperative one (`engine-coop`, `os-posix`, `os-windows` or `os-zephyr`): the default \
+     features name `engine-coop`, so build the tokio engine's library with \
+     `--no-default-features` and `engine-tokio` with its features (`wz_config.py \
+     --bench-cargo-args tokio` prints them), or the cooperative one without the tokio engine"
 );
 
 // `os-zephyr` is the image's engine and host, and an image has no standard library: a capability
@@ -498,8 +513,6 @@ pub mod config;
 // (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
 // them the open runs a session under the build's policies and limits.
 pub mod config_policy;
-// What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
-// unstable surface (docs/target-build-contract.md T9).
 #[cfg(feature = "connectivity")]
 pub mod connectivity;
 // The clock a program registers and the standing it reports: wz doors (`wz_ext.h`) of the unstable
@@ -513,7 +526,9 @@ pub mod clock_source;
     feature = "declarations-synced-event"
 ))]
 pub mod decl_watch;
-#[cfg(feature = "unstable-api")]
+// What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
+// unstable surface (docs/target-build-contract.md T9), in a build with `device-requires`.
+#[cfg(feature = "device-requires")]
 pub mod device_requires;
 // End-to-end protection of an application's payload: what the sending and the receiving doors
 // share, and the instance keys' and the message payloads' doors with them, in a build with any of
@@ -617,8 +632,12 @@ pub mod platform;
 #[cfg(wz_process_pools)]
 mod process_pool;
 // One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
-// that read a schema: the instance keys' and the message payloads'.
-#[cfg(any(feature = "instance-key", feature = "message-payload"))]
+// that read a schema from its text: the instance keys' and the message payloads', in a build that
+// links the text reader.
+#[cfg(all(
+    feature = "proto-text",
+    any(feature = "instance-key", feature = "message-payload")
+))]
 #[cfg(not(wz_additional_apart))]
 pub mod proto_file;
 pub mod pubsub;
@@ -629,6 +648,8 @@ pub mod querier;
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+#[cfg(test)]
+mod heap_refusal_tests;
 mod refusal;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
@@ -641,6 +662,8 @@ pub mod reply_keyexpr;
 pub mod result;
 #[cfg(any(feature = "scout", feature = "scout-mcu"))]
 pub mod scout;
+#[cfg(test)]
+mod test_heap;
 // The sending side of a declared segment profile: wz doors (`wz_ext.h`) of the unstable surface,
 // over the piece writer the zenoh-c ABI's doors of the same capability write with.
 #[cfg(feature = "segment-sender")]

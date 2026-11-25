@@ -12,8 +12,8 @@
 //!   and call nested `spawn` (R311av-pre Decision 5).
 //! - `impl Runtime for CoopRuntime<C>`:
 //!   - `type JoinHandle<T> = CoopJoinHandle<T>`
-//!   - `type Mutex<T> = crate::sync::Mutex<T>`
-//!   - `type RwLock<T> = crate::sync::RwLock<T>`
+//!   - `type Mutex<T> = K::Mutex<T>` (`crate::sync::LockKind`)
+//!   - `type RwLock<T> = K::Mutex<T>`
 //!   - `fn spawn<F>(..) -> CoopJoinHandle<F::Output>`: writes the
 //!     future into a cell of the runtime's task table, where its output
 //!     is written too when it ends ([`crate::executor`]).
@@ -108,22 +108,34 @@ use wz_runtime_core::RuntimeError;
 #[cfg(feature = "session-slot")]
 use crate::executor::TaskTable;
 use crate::executor::{ExecutorState, TaskJoin};
+#[cfg(not(feature = "session-slot"))]
+use crate::executor::{StoreLayout, TaskStore};
 use crate::join_handle::CoopJoinHandle;
+#[cfg(not(feature = "session-slot"))]
+use crate::kept::{self, Kept};
+use crate::sync::{Confined, ConfinedOwner, LockKind, Shared};
 use crate::time::ClockSource;
 use crate::timer::TimerQueue;
+#[cfg(not(feature = "session-slot"))]
+use crate::timer::TimerSlot;
 #[cfg(feature = "session-slot")]
 use crate::timer::TimerTable;
+#[cfg(not(feature = "session-slot"))]
+use core::alloc::Layout;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
 #[cfg(feature = "session-slot")]
 use core::mem::MaybeUninit;
-
-/// How a runtime handle and a time source hold the runtime's state: an `Arc` of it,
-/// or under `session-slot` a reference to the `static` cell that holds it
-/// ([`RuntimeCell`]). Both are cheap to clone; the second allocates nothing.
 #[cfg(not(feature = "session-slot"))]
-pub(crate) type InnerRef<C> = Arc<RuntimeInner<C>>;
-/// See the `Arc` form of this alias.
+use core::ptr::{self, NonNull};
+
+/// How a runtime handle and a time source hold the runtime's state: a count of it, on the heap
+/// or placed in a span of counted memory ([`CoopRuntime::placed`]), or under `session-slot` a
+/// reference to the `static` cell that holds it ([`RuntimeCell`]). Both are cheap to clone; the
+/// second allocates nothing.
+#[cfg(not(feature = "session-slot"))]
+pub(crate) type InnerRef<C> = kept::Shared<RuntimeInner<C>>;
+/// See the counted form of this alias.
 #[cfg(feature = "session-slot")]
 pub(crate) type InnerRef<C> = &'static RuntimeInner<C>;
 
@@ -135,7 +147,7 @@ pub(crate) fn share_inner<C: ClockSource>(inner: &InnerRef<C>) -> InnerRef<C> {
     inner.clone()
 }
 
-/// See the `Arc` form of this function.
+/// See the counted form of this function.
 #[cfg(feature = "session-slot")]
 pub(crate) fn share_inner<C: ClockSource>(inner: &InnerRef<C>) -> InnerRef<C> {
     inner
@@ -164,7 +176,7 @@ pub type DefaultDriver = dyn wz_session_core::link::BoxedLinkDriver;
 pub type DefaultDriver = ();
 
 /// `impl Runtime` for the MCU profile. Cheap to clone — the entire
-/// state lives in `Arc<RuntimeInner<C>>`. Multiple clones share the
+/// state lives behind one count of it (`InnerRef`). Multiple clones share the
 /// same task pool, timer queue, and clock; task closures may capture
 /// a `CoopRuntime` clone and call nested `spawn` (R311av-pre
 /// Decision 5).
@@ -175,12 +187,17 @@ pub type DefaultDriver = ();
 /// Kconfig chose) gets direct calls through the link, and the default, the trait object, is the
 /// profile that picks its driver at run time. A build with no session tier has no driver trait
 /// to name and its default is `()`, which nothing reads.
-pub struct CoopRuntime<C: ClockSource, D: ?Sized = DefaultDriver> {
+///
+/// `K` is how the values the runtime lends a session are locked (`Runtime::Mutex`): the
+/// profile's lock ([`Shared`], the default), or none under an engine that keeps each of its
+/// sessions behind one lock of its own ([`Confined`], [`Self::confined`]). The runtime holds no
+/// such value itself, so the choice is a type and costs the runtime nothing.
+pub struct CoopRuntime<C: ClockSource, D: ?Sized = DefaultDriver, K: LockKind = Shared> {
     pub(crate) inner: InnerRef<C>,
-    driver: PhantomData<fn() -> *const D>,
+    driver: PhantomData<fn() -> (K, *const D)>,
 }
 
-impl<C: ClockSource, D: ?Sized> Clone for CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized, K: LockKind> Clone for CoopRuntime<C, D, K> {
     fn clone(&self) -> Self {
         Self {
             inner: share_inner(&self.inner),
@@ -217,12 +234,34 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// ([`Self::task_refusals`]); a sleep past the timers is refused an entry, counted
     /// ([`Self::timer_refusals`]), and ends by polling. No spawn and no sleep allocates. What an
     /// engine that owes no allocation after its open makes at its open.
+    ///
+    /// `rows.timers` of 0 makes no timer table at all (a build in which no task sleeps). Always
+    /// inlined, as are the other reserved makings: a maker that states the count as a constant
+    /// links only the making of that count.
     #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
     pub fn reserved(clock: C, rows: RuntimeRows) -> Self {
         Self::over(
             clock,
             ExecutorState::reserved(rows.tasks, rows.task_bytes),
-            TimerQueue::reserved(rows.timers),
+            TimerQueue::of_rows(rows.timers),
+        )
+    }
+
+    /// [`Self::reserved`] for a runtime that hosts one task at a time: an engine whose session holds
+    /// one link, its dial role's, and runs no task beside that link's. It holds one cell of
+    /// `rows.task_bytes` (none for `rows.tasks` of 0, and one for a count past it), and its
+    /// passes, spawns and sweeps look at that cell alone: a spawn while the cell is taken is
+    /// refused, counted, as one past a reserved table's rows is. As only this names the walks of
+    /// one cell and only the other makings name the walks of many, a build whose runtimes are all
+    /// made here links no walk of many cells.
+    #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
+    pub fn reserved_for_one(clock: C, rows: RuntimeRows) -> Self {
+        Self::over(
+            clock,
+            ExecutorState::reserved_one(rows.tasks, rows.task_bytes),
+            TimerQueue::of_rows(rows.timers),
         )
     }
 
@@ -235,24 +274,189 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// table's rows is. Once sealed the runtime is [`Self::reserved`]'s: no spawn and no sleep
     /// allocates.
     #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
     pub fn opening(clock: C, rows: RuntimeRows, added: usize) -> Self {
         Self::over(
             clock,
             ExecutorState::opening(rows.tasks, rows.task_bytes, added),
-            TimerQueue::reserved(rows.timers),
+            TimerQueue::of_rows(rows.timers),
         )
     }
 
     #[cfg(not(feature = "session-slot"))]
     fn over(clock: C, executor: ExecutorState, timers: TimerQueue) -> Self {
         Self {
-            inner: Arc::new(RuntimeInner {
+            inner: kept::Shared::boxed(RuntimeInner {
                 executor,
                 timers,
                 clock,
             }),
             driver: PhantomData,
         }
+    }
+}
+
+/// Which table a runtime placed in a span holds ([`CoopRuntime::placed`]): the one
+/// [`CoopRuntime::reserved`] holds, the one cell [`CoopRuntime::reserved_for_one`] holds, or the
+/// cells [`CoopRuntime::opening`] holds with its count of cells added while the open lasts, which
+/// take their bytes of the heap.
+#[cfg(not(feature = "session-slot"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeForm {
+    /// Every cell reserved, a table of any count of them.
+    Reserved,
+    /// One cell at most.
+    ForOne,
+    /// The cells reserved and `added` bare cells beside them while the open lasts.
+    Opening {
+        /// The bare cells.
+        added: usize,
+    },
+}
+
+/// A span a runtime's state is placed in ([`CoopRuntime::placed`]), and the count that keeps the
+/// memory it lies in: the runtime holds a count of that memory until its last holder (a handle, a
+/// waker or a join handle of one of its tasks) lets go, and gives it back then.
+#[cfg(not(feature = "session-slot"))]
+pub struct RuntimePlace {
+    at: NonNull<u8>,
+    bytes: usize,
+    memory: NonNull<Kept>,
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl RuntimePlace {
+    /// The `bytes` bytes at `at`, in the memory `memory` keeps.
+    ///
+    /// # Safety
+    /// `at` is valid for reads and writes of `bytes` bytes, which nothing else uses while a count
+    /// of `memory` is held; `memory` is a live count of the memory that holds them, which the
+    /// caller holds one of until the place is used.
+    pub unsafe fn new(at: NonNull<u8>, bytes: usize, memory: NonNull<Kept>) -> Self {
+        Self { at, bytes, memory }
+    }
+}
+
+/// Where each part of a placed runtime's state lies from the start of its span: its own state, the
+/// count and fields of its task table, the table's cells and their bytes, and its timer entries.
+#[cfg(not(feature = "session-slot"))]
+struct PlacedParts {
+    inner: usize,
+    store: usize,
+    block: usize,
+    timers: usize,
+    laid: StoreLayout,
+    /// The span: its bytes, and the alignment it starts on.
+    layout: Layout,
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl PlacedParts {
+    /// The parts of a runtime of `rows` and `form` on the clock `C`, one after another; `None`
+    /// past the address space. The one reckoning of the span, for its size and for its placing.
+    #[inline(always)]
+    fn of<C: ClockSource>(rows: RuntimeRows, form: RuntimeForm) -> Option<Self> {
+        let laid = match form {
+            RuntimeForm::ForOne => StoreLayout::of::<true>(rows.tasks, Some(rows.task_bytes)),
+            RuntimeForm::Reserved | RuntimeForm::Opening { .. } => {
+                StoreLayout::of::<false>(rows.tasks, Some(rows.task_bytes))
+            }
+        };
+        let layout = kept::Shared::<RuntimeInner<C>>::layout();
+        let (layout, store) = layout.extend(kept::Shared::<TaskStore>::layout()).ok()?;
+        let (layout, block) = layout.extend(laid.layout()).ok()?;
+        let timer_entries = Layout::array::<TimerSlot>(rows.timers).ok()?;
+        let (layout, timers) = layout.extend(timer_entries).ok()?;
+        Some(Self {
+            inner: 0,
+            store,
+            block,
+            timers,
+            laid,
+            layout: layout.pad_to_align(),
+        })
+    }
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl<C: ClockSource> CoopRuntime<C> {
+    /// The bytes of the span [`Self::placed`] places a runtime of `rows` and `form` in, and the
+    /// alignment it starts on; `None` past the address space.
+    #[inline(always)]
+    pub fn placed_layout(rows: RuntimeRows, form: RuntimeForm) -> Option<Layout> {
+        PlacedParts::of::<C>(rows, form).map(|parts| parts.layout)
+    }
+
+    /// The runtime [`Self::reserved`], [`Self::reserved_for_one`] or [`Self::opening`] makes,
+    /// as `form` says, with its state, its task table and its timer table placed in `place`
+    /// rather than on the heap: nothing allocates, and the memory of the span is kept until the
+    /// runtime's last holder lets go. `None`, having placed nothing, for a span shorter than
+    /// [`Self::placed_layout`] or not on its alignment. Always inlined, as the other makings: a
+    /// maker that states its form and its timers as constants links only the making of those.
+    #[inline(always)]
+    pub fn placed(
+        clock: C,
+        rows: RuntimeRows,
+        form: RuntimeForm,
+        place: RuntimePlace,
+    ) -> Option<Self> {
+        let parts = PlacedParts::of::<C>(rows, form)?;
+        let at = place.at.as_ptr();
+        // A layout's alignment is a power of two, so a start on it has none of the bits below it;
+        // being at least one, it takes one away without wrapping.
+        let below = parts.layout.align().wrapping_sub(1);
+        let off_alignment = (at as usize) & below != 0;
+        if place.bytes < parts.layout.size() || off_alignment {
+            return None;
+        }
+        let store_block = if parts.laid.layout().size() == 0 {
+            ptr::null_mut()
+        } else {
+            at.wrapping_add(parts.block)
+        };
+        // SAFETY: the span holds every part at its offset, on the alignment the parts were laid
+        // out for, the parts apart; nothing else uses the span while a count of its memory is
+        // held, and each part takes one (`RuntimePlace::new`).
+        let store = unsafe {
+            TaskStore::placed(
+                parts.laid,
+                NonNull::new_unchecked(at.wrapping_add(parts.store)),
+                store_block,
+                place.memory,
+            )
+        };
+        let executor = match form {
+            RuntimeForm::Reserved => ExecutorState::reserved_in(store),
+            RuntimeForm::ForOne => ExecutorState::reserved_one_in(store),
+            RuntimeForm::Opening { added } => ExecutorState::opening_in(store, added),
+        };
+        let timers = if rows.timers == 0 {
+            TimerQueue::of_rows(0)
+        } else {
+            // SAFETY: as above: the entries' part of the span.
+            unsafe {
+                TimerQueue::placed(
+                    NonNull::new_unchecked(at.wrapping_add(parts.timers).cast::<TimerSlot>()),
+                    rows.timers,
+                )
+            }
+        };
+        let inner = RuntimeInner {
+            executor,
+            timers,
+            clock,
+        };
+        Some(Self {
+            // SAFETY: as above: the state's part of the span.
+            inner: unsafe {
+                kept::Shared::placed(
+                    NonNull::new_unchecked(at.wrapping_add(parts.inner)),
+                    inner,
+                    place.memory,
+                )
+            },
+            driver: PhantomData,
+        })
     }
 }
 
@@ -290,11 +494,24 @@ impl RuntimeRows {
     }
 }
 
-impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
     /// The same runtime read as one whose sessions send through `D2`. The driver is only a type
     /// the session tier reads back; the runtime holds none, so a handle to the runtime serves for
     /// any driver and the tables and the executor stay the one pair.
-    pub fn with_driver<D2: ?Sized>(&self) -> CoopRuntime<C, D2> {
+    pub fn with_driver<D2: ?Sized>(&self) -> CoopRuntime<C, D2, K> {
+        self.retyped()
+    }
+
+    /// The same runtime read as one that lends its values with no lock of their own, reached
+    /// under the lock of `O`'s engine ([`Confined`]): what `O`'s `unsafe impl ConfinedOwner`
+    /// answers for.
+    pub fn confined<O: ConfinedOwner>(&self) -> CoopRuntime<C, D, Confined<O>> {
+        self.retyped()
+    }
+
+    /// The same runtime state under another driver and lock type: both are types the session
+    /// tier reads back, and the runtime holds a value of neither.
+    pub(crate) fn retyped<D2: ?Sized, K2: LockKind>(&self) -> CoopRuntime<C, D2, K2> {
         CoopRuntime {
             inner: share_inner(&self.inner),
             driver: PhantomData,
@@ -458,7 +675,7 @@ impl<C: ClockSource + Default> Default for CoopRuntime<C> {
     }
 }
 
-impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
     /// The spawns the task table refused, by reason.
     pub fn task_refusals(&self) -> crate::executor::Refusals {
         self.inner.executor.refusals()
@@ -486,7 +703,9 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
 /// The runtime's task table as a pool (`pool-monitor`): see
 /// [`crate::executor::ExecutorState`].
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, D: ?Sized> wz_session_core::pool_gauge::PoolGauge for CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized, K: LockKind> wz_session_core::pool_gauge::PoolGauge
+    for CoopRuntime<C, D, K>
+{
     fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
         wz_session_core::pool_gauge::PoolGauge::pool_stat(&self.inner.executor, name)
     }
@@ -585,19 +804,21 @@ impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: 
     }
 }
 
-impl<C: ClockSource, D: ?Sized + 'static> Runtime for CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized + 'static, K: LockKind> Runtime for CoopRuntime<C, D, K> {
     type JoinHandle<T>
         = CoopJoinHandle<T>
     where
         T: Send + 'static;
 
     type Mutex<T>
-        = crate::sync::Mutex<T>
+        = K::Mutex<T>
     where
         T: Send + 'static;
 
+    // One kind of hold for both: a reader is exclusive on a single core and under an owner's
+    // lock alike (`crate::sync`).
     type RwLock<T>
-        = crate::sync::RwLock<T>
+        = K::Mutex<T>
     where
         T: Send + Sync + 'static;
 
@@ -616,53 +837,43 @@ impl<C: ClockSource, D: ?Sized + 'static> Runtime for CoopRuntime<C, D> {
         }
     }
 
-    // R311ct — closure-scoped mutex access. MCU profile binds through
-    // `critical_section::with` (interrupt-disabling) + `RefCell::borrow_mut`
-    // (interior-mutable shared access inside the critical section). No
-    // poison concept on this profile: a panicking observer task would
-    // abort the whole executor under `panic = "abort"` (MCU default),
-    // so the only observable lock-failure mode is the runtime never
-    // resuming — recovery is not meaningful.
+    // Closure-scoped access, as `K` holds the value (`crate::sync::LockKind`). No poison concept
+    // on this profile: a panicking observer task would abort the whole executor under
+    // `panic = "abort"` (MCU default), so the only observable lock-failure mode is the runtime
+    // never resuming, and recovery is not meaningful.
     fn with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U
     where
         T: Send + 'static,
     {
-        crate::sync::with(mutex, f)
+        K::with(mutex, f)
     }
 
     // The non-waiting twin. On a host (`host-lock`) a held value answers `None`, as the tokio
     // runtime's lock does, so a sender that may not wait behind another (a droppable message
-    // behind a blocking one waiting for its link's room) is told so; under a critical section
-    // there is never another holder, and `f` runs.
+    // behind a blocking one waiting for its link's room) is told so; under a critical section or
+    // an owner's lock (`Confined`) there is never another holder, and `f` runs.
     fn try_with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>
     where
         T: Send + 'static,
     {
-        crate::sync::try_with(mutex, f)
+        K::try_with(mutex, f)
     }
 
-    // R311di-pre-e — construction-side Mutex/RwLock helpers. MCU profile
-    // wraps `value` in `RefCell<T>` first (interior-mutable storage that
-    // `critical_section::Mutex` exposes via `borrow(cs).borrow_mut()`),
-    // then in `critical_section::Mutex<RefCell<T>>` (the interrupt-
-    // disabling outer lock). RwLock collapses to the same shape per the
-    // single-core IRQ-safe model — see crate::sync module doc.
-    //
-    // Both constructors are infallible — `critical_section::Mutex::new` /
-    // `RefCell::new` are pure value-wrapping with no allocator or syscall
-    // dependency, matching the no_std + alloc constraint of this profile.
+    // Both constructors are infallible: `K` wraps the value with no allocator or syscall
+    // dependency, matching the no_std + alloc constraint of this profile. RwLock is the same
+    // form per the single-core IRQ-safe model (crate::sync module doc).
     fn new_mutex<T>(value: T) -> Self::Mutex<T>
     where
         T: Send + 'static,
     {
-        crate::sync::new(value)
+        K::wrap(value)
     }
 
     fn new_rwlock<T>(value: T) -> Self::RwLock<T>
     where
         T: Send + Sync + 'static,
     {
-        crate::sync::new(value)
+        K::wrap(value)
     }
 }
 
@@ -698,6 +909,15 @@ mod compile_time_assertions {
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::Mutex<u64>>();
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::RwLock<u32>>();
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::RwLock<u64>>();
+    };
+
+    // The same bounds for a runtime that lends its values under its owner's lock.
+    type ConfinedRuntime =
+        CoopRuntime<NopClock, DefaultDriver, Confined<crate::sync::tests::TestOwner>>;
+    const _: fn() = || {
+        _assert_send_sync::<ConfinedRuntime>();
+        _assert_send_sync::<<ConfinedRuntime as Runtime>::Mutex<u32>>();
+        _assert_send_sync::<<ConfinedRuntime as Runtime>::RwLock<u32>>();
     };
 
     // R258 / R311av — generic-composition smoke fn. Validates
@@ -837,6 +1057,29 @@ mod tests {
             <R as Runtime>::try_with_mutex_mut(&*value, |held| *held),
             Some(1)
         );
+    }
+
+    /// A runtime that lends its values under its owner's lock runs each closure on the value and
+    /// never finds a holder to wait for, and its tasks run as the shared runtime's do: it is the
+    /// same runtime state read under another lock type.
+    #[test]
+    fn a_confined_runtime_lends_values_its_owner_holds() {
+        type R = CoopRuntime<NopClock, DefaultDriver, Confined<crate::sync::tests::TestOwner>>;
+        let shared = CoopRuntime::new(NopClock);
+        let rt: R = shared.confined();
+        let value = <R as Runtime>::new_mutex(1u32);
+        <R as Runtime>::with_mutex_mut(&value, |held| *held += 1);
+        assert_eq!(
+            <R as Runtime>::try_with_mutex_mut(&value, |held| *held),
+            Some(2)
+        );
+        let h = rt.spawn(async { 7u8 });
+        assert_eq!(
+            shared.live_task_count(),
+            1,
+            "the task is in the one table both handles read"
+        );
+        assert_eq!(rt.block_on(h).expect("not stalled").expect("spawn ok"), 7);
     }
 
     #[test]

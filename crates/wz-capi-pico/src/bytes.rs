@@ -16,9 +16,10 @@
 //! borrowed shape a view string (from `z_keyexpr_as_view_string`) produces.
 //!
 //! The bytes a payload, a string or a slice holds lie in a block (`Block`): in a library with
-//! the process pools, one of their payloads' area (`HELD_PAYLOAD_BYTES`), so making or copying one
-//! allocates nothing once the pools are reserved and is refused with
-//! `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when the area has no block for it; in one without, the heap's.
+//! the process pools, one of their pools of payload blocks (`HELD_SMALL_PAYLOAD_BLOCKS` and the
+//! two larger), so making or copying one allocates nothing once the pools are reserved and is
+//! refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when no pool has a free block that holds it; in one
+//! without, the heap's.
 
 use core::ffi::{c_char, c_void, CStr};
 use core::mem::ManuallyDrop;
@@ -76,7 +77,7 @@ impl Drop for Release {
 }
 
 /// No room for an owned value's bytes, or for its place: what a constructor or a copy of a payload,
-/// a string or a slice meets when the payloads' area of the process pools, or the pool of its
+/// a string or a slice meets when the process pools' payload blocks, or the pool of its
 /// kind, has none free; the call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and leaves its output null.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NoRoom;
@@ -86,6 +87,84 @@ impl NoRoom {
     pub(crate) const fn code(self) -> ZResult {
         crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
     }
+}
+
+/// `value` in a box of its own, or [`NoRoom`] with `value` let go of when the heap refuses the
+/// box: what every door that boxes an object it hands the program asks, so a full heap is answered
+/// as zenoh-pico answers its failed `malloc` and never ends the program. Laid out as
+/// `Box::new(value)` lays it out, so the box is dropped and freed as any other is.
+pub(crate) fn try_box<T>(value: T) -> Result<Box<T>, NoRoom> {
+    let layout = core::alloc::Layout::new::<T>();
+    let at = if layout.size() == 0 {
+        NonNull::<T>::dangling()
+    } else {
+        // SAFETY: the layout has bytes.
+        NonNull::new(unsafe { alloc::alloc::alloc(layout) }.cast::<T>()).ok_or(NoRoom)?
+    };
+    // SAFETY: `at` is a block of `T`'s layout from the global allocator (or the aligned place of
+    // a value of no bytes), this call's alone; it is written whole before the box owns it.
+    unsafe {
+        at.as_ptr().write(value);
+        Ok(Box::from_raw(at.as_ptr()))
+    }
+}
+
+/// A copy of `bytes` of its own, or [`NoRoom`] when the heap refuses it: laid out as
+/// `Box::<[u8]>::from(bytes)` lays it out, so it is dropped and freed as that is.
+pub(crate) fn try_boxed_bytes(bytes: &[u8]) -> Result<Box<[u8]>, NoRoom> {
+    let len = bytes.len();
+    let at = if len == 0 {
+        NonNull::<u8>::dangling()
+    } else {
+        let layout = core::alloc::Layout::array::<u8>(len).map_err(|_| NoRoom)?;
+        // SAFETY: the layout has bytes, `len` of them.
+        let at = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).ok_or(NoRoom)?;
+        // SAFETY: a new block of `len` bytes, this call's alone, apart from `bytes`.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at.as_ptr(), len) };
+        at
+    };
+    // SAFETY: `len` bytes written whole, laid out as a boxed slice of them (none for no bytes).
+    Ok(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(at.as_ptr(), len)) })
+}
+
+/// A copy of a payload's segment ends, or [`NoRoom`] when the heap refuses its room: a clone of
+/// them whose refusal is answered, not ended in the program. Written in the room taken, so the
+/// copy carries no growth of its own.
+fn try_copy_ends(ends: &[usize]) -> Result<Vec<usize>, NoRoom> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(ends.len()).map_err(|_| NoRoom)?;
+    let room = copy
+        .spare_capacity_mut()
+        .get_mut(..ends.len())
+        .ok_or(NoRoom)?;
+    for (place, &end) in room.iter_mut().zip(ends) {
+        place.write(end);
+    }
+    // SAFETY: the first `ends.len()` places, within the room reserved, were written above.
+    unsafe { copy.set_len(ends.len()) };
+    Ok(copy)
+}
+
+/// `value` put after the last of `items`, or [`NoRoom`] with `items` as they were and `value`
+/// let go of when the heap refuses the room: a push with no path that ends the program.
+pub(crate) fn try_push<T>(items: &mut Vec<T>, value: T) -> Result<(), NoRoom> {
+    items.try_reserve(1).map_err(|_| NoRoom)?;
+    push_within(items, value)
+}
+
+/// `value` put after the last of `items` in the room already reserved, or [`NoRoom`] with `items`
+/// as they were and `value` let go of when none is left: for a caller that reserved the room of
+/// every item it puts, whose pushes then carry no growth of their own.
+pub(crate) fn push_within<T>(items: &mut Vec<T>, value: T) -> Result<(), NoRoom> {
+    let len = items.len();
+    items
+        .spare_capacity_mut()
+        .first_mut()
+        .ok_or(NoRoom)?
+        .write(value);
+    // SAFETY: the place after the last item was written above, within the room reserved.
+    unsafe { items.set_len(len.saturating_add(1)) };
+    Ok(())
 }
 
 /// The head of a block of payload storage, which its contents follow.
@@ -109,7 +188,7 @@ struct BlockHead {
 }
 
 /// The bytes of a block's head, after which its contents lie aligned to 16.
-const HEAD: usize = core::mem::size_of::<BlockHead>();
+pub(crate) const HEAD: usize = core::mem::size_of::<BlockHead>();
 
 /// Set in [`BlockHead::room`] when the block holds the record of the caller's bytes.
 const ALIAS: usize = 1 << (usize::BITS - 1);
@@ -122,7 +201,7 @@ struct Alias {
     _release: Release,
 }
 
-/// A block of at least `bytes` bytes aligned to 16 from the payloads' area of the process pools,
+/// A block of at least `bytes` bytes aligned to 16 from the pools of payload blocks,
 /// and the bytes it has; `None` when the area has no free block that large.
 #[cfg(wz_process_pools)]
 fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
@@ -135,7 +214,10 @@ fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
 /// `at` and `bytes` are a block [`take_block`] handed out, given back once.
 #[cfg(wz_process_pools)]
 unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
-    crate::process_pool::give_back_block(at, bytes);
+    // A pool's block is found by its address; its bytes are the heap's to know.
+    let _ = bytes;
+    let given = crate::process_pool::give_back(at);
+    debug_assert!(given, "a payload block goes back to the pool it lies in");
 }
 
 /// A block of `bytes` bytes aligned to 16 from the heap: a library without the process pools keeps
@@ -207,6 +289,25 @@ impl Block {
         Some((block, start))
     }
 
+    /// One block holding each of `parts` copied one after another, the start of each written to
+    /// the entry of `starts` at its index: the one copy a value kept past its callback makes of
+    /// what was lent to it, whose parts then each hold a share of the block. `None` when there
+    /// is no room for all of them.
+    pub(crate) fn kept_parts(parts: &[&[u8]], starts: &mut [*const u8]) -> Option<Self> {
+        let room = parts
+            .iter()
+            .try_fold(0usize, |sum, part| sum.checked_add(part.len()))?;
+        let mut block = Self::with_room(room)?;
+        let mut at = 0usize;
+        for (part, start) in parts.iter().zip(starts.iter_mut()) {
+            // SAFETY: a new block, of one holder, with room for every part after the ones before.
+            unsafe { block.write(at, part) };
+            *start = block.contents().wrapping_add(at).cast_const();
+            at = at.saturating_add(part.len());
+        }
+        Some(block)
+    }
+
     /// A block holding the record of the caller's `len` bytes at `start`, which `release` lets
     /// go when the last holder goes; with no room for one, the release is handed back.
     ///
@@ -274,7 +375,7 @@ impl Block {
 
     /// Another holder of the block; `None` when its holders are past half the address space, a
     /// share leaked in a loop, which `Arc` aborts the process for and a payload is refused for.
-    fn share(&self) -> Option<Self> {
+    pub(crate) fn share(&self) -> Option<Self> {
         let before = self.head().refs.fetch_add(1, Ordering::Relaxed);
         if before > isize::MAX as usize {
             self.head().refs.fetch_sub(1, Ordering::Relaxed);
@@ -290,6 +391,9 @@ impl Block {
 }
 
 impl Drop for Block {
+    // Out of line: every holder's drop and every refused copy's unwinding lets a block go, and the
+    // body inlined at each of them is several times the call.
+    #[inline(never)]
     fn drop(&mut self) {
         if self.head().refs.fetch_sub(1, Ordering::Release) != 1 {
             return;
@@ -469,6 +573,57 @@ impl ByteBuf {
         }
     }
 
+    /// A payload of the `like.len` bytes at `start` of `block`, holding a share of it, with
+    /// `like`'s segment ends: a part of a block that holds more than one ([`Block::kept_parts`]).
+    /// An empty one holds no block, as an empty payload does, and needs none made for it.
+    ///
+    /// # Safety
+    /// For a `like` that is not empty, `block` is one and the `like.len` bytes at `start` lie in
+    /// its own room and are written.
+    unsafe fn part_of(
+        block: Option<&Block>,
+        start: *const u8,
+        like: &ByteBuf,
+    ) -> Result<Self, NoRoom> {
+        let mut part = match NonNull::new(start.cast_mut()) {
+            Some(start) if like.len != 0 => Self {
+                start,
+                len: like.len,
+                block: ManuallyDrop::new(Some(block.and_then(Block::share).ok_or(NoRoom)?)),
+                bounds: ManuallyDrop::new(Vec::new()),
+            },
+            _ => Self::new(),
+        };
+        *part.bounds = try_copy_ends(&like.bounds)?;
+        Ok(part)
+    }
+
+    /// Whether the payload holds a share of a block, which a holder that keeps it may share
+    /// rather than copy: not a lent one, whose bytes are its lender's, nor an empty one.
+    pub(crate) fn holds_block(&self) -> bool {
+        self.block.is_some()
+    }
+
+    /// This payload as a value kept past its callback holds it: a share of the block it holds, or
+    /// for a lent one the part of `block` at `start` that the one copy of what was lent wrote its
+    /// bytes to ([`Self::part_of`]). Out of line: a kept sample keeps its payload and its
+    /// attachment through it, and each inlined copy carried a part's share and segment ends.
+    ///
+    /// # Safety
+    /// For a payload that holds no block, as [`Self::part_of`] with this payload as `like`.
+    #[inline(never)]
+    pub(crate) unsafe fn kept_in(
+        &self,
+        block: Option<&Block>,
+        start: *const u8,
+    ) -> Result<Self, NoRoom> {
+        if self.holds_block() {
+            self.try_clone()
+        } else {
+            Self::part_of(block, start, self)
+        }
+    }
+
     /// The payload's bytes.
     pub(crate) fn as_slice(&self) -> &[u8] {
         // SAFETY: `start` is never null, and the `len` bytes there are the payload's, written
@@ -489,15 +644,19 @@ impl ByteBuf {
             },
             None => Self::copy_of(self.as_slice())?,
         };
-        *clone.bounds = (*self.bounds).clone();
+        *clone.bounds = try_copy_ends(&self.bounds)?;
         Ok(clone)
     }
 
-    /// The block, for a holder that keeps it: a lent payload's bytes are copied into one of their
-    /// own first; an empty payload has none.
+    /// The block, for a holder that keeps it: a lent payload's bytes, and those of a part of a
+    /// block that holds more ([`Self::part_of`]), whose holder reads the block from its start, are
+    /// copied into one of their own first; an empty payload has none.
     fn into_block(mut self) -> Result<Option<Block>, NoRoom> {
-        if let Some(block) = (*self.block).take() {
-            return Ok(Some(block));
+        if (*self.block)
+            .as_ref()
+            .is_some_and(|block| block_start(block) == self.start)
+        {
+            return Ok((*self.block).take());
         }
         if self.len == 0 {
             return Ok(None);
@@ -518,7 +677,13 @@ impl ByteBuf {
     fn reserve(&mut self, extra: usize) -> Result<(), NoRoom> {
         let need = self.len.checked_add(extra).ok_or(NoRoom)?;
         if let Some(block) = &*self.block {
-            if block.is_unique() && !block.is_alias() && block.room() >= need {
+            // Written after its bytes only where they start the block, as a part of a block that
+            // holds more does not ([`Self::part_of`]).
+            if block.is_unique()
+                && !block.is_alias()
+                && block_start(block) == self.start
+                && block.room() >= need
+            {
                 return Ok(());
             }
         }
@@ -586,22 +751,44 @@ impl ByteBuf {
         if other.len != 0 {
             self.reserve(other.len)?;
         }
+        // The room of every end this append writes, taken before anything is written: one for
+        // each of the other's segments and one to close this payload's own.
+        self.bounds
+            .try_reserve(other.bounds.len().saturating_add(2))
+            .map_err(|_| NoRoom)?;
         if self.bounds.is_empty() && self.len != 0 {
-            self.bounds.push(self.len);
+            push_within(&mut self.bounds, self.len)?;
         }
-        for segment in (0..).map_while(|idx| other.segment(idx)) {
-            self.put_segment(segment);
+        // The other payload's segment ends, walked in one loop: a payload that keeps none is one
+        // segment of its whole length, or none when it is empty, as `Self::segment` reads it. Read
+        // through `Self::segment` by index, the first segment was read apart from the rest.
+        let data = other.as_slice();
+        let whole = [other.len];
+        let ends: &[usize] = if !other.bounds.is_empty() {
+            &other.bounds
+        } else if data.is_empty() {
+            &[]
+        } else {
+            &whole
+        };
+        let mut start = 0;
+        for &end in ends {
+            let Some(segment) = data.get(start..end) else {
+                break;
+            };
+            self.put_segment(segment)?;
+            start = end;
         }
         Ok(())
     }
 
-    /// Write `segment` after the payload's bytes and end a segment there. Out of line: the loop
-    /// that reads the other payload's segments is unrolled into a first one read apart, and each
-    /// copy of the loop held the write and the end of its own.
+    /// Write `segment` after the payload's bytes and end a segment there, in the room of the end
+    /// [`Self::append_segments`] reserved. Out of line: it is written once per segment of an
+    /// appended payload.
     #[inline(never)]
-    fn put_segment(&mut self, segment: &[u8]) {
+    fn put_segment(&mut self, segment: &[u8]) -> Result<(), NoRoom> {
         self.put_after(segment);
-        self.bounds.push(self.len);
+        push_within(&mut self.bounds, self.len)
     }
 
     /// Append raw bytes to the CURRENT segment (pico
@@ -715,14 +902,14 @@ impl SliceState {
             Some(start) if !start.is_null() => start,
             _ => NonNull::<u8>::dangling().as_ptr().cast_const(),
         };
-        Ok(Box::new(SliceState {
+        try_box(SliceState {
             backing,
             filled: len,
             self_view: z_loaned_slice_t {
                 _start: start,
                 _len: len,
             },
-        }))
+        })
     }
 
     /// Put in `bytes` this slice as a payload that SHARES its block.
@@ -747,14 +934,14 @@ impl StringState {
     /// the library's and holds no block.
     fn boxed(bytes: &[u8]) -> Result<Box<StringState>, NoRoom> {
         if bytes.is_empty() {
-            return Ok(Box::new(StringState {
+            return try_box(StringState {
                 backing: None,
                 filled: 0,
                 self_view: z_loaned_string_t {
                     _start: &EMPTY_C_STRING,
                     _len: 0,
                 },
-            }));
+            });
         }
         let filled = bytes.len().checked_add(1).ok_or(NoRoom)?;
         let mut block = Block::with_room(filled).ok_or(NoRoom)?;
@@ -764,14 +951,14 @@ impl StringState {
             block.write(bytes.len(), &[0]);
         }
         let start = block.span().0;
-        Ok(Box::new(StringState {
+        try_box(StringState {
             backing: Some(block),
             filled,
             self_view: z_loaned_string_t {
                 _start: start,
                 _len: bytes.len(),
             },
-        }))
+        })
     }
 
     /// A string that DESCRIBES the caller's `len` bytes at `start` (pico
@@ -789,14 +976,14 @@ impl StringState {
             NoRoom
         })?;
         let view_start = block.span().0;
-        Ok(Box::new(StringState {
+        try_box(StringState {
             backing: Some(block),
             filled: len,
             self_view: z_loaned_string_t {
                 _start: view_start,
                 _len: len,
             },
-        }))
+        })
     }
 
     /// Put in `bytes` this string as a payload that SHARES its block, minus the terminator.
@@ -850,12 +1037,15 @@ fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
     None
 }
 
-/// Box `buf`, in a kept allocation when this thread has one; `None` never.
+/// Box `buf`, in a kept allocation when this thread has one; `None` when the heap refuses a box.
 #[cfg(not(wz_process_pools))]
 fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
     // `Box::new_uninit` is newer than this crate's minimum Rust; an uninitialised value boxed
     // is the same allocation, and the optimiser writes nothing into it.
-    let mut slot = kept_box().unwrap_or_else(|| Box::new(core::mem::MaybeUninit::uninit()));
+    let mut slot = match kept_box() {
+        Some(slot) => slot,
+        None => try_box(core::mem::MaybeUninit::uninit()).ok()?,
+    };
     slot.write(buf);
     Some(Box::into_raw(slot).cast::<ByteBuf>())
 }
@@ -2222,8 +2412,55 @@ mod box_cache_tests {
 }
 
 #[cfg(test)]
+impl ByteBuf {
+    /// How many hold the block this payload holds a share of; none for a payload with no block.
+    pub(crate) fn holders(&self) -> usize {
+        (*self.block)
+            .as_ref()
+            .map_or(0, |block| block.head().refs.load(Ordering::Relaxed))
+    }
+
+    /// Set how many hold this payload's block, for a test that has a share of it refused.
+    pub(crate) fn set_holders(&self, holders: usize) {
+        if let Some(block) = &*self.block {
+            block.head().refs.store(holders, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
 mod block_tests {
     use super::*;
+
+    /// A payload that is a part of a block holding more is copied before it is written after, as
+    /// its bytes do not start the block, and kept as the block of a slice the same way: the bytes
+    /// before it are never read or written as its own. Turned red by dropping the start test in
+    /// `ByteBuf::reserve` or in `ByteBuf::into_block`.
+    #[test]
+    fn a_part_of_a_block_is_copied_before_it_is_written_or_kept() {
+        let like = ByteBuf::copy_of(b"cd").expect("room");
+        let parts: [&[u8]; 2] = [b"ab", b"cd"];
+        let mut starts = [core::ptr::null::<u8>(); 2];
+        let block = Block::kept_parts(&parts, &mut starts).expect("room");
+        // SAFETY: `kept_parts` wrote "cd" at `starts[1]` of `block`.
+        let mut part =
+            unsafe { ByteBuf::part_of(Some(&block), starts[1], &like) }.expect("a share");
+        assert_eq!(part.holders(), 2);
+        drop(block);
+        assert_eq!(part.as_slice(), b"cd");
+        part.write_all(b"ef").expect("room");
+        assert_eq!(part.as_slice(), b"cdef");
+
+        let block = Block::kept_parts(&parts, &mut starts).expect("room");
+        // SAFETY: as above.
+        let kept = unsafe { ByteBuf::part_of(Some(&block), starts[1], &like) }.expect("a share");
+        drop(block);
+        let slice = SliceState::boxed(kept).expect("room");
+        // SAFETY: the slice's own view of its block.
+        let read =
+            unsafe { core::slice::from_raw_parts(slice.self_view._start, slice.self_view._len) };
+        assert_eq!(read, b"cd");
+    }
 
     /// Counts the releases of a caller's buffer.
     unsafe extern "C" fn count_release(_value: *mut c_void, context: *mut c_void) {
@@ -2367,6 +2604,69 @@ mod block_tests {
         assert_eq!(writer.segment(usize::MAX), None);
     }
 
+    /// An empty payload appended brings no segment, not an empty one, while it still closes the
+    /// writer's own bytes into a segment of their own. Turned red by an append that walks one end
+    /// for every payload that keeps none, whatever its length.
+    #[test]
+    fn an_empty_payload_appended_brings_no_segment() {
+        let mut writer = ByteBuf::copy_of(b"x").expect("room");
+        writer.append_segments(&ByteBuf::new()).expect("room");
+        assert_eq!(writer.as_slice(), b"x");
+        assert_eq!(*writer.bounds, [1]);
+        assert_eq!(writer.segment(0), Some(&b"x"[..]));
+        assert_eq!(writer.segment(1), None);
+    }
+
+    /// A push within the room reserved puts the value while there is room and refuses it, the items
+    /// as they were, once there is none, where a growing push would have taken more. Turned red by a
+    /// `push_within` that grows the items.
+    #[test]
+    fn a_push_within_the_room_reserved_never_grows() {
+        let mut items: Vec<u8> = Vec::new();
+        assert_eq!(push_within(&mut items, 1), Err(NoRoom));
+        assert!(items.is_empty());
+        items.try_reserve_exact(2).expect("the test's heap");
+        let room = items.capacity();
+        for value in 0..room {
+            assert_eq!(push_within(&mut items, value as u8), Ok(()));
+        }
+        assert_eq!(push_within(&mut items, 0), Err(NoRoom));
+        assert_eq!(items.len(), room);
+        assert_eq!(items.capacity(), room);
+        assert_eq!(items.first(), Some(&0));
+    }
+
+    /// A copy of a payload that keeps segment ends is refused when the heap has no room for the
+    /// ends, its share of the block let go of, where a clone of them would end the program; a
+    /// payload that keeps none asks the heap for nothing. Turned red by a copy of the ends made by
+    /// `clone` in `ByteBuf::try_clone` or in `ByteBuf::part_of`.
+    #[test]
+    fn a_full_heap_refuses_a_copy_of_a_payloads_segment_ends() {
+        let mut writer = ByteBuf::copy_of(b"x").expect("room");
+        writer
+            .append_segments(&ByteBuf::copy_of(b"ab").expect("room"))
+            .expect("room");
+        assert_eq!(*writer.bounds, [1, 3]);
+        let refusal = crate::test_heap::refused(|| writer.try_clone().err());
+        assert_eq!(refusal, Some(NoRoom));
+        assert_eq!(writer.holders(), 1, "the refused copy's share let go of");
+
+        let parts: [&[u8]; 1] = [b"xab"];
+        let mut starts = [core::ptr::null::<u8>(); 1];
+        let block = Block::kept_parts(&parts, &mut starts).expect("room");
+        let refusal = crate::test_heap::refused(|| {
+            // SAFETY: `kept_parts` wrote the writer's three bytes at `starts[0]` of `block`.
+            let part = unsafe { ByteBuf::part_of(Some(&block), starts[0], &writer) };
+            part.err()
+        });
+        assert_eq!(refusal, Some(NoRoom));
+        assert!(block.is_unique(), "the refused part's share let go of");
+
+        let plain = ByteBuf::copy_of(b"plain").expect("room");
+        let copy = crate::test_heap::refused(|| plain.try_clone()).expect("no ends to copy");
+        assert_eq!(copy.as_slice(), b"plain");
+    }
+
     /// A block whose holders are past half the address space is not shared again: the share is
     /// refused and the count left as it was, where `Arc` would abort the process.
     #[test]
@@ -2448,14 +2748,17 @@ mod block_tests {
         assert_eq!(unsafe { *empty.self_view._start }, 0);
     }
 
-    /// With the process pools, a payload's bytes lie in their payloads' area, not on the heap.
+    /// With the process pools, a payload's bytes lie in their pools of payload blocks, not on the
+    /// heap.
     #[cfg(wz_process_pools)]
     #[test]
     fn a_payloads_bytes_lie_in_the_process_pools() {
-        let payload = ByteBuf::copy_of(b"pooled bytes").expect("room in the area");
+        let payload = ByteBuf::copy_of(b"pooled bytes").expect("room in the pools");
         let Some(block) = &*payload.block else {
             panic!("a payload of bytes holds a block");
         };
-        assert!(crate::process_pool::lies_in_area(block.head.cast::<u8>()));
+        assert!(crate::process_pool::lies_in_payloads(
+            block.head.cast::<u8>()
+        ));
     }
 }

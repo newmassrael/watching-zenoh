@@ -123,7 +123,11 @@ image_spec() {
         # stack gate row and no resource row: what a compare run reads of them is its own report.
         #
         # zenoh-pico with the wz client's planes (docs/upstream-parity.md step M2), in its two arms:
-        # its own read and lease tasks, and the program stepping the session.
+        # its own read and lease tasks, and the program stepping the session. Both keys are zenoh-pico
+        # itself, the reference side: a compare run's rows hold every image against the first, so a row
+        # of zephyr-pico-queryable against zephyr-pico-queryable-st is pico's multi-threaded arm against
+        # its single-threaded one, which says which arm is the reference and is no cell of wz. wz's
+        # library under the same program is zephyr-wz-pico-queryable and -st, below.
         zephyr-pico-queryable)
             APP=zephyr-pico-compare
             OVERLAYS="overlays/multi_thread.conf"
@@ -235,7 +239,9 @@ NODE_IMAGES=(zephyr-fixed zephyr-fixed-tcp)
 # The images `build` holds to their rows with no kit: Layer Qzk's population, listed whole by `images`
 # and cut by `parts` into the ceiling groups of scripts/lib/pico_ceiling_gate.py.
 KITLESS_IMAGES=("${IMAGES[@]}" "${ADMIN_IMAGES[@]}")
-# The compare images: run only by `compare`, beside the images above.
+# The compare images: run only by `compare`, beside the images above. The two zephyr-pico-* keys are
+# zenoh-pico's arms (the reference side) and the two zephyr-wz-pico-* keys wz's pico C ABI under the
+# same program; a row between two zephyr-pico-* keys is pico against pico.
 COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st zephyr-wz-pico-queryable zephyr-wz-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
 # The port a verify image's router listens on for `tls/` (the image's CONFIG_WZ_CLIENT_ENDPOINT).

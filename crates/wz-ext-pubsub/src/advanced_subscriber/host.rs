@@ -62,7 +62,7 @@ use wz_session_core::sample::EntityGlobalId;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::serde_codec::z_deserialize;
 use wz_session_core::session_zid::SessionZid;
-use wz_session_core::sink::SampleView;
+use wz_session_core::sink::SampleRef;
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
@@ -154,7 +154,7 @@ struct Shared<E: SessionEngine + ?Sized> {
     /// The timeout of every get, in milliseconds.
     timeout_ms: u32,
     /// The bounds of a detected late publisher's history get: its depth and its age.
-    late: (Option<usize>, Option<f64>),
+    late: (Option<usize>, Option<core::time::Duration>),
 }
 
 impl<E: SessionEngine + ?Sized> Shared<E> {
@@ -376,7 +376,7 @@ unsafe fn end_leg<E: SessionEngine + ?Sized>(context: *mut c_void) {
 /// subscriber, which the engine lets go of with the callback: no memory is taken for it.
 fn own_sink<E: SessionEngine + ?Sized>(
     shared: &Strong<Shared<E>>,
-    call: unsafe fn(context: *mut c_void, sample: &dyn SampleView),
+    call: unsafe fn(context: *mut c_void, sample: &SampleRef<'_>),
 ) -> SubscriberSink {
     let context = Strong::into_raw(shared.clone());
     // SAFETY: the context is a count of the subscriber, let go of once by `let_go` after the last
@@ -407,7 +407,7 @@ unsafe fn let_go<E: SessionEngine + ?Sized>(context: *mut c_void) {
 ///
 /// # Safety
 /// As [`held`]'s.
-unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &dyn SampleView) {
+unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &SampleRef<'_>) {
     // SAFETY: the caller's.
     let shared = unsafe { held::<E>(context) };
     if shared.is_closing() {
@@ -427,18 +427,18 @@ unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &dyn Sa
 ///
 /// # Safety
 /// As [`held`]'s.
-unsafe fn on_heartbeat<E: SessionEngine + ?Sized>(context: *mut c_void, view: &dyn SampleView) {
+unsafe fn on_heartbeat<E: SessionEngine + ?Sized>(context: *mut c_void, view: &SampleRef<'_>) {
     // SAFETY: the caller's.
     let shared = unsafe { held::<E>(context) };
-    if shared.is_closing() || view.kind() != SampleKind::Put {
+    if shared.is_closing() || view.kind != SampleKind::Put {
         return;
     }
     // Sequenced only: a heartbeat's payload IS a sequence number.
-    let Some(AdvPublisherSource::Sequenced { zid, eid }) = parse_heartbeat_source(view.keyexpr())
+    let Some(AdvPublisherSource::Sequenced { zid, eid }) = parse_heartbeat_source(view.keyexpr)
     else {
         return;
     };
-    let Ok(last_sn) = z_deserialize::<u32>(view.payload()) else {
+    let Ok(last_sn) = z_deserialize::<u32>(view.payload) else {
         return;
     };
     let now = shared.now_ms();
@@ -967,7 +967,7 @@ fn admitted<E: SessionEngine + ?Sized>(
                 knob: "max_samples",
             });
         }
-        if history.max_age == Some(0.0) {
+        if history.max_age == Some(core::time::Duration::ZERO) {
             return Err(HostError::HistoryBoundZero { knob: "max_age" });
         }
     }
@@ -1236,7 +1236,7 @@ fn issue_recovery_query<E: SessionEngine + ?Sized>(
 fn issue_history_query<E: SessionEngine + ?Sized>(
     shared: &Strong<Shared<E>>,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     let key = history_key(shared.base());
     let parameters = GetParameters::history(depth, age);
@@ -1254,7 +1254,7 @@ fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
     zid: Vec<u8>,
     eid: u32,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     let key = recovery_key(shared.base(), &zid, eid);
     let parameters = GetParameters::history(depth, age);
@@ -1269,7 +1269,7 @@ fn issue_timestamped_late_publisher_query<E: SessionEngine + ?Sized>(
     token_keyexpr: &str,
     zid: Vec<u8>,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     let parameters = GetParameters::history(depth, age);
     let opts = get_options(shared, &parameters);
@@ -1282,7 +1282,7 @@ fn issue_unidentified_late_publisher_query<E: SessionEngine + ?Sized>(
     shared: &Strong<Shared<E>>,
     token_keyexpr: &str,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     let parameters = GetParameters::history(depth, age);
     let opts = get_options(shared, &parameters);
@@ -1296,7 +1296,7 @@ fn on_late_publisher_detected<E: SessionEngine + ?Sized>(
     kind: LivelinessSampleKind,
     token_keyexpr: &str,
     depth: Option<usize>,
-    age: Option<f64>,
+    age: Option<core::time::Duration>,
 ) {
     if kind != LivelinessSampleKind::Put {
         // A departed publisher has nothing to recover, but its retention flag is how the sweep

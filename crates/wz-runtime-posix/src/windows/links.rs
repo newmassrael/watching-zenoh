@@ -17,6 +17,13 @@ use super::stream::WindowsTcpDial;
 /// `WindowsLinks::new(local, WindowsTcpDial)`.
 pub type WindowsLinks = wz_runtime_coop::ip_stack::IpLinks<WindowsUdpSocket, WindowsTcpDial>;
 
+/// [`WindowsLinks`] in a build that links no datagram link: `tcp/` as there, every `udp/` dial
+/// and listener refused as unsupported, and no link over a [`WindowsUdpSocket`] made.
+pub type WindowsStreamLinks = wz_runtime_coop::ip_stack::IpLinks<
+    wz_runtime_coop::udp_link::NoDatagramOf<WindowsUdpSocket>,
+    WindowsTcpDial,
+>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

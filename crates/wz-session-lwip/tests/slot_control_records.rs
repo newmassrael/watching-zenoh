@@ -124,7 +124,7 @@ fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: wz_session_core::session_zid::SessionZid::from_array([zid; 4]),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -138,7 +138,8 @@ fn params(zid: u8) -> SessionInitParams {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::from_slice(&[7u8; 32]).expect("key"),
+        cookie_signing_key: SigningKey::from_slice(&[7u8; 32]).expect("key").into(),
+        region: None,
     }
 }
 
@@ -456,20 +457,20 @@ fn read(
 
 /// The initiator's next reliable transmit SN.
 fn next_sn(initiator: &End) -> u64 {
-    initiator.actions.next_outbound_frame_sn(
+    wz_session_core::sn::to_wire(initiator.actions.next_outbound_frame_sn(
         wz_session_core::qos::Priority::DEFAULT,
         true,
         initiator.actions.negotiated_sn_mask(),
-    )
+    ))
 }
 
 /// The initiator's next best-effort transmit SN.
 fn next_best_effort_sn(initiator: &End) -> u64 {
-    initiator.actions.next_outbound_frame_sn(
+    wz_session_core::sn::to_wire(initiator.actions.next_outbound_frame_sn(
         wz_session_core::qos::Priority::DEFAULT,
         false,
         initiator.actions.negotiated_sn_mask(),
-    )
+    ))
 }
 
 /// [`frame_wire`] on the best-effort channel: the same Frame with its `R` flag clear.

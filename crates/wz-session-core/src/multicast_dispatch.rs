@@ -408,7 +408,10 @@ pub enum FragmentIngest {
     /// aborts the slot's chains before the index can be recycled).
     /// `sn_mask` is the peer's JOIN-advertised SN ring mask, which the
     /// reassembly continuation gate compares at.
-    Admitted { peer_idx: usize, sn_mask: u64 },
+    Admitted {
+        peer_idx: usize,
+        sn_mask: crate::sn::Sn,
+    },
     /// The fragment SN is stale / duplicated / outside the half-window.
     /// The fragment must be dropped AND the channel's in-progress
     /// reassembly chain aborted (pico clears the channel dbuf + state on
@@ -568,7 +571,7 @@ struct PeerSlot {
     /// `seq_num_res` ([`sn::mask_from_res`]; zenoh-pico
     /// `entry->_sn_res = _z_sn_max(msg->_seq_num_res)`). Valid iff
     /// `src.is_some()`.
-    sn_mask: u64,
+    sn_mask: crate::sn::Sn,
     /// Last-seen SN per `(priority, channel)` conduit, seeded one before the
     /// JOIN-advertised `next_sn` (§3.2 `init_rx_seq`) and advanced by each admitted
     /// frame. Valid iff `src.is_some()`. R311y227 — under `transport-qos` a qos
@@ -788,8 +791,8 @@ impl PeerSlot {
         let _ = qos_next_sns;
         self.rx_sn.seed_plain(
             self.sn_mask,
-            baseline.next_sn_reliable,
-            baseline.next_sn_best_effort,
+            sn::from_wire(baseline.next_sn_reliable),
+            sn::from_wire(baseline.next_sn_best_effort),
         );
         self.lease_ms = baseline.lease_ms;
     }
@@ -1153,7 +1156,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -1174,7 +1177,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -1185,12 +1188,15 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     {
         for retraction in self.member_retractions.drain(..) {
             let declare = retraction.lent();
-            sink.record(crate::driver_loop::InPlaceRecord::declare_of_frame(
-                &declare,
-                true,
-                0,
-                crate::qos::Priority::DEFAULT,
-            ));
+            sink.record(
+                crate::driver_loop::InPlaceRecord::declare_of_frame(
+                    &declare,
+                    true,
+                    0,
+                    crate::qos::Priority::DEFAULT,
+                )
+                .sent_by(retraction.sender()),
+            );
         }
     }
 
@@ -2027,7 +2033,10 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         // SN gate): any frame from a known address refreshes the lease.
         slot.last_seen_ms = now_ms;
         let mask = slot.sn_mask;
-        if !slot.rx_sn.admit(priority, mask, reliable, frame_sn) {
+        if !slot
+            .rx_sn
+            .admit(priority, mask, reliable, sn::from_wire(frame_sn))
+        {
             return FrameIngest::OutOfOrder;
         }
         FrameIngest::Admitted
@@ -2094,7 +2103,10 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         // SN gate): any fragment from a known address refreshes the lease.
         slot.last_seen_ms = now_ms;
         let mask = slot.sn_mask;
-        if !slot.rx_sn.admit(priority, mask, reliable, frame_sn) {
+        if !slot
+            .rx_sn
+            .admit(priority, mask, reliable, sn::from_wire(frame_sn))
+        {
             return FragmentIngest::OutOfOrder { peer_idx: idx };
         }
         FragmentIngest::Admitted {
@@ -2595,8 +2607,9 @@ pub(crate) fn ingest_multicast_fragment_counted<
 ///
 /// A completed chain whose records do not decode is dropped after the records before
 /// it were handed over, as the frame walk drops a payload (a multicast peer has no
-/// session to tell: the datagram stays unanswered). Nothing is counted per network
-/// message (the owned messages `transport-stats` counts by are the owned form's).
+/// session to tell: the datagram stays unanswered). A build with `transport-stats` counts each
+/// record lent against the member that sent it, by the class read off the record, as the owned
+/// form counts each message of the chain.
 #[cfg(all(
     feature = "reassembly",
     feature = "storage-profile",
@@ -2605,7 +2618,6 @@ pub(crate) fn ingest_multicast_fragment_counted<
         all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2625,6 +2637,10 @@ pub(crate) fn ingest_multicast_fragment_in_place<
     fragment: GroupFragment<'_>,
     now_ms: u64,
     on_event: &mut F,
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))] counted: &mut dyn FnMut(
+        &[u8],
+        &crate::network_message::RecordClass<'_>,
+    ),
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: crate::driver_loop::EventSink + ?Sized,
@@ -2683,6 +2699,12 @@ pub(crate) fn ingest_multicast_fragment_in_place<
                 priority,
                 false,
                 &mut records,
+                #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+                &mut |record: &crate::network_message::RecordClass<'_>| {
+                    if let Some(member) = &member {
+                        counted(member.as_slice(), record);
+                    }
+                },
             );
         },
     );
@@ -2710,7 +2732,7 @@ pub(crate) fn ingest_multicast_fragment_in_place<
         all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2732,7 +2754,7 @@ pub(crate) struct MemberRecords<'s, E: ?Sized> {
         feature = "codec-declare",
         feature = "session-unicast",
         feature = "rx-lent-control",
-        not(feature = "transport-stats"),
+        any(not(feature = "transport-stats"), feature = "reassembly"),
         not(feature = "routing-namespace"),
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
@@ -2747,7 +2769,7 @@ pub(crate) struct MemberRecords<'s, E: ?Sized> {
         all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2774,7 +2796,7 @@ impl<'s, E: crate::driver_loop::EventSink + ?Sized> MemberRecords<'s, E> {
             feature = "codec-declare",
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2787,7 +2809,7 @@ impl<'s, E: crate::driver_loop::EventSink + ?Sized> MemberRecords<'s, E> {
                 feature = "codec-declare",
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")
@@ -2804,7 +2826,7 @@ impl<'s, E: crate::driver_loop::EventSink + ?Sized> MemberRecords<'s, E> {
         all(
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
@@ -2832,22 +2854,32 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
             feature = "codec-declare",
             feature = "session-unicast",
             feature = "rx-lent-control",
-            not(feature = "transport-stats"),
+            any(not(feature = "transport-stats"), feature = "reassembly"),
             not(feature = "routing-namespace"),
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
         ))]
-        if let (Some(member), Some(declare)) = (self.member.as_deref_mut(), record.declare()) {
-            if let Some(scoped) = member.scope_lent(declare) {
-                self.inner
-                    .record(crate::driver_loop::InPlaceRecord::declare_of_frame(
-                        &scoped,
-                        record.reliable(),
-                        record.sn(),
-                        record.priority(),
-                    ));
-                return;
-            }
+        if let Some(member) = self.member.as_deref_mut() {
+            use crate::multicast_member_scope::PastBound;
+            let tag = member.tag();
+            let record = match record.declare().map(|declare| member.scope_lent(declare)) {
+                Some(Ok(Some(scoped))) => {
+                    self.inner.record(
+                        crate::driver_loop::InPlaceRecord::declare_of_frame(
+                            &scoped,
+                            record.reliable(),
+                            record.sn(),
+                            record.priority(),
+                        )
+                        .sent_by(tag),
+                    );
+                    return;
+                }
+                Some(Err(PastBound)) => record.past_sender_bound(),
+                Some(Ok(None)) | None => record,
+            };
+            self.inner.record(record.sent_by(tag));
+            return;
         }
         self.inner.record(record);
     }

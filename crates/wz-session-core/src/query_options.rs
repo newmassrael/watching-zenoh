@@ -601,8 +601,14 @@ impl<'a> QueryOptionsOf<'a> {
     /// [`Self::with_payload`] with the bytes read where their holder keeps them for as long as
     /// the call runs: a get sends its value from the caller's bytes, and nothing is copied for it.
     pub fn with_payload_lent(mut self, payload: &'a [u8]) -> Self {
-        self.payload = Some(Cow::Borrowed(payload));
+        self.set_payload_lent(payload);
         self
+    }
+
+    /// [`Self::with_payload_lent`] on options in place, for a caller that sets it only on a
+    /// condition and would otherwise move the whole options value through the setter.
+    pub fn set_payload_lent(&mut self, payload: &'a [u8]) {
+        self.payload = Some(Cow::Borrowed(payload));
     }
 
     /// Attach Query-body encoding metadata — the content-type of the
@@ -619,8 +625,13 @@ impl<'a> QueryOptionsOf<'a> {
     /// [`Self::with_encoding`] with the encoding read where its holder keeps it for as long as
     /// the call runs.
     pub fn with_encoding_ref(mut self, encoding: EncodingRef<'a>) -> Self {
-        self.encoding = Some(CarriedEncoding::Lent(encoding));
+        self.set_encoding_ref(encoding);
         self
+    }
+
+    /// [`Self::with_encoding_ref`] on options in place.
+    pub fn set_encoding_ref(&mut self, encoding: EncodingRef<'a>) {
+        self.encoding = Some(CarriedEncoding::Lent(encoding));
     }
 
     /// Attach a Query-level attachment blob. Gated on `query-attachment`
@@ -637,8 +648,14 @@ impl<'a> QueryOptionsOf<'a> {
     /// as the call runs.
     #[cfg(feature = "query-attachment")]
     pub fn with_attachment_lent(mut self, attachment: &'a [u8]) -> Self {
-        self.attachment = Some(Cow::Borrowed(attachment));
+        self.set_attachment_lent(attachment);
         self
+    }
+
+    /// [`Self::with_attachment_lent`] on options in place.
+    #[cfg(feature = "query-attachment")]
+    pub fn set_attachment_lent(&mut self, attachment: &'a [u8]) {
+        self.attachment = Some(Cow::Borrowed(attachment));
     }
 
     /// Attach Query selector parameters (the `_sn=START..&_max=N` URL-style
@@ -673,9 +690,15 @@ impl<'a> QueryOptionsOf<'a> {
     /// [`Self::sent_parameters`], `effective_accept_replies` or `query_parts`.
     #[cfg(feature = "query-selector-parameters")]
     pub fn with_parameters_lent_anyke(mut self, parameters: &'a [u8], anyke: bool) -> Self {
+        self.set_parameters_lent_anyke(parameters, anyke);
+        self
+    }
+
+    /// [`Self::with_parameters_lent_anyke`] on options in place.
+    #[cfg(feature = "query-selector-parameters")]
+    pub fn set_parameters_lent_anyke(&mut self, parameters: &'a [u8], anyke: bool) {
         self.parameters = Some(Cow::Borrowed(parameters));
         self.anyke = anyke;
-        self
     }
 
     /// R311y833 — opt out of (or back into) the matching-reply guarantee.
@@ -1242,6 +1265,34 @@ mod tests {
             plain.effective_accept_replies(),
             ReplyKeyExpr::MatchingQuery
         );
+    }
+
+    /// The setters that set a lent slot in place leave the options as the builders that take the
+    /// value and give it back do, slot for slot. Turned red by a setter that writes another slot or
+    /// drops the flag.
+    #[test]
+    fn the_in_place_setters_leave_what_the_builders_leave() {
+        let encoding = EncodingRef {
+            packed_id: 0x0B,
+            schema: Some(&b"json"[..]),
+        };
+        let built = QueryOptionsOf::get()
+            .with_payload_lent(b"value")
+            .with_encoding_ref(encoding);
+        let mut set = QueryOptionsOf::get();
+        set.set_payload_lent(b"value");
+        set.set_encoding_ref(encoding);
+        #[cfg(feature = "query-attachment")]
+        let built = built.with_attachment_lent(b"att");
+        #[cfg(feature = "query-attachment")]
+        set.set_attachment_lent(b"att");
+        #[cfg(feature = "query-selector-parameters")]
+        let built = built.with_parameters_lent_anyke(b"_sn=7..", true);
+        #[cfg(feature = "query-selector-parameters")]
+        set.set_parameters_lent_anyke(b"_sn=7..", true);
+        assert_eq!(alloc::format!("{set:?}"), alloc::format!("{built:?}"));
+        assert_eq!(set.query_parts(), built.query_parts());
+        assert_eq!(set.payload.as_deref(), Some(&b"value"[..]));
     }
 
     /// The parts a link's `get` is written from are the metadata the owned path is handed, slot

@@ -495,9 +495,24 @@ impl ExtEntryWire {
     }
 
     /// [`Self::write_source`] with the flags a parent sets in place of the
-    /// ones `src` presents.
+    /// ones `src` presents. `src` is read once into `ExtEntryParts`, whatever form
+    /// it is in, and the wire is written from that one form (`write_parts_in`).
     #[doc(hidden)]
     pub fn write_source_in<S: ExtEntrySource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &ExtEntryOverrides) -> Result<(), K::Error> {
+        match src.body() {
+            ExtEntryVariantSource::CodecZenohExtUnit(_b) => Self::write_parts_in(&ExtEntryParts { header: src.header(), body: ExtEntryPartsBody::CodecZenohExtUnit(&super::ext_unit::ExtUnitParts::of(_b)) }, w, over),
+            ExtEntryVariantSource::CodecZenohExtZint(_b) => Self::write_parts_in(&ExtEntryParts { header: src.header(), body: ExtEntryPartsBody::CodecZenohExtZint(&super::ext_zint::ExtZintParts::of(_b)) }, w, over),
+            ExtEntryVariantSource::CodecZenohExtZbuf(_b) => Self::write_parts_in(&ExtEntryParts { header: src.header(), body: ExtEntryPartsBody::CodecZenohExtZbuf(&super::ext_zbuf::ExtZbufParts::of(_b)) }, w, over),
+            ExtEntryVariantSource::Default { tag, body: _b } => Self::write_parts_in(&ExtEntryParts { header: src.header(), body: ExtEntryPartsBody::Default { tag, body: &super::ext_unit::ExtUnitParts::of(_b) } }, w, over),
+        }
+    }
+
+    /// The wire of `src`, the one form every source of this codec is read
+    /// into: one writer for each sink, however many forms are written. It is
+    /// out of line unless every write is asked inlined (`--inline-encode`):
+    /// inlined into `write_source_in`, it is copied into each form.
+    #[inline(never)]
+    fn write_parts_in<K: SceSink>(src: &ExtEntryParts<'_>, w: &mut K, over: &ExtEntryOverrides) -> Result<(), K::Error> {
         let _d_header_enc: u8 = src.body().tag();
         let mut _c_header: u8 = (src.header() & !0x60) | (_d_header_enc << 5);
         if let Some(_o) = over.header_m {
@@ -557,6 +572,21 @@ impl ExtEntryWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `ExtEntry` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct ExtEntryWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for ExtEntryWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtEntryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `ExtEntryView` is what a decode of `ExtEntry` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `ExtEntry` holds it, an embedded body or a variant arm as its

@@ -65,8 +65,9 @@
 // Fixed-memory step S9c -- under `session-slot` the crate does not link `alloc` at
 // all, so a use that creeps back into the slot profile is a compile error and not a
 // silent allocation (the rule `wz-link-lwip` keeps under `static-link-storage`). The
-// tests keep it: their sessions, sinks and fixtures are host code.
-#[cfg(any(not(feature = "session-slot"), test))]
+// tests keep it: their sessions, sinks and fixtures are host code. A build that names `alloc`
+// itself (`transport-stats` does) links it beside the slot profile, as it asked.
+#[cfg(any(not(feature = "session-slot"), feature = "alloc", test))]
 extern crate alloc;
 
 // Host tests: the shell's critical sections are the runtime's (`wz_runtime_coop::cs`),

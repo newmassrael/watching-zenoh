@@ -17,6 +17,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -566,7 +567,7 @@ fn a_frame_that_fails_integrity_is_reported_moves_nothing_and_keeps_its_payload(
     let refit = {
         let mut copy = long.clone();
         let crc = p.crc();
-        let mut digest = crc.engine.start();
+        let mut digest = crate::e2e_crc::Digest::start(&crc.engine);
         for &item in &crc.cover {
             crate::e2e_frame::feed(&p, &mut digest, item, &copy);
         }
@@ -1139,4 +1140,25 @@ fn the_crc_cache_gives_the_bytes_the_full_computation_gives() {
         StreamSender::new(p, right_values(ADDR_A), SenderOptions::default()).expect("made");
     tx.protect(0, b"same").expect("sent");
     assert!(!tx.protect(0, b"same").expect("sent").from_cache);
+}
+
+/// A sender and a receiver made from one shared profile hold that profile, not
+/// a copy of it, and a profile handed over by value is the receiver's own.
+/// Turned red by a constructor that copies the profile it is handed.
+#[test]
+fn a_shared_profile_is_held_by_its_sender_and_receiver_not_copied() {
+    let shared = Arc::new(right());
+    let tx = StreamSender::new(
+        Arc::clone(&shared),
+        right_values(ADDR_A),
+        SenderOptions::default(),
+    )
+    .expect("made");
+    let one = || Keying::Indexed { streams: 1 };
+    let rx =
+        Receiver::new(Arc::clone(&shared), &right_values(ADDR_A), one(), None, 8).expect("made");
+    assert!(core::ptr::eq(tx.profile(), &*shared));
+    assert!(core::ptr::eq(rx.profile(), &*shared));
+    let owned = Receiver::new(right(), &right_values(ADDR_A), one(), None, 8).expect("made");
+    assert!(!core::ptr::eq(owned.profile(), &*shared));
 }

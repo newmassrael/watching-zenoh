@@ -20,19 +20,20 @@
 
 use core::ptr::NonNull;
 
-use wz_capi_port::{LivelinessSink, SubId, TokenId, WireHolds, WireKey};
+use super::LinkActions;
+use wz_capi_port::{KeyAnchor, LivelinessSink, SubId, TokenId, WireKey};
 #[cfg(feature = "group")]
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::named_key::NamedKey;
-use wz_session_core::row_callback::{CallLatch, RowCallback};
+use wz_session_core::row_callback::RowCallback;
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
-use wz_session_mcu::dial::McuActions;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
+use crate::round::Latch;
 
 #[cfg(feature = "group")]
 use super::transport::TellGroups;
@@ -40,7 +41,7 @@ use super::transport::TellGroups;
 /// Announce the token `id` the session holds on `key` over `actions`, its key named as the
 /// session's tables name it or as the link's key-wire form says: whether the link took it.
 pub(super) fn declare_token<C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     id: TokenId,
     key: NamedKey<'_>,
 ) -> bool {
@@ -78,7 +79,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
 /// Retract the token `id` over `actions`, naming its key as `names` says (the declaration's id
 /// and the rest of the key) when its declaration asked to.
 pub(super) fn retract_token<C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     id: TokenId,
     names: Option<(ExprId, &str)>,
 ) {
@@ -96,29 +97,23 @@ pub(super) fn retract_token<C: ClockSource + 'static>(
 /// is its callback's life (P11): a call is begun on the row's latch with the session held and made
 /// after it, and an undeclared row is let go of by whoever sees its last call end.
 pub(crate) struct LivelinessRow {
-    /// What the ABI's key held besides the declaration the tables' row holds (an object of the
-    /// ABI's), let go of with the row, with no lock of the session held.
-    holds: WireHolds,
+    /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
+    /// lock of the session held: the declaration the key names is the tables' row's to hold.
+    _anchor: KeyAnchor,
     /// The program's callback, called where the row lies: the tables lend their rows from the
     /// session's arena and never move one.
     sink: LivelinessSink,
     /// How many calls of the callback run, and whether the subscriber was undeclared.
-    latch: CallLatch,
-}
-
-impl super::RowHolds for LivelinessRow {
-    fn into_holds(self) -> WireHolds {
-        self.holds
-    }
+    latch: Latch,
 }
 
 impl LivelinessRow {
-    /// A subscriber keeping `holds`, handing what it hears to `sink`.
-    pub(crate) fn new(holds: WireHolds, sink: LivelinessSink) -> Self {
+    /// A subscriber keeping `anchor`, handing what it hears to `sink`.
+    pub(crate) fn new(anchor: KeyAnchor, sink: LivelinessSink) -> Self {
         Self {
-            holds,
+            _anchor: anchor,
             sink,
-            latch: CallLatch::new(),
+            latch: Latch::new(),
         }
     }
 
@@ -135,7 +130,7 @@ impl LivelinessRow {
 /// come, and with `history` the ones alive now, its key named as the session's tables name it
 /// (`form`) or as the link's key-wire form says: whether the link took it.
 pub(super) fn ask<C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     id: SubId,
     keyexpr: &str,
     form: WireForm<'_>,
@@ -210,7 +205,7 @@ impl LivelinessCall {
     pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held
-        // (`CallLatch::ENDS_HELD` is asserted false where the rows are chosen).
+        // (`Latch::ENDS_HELD` is asserted false where the rows are chosen).
         unsafe { <LivelinessRow as RowCallback>::end(self.call) }
     }
 }

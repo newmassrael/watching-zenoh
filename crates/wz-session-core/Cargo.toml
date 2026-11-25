@@ -537,13 +537,19 @@ codec-hello = ["wz-codecs/codec-hello"]
 # the `LinkDriver` impl that drives it live in wz-runtime-tokio.
 transport-link-serial = ["wz-codecs/codec-serial", "alloc"]
 # R311y579 (G9) — `transport-link-raweth`: the raweth (L2) link's FRAMING, the
-# `raweth_link` module. Needs only `alloc` and NO codec feature: unlike serial,
-# raweth adds no per-frame codec (no COBS, no CRC) — the Ethernet header is the
-# whole framing and the payload is an ordinary zenoh batch. The AF_PACKET
-# socket that carries it is a wz-runtime-tokio concern (Linux-only), gated on
-# the feature of the same name there; this half stays no_std so an MCU raweth
-# port has the framing without the socket.
-transport-link-raweth = ["alloc"]
+# `raweth_link` module. No codec feature: unlike serial, raweth adds no per-frame
+# codec (no COBS, no CRC) — the Ethernet header is the whole framing and the
+# payload is an ordinary zenoh batch. No heap either: the header, the `reth/`
+# endpoint's rows and the key a frame is routed by are read into fixed storage,
+# so an engine without a heap joins a raweth group; the helpers that return an
+# owned frame or text are the heap profile's (`alloc`). The socket that carries
+# it is the engine's concern, gated on the feature of the same name there.
+transport-link-raweth = []
+# `transport-link-ws`: the WebSocket link's RFC 6455 pieces, the `ws_link` module (the opening
+# handshake and its SHA-1 accept value, the frame header, the mask, the ChaCha20 mask keys). No
+# heap and no dependency: the engine with no heap (`wz-runtime-coop`'s `ws`) frames its links
+# with it; the tokio leaf frames its own with tokio-tungstenite.
+transport-link-ws = []
 
 # attachment domain primitive: gates the `attachment` SSOT module (the
 # one attachment-ext encode/decode pair). Selected by the

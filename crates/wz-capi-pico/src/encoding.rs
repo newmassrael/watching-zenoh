@@ -90,7 +90,7 @@ pub(crate) struct EncodingState {
     /// while it lives; or they lie in `_block`.
     schema_start: *const u8,
     schema_len: usize,
-    /// Held for its drop alone, never read: the block of the payloads' area a kept schema lies
+    /// Held for its drop alone, never read: the payload block a kept schema lies
     /// in ([`Self::kept`]), let go with the state. It is what a sample, a reply or a query kept
     /// past its callback holds, whose message's bytes it may outlive. It takes no encoding of the
     /// pool, whose count is the program's own encodings. None for a schema another holds, for an
@@ -100,7 +100,7 @@ pub(crate) struct EncodingState {
 
 // SAFETY: a lent schema is its holder's, valid and unchanged for as long as the state lives
 // (`EncodingState::lent`), and nothing writes through the pointer, so it is shared between threads
-// as the holder's own borrow would be; a kept one is a block of the payloads' area this state alone
+// as the holder's own borrow would be; a kept one is a payload block this state alone
 // holds and nothing writes after the copy, and the pools are reached under the port's lock.
 unsafe impl Send for EncodingState {}
 unsafe impl Sync for EncodingState {}
@@ -148,9 +148,10 @@ impl EncodingState {
     }
 
     /// A state of its own with the same encoding: what a sample, a reply or a query kept past its
-    /// callback holds. A schema is copied into a block of the payloads' area, as the kept value's
+    /// callback holds. A schema is copied into a payload block, as the kept value's
     /// payload and attachment are, refused with [`NoRoom`] when the area has none free; an
     /// encoding of no schema, or of an empty one, takes none.
+    #[cfg(any(test, feature = "queryable"))]
     pub(crate) fn kept(&self) -> Result<Self, NoRoom> {
         let (schema_start, block) = match self.view().schema {
             None => (core::ptr::null(), None),
@@ -163,6 +164,39 @@ impl EncodingState {
                 let (block, start) = Block::kept_copy(schema).ok_or(NoRoom)?;
                 (start.as_ptr().cast_const(), Some(block))
             }
+        };
+        Ok(Self {
+            packed_id: self.packed_id,
+            schema_start,
+            schema_len: self.schema_len,
+            _block: block,
+        })
+    }
+
+    /// [`Self::kept`] with the schema already copied to `schema_start` of `block`, the one
+    /// block a value kept past its callback copies its lent parts into
+    /// ([`Block::kept_parts`]): this state holds a share of it. Refused with [`NoRoom`] only for
+    /// a share the block cannot give.
+    ///
+    /// # Safety
+    /// The schema's bytes, when it has some, are written at `schema_start` of `block`, which is
+    /// then one.
+    pub(crate) unsafe fn kept_in(
+        &self,
+        block: Option<&Block>,
+        schema_start: *const u8,
+    ) -> Result<Self, NoRoom> {
+        let (schema_start, block) = match self.view().schema {
+            None => (core::ptr::null(), None),
+            // Present but empty: a start that reads nothing and outlives every lender.
+            Some([]) => (
+                core::ptr::NonNull::<u8>::dangling().as_ptr().cast_const(),
+                None,
+            ),
+            Some(_) => (
+                schema_start,
+                Some(block.and_then(Block::share).ok_or(NoRoom)?),
+            ),
         };
         Ok(Self {
             packed_id: self.packed_id,
@@ -194,19 +228,31 @@ impl HeldEncoding {
     /// the room a slot has or the pool has no slot free, which every door that makes one answers
     /// with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as zenoh-pico answers a schema its heap cannot copy.
     fn place(encoding: EncodingRef<'_>) -> Option<*mut HeldEncoding> {
-        let kept = BoundedEncoding::of(encoding).ok()?;
         let slot = Slot::<HeldEncoding>::take(Kind::Encoding)?;
-        // SAFETY: `write_at` writes both fields of the slot it is handed.
-        Some(unsafe { slot.fill_in_place(|at| Self::write_at(at, kept)) })
+        // SAFETY: `write_at` writes both fields of the slot it is handed when it keeps the
+        // encoding, and nothing when it refuses it, which gives the slot back.
+        unsafe { slot.try_fill_in_place(|at| Self::write_at(at, encoding)) }.ok()
     }
 
-    /// Write `kept` at `at` and the state that reads it there.
+    /// Keep `encoding` in the room at `at`, written there rather than made on the stack and moved
+    /// in, and write the state that reads it there. Refused with nothing written when the schema is
+    /// longer than the room, so a held encoding keeps the one it had.
+    ///
+    /// One body out of line for the encoding placed and the schema set, so that neither holds a
+    /// copy of the write of the room.
     ///
     /// # Safety
-    /// `at` is the place of a `HeldEncoding` that holds none and does not move while it is held.
-    unsafe fn write_at(at: *mut HeldEncoding, kept: BoundedEncoding) {
-        core::ptr::addr_of_mut!((*at).kept).write(kept);
+    /// `at` is the place of a `HeldEncoding`, holding one or none, that does not move while it is
+    /// held and that nothing else reads while this runs.
+    #[inline(never)]
+    unsafe fn write_at(at: *mut HeldEncoding, encoding: EncodingRef<'_>) -> Result<(), NoRoom> {
+        // SAFETY: the caller's; a kept encoding has no drop, so its room is written over whatever
+        // it held, and is left holding a whole one or untouched.
+        let room = &mut *core::ptr::addr_of_mut!((*at).kept)
+            .cast::<core::mem::MaybeUninit<BoundedEncoding>>();
+        BoundedEncoding::write_into(room, encoding).map_err(|_| NoRoom)?;
         Self::read_own_room(at);
+        Ok(())
     }
 
     /// Point the state at `at` at the room beside it, as it now holds.
@@ -228,14 +274,13 @@ impl HeldEncoding {
     /// `at` is a live `HeldEncoding` nothing else reads while this runs.
     unsafe fn set_schema(at: *mut HeldEncoding, bytes: &[u8]) -> Result<(), NoRoom> {
         let has_schema = !bytes.is_empty();
-        let kept = BoundedEncoding::of(EncodingRef {
-            packed_id: with_schema_flag((*at).kept.view().packed_id, has_schema),
-            schema: has_schema.then_some(bytes),
-        })
-        .map_err(|_| NoRoom)?;
-        (*at).kept = kept;
-        Self::read_own_room(at);
-        Ok(())
+        Self::write_at(
+            at,
+            EncodingRef {
+                packed_id: with_schema_flag((*at).kept.view().packed_id, has_schema),
+                schema: has_schema.then_some(bytes),
+            },
+        )
     }
 }
 
@@ -521,17 +566,12 @@ pub unsafe extern "C" fn z_encoding_to_string(
         if string.is_null() {
             return Z_ERR_NULL;
         }
-        let rendered = match encoding_view(encoding) {
-            Some(view) => {
-                wz_session_core::encoding_hint::parts_to_bytes(view.packed_id, view.schema)
-            }
-            None => ENCODING_ID_TO_STR
-                .get(usize::from(ENCODING_ID_DEFAULT))
-                .copied()
-                .unwrap_or_default()
-                .as_bytes()
-                .to_vec(),
+        // The null encoding is rendered as the default it reads as, through the one rendering.
+        let (packed_id, schema) = match encoding_view(encoding) {
+            Some(view) => (view.packed_id, view.schema),
+            None => (u32::from(ENCODING_ID_DEFAULT) << 1, None),
         };
+        let rendered = wz_session_core::encoding_hint::parts_to_bytes(packed_id, schema);
         store_owned_string(string, &rendered)
     })
 }
@@ -1319,5 +1359,31 @@ mod tests {
             assert_eq!(rendered(&parsed(s)), s);
         }
         assert_eq!(rendered(&parsed("text/plain;utf8")), "text/plain;utf8");
+    }
+
+    /// The null encoding renders as the default it reads as, and a null string to write into is
+    /// refused. Turned red by a null encoding rendered as anything but `zenoh/bytes`.
+    #[test]
+    fn a_null_encoding_renders_as_the_default() {
+        // SAFETY: a null encoding and a string of this test's own, let go of before it ends.
+        unsafe {
+            let mut out = z_owned_string_t::null_value();
+            assert_eq!(z_encoding_to_string(core::ptr::null(), &mut out), Z_OK);
+            let view = crate::bytes::z_string_loan(&out);
+            let text = core::slice::from_raw_parts(
+                crate::bytes::z_string_data(view).cast::<u8>(),
+                crate::bytes::z_string_len(view),
+            );
+            assert_eq!(text, b"zenoh/bytes");
+            assert_eq!(
+                text,
+                ENCODING_ID_TO_STR[usize::from(ENCODING_ID_DEFAULT)].as_bytes()
+            );
+            crate::bytes::z_string_drop(crate::bytes::z_string_move(&mut out));
+            assert_eq!(
+                z_encoding_to_string(core::ptr::null(), core::ptr::null_mut()),
+                Z_ERR_NULL
+            );
+        }
     }
 }

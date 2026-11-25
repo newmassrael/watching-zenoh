@@ -828,6 +828,24 @@ impl<T: TxStore> TxLender<T> {
         Some((from, end))
     }
 
+    /// Mask the frame `start .. start + len` of `slot` with `key` where it lies, as a framing
+    /// that masks what it sends asks ([`crate::stream_link::StreamFraming::prefix`]): every byte
+    /// XORed with the key byte its place names. `false` when the frame is not inside the slot.
+    pub fn mask(&self, slot: TxSlot, start: usize, len: usize, key: [u8; 4]) -> bool {
+        let (base, capacity) = self.storage(slot);
+        if !start.checked_add(len).is_some_and(|end| end <= capacity) {
+            return false;
+        }
+        // SAFETY: `base` is the first byte of a slot of the store, `capacity` bytes long, and
+        // `start .. start + len` is within it. The session handed the slot over, so nothing else
+        // reads or writes it while the frame is masked.
+        let frame = unsafe { core::slice::from_raw_parts_mut(base.add(start), len) };
+        for (byte, key_byte) in frame.iter_mut().zip(key.iter().cycle()) {
+            *byte ^= key_byte;
+        }
+        true
+    }
+
     /// The bytes `from .. end` of `slot`, cut to the slot.
     ///
     /// # Safety

@@ -18,6 +18,8 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::runtime_cell::FlagCell;
+
 /// Whether a link takes data sends: open while it is established, closed from the moment the
 /// session lets the link go (or tears it down for a re-dial) until it is established again.
 ///
@@ -53,14 +55,22 @@ impl SendGate {
 /// session for congestion, which every later send reads to refuse at once.
 ///
 /// `raise` stores with `Release` and `is_raised` loads with `Acquire`, so a reader that sees
-/// the flag raised also sees what the thread that raised it wrote first.
-#[derive(Debug, Default)]
-pub struct Latch(AtomicBool);
+/// the flag raised also sees what the thread that raised it wrote first. The flag is the
+/// runtime's (`F`): an atomic where the session's holders are threads, a cell where they are one
+/// task, which has nothing to order.
+#[derive(Debug)]
+pub struct Latch<F: FlagCell>(F);
 
-impl Latch {
+impl<F: FlagCell> Default for Latch<F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<F: FlagCell> Latch<F> {
     /// A flag not raised.
-    pub const fn new() -> Self {
-        Self(AtomicBool::new(false))
+    pub fn new() -> Self {
+        Self(F::new(false))
     }
 
     /// Raise the flag; raising it again changes nothing.
@@ -93,15 +103,28 @@ mod tests {
         assert!(!SendGate::new(false).is_open(), "made closed");
     }
 
-    #[test]
-    fn a_latch_once_raised_stays_raised() {
-        let latch = Latch::new();
+    fn latch_round<F: FlagCell>() {
+        let latch = Latch::<F>::new();
         assert!(!latch.is_raised(), "not raised at first");
         latch.raise();
         assert!(latch.is_raised());
         latch.raise();
         assert!(latch.is_raised(), "raising again changes nothing");
-        assert!(!Latch::default().is_raised(), "the default is not raised");
+        assert!(
+            !Latch::<F>::default().is_raised(),
+            "the default is not raised"
+        );
+    }
+
+    #[test]
+    fn a_latch_once_raised_stays_raised() {
+        latch_round::<AtomicBool>();
+    }
+
+    /// The form a runtime of one task binds behaves as the atomic one.
+    #[test]
+    fn a_latch_of_a_cell_once_raised_stays_raised() {
+        latch_round::<core::cell::Cell<bool>>();
     }
 
     /// The edge the orderings are chosen for: a value written with no ordering of its own before

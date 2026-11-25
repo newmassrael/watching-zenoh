@@ -257,7 +257,8 @@ impl ValuesFold {
             let Some(matched) = map.segment_for(covering) else {
                 continue;
             };
-            let Some(piece) = matched.profile.recognise(&held.bytes) else {
+            let Some(piece) = crate::segment_profile::recognise(matched.profile, &held.bytes)
+            else {
                 continue;
             };
             let key = match (&held.keyexpr, &held.missed) {

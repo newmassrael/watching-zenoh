@@ -97,12 +97,18 @@ mod prelude {
 // on another system: a build for one is refused here by name, rather than by the paths it lacks.
 #[cfg(all(
     any(feature = "scout", feature = "group-host"),
-    not(any(target_os = "linux", target_os = "android", target_os = "nto", windows))
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "nto",
+        target_os = "macos",
+        windows
+    ))
 ))]
 compile_error!(
     "wz-capi-coop: `scout` and `group-host` open a host's multicast sockets, which \
-     `wz-runtime-posix` has on Linux, Android, QNX Neutrino and Windows; an image scouts with \
-     `scout-datagram` over its own stack"
+     `wz-runtime-posix` has on Linux, Android, QNX Neutrino, macOS and Windows; an image scouts \
+     with `scout-datagram` over its own stack"
 );
 
 #[cfg(feature = "listen")]
@@ -131,6 +137,10 @@ pub use wz_runtime_coop::app_link;
 /// opens this engine with, so the engine it reaches is one type (`either_links::EitherLinks`).
 #[cfg(feature = "app-transport")]
 pub use wz_runtime_coop::either_links;
+/// The joiner of the groups over raw Ethernet (`raweth_group::RawethJoiner`), which an ABI wraps
+/// the host's groups in where its build joins `reth/` groups.
+#[cfg(feature = "raweth")]
+pub use wz_runtime_coop::raweth_group;
 // The tests are a host's: they run a router stand-in on threads of `std`.
 #[cfg(all(test, feature = "std"))]
 mod tests;
@@ -143,6 +153,11 @@ pub use engine::{
 };
 /// Why the session's runtime had no task for a link or a group ([`OpenError::NoTask`]).
 pub use wz_runtime_coop::executor::SpawnRefusal;
+/// The grammar this engine reads an endpoint's text with when it dials or listens on it, and the
+/// protocols a locator it reads names: what an ABI reads an endpoint with when it answers for an
+/// open of this engine without opening it.
+pub use wz_runtime_coop::locator_text;
+pub use wz_runtime_coop::session_drive::LinkProto;
 /// The clock a session of this engine runs on, which every timer of the session reads: an ABI
 /// opens the engine with its host's, or with one of its own (a time base the program supplies).
 pub use wz_runtime_coop::ClockSource;

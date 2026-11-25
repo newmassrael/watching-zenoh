@@ -100,6 +100,10 @@ members = [
     # profiles. Below `wz-capture`, which re-exports it, and built on the core,
     # so a session runtime or a C ABI can use it without the capture crate.
     "wz-app-frame",
+    # The readers of an application's payload schema (the `.proto` tokenizer, parser and linker),
+    # run once when a schema is handed over, below `wz-app-frame`, which re-exports them; their own
+    # crate so the release profiles build them for size and the per-sample code for speed.
+    "wz-app-schema",
     # Round 1998 (item 470) — Linux packet I/O: the `AF_PACKET` socket, the
     # raweth link over it, and the capture tap. Split out of `wz-runtime-tokio`,
     # which never drove either and whose MANDATORY `tokio` is what kept the tap
@@ -406,33 +410,94 @@ warnings = "deny"
 [profile.dev]
 debug = "line-tables-only"
 
+# The optimized build of the work in this tree (`cargo build --release`, the lanes and benches
+# that want optimized code), never what a deployer receives: `ship` below builds that. Thin LTO
+# links in a fraction of the time and keeps each crate's code apart, so a generic function
+# instantiated in two crates is carried twice.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 opt-level = 3
 
+# Every artifact a deployer receives is built with this profile or one that inherits it: the C
+# ABI libraries and executables a package carries (`scripts/lib/wz_package.py`,
+# `scripts/lib/pico_windows_package.py`) and the builds the size gate holds to zenoh-pico
+# (`scripts/lib/capability_cost_gate.py`). It is linked as one program (`fat`, one codegen unit):
+# a generic instantiated in several crates is kept once and what no export reaches is not
+# carried, where thin LTO left 201 same-named copies (43,573 bytes) in the Windows x64 DLL with
+# `std`. A panic still unwinds, as in `release`, so the ABI doors catch it (`ffi::guarded`).
+# Selected with `cargo build --profile ship`.
+[profile.ship]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
 # The C ABI libraries for a deployer who wants the smallest binary, selected with
-# `cargo build --profile capi-small`. A panic ABORTS the process instead of unwinding: the
-# release profile above keeps unwinding because the ABI doors catch a panic and return an error
-# code (`ffi::guarded`), and a deployer who has not chosen otherwise gets that. zenoh-pico is C,
+# `cargo build --profile capi-small`. A panic ABORTS the process instead of unwinding: `ship`
+# keeps unwinding because the ABI doors catch a panic and return an error code
+# (`ffi::guarded`), and a deployer who has not chosen otherwise gets that. zenoh-pico is C,
 # where the same bug is an assertion or a fault, so for the pico-class client this is the
 # like-for-like build. What it drops is the unwind tables and the std backtrace support; the
 # size gate grades both profiles (`scripts/lib/capability_cost_gate.py`).
 [profile.capi-small]
-inherits = "release"
+inherits = "ship"
 panic = "abort"
 
 # The pico C ABI's host library without `std` (`wz-capi-pico`'s `os-posix` on a POSIX host,
 # `os-windows` on Windows), selected with `cargo build --profile capi-nostd`. A library without
-# `std` has no unwinder, so a panic aborts the process. It is linked as one program (`fat`): what
-# none of its exports reaches is not carried, and no landing pad of the prebuilt `core` is kept to
-# name the personality routine `std` would define. On a POSIX host its unwind tables are dropped by
+# `std` has no unwinder, so a panic aborts the process. It is linked as one program (`fat`, stated
+# here as well as by `ship` because this library needs it whatever `ship` says): what none of its
+# exports reaches is not carried, and no landing pad of the prebuilt `core` is kept to name the
+# personality routine `std` would define. On a POSIX host its unwind tables are dropped by
 # the configuration beside it (`.cargo/capi-nostd.toml`), since a profile cannot carry a code
 # generation flag on a stable toolchain; a Windows build keeps them (that file says why).
 [profile.capi-nostd]
-inherits = "release"
+inherits = "ship"
 panic = "abort"
 lto = "fat"
+
+# The code that runs once, when a node is handed a document or a session is opened, built for size:
+# the schema's tokenizer, parser and linker (`wz-app-schema`), the handshake's auth methods
+# (`wz-auth`, called only while a session's handshake runs, never on a frame after it) and the
+# reader of a TLS key's PEM material (`wz-tls-pem`). What reads and writes every sample keeps the
+# profile's `opt-level = 3`; the crate boundary is the line between the two. The level is a crate's
+# own code: a generic it defines is built at the level of the crate that instantiates it. Stated for
+# each profile a release library is built with, so no profile builds the crate otherwise.
+[profile.release.package.wz-app-schema]
+opt-level = "s"
+
+[profile.ship.package.wz-app-schema]
+opt-level = "s"
+
+[profile.capi-small.package.wz-app-schema]
+opt-level = "s"
+
+[profile.capi-nostd.package.wz-app-schema]
+opt-level = "s"
+
+[profile.release.package.wz-auth]
+opt-level = "s"
+
+[profile.ship.package.wz-auth]
+opt-level = "s"
+
+[profile.capi-small.package.wz-auth]
+opt-level = "s"
+
+[profile.capi-nostd.package.wz-auth]
+opt-level = "s"
+
+[profile.release.package.wz-tls-pem]
+opt-level = "s"
+
+[profile.ship.package.wz-tls-pem]
+opt-level = "s"
+
+[profile.capi-small.package.wz-tls-pem]
+opt-level = "s"
+
+[profile.capi-nostd.package.wz-tls-pem]
+opt-level = "s"
 
 # socket2 0.6.3 and tokio 1.52.3 do not compile for QNX on the io-sock network stack: `libc` has
 # no `TCP_KEEPALIVE`, `unpcbid` or `LOCAL_PEEREID` there. ring 0.17.14 compiles for QNX but has no

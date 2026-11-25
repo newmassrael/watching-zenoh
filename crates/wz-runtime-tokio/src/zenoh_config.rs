@@ -3760,9 +3760,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // `plugins_loading/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: the plugin plane takes
     // it from the reader.
     // R2539 — `region_name` ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
-    // capability (`SessionLinkActions::set_local_region`, `wz_session_core::extregion`), and it
-    // LEFT for [`C_ABI_SESSION_HONOURED_KEYS`] once the reader fed that setter through the offer
-    // of the session.
+    // capability (`SessionInitParams::region`, `wz_session_core::extregion`), and it LEFT for
+    // [`C_ABI_SESSION_HONOURED_KEYS`] once the reader fed it through the offer of the session.
     // ⚠ R2633 — `routing/router/linkstate/transport_weights` LEFT this list for
     // [`HONOURED_CONFIG_KEYS`], one round after R2632 put it here. That is this
     // list's whole purpose working as designed: R2632 built the capability and
@@ -4101,7 +4100,7 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // it used for `connect/timeout_ms`: a verdict about a key no longer in the
     // population is "a verdict about evidence that is gone".
     // The `region_name` / `wz-has-it` row (R2437, kind changed at R2539) left with its key: the
-    // reader feeds `SessionLinkActions::set_local_region` through the offer of the session.
+    // reader feeds `SessionInitParams::region` through the offer of the session.
     // R3075 -- the `autoconnect`, `autoconnect_strategy`, `target` and `multihop` rows left with
     // their keys.
     // R2336 (open-debt item 15) — the `transport/auth/pubkey/known_keys_file`
@@ -8882,12 +8881,23 @@ impl ZenohNodeConfig {
         const SN_RESOLUTION: &str = "transport/link/tx/sequence_number_resolution";
         const SN_RESOLUTION_EXPECTED: &str = "one of \"8bit\", \"16bit\", \"32bit\", \"64bit\"";
         if let Some(text) = want_string(&doc, SN_RESOLUTION, SN_RESOLUTION_EXPECTED)? {
-            out.sn_resolution = crate::policy::SnResolution::from_zenoh_name(&text).ok_or(
+            let width = crate::policy::SnResolution::from_zenoh_name(&text).ok_or(
                 ConfigIngestError::WrongType {
                     path: SN_RESOLUTION,
                     expected: SN_RESOLUTION_EXPECTED,
                 },
             )?;
+            // The key stands in for the `sn-resolution` policy, so it is held to the policy's
+            // domain: a width the build leaves out is one its sessions hold no word for
+            // (`wz_session_core::sn::Sn`), and is refused here rather than run on a narrower ring.
+            use wz_session_core::policy_binding::PolicyValue;
+            if !<crate::policy::SnResolution as PolicyValue>::DOMAIN.contains(width) {
+                return Err(ConfigIngestError::OutOfRange {
+                    path: SN_RESOLUTION,
+                    value: text,
+                });
+            }
+            out.sn_resolution = width;
             named.push(SN_RESOLUTION);
         }
         if let Some(v) = want_u64(&doc, "transport/link/tx/keep_alive")? {
@@ -9500,6 +9510,34 @@ mod tests {
     /// Item 751 — read one `gateway/south` value the way an operator writes it.
     fn south(text: &str) -> Result<SouthPartition, ConfigIngestError> {
         gateway_south_of(&wz_session_core::json5::parse(text).expect("the value is JSON5"))
+    }
+
+    /// The width `transport/link/tx/sequence_number_resolution` states is held to the build's
+    /// `sn-resolution` domain as the policy is: each width the domain holds is read, and each it
+    /// leaves out is refused at the key by name, so it never reaches a session.
+    #[test]
+    fn a_sequence_number_width_outside_the_domain_is_refused_at_the_key() {
+        use crate::policy::SnResolution;
+        use wz_session_core::policy_binding::PolicyValue;
+        for width in SnResolution::WIDTHS {
+            let doc = format!(
+                r#"{{ "transport": {{ "link": {{ "tx": {{ "sequence_number_resolution": "{}" }} }} }} }}"#,
+                width.zenoh_name()
+            );
+            let read = ZenohNodeConfig::from_json5(&doc).map(|ingest| ingest.config.sn_resolution);
+            if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+                assert_eq!(read, Ok(width), "{doc}");
+            } else {
+                assert_eq!(
+                    read,
+                    Err(ConfigIngestError::OutOfRange {
+                        path: "transport/link/tx/sequence_number_resolution",
+                        value: width.zenoh_name().into(),
+                    }),
+                    "{doc}"
+                );
+            }
+        }
     }
 
     /// Item 751 — the preset, in each spelling the pinned zenohd starts on, and

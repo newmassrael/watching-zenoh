@@ -72,7 +72,7 @@ struct Stage {
 }
 
 impl Stage {
-    fn new(mask: u64) -> Mutex<Self> {
+    fn new(mask: sn::Sn) -> Mutex<Self> {
         #[cfg(not(any(
             feature = "codec-push",
             feature = "codec-response",
@@ -105,7 +105,7 @@ type Stages = [Mutex<Stage>; Priority::NUM];
 
 /// A fresh stage per conduit, every ring at 0 (the JOIN advertisement makes
 /// any start valid).
-fn new_stages(mask: u64) -> Arc<Stages> {
+fn new_stages(mask: sn::Sn) -> Arc<Stages> {
     Arc::new(std::array::from_fn(|_| Stage::new(mask)))
 }
 
@@ -844,17 +844,8 @@ impl MulticastTxPlane {
     ) -> Self {
         // Open-debt item 911 — what the link can carry bounds what is framed for it; the
         // group's batch, which the JOIN advertises, is left to the drive loop's own params.
-        let framed;
-        let params = match driver.frame_budget() {
-            Some(budget) if budget < params.batch_size => {
-                framed = MulticastParams {
-                    batch_size: budget,
-                    ..params.clone()
-                };
-                &framed
-            }
-            _ => params,
-        };
+        let framed = params.framed_to(driver.frame_budget());
+        let params = framed.as_ref().unwrap_or(params);
         let (lanes, mut queued) = pipeline_lanes();
         // A multicast group sends the configured batch, so the batch the link
         // sends and the batch a lane is counted in are the same number.
@@ -1060,7 +1051,7 @@ impl MulticastTxPlane {
                 .queued
                 .pop_front();
             if let Some(Some((reliable, sn))) = front {
-                self.on_wire.written(priority, reliable, sn);
+                self.on_wire.written(priority, reliable, sn::from_wire(sn));
             }
         }
     }

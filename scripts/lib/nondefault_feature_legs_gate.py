@@ -294,7 +294,10 @@ def legs(text: str) -> list[Leg]:
         fields = row[1 : row.rindex('"')].split("|")
         if len(fields) < 3:
             raise ValueError(f"a LEGS row of fewer than three fields: {row}")
-        names = [f for f in re.sub(r"\s", "", fields[2]).split(",") if f]
+        # An `@env:NAME=VALUE` token sets the leg's environment and turns no feature on.
+        names = [
+            f for f in re.sub(r"\s", "", fields[2]).split(",") if f and not f.startswith("@env:")
+        ]
         out.append(
             Leg(fields[0], tuple(n for n in names if n != "-default"), "-default" in names)
         )
@@ -612,6 +615,8 @@ def selftest() -> int:
     table = legs(_legs('    "a|hook|\\', "        z,\\", '        w|mod::"', '    "b|hook|q|"'))
     expect("a row over lines", table[0] == Leg("a", ("z", "w"), False), table)
     expect("-default is a flag", legs(_legs('    "a|hook|-default,y|"'))[0].no_default, "")
+    env_leg = legs(_legs('    "a|lane|@env:WZ_X_ALLOWS_ON=off,y|"'))[0]
+    expect("an @env: token is no feature", env_leg == Leg("a", ("y",), False), env_leg)
 
     gov = ("a",)
     files = {

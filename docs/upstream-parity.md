@@ -292,7 +292,15 @@ derived from the declaration and never chosen by hand:
   one row per cell with its figures, the boots, the host, the date and the tree. A change
   that moves a cell moves its row in the same commit. Hosted CI grades the host size cells.
   The MCU and the host time cells are lab rows: a person or the loop runs the lane, and the
-  row records when.
+  row records when. A run's rows hold every image of the run against its reference, the
+  reference's other arm included, so not every row is a cell of wz: the rows of
+  `zephyr-pico-queryable` against `zephyr-pico-queryable-st` (run 20261031T063515) are
+  zenoh-pico's multi-threaded arm against its single-threaded arm, which is how the stronger
+  arm was chosen as the reference. Their gaps are pico's own, not debts of D5: the
+  multi-threaded arm's static task stacks and its read task,
+  `vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`.
+  wz's pico C ABI under the same program is `zephyr-wz-pico-queryable` and `-st` (section
+  5a), which no run of the matrix holds yet.
 
 - **D7. Every capability is a switch, from Kconfig down to the generated state machine (owner,
   2026-10-26: "kconfig와 sce code gen으로 기능을 껐다 켰다 자유롭게 조작할 수 있어야 해").**
@@ -466,6 +474,27 @@ derived from the declaration and never chosen by hand:
      and the job's ceiling step fails with the row to paste; the rows then move only down, under
      `debt-pico-host-size-ceiling`, until each reads WIN and is locked. The Linux client without
      `std` (`pico-client-coop-nostd`, 1.4025) is the reading the size work starts from.
+  9. **The like-for-like verdict of the release DLL, and its doors apart.** The release DLL is
+     `host-peer-ext`: zenoh-pico's features with the peer role, the advanced plane, the unstable
+     API and connectivity, whose switches the reference turns on with them, and wz's own doors
+     (`wz_ext_*`), which zenoh-pico has no switch of. A door's bytes therefore count on wz's side
+     alone, and rule 8's row is the release DLL whole, held so that it does not grow, and no
+     verdict of like against like. The verdict is `pico-api-windows-x64` and
+     `pico-api-windows-x86`: the release profile without its doors
+     (`configs/profiles/host-peer.conf`), built as the release DLL is (without `std`, the
+     `capi-nostd` profile and configuration, the same link), against the same reading's
+     zenoh-pico. Each door is held apart by a row of that library and the door alone,
+     `pico-api-windows-<width>-with-<door>`, as Layer C1cs pairs a capability with the build
+     without it; the judge prints the door's bytes over the library without it, and zenoh-pico's
+     are none. `pico_windows_package.py --size-features` builds and grades them in the job that
+     reads rule 8's row, against the reference that step built: it fails a library whose derived
+     zenoh-pico is not that reference (a door that turns a switch of zenoh-pico's on would need a
+     reference of its own), and fails when `host-peer-ext`'s features are not `host-peer`'s and
+     exactly the doors that have rows (`RELEASE_DOORS`), so a door added to the release has its
+     rows from the commit that adds it. The library with `std` is no release form (the release
+     workflow ships the one library without it, and `--release` refuses a set with `std`), so no
+     row reads it: its sizes are printed by the package job and gate nothing. The rows start
+     unfilled, as rule 7 says, and are filled from the hosted run that first reads them.
 - **D10. The host performance matrix of the pico ABI is a ratchet and a debt loop (owner,
   2026-11-21).** wz is to be faster than zenoh-pico and than a deployment's own build of a
   library of the pico API, and gates hold it, not a reading taken now and then. The matrix is
@@ -761,6 +790,25 @@ stops holding.
 | preset | behaviour | the original | wz | rule | held by |
 |---|---|---|---|---|---|
 | pico, on a host with a heap | how many members a group holds | no cap: the member list grows while the allocator gives (`vendor/zenoh-pico/src/transport/multicast/rx.c` @ `ztm->_peers = _z_transport_peer_multicast_slist_push_empty(ztm->_peers);`) | the rows of the group face's table, `GROUP_FACE_ROWS` (32) in `crates/wz-runtime-tokio/src/multicast_glue.rs`; the Join of a member past them is refused and counted | a group grows only to a cap a configuration states | `a_face_with_no_stated_cap_holds_its_rows_where_pico_would_grow` (`multicast_glue.rs`), `the_pico_group_states_no_member_cap` (`crates/wz-capi-pico/src/session.rs`) |
+| pico, on a 32-bit host | the sequence-number ring of a session that negotiates the 64-bit resolution (wire code `0x03`) | the ring follows the host's word: `_z_zint_t` is a `size_t` (`vendor/zenoh-pico/include/zenoh-pico/protocol/core.h` @ `typedef size_t _z_zint_t;`) and the 64-bit mask is cast to it (`vendor/zenoh-pico/src/transport/utils.c` @ `ret = (_z_zint_t)(U64_MAX >> 1);`), so a 32-bit build runs a ring of 2^32 where a 64-bit build runs one of 2^63; upstream zenoh refuses the width in its configuration (`commons/zenoh-config/src/lib.rs` @ `fn sequence_number_resolution_validator(b: &Bits) -> bool {`) | the ring of 2^63 on every host, the width the wire code states (`mask_from_res` in `crates/wz-session-core/src/sn.rs`) | the ring is the wire code's and not the host word's; the difference is pico's, recorded and not followed, and it arises only between two peers that both state `0x03`, which pico does not by default (`Z_SN_RESOLUTION 0x02`) | `mask_mapping_mirrors_pico` (`crates/wz-session-core/src/sn.rs`) |
+| pico | a key not in canon form, at a door that makes, declares or sends a key | the view constructor refuses it with `Z_EINVAL` (`vendor/zenoh-pico/src/api/api.c` @ `if (_z_keyexpr_is_canon(name, len) != Z_KEYEXPR_CANON_SUCCESS) {`); the owned constructor copies it unjudged (`vendor/zenoh-pico/src/api/api.c` @ `return _z_declared_keyexpr_from_substr(&key->_val, name, len);`), the concatenation keeps a result not in canon form, and a declaration, a put, a get and a reply send whatever text the key holds | refused with `Z_EINVAL` at every such door: the owned constructors, the concatenation, `z_declare_keyexpr`, the declarations of a publisher, subscriber, queryable, querier, liveliness token and liveliness subscriber, `z_put`, `z_delete`, `z_get`, `z_query_reply` and `z_query_reply_del`, all through one judgement (`canon_key` in `crates/wz-capi-pico/src/keyexpr.rs`); a text that needs rewriting goes through an `_autocanonize` door or the join, which rewrite it as pico's do | a key is made of text only when the text is in canon form, as upstream zenoh makes one (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `fn try_from(value: &'a str) -> Result<Self, Self::Error> {`), its concatenation included (`zenoh/src/api/key_expr.rs` @ `key_expr: OwnedKeyExpr::try_from(format!("{self}{s}"))?,`) | `the_owned_constructors_refuse_a_text_not_in_canon_form`, `a_concatenation_is_taken_only_as_it_is`, `the_outbound_gate_reads_a_canon_key_and_refuses_the_rest` (`crates/wz-capi-pico/src/keyexpr.rs`); `crates/wz-capi-pico/tests/it/files/noncanon_keys_refused.rs` |
+| pico | an element pushed into a ring channel of no places | neither kept nor released: the forced push pulls nothing from the empty ring, its second push is refused, and the free function is not called (`vendor/zenoh-pico/src/collections/ring.c` @ `void *ret = _z_ring_push_force(r, e);`) | released through the free function at the push, nothing kept (`push` in `crates/wz-capi-pico/src/handlers.rs`) | an element handed to a collection is kept or released by it, never neither (owner, 2026-11-25) | `a_ring_collection_of_no_places_releases_each_push` (`crates/wz-capi-pico/src/handlers.rs`) |
+| pico, the cooperative engine's group with `multicast-declarations` | how many keyexprs one member of a group holds declared | no cap: each member's resources are a list of that peer on the heap (`vendor/zenoh-pico/src/session/resource.c` @ `*resources = _z_resource_slist_push_empty(*resources);`) | `MAX_MEMBER_KEYEXPRS` (16) rows for each member, reserved in the session's pool at the open with the group face's `MAX_GROUP_MEMBERS` members; a declaration of a new id past them is refused and counted in `alias_refusals`, and a key named by it is dropped | every pool is finite at the open (decision Q3 of `docs/c-abi-engine-and-memory.md`); a limit of what the peer writes keeps its default, one peer's `MAX_PEER_KEYEXPR_ALIASES`, and has no lower preset (`docs/c-abi-no-heap-pools.md` section 9.1) | `a_member_holds_its_keyexprs_to_its_rows` (`crates/wz-session-core/src/multicast_member_scope.rs`), `a_members_keyexpr_binds_under_its_tag_and_one_past_its_bound_is_counted` (`crates/wz-session-core/src/pubsub.rs`) |
+| pico | a serial locator's `exclusive` key, on a host tty | no such key: the tty is opened and set with no lock, so a second opener shares it (`vendor/zenoh-pico/src/link/transport/serial/tty_posix.c` @ `static z_result_t _z_posix_tty_open_impl(`) | the key is read as upstream reads it, `true` when the locator states none: an exclusive `flock` and `TIOCEXCL` on the tty, so a second opener of either kind is refused; `exclusive=false` takes a shared `flock` and `TIOCNXCL`, and sharers admit one another (`PosixSerialLine::claim` in `crates/wz-runtime-posix/src/serial.rs`) | a key a locator states is applied with its original's meaning and default (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `const DEFAULT_EXCLUSIVE: bool = true;`); pico has no key, so a pico locator, which states none, takes upstream's default | `an_exclusive_line_refuses_a_second_opener_and_shared_lines_do_not` (`crates/wz-runtime-posix/src/serial.rs`) |
+| pico | a serial locator's `tout` key: how long a dial waits after the peer's RESET before it writes INIT again | no such key: a fixed 250 ms (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c` @ `#define SERIAL_CONNECT_THROTTLE_TIME_MS 250`) | the key is read as upstream reads it, in microseconds, 50 ms when the locator states none; the dial does not write INIT again before that much time has passed on the opener's clock, and does not wait in its poll (`SerialDriver::dial_step` in `crates/wz-runtime-coop/src/serial_link/links.rs`) | a key a locator states is applied with its original's meaning and default (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `const DEFAULT_TIMEOUT: u64 = 50_000;`); pico has no key, so a pico locator, which states none, takes upstream's default | `a_reset_holds_the_next_init_back_for_the_locators_tout` (`crates/wz-runtime-coop/src/serial_link/links.rs`) |
+| zenoh, zenoh-c, pico | a serial locator's `release_on_close` key, on a listener | pico has no such key and no serial listener that takes a second peer; upstream's listener opens its port for each peer when the key is `true` (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `if release_on_close {`) and, when it is `false`, never opens it: the listener's link is made with no port (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `UnsafeCell::new(None),`) and only that branch sets one, so every accept fails | `true` (the default): the line is opened by the accept that waits for a peer and let go when the link over it ends, so the next peer's accept opens it again; `false`: the line is opened once and kept between links, the next peer taken on it (`SerialListener` in `crates/wz-runtime-coop/src/serial_link/links.rs`) | a key is applied with the meaning its original states for it, here the close of upstream's link (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `if self.release_on_close {`); where the original cannot honour the meaning, wz honours it and does not copy the failure | `a_listener_that_releases_its_line_opens_it_for_each_link`, `a_listener_that_keeps_its_line_takes_the_next_peer_on_it` (`crates/wz-runtime-coop/src/serial_link/links.rs`) |
+| pico | what a serial listen does when the peer's INIT arrives | the listen opens the device and returns before the handshake, so it answers nothing (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c` @ `static z_result_t _z_serial_open_impl(_z_serial_socket_t *sock, const _z_endpoint_t *endpoint, bool connect) {`, which connects only when it dials) | the listener answers the INIT with INIT\|ACK and hands the link over then; the INIT is found behind bytes the line held before it, since a dialling peer writes it once (`SerialDriver::accept_step` in `crates/wz-runtime-coop/src/serial_link/links.rs`) | the serial handshake is the protocol's: a listener answers it, as upstream's does (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `while link.get_port_mut()?.accept().await.is_err() {`), so a pico or zenoh dial reaches a wz listener (main session, 2026-11-25) | `a_listener_that_releases_its_line_opens_it_for_each_link` (`crates/wz-runtime-coop/src/serial_link/links.rs`) |
+| zenoh, zenoh-c | a Ping frame a peer sends on a `ws/` link | the link ends (`io/zenoh-links/zenoh-link-ws/src/unicast.rs` @ `Message::Ping(_) => bail!(`) | answered with a Pong, and the link goes on (`WsFraming` in `crates/wz-runtime-coop/src/ws_link.rs`) | RFC 6455 section 5.5.2: an endpoint that receives a Ping sends a Pong; a link that ends on a frame the protocol tells it to answer is a defect of the original, not a contract | `a_fragmented_message_is_one_batch_and_a_ping_is_answered` (`crates/wz-runtime-coop/src/ws_link/tests.rs`) |
+| pico | what a `ws/` link carries on a host | plain TCP: no opening handshake and no framing (`vendor/zenoh-pico/src/link/transport/upper/ws_stream.c` @ `return _z_tcp_open(&sock->_sock, sock->_rep, tout);`) | the RFC 6455 opening handshake, then each batch one BINARY message, as zenoh's link writes it (`crates/wz-runtime-coop/src/ws_link.rs`, `crates/wz-runtime-coop/src/ws_link/links.rs`) | a `ws/` link speaks WebSocket, so it reaches zenoh's and a browser's; pico's host form reaches only another pico | `a_dial_and_a_listener_upgrade_a_loopback_connection` (`crates/wz-runtime-posix/src/ws.rs`) |
+| zenoh, zenoh-c | how long a `ws/` listener waits for an opening request | no limit: the accept waits for it (`io/zenoh-links/zenoh-link-ws/src/unicast.rs` @ `let stream = match accept_async(MaybeTlsStream::Plain(stream)).await {`) | 10 s, zenoh-pico's connect timeout; a connection whose request has not ended by then is closed unanswered, on both profiles (`OPEN_WAIT_US` in `crates/wz-runtime-coop/src/ws_link/handshake.rs`) | a peer that connects and says nothing holds no buffer of a link for good | `a_listener_lets_go_of_a_bad_or_silent_connection` (`crates/wz-runtime-coop/src/ws_link/links/tests.rs`), `a_handshake_not_done_in_time_is_let_go_with_its_row_and_buffers` (`crates/wz-runtime-coop/src/ws_link/slot/tests.rs`) |
+| zenoh, zenoh-c | how many opening requests a `ws/` listener answers at once | one: the accept waits for each in turn, and the next connection waits queued on the port (`io/zenoh-links/zenoh-link-ws/src/unicast.rs` @ `let stream = match accept_async(MaybeTlsStream::Plain(stream)).await {`) | as many as the session's `accept_pending`, each in a row the listener reserves when it opens; while every row holds one the port is not asked for another, so the next connection waits queued on it as upstream's does (`WsListener` in `crates/wz-runtime-coop/src/ws_link/links.rs`); on the slot profile as many as the rows of the acceptor's table, a constant of the image, held the same way (`WsAcceptor` in `crates/wz-runtime-coop/src/ws_link/slot.rs`) | an opening handshake is an inbound link under way, which upstream bounds by `accept_pending` (`commons/zenoh-config/src/lib.rs` @ `/// Number of links that may stay pending during accept phase (default: 100).`) | `a_listener_leaves_a_connection_queued_while_its_table_is_full` (`crates/wz-runtime-coop/src/ws_link/links/tests.rs`), `a_full_handshake_table_leaves_the_next_connection_queued_on_the_port` (`crates/wz-runtime-coop/src/ws_link/slot/tests.rs`, `crates/wz-session-lwip/tests/session_ws_slot.rs`) |
+| zenoh, zenoh-c | the mode a unixpipe link's FIFOs are made with when its locator states no `file_mask` | `0o777`, so any account of the host can open the FIFOs of another's link and write frames into its session (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs` @ `pub const FILE_ACCESS_MASK_DEFAULT: u32 = 0o777;`) | `0o600`, owner only, on both engines (`DEFAULT_FILE_MASK` in `crates/wz-runtime-tokio/src/unixpipe_pipeline.rs`, `UNIXPIPE_DEFAULT_FILE_MASK` in `crates/wz-runtime-coop/src/unixpipe_link.rs`); a locator that states `file_mask` gets that mode, so upstream's is `file_mask=511` | a link is open by default only to the account that made it, and a wider reach is one its locator states | `the_file_mask_reaches_every_fifo_the_link_creates` (`crates/wz-runtime-tokio/tests/unixpipe_file_mask.rs`), `a_link_makes_its_fifos_owner_only_unless_its_locator_states_a_mode` (`crates/wz-runtime-coop/src/unixpipe_link.rs`) |
+| zenoh, zenoh-c | how long a unixpipe listener waits for the dialer of an invitation to confirm it | without end: the listener answers one invitation at a time and reads the next only once the dialer has confirmed the last (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `Invitation::expect(suffix, &mut dedicated_uplink).await?;`), so a dialer that invites and stops holds every later dial off | 10 s: the listener answers one invitation at a time, as upstream's, and lets go of one not confirmed by then, its pair with it, and reads the next, on both engines (`HANDSHAKE_TIMEOUT` in `crates/wz-runtime-tokio/src/unixpipe_pipeline.rs`, `HANDSHAKE_TIMEOUT_US` in `crates/wz-runtime-coop/src/unixpipe_link.rs`) | a peer that stops halfway through opening a link holds a listener no longer than the accept timeout upstream gives a link of every other kind (`commons/zenoh-config/src/defaults.rs` @ `accept_timeout: 10_000,`) | `a_listener_passes_over_junk_and_drops_an_unconfirmed_invitation` (`crates/wz-runtime-coop/src/unixpipe_link.rs`) |
+| zenoh, zenoh-c | how a unixpipe link opens the FIFO of its pair it reads, on Linux | read and write (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `fn open_unique_pipe_for_read(path: &str) -> ZResult<File> {`), so the end is a writer of its own FIFO and never reads the end of the stream: a peer that is gone is found only by the lease | read only, on both engines (`open_read_end` in `crates/wz-runtime-tokio/src/unixpipe_pipeline.rs`, `PosixFifoOpen::reader` in `crates/wz-runtime-posix/src/unixpipe.rs`), so the end reads the end of the stream once its peer's writer has closed, and the link ends then; the tokio engine opens it as upstream does on another Unix | a link ends when its peer's end is gone, as a stream link ends when its peer closes | `a_read_end_reads_its_peer_and_the_end_of_the_stream` (`crates/wz-runtime-posix/src/unixpipe.rs`) |
+| zenoh, zenoh-c | a group endpoint's metadata (`?prio=`, `?rel=`, any other key) | read by no part of the multicast open: the transport carries the span into the endpoint it rebuilds and reads none of it (`io/zenoh-transport/src/multicast/manager.rs` @ `pub async fn open_transport_multicast(`), and the group link answers best effort whatever `rel` says (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `fn is_reliable(&self) -> bool {`), so `?rel=1` or `?prio=1-3` on a group is accepted and not kept | refused unless it states only `rel=0`, by the one reader of a group endpoint (`parse_group_locator` in `crates/wz-session-core/src/group_locator.rs`) | an endpoint that asks for what a group's link does not do is not joined as if it had not asked | `metadata_a_group_does_not_keep_is_refused` (`crates/wz-session-core/src/group_locator.rs`) |
+| zenoh, zenoh-c | how long a group endpoint may be | no cap: an endpoint is a string the allocator grows (`commons/zenoh-protocol/src/core/endpoint.rs` @ `pub(super) inner: String,`) | refused past `MAX_GROUP_ENDPOINT_LEN` (96 bytes by default, a limit of the configuration) by the one reader of a group endpoint, on every engine, the tokio one included (`parse_group_locator` in `crates/wz-session-core/src/group_locator.rs`), which reads the endpoint into fields of fixed size | every row a session holds is finite and its size is stated by the configuration, which can raise it | `an_endpoint_past_the_bound_is_refused_by_it` (`crates/wz-session-core/src/group_locator.rs`), `a_udp_group_is_read_as_every_engine_reads_it` (`crates/wz-capi-core/src/drive.rs`) |
+| pico | how long a `reth/` endpoint may be | no cap: the endpoint is read into strings and a map of its config the allocator grows (`vendor/zenoh-pico/src/link/endpoint.c` @ `z_result_t _z_endpoint_from_string(_z_endpoint_t *ep, const _z_string_t *str) {`, `vendor/zenoh-pico/src/transport/raweth/link.c` @ `z_result_t _z_raweth_config_from_strn(_z_str_intmap_t *strint, const char *s, size_t n) {`) | refused past `MAX_RAWETH_ENDPOINT_LEN` (160 bytes by default, a limit of the configuration) by the one reader of a group endpoint on both engines (`parse_reth_locator` in `crates/wz-session-core/src/raweth_link.rs`), which holds the interface, the mapping and the whitelist in rows sized from that bound: no value that fits the endpoint is cut, and none is held on the heap | every row a session holds is finite and its size is stated by the configuration, which can raise it | `an_endpoint_past_the_bound_is_refused_by_it`, `the_longest_rows_the_bound_lets_in_fit` (`crates/wz-session-core/src/raweth_link.rs`), `a_reth_endpoint_is_a_raw_ethernet_group_read_to_its_own_bound` (`crates/wz-session-core/src/group_locator.rs`) |
+| pico | a `reth/` endpoint's metadata (`?rel=`, `?prio=`, any other key) | read by no part of the raweth open, which reads only the four keys of its config (`vendor/zenoh-pico/src/transport/raweth/link.c` @ `#define RAWETH_CONFIG_MAPPING_BUILD`) | the rule of a UDP group's: only `rel=0`, the best effort a group carries, is kept, and any other value or key refuses the endpoint before the group is joined (`kept_metadata` in `crates/wz-session-core/src/group_locator.rs`) | an endpoint that asks for what a group does not do is never joined as if it had not asked | `a_reth_endpoint_is_a_raw_ethernet_group_read_to_its_own_bound` (`crates/wz-session-core/src/group_locator.rs`) |
 
 The rule, and why it is the pico preset's alone. A group admits a member on an unauthenticated
 Join, keyed by the source address of the datagram, and a single host on the segment can send
@@ -777,6 +825,76 @@ What the row costs, stated: a pico group past 32 members is a group whose 33rd m
 by a wz host, where a pico host would hear it. An MCU image is not in the row: its table is the
 one the image declares, as pico's is bounded by the heap the image gives it, and pico on the same
 image would refuse the member it had no memory for.
+
+Why the key row does not follow pico (owner, 2026-11-25). pico judges a key's text at one door,
+its view constructor, and at no other: the same text that view refuses is taken by the owned
+constructor, kept by the concatenation and put on the wire by every door that names a key. That is
+an inconsistency of pico's, not a contract a program can rely on, and upstream zenoh, the original
+of the zenoh and zenoh-c presets, refuses the text wherever a key is made of one. The pico
+preset takes upstream's rule at every door, with the code pico's own view answers. Only an
+unchecked view can still hold such a text, and every door that declares or sends it refuses it
+there. The concatenation also refuses a `*` meeting a `*` at the seam, as pico's and upstream's
+both do (`vendor/zenoh-pico/src/session/keyexpr.c` @
+`if (left_data[left_len - 1] == '*' && len > 0 && right[0] == '*') {`).
+
+What the row costs, stated: a pico program that builds an owned key or a concatenation of a text
+not in canon form, or sends one through an unchecked view, gets `Z_EINVAL` where pico went on,
+and nothing is made or sent; the program asks an `_autocanonize` door for the canon form instead.
+
+Why the serial row follows upstream (main session, 2026-11-25). A locator key that is read and
+not applied is a silent drop of what its writer asked for, so every key of upstream's serial link
+is applied with upstream's meaning. Only `exclusive` belongs to the line; `tout` (the wait
+before an INIT is sent again after the peer's RESET) and `release_on_close` (whether the port is
+let go when the link closes) belong to the link, and are the rows after it: the cooperative
+engine's serial link applies both.
+
+What the row costs, stated: a pico program on a host that opens a tty another process already
+holds through a wz serial link is refused where pico would share the line, and two pico-preset
+nodes cannot open one tty unless their locators say `exclusive=false`. A pico-preset dial that meets a
+RESET writes its INIT again after 50 ms where pico waits 250 ms, unless its locator states
+`tout`. A wz listener whose locator says `release_on_close=false` takes peers one after another
+on one open line, where upstream's takes none. A pico program that listens on a serial line gets
+a link only once a peer's INIT is answered, where pico's listen returned at once with the device
+open.
+
+Why the WebSocket rows follow the protocol (main session, 2026-11-25). A `ws/` link is the
+WebSocket of RFC 6455 on every preset, so a wz node reaches zenoh's link, a browser's and its own
+alike; where an original answers a frame the protocol defines by ending the link, or speaks no
+WebSocket at all, wz speaks the protocol. The listener's two bounds, the time a request may take
+and the requests answered at once, are the bounds of an inbound link under way, as a session holds
+every such link to them.
+
+What the rows cost, stated: a zenoh peer that sends a Ping keeps its link to a wz node, where a
+zenoh node would end it. A pico program on a host whose `ws/` peer is another pico host reaches
+it only if that peer speaks WebSocket. A client that connects to a wz `ws/` listener and sends no
+request is closed after 10 s, where zenoh's waits for good, and a burst of clients is answered
+`accept_pending` at a time where zenoh's answers one.
+
+Why the unixpipe rows depart. A FIFO pair in a shared directory is the
+link itself: whoever can open it writes frames into the session. Upstream's default lets every
+account of the host do that, so a wz link is its owner's alone unless its locator asks for more,
+and the permissive mode stays one `file_mask` away. A listener that waits without end for a
+confirmation is one any account of the host stops with eight bytes, so the wait is bounded by the
+accept timeout upstream already applies to a link of every other kind. A read end that is a writer
+of its own FIFO cannot see its peer leave; read only, it sees the end of the stream at once, where
+upstream finds the peer gone only when the lease runs out.
+
+What the rows cost, stated: a program of another account than the listener's cannot open a wz
+unixpipe link whose locator states no `file_mask`, where it could open upstream's. A dialer that
+takes longer than 10 s to confirm its invitation is let go, where upstream's listener would wait
+for it. A peer that closes its write end ends the link at once, not when the lease runs out.
+
+Why the group metadata row departs (main session, 2026-11-25). Upstream's multicast open reads no
+key of an endpoint's metadata: a priority range or a reliable link asked of a group is accepted and
+then not given, which is a silent drop of what the endpoint's writer asked for. wz keeps the one
+value that states what a group's link does, best effort, and refuses every other.
+
+What the row costs, stated: a group endpoint that carries `?prio=` or `?rel=1`, joined by
+upstream, is refused by wz until the metadata is taken off.
+
+What the length row costs, stated: a group endpoint longer than `MAX_GROUP_ENDPOINT_LEN`, joined
+by upstream, is refused by wz until the configuration states a larger limit. Its fields are sized
+from that limit, so an interface name or a list of `join` groups that fits the endpoint fits them.
 
 ## 8. Limits of an original, measured on wz
 

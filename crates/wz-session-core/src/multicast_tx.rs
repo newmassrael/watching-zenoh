@@ -541,6 +541,10 @@ pub struct MulticastTxEncoded<'a> {
     pub size: usize,
     /// The encoder of the network message the frame carries.
     pub body: &'a crate::frame_encode::BodyEncoder<'a>,
+    /// What the network counters take of the message once it is pushed: its own band and its
+    /// class, read off the parts it is written from as the owned message of the same bytes is read
+    /// (`multicast_tx_stats_class`).
+    pub tally: MulticastTxTally,
 }
 
 /// How a message lent for the call is framed onto a group, read as its owned form is
@@ -715,6 +719,17 @@ impl MulticastTxMeta {
         Self(frame_meta(item, params))
     }
 
+    /// How a reply that goes out with `qos` is framed onto a group of `params`: on the reliable
+    /// channel, on the band its QoS names. The one reading of a reply's framing, of its owned
+    /// record ([`MulticastTxReply::meta`]) and of its parts.
+    #[cfg(feature = "codec-response")]
+    pub fn of_reply(
+        qos: crate::sample::QosLevel,
+        params: &crate::multicast_params::MulticastParams,
+    ) -> Self {
+        Self(qos_frame_meta(qos, true, params))
+    }
+
     /// The conduit the message mints on: the lane its datagrams take.
     pub fn conduit(self) -> Priority {
         self.0.priority
@@ -752,6 +767,31 @@ pub enum MulticastTxReply<'a> {
     )
 ))]
 impl MulticastTxReply<'_> {
+    /// What the network counters take of the reply once it is pushed, as [`MulticastTxTally::of`]
+    /// reads its owned item: its own band and its class.
+    pub fn tally(self) -> MulticastTxTally {
+        #[cfg(feature = "transport-stats")]
+        {
+            match self {
+                #[cfg(feature = "codec-response")]
+                Self::Response(response) => MulticastTxTally::new(
+                    crate::declare_ext_qos::read_response_qos(response).priority(),
+                    crate::network_message::response_stats_class(response, |_| None),
+                ),
+                #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+                Self::DeclareReply(declare) => MulticastTxTally::new(
+                    crate::declare_ext_qos::read_declare_qos(declare).priority(),
+                    crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+                ),
+            }
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            let _ = self;
+            MulticastTxTally::new(Priority::DEFAULT, crate::stats::NetworkStatsClass::unread())
+        }
+    }
+
     /// The reply as the owned item a backing that keeps owned replies queues, copied.
     pub fn to_item(self) -> MulticastTxItem {
         match self {
@@ -783,11 +823,10 @@ impl MulticastTxReply<'_> {
     pub fn meta(self, params: &crate::multicast_params::MulticastParams) -> MulticastTxMeta {
         match self {
             #[cfg(feature = "codec-response")]
-            Self::Response(response) => MulticastTxMeta(qos_frame_meta(
+            Self::Response(response) => MulticastTxMeta::of_reply(
                 crate::declare_ext_qos::read_response_qos(response),
-                true,
                 params,
-            )),
+            ),
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
             Self::DeclareReply(declare) => {
                 let _ = params;
@@ -970,12 +1009,15 @@ where
         wz_codecs::declare::DeclareWire::encode_source(declaration, sink)
     };
     let size = encoded_size(&body)?;
+    let qos = crate::declare_ext_qos::QOS_DECLARE;
     Some(f(&MulticastTxEncoded {
-        framing: MulticastTxFraming::Control {
-            qos: crate::declare_ext_qos::QOS_DECLARE,
-        },
+        framing: MulticastTxFraming::Control { qos },
         size,
         body: &body,
+        tally: MulticastTxTally::new(
+            qos.priority(),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+        ),
     }))
 }
 
@@ -996,6 +1038,45 @@ pub fn multicast_tx_interest<R>(
         },
         size,
         body: &body,
+        tally: MulticastTxTally::new(
+            Priority::DEFAULT,
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
+        ),
+    }))
+}
+
+/// `f` handed the answer to a member's interest in liveliness tokens for one held token, written
+/// from the borrowed reply ([`crate::declare::local_token::build_token_reply`]) as a message lent
+/// for the call: framed as the owned reply is, which carries no `ext_qos`. `None` when its encoder
+/// refuses it (a keyexpr past the protocol's bound), with `f` not called.
+///
+/// The reply is built again inside its encoder, as the session with no allocator writes it to its
+/// link, so the borrowed message is on the stack only while it is counted or written.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "liveliness-token"
+))]
+pub fn multicast_tx_token_reply<R>(
+    token_id: u64,
+    keyexpr: &str,
+    interest_id: u64,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Option<R> {
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
+        crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)
+    };
+    let size = encoded_size(&body)?;
+    Some(f(&MulticastTxEncoded {
+        framing: MulticastTxFraming::Control {
+            qos: crate::sample::QosLevel::DEFAULT,
+        },
+        size,
+        body: &body,
+        tally: MulticastTxTally::new(
+            Priority::DEFAULT,
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+        ),
     }))
 }
 
@@ -1011,6 +1092,10 @@ pub fn multicast_tx_request<R>(
 ) -> Option<R> {
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| writer.encode(sink);
     let size = encoded_size(&body)?;
+    #[cfg(feature = "transport-stats")]
+    let class = crate::network_message::get_stats_class(writer, |_| None);
+    #[cfg(not(feature = "transport-stats"))]
+    let class = crate::stats::NetworkStatsClass::unread();
     Some(f(&MulticastTxEncoded {
         framing: MulticastTxFraming::OwnBand {
             qos,
@@ -1018,6 +1103,7 @@ pub fn multicast_tx_request<R>(
         },
         size,
         body: &body,
+        tally: MulticastTxTally::new(qos.priority(), class),
     }))
 }
 
@@ -1159,6 +1245,22 @@ pub fn multicast_tx_publication<R>(
         crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
     };
     let size = encoded_size(&body).ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+    // The attachment is counted as far as the build writes it.
+    #[cfg(all(feature = "transport-stats", feature = "pubsub-attachment"))]
+    let attachment = meta.attachment.map_or(0, <[u8]>::len);
+    #[cfg(all(feature = "transport-stats", not(feature = "pubsub-attachment")))]
+    let attachment = 0;
+    #[cfg(feature = "transport-stats")]
+    let class = crate::network_message::publication_stats_class(
+        mapping_id,
+        suffix,
+        kind,
+        value.len(),
+        attachment,
+        |_| None,
+    );
+    #[cfg(not(feature = "transport-stats"))]
+    let class = crate::stats::NetworkStatsClass::unread();
     Ok(f(&MulticastTxEncoded {
         framing: MulticastTxFraming::Publication {
             qos,
@@ -1167,6 +1269,7 @@ pub fn multicast_tx_publication<R>(
         },
         size,
         body: &body,
+        tally: MulticastTxTally::new(priority, class),
     }))
 }
 
@@ -1663,17 +1766,17 @@ impl MulticastTxLanes {
 /// one conduit a producer holds ([`MulticastTxConduit`]).
 pub trait MulticastTxMint {
     /// Mint the next SN on the `(priority, reliable)` conduit.
-    fn mint(&mut self, priority: Priority, reliable: bool) -> u64;
+    fn mint(&mut self, priority: Priority, reliable: bool) -> crate::sn::Sn;
     /// The SN ring's mask.
-    fn mask(&self) -> u64;
+    fn mask(&self) -> crate::sn::Sn;
 }
 
 impl MulticastTxMint for crate::sn::MulticastTxConduits {
-    fn mint(&mut self, priority: Priority, reliable: bool) -> u64 {
+    fn mint(&mut self, priority: Priority, reliable: bool) -> crate::sn::Sn {
         crate::sn::MulticastTxConduits::mint(self, priority, reliable)
     }
 
-    fn mask(&self) -> u64 {
+    fn mask(&self) -> crate::sn::Sn {
         crate::sn::MulticastTxConduits::mask(self)
     }
 }
@@ -1695,7 +1798,7 @@ impl<'a> MulticastTxConduit<'a> {
 }
 
 impl MulticastTxMint for MulticastTxConduit<'_> {
-    fn mint(&mut self, priority: Priority, reliable: bool) -> u64 {
+    fn mint(&mut self, priority: Priority, reliable: bool) -> crate::sn::Sn {
         assert_eq!(
             priority, self.priority,
             "a push minted on a conduit its producer does not hold"
@@ -1703,7 +1806,7 @@ impl MulticastTxMint for MulticastTxConduit<'_> {
         self.sn.mint(reliable)
     }
 
-    fn mask(&self) -> u64 {
+    fn mask(&self) -> crate::sn::Sn {
         self.sn.mask
     }
 }
@@ -1831,6 +1934,8 @@ where
         return PushOutcome::Congested;
     }
     let sn = tx_sn.mint(priority, reliable);
+    // The SN as the frame head writes it and as a datagram on the queue names it.
+    let wire_sn = crate::sn::to_wire(sn);
     let flags = crate::frame_encode::frame_flags(reliable);
     // A compressing group does not lend: a lent frame is written once, into the slot the link
     // sends, and the batch around it is built from the frame's bytes. Nor does a window: a
@@ -1850,9 +1955,10 @@ where
             // A slot longer than the batch refuses the frame where it crosses the batch, before
             // the payload that would carry it past is copied in.
             slot.hold_to(mtu);
-            crate::frame_encode::encode_frame_envelope_into(slot, sn, flags, ext_qos, &body).is_ok()
+            crate::frame_encode::encode_frame_envelope_into(slot, wire_sn, flags, ext_qos, &body)
+                .is_ok()
         };
-        if queue.enqueue_lent(priority, reliable, sn, want, &mut fill) {
+        if queue.enqueue_lent(priority, reliable, wire_sn, want, &mut fill) {
             return PushOutcome::Pushed;
         }
         // A build that cuts no chain sends a frame past the batch as the heap path does.
@@ -1891,7 +1997,8 @@ where
                         )
                         .is_ok()
                     };
-                    if !queue.enqueue_lent(priority, reliable, span.sn, mtu, &mut write) {
+                    let span_sn = crate::sn::to_wire(span.sn);
+                    if !queue.enqueue_lent(priority, reliable, span_sn, mtu, &mut write) {
                         // A queue whose lend this fragment did not fit builds it on the heap.
                         let mut bytes = Vec::new();
                         if write_fragment(
@@ -1909,7 +2016,7 @@ where
                                 MulticastTxDatagram {
                                     priority,
                                     reliable,
-                                    sn: span.sn,
+                                    sn: span_sn,
                                     bytes,
                                 },
                             );
@@ -1930,7 +2037,7 @@ where
     if !express {
         if let Some(open) = window.as_deref_mut() {
             let opened = open.open_with(reliable, sn, mtu, |buf| {
-                crate::frame_encode::encode_frame_envelope_into(buf, sn, flags, ext_qos, &body)
+                crate::frame_encode::encode_frame_envelope_into(buf, wire_sn, flags, ext_qos, &body)
                     .is_ok()
             });
             if opened {
@@ -1940,21 +2047,22 @@ where
     }
     // The vector refuses no write, but the body can refuse its message: nothing is queued then,
     // and the SN minted for it is skipped, as a chain its drop marker stops skips the rest.
-    let frame =
-        match crate::frame_encode::encode_frame_envelope(sn, flags, worst_case, ext_qos, &body) {
-            Ok(frame) => frame,
-            Err(refused) => return PushOutcome::Refused(refused),
-        };
+    let frame = match crate::frame_encode::encode_frame_envelope(
+        wire_sn, flags, worst_case, ext_qos, &body,
+    ) {
+        Ok(frame) => frame,
+        Err(refused) => return PushOutcome::Refused(refused),
+    };
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
-        let body = crate::frame_encode::frame_wire_body(&frame, sn, ext_qos);
+        let body = crate::frame_encode::frame_wire_body(&frame, wire_sn, ext_qos);
         let mut chain =
             crate::frame_encode::FragmentChain::new(body, reliable, mtu, sn, tx_sn.mask(), ext_qos);
         let mut emitted = 0usize;
         while chain.remaining_fragments() > 0 {
             // The SN the fragment this iteration sends carries — and the one
             // the stop marker takes if there is no room for it.
-            let this_sn = chain.next_sn();
+            let this_sn = crate::sn::to_wire(chain.next_sn());
             if emitted > 0 {
                 if !has_room(queue, &mut deadline) {
                     let marker =
@@ -2005,7 +2113,7 @@ where
             MulticastTxDatagram {
                 priority,
                 reliable,
-                sn,
+                sn: wire_sn,
                 bytes: frame,
             },
         ),
@@ -2051,7 +2159,7 @@ pub struct MulticastBatch {
 #[derive(Debug, Clone, Copy)]
 struct OpenFrame {
     reliable: bool,
-    sn: u64,
+    sn: crate::sn::Sn,
 }
 
 #[cfg(all(
@@ -2110,7 +2218,8 @@ impl MulticastBatch {
             let mut fill = |slot: &mut crate::tx_buf::SliceTxBuf<'_>| {
                 crate::tx_buf::TxBuf::append(slot, bytes).is_ok()
             };
-            if queue.enqueue_lent(priority, open.reliable, open.sn, bytes.len(), &mut fill) {
+            let sn = crate::sn::to_wire(open.sn);
+            if queue.enqueue_lent(priority, open.reliable, sn, bytes.len(), &mut fill) {
                 self.len = 0;
                 return;
             }
@@ -2122,7 +2231,7 @@ impl MulticastBatch {
             MulticastTxDatagram {
                 priority,
                 reliable: open.reliable,
-                sn: open.sn,
+                sn: crate::sn::to_wire(open.sn),
                 bytes,
             },
         );
@@ -2169,7 +2278,7 @@ impl MulticastBatch {
     fn open_with(
         &mut self,
         reliable: bool,
-        sn: u64,
+        sn: crate::sn::Sn,
         mtu: usize,
         write: impl FnOnce(&mut crate::tx_buf::EncodeBuf<'_>) -> bool,
     ) -> bool {
@@ -2230,7 +2339,7 @@ impl MulticastBatch {
 
     /// Hold `bytes`, a whole frame on the `reliable` channel that took `sn`, open: one past the
     /// batch, which a build that cuts no chain holds as it is.
-    fn hold(&mut self, reliable: bool, sn: u64, bytes: alloc::vec::Vec<u8>) {
+    fn hold(&mut self, reliable: bool, sn: crate::sn::Sn, bytes: alloc::vec::Vec<u8>) {
         debug_assert!(self.open.is_none(), "one frame is open at a time");
         self.len = bytes.len();
         self.buf = bytes;
@@ -2377,6 +2486,7 @@ pub fn multicast_tx_stats_class(
         any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
+#[derive(Clone, Copy)]
 pub struct MulticastTxTally {
     #[cfg(feature = "transport-stats")]
     priority: Priority,
@@ -2405,6 +2515,40 @@ impl MulticastTxTally {
         #[cfg(not(feature = "transport-stats"))]
         {
             let _ = item;
+            Self {}
+        }
+    }
+
+    /// The tally of a message a group's producer writes from its parts, with no owned message to
+    /// read: of `class` on its own band `priority`. A build without `transport-stats` keeps
+    /// neither, and its senders hand `NetworkStatsClass::unread`.
+    pub fn new(priority: Priority, class: crate::stats::NetworkStatsClass) -> Self {
+        #[cfg(feature = "transport-stats")]
+        {
+            Self { priority, class }
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            let _ = (priority, class);
+            Self {}
+        }
+    }
+
+    /// The tally of the reply `parts` describes, written from them with no owned `Response`, as
+    /// [`Self::of`] reads the owned one the same parts build: on the reply's own band, by its
+    /// class.
+    #[cfg(feature = "codec-response")]
+    pub fn of_reply_parts(parts: &crate::reply_stage::ReplyParts<'_>) -> Self {
+        #[cfg(feature = "transport-stats")]
+        {
+            Self::new(
+                parts.qos.priority(),
+                crate::network_message::reply_parts_stats_class(parts),
+            )
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            let _ = parts;
             Self {}
         }
     }
@@ -2568,9 +2712,15 @@ pub fn multicast_tx_emit_lent(
     let whole = {
         let mut buf = SliceTxBuf::new(&mut *datagram);
         buf.hold_to(mtu);
-        crate::frame_encode::encode_frame_envelope_into(&mut buf, sn, flags, ext_qos, body)
-            .ok()
-            .map(|()| TxBuf::len(&buf))
+        crate::frame_encode::encode_frame_envelope_into(
+            &mut buf,
+            crate::sn::to_wire(sn),
+            flags,
+            ext_qos,
+            body,
+        )
+        .ok()
+        .map(|()| TxBuf::len(&buf))
     };
     // The length is what the buffer over `datagram` holds.
     if let Some(frame) = whole.and_then(|len| datagram.get(..len)) {
@@ -2915,6 +3065,7 @@ mod push_tests {
             },
             size: multicast_tx_bytes(&owned),
             body: &body,
+            tally: MulticastTxTally::of(&owned),
         };
         assert_eq!(
             multicast_tx_encoded_conduit(&lent, &params),
@@ -3213,14 +3364,14 @@ mod push_tests {
         assert_eq!(outcome, PushOutcome::Pushed);
         assert_eq!(queue.enqueued, emitted.datagrams);
         assert_eq!(
-            tx.advertise_default().next_reliable,
+            crate::sn::to_wire(tx.advertise_default().next_reliable),
             emitted.datagrams.len() as u64
         );
         // Against the whole-chain producer the pre-R2928 emit used.
         let mut whole_tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
         let sn = whole_tx.mint(Priority::DEFAULT, true);
         let frame = crate::frame_encode::encode_frame_with_push_qos(
-            sn,
+            crate::sn::to_wire(sn),
             crate::push_build::build_push_literal("k", &payload).unwrap(),
             true,
             None,
@@ -3256,6 +3407,26 @@ mod push_tests {
             MulticastParams::BATCH_HEADER_BYTES,
             crate::compression::BATCH_HEADER_BYTES
         );
+    }
+
+    /// A link that carries less than the group's batch has the group framed to it, and one that
+    /// carries the whole batch, or names no budget, leaves the parameters as they are. Turned red
+    /// by a budget taken when it is the larger.
+    #[test]
+    fn a_group_is_framed_to_the_budget_of_a_link_that_carries_less() {
+        let group = params(2_048);
+        assert_eq!(
+            group.framed_to(Some(1_498)).map(|framed| framed.batch_size),
+            Some(1_498)
+        );
+        assert_eq!(
+            group.framed_to(Some(1_498)).map(|framed| framed.lease_ms),
+            Some(group.lease_ms),
+            "the rest of the group's parameters stay"
+        );
+        assert_eq!(group.framed_to(Some(2_048)), None);
+        assert_eq!(group.framed_to(Some(9_000)), None);
+        assert_eq!(group.framed_to(None), None);
     }
 
     /// A compressing group's frame is a batch: the `BatchHeader` in front, the payload lz4-compressed
@@ -4161,6 +4332,98 @@ mod group_declarations_written_from_parts {
         }
         assert_eq!(compared, kinds().len() * keys().len());
     }
+
+    /// The answer to a member's interest in tokens, written from the borrowed reply, is the bytes
+    /// of the owned reply a backing that queues owned items builds, counted as long as it is and
+    /// framed as that one is; a keyexpr past the protocol's bound is refused with `f` not called.
+    /// Turned red by a writer that answers with another header, id or key than the owned reply, a
+    /// size that is not its length, or a framing that reads another QoS than the owned reply's.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_token_reply_written_from_the_borrowed_reply_is_the_owned_replys_bytes() {
+        let long = "k".repeat(300);
+        let cases: [(u64, &str, u64); 3] = [
+            (0, "demo/token", 0),
+            (9, "demo/**", 42),
+            (300, long.as_str(), 70_000),
+        ];
+        for (token_id, keyexpr, interest_id) in cases {
+            let owned =
+                crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id)
+                    .and_then(|reply| {
+                        reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
+                    })
+                    .expect("an owned reply");
+            let expected = written(&|sink: &mut crate::tx_buf::TxSink<'_>| owned.encode(sink));
+            let (bytes, size, framing) =
+                multicast_tx_token_reply(token_id, keyexpr, interest_id, |m| {
+                    (written(m.body), m.size, m.framing)
+                })
+                .expect("a reply written from the borrowed one");
+            assert_eq!(bytes, expected, "token {token_id} on {keyexpr}");
+            assert_eq!(size, expected.len());
+            assert_eq!(
+                framing,
+                MulticastTxFraming::Control {
+                    qos: crate::declare_ext_qos::read_declare_qos(&owned),
+                }
+            );
+        }
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let mut called = false;
+        assert!(multicast_tx_token_reply(1, &past, 2, |_| called = true).is_none());
+        assert!(!called, "a refused reply is handed to nobody");
+    }
+
+    /// A declaration written from its parts is counted as the owned one is, a control message of
+    /// the declare kind on the band of its own QoS with no payload; so is the answer to a member's
+    /// interest in tokens, and an interest is one of the interest kind on the default band. Turned
+    /// red by a lent control message counted as another kind or on another band.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn a_control_message_written_from_its_parts_is_counted_by_its_kind() {
+        use crate::stats::{MessageLabel, NetworkStatsClass};
+        let declare = NetworkStatsClass::control(MessageLabel::Declare);
+        let mut compared = 0usize;
+        for what in kinds() {
+            for key in keys() {
+                let owned = crate::declare_build::build_group_announcement(what, 5, key)
+                    .expect("an owned announcement");
+                let tally = multicast_tx_group_announcement(what, 5, key, |m| m.tally)
+                    .expect("an announcement written from its parts");
+                assert_eq!(
+                    (tally.priority(), *tally.class()),
+                    (
+                        crate::declare_ext_qos::read_declare_qos(&owned).priority(),
+                        declare
+                    ),
+                    "{what:?} on {key:?}"
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, kinds().len() * keys().len());
+
+        let interest = crate::lent_control::interest_final(9);
+        let tally = multicast_tx_interest(&interest, |m| m.tally).expect("an interest");
+        assert_eq!(
+            (tally.priority(), *tally.class()),
+            (
+                Priority::DEFAULT,
+                NetworkStatsClass::control(MessageLabel::Interest)
+            )
+        );
+
+        #[cfg(feature = "liveliness-token")]
+        {
+            let tally =
+                multicast_tx_token_reply(9, "demo/token", 42, |m| m.tally).expect("a reply");
+            assert_eq!(
+                (tally.priority(), *tally.class()),
+                (Priority::DEFAULT, declare)
+            );
+        }
+    }
 }
 
 /// A group's publication written from its parts is the bytes of the owned Push the group would
@@ -4252,5 +4515,362 @@ mod group_publications_written_from_parts {
             compared += 4;
         }
         assert_eq!(compared, metas.len() * 4);
+    }
+
+    /// The band and the class a tally holds.
+    #[cfg(feature = "transport-stats")]
+    fn read(tally: &MulticastTxTally) -> (Priority, crate::stats::NetworkStatsClass) {
+        (tally.priority(), *tally.class())
+    }
+
+    /// What the publication written from `(mapping_id, suffix)` on the band `DataHigh` is counted
+    /// as.
+    #[cfg(feature = "transport-stats")]
+    fn lent_tally(
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        kind: SampleKind,
+        meta: &PushMetadata<'_>,
+    ) -> (Priority, crate::stats::NetworkStatsClass) {
+        multicast_tx_publication(
+            crate::declare_form::GroupKey { mapping_id, suffix },
+            kind,
+            b"value",
+            meta,
+            true,
+            Priority::DataHigh,
+            |message| read(&message.tally),
+        )
+        .expect("written from its parts")
+    }
+
+    /// What the owned `push` queued on the band `DataHigh` is counted as.
+    #[cfg(feature = "transport-stats")]
+    fn owned_tally(push: crate::wire::PushOwned) -> (Priority, crate::stats::NetworkStatsClass) {
+        read(&MulticastTxTally::of(&MulticastTxItem::Push {
+            push: Box::new(push),
+            reliable: true,
+            priority: Priority::DataHigh,
+        }))
+    }
+
+    /// A publication written from its parts is counted as the owned Push of the same parts is: on
+    /// the band its publisher chose, by its kind, the space of its key, and its payload with its
+    /// attachment, a Del by its attachment alone. Turned red by a lent class read off other parts
+    /// than the owned one's: a Del sized by its value, an attachment left out, an admin key read
+    /// as a user one.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn a_group_publication_written_from_its_parts_is_counted_as_its_owned_push() {
+        use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage, StatSpace};
+        let attached = PushMetadata {
+            attachment: Some(&[1, 2, 3]),
+            ..PushMetadata::default()
+        };
+        let plain = PushMetadata::default();
+        let mut compared = 0usize;
+        for meta in [&plain, &attached] {
+            for keyexpr in ["demo/group", "@/group"] {
+                let put =
+                    push_build::build_push_literal_with_meta(keyexpr, b"value", meta).expect("put");
+                let del = push_build::build_push_del_literal_with_meta(keyexpr, meta).expect("del");
+                assert_eq!(
+                    lent_tally(0, Some(keyexpr), SampleKind::Put, meta),
+                    owned_tally(put)
+                );
+                assert_eq!(
+                    lent_tally(0, Some(keyexpr), SampleKind::Del, meta),
+                    owned_tally(del)
+                );
+                compared += 2;
+            }
+            let put = push_build::build_push_aliased_with_meta(7, Some("/x"), b"value", meta)
+                .expect("aliased put");
+            let del = push_build::build_push_del_aliased_with_meta(7, Some("/x"), meta)
+                .expect("aliased del");
+            assert_eq!(
+                lent_tally(7, Some("/x"), SampleKind::Put, meta),
+                owned_tally(put)
+            );
+            assert_eq!(
+                lent_tally(7, Some("/x"), SampleKind::Del, meta),
+                owned_tally(del)
+            );
+            compared += 2;
+        }
+        assert_eq!(compared, 12);
+        // The cells themselves, so that a rule both readings got wrong alike is caught too: the
+        // attachment counts where the build writes it.
+        let attachment = if cfg!(feature = "pubsub-attachment") {
+            3
+        } else {
+            0
+        };
+        assert_eq!(
+            lent_tally(0, Some("@/group"), SampleKind::Put, &attached),
+            (
+                Priority::DataHigh,
+                NetworkStatsClass::net(
+                    MessageLabel::Put,
+                    StatMessage::Put,
+                    StatSpace::Admin,
+                    "value".len() + attachment
+                )
+            )
+        );
+        assert_eq!(
+            lent_tally(7, Some("/x"), SampleKind::Del, &attached),
+            (
+                Priority::DataHigh,
+                NetworkStatsClass::net(
+                    MessageLabel::Del,
+                    StatMessage::Del,
+                    StatSpace::User,
+                    attachment
+                )
+            )
+        );
+    }
+}
+
+/// A get written from its parts is counted as the owned `Request` of the same parts is.
+#[cfg(all(
+    test,
+    feature = "transport-stats",
+    feature = "codec-push",
+    feature = "codec-request"
+))]
+mod lent_get_tallies {
+    use super::*;
+    use crate::query_parts::{GetParts, QueryParts};
+    use crate::reply_stage::EncodingParts;
+    use crate::wire_key::WireKey;
+
+    /// Every key form, a get with no value, with a value under the zero encoding and under one
+    /// with a schema, with and without an attachment, on two bands: the lent tally is the owned
+    /// `Request`'s, a query counted by its value's payload and its attachment. Turned red by a
+    /// value counted with its encoding, an attachment left out, a key read into another space, or
+    /// a band other than the query's own.
+    #[test]
+    fn a_get_written_from_its_parts_is_counted_as_its_owned_request() {
+        use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage, StatSpace};
+        let keys = [
+            WireKey::literal("demo/**").expect("a literal"),
+            WireKey::literal("@/demo").expect("a literal"),
+            WireKey::from_parts(300, Some("/tail")).expect("an id and a suffix"),
+        ];
+        let values: [Option<(EncodingParts<'_>, &[u8])>; 3] = [
+            None,
+            Some((
+                EncodingParts {
+                    packed_id: 0,
+                    schema: None,
+                },
+                b"payload",
+            )),
+            Some((
+                EncodingParts {
+                    packed_id: 0x0B,
+                    schema: Some(b"json"),
+                },
+                b"{}",
+            )),
+        ];
+        let attachments: [&[u8]; 2] = [b"", b"attached"];
+        let bands = [
+            crate::sample::QosLevel::DEFAULT,
+            crate::declare_ext_qos::QOS_DECLARE,
+        ];
+        let tally_of = |parts: GetParts<'_>| {
+            let writer = crate::lent_request::RequestWriter::new(parts);
+            multicast_tx_request(&writer, parts.query.qos, |m| {
+                (m.tally.priority(), *m.tally.class())
+            })
+            .expect("written from its parts")
+        };
+        let mut compared = 0usize;
+        for key in keys {
+            for value in values {
+                for attachment in attachments {
+                    for qos in bands {
+                        let parts = GetParts {
+                            rid: 7,
+                            key,
+                            query: QueryParts {
+                                value,
+                                attachment,
+                                qos,
+                                ..QueryParts::PLAIN
+                            },
+                        };
+                        let owned = MulticastTxTally::of(&MulticastTxItem::Request {
+                            request: Box::new(parts.owned_request().expect("built")),
+                        });
+                        assert_eq!(
+                            tally_of(parts),
+                            (owned.priority(), *owned.class()),
+                            "{parts:?}"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 3 * 2 * 2);
+        // The cell itself, so that a rule both readings got wrong alike is caught too: the value
+        // and the attachment count where the build writes them.
+        let value = if cfg!(feature = "query-value") {
+            "payload".len()
+        } else {
+            0
+        };
+        let attachment = if cfg!(feature = "query-attachment") {
+            "attached".len()
+        } else {
+            0
+        };
+        let admin = GetParts {
+            rid: 7,
+            key: WireKey::literal("@/demo").expect("a literal"),
+            query: QueryParts {
+                value: values[1],
+                attachment: b"attached",
+                ..QueryParts::PLAIN
+            },
+        };
+        assert_eq!(
+            tally_of(admin),
+            (
+                crate::sample::QosLevel::DEFAULT.priority(),
+                NetworkStatsClass::net(
+                    MessageLabel::Query,
+                    StatMessage::Query,
+                    StatSpace::Admin,
+                    value + attachment
+                )
+            )
+        );
+    }
+}
+
+/// A reply a group's dispatch stages is counted as its owned record is, whichever form it is
+/// handed in.
+#[cfg(all(test, feature = "transport-stats", feature = "codec-response"))]
+mod reply_tallies {
+    use super::*;
+    use crate::qos::CongestionControl;
+    use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+    use crate::sample::QosLevel;
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage, StatSpace};
+
+    /// The band and the class a tally holds.
+    fn read(tally: &MulticastTxTally) -> (Priority, NetworkStatsClass) {
+        (tally.priority(), *tally.class())
+    }
+
+    /// What the owned `Response` the parts build is counted as, queued as the item a backing
+    /// that keeps owned replies queues.
+    fn owned(parts: &ReplyParts<'_>) -> (Priority, NetworkStatsClass) {
+        let response = crate::query::QueryReply::from_parts(parts)
+            .into_response()
+            .expect("the owned reply");
+        read(&MulticastTxTally::of(&MulticastTxItem::Response {
+            response: Box::new(response),
+        }))
+    }
+
+    /// A reply's parts: of `body` with `attachment`, stamped with `keyexpr`, on the band
+    /// `DataHigh`.
+    fn parts<'a>(
+        keyexpr: &'a str,
+        body: PartsBody<'a>,
+        attachment: Option<&'a [u8]>,
+    ) -> ReplyParts<'a> {
+        ReplyParts::new(
+            9,
+            keyexpr,
+            Some((&[1, 2, 3, 4], 5)),
+            QosLevel::from_parts(Priority::DataHigh, CongestionControl::Block, false),
+            PartsKind::Reply {
+                body,
+                encoding: None,
+                timestamp: None,
+                attachment,
+                source_info: None,
+            },
+        )
+    }
+
+    /// A reply written from its parts is counted as the owned `Response` the same parts build: a
+    /// Put by its payload and attachment, a Del by its attachment, each in its key's space and on
+    /// its own band; and a reply handed as its owned record is counted as the item it copies to.
+    /// Turned red by a lent reply counted by other bytes, in another space or on another band than
+    /// the owned one, or a lent record whose tally is not its item's.
+    #[test]
+    fn a_reply_written_from_its_parts_is_counted_as_its_owned_response() {
+        let mut compared = 0usize;
+        for keyexpr in ["demo/a", "@/a"] {
+            for body in [PartsBody::Put(b"answer"), PartsBody::Del] {
+                for attachment in [None, Some(&b"att"[..])] {
+                    let parts = parts(keyexpr, body, attachment);
+                    let expected = owned(&parts);
+                    assert_eq!(
+                        read(&MulticastTxTally::of_reply_parts(&parts)),
+                        expected,
+                        "{keyexpr}"
+                    );
+                    let response = crate::query::QueryReply::from_parts(&parts)
+                        .into_response()
+                        .expect("the owned reply");
+                    let lent = MulticastTxReply::Response(&response);
+                    assert_eq!(
+                        read(&lent.tally()),
+                        read(&MulticastTxTally::of(&lent.to_item()))
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 2 * 2 * 2);
+        // The cell itself, so that a rule both readings got wrong alike is caught too.
+        let attachment = if cfg!(feature = "pubsub-attachment") {
+            3
+        } else {
+            0
+        };
+        assert_eq!(
+            read(&MulticastTxTally::of_reply_parts(&parts(
+                "@/a",
+                PartsBody::Put(b"answer"),
+                Some(&b"att"[..])
+            ))),
+            (
+                Priority::DataHigh,
+                NetworkStatsClass::net(
+                    MessageLabel::Reply,
+                    StatMessage::Reply,
+                    StatSpace::Admin,
+                    "answer".len() + attachment
+                )
+            )
+        );
+    }
+
+    /// The answer to a member's interest, handed as its owned record, is counted as the item it
+    /// copies to: a control message of the declare kind. Turned red by a lent record whose tally
+    /// is not its item's.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_declare_reply_handed_as_its_record_is_counted_as_its_item() {
+        let declare = crate::declare_build::build_declare_final_reply(7);
+        let lent = MulticastTxReply::DeclareReply(&declare);
+        assert_eq!(
+            read(&lent.tally()),
+            read(&MulticastTxTally::of(&lent.to_item()))
+        );
+        assert_eq!(
+            *lent.tally().class(),
+            NetworkStatsClass::control(MessageLabel::Declare)
+        );
     }
 }

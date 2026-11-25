@@ -134,7 +134,7 @@ fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: wz_session_core::session_zid::SessionZid::from_array([zid; 4]),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -148,7 +148,8 @@ fn params(zid: u8) -> SessionInitParams {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::from_slice(&[7u8; 32]).expect("key"),
+        cookie_signing_key: SigningKey::from_slice(&[7u8; 32]).expect("key").into(),
+        region: None,
     }
 }
 
@@ -341,10 +342,14 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
 
     let mask = i_actions.negotiated_sn_mask();
     let priority = wz_session_core::qos::Priority::DEFAULT;
-    let reliable = i_actions.next_outbound_frame_sn(priority, true, mask);
-    let best_effort = i_actions.next_outbound_frame_sn(priority, false, mask);
+    // The SNs as the Frames below carry them and the records read them back.
+    let next = |reliable| {
+        wz_session_core::sn::to_wire(i_actions.next_outbound_frame_sn(priority, reliable, mask))
+    };
+    let reliable = next(true);
+    let best_effort = next(false);
     // Taken from the session rather than added to: an SN wraps at the negotiated resolution.
-    let best_effort_next = i_actions.next_outbound_frame_sn(priority, false, mask);
+    let best_effort_next = next(false);
     let before = DECLARED.load(Ordering::SeqCst);
     let declared = || {
         (

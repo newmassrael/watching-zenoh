@@ -5,7 +5,8 @@
 //! (fixed-memory step S4, ARCHITECTURE section 9.1).
 //!
 //! A real session pair over the host lwIP loopback, an initiator and an
-//! acceptor, each over a socket whose driver LENDS the pbuf lwIP will send. The
+//! acceptor, each over a socket whose driver LENDS the slot it reserves for its
+//! link, out of which the send copies the datagram into the pbuf lwIP sends. The
 //! messages a session sends, each run on its own under a counting
 //! `#[global_allocator]`:
 //!
@@ -30,7 +31,7 @@
 //! the wire.
 //!
 //! With `tx-lend-only` the refusal is witnessed too. A send for which the link
-//! lends no slot (both of the driver's slots out) or that is past the link's
+//! lends no slot (the driver's one slot out) or that is past the link's
 //! budget with no fragmentation to cut it up in is an explicit
 //! `LinkRefused(NoTxSlot | Oversize)`, counted in `tx_refusals()`, with nothing
 //! on the wire, nothing allocated, and no slot lost: the next send finds one.
@@ -196,7 +197,7 @@ fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [zid; 4].into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -211,7 +212,9 @@ fn params(zid: u8) -> SessionInitParams {
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
-            .expect("key"),
+            .expect("key")
+            .into(),
+        region: None,
     }
 }
 
@@ -314,6 +317,18 @@ fn bound_pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
         wz_session_core::datagram_peer::is_init_syn(&acceptor.one()),
         "the InitSyn binds the acceptor"
     );
+    (acceptor, initiator)
+}
+
+/// [`bound_pair`], with the initiator established, which is where a data message leaves
+/// from: a session lets a Push, a Request or a ResponseFinal through only once its link is
+/// established, and refuses one before as `TransportUnavailable`. The initiator enters it
+/// through the door the machine's `Established` entry takes
+/// (`SessionLinkActions::enter_established`), which also settles its send limits from what
+/// it negotiated: its own batch, since it has read no InitAck.
+fn established_pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
+    let (acceptor, initiator) = bound_pair(link, port);
+    initiator.actions.enter_established();
     (acceptor, initiator)
 }
 
@@ -534,7 +549,7 @@ fn put_of(datagram: &[u8]) -> (String, Vec<u8>, u64) {
 fn a_put_is_sent_without_the_heap_at_every_size() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let (acceptor, initiator) = bound_pair(&link, 7613);
+    let (acceptor, initiator) = established_pair(&link, 7613);
     let m = Measurement::new();
     let mut costs = Costs::default();
 
@@ -572,7 +587,7 @@ fn a_response_final_with_its_qos_is_sent_without_the_heap() {
 
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let (acceptor, initiator) = bound_pair(&link, 7616);
+    let (acceptor, initiator) = established_pair(&link, 7616);
     let m = Measurement::new();
 
     assert_ne!(QOS_DECLARE, QosLevel::DEFAULT, "a QoS that is carried");
@@ -622,7 +637,7 @@ fn a_get_with_its_qos_is_sent_without_the_heap() {
 
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let (acceptor, initiator) = bound_pair(&link, 7617);
+    let (acceptor, initiator) = established_pair(&link, 7617);
     let m = Measurement::new();
 
     assert_ne!(QOS_DECLARE, QosLevel::DEFAULT, "a QoS that is carried");
@@ -735,9 +750,9 @@ mod refusal {
     use wz_session_core::session_actions::TxRefusalCounts;
 
     /// Take every slot the driver will lend, and hold them: the driver has
-    /// `LENT_MAX` (two), and the table is exactly that full when the next ask is
-    /// refused, which is the fill-to-N half of the exhaustion case R5 (the
-    /// refusals counted below are its N+1).
+    /// `LENT_MAX` (one, the slot it reserves for its link), and it is exactly
+    /// that full when the next ask is refused, which is the fill-to-N half of the
+    /// exhaustion case R5 (the refusals counted below are its N+1).
     fn hold_every_slot(side: &Side) -> Vec<wz_session_core::link::TxSlotGrant> {
         let mut held = Vec::new();
         while let Some(grant) = side.sink.tx_slot_acquire(8, Priority::DEFAULT) {
@@ -761,7 +776,7 @@ mod refusal {
     fn a_send_for_which_no_slot_is_lent_is_refused_counted_and_loses_no_slot() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
-        let (acceptor, initiator) = bound_pair(&link, 7614);
+        let (acceptor, initiator) = established_pair(&link, 7614);
         let m = Measurement::new();
         assert_eq!(initiator.actions.tx_refusals(), TxRefusalCounts::default());
 
@@ -822,7 +837,7 @@ mod refusal {
     fn a_put_past_the_budget_is_refused_as_oversize_and_gives_its_slot_back() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
-        let (acceptor, initiator) = bound_pair(&link, 7615);
+        let (acceptor, initiator) = established_pair(&link, 7615);
         let m = Measurement::new();
 
         // The batch the pair negotiates is 1024 bytes, so a payload past it is
@@ -844,12 +859,12 @@ mod refusal {
         );
         assert!(acceptor.received().is_empty(), "nothing reached the wire");
 
-        // The slot that refusal took was given back: both are still lent.
+        // The slot that refusal took was given back: it is lent again.
         let held = hold_every_slot(&initiator);
-        assert!(
-            held.len() >= 2,
-            "the refused send left every slot the driver has: {} lent",
-            held.len()
+        assert_eq!(
+            held.len(),
+            wz_session_lwip::driver::LENT_MAX,
+            "the refused send left every slot the driver has"
         );
         for grant in held {
             initiator.sink.tx_slot_abort(grant.slot);

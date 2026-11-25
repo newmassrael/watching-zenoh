@@ -1473,7 +1473,7 @@ impl<'a> QueryResponder<'a> {
     /// job (wz-runtime-tokio) builds a responder over its own reply
     /// buffer when it runs the user handler OUTSIDE the observer lock,
     /// then routes the accumulated [`QueryReply`]s per query origin
-    /// (wire -> `ResponseSink::send_response`, local ->
+    /// (wire -> `OwnedResponseSink::send_response`, local ->
     /// `ReplyRegistry::deliver_local_reply`). In-module dispatch keeps
     /// building the struct literally.
     /// R311y834 — `accept` is REQUIRED, for the reason the requester-side
@@ -3792,7 +3792,7 @@ impl QueryPeer {
                         queryables,
                         cx,
                         request,
-                        peer_keyexpr_table,
+                        MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
                         pending_replies,
                         pending_final_rids,
                     );
@@ -3996,38 +3996,33 @@ where
             let carries_stack = ts_stack.is_some();
             #[cfg(not(feature = "pubsub-ts-stack"))]
             let carries_stack = false;
-            if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
-                let shared = crate::query_sink::SharedQuery {
-                    base: query_view,
-                    value: lent_value,
-                    attachment: attachment_shared.as_ref(),
-                    #[cfg(feature = "pubsub-ts-stack")]
-                    ts_stack,
+            // One view or the other, and one call of the sink for both: each call is the sink's
+            // whole delivery inlined.
+            let shared;
+            let inner: &dyn crate::query_sink::QueryView =
+                if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
+                    shared = crate::query_sink::SharedQuery {
+                        base: query_view,
+                        value: lent_value,
+                        attachment: attachment_shared.as_ref(),
+                        #[cfg(feature = "pubsub-ts-stack")]
+                        ts_stack,
+                    };
+                    &shared
+                } else {
+                    &query_view
                 };
-                L::Sink::ask(
-                    cx,
-                    id,
-                    row,
-                    &crate::query_sink::ProvenQuery {
-                        inner: &shared,
-                        peer: requester,
-                        encoding: lent_encoding,
-                    },
-                    &mut responder,
-                )
-            } else {
-                L::Sink::ask(
-                    cx,
-                    id,
-                    row,
-                    &crate::query_sink::ProvenQuery {
-                        inner: &query_view,
-                        peer: requester,
-                        encoding: lent_encoding,
-                    },
-                    &mut responder,
-                )
-            }
+            L::Sink::ask(
+                cx,
+                id,
+                row,
+                &crate::query_sink::ProvenQuery {
+                    inner,
+                    peer: requester,
+                    encoding: lent_encoding,
+                },
+                &mut responder,
+            )
         }
         // The view and the responder are handed over as their own types: a sink of one
         // closed type is called without a vtable (`ResponderSink`).

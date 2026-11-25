@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey};
+#[cfg(feature = "threads")]
+use wz_capi_port::SessionDrive;
+use wz_capi_port::{PeerLists, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
 use wz_runtime_coop::stream_link::NoDial;
 use wz_runtime_posix::links::PosixLinks;
@@ -26,6 +28,8 @@ use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
 use wz_session_core::WhatAmI;
 
+#[cfg(not(feature = "threads"))]
+use super::one_thread::OwnThread;
 use super::{client_config, config_zid};
 use crate::host_group::HostGroups;
 use crate::{CoopConfig, CoopEngine};
@@ -42,7 +46,7 @@ fn profile() -> GroupProfile {
         lease_ms: 10_000,
         join_interval_ms: 100,
         max_sessions: None,
-        seq_num_res: 0x02,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: false,
@@ -72,7 +76,7 @@ fn open_member(member: u8, endpoint: &str, policy: SessionPolicy) -> Arc<Engine>
         .expect("the member joins the group on the host's sockets")
 }
 
-/// Wait, for at most five seconds, until `done`: each session is stepped by its read task.
+/// Wait, for at most five seconds, until `done`: each session is stepped by a thread of its own.
 fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !done() {
@@ -84,6 +88,7 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 /// Two sessions of this host join one group on the host's sockets, learn each other by their
 /// JOINs, and a put of the first reaches the second's subscriber over the group. Closing the
 /// second tells the group it leaves, which the first hears before any lease runs out.
+#[cfg(feature = "threads")]
 #[test]
 #[ignore = "environment-dependent: needs a multicast route on this host (Layer M runs it)"]
 fn two_members_on_the_hosts_sockets_learn_each_other_and_a_put_crosses_the_group() {
@@ -142,4 +147,68 @@ fn two_members_on_the_hosts_sockets_learn_each_other_and_a_put_crosses_the_group
         first.group_member_zids().is_empty()
     });
     SessionDrive::close(&*first);
+}
+
+/// The same two members in the form of one thread, each opened, called and read on a thread of its
+/// own ([`OwnThread`]): their own reads beacon and take the JOINs, a put of the first reaches the
+/// second's subscriber over the group, and the second, closed, tells the group it leaves.
+#[cfg(not(feature = "threads"))]
+#[test]
+#[ignore = "environment-dependent: needs a multicast route on this host (Layer M runs it)"]
+fn two_members_of_one_thread_on_the_hosts_sockets_learn_each_other() {
+    let port = UdpSocket::bind("0.0.0.0:0")
+        .and_then(|probe| probe.local_addr())
+        .expect("a free port")
+        .port();
+    let endpoint = format!("udp/239.255.77.13:{port}");
+    let mut policy = SessionPolicy::defaults();
+    let _ = policy.select_multicast_loopback(MulticastLoopback::On);
+    let member = |id: u8| {
+        let endpoint = endpoint.clone();
+        OwnThread::open(move || open_member(id, &endpoint, policy))
+    };
+    let first = member(1);
+    let second = member(2);
+    eventually("each member to list the other", || {
+        first.call(|engine| engine.group_member_zids()) == [vec![2u8; 4]]
+            && second.call(|engine| engine.group_member_zids()) == [vec![1u8; 4]]
+    });
+
+    let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let into = Arc::clone(&heard);
+    second.call(move |engine| {
+        engine
+            .declare_subscriber_on_wire(
+                "demo/host-group/**",
+                WireKey::literal(),
+                Locality::Any,
+                None,
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    into.lock().unwrap().push(sample.payload().to_vec());
+                }),
+            )
+            .expect("a session with ids left declares");
+    });
+    eventually("a put of the first to reach the second", || {
+        first.call(|engine| {
+            engine
+                .publish_on_wire_all(
+                    "demo/host-group/a",
+                    &WireKey::literal(),
+                    b"over-the-hosts-group",
+                    &PublishOptions::put().with_locality(Locality::Remote),
+                )
+                .expect("a put the group carries");
+        });
+        heard
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|payload| payload == b"over-the-hosts-group")
+    });
+
+    drop(second);
+    eventually("the first member to lose the second", || {
+        first.call(|engine| engine.group_member_zids()).is_empty()
+    });
 }

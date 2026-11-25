@@ -214,6 +214,12 @@
       "why": "the draws of a handshake's secrets (each auth method's challenge, the multilink challenge and the cookie nonce) from the session's one source"
     },
     {
+      "id": "lent-write",
+      "where": {"file": "session_actions.rs", "anchor": "write.write_lent(&mut *slot)"},
+      "callees": "LentWrite>::write_lent$",
+      "why": "the writer of the one message a lend puts into its slot (send_lent_on), through `&dyn LentWrite`: the closure of the send that lends, a handshake or close message's (send_control_lent), a fragment's (send_fragment) or a lean frame's (dispatch_network_message_in). An image whose lends have one writer may call it directly, and then this site has no call by register"
+    },
+    {
       "id": "record",
       "where": {"file": "driver_loop.rs"},
       "callees": "driver_loop::EventSink>::record$",

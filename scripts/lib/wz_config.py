@@ -45,11 +45,13 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   written only while the declaration names one for the image)
     --write                       write every one of them
     --features ABI CONFIG         turn a Kconfig result (or a pico config.h) into the cargo arguments
-    --features pico --engine coop CONFIG
-                                  the same list for the cooperative engine: the features that
-                                  select the tokio engine (its drive threads, the groups, gossip)
-                                  are left out and `engine-coop` is named, so the build is the
-                                  header arm's drop-in with the engine under it changed
+    --features pico --engine coop|tokio CONFIG
+                                  the same list on a named engine: on the cooperative one (the
+                                  base's) the features that select the tokio engine (its drive
+                                  threads, the raw Ethernet group, gossip) are left out; on the
+                                  tokio one `engine-coop` is replaced by the tokio option's
+                                  features, so the build is the header arm's drop-in with the
+                                  engine under it changed
     --pico-config-h [--engine coop] FEATURES
                                   the reverse: print the zenoh-pico `config.h` of the wz-capi-pico
                                   build of FEATURES (a comma list, empty for none) on the default
@@ -57,8 +59,10 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   from the pinned config.h.in: every Z_FEATURE_* switch as the
                                   build carries it, every value switch a limit maps to at the
                                   WZ_LIMIT_<ID> the environment states, pico's defaults for the
-                                  rest. A C program compiled against it allocates the structs
-                                  that build's library writes
+                                  rest, and every capability of wz's own that no switch states
+                                  as `#define WZ_FEATURE_<ID> 0|1`. A C program compiled against
+                                  it allocates the structs that build's library writes and sees
+                                  the declarations of the doors that build has
     --bench-engine [ENGINE]       the engine a host bench builds the pico ABI on: ENGINE (tokio or
                                   coop) when given, else the one the package's profile
                                   (configs/profiles/host-peer-ext.conf) chooses (kconfiglib)
@@ -185,7 +189,8 @@ Usage:
     wz_config.py --pico-config-h [--engine coop] FEATURES
     wz_config.py --features pico|c|core CONFIG
         CONFIG is a Kconfig `.config` (CONFIG_WZ_CAP_X=y) or a pico header of
-        `#define Z_FEATURE_X 0|1` lines; a capability the file does not mention is OFF.
+        `#define Z_FEATURE_X 0|1` and `#define WZ_FEATURE_X 0|1` lines; a capability the
+        file does not mention is OFF.
 """
 
 from __future__ import annotations
@@ -283,7 +288,7 @@ def read_decl_toml(text: str) -> dict:
     `[array.table]`, a table of the last element of an array of tables opened before it (a
     profile's `[profile.policies]`), or of a table; `key = value` on ONE line, the value a string,
     an integer, a boolean, an array of strings or a non-empty array of integers (a limit's
-    `range`); a `'''`
+    `range`), or an inline table of bare keys to integers (a policy's `wire_codes`); a `'''`
     literal string whose lines run to the closing `'''` (the newline right after the opening
     delimiter is not part of it, as TOML says), or one closed on the line it opens (`'''text'''`,
     with no `'''` inside); `#` comments on lines of their own. Anything else is refused by line
@@ -340,6 +345,21 @@ def read_decl_toml(text: str) -> dict:
             value = rest[3:-3]
         elif rest.startswith("'''"):
             raise ValueError(f"line {number}: a ''' string opens a line of its own")
+        elif rest.startswith("{"):
+            # An inline table of bare keys to integers on one line (a policy's `wire_codes`).
+            body_m = re.fullmatch(r"\{\s*(.*?)\s*\}", rest)
+            entries = [] if body_m is None or not body_m.group(1) else body_m.group(1).split(",")
+            inline: dict = {}
+            for entry in entries:
+                kv = re.fullmatch(r"\s*([A-Za-z0-9_-]+)\s*=\s*(-?[0-9]+)\s*", entry)
+                if body_m is None or kv is None or kv.group(1) in inline:
+                    raise ValueError(f"line {number}: an inline table is bare keys to integers, "
+                                     "each once, on one line")
+                inline[kv.group(1)] = int(kv.group(2))
+            if body_m is None:
+                raise ValueError(f"line {number}: an inline table is bare keys to integers, "
+                                 "each once, on one line")
+            value = inline
         else:
             try:
                 value = json.loads(rest)
@@ -439,7 +459,8 @@ def validate_decl(data: dict) -> list[str]:
 
 IMAGE_KEYS = {"id", "dir"}
 AXIS_KEYS = {"id", "image", "kconfig", "prompt", "default", "help"}
-OPTION_KEYS = {"id", "axis", "kconfig", "prompt", "requires", "implies", "upstream_on", "help"}
+OPTION_KEYS = {"id", "axis", "kconfig", "prompt", "requires", "implies", "upstream_on", "features",
+               "help"}
 RULE_KEYS = {"image", "when", "features", "defaults"}
 
 
@@ -483,6 +504,15 @@ def validate_images(data: dict) -> list[str]:
             out.append(f"option {option.get('id')!r} names axis {option.get('axis')!r}, which is not declared")
             continue
         options[option["axis"]].append(option)
+        # `features`: the cargo features a build that chooses the option names in the place of its
+        # ABI base's engine feature (the engine axis, `engine_features`).
+        named = option.get("features")
+        if named is not None and (not isinstance(named, list)
+                                  or not all(isinstance(f, str) and f for f in named)):
+            out.append(f"option {option.get('id')!r}: `features` is not an array of feature names")
+        if named is not None and not is_global(axes[option["axis"]]):
+            out.append(f"option {option.get('id')!r} of the image axis {option['axis']!r} names "
+                       f"features; only a global axis's option can")
         implied = option.get("implies")
         if implied is None:
             continue
@@ -1802,7 +1832,7 @@ def validate_limits(limits: list[dict]) -> list[str]:
 POLICY_KINDS = ("bool", "choice")
 POLICY_ID_RE = re.compile(r"[a-z][a-z0-9]*(-[a-z0-9]+)*")
 POLICY_KEYS = {"id", "kind", "kconfig", "choices", "default", "upstream", "since", "help",
-               "scope", "binding", "mutability", "boundary", "wire"}
+               "scope", "binding", "mutability", "boundary", "wire", "wire_codes"}
 
 
 def policy_binding_problems(pid: str, pol: dict) -> list[str]:
@@ -1983,6 +2013,8 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
         if kind == "bool":
             if "choices" in pol:
                 out.append(f"policy `{pid}`: a bool has no `choices`")
+            if "wire_codes" in pol:
+                out.append(f"policy `{pid}`: a bool has no `wire_codes`")
             if pol.get("default") != "off":
                 out.append(f"policy `{pid}`: a bool policy defaults to `off`, which is upstream's "
                            f"behaviour (C2); it says {pol.get('default')!r}")
@@ -2001,6 +2033,7 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
                 if pol.get("default") not in choices:
                     out.append(f"policy `{pid}`: default {pol.get('default')!r} is not one of "
                                f"its choices")
+                out += wire_code_problems(pid, pol, choices)
         if not isinstance(pol.get("upstream"), str) or not pol["upstream"].strip():
             out.append(f"policy `{pid}`: it does not say what upstream does; a behaviour that "
                        "departs from no upstream behaviour is a capability or a defect, not a policy")
@@ -2014,6 +2047,28 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
         elif re.search(r"\[`|crate::", pol["help"]):
             out.append(f"policy `{pid}`: its help names Rust items; it is written for a deployer")
     return out
+
+
+def wire_code_problems(pid: str, pol: dict, choices: list) -> list[str]:
+    """A choice whose values a peer reads as codes on the wire may state them in `wire_codes`,
+    one code for each of its choices: its enum then holds each value at its code, so a value
+    becomes its wire byte by its discriminant, and a domain finds a value by its place among the
+    choices apart from that (`position`). Only a policy a peer sees has codes."""
+    if "wire_codes" not in pol:
+        return []
+    where = f"policy `{pid}`"
+    codes = pol["wire_codes"]
+    if pol.get("wire") == "none":
+        return [f"{where}: `wire_codes` is stated only by a policy a peer sees; its `wire` is "
+                "'none'"]
+    if not isinstance(codes, dict) or sorted(codes) != sorted(str(c) for c in choices):
+        return [f"{where}: `wire_codes` gives each of its choices one code, and nothing else"]
+    values = list(codes.values())
+    if not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 255 for v in values):
+        return [f"{where}: a wire code is an integer from 0 to 255"]
+    if len(set(values)) != len(values):
+        return [f"{where}: two of its choices have the same wire code"]
+    return []
 
 
 PROFILE_KEYS = {"id", "help", "policies"}
@@ -2115,6 +2170,11 @@ DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\s+([01])\b")
 # when it is on and `/* #undef ... */` when it is off, and its headers test it with `#ifdef`.
 BARE_DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\s*(?://.*|/\*.*)?$")
 UNDEF_RE = re.compile(r"^\s*/\*\s*#\s*undef\s+(Z_FEATURE_[A-Z0-9_]+)\s*\*/")
+# The macro a rendered pico header states a capability of wz's own with, as pico states its own
+# switches: `#define WZ_FEATURE_<ID> 0|1` (`wz_feature_macro`).
+WZ_FEATURE_PREFIX = "WZ_FEATURE_"
+WZ_DEFINE_RE = re.compile(r"^\s*#\s*define\s+(WZ_FEATURE_[A-Z0-9_]+)\s+([01])\b")
+WZ_FEATURE_TOKEN_RE = re.compile(r"\bWZ_FEATURE_[A-Z0-9_]+\b")
 
 
 def pico_flag_states(text: str) -> tuple[set[str], set[str]]:
@@ -2182,12 +2242,16 @@ def pico_header_conflicts(decl: dict, abi: str, text: str) -> list[str]:
     caps = decl["caps"]
     on = read_config(decl, text)
     flags_on, flags_off = pico_flag_states(text)
+    wz_stated = wz_feature_states(text)
     out: list[str] = []
     for cid in sorted(closure(caps, on) - on):
         if abi not in caps[cid]["abis"]:
             continue
         flags, _ = pico_switches(decl, cid)
-        if flags and all(f in flags_on | flags_off for f in flags):
+        if not (flags and all(f in flags_on | flags_off for f in flags)):
+            # A capability of wz's own is stated off by its own macro at 0.
+            flags = [wz_feature_macro(cid)] if wz_stated.get(wz_feature_macro(cid)) == 0 else []
+        if flags:
             askers = sorted(x for x in on if cid in closure(caps, {x}) and x != cid)
             out.append(f"the header states {cid} off ({', '.join(flags)}), and {', '.join(askers)}, "
                        f"which it turns on, implies it in wz")
@@ -2201,7 +2265,8 @@ def read_config(decl: dict, text: str) -> set[str]:
     of them is (the advanced plane, which either advanced switch asks for), or when all are where
     it says so (the multicast transport, which pico has only with its group link). One no row
     reaches is on when every switch of its `pico_flags_all` is (the liveliness get exists where
-    pico has both the liveliness and the query plane).
+    pico has both the liveliness and the query plane). A capability of wz's own, which no switch
+    states, is on when its `WZ_FEATURE_*` macro is 1 (`wz_own_header_features`).
     """
     by_kconfig = {c["kconfig"]: cid for cid, c in decl["caps"].items()}
     on: set[str] = set()
@@ -2214,6 +2279,8 @@ def read_config(decl: dict, text: str) -> set[str]:
         flags, combine = pico_switches(decl, cid)
         if flags and (all if combine == "all" else any)(f in flags_on for f in flags):
             on.add(cid)
+    wz_stated = wz_feature_states(text)
+    on |= {cid for cid in wz_own_header_features(decl) if wz_stated.get(wz_feature_macro(cid)) == 1}
     return on
 
 
@@ -2234,26 +2301,57 @@ def cargo_args_of(feats: list[str]) -> str:
 
 
 # The option of the global axis `engine` that runs a pico build's sessions on the cooperative engine
-# (docs/c-abi-engine-and-memory.md, E1). The axis chooses no capability: the choice changes the
-# build's feature list (`engine_features`).
+# (docs/c-abi-engine-and-memory.md, E1), the pico base's engine. The axis chooses no capability: the
+# choice changes the build's feature list (`engine_features`).
 ENGINE_COOP_SYMBOL = "WZ_ENGINE_COOP"
+ENGINE_AXIS = "engine"
+#: The feature of the pico base that names its engine, which the tokio option replaces.
+BASE_ENGINE_FEATURE = "engine-coop"
+
+
+def engine_option_features(decl: dict, option: str) -> list[str]:
+    """The features the option `option` of the engine axis names in the place of the pico base's
+    `engine-coop` (its `features` key). An option the axis lacks is a `KeyError`."""
+    for o in decl["options"]:
+        if o["axis"] == ENGINE_AXIS and o["id"] == option:
+            return list(o.get("features", []))
+    raise KeyError(f"the {ENGINE_AXIS} axis has no option `{option}`")
+
+
+def tokio_switches() -> list[str]:
+    """The tokio engine and the switches of its drive, as the declaration's tokio option names them."""
+    return engine_option_features(load_decl(), "tokio")
+
+
+def tokio_features(feats: list[str], switches: list[str]) -> list[str]:
+    """`feats`, a pico list on the base's cooperative engine, on the tokio engine instead:
+    `engine-coop` replaced, where it stands, by `switches` (the tokio option's features)."""
+    out: list[str] = []
+    for feat in feats:
+        for named in (switches if feat == BASE_ENGINE_FEATURE else [feat]):
+            if named not in out:
+                out.append(named)
+    return out
 
 
 def engine_features(abi: str, base: list[str], feats: list[str], coop: bool,
-                    table: dict) -> list[str]:
+                    table: dict, switches: list[str] | None = None) -> list[str]:
     """`feats`, `abi`'s list for the capabilities a configuration turns on over the ABI's
-    `base`, on the engine it chose: as it is for the tokio engine, and for the cooperative one the
-    pico crate's list with the base's tokio switches left out and `engine-coop` named
-    (`coop_features`, over the crate's feature table `table`).
+    `base`, on the engine it chose: for the cooperative one, the pico base's engine, the pico
+    crate's list with what selects the tokio engine left out (`coop_features`, over the crate's
+    feature table `table`); for the tokio one, the list with `engine-coop` replaced by
+    `switches`, the tokio option's features (read from the declaration when not given).
 
     Strict, as the resolution is (C9): a capability the configuration turned on that only the
     tokio engine runs would be left out of the cooperative build without a word, so it is refused
     by name, and so is the cooperative choice for an ABI that has one engine."""
-    if not coop:
-        return feats
     if abi != "pico":
-        raise PresetError(f"{ENGINE_COOP_SYMBOL} chooses the cooperative engine, which the {abi} "
-                          "ABI does not have; only the pico ABI runs on it")
+        if coop:
+            raise PresetError(f"{ENGINE_COOP_SYMBOL} chooses the cooperative engine, which the {abi} "
+                              "ABI does not have; only the pico ABI runs on it")
+        return feats
+    if not coop:
+        return tokio_features(feats, tokio_switches() if switches is None else switches)
     out = coop_features(feats, table)
     lost = [f for f in feats if f not in out and f not in base]
     if lost:
@@ -2266,12 +2364,18 @@ def engine_features(abi: str, base: list[str], feats: list[str], coop: bool,
 def resolved_features(decl: dict, abi: str, kconf) -> list[str]:
     """The `--features` list of `abi` a resolved configuration gives: its capabilities on the
     engine it chose. A tree generated before the engine axis was declared has no such symbol and
-    chooses the tokio engine, as every build did then."""
+    takes the pico base's engine, the cooperative one. The axis is the pico ABI's: another ABI has
+    one engine, so its configuration is refused only where it states the cooperative choice
+    itself, not where the axis's default makes it."""
     sym = kconf.syms.get(ENGINE_COOP_SYMBOL)
-    coop = sym is not None and sym.tri_value == 2
-    table = manifest_features(MANIFESTS["pico"]) if coop else {}
+    coop = sym is None or sym.tri_value == 2
+    if abi != "pico":
+        coop = (sym is not None and coop and sym.choice is not None
+                and sym.choice.user_selection is sym)
+    table = manifest_features(MANIFESTS["pico"]) if abi == "pico" and coop else {}
     return engine_features(abi, decl["base"][abi],
-                           features_for(decl, abi, resolved_caps(decl, kconf)), coop, table)
+                           features_for(decl, abi, resolved_caps(decl, kconf)), coop, table,
+                           engine_option_features(decl, "tokio"))
 
 
 def coop_features(feats: list[str], table: dict) -> list[str]:
@@ -2299,7 +2403,8 @@ def coop_features(feats: list[str], table: dict) -> list[str]:
                 return True
         return False
 
-    return ["engine-coop"] + [f for f in feats if f != "engine-tokio" and not selects_tokio(f)]
+    return ["engine-coop"] + [f for f in feats
+                              if f not in ("engine-tokio", "engine-coop") and not selects_tokio(f)]
 
 
 def enabled_features(feats: dict, start: list[str]) -> set[str]:
@@ -2352,12 +2457,17 @@ PICO_SOURCE = ROOT / "vendor" / "zenoh-pico"
 
 
 def pico_build_features(engine: str, asked: list[str], table: dict) -> set[str]:
-    """The wz-capi-pico features a build turns on, as cargo resolves them: the default features and
-    `asked` for the tokio engine (`cargo build -p wz-capi-pico --features ...`), or `engine-coop`
-    and `asked` alone for the cooperative one (`--no-default-features --features engine-coop,...`).
-    A name the package lacks is a `KeyError`."""
-    start = (["default"] if engine == "tokio" else ["engine-coop"]) + [f for f in asked if f]
-    return enabled_features(table, start)
+    """The wz-capi-pico features a build turns on, as cargo resolves them: `default` is the default
+    features and `asked` (`cargo build -p wz-capi-pico --features ...`, the cooperative engine),
+    `coop` is `engine-coop` and `asked` alone (`--no-default-features --features
+    engine-coop,...`), and `tokio` is the default list on the tokio engine and `asked`
+    (`tokio_features`, `--no-default-features`). A name the package lacks is a `KeyError`."""
+    asked = [f for f in asked if f]
+    if engine == "default":
+        return enabled_features(table, ["default"] + asked)
+    if engine == "tokio":
+        return enabled_features(table, tokio_features(list(table["default"]), tokio_switches()) + asked)
+    return enabled_features(table, ["engine-coop"] + asked)
 
 
 # -- the engine a host bench measures -------------------------------------------------------------------
@@ -2396,11 +2506,12 @@ def bench_engine(stated: str, kconf=None) -> str:
 
 
 def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str = "std") -> list[str]:
-    """The features a bench's cargo build of wz-capi-pico names on `engine` with the standard library
-    `stdlib`, `table` the crate's feature table: `asked` over the default build on the tokio engine;
-    on the cooperative one, without the default features, the default build's list with what selects
-    the tokio engine left out and `engine-coop` named (`coop_features`), as the package's profile
-    resolves its own, and `asked`; without `std`, that list with `BENCH_NOSTD_FEATURE` in the place of
+    """The features a bench's cargo build of wz-capi-pico names, without the default features, on
+    `engine` with the standard library `stdlib`, `table` the crate's feature table: on the tokio
+    engine the default build's list with `engine-coop` replaced by the tokio option's features
+    (`tokio_features`), and `asked`; on the cooperative one the default build's list with what
+    selects the tokio engine left out (`coop_features`), as the package's profile resolves its own,
+    and `asked`; without `std`, that list with `BENCH_NOSTD_FEATURE` in the place of
     `engine-coop` and `std` left out, as the Windows package without `std` is made from its profile's
     list. A capability asked that the cooperative engine does not run is refused by name rather than
     built into a library on the tokio engine, and so is one that turns `std` on, asked of the library
@@ -2415,7 +2526,8 @@ def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str
         raise PresetError("the library without `std` is a form of the cooperative engine: measure it on "
                           "the coop engine")
     if engine == "tokio":
-        return asked
+        named = tokio_features(list(table["default"]), tokio_switches())
+        return named + [f for f in asked if f not in named]
     named = coop_features(list(table["default"]) + asked, table)
     lost = [f for f in asked if f not in named]
     if lost:
@@ -2436,15 +2548,14 @@ def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str
 def bench_features(engine: str, asked: list[str], table: dict, stdlib: str = "std") -> set[str]:
     """The wz-capi-pico features a bench's build on `engine` with `stdlib` turns on, as cargo resolves
     them: what the reference zenoh-pico and the header a probe compiles against are derived from."""
-    named = bench_named_features(engine, asked, table, stdlib)
-    return enabled_features(table, (["default"] if engine == "tokio" else []) + named)
+    return enabled_features(table, bench_named_features(engine, asked, table, stdlib))
 
 
 def bench_cargo_args(engine: str, asked: list[str], table: dict) -> str:
     """The cargo words of that build, each feature named by its package, so the same words build it
     beside another package (`-p zenoh-pico-sys -p wz-capi-pico`)."""
     named = [f"wz-capi-pico/{f}" for f in bench_named_features(engine, asked, table)]
-    words = ["--no-default-features"] if engine == "coop" else []
+    words = ["--no-default-features"]
     if named:
         words.append("--features " + ",".join(named))
     return " ".join(words)
@@ -2493,17 +2604,69 @@ def pico_config_header(decl: dict, enabled: set[str], env: dict[str, str],
 
     template = (source / "include" / "zenoh-pico" / "config.h.in").read_text(encoding="utf-8")
     defaults = usm.cmake_defaults(usm.pico_cmake_text(source))
-    return render_pico_config(template, pico_config_values(decl, enabled, defaults, env))
+    rendered = render_pico_config(template, pico_config_values(decl, enabled, defaults, env))
+    return with_wz_features(decl, enabled, rendered)
 
 
 def pico_header_features(decl: dict) -> set[str]:
-    """The wz-capi-pico capabilities a pico header states: those a zenoh-pico `Z_FEATURE_*` switch
-    maps to. They are what a rendered header must give back, since `--features pico` reads only
-    them; a capability no switch reaches is not in a header to be read."""
+    """The wz-capi-pico capabilities a pico header states by a zenoh-pico `Z_FEATURE_*` switch:
+    those a `maps` row reaches. A capability no switch reaches is stated by its own
+    `WZ_FEATURE_*` macro instead (`wz_own_header_features`)."""
     return {row["anchor"].removeprefix(PICO_DROP_IN) for row in decl["switches"]
             if row.get("original") == "zenoh-pico" and row.get("class") == "maps"
             and row["switch"].startswith("Z_FEATURE_")
             and row["anchor"].removeprefix(PICO_DROP_IN) in decl["caps"]}
+
+
+def wz_feature_macro(cid: str) -> str:
+    """The macro a pico header states capability `cid` with: `WZ_FEATURE_` and the id in capitals,
+    each `-` a `_` (`message-payload`: `WZ_FEATURE_MESSAGE_PAYLOAD`)."""
+    return WZ_FEATURE_PREFIX + cid.upper().replace("-", "_")
+
+
+def wz_own_header_features(decl: dict) -> list[str]:
+    """The wz-capi-pico capabilities no zenoh-pico switch states, in the declaration's order: no
+    `maps` row reaches them and they name no `pico_flags_all`. A C program compiled against a
+    build's header learns whether the build has one from its `WZ_FEATURE_*` macro, as it learns
+    the others from pico's `Z_FEATURE_*` switches."""
+    stated = pico_header_features(decl)
+    return [cid for cid in decl["order"]
+            if "pico" in decl["caps"][cid]["abis"] and cid not in stated
+            and not decl["caps"][cid].get("pico_flags_all")]
+
+
+def wz_feature_states(text: str) -> dict[str, int]:
+    """Each `WZ_FEATURE_*` macro a header defines to 0 or 1, and that value."""
+    return {m.group(1): int(m.group(2)) for line in text.splitlines() if (m := WZ_DEFINE_RE.match(line))}
+
+
+def with_wz_features(decl: dict, enabled: set[str], rendered: str) -> str:
+    """`rendered` (a pico `config.h`) with every capability of `wz_own_header_features` stated as
+    the build of the features `enabled` carries it, `#define WZ_FEATURE_<ID> 0|1` as pico states
+    its own switches, inside the include guard: before the header's last `#endif`. A header with
+    no `#endif` is a `ValueError`: the template changed shape, and a block after its guard would
+    be read again on every include."""
+    lines = rendered.splitlines(keepends=True)
+    last = max((i for i, line in enumerate(lines) if re.match(r"\s*#\s*endif\b", line)), default=None)
+    if last is None:
+        raise ValueError("the pico config template has no #endif to state wz's capabilities before")
+    block = ["/* The capabilities of wz's own that no Z_FEATURE_* switch states, each 1 when this\n",
+             " * build has it (scripts/lib/wz_config.py, from deploy/wz-config.toml). */\n"]
+    block += [f"#define {wz_feature_macro(cid)} {int(cid in enabled)}\n"
+              for cid in wz_own_header_features(decl)]
+    return "".join(lines[:last] + block + ["\n"] + lines[last:])
+
+
+def check_wz_feature_uses(decl: dict, headers: dict[str, str]) -> list[str]:
+    """Each `WZ_FEATURE_*` name a header of the C ABIs (`headers`, its path to its text) tests
+    that no rendered pico header defines: a test of a macro nobody defines hides its declarations
+    in every build, which a program reads as a door the library has not."""
+    known = {wz_feature_macro(cid) for cid in wz_own_header_features(decl)}
+    out: list[str] = []
+    for path, text in sorted(headers.items()):
+        for name in sorted(set(WZ_FEATURE_TOKEN_RE.findall(text)) - known):
+            out.append(f"{path} tests {name}, which no rendered pico header defines")
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2796,10 +2959,10 @@ def camel_limit(lid: str) -> str:
 def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
                         presets: dict[str, int] | None = None) -> list[str]:
     """The snapshot `snapshot` of `lims`: one field per limit, its build defaults, an accessor and a
-    `select_*` per field, the `LimitField` impl of each limit's type, and the table a reader that
-    names a limit by its id dispatches on. With `presets` (`limit_presets`), the snapshot of the pico
-    preset too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens under, whatever the build's
-    environment states."""
+    `select_*` per field, the `LimitField` impl that states where each limit's field is, and the
+    table a reader that names a limit by its id dispatches on. With `presets` (`limit_presets`),
+    the snapshot of the pico preset too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens
+    under, whatever the build's environment states."""
     table = {"SessionLimits": "SESSION_LIMITS", "RuntimeLimits": "RUNTIME_LIMITS"}[snapshot]
     count = f"{table[:-len('LIMITS')]}LIMIT_COUNT"
     out = rust_doc(f"The value of every limit {what}, as one snapshot: what a creator resolved and "
@@ -2882,19 +3045,20 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
         out += [f"        self.{field} = Limited::select(value)?;", "        Ok(())", "    }"]
     out += ["}", "", f"impl Default for {snapshot} {{", "    fn default() -> Self {",
             "        Self::BUILD", "    }", "}"]
+    # A field's offset, not a function per limit: every entry of the table selects and reads through
+    # the one body of `LimitEntry`, so the table links nothing per limit.
     for lim in lims:
         field, name = lim["id"].lower(), camel_limit(lim["id"])
-        ty = "Quota" if lim["kind"] == "bound" else "usize"
-        head = f"    fn select_in(snapshot: &mut {snapshot}, value: {ty}) -> Result<(), OutsideLimitDomain> {{"
-        if len(head) <= RUST_MAX_WIDTH:
-            sel = [head]
+        out += ["", "// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.",
+                f"unsafe impl LimitField<{snapshot}> for {name} {{"]
+        out += rust_assoc_const("AT", "usize", f"core::mem::offset_of!({snapshot}, {field})")
+        # The field's type is checked by the compiler, not by this rule: a field of any type but the
+        # limit's `Held` does not coerce, so `AT` can only name the word the entry reads.
+        pin = f"const _: fn(&{snapshot}) -> &{name}Held = |s| &s.{field};"
+        if len(pin) <= RUST_MAX_WIDTH:
+            out += ["}", "", pin]
         else:
-            sel = ["    fn select_in(", f"        snapshot: &mut {snapshot},", f"        value: {ty},",
-                   "    ) -> Result<(), OutsideLimitDomain> {"]
-        out += ["", f"impl LimitField<{snapshot}> for {name} {{"] + sel + [
-                f"        snapshot.select_{field}(value)", "    }", "",
-                f"    fn held_in(snapshot: &{snapshot}) -> {ty} {{",
-                f"        snapshot.{field}()", "    }", "}"]
+            out += ["}", "", f"const _: fn(&{snapshot}) -> &{name}Held =", f"    |s| &s.{field};"]
     out += ["", f"/// How many limits [`{snapshot}`] holds: the length of [`{table}`].",
             f"pub const {count}: usize = {len(lims)};", "",
             f"/// Every limit of [`{snapshot}`] as a reader that names it by its id sees it, in the order of",
@@ -3630,14 +3794,25 @@ def emit_rust_policies(decl: dict) -> str:
         values = pol["choices"]
         out += rust_doc(f"`{pol['id']}`: {pol['help'].strip()}".replace("\n", " "), "")
         out += rust_doc(f"Upstream: {pol['upstream'].strip()}", "")
-        out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub enum {name} {{"]
+        codes = pol.get("wire_codes")
+        out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]"]
+        if codes is not None:
+            out.append("#[repr(u8)]")
+        out.append(f"pub enum {name} {{")
         for value in values:
-            out += [f"    /// `{value}`.", f"    {camel(value)},"]
+            code = "" if codes is None else f" = {codes[value]}"
+            out += [f"    /// `{value}`.", f"    {camel(value)}{code},"]
         out += ["}", "", f"impl {name} {{"]
         out += ["    /// The value as the declaration, the Kconfig and the environment spell it.",
                 "    pub const fn id(self) -> &'static str {", "        match self {"]
         out += [f'            Self::{camel(v)} => "{v}",' for v in values]
         out += ["        }", "    }", ""]
+        if codes is not None:
+            out += ["    /// The value's place among the values (`PolicyValue::ALL`), the bit a domain keeps",
+                    "    /// for it: apart from the discriminant, which is the value's code on the wire.",
+                    "    pub const fn position(self) -> usize {", "        match self {"]
+            out += [f"            Self::{camel(v)} => {i}," for i, v in enumerate(values)]
+            out += ["        }", "    }", ""]
         out += rust_static_array(f"const CHOICES: [&str; {len(values)}] =",
                                  [f'"{v}"' for v in values], "    ")
         out += rust_static_array(f"const ALL: [Self; {len(values)}] =",
@@ -3876,10 +4051,11 @@ def rust_stated_assert(pol: dict) -> list[str]:
     return rust_refusal(f"{camel(pol['id'])}::stated().is_some()", STATED_REFUSALS[pol["kind"]])
 
 
-def rust_default_assert(name: str, pid: str) -> list[str]:
+def rust_default_assert(name: str, pid: str, index: str = "as usize") -> list[str]:
     """The constant that refuses a build whose domain of `pid` leaves out its default, laid out as
-    rustfmt lays it out (the message is short enough for any id a line holds)."""
-    arg = f"{name}::DEFAULT as usize"
+    rustfmt lays it out (the message is short enough for any id a line holds). `index` is how a
+    value is turned into its place among the values (`rust_value_index`)."""
+    arg = f"{name}::DEFAULT {index}" if index.startswith("as ") else f"{name}::DEFAULT{index}"
     one = f"    default_is_allowed::<{name}>({arg}),"
     if len(arg) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
         check = [one]
@@ -3927,6 +4103,9 @@ def policy_value_rust(pol: dict) -> list[str]:
         stated_arm, upstream = "Some(on) => Self::from_bool(on),", "off"
     else:
         stated_arm, upstream = "Some(value) => value,", pol["default"]
+    index = rust_value_index(pol)
+    default_index = f"Self::DEFAULT {index}" if index.startswith("as ") else f"Self::DEFAULT{index}"
+    self_index = f"self {index}" if index.startswith("as ") else f"self{index}"
     out = bool_value_rust(pol) if pol["kind"] == "bool" else []
     out += rust_bound_alias(pol)
     out += [f"impl PolicyValue for {name} {{",
@@ -3937,7 +4116,7 @@ def policy_value_rust(pol: dict) -> list[str]:
     for value in values:
         out += rust_domain_entry(rust_word(policy_allows_symbol(pol, value)))
     out += ["        ],",
-            "        Self::DEFAULT as usize,",
+            f"        {default_index},",
             "        DEFAULTS_ONLY,",
             "    );",
             "    const DEFAULT: Self = match Self::stated() {",
@@ -3952,9 +4131,16 @@ def policy_value_rust(pol: dict) -> list[str]:
         out += rust_boundary(rust_text(pol["boundary"]))
     else:
         out.append("    const BOUNDARY: Option<&'static str> = None;")
-    out += ["", "    fn index(self) -> usize {", "        self as usize", "    }", "}", ""]
-    return (out + rust_stated_assert(pol) + [""] + rust_default_assert(name, pol["id"])
+    out += ["", "    fn index(self) -> usize {", f"        {self_index}", "    }", "}", ""]
+    return (out + rust_stated_assert(pol) + [""] + rust_default_assert(name, pol["id"], index)
             + policy_field_rust(pol))
+
+
+def rust_value_index(pol: dict) -> str:
+    """How a value of `pol` becomes its place among the values, the bit its domain keeps: the
+    discriminant (`as usize`) of an enum declared in that order, and `.position()` of one whose
+    discriminants are the values' wire codes (`wire_codes`)."""
+    return ".position()" if pol.get("wire_codes") is not None else "as usize"
 
 
 def global_axes(decl: dict) -> list[dict]:
@@ -4717,7 +4903,8 @@ def pico_header_statement(decl: dict, text: str, macros: dict[str, str], name: s
     `--features pico` and `--env pico` modes describe together), and the problems.
 
     The header states no policy, so every policy is upstream's, which is what that build runs.
-    `engine_features`, the pico crate's feature table, makes it the cooperative engine's build.
+    `engine_features`, the pico crate's feature table, leaves out what selects the tokio engine, as
+    the cooperative engine's build does; the base already names that engine.
     A Kconfig result is refused: this reads the header's own switches, and a `.config` states
     its numbers through symbols this mode does not read."""
     if any(CONFIG_RE.match(line) or re.match(r"^\s*#\s*CONFIG_WZ_", line)
@@ -4730,11 +4917,10 @@ def pico_header_statement(decl: dict, text: str, macros: dict[str, str], name: s
     if problems:
         return None, problems
     features = features_for(decl, "pico", read_config(decl, text))
-    engine = "tokio"
     if engine_features is not None:
         features = coop_features(features, engine_features)
-        engine = "coop"
-    derived = {"kind": "pico-header", "inputs": [name], "engine": engine}
+    derived = {"kind": "pico-header", "inputs": [name],
+               "engine": statement_engine("pico", set(features))}
     return conformance_statement(decl, "pico", features, limits,
                                  {pol["id"]: pol["default"] for pol in decl["policies"]},
                                  derived), []
@@ -4916,6 +5102,8 @@ def cmd_check() -> int:
     findings += check_caps_rs(decl, CAPS_RS.read_text(encoding="utf-8"))
     findings += check_policy_binding_rs(POLICY_BINDING_RS.read_text(encoding="utf-8"))
     findings += check_open_facilities_rs(decl, OPEN_FACILITIES_RS.read_text(encoding="utf-8"))
+    findings += check_wz_feature_uses(decl, {str(p.relative_to(ROOT)): p.read_text(encoding="utf-8")
+                                             for p in sorted(CRATES_ROOT.glob("*/include/*.h"))})
     for abi, path in MANIFESTS.items():
         try:
             feats = manifest_features(path)
@@ -5350,6 +5538,37 @@ def cmd_selftest() -> int:
     expect("a #cmakedefine with no value renders as its #undef",
            render_pico_config('#cmakedefine P "@P@"\n#define A @A@\n', {"A": "1"})
            == '/* #undef P */\n#define A 1\n')
+    # The capabilities of wz's own: a macro each, stated in the guard as pico states its switches,
+    # read back, held against the capabilities it implies, and the only ones a header may test.
+    own = wz_own_header_features(decl)
+    expect("a capability's macro is its id in capitals",
+           wz_feature_macro("message-payload") == "WZ_FEATURE_MESSAGE_PAYLOAD")
+    expect("a capability of wz's own is one no pico switch states",
+           "message-payload" in own and "query" not in own and "liveliness-get" not in own
+           and not set(own) & pico_header_features(decl)
+           and all("pico" in caps[cid]["abis"] for cid in own))
+    guarded = with_wz_features(decl, {"message-catalog"}, "#ifndef G\n#define G\n#endif /* G */\n")
+    expect("the capabilities of wz's own are stated inside the guard, each as the build has it",
+           "#define WZ_FEATURE_MESSAGE_CATALOG 1\n" in guarded
+           and "#define WZ_FEATURE_MESSAGE_PAYLOAD 0\n" in guarded
+           and guarded.endswith("#endif /* G */\n")
+           and len(wz_feature_states(guarded)) == len(own))
+    try:
+        with_wz_features(decl, set(), "#define A 1\n")
+        expect("a template with no #endif is refused", False)
+    except ValueError:
+        pass
+    expect("a header reads a wz capability at 1 and not at 0",
+           read_config(decl, "#define WZ_FEATURE_MESSAGE_CATALOG 1\n#define WZ_FEATURE_MESSAGE_PAYLOAD 0\n")
+           == {"message-catalog"})
+    expect("a header that states a wz capability off under one it implies it from is refused",
+           pico_header_conflicts(decl, "pico", "#define WZ_FEATURE_MESSAGE_PAYLOAD 1\n"
+                                               "#define WZ_FEATURE_MESSAGE_CATALOG 0\n") != []
+           and pico_header_conflicts(decl, "pico", "#define WZ_FEATURE_MESSAGE_PAYLOAD 1\n"
+                                                   "#define WZ_FEATURE_MESSAGE_CATALOG 1\n") == [])
+    expect("a header of the C ABIs tests only a macro a rendered header defines",
+           check_wz_feature_uses(decl, {"a.h": "#if WZ_FEATURE_MESSAGE_PAYLOAD == 1\n"}) == []
+           and len(check_wz_feature_uses(decl, {"a.h": "#if defined(WZ_FEATURE_NO_SUCH_THING)\n"})) == 1)
     stated_limits = limit_rows(decl)
     if stated_limits:
         switch0, lid0 = stated_limits[0]
@@ -5361,7 +5580,8 @@ def cmd_selftest() -> int:
     # same header-stated capabilities, and the build's arm switches are what it was built with.
     pico_table = manifest_features(MANIFESTS["pico"])
     header_caps = pico_header_features(decl)
-    for engine, asked in (("tokio", []), ("tokio", ["app-transport", "e2e-sender", "local-subscriber"]),
+    for engine, asked in (("default", []), ("tokio", []),
+                          ("tokio", ["app-transport", "e2e-sender", "local-subscriber"]),
                           ("coop", ["query", "queryable"]), ("coop", ["peer", "multi-thread", "liveliness"])):
         label = f"{engine} {','.join(asked) or 'defaults'}"
         enabled = pico_build_features(engine, asked, pico_table)
@@ -5375,14 +5595,18 @@ def cmd_selftest() -> int:
         back = features_for(decl, "pico", read_config(decl, rendered))
         if engine == "coop":
             back = coop_features(back, pico_table)
+        elif engine == "tokio":
+            back = tokio_features(back, tokio_switches())
         expect(f"the header of the {label} build reads back as that build",
                enabled_features(pico_table, back) & header_caps == enabled & header_caps)
+        expect(f"the header of the {label} build states each capability of wz's own as it has it",
+               wz_feature_states(rendered) == {wz_feature_macro(cid): int(cid in enabled) for cid in own})
         flags_on, flags_off = pico_flag_states(rendered)
         expect(f"the header of the {label} build states its threading arm and the unstable API",
                ("Z_FEATURE_MULTI_THREAD" in flags_on) == ("multi-thread" in enabled)
                and ("Z_FEATURE_UNSTABLE_API" in flags_on) == ("unstable-api" in enabled)
                and "Z_FEATURE_UNSTABLE_API" in flags_on | flags_off)
-        if engine == "tokio" and not asked:
+        if engine == "default" and not asked:
             # The defect this mode exists for: the vendored library installs pico's default arm,
             # which has no unstable API, under a library whose default build has it.
             expect("the default build's header has the unstable API and the advanced plane",
@@ -5394,7 +5618,27 @@ def cmd_selftest() -> int:
         pass
     expect("cargo args of nothing", cargo_args(decl, "c", set()) == "--no-default-features")
     expect("cargo args name the base then the closure",
-           cargo_args(decl, "pico", {"peer"}).endswith("rx-busy-poll,link-udp,scout,peer"))
+           cargo_args(decl, "pico", {"peer"}).endswith("engine-coop,link-udp,scout,peer"))
+    # The tokio engine is the base's list with its engine feature replaced where it stands.
+    switches = engine_option_features(decl, "tokio")
+    expect("the tokio option names the tokio engine and its drive",
+           switches[:1] == ["engine-tokio"] and not engine_option_features(decl, "coop")
+           and "engine-coop" not in switches)
+    expect("the tokio list replaces engine-coop by the tokio option's features, in place, once",
+           tokio_features(["std", "engine-coop", "peer"], ["engine-tokio", "rx-busy-poll"])
+           == ["std", "engine-tokio", "rx-busy-poll", "peer"]
+           and tokio_features(["std", "peer"], ["engine-tokio"]) == ["std", "peer"])
+    expect("an engine option's features are an array of names, on a global axis only",
+           any("features" in p for p in validate_images(
+               {"axis": [{"id": "engine"}], "axis_option": [{"id": "t", "axis": "engine",
+                                                              "features": "engine-tokio"}]}))
+           and any("features" in p for p in validate_images(
+               {"image": [{"id": "i", "dir": "d"}], "axis": [{"id": "a", "image": "i"}],
+                "axis_option": [{"id": "t", "axis": "a", "features": ["x"]}]}))
+           and not [p for p in validate_images(
+               {"axis": [{"id": "engine"}], "axis_option": [{"id": "t", "axis": "engine",
+                                                              "features": ["engine-tokio"]}]})
+               if "features" in p])
     kconfig = emit_kconfig_capabilities(decl)
     expect("peer selects scout in the Kconfig", "config WZ_CAP_PEER" in kconfig
            and "\tselect WZ_CAP_SCOUT" in kconfig)
@@ -5422,8 +5666,12 @@ def cmd_selftest() -> int:
     # list, and the cooperative choice for an ABI with one engine is refused by name.
     base = decl["base"]["pico"]
     shared = features_for(decl, "pico", {"peer", "query"})
-    expect("the tokio engine keeps the list as the capabilities make it",
-           engine_features("pico", base, arm, False, good) == arm)
+    expect("the tokio engine is the list with the base's engine replaced by the tokio option's",
+           engine_features("pico", base, arm, False, good, switches) == tokio_features(arm, switches)
+           and "engine-coop" not in engine_features("pico", base, arm, False, good, switches)
+           and "raweth-transport" in engine_features("pico", base, arm, False, good, switches))
+    expect("the base is the cooperative engine's",
+           "engine-coop" in base and "engine-tokio" not in base)
     expect("the cooperative engine is the cooperative list, the base's tokio switches out",
            engine_features("pico", base, shared, True, good) == coop_features(shared, good)
            and "rx-busy-poll" not in engine_features("pico", base, shared, True, good))
@@ -5456,10 +5704,17 @@ def cmd_selftest() -> int:
     expect("a bench takes the engine it is told and refuses a name that is no engine",
            bench_engine("coop") == "coop" and bench_engine("tokio") == "tokio"
            and "fast" in refusal_text(lambda: bench_engine("fast")))
-    expect("a bench on the tokio engine builds the default build",
+    expect("a bench on the tokio engine builds the default build on that engine",
            bench_features("tokio", [], good) == pico_build_features("tokio", [], good)
-           and bench_cargo_args("tokio", [], good) == ""
-           and bench_cargo_args("tokio", ["app-transport"], good) == "--features wz-capi-pico/app-transport")
+           and "engine-tokio" in bench_features("tokio", [], good)
+           and "engine-coop" not in bench_features("tokio", [], good)
+           and bench_cargo_args("tokio", [], good).startswith(
+               "--no-default-features --features wz-capi-pico/std,wz-capi-pico/engine-tokio,")
+           and bench_cargo_args("tokio", ["app-transport"], good).endswith(",wz-capi-pico/app-transport"))
+    expect("the default build is the cooperative engine's",
+           pico_build_features("default", [], good) == enabled_features(good, ["default"])
+           and "engine-coop" in pico_build_features("default", [], good)
+           and "engine-tokio" not in pico_build_features("default", [], good))
     on_coop = bench_features("coop", [], good)
     expect("a bench on the cooperative engine builds the default capabilities that engine runs",
            "engine-coop" in on_coop and "engine-tokio" not in on_coop
@@ -5551,7 +5806,7 @@ def cmd_selftest() -> int:
         decl, "pico", ["os-zephyr"] + [f for f in coop if f != "engine-coop"], defaults,
         upstream, {})
     expect("a statement names its engine and platform, and each moves the digest alone",
-           stated["engine"] == "tokio" and stated["platform"] == "host"
+           stated["engine"] == "coop" and stated["platform"] == "host"
            and on_coop["engine"] == "coop" and same_on_tokio["engine"] == "tokio"
            and on_coop["capabilities"] == same_on_tokio["capabilities"]
            and on_coop["digest"] != same_on_tokio["digest"]
@@ -5665,7 +5920,7 @@ def cmd_selftest() -> int:
                and {c["id"]: c["supported"] for c in from_header["capabilities"]}["query"]
                and all(p["value"] == p["upstream"] for p in from_header["policies"])
                and from_header["derived_from"] == {"kind": "pico-header", "inputs": ["config.h"],
-                                                   "engine": "tokio"})
+                                                   "engine": "coop"})
     expect("a Kconfig result is not read as a pico header",
            pico_header_statement(decl, "CONFIG_WZ_CAP_QUERY=y\n", identity_macros, ".config")[0]
            is None)
@@ -5836,6 +6091,47 @@ def cmd_selftest() -> int:
            "config WZ_POLICY_EAGER_FLUSH\n\tbool \"eager-flush\"\n\tdefault n" in kpolicies
            and "\t  Upstream: Flushes on the batch boundary.\n" in kpolicies)
     rpolicies = emit_rust_policies(pdecl)
+    # A choice whose values are codes on the wire holds each value at its code.
+    choices_line = 'choices = ["os-default", "on", "off"]'
+    coded = with_policy.replace(choices_line,
+                                choices_line + "\nwire_codes = { os-default = 2, on = 0, off = 1 }")
+
+    def coded_refused(codes: str, words: str, text: str = with_policy) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(
+            text.replace(choices_line, choices_line + "\nwire_codes = " + codes))))
+
+    expect("a choice that states a wire code for each of its choices validates",
+           validate_decl(read_decl_toml(coded)) == [])
+    expect("wire codes that leave out a choice are refused",
+           coded_refused("{ os-default = 2, on = 0 }", "each of its choices one code"))
+    expect("wire codes that name a value the policy does not have are refused",
+           coded_refused("{ os-default = 2, on = 0, off = 1, loud = 3 }",
+                         "each of its choices one code"))
+    expect("two choices on one wire code are refused",
+           coded_refused("{ os-default = 1, on = 0, off = 1 }", "the same wire code"))
+    expect("a wire code past a byte is refused",
+           coded_refused("{ os-default = 256, on = 0, off = 1 }", "from 0 to 255"))
+    expect("wire codes on a policy no peer sees are refused",
+           coded_refused("{ os-default = 2, on = 0, off = 1 }", "its `wire` is 'none'",
+                         with_policy.replace('wire = "visible"', 'wire = "none"')))
+    expect("wire codes on a bool are refused",
+           policy_refused('kconfig = "WZ_POLICY_EAGER_FLUSH"',
+                          'kconfig = "WZ_POLICY_EAGER_FLUSH"\nwire_codes = { off = 0, on = 1 }',
+                          "a bool has no `wire_codes`"))
+    rcoded = emit_rust_policies(decl_of(read_decl_toml(coded)))
+    expect("the discriminant of a coded value is its wire code, and its place in the domain is apart",
+           "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n#[repr(u8)]\npub enum WireMode {\n"
+           "    /// `os-default`.\n    OsDefault = 2,\n    /// `on`.\n    On = 0,\n" in rcoded
+           and "    pub const fn position(self) -> usize {\n        match self {\n"
+               "            Self::OsDefault => 0,\n            Self::On => 1,\n"
+               "            Self::Off => 2,\n" in rcoded
+           and "        Self::DEFAULT.position(),\n        DEFAULTS_ONLY,\n" in rcoded
+           and "    fn index(self) -> usize {\n        self.position()\n    }\n" in rcoded
+           and "    default_is_allowed::<WireMode>(WireMode::DEFAULT.position()),\n" in rcoded
+           and "WireMode::DEFAULT as usize" not in rcoded and "Self::DEFAULT as usize" in rcoded)
+    expect("an enum without wire codes is held at its place, with no second mapping",
+           "#[repr(u8)]" not in rpolicies and "fn position" not in rpolicies
+           and "    fn index(self) -> usize {\n        self as usize\n    }\n" in rpolicies)
     expect("a choice policy is an enum whose stated word is found, without an index, among its values",
            "pub enum WireMode {" in rpolicies
            and "    const fn stated() -> Option<Self> {\n"
@@ -6182,8 +6478,8 @@ def cmd_selftest() -> int:
     expect("the generated rule and the Kconfig help name the build that selects nothing",
            f"(no `{POLICY_SELECTION_FEATURE}`)" in rpolicies
            and "or a build where nothing selects a policy after it," in kpolicies)
-    pico_doors = re.search(r"^config-policy = \[(.*)\]$", MANIFESTS["pico"].read_text(encoding="utf-8"),
-                           re.MULTILINE)
+    pico_doors = re.search(r"^config-policy = \[(.*?)\]$", MANIFESTS["pico"].read_text(encoding="utf-8"),
+                           re.MULTILINE | re.DOTALL)
     expect("the pico config doors keep the domains wide, and a pico build without them does not",
            pico_doors is not None
            and f'"wz-session-core/{POLICY_SELECTION_FEATURE}"' in pico_doors.group(1))
@@ -6477,6 +6773,16 @@ def cmd_selftest() -> int:
     rsnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(limit_text(scope='"runtime"'))))
     expect("a runtime-scope limit is a field of RuntimeLimits",
            "pub const RUNTIME_LIMIT_COUNT: usize = 1;" in rsnap)
+    expect("a limit's entry reaches its field by the offset its LimitField states, not by a function",
+           "unsafe impl LimitField<SessionLimits> for MaxA {\n"
+           "    const AT: usize = core::mem::offset_of!(SessionLimits, max_a);\n}\n" in bsnap
+           and "unsafe impl LimitField<RuntimeLimits> for MaxA {\n"
+           "    const AT: usize = core::mem::offset_of!(RuntimeLimits, max_a);\n}\n" in rsnap
+           and "fn select_in(" not in bsnap and "fn held_in(" not in bsnap)
+    expect("a limit's field is pinned to its Held type beside its offset, so the compiler checks it",
+           "    const AT: usize = core::mem::offset_of!(SessionLimits, max_a);\n}\n\n"
+           "const _: fn(&SessionLimits) -> &MaxAHeld = |s| &s.max_a;\n" in bsnap
+           and "const _: fn(&RuntimeLimits) -> &MaxAHeld = |s| &s.max_a;\n" in rsnap)
     csnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(
         SAMPLE.replace('on_heap = "advisory"', 'on_heap = "capacity"'))))
     expect("a bound the heap sizes too has its capacity in every build",
@@ -7216,7 +7522,8 @@ def main(argv: list[str]) -> int:
         if argv[2] in files:
             sys.stdout.write(files[argv[2]][1])
             return 0
-    if (len(argv) == 6 and argv[1:5] == ["--features", "pico", "--engine", "coop"]):
+    if (len(argv) == 6 and argv[1:4] == ["--features", "pico", "--engine"]
+            and argv[4] in PICO_ENGINES):
         decl = load_decl()
         text = pathlib.Path(argv[5]).read_text(encoding="utf-8")
         conflicts = pico_header_conflicts(decl, "pico", text)
@@ -7224,10 +7531,14 @@ def main(argv: list[str]) -> int:
             print(f"  wz-config FAIL: {argv[5]}: {conflict}", file=sys.stderr)
         if conflicts:
             return 1
-        feats = coop_features(
-            features_for(decl, "pico", read_config(decl, text)),
-            manifest_features(MANIFESTS["pico"]),
-        )
+        stated = features_for(decl, "pico", read_config(decl, text))
+        if argv[4] == "coop":
+            feats = coop_features(stated, manifest_features(MANIFESTS["pico"]))
+        else:
+            # The header's build on the tokio engine, which the base no longer names: a header
+            # arm whose capability only that engine runs (raw Ethernet), or a leg that grades
+            # the tokio engine until it leaves the C library (phase P5).
+            feats = tokio_features(stated, engine_option_features(decl, "tokio"))
         print("--no-default-features --features " + ",".join(feats))
         return 0
     if len(argv) == 4 and argv[1] == "--features" and argv[2] in ABIS:
@@ -7379,7 +7690,7 @@ def main(argv: list[str]) -> int:
     if coop_header or (len(argv) == 3 and argv[1] == "--pico-config-h"):
         decl = load_decl()
         try:
-            enabled = pico_build_features("coop" if coop_header else "tokio", argv[-1].split(","),
+            enabled = pico_build_features("coop" if coop_header else "default", argv[-1].split(","),
                                           manifest_features(MANIFESTS["pico"]))
             header = pico_config_header(decl, enabled, dict(os.environ))
         except KeyError as exc:

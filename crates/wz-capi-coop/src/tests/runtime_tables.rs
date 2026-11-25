@@ -3,16 +3,33 @@
 
 //! The tables a session's runtime reserves when it opens (`RuntimeTables`): a task cell for each
 //! link the config admits, in the bytes a link's session task takes, held with the groups' cells to
-//! the build's `MAX_TASKS`; and the build's `MAX_TIMERS` deadlines.
+//! the build's `MAX_TASKS`; and the deadlines a task of the build that sleeps places
+//! (`RUNTIME_TIMERS`): none in a build none of whose tasks sleeps.
 
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::CoopLocalSet;
+use wz_runtime_coop::{CoopLocalSet, CoopRuntime};
 use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
 
 use super::client_config;
-use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables};
+use crate::arena::{AllocatorMemory, ArenaPlan, SessionArena};
+use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables, RUNTIME_TIMERS};
 use crate::CoopConfig;
+
+/// The runtime `tables` are for, placed as an open places it: in a span of an arena that holds
+/// that span alone, which the runtime keeps until its last holder lets go.
+fn placed_runtime(tables: RuntimeTables) -> CoopRuntime<PosixClock> {
+    let bytes = tables
+        .placed_bytes::<PosixClock>()
+        .expect("a span of the tables' rows");
+    let mut plan = ArenaPlan::vacant();
+    plan.holding_runtime(bytes).expect("the span fits");
+    let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has it");
+    let place = arena.runtime_place(bytes).expect("the plan holds the span");
+    tables
+        .runtime(PosixClock, place)
+        .expect("the span fits the runtime")
+}
 
 /// A read's waits are reserved at the open for every link the session may wait on at once: each
 /// face's (the dial role's and each `max_faces` admits), each port's, each group's and the
@@ -53,7 +70,30 @@ fn a_client_reserves_one_cell_for_the_link_it_dials() {
     assert_eq!(tables.groups, 0, "the config joins no group");
     assert_eq!(tables.rows.task_bytes, link_task_bytes::<PosixClock>());
     assert!(tables.rows.task_bytes > 0, "a session's task has bytes");
-    assert_eq!(tables.rows.timers, caps::MAX_TIMERS);
+    assert_eq!(tables.rows.timers, RUNTIME_TIMERS);
+}
+
+/// The timer table a session's runtime reserves is the build's `MAX_TIMERS` entries only where a
+/// feature spawns a task that sleeps on the runtime, and none otherwise: a session keeps its own
+/// deadlines, so a table no task places a deadline in is not reserved.
+///
+/// # Control
+///
+/// A runtime made of a hand count of timers, the build's `MAX_TIMERS` in a build none of whose
+/// tasks sleeps, reds the capacity of its table.
+#[test]
+fn a_sessions_runtime_reserves_timers_only_for_a_task_that_sleeps() {
+    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        max_faces: 0,
+        ..client_config()
+    });
+    let runtime = placed_runtime(tables);
+    assert_eq!(runtime.timers().capacity(), RUNTIME_TIMERS);
+    assert_eq!(runtime.timers().next_deadline_us(), None);
+    assert_eq!(
+        RUNTIME_TIMERS, 0,
+        "no feature of this engine spawns a task that sleeps"
+    );
 }
 
 /// A listener reserves a cell for each face it admits, a link in its handshake among them, and for
@@ -77,7 +117,8 @@ fn a_listener_reserves_a_cell_for_each_face_it_admits() {
 /// A session that listens with the peers zenoh-pico takes (its ten, `Z_LISTEN_MAX_CONNECTION_NB`)
 /// runs a task for each: ten cells, and the eighth to the tenth session are spawned as the first
 /// is; one that also dials has a cell for its dial beside them. Only a link past the faces it
-/// admits finds no cell.
+/// admits finds no cell. A build that takes faces, whose runtime is one of many cells.
+#[cfg(any(feature = "listen", feature = "group"))]
 #[test]
 fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
     let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
@@ -95,7 +136,7 @@ fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
         ..client_config()
     });
     assert_eq!(dialling.rows.tasks, 11, "the dial role's and ten faces");
-    let runtime = tables.runtime(PosixClock);
+    let runtime = placed_runtime(tables);
     let local = CoopLocalSet::new(&runtime);
     let sessions: Vec<_> = (0..10u8)
         .map(|at| {
@@ -115,6 +156,43 @@ fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
         "a link past the faces finds no cell"
     );
     drop(sessions);
+}
+
+/// A build that takes no face beside its dial role's runs that one link's task in the one cell of
+/// its runtime, whatever count of faces the config states: a second task is refused for want of a
+/// cell, counted, and the cell takes the next task once the first is over and read.
+///
+/// # Control
+///
+/// A runtime made of the tables' rows as a table of many reds the refusal of the second task.
+#[cfg(not(any(feature = "listen", feature = "group")))]
+#[test]
+fn a_dial_only_runtime_runs_one_task_at_a_time_whatever_faces_the_config_states() {
+    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        max_faces: 3,
+        ..client_config()
+    });
+    let runtime = placed_runtime(tables);
+    let local = CoopLocalSet::new(&runtime);
+    let first = local
+        .try_spawn_local(async { 1u8 })
+        .unwrap_or_else(|_| panic!("the dial role's link has the cell"));
+    assert!(
+        matches!(
+            local
+                .try_spawn_local(async { 2u8 })
+                .map(|_| ())
+                .map_err(|refused| refused.why),
+            Err(SpawnRefusal::NoTaskCell)
+        ),
+        "no second cell"
+    );
+    assert_eq!(runtime.task_refusals().no_task_cell, 1);
+    assert_eq!(local.block_on_local(first).expect("ran"), 1);
+    let next = local
+        .try_spawn_local(async { 3u8 })
+        .unwrap_or_else(|_| panic!("the cell is free once its task is read"));
+    assert_eq!(local.block_on_local(next).expect("ran"), 3);
 }
 
 /// The cells are held to the build's `MAX_TASKS` whatever the config admits, a count past the
@@ -139,7 +217,7 @@ fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger
         max_faces: 0,
         ..client_config()
     });
-    let runtime = tables.runtime(PosixClock);
+    let runtime = placed_runtime(tables);
     let local = CoopLocalSet::new(&runtime);
     let large = [7u8; LARGER];
     let refused = local

@@ -8,7 +8,7 @@
 //!
 //! protobuf's wire format carries field numbers and no names and four wire
 //! types and no types. A reader that holds the schema knows both, and a program
-//! that reads a payload by its fields (the typed reader [`crate::proto_decode`],
+//! that reads a payload by its fields (the typed reader `wz_app_frame::proto_decode`,
 //! the instance keys of a message) must not parse `.proto` itself: a second
 //! reader of a language is a second opinion about which field is which, and the
 //! two disagree exactly at the unusual constructs. This module is the one
@@ -120,12 +120,15 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt;
 
 use crate::proto_lex::{Pos, SyntaxError};
 use crate::proto_parse::{
-    parse_file, Docs, EnumDecl, ExtendDecl, FieldOption, FieldType, FileAst, ImportKind, Label,
-    MapValue, MessageDecl, ScalarKind, Syntax, TypeName, MAX_FIELD_NUMBER,
+    parse_file, EnumDecl, ExtendDecl, FieldOption, FieldType, FileAst, ImportKind, MapValue,
+    MessageDecl, Syntax, TypeName, MAX_FIELD_NUMBER,
+};
+use crate::proto_types::{Blocker, BlockerKind, Target};
+pub use crate::proto_types::{
+    EnumInfo, FieldKind, FileOptions, Fld, LinkedTypes, MapValueKind, Msg, ProtoDiagnostic,
 };
 
 /// How many messages deep a field path may go.
@@ -150,69 +153,6 @@ pub struct ProtoFile<'a> {
     /// handed over: a file nothing imports is never opened, so its bytes are
     /// not judged.
     pub text: &'a [u8],
-}
-
-/// Why a schema was refused, and where.
-///
-/// `file`, `line` and `column` are present together when the problem is at a
-/// place in a file. Lines and columns count from 1; a column counts bytes from
-/// the start of the line, so a tab is one column and a multi-byte character
-/// several. `file` alone means the problem is about the file as a whole (the
-/// root message is not in it); none of the three means it is about an argument.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProtoDiagnostic {
-    /// The name the file was handed over under.
-    pub file: Option<String>,
-    /// 1-based line.
-    pub line: Option<usize>,
-    /// 1-based byte column.
-    pub column: Option<usize>,
-    /// What is wrong, in a sentence.
-    pub reason: String,
-}
-
-impl fmt::Display for ProtoDiagnostic {
-    /// `{file}: line {line}: {reason}` for a place in a file, `{file}: {reason}`
-    /// for a whole file, and the reason alone otherwise.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.file, self.line) {
-            (Some(file), Some(line)) => write!(f, "{file}: line {line}: {}", self.reason),
-            (Some(file), None) => write!(f, "{file}: {}", self.reason),
-            (None, _) => f.write_str(&self.reason),
-        }
-    }
-}
-
-impl ProtoDiagnostic {
-    /// A problem at `pos` in the file `file`.
-    pub fn at(file: &str, pos: Pos, reason: impl Into<String>) -> Self {
-        Self {
-            file: Some(String::from(file)),
-            line: Some(pos.line as usize),
-            column: Some(pos.col as usize),
-            reason: reason.into(),
-        }
-    }
-
-    /// A problem of the file `file` as a whole.
-    pub fn in_file(file: &str, reason: impl Into<String>) -> Self {
-        Self {
-            file: Some(String::from(file)),
-            line: None,
-            column: None,
-            reason: reason.into(),
-        }
-    }
-
-    /// A problem of an argument, at no place in a file.
-    pub fn argument(reason: impl Into<String>) -> Self {
-        Self {
-            file: None,
-            line: None,
-            column: None,
-            reason: reason.into(),
-        }
-    }
 }
 
 /// What a walk of the field tree hands each field to ([`Linker::expand_names`]).
@@ -303,28 +243,6 @@ struct Symbol {
     file: usize,
 }
 
-/// A message as the expansion and the value door see it.
-pub struct Msg {
-    pub full_name: String,
-    pub file: usize,
-    /// The index in [`Linker::msgs`] of the message this one is written inside,
-    /// or `None` for a message at the top level of its file.
-    pub parent: Option<usize>,
-    /// The syntax of the file the message is written in: it decides whether a
-    /// singular field has presence and whether a repeated one is packed.
-    pub syntax: Syntax,
-    pub fields: Vec<Fld>,
-    /// The names of the message's oneofs, in the order written.
-    pub oneofs: Vec<String>,
-    /// The comments `protoc` attaches to the message.
-    pub docs: Docs,
-    /// The message's own `option` statements, in the order written.
-    pub options: Vec<FieldOption>,
-    /// What in the text keeps this message from being declared, should the
-    /// expansion visit it, in the order the linker met them.
-    blockers: Vec<Blocker>,
-}
-
 /// An extension field an `extend` block declares, as an option's name finds it.
 ///
 /// Only what says WHERE it is declared is kept: nothing about the field's own
@@ -334,87 +252,6 @@ pub struct Extension {
     pub file: usize,
     /// The package of that file, empty when it declares none.
     pub package: String,
-}
-
-/// An enum, with the numbers its names stand for.
-pub struct EnumInfo {
-    pub full_name: String,
-    /// The enum's syntax decides whether a number that is none of its values is
-    /// a value anyway (proto3, an open enum) or an error (proto2, closed).
-    pub syntax: Syntax,
-    /// `(name, number)` in the order written.
-    pub values: Vec<(String, i128)>,
-}
-
-/// What a field holds, resolved.
-#[derive(Clone, Copy, Debug)]
-pub enum FieldKind {
-    Scalar(ScalarKind),
-    Enum(usize),
-    Message(usize),
-    /// A `group`. Declared here so the value door can say what it refuses; it
-    /// never writes one, so the group's body message is not kept.
-    Group,
-    Map {
-        key: ScalarKind,
-        value: MapValueKind,
-    },
-}
-
-/// What a map's values are.
-#[derive(Clone, Copy, Debug)]
-pub enum MapValueKind {
-    Scalar(ScalarKind),
-    Enum(usize),
-    Message(usize),
-}
-
-/// A `group` or an `extend` that makes a message undeclarable, and where it is.
-///
-/// Recorded when the schema is linked and judged only once the root is known:
-/// the same text is harmless to a root that never reaches the message and fatal
-/// to one that does.
-struct Blocker {
-    /// The file the keyword is written in.
-    file: usize,
-    /// The `group` or `extend` keyword.
-    pos: Pos,
-    kind: BlockerKind,
-}
-
-enum BlockerKind {
-    /// The message holds a group of this name, which is a field of it.
-    Group(String),
-    /// Some `extend` block extends the message.
-    Extend,
-}
-
-/// What the expansion does with a field after its own line.
-enum Target {
-    /// Nothing: a scalar or an enum.
-    Leaf,
-    Message(usize),
-    /// A map: `key` and `value` lines, and the value message's fields if any.
-    Map(Option<usize>),
-}
-
-pub struct Fld {
-    pub name: String,
-    pub number: u64,
-    target: Target,
-    /// Where the type was written, for the diagnostics that blame it.
-    ty_pos: Pos,
-    /// The same type as `target` reads it, with the scalar kind and the enum
-    /// kept: the declaration door needs only the tree, the value door needs
-    /// what each leaf is.
-    pub kind: FieldKind,
-    pub label: Label,
-    /// The index in the owning message's `oneofs`, if the field is a member.
-    pub oneof: Option<usize>,
-    /// Every `[...]` entry, in the order written.
-    pub options: Vec<FieldOption>,
-    /// The comments `protoc` attaches to the field.
-    pub docs: Docs,
 }
 
 pub struct Linker<'f, 'a> {
@@ -476,7 +313,7 @@ impl<'f, 'a> Linker<'f, 'a> {
     /// The type tables a link produced and each file's own options, given up by
     /// the linker that borrows the files: what the typed reader needs to read a
     /// message after the files are gone, and what a writer that narrows by the
-    /// nanopb options reads them from ([`crate::proto_decode::SchemaSet`]).
+    /// nanopb options reads them from (`wz_app_frame::proto_decode::SchemaSet`).
     pub fn into_types(self) -> (Vec<Msg>, Vec<EnumInfo>, Vec<Vec<FieldOption>>) {
         (self.msgs, self.enums, self.file_options)
     }
@@ -512,19 +349,19 @@ impl<'f, 'a> Linker<'f, 'a> {
     }
 }
 
-/// The `option` statements of each file of a linked schema, by the file's index
-/// ([`Msg::file`]): the outermost level the nanopb options are merged from
-/// ([`crate::proto_nanopb`]). The linker a schema is read with and the schema set
-/// a payload keeps both answer it, so an option reads the same over either.
-pub trait FileOptions {
-    /// The options file `file` states, in the order written; none for an index
-    /// the schema has no file at.
-    fn options_of_file(&self, file: usize) -> &[FieldOption];
-}
-
 impl FileOptions for Linker<'_, '_> {
     fn options_of_file(&self, file: usize) -> &[FieldOption] {
         self.file_options.get(file).map_or(&[][..], Vec::as_slice)
+    }
+}
+
+impl LinkedTypes for Linker<'_, '_> {
+    fn linked_messages(&self) -> &[Msg] {
+        &self.msgs
+    }
+
+    fn linked_enums(&self) -> &[EnumInfo] {
+        &self.enums
     }
 }
 

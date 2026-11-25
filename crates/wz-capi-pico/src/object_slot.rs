@@ -182,6 +182,21 @@ impl<T> Slot<T> {
         }
         at
     }
+
+    /// [`Self::fill_in_place`] with a `write` that can be refused: refused, the place is given
+    /// back with nothing in it dropped, and the refusal handed back.
+    ///
+    /// # Safety
+    /// `write` leaves a valid `T` at the place it is handed when it answers `Ok`, and nothing
+    /// there to drop when it answers `Err`; the place is sized and aligned for one and holds none.
+    pub(crate) unsafe fn try_fill_in_place<E>(
+        self,
+        write: impl FnOnce(*mut T) -> Result<(), E>,
+    ) -> Result<*mut T, E> {
+        write(self.place.as_ptr().cast::<T>())?;
+        // SAFETY: the caller's: the place holds the `T` written above, which writing nothing keeps.
+        Ok(unsafe { self.fill_in_place(|_| {}) })
+    }
 }
 
 impl<T> Drop for Slot<T> {
@@ -600,10 +615,96 @@ pub(crate) unsafe fn retire_entity<T, K>(object: *mut T) {
     // the object alone is dropped, as a closure may still read what is kept beside it.
     unsafe {
         core::mem::ManuallyDrop::drop(&mut (*at).value);
+        retire_answering(at);
+    }
+}
+
+/// The owner's letting go of an `Answering<T, K>` whose object is dropped: the place given back
+/// now when nothing counted in it is held, else left to the last hold.
+///
+/// # Safety
+/// As [`retire_entity`], its object dropped.
+#[cfg(not(feature = "engine-tokio"))]
+unsafe fn retire_answering<T, K>(at: *mut Answering<T, K>) {
+    // SAFETY: the caller's.
+    unsafe {
+        let (open, lender) = lent_count(at);
+        retire_lent(open, lender);
+    }
+}
+
+/// As the cooperative engine's, the place going back to the kind's pool.
+///
+/// # Safety
+/// As [`retire_entity`], its object dropped.
+#[cfg(feature = "engine-tokio")]
+unsafe fn retire_answering<T, K>(at: *mut Answering<T, K>) {
+    // SAFETY: the caller's.
+    unsafe {
         if (*at).open.retire() {
             release_entity(at);
         }
     }
+}
+
+/// The count of an `Answering<T, K>` lying in a place its session lent, and the lender kept
+/// beside it: the two the place's letting go reads, apart from `T` and `K`.
+///
+/// # Safety
+/// `at` is an `Answering<T, K>` [`Slot::take_entity`] placed and filled.
+#[cfg(not(feature = "engine-tokio"))]
+unsafe fn lent_count<T, K>(
+    at: *mut Answering<T, K>,
+) -> (
+    *mut crate::ffi::OpenClosures,
+    *const core::mem::ManuallyDrop<Lender>,
+) {
+    let place = at.cast::<InSession<Answering<T, K>>>();
+    // SAFETY: the caller's: the place is an `InSession<Answering<T, K>>`, the object first.
+    unsafe {
+        (
+            core::ptr::addr_of_mut!((*at).open),
+            core::ptr::addr_of!((*place).lender),
+        )
+    }
+}
+
+/// The owner's letting go of a lent place by its count and its lender. One body for every kind
+/// of entity whose closures are counted: each kind's own copy of the count's lock and of the
+/// place given back differed only in where the two lie.
+///
+/// # Safety
+/// As [`lent_count`]'s two, of a place whose object is dropped; called once.
+#[cfg(not(feature = "engine-tokio"))]
+#[inline(never)]
+unsafe fn retire_lent(
+    open: *mut crate::ffi::OpenClosures,
+    lender: *const core::mem::ManuallyDrop<Lender>,
+) {
+    // SAFETY: the caller's: the count stands until the place goes back.
+    if unsafe { (*open).retire() } {
+        // SAFETY: the caller's; nothing holds the place, so it goes back here, once.
+        unsafe { give_back_lent(open, lender) };
+    }
+}
+
+/// Let go of the count of a lent place and give the place back to the session that lent it: the
+/// rest of an `Answering` is its object and what its closures kept, let go of before.
+///
+/// # Safety
+/// As [`lent_count`]'s two, of a place nothing holds any more; called once.
+#[cfg(not(feature = "engine-tokio"))]
+#[inline(never)]
+unsafe fn give_back_lent(
+    open: *mut crate::ffi::OpenClosures,
+    lender: *const core::mem::ManuallyDrop<Lender>,
+) {
+    // SAFETY: the caller's: the lender was written when the place was filled, and is read out
+    // once, here, as the count is dropped once.
+    let lender = core::mem::ManuallyDrop::into_inner(unsafe { core::ptr::read(lender) });
+    // SAFETY: the caller's: the count is live and nothing reads it after.
+    unsafe { core::ptr::drop_in_place(open) };
+    lender.give_back();
 }
 
 /// Give back the place of an entity whose owner and closures are all gone.
@@ -613,7 +714,31 @@ pub(crate) unsafe fn retire_entity<T, K>(object: *mut T) {
 /// it kept taken out by its closures, and in which no closure is counted; called once.
 unsafe fn give_back_answering<T, K>(place: NonNull<core::ffi::c_void>) {
     // SAFETY: the caller's: its count is all that is left to drop, and the place goes back once.
-    unsafe { release_entity(place.cast::<Answering<T, K>>().as_ptr()) };
+    unsafe { give_back_place(place.cast::<Answering<T, K>>().as_ptr()) };
+}
+
+/// Give back the place of an `Answering<T, K>` nothing holds any more, to the session that lent
+/// it.
+///
+/// # Safety
+/// As [`give_back_answering`].
+#[cfg(not(feature = "engine-tokio"))]
+unsafe fn give_back_place<T, K>(at: *mut Answering<T, K>) {
+    // SAFETY: the caller's.
+    unsafe {
+        let (open, lender) = lent_count(at);
+        give_back_lent(open, lender);
+    }
+}
+
+/// As the cooperative engine's, the place going back to the kind's pool.
+///
+/// # Safety
+/// As [`give_back_answering`].
+#[cfg(feature = "engine-tokio")]
+unsafe fn give_back_place<T, K>(at: *mut Answering<T, K>) {
+    // SAFETY: the caller's.
+    unsafe { release_entity(at) };
 }
 
 /// Drop the object at `object` and give its place back.
@@ -966,7 +1091,7 @@ mod tests {
         unsafe { count_in_entity::<_, (), _>(object, &mut closure) };
         {
             // An owner inside a callback does not wait for the closures it counts.
-            let _inside = crate::ffi::InCallback::enter();
+            let _inside = crate::ffi::InCallback::enter().expect("a thread is marked");
             // SAFETY: as above; the owner lets go of `object` once, here.
             unsafe {
                 closures_of::<_, ()>(object).wait_none();
@@ -1035,6 +1160,63 @@ mod tests {
         assert_eq!(free(&engine), places - 1, "the keep holds the place");
         drop(kept);
         assert_eq!(free(&engine), places, "the keep's drop gave it back");
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// A subscriber's place, its owner let go of while a hold counted in it stands, has its object
+    /// dropped at once and goes back with the hold's drop; one let go of with nothing held goes back
+    /// at once, and a matching listener's place does the same through the one body both kinds
+    /// share. Turned red by a release that gives the place back under a hold, never, or to no
+    /// session (`retire_lent` or `give_back_lent` reading the lender at the wrong place).
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_counted_place_goes_back_with_the_last_of_its_owner_and_holds() {
+        use crate::session::{
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move,
+        };
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
+        // How many places of `kind` `engine` has free: each claimed, then all given back.
+        let free = |kind: Kind| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(&engine, kind)).collect();
+            claimed.len()
+        };
+        let drops = core::cell::Cell::new(0);
+        for kind in [Kind::Subscriber, Kind::MatchingListener] {
+            let places = free(kind);
+            assert!(places > 0, "the session's limit admits the kind");
+
+            let object = Slot::take_entity(&engine, kind)
+                .expect("a place")
+                .fill(Answering::keeping(Counted(&drops), ()))
+                .cast::<Counted<'_>>();
+            // SAFETY: `object` was filled for an `Answering` just above, and its owner holds it.
+            let held = unsafe { hold_entity::<_, ()>(object) };
+            // SAFETY: as above; the owner lets go of `object` once, here.
+            unsafe { retire_entity::<_, ()>(object) };
+            let dropped = drops.get();
+            assert_eq!(free(kind), places - 1, "the hold keeps the place");
+            drop(held);
+            assert_eq!(free(kind), places, "the hold's drop gave it back");
+
+            let object = Slot::take_entity(&engine, kind)
+                .expect("a place")
+                .fill(Answering::keeping(Counted(&drops), ()))
+                .cast::<Counted<'_>>();
+            // SAFETY: as above, with nothing counted.
+            unsafe { retire_entity::<_, ()>(object) };
+            assert_eq!(drops.get(), dropped + 1, "each release drops its object");
+            assert_eq!(free(kind), places, "the owner gave it back itself");
+        }
+        assert_eq!(drops.get(), 4, "each object is dropped once");
 
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.

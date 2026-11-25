@@ -4,7 +4,8 @@
 //! A dial under way does not hold the session. The read task redials a lost link inside its step,
 //! with the session held; a dial is begun there and asked at each step, never waited for, so a
 //! call that takes the session (a close, a question about the peers) gets it while the dial's
-//! connection is still being made.
+//! connection is still being made. A program of one thread redials in its own read, the same
+//! step, which a dial under way holds no longer than a step that dials nothing.
 //!
 //! The links here dial the router for the session's open and, once the test says so, begin dials
 //! that are never answered: the way of a connect to a host that does not answer, or one that
@@ -105,6 +106,7 @@ impl SessionLinks for SlowDials {
 /// The session opens over a `tcp/` dial begun without waiting; its router goes, and the read task
 /// redials it with a dial that is never answered. Asked about its peers from another thread, the
 /// session answers promptly, and its close, which stops the read task first, returns promptly.
+#[cfg(feature = "threads")]
 #[test]
 fn a_dial_under_way_holds_neither_the_session_nor_its_close() {
     let router = Router::start(CatchAll::None);
@@ -148,6 +150,68 @@ fn a_dial_under_way_holds_neither_the_session_nor_its_close() {
         "a question about the peers waited {:?} behind a dial under way",
         asked.elapsed()
     );
+
+    let closing = Instant::now();
+    SessionDrive::close(&*engine);
+    assert!(
+        closing.elapsed() < PROMPT,
+        "the close waited {:?} behind a dial under way",
+        closing.elapsed()
+    );
+    assert!(SessionDrive::is_closed(&*engine));
+}
+
+/// The same in the form of one thread, which starts no read task: the program's own reads redial
+/// the lost link with a dial that is never answered, and each returns promptly while the dial is
+/// under way, as does the session's close. Turned red by a read that redials the waiting way
+/// (`SessionLinks::open_initiator`), which holds it for [`DIAL_MS`].
+#[cfg(not(feature = "threads"))]
+#[test]
+fn a_dial_under_way_holds_no_read_of_one_thread() {
+    let router = Router::start(CatchAll::None);
+    let slow = Arc::new(AtomicBool::new(false));
+    let dials = Arc::new(AtomicUsize::new(0));
+    let engine = CoopEngine::open(
+        SlowDials {
+            inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            slow: slow.clone(),
+            dials: dials.clone(),
+        },
+        PosixClock,
+        PosixEntropy,
+        CoopConfig {
+            redial_ms: Some(50),
+            ..config(&router)
+        },
+    )
+    .expect("the session opens over a dial begun without waiting");
+
+    slow.store(true, Ordering::SeqCst);
+    router.send(Command::Close);
+    drop(router);
+    let until = Instant::now() + Duration::from_secs(5);
+    while dials.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < until,
+            "the lost link was not dialled again"
+        );
+        let read = Instant::now();
+        let _ = SessionDrive::read(&*engine, false);
+        assert!(
+            read.elapsed() < PROMPT,
+            "a read took {:?} with a dial under way",
+            read.elapsed()
+        );
+    }
+    // The dial begun, a read asks it and goes on.
+    let read = Instant::now();
+    let _ = SessionDrive::read(&*engine, false);
+    assert!(
+        read.elapsed() < PROMPT,
+        "a read waited {:?} behind a dial under way",
+        read.elapsed()
+    );
+    assert!(engine.peer_identities().is_empty(), "the link is lost");
 
     let closing = Instant::now();
     SessionDrive::close(&*engine);

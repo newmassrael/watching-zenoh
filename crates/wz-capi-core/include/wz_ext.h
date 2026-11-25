@@ -35,8 +35,9 @@
  * may_require is the rest a run may ask for, null when part of it has no
  * facility name, and unknown says why. The words are the manifest's
  * facility vocabulary. The config is read as z_open reads it, and is not
- * consumed. Part of the unstable surface: a library built without its
- * unstable API does not have it.
+ * consumed. Part of the unstable surface, in a library built with the
+ * device-requires capability (on in a build that names nothing, off in
+ * the zenoh-pico preset), which implies the unstable API.
  *
  * Z_OK with the object, or the code z_open would refuse the config with,
  * the string then naming the reason. */
@@ -97,11 +98,13 @@ z_result_t wz_ext_config_document(z_loaned_config_t *config,
  * of this function after it answers Z_EINVAL and the process keeps the
  * limits it took.
  *
- * Text that is no JSON5 object, a wz member of a refused shape, a profile, a
- * policy, key ids, a limit of a session, a limit the build does not have or
- * decides alone, and a value the build's domain leaves out or that is over
- * the build's value answer _Z_ERR_CONFIG_INVALID_VALUE, whenever the call
- * comes, and change nothing; a NULL json5 answers _Z_ERR_NULL. */
+ * Text that is no JSON5 object, a document nested deeper than
+ * CONFIG_DOCUMENT_DEPTH (the outermost object being 1), as
+ * wz_ext_config_document refuses one, a wz member of a refused shape, a
+ * profile, a policy, key ids, a limit of a session, a limit the build does
+ * not have or decides alone, and a value the build's domain leaves out or
+ * that is over the build's value answer _Z_ERR_CONFIG_INVALID_VALUE, whenever
+ * the call comes, and change nothing; a NULL json5 answers _Z_ERR_NULL. */
 z_result_t wz_ext_runtime_limits_document(const char *json5);
 
 /* A clock the program registers, which z_timestamp_new then stamps with in
@@ -943,7 +946,7 @@ bool wz_ext_internal_e2e_receiver_check(
  * A message is published on one key expression whatever its instance; a
  * KEYER names up to the build's INSTANCE_KEY_FIELDS fields of the payload's
  * protobuf message (integers, enumerations by their numbers, or strings), read
- * through the program's .proto files, and the values each may take. The
+ * through the program's schema, and the values each may take. The
  * instance of a sample is the position of its values in the product of those
  * lists, row-major (the last field varies fastest), at most
  * INSTANCES_PER_MESSAGE of them; it is never on the wire. A node makes one
@@ -965,16 +968,25 @@ bool wz_ext_internal_e2e_receiver_check(
  * keys and sender slots are exclusive on one message. The last value of each
  * instance is kept in storage the program gives.
  *
+ * THE SCHEMA is the FileDescriptorSet protoc compiles the program's .proto
+ * files into when the program is built (protoc --include_imports -o), handed
+ * over as bytes. A build with the proto-text capability (WZ_FEATURE_PROTO_TEXT
+ * of the config.h of the library's build) also reads the files' text itself,
+ * through wz_ext_proto_file_t; a build without it links no text reader, and
+ * those declarations are not made.
+ *
  * OWNERSHIP AND THREADS. As for the end-to-end doors. The judging and
  * protecting doors hold the keyer's lock, then the receiver's or the
  * sender's. Part of the unstable surface. */
 
+#if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
 /* One .proto file: the name other files import it by, and its text, both
  * NUL-terminated UTF-8, borrowed for the call. */
 typedef struct wz_ext_proto_file_t {
   const char *name;
   const char *text;
 } wz_ext_proto_file_t;
+#endif
 
 typedef struct wz_ext_owned_instance_keyer_t {
   void *_handle;
@@ -1023,22 +1035,34 @@ typedef struct wz_ext_instance_key_t {
 void wz_ext_instance_keyer_options_default(
     wz_ext_instance_keyer_options_t *this_);
 
-/* A keyer of the message description names, over the file_count files
- * (every one is read, with what it imports). description is JSON:
+/* A keyer of the message description names, over the schema in the len
+ * bytes at bytes, a FileDescriptorSet. description is JSON:
  *   {"message": "<full name, package included>",
  *    "fields": [{"path": "<field>" or "<holder>.<field>",
  *                "values": [<integer>, {"range": [<low>, <high>]}, ...]
  *                          or ["<string>", ...]}, ...],
  *    "report_interval_ms": <n>}
  * options may be NULL (no last values). On _Z_ERR_CONFIG_INVALID_VALUE (-89),
- * for schema files, a description or storage that is refused, refusal (which
- * may be NULL) holds the reason. Z_ERR_NULL (-127) for a NULL argument the
- * call needs; Z_EINVAL (-75) for text that is not UTF-8. */
+ * for a schema, a description or storage that is refused, refusal (which may
+ * be NULL) holds the reason, beginning schema, description or storage, or
+ * naming the limit exceeded. Z_ERR_NULL (-127) for a NULL argument the call
+ * needs, NULL bytes with a length, or NULL storage with a value_capacity;
+ * Z_EINVAL (-75) for a description that is not UTF-8. */
+z_result_t wz_ext_instance_keyer_from_descriptor_set(
+    wz_ext_owned_instance_keyer_t *this_, const uint8_t *bytes, size_t len,
+    const char *description, const wz_ext_instance_keyer_options_t *options,
+    z_owned_string_t *refusal);
+#if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
+/* The same keyer over the file_count .proto files (every one is read, with
+ * what it imports), in a build with proto-text. Z_ERR_NULL also for NULL files
+ * with a count or a file with a NULL name or text; Z_EINVAL for any text that
+ * is not UTF-8. */
 z_result_t wz_ext_instance_keyer_new(
     wz_ext_owned_instance_keyer_t *this_, const wz_ext_proto_file_t *files,
     size_t file_count, const char *description,
     const wz_ext_instance_keyer_options_t *options,
     z_owned_string_t *refusal);
+#endif
 z_result_t wz_ext_instance_keyer_instances(
     const wz_ext_loaned_instance_keyer_t *this_, size_t *out);
 /* The instance payload, received or about to be sent at now_ms, is; an
@@ -1636,8 +1660,8 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
 
 /* ================================================ callbacks
  *
- * No door of wz's own: this section states how the cooperative engine calls
- * a program's subscriber and queryable callbacks (docs/c-abi-architecture.md,
+ * This section states how the cooperative engine calls a program's
+ * subscriber and queryable callbacks (docs/c-abi-architecture.md,
  * section 3, L3). A callback is called as zenoh-pico calls it: with no lock of
  * the library held, on the thread that delivers (the read task, or the thread
  * whose zp_read or put reached it), so it may run on two threads at once and
@@ -1661,7 +1685,18 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  *
  * The library lets go of a callback once, after its last call has returned:
  * then its drop runs, and z_undeclare_subscriber returns after it, as
- * zenoh-pico's undeclare does. */
+ * zenoh-pico's undeclare does.
+ *
+ * A library built without std has no thread-local storage to mark a thread
+ * inside a callback with, so it marks each in a table of CALLBACK_THREADS
+ * entries in the multi-threaded arm and of one in the single-threaded arm,
+ * where the program calls from one thread at a time. A callback a thread past
+ * the table would run is not run, and is counted here. */
+
+/* How many callbacks the library did not run because the threads already
+ * inside callbacks filled its table; 0 in a library with std, which runs
+ * every one. */
+size_t wz_ext_callbacks_refused(void);
 
 /* ================================================ the program's transport
  *
@@ -1980,16 +2015,21 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * never lends a slot to another, so each kind holds what was stated for it
  * and no more. wz_ext_object_pool_class reports the pools by size class, of
  * WZ_EXT_OBJECT_POOL_CLASSES classes whose largest slots are 16 bytes, then
- * each twice the one before: the kinds whose slots a class holds together,
- * with the bytes their slots take. A pool of slots larger than the largest
- * class is reported by none.
+ * each twice the one before: the pools whose slots a class holds together,
+ * the kinds' and the payload blocks', with the bytes their slots take. A pool
+ * of slots larger than the largest class is reported by none.
  *
- * THE PAYLOADS' AREA. The bytes the owned payloads, strings and slices carry
- * lie beside the pools, in one area of payload_bytes bytes: blocks of
- * power-of-two sizes from 32 bytes, a payload taking the smallest that holds
- * its bytes and a 16-byte head, a larger block split in halves for it and
- * joined again when both halves are free. A payload larger than the area's
- * largest block, or one no free block holds, is refused.
+ * THE PAYLOAD BLOCKS. The bytes the owned payloads, strings and slices carry
+ * lie beside the pools, in three pools of fixed blocks: small_payload_blocks
+ * blocks of PAYLOAD_SMALL_BLOCK_BYTES, medium_payload_blocks blocks of
+ * PAYLOAD_MEDIUM_BLOCK_BYTES, and large_payload_blocks blocks that each hold
+ * the largest message a session of the build delivers (the larger of
+ * PICO_FRAG_MAX_BYTES and the batch sizes), each block's bytes counting a
+ * 16-byte head. A payload takes a block of the smallest pool whose blocks
+ * hold it and that has one free. One no free block holds is refused, and
+ * counted in the class of the smallest pool whose blocks hold it, or of its
+ * own bytes when none does. payload_bytes is refused with Z_EINVAL when it is
+ * not 0: bytes are no count of blocks of each size.
  *
  * THE COUNTS. The program states how many of each object it holds at once.
  * The entity counts (publishers to liveliness_subscribers, queriers,
@@ -2008,8 +2048,8 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
  * other counts are as stated, 0 being none, so a program that reserves its
- * own pools states the configs it opens from and the bytes its payloads
- * carry. A count of an object the build has none of is not read.
+ * own pools states the configs it opens from and the payload blocks its
+ * payloads take. A count of an object the build has none of is not read.
  *
  * THE SIZE. The counts are a sized struct (SIZED STRUCTS, at the top): a
  * program compiled before a count was added states it as 0, its limit's
@@ -2021,8 +2061,9 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * reserves the build's pools: HELD_SESSIONS sessions, each with the entities
  * its limits admit, HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES, HELD_PAYLOADS
  * and HELD_ENCODINGS of the owned values, HELD_CONFIGS configs, HELD_HELLOS
- * kept hellos and HELD_PAYLOAD_BYTES of payload bytes. A program that states
- * counts of its own reserves them before its first object instead.
+ * kept hellos, and HELD_SMALL_PAYLOAD_BLOCKS, HELD_MEDIUM_PAYLOAD_BLOCKS and
+ * HELD_LARGE_PAYLOAD_BLOCKS payload blocks. A program that states counts of
+ * its own reserves them before its first object instead.
  *
  * RUNNING. Nothing falls back to the heap. A pool with no free slot, or a
  * build's reservation the heap cannot give, refuses the object: the call that
@@ -2055,7 +2096,7 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t bytes;
   size_t configs;
   size_t hellos;
-  size_t payload_bytes;
+  size_t payload_bytes; /* 0; any other value is refused with Z_EINVAL */
   size_t queriers;
   size_t keyexprs;
   size_t encodings;
@@ -2066,6 +2107,9 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t decl_watches;
   size_t transport_events_listeners;
   size_t link_events_listeners;
+  size_t small_payload_blocks;
+  size_t medium_payload_blocks;
+  size_t large_payload_blocks;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {
@@ -2083,23 +2127,25 @@ typedef struct wz_ext_object_pool_class_t {
  * argument; _Z_ERR_CONFIG_INVALID_VALUE for counts that make no pool (a
  * count left 0 whose limit holds no bound, or no slot at all);
  * _Z_ERR_SYSTEM_OUT_OF_MEMORY for more than the address space holds;
- * Z_EINVAL for a struct_size short of the base (THE SIZE). */
+ * Z_EINVAL for a struct_size short of the base (THE SIZE) or a payload_bytes
+ * not 0. */
 z_result_t wz_ext_object_pool_bytes(const wz_ext_object_pool_counts_t *counts,
                                     size_t *out_bytes);
 
 /* Reserve the pools of counts from the heap, in one allocation. Z_OK;
  * _Z_ERR_NULL for a NULL counts; _Z_ERR_CONFIG_INVALID_VALUE for counts that
  * make no pool; _Z_ERR_SYSTEM_OUT_OF_MEMORY when the heap has not the
- * memory; Z_EINVAL when pools are reserved already, or for a struct_size
- * short of the base (THE SIZE). A refusal leaves the heap as it was. */
+ * memory; Z_EINVAL when pools are reserved already, for a struct_size short
+ * of the base (THE SIZE), or for a payload_bytes not 0. A refusal leaves the
+ * heap as it was. */
 z_result_t wz_ext_object_pool_reserve(const wz_ext_object_pool_counts_t *counts);
 
 /* Reserve the pools of counts over the len bytes at base, which the program
  * hands over until wz_ext_object_pool_release and must not touch meanwhile.
  * Z_OK; _Z_ERR_NULL for a NULL argument; _Z_ERR_CONFIG_INVALID_VALUE for
  * counts that make no pool; Z_EINVAL for a base not aligned to 16 bytes,
- * when pools are reserved already, or for a struct_size short of the base
- * (THE SIZE); _Z_ERR_SYSTEM_OUT_OF_MEMORY for a len
+ * when pools are reserved already, for a struct_size short of the base
+ * (THE SIZE) or a payload_bytes not 0; _Z_ERR_SYSTEM_OUT_OF_MEMORY for a len
  * under what wz_ext_object_pool_bytes answers. A refused call writes nothing
  * at base. */
 z_result_t wz_ext_object_pool_place(void *base, size_t len,
@@ -2292,8 +2338,9 @@ bool wz_ext_internal_message_catalog_check(
  * A catalog message's payload set and read field by field, under .proto
  * files the program hands over when it runs: a program that knows its
  * messages by name and its fields by path, with no code generated for them.
- * It reads a SCHEMA once (every file of wz_ext_proto_file_t, with what each
- * imports), makes a PAYLOAD for message index of a catalog, naming the
+ * It reads a SCHEMA once (the FileDescriptorSet protoc compiled the .proto
+ * files into, or with proto-text every file of wz_ext_proto_file_t, with what
+ * each imports), makes a PAYLOAD for message index of a catalog, naming the
  * message type of the schema it is (its full name, package included), sets
  * values at field paths, encodes the protobuf bytes to put on the key
  * wz_ext_message_payload_key_expr gives, decodes the bytes a sample carries
@@ -2373,15 +2420,24 @@ typedef struct wz_ext_moved_message_payload_t {
   wz_ext_owned_message_payload_t _this;
 } wz_ext_moved_message_payload_t;
 
-/* Read every file (each with what it imports) into a schema. this_ holds the
- * null state on every error; on _Z_ERR_CONFIG_INVALID_VALUE (-89) refusal
- * (which may be NULL) holds the reader's diagnostic. Z_ERR_NULL (-127) for a
- * NULL this_, NULL files with a count, or a file with a NULL name or text;
- * Z_EINVAL (-75) for text that is not UTF-8. */
+/* Read the len bytes at bytes, a FileDescriptorSet (what protoc
+ * --include_imports -o writes), into a schema. this_ holds the null state on
+ * every error; on _Z_ERR_CONFIG_INVALID_VALUE (-89) refusal (which may be
+ * NULL) holds why the bytes are refused. Z_ERR_NULL (-127) for a NULL this_,
+ * or NULL bytes with a length. */
+z_result_t wz_ext_payload_schema_from_descriptor_set(
+    wz_ext_owned_payload_schema_t *this_, const uint8_t *bytes, size_t len,
+    z_owned_string_t *refusal);
+#if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
+/* Read every file (each with what it imports) into a schema, in a build with
+ * proto-text. As above, and refusal holds the text reader's diagnostic;
+ * Z_ERR_NULL also for NULL files with a count, or a file with a NULL name or
+ * text; Z_EINVAL (-75) for text that is not UTF-8. */
 z_result_t wz_ext_payload_schema_new(wz_ext_owned_payload_schema_t *this_,
                                      const wz_ext_proto_file_t *files,
                                      size_t file_count,
                                      z_owned_string_t *refusal);
+#endif
 const wz_ext_loaned_payload_schema_t *wz_ext_payload_schema_loan(
     const wz_ext_owned_payload_schema_t *this_);
 wz_ext_moved_payload_schema_t *wz_ext_payload_schema_move(
@@ -2682,7 +2738,10 @@ z_result_t wz_ext_interface_bytes_view(const z_loaned_bytes_t *bytes,
  * waiting, as it does from a callback the library runs itself, since the
  * wait would be for the callback that is waiting.
  *
- * Z_OK once body returned; Z_ERR_NULL for a NULL body, which runs nothing. */
+ * Z_OK once body returned; Z_ERR_NULL for a NULL body, which runs nothing;
+ * _Z_ERR_SYSTEM_OUT_OF_MEMORY, running nothing, when the library marks the
+ * threads in callbacks in a table of fixed room (a build without std) and
+ * other threads fill it (wz_ext_callbacks_refused). */
 z_result_t wz_ext_interface_run_in_callback(void (*body)(void *context),
                                             void *context);
 

@@ -104,6 +104,33 @@ pub trait TextOut: fmt::Write {
     }
 }
 
+/// An address written as `core::net`'s `Display` writes it, for a `write!` or a log line: through
+/// [`TextOut::push_ip`] and [`TextOut::push_socket_addr`], so an image whose only address text is
+/// this carries none of `core::net`'s formatting. Width and alignment flags are not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddrText<A>(pub A);
+
+/// The longest text [`TextOut::push_socket_addr`] writes: an IPv6 end with every group written
+/// out, the widest scope and the widest port.
+const SOCKET_ADDR_TEXT_LEN: usize =
+    "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".len();
+
+impl fmt::Display for AddrText<SocketAddr> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text: FixedText<SOCKET_ADDR_TEXT_LEN> = FixedText::new();
+        text.push_socket_addr(self.0);
+        f.write_str(text.finish().map_err(|_| fmt::Error)?)
+    }
+}
+
+impl fmt::Display for AddrText<IpAddr> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text: FixedText<IPV6_TEXT_LEN> = FixedText::new();
+        text.push_ip(self.0);
+        f.write_str(text.finish().map_err(|_| fmt::Error)?)
+    }
+}
+
 /// `a.b.c.d`, as [`TextOut::push_ip`] writes an IPv4 address.
 fn push_ipv4<W: TextOut + ?Sized>(out: &mut W, ip: Ipv4Addr) {
     for (at, octet) in ip.octets().into_iter().enumerate() {
@@ -431,6 +458,33 @@ impl<const N: usize> TextOut for FixedText<N> {}
 mod tests {
     use super::*;
 
+    /// The address adapter writes what `core::net`'s `Display` writes, the longest addresses
+    /// whole. Turned red by a buffer under the longest text, which the adapter refuses.
+    #[test]
+    fn an_address_is_written_as_the_formatter_writes_it() {
+        use core::net::{Ipv6Addr, SocketAddrV6};
+        let widest = Ipv6Addr::new(
+            0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+        );
+        for ip in [
+            IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)),
+            IpAddr::V4(Ipv4Addr::new(224, 0, 0, 224)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped()),
+            IpAddr::V6(widest),
+        ] {
+            assert_eq!(std::format!("{}", AddrText(ip)), std::format!("{ip}"));
+            let at = SocketAddr::new(ip, 65535);
+            assert_eq!(std::format!("{}", AddrText(at)), std::format!("{at}"));
+        }
+        let scoped = SocketAddr::V6(SocketAddrV6::new(widest, 65535, 0, u32::MAX));
+        assert_eq!(
+            std::format!("{}", AddrText(scoped)),
+            std::format!("{scoped}")
+        );
+    }
+
     #[test]
     fn the_number_writers_print_what_the_formatter_prints() {
         for n in [0u64, 1, 9, 10, 99, 100, 65_535, 4_294_967_295, u64::MAX] {
@@ -449,7 +503,7 @@ mod tests {
     /// alone, a run at either end, two runs of which the first or the longer wins), the
     /// unspecified, loopback and IPv4-mapped forms, and a scope.
     #[test]
-    fn an_address_is_written_as_the_formatter_writes_it() {
+    fn every_shape_of_an_address_is_written_as_the_formatter_writes_it() {
         use core::net::{Ipv6Addr, SocketAddrV6};
         let v6 = [
             Ipv6Addr::UNSPECIFIED,

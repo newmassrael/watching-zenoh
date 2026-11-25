@@ -43,8 +43,10 @@ tap = ["dep:wz-capture"]
 libc = { version = "0.2" }
 # The raweth FRAMING SSOT — `raweth_socket` carries frames it does not define.
 # `transport-link-raweth` is what gates that module there, so naming it here is
-# the same selection `wz-runtime-tokio` made when this file lived beside it.
+# the same selection `wz-runtime-tokio` made when this file lived beside it;
+# `alloc` is for `frame`, which hands each frame back owned.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
     "transport-link-raweth",
 ] }
 # Only `tap` needs it, for `Dissection` and `LINKTYPE_ETHERNET` — the types the

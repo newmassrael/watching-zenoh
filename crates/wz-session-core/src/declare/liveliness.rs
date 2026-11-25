@@ -351,7 +351,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
             IterationEvent::InPlace(record) => {
                 if let Some(declare) = record.declare() {
                     if !declare.interest_id.is_some_and(claimed) {
-                        self.dispatch_declare_view(&declare.body, peer_keyexpr_table);
+                        self.dispatch_declare_view(
+                            &declare.body,
+                            MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
+                        );
                     }
                 }
             }

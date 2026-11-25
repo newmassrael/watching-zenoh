@@ -139,7 +139,10 @@ pub fn chain_headers<S: MsgPutStorage>(
             (SceList::as_slice(extensions.as_ref()?.inner()), None)
         }
     };
-    let (before, after) = entries.split_at(place.unwrap_or(entries.len()));
+    // A place past the last entry is read as the place after it.
+    let (before, after) = entries
+        .split_at_checked(place.unwrap_or(entries.len()))
+        .unwrap_or((entries, &[]));
     Some(
         before
             .iter()
@@ -156,7 +159,7 @@ pub fn view_chain<'v, 'a>(
     put: &'v wz_codecs::msg_put::MsgPutView<'a>,
 ) -> Option<(
     &'v sce_forge_runtime::codec::Without<
-        sce_forge_runtime::codec::ListView<'a, wz_codecs::msg_put::MsgPutExtensionsWalk, 0>,
+        sce_forge_runtime::codec::ListView<'a, wz_codecs::ext_entry::ExtEntryWalk, 0>,
     >,
     Option<usize>,
 )> {

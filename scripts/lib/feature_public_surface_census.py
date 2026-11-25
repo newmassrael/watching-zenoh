@@ -445,12 +445,21 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "counters, a Rust surface neither C ABI reports, which the crate's own "
         "`tests::congestion` reads; `time-base` gates `ClockMoves`, the word of a clock the "
         "program moves that ends a read's wait, which the pico ABI's time base hands the engine "
-        "and the crate's own `clock_moves_tests` run",
+        "and the crate's own `clock_moves_tests` run; `runtime-plan` gates `ArenaPlan::rows`, "
+        "the plan of a session's arena read row by row, `PlanFrom::Config` and `CoopEngine::open` "
+        "with the opens beside it, the plan laid out from the config at the open, which the "
+        "crate's own tests run whatever it says (`tests::arena` and every engine test) and the "
+        "pico ABI's `peer` and `config-policy` builds open through; `raweth` gates the "
+        "`raweth_group` re-export of the runtime's joiner of `reth/` groups, which the pico "
+        "ABI's `raweth-transport` wraps the host's groups in and the runtime's own "
+        "`raweth_group` unit tests run",
         frozenset(
             {
                 "app-transport",
                 "group-host",
                 "listen",
+                "raweth",
+                "runtime-plan",
                 "scout",
                 "scout-datagram",
                 "shared-key-ids",
@@ -616,19 +625,23 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `_supervise`, with the types and constants they take, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
         # `instance-key` gates `pub mod instance_key`, whose public items are wz's own doors
-        # `wz_ext_instance_keyer_new`, `_instances`, `_index`, `_flush`, `_counts`, `_last`,
+        # `wz_ext_instance_keyer_from_descriptor_set`, `_instances`, `_index`, `_flush`, `_counts`, `_last`,
         # `_set_last`, `_loan`, `_move`, `_drop`, `wz_ext_instance_keyer_options_default` and the
         # two `wz_ext_internal_instance_keyer_*` doors, and the types and constants they take,
         # declared in `wz_ext.h`; `e2e-receiver` and `e2e-sender` gate its `_judge` and `_protect`
         # doors inside it. Off by default, as upstream has no such doors.
         # `message-payload` gates `pub mod message_payload`, whose public items are wz's own doors
-        # `wz_ext_payload_schema_new`, `_loan`, `_move`, `_drop`, `wz_ext_message_payload_new`,
+        # `wz_ext_payload_schema_from_descriptor_set`, `_loan`, `_move`, `_drop`, `wz_ext_message_payload_new`,
         # `_options_default`, `_storage_size`, `_key_expr`, the six `_set_*` and six `_get_*` doors, `_count`, `_clear`, `_reset`,
         # `_encode`, `_decode`, `_refusal`, `_loan`, `_move`, `_drop`, the four `wz_ext_internal_*`
         # doors of the two handles, and the types they take, declared in `wz_ext.h`; off by
-        # default, as upstream has no such doors. It and `instance-key` each gate
-        # `pub mod proto_file` (either one is enough), whose one public item is the
-        # `wz_ext_proto_file_t` struct both take, declared in `wz_ext.h`.
+        # default, as upstream has no such doors.
+        # `proto-text` gates the doors `wz_ext_payload_schema_new` (inside `message-payload`'s
+        # module) and `wz_ext_instance_keyer_new` (inside `instance-key`'s), which read a schema
+        # from `.proto` text, and, beside either of those two, `pub mod proto_file`, whose one
+        # public item is the `wz_ext_proto_file_t` struct both take, declared in `wz_ext.h`; off
+        # by default, as upstream has no such doors and a schema is otherwise read from the
+        # `FileDescriptorSet` `protoc` compiled.
         # `object-pool` gates `pub mod object_pool`, whose public items are wz's own doors
         # `wz_ext_object_pool_bytes`, `_reserve`, `_class` and `_release`, the
         # `WZ_EXT_OBJECT_POOL_CLASSES` constant and the two structs they take, declared in
@@ -660,6 +673,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "message-payload",
                 "object-pool",
                 "object-pool-region",
+                "proto-text",
                 "remote-declaration-watch",
                 "replay-cache",
                 "resource-snapshot",
@@ -677,7 +691,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # into a library of their own over the core library. Each feature here is `wz-capi-pico`'s of
     # that name: `e2e-sender`, `e2e-receiver`, `e2e-supervision`, `instance-key`,
     # `message-catalog`, `message-payload` and `replay-cache` gate the `pub mod` of their door
-    # files, and each of them but `message-payload` gates `pub mod additional` too; `event-ring`
+    # files, and each of them but `message-payload` gates `pub mod additional` too; `proto-text`
+    # gates the two doors that read a schema from text inside those files and `pub mod proto_file`;
+    # `event-ring`
     # and `replay-cache` gate the modules of `src/core_view.rs`, the core's C ABI as the doors
     # import it, and their re-exports at the crate root, where the door files name them. A `#[path]` module, an inline module and a re-export are
     # shapes `ABI_CONTRACT` refuses, so the row is held to `PROSE_ONLY` below.
@@ -695,6 +711,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "instance-key",
                 "message-catalog",
                 "message-payload",
+                "proto-text",
                 "replay-cache",
             }
         ),
@@ -858,20 +875,37 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # (`link_storage::LinkRx`, `LinkTxStore`, `LinkStorage::claim`) and the faces' owed writes
         # (`Faces::write_owed_now`, `owing_waits`), selected by `wz-capi-coop`'s `listen`; sites
         # inside a `pub mod` or an `impl`, the shape `udp-listen`'s have.
+        # `serial` joins: the locator of a link over a serial line (`Locator::Serial`,
+        # `SerialLocator`, `SerialLine`, `SerialPath`, `SERIAL_PATH_LEN` in `pub mod session_drive`),
+        # selected by the pico ABI's `transport-link-serial`; sites inside a `pub mod` or an `impl`,
+        # the shape `udp-listen`'s have.
+        # `ws` joins the same way: the locator of a WebSocket link (`Locator::Ws`, `WsLocator`,
+        # `Locator::ws`, `Locator::as_ws` in `pub mod session_drive`), selected by the pico ABI's
+        # `transport-link-ws`.
+        # `unixpipe` joins: the locator of a link over a pair of named FIFOs (`Locator::Unixpipe`,
+        # `UnixpipeLocator`, `UnixpipePath`, `UNIXPIPE_PATH_LEN` in `pub mod session_drive`), selected
+        # by the pico ABI's `transport-link-unixpipe`; the shape `serial`'s have.
+        # `raweth` joins: the groups over raw Ethernet (`pub mod raweth_group`: `RawEthDevice`,
+        # `RawEthOpen`, `RawEthGroup`, `RawethJoiner`), selected by the crate that joins
+        # `reth/` groups on this engine; the shape `app-link`'s site has.
         frozenset(
             {
                 "alloc",
                 "app-link",
                 "host-lock",
+                "raweth",
                 "reassembly",
                 "runtime",
                 "rx-in-place",
                 "scouting-static",
+                "serial",
                 "session-slot",
                 "session-unicast",
                 "session-unicast-accept",
                 "switchboard",
                 "udp-listen",
+                "unixpipe",
+                "ws",
             }
         ),
     ),
@@ -1041,6 +1075,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "session-slot",
                 "test-support",
                 "transport-multicast",
+                # The counters a group session counts what it sends and receives into
+                # (`MulticastPump::attach_stats`, `MulticastSessionSeed::with_stats`,
+                # `GroupTxStage::attach_stats`): methods of
+                # the group drive's types, selected by the cooperative C engine's
+                # `transport-stats`, which no MCU image selects.
+                "transport-stats",
             }
         ),
     ),
@@ -1093,8 +1133,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`session-slot` is `deploy/host-slot-node`, a crate outside this workspace built with "
         "a fixed feature set; `host-multicast` gates the host's interface table, a group's "
         "sockets and a scouting window's sockets (`interfaces`, `multicast`, `scouting`), which "
-        "the cooperative engine's `scout` and `group-host` open and this crate's own tests run",
-        frozenset({"host-multicast", "session-slot"}),
+        "the cooperative engine's `scout` and `group-host` open and this crate's own tests run; "
+        "`serial` gates the host's ttys as serial lines (`serial`), which the cooperative engine's "
+        "serial links open and this crate's own tests run; `unixpipe` gates the host's named FIFOs "
+        "(`unixpipe`), which the cooperative engine's unixpipe links open and this crate's own "
+        "tests run; `raweth` gates the host's raw packet sockets (`raweth`), which the "
+        "cooperative engine's `reth/` groups open and this crate's own tests run; `ws` gates "
+        "the opener of the cooperative engine's WebSocket links over the host's TCP (`ws`), "
+        "which this crate's own tests run",
+        frozenset({"host-multicast", "raweth", "serial", "session-slot", "unixpipe", "ws"}),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -1464,20 +1511,28 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # `udp-listen` joins with its OFF_AXIS row: its sites (`UdpPort`, `PortPeer`, `PortPeerError`,
     # `PORT_PEER_BACKLOG`) sit inside `pub mod udp_link` behind `all(udp-listen,
     # not(session-slot))`, compound and nested, which the second clause reads off the sites.
+    # `serial` joins with its OFF_AXIS row: its sites sit inside `pub mod session_drive`, nested,
+    # which the second clause reads off the sites. `ws` and `unixpipe` join the same way.
+    # `raweth` joins with its OFF_AXIS row: its one site, `pub mod raweth_group`, is at the crate
+    # root behind `all(raweth, not(session-slot))`, the compound `app-link`'s site has.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
             "app-link",
             "host-lock",
+            "raweth",
             "reassembly",
             "runtime",
             "rx-in-place",
             "scouting-static",
+            "serial",
             "session-slot",
             "session-unicast",
             "session-unicast-accept",
             "switchboard",
             "udp-listen",
+            "unixpipe",
+            "ws",
         }
     ),
     # R2298 — the last three, and they failed R2297's first clause on ONE
@@ -1526,14 +1581,18 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "session-slot",
             "test-support",
             "transport-multicast",
+            "transport-stats",
         }
     ),
     "wz-runtime-core": frozenset({"alloc"}),
     "wz-runtime-zephyr": frozenset({"session-slot"}),
     # The host profile: `session-slot` gates one crate-root `pub mod slot`, and `host-multicast`
     # three crate-root modules, the simple shape the axis names, so the row is excused only while
-    # the axis could take it for free.
-    "wz-runtime-posix": frozenset({"host-multicast", "session-slot"}),
+    # the axis could take it for free. `raweth` gates one crate-root `pub mod raweth` behind
+    # `all(raweth, not(session-slot))`, the compound `wz-runtime-coop`'s `app-link` site has.
+    "wz-runtime-posix": frozenset(
+        {"host-multicast", "raweth", "serial", "session-slot", "unixpipe", "ws"}
+    ),
     # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind
     # `all(feature = .., lwip_real_build)`, a compound the derivation reads.

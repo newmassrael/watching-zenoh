@@ -42,7 +42,8 @@
 //!
 //! ## Comments
 //!
-//! A message and a field keep the comments `protoc` attaches to them ([`Docs`]).
+//! A message and a field keep the comments `protoc` attaches to them ([`Docs`]), in a
+//! build that keeps them (the crate's `docs` feature); without it they have none.
 //! `protoc` does not look at every token for them: it reads the gap after a `;`,
 //! a `{` that opens a block and a `}` that closes one, the three tokens that end
 //! a declaration, so this parser does the same (`Parser::end_decl`), and the
@@ -69,10 +70,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::proto_lex::{Lexer, Pos, SyntaxError, Tok, Token};
-
-/// The largest legal field number, `2^29 - 1`: the tag keeps three bits for the
-/// wire type in a 32-bit varint.
-pub const MAX_FIELD_NUMBER: u64 = 536_870_911;
+pub use crate::proto_types::{
+    Docs, FieldOption, Label, OptionValue, ScalarKind, Syntax, MAX_FIELD_NUMBER,
+};
 
 /// How deeply messages may be written inside one another.
 ///
@@ -90,111 +90,6 @@ pub const MAX_FIELD_NUMBER: u64 = 536_870_911;
 /// measures the limit of the `protoc` it runs and holds the door to its own 31
 /// on both sides, as a deliberate refusal where `protoc` is more permissive.
 pub const MAX_MESSAGE_NESTING: usize = 31;
-
-/// The scalar type keywords. A field of one of these has no structure to name.
-///
-/// The declaration door only needs to know that a type IS one; the value door
-/// (the capture crate's `proto_encode`) needs which, because the wire form of `int32`,
-/// `sint32` and `fixed32` differ.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScalarKind {
-    Double,
-    Float,
-    Int32,
-    Int64,
-    Uint32,
-    Uint64,
-    Sint32,
-    Sint64,
-    Fixed32,
-    Fixed64,
-    Sfixed32,
-    Sfixed64,
-    Bool,
-    String,
-    Bytes,
-}
-
-impl ScalarKind {
-    /// Every scalar kind, in the order the language guide lists them. The walk a
-    /// vocabulary of type words is held to, so a kind added to the enum is a
-    /// keyword a document has to declare.
-    pub const ALL: [Self; 15] = [
-        Self::Double,
-        Self::Float,
-        Self::Int32,
-        Self::Int64,
-        Self::Uint32,
-        Self::Uint64,
-        Self::Sint32,
-        Self::Sint64,
-        Self::Fixed32,
-        Self::Fixed64,
-        Self::Sfixed32,
-        Self::Sfixed64,
-        Self::Bool,
-        Self::String,
-        Self::Bytes,
-    ];
-
-    /// The kind a type keyword names, or `None` for any other word.
-    pub fn from_keyword(word: &str) -> Option<Self> {
-        Some(match word {
-            "double" => Self::Double,
-            "float" => Self::Float,
-            "int32" => Self::Int32,
-            "int64" => Self::Int64,
-            "uint32" => Self::Uint32,
-            "uint64" => Self::Uint64,
-            "sint32" => Self::Sint32,
-            "sint64" => Self::Sint64,
-            "fixed32" => Self::Fixed32,
-            "fixed64" => Self::Fixed64,
-            "sfixed32" => Self::Sfixed32,
-            "sfixed64" => Self::Sfixed64,
-            "bool" => Self::Bool,
-            "string" => Self::String,
-            "bytes" => Self::Bytes,
-            _ => return None,
-        })
-    }
-
-    /// The keyword, as written in a `.proto` file.
-    pub fn keyword(self) -> &'static str {
-        match self {
-            Self::Double => "double",
-            Self::Float => "float",
-            Self::Int32 => "int32",
-            Self::Int64 => "int64",
-            Self::Uint32 => "uint32",
-            Self::Uint64 => "uint64",
-            Self::Sint32 => "sint32",
-            Self::Sint64 => "sint64",
-            Self::Fixed32 => "fixed32",
-            Self::Fixed64 => "fixed64",
-            Self::Sfixed32 => "sfixed32",
-            Self::Sfixed64 => "sfixed64",
-            Self::Bool => "bool",
-            Self::String => "string",
-            Self::Bytes => "bytes",
-        }
-    }
-
-    /// Whether a map key may be of this kind: integral types, `bool` and
-    /// `string` (language guide, "Maps": the key type "can be any integral or
-    /// string type"; `float`, `double` and `bytes` are out).
-    pub fn may_key_a_map(self) -> bool {
-        !matches!(self, Self::Double | Self::Float | Self::Bytes)
-    }
-}
-
-/// Which `syntax` the file declared. Without a statement it is proto2, which is
-/// what `protoc` assumes too.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Syntax {
-    Proto2,
-    Proto3,
-}
 
 /// How a file imports another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,59 +168,6 @@ pub enum FieldType {
     /// A `group`: the type is the message of this name, written in the same
     /// message as the field (see the module documentation).
     Group(String),
-}
-
-/// The label a field was written with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Label {
-    /// None: a proto3 singular field, a member of a oneof, or a map.
-    Implicit,
-    Optional,
-    Required,
-    Repeated,
-}
-
-/// What an option's value was written as. The parser keeps the value as written
-/// and does not judge it: whoever acts on an option decides what it may be.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OptionValue {
-    /// A bare word: `true`, `false`, an enum value's name, `inf`, or a signed
-    /// one (`-inf`).
-    Ident(String),
-    Str(String),
-    /// An integer literal with its sign, wide enough for every `u64` and its
-    /// negation.
-    Int(i128),
-    /// A floating-point literal as it was written, sign included.
-    Float(String),
-    /// A `{ ... }` aggregate: the text between the braces, as written, trimmed.
-    Aggregate(String),
-}
-
-/// One option, from a field's or an enum value's `[...]` list or from an
-/// `option` statement.
-///
-/// The name is kept as written: a plain word (`packed`), a dotted path
-/// (`foo.bar`), or an extension in parentheses with the rest of the path after it
-/// (`(my.ext).field`), the parts joined by `.`.
-#[derive(Clone, Debug)]
-pub struct FieldOption {
-    pub name: String,
-    pub value: OptionValue,
-    /// Where the value starts, which is where a wrong value is blamed.
-    pub value_pos: Pos,
-}
-
-/// The comments `protoc` attaches to a declaration (see [`crate::proto_lex::Gap`]
-/// for the rule), as it stores them: the text after the comment marker, line
-/// breaks included.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Docs {
-    /// The comment in front of the declaration with no blank line between.
-    pub leading: Option<String>,
-    /// The comment after the declaration's `;`, or after the `{` that opens a
-    /// message.
-    pub trailing: Option<String>,
 }
 
 /// One field.
@@ -436,6 +278,7 @@ struct Parser<'a> {
     /// The comment that leads the declaration about to start: found in the gap
     /// after the last `;`, `{` or `}` that ended a declaration, which is where
     /// `protoc` looks for it.
+    #[cfg(feature = "docs")]
     upcoming: Option<String>,
 }
 
@@ -449,6 +292,7 @@ pub fn parse_file(src: &str) -> Result<FileAst, SyntaxError> {
         lex: Lexer::new(src),
         ahead: VecDeque::new(),
         syntax: Syntax::Proto2,
+        #[cfg(feature = "docs")]
         upcoming: None,
     };
     p.file()
@@ -506,6 +350,7 @@ impl<'a> Parser<'a> {
     ///
     /// Peeks the token after, which a lexical error there surfaces at, the place
     /// `protoc` meets it.
+    #[cfg(feature = "docs")]
     fn end_decl(&mut self) -> Result<Docs, SyntaxError> {
         let next = self.peek()?;
         let (trailing, leading_next) = match &next.gap {
@@ -514,6 +359,15 @@ impl<'a> Parser<'a> {
         };
         let leading = core::mem::replace(&mut self.upcoming, leading_next);
         Ok(Docs { leading, trailing })
+    }
+
+    /// A declaration has just ended, in a build that keeps no comment: the token
+    /// after is peeked as the build that keeps them peeks it, so a lexical error
+    /// surfaces at the same place, and the declaration has no comment.
+    #[cfg(not(feature = "docs"))]
+    fn end_decl(&mut self) -> Result<Docs, SyntaxError> {
+        self.peek()?;
+        Ok(Docs::default())
     }
 
     fn is_sym(&mut self, c: char) -> bool {
@@ -598,8 +452,14 @@ impl<'a> Parser<'a> {
             extends: Vec::new(),
             options: Vec::new(),
         };
-        // The comment in front of the first declaration leads it.
-        self.upcoming = self.peek()?.gap.as_ref().and_then(|g| g.leading.clone());
+        // The comment in front of the first declaration leads it. Peeked in every
+        // build, so a lexical error on the first token surfaces here.
+        #[cfg(feature = "docs")]
+        {
+            self.upcoming = self.peek()?.gap.as_ref().and_then(|g| g.leading.clone());
+        }
+        #[cfg(not(feature = "docs"))]
+        self.peek()?;
         if self.is_ident("syntax") {
             ast.syntax = self.syntax_statement()?;
             self.syntax = ast.syntax;

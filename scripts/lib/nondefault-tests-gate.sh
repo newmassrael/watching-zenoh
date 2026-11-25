@@ -148,7 +148,11 @@ source "$here/build-evidence.sh"
 # be written one feature per line with `\` continuations; whitespace is stripped,
 # so the list stays diffable a line at a time. The token `-default` in it builds the
 # package without its default features (`leg_feature_args`): a test that only a build
-# with no allocator compiles is reached that way, and nothing else is.
+# with no allocator compiles is reached that way, and nothing else is. A token
+# `@env:NAME=VALUE` is no feature: the leg's cargo runs with NAME set to VALUE in its
+# environment (`LEG_ENV`), the one way a leg reaches a build form that the build's
+# environment decides and no feature does, as a policy's domain (`WZ_POLICY_*_ALLOWS_*`)
+# is. NAME is a `WZ_` word; the census lists such a leg in the same environment.
 #
 # `test-name-filter` may be EMPTY, which means the whole crate at that feature
 # set. An empty filter cannot hide a defect -- it runs MORE, not less -- and the
@@ -355,8 +359,32 @@ session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_ar
     #
     # `admin-space` joins with the pico admin space: its unit tests and the
     # `admin_space_roundtrip` target are reached only by that feature.
-    "wz-capi-pico|hook|admin-space,transport-link-quic,transport-link-serial,transport-link-tls,\
-transport-link-unixpipe,transport-link-ws|"
+    #
+    # The leg is the TOKIO engine's build. `transport-link-quic`, `transport-link-tls` and
+    # `transport-link-ws` select `engine-tokio`, and `src/lib.rs` refuses each beside the
+    # crate's default `engine-coop` by name, so the same list over the default features is a
+    # build that never compiles. The features are the crate's default list with `engine-coop`
+    # replaced by the tokio option's of deploy/wz-config.toml (`wz_config.py --bench-cargo-args
+    # tokio` prints them), spelled out because a leg's field is cargo features. The cooperative
+    # engine's serial and unixpipe links are the legs after this one; its admin space is the
+    # `resource-snapshot,peer,query,admin-space` leg's.
+    "wz-capi-pico|hook|-default,std,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,config-policy,conformance-digest,device-requires,admin-space,\
+transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
+transport-link-ws|"
+    # The `serial/` link on the cooperative engine, the default one: the host's ttys beside its
+    # sockets, a sample across two pty pairs this process pumps into each other, and a pin pair,
+    # which names no tty of a host, refused at the dial. Nothing leaves the host.
+    "wz-capi-pico|hook|transport-link-serial|files::serial_link_roundtrip::"
+    # The `ws/` link on the cooperative engine, the default one: WebSocket links over the host's
+    # TCP beside its sockets, a sample across a loopback ws listener. Nothing leaves the host.
+    "wz-capi-pico|hook|transport-link-ws,peer|files::ws_link_roundtrip::"
+    # The `unixpipe/` link on the cooperative engine, the default one: the host's named FIFOs
+    # beside its sockets, a listen that holds its request FIFO, and a sample across the pair a
+    # dial reserved and the listener confirmed. Nothing leaves the host.
+    "wz-capi-pico|hook|transport-link-unixpipe|files::unixpipe_link_roundtrip::"
+    "wz-capi-pico|hook|transport-link-unixpipe|files::unixpipe_listen_multiclient::"
     # pico's session-local delivery, a row of its own rather than two more features on
     # the row above: with them a session's own put reaches its own subscribers, which
     # every other test of the crate is written against pico's default build NOT doing.
@@ -429,6 +457,10 @@ transport-link-unixpipe,transport-link-ws|"
     # The process's runtime document with the three machines that read its limits: a document
     # that lowers each limit, and each machine refusing the one past what it was lent.
     "wz-capi-pico|hook|config-document,supervision,e2e-supervision,message-catalog|config_policy::tests::a_runtime_document"
+    # The same module in a build with the key ids a config states (`shared-key-ids`): the door's
+    # reading of `wz/key-ids` against the tree reader, and the arms that capability turns on in the
+    # other tests of the module, are compiled in no other build, so no row above runs them.
+    "wz-capi-pico|hook|config-document,shared-key-ids|config_policy::tests::"
     "wz-capi-pico|hook|shared-key-ids|key_ids::"
     # The same doors driven from C-shaped calls over loopback: sessions joined by the program's
     # transport (`app_transport_doors`) and puts and gets by a shared id (`key_ids_tokio`), each
@@ -507,8 +539,10 @@ transport-link-unixpipe,transport-link-ws|"
     # `wz_ext_message_payload_*`): the file that makes a schema and a payload, sets, encodes,
     # decodes and reads back, and refuses each misuse by its own code (`message_payload_doors`,
     # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
-    # below.
+    # below. Alone the schema is read from a compiled descriptor set; with `proto-text` the file
+    # also reads it from text and holds that door's refusals.
     "wz-capi-pico|hook|message-payload|--test=message_payload_doors"
+    "wz-capi-pico|hook|message-payload,proto-text|--test=message_payload_doors"
     # The object pools (`wz_ext_object_pool_*`): the unit tests of the doors, of the pools' plan and
     # layout, which the tokio engine has only with the doors, and of the place an object is taken
     # from, and the file that reserves, exhausts, reuses and
@@ -521,17 +555,35 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|object-pool|--test=object_pool_doors"
     "wz-capi-pico|hook|object-pool-region|--test=object_pool_doors"
     # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
-    # and its two stream doors, with the tests of the schema reader's tokenizer and parser, which
-    # moved to this crate with the reader and compile only with `proto` (which this implies).
-    "wz-app-frame|hook|instance-key|"
+    # and its two stream doors. The tests of the schema reader's tokenizer and parser are
+    # `wz-app-schema`'s, the leg below.
+    "wz-app-frame|hook|instance-key,proto-text|"
+    # The schema's text reader (`proto_lex`, `proto_parse`, `proto_schema`, behind `proto-text`,
+    # which the crate's default leaves off so a device image links none of it): the tokenizer's,
+    # the parser's and the linker's tests, with no comment kept.
+    "wz-app-schema|hook|proto-text|"
+    # The comments a schema keeps (`wz_app_schema::proto_lex::Gap`, behind `docs`): the
+    # tokenizer's tests of which comment trails a token and which leads the next.
+    "wz-app-schema|hook|docs|"
+    # The crate as an image with no allocator links it (`-default` drops its default `alloc`): the
+    # message catalog's static tables alone, their test building a whole catalog as a constant.
+    "wz-app-schema|hook|-default|message_catalog_table::"
     # The message payload (`wz_app_frame::message_payload`): the model tests of a message set and
     # read by path, its bytes laid by hand, decoded, merged and kept, on a synthetic schema.
-    "wz-app-frame|hook|message-payload|message_payload_tests::"
+    "wz-app-frame|hook|message-payload,proto-text|message_payload_tests::"
+    # The schema compiled by protoc and read without the text reader (`proto_descriptor`, behind
+    # `proto`): the fixture's tables, a payload set, encoded, decoded and refused on them, and the
+    # refused descriptor sets. With the text reader too, the same fixture's text is held to them,
+    # and the writer's and the typed reader's own tests on schemas read from text run.
+    "wz-app-frame|hook|message-payload|proto_descriptor_tests::"
+    "wz-app-frame|hook|proto-text|"
     # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
     # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
     # slots and the event log, where it also judges and protects in the stream of an instance,
-    # refuses a receiver kept per sender, and reads a report of drops back as an event.
+    # refuses a receiver kept per sender, and reads a report of drops back as an event; with
+    # `proto-text`, a keyer made from the schema's text as well as from its descriptor set.
     "wz-capi-pico|hook|instance-key|--test=instance_key_doors"
+    "wz-capi-pico|hook|instance-key,proto-text|--test=instance_key_doors"
     "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring|--test=instance_key_doors"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
@@ -602,10 +654,6 @@ transport-link-unixpipe,transport-link-ws|"
     # were compiled by no lane until this row -- the census reported them as
     # claimed by nothing. The filter is empty: every test of the build runs.
     "wz-capi-core|hook|access-extauth-usrpwd,interceptors|"
-    # Open-debt item 913 -- a group joined over raw Ethernet labels its member by the
-    # `reth/` locator of its MAC. `raweth-transport` is off by default, so that test was
-    # compiled by no leg. The filter is the module path, so a test added there is covered.
-    "wz-capi-core|hook|raweth-transport|faces::multicast::"
     # The router node's own face (`drive::router_node::local_face`): what a program is told of the
     # liveliness tokens of the faces a router node holds, and where its own are counted. The module
     # is built only with `router-node`, which no leg named, so its six tests were compiled by
@@ -666,6 +714,30 @@ transport-link-unixpipe,transport-link-ws|"
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
     "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
+    # The same suite in the form the C library ships for pico's single-threaded arm: no `threads`,
+    # so the rows count their calls on the latch of one thread, a delivery is one flag and no read
+    # task starts (`row_callback::OneThread`). The tests a read task or a second thread on one
+    # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
+    # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
+    # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
+    # in this form too.
+    "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
+    # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
+    # round with the links held, which the watch's tests prove only where they run in it.
+    "wz-capi-coop|hook|-default,std,liveliness,query,queryable,remote-declaration-watch|"
+    # The features that hold more than one link, face or session, in the same form: each session
+    # is opened, called and read on a thread of its own (`tests::one_thread::OwnThread`). The
+    # `listen` ones (a listener, one face, the outbound pool, a dial under way) run in the row
+    # above; the dictionary of key ids and the group of the program's transport here.
+    "wz-capi-coop|hook|-default,std,listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::one_thread::shared_key_ids::"
+    "wz-capi-coop|hook|-default,std,app-transport,group|tests::one_thread::group::"
+    # The host's group in the same form: the joiner's tests run here; the engine's, which needs a
+    # multicast route as its twin of `threads` does, Layer M runs with `--ignored` in this form.
+    "wz-capi-coop|hook|-default,std,group-host|host_group::"
+    # The default build less `key-matching-listener`, as the pico C ABI builds the engine: a matching
+    # listener declared on a key is refused as not built, its sink let go of, while one on an
+    # entity's filter is taken. No other row builds without it, so this one runs the refusal.
+    "wz-capi-coop|hook|-default,std,threads|tests::entity_tables::a_build_without_key_listeners_refuses_one_as_not_built"
     # A `tls/` listener that tells the node's event log of a connection it dropped (`event-ring`): bytes
     # that are no handshake are dropped and the event follows (`tests/tls_provider.rs`, whose other
     # tests run as the row above runs them).
@@ -692,14 +764,25 @@ transport-link-unixpipe,transport-link-ws|"
     # its members' tokens, which a member answers from the tokens its session holds. Each of the
     # four runs the module's own tests too, a JOIN asked between two beacons among them.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
-    # And with `transport-stats` (`tests::group::congested::`): what a group's queue drops for
-    # congestion is the transport's `tx.n_dropped`, as the tokio engine's group counts it.
-    "wz-capi-coop|hook|app-transport,group,transport-stats|tests::group::congested::"
+    # And with `transport-stats`: what a group's queue drops for congestion is the transport's
+    # `tx.n_dropped`, as the tokio engine's group counts it (`tests::group::congested::`), and a
+    # member's datagram is still read where it lies and its records lent, each counted once against
+    # the member and in the session's `transport_stats` (`tests::group::in_place::`), with the
+    # module's other tests, a get and its answer
+    # among them. The second row adds the members' keyexprs read member by member.
+    "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|tests::group::"
+    "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable,transport-stats|tests::group::"
     # And with the lent-only receive the C library's final build selects (the session core's
     # `rx-lent-only`): a member's datagram is read where it lies and its records lent, its
     # declarations scoped by the member and its departure's retractions lent, and no table is handed
     # an owned record.
     "wz-capi-coop|hook|app-transport,group,wz-session-core/rx-lent-only|tests::group::"
+    # And with the members' keyexprs read member by member (`multicast-declarations`,
+    # `tests::group::member_keyexprs::`): two members that declare one keyexpr id for two keys each
+    # put on, and declare a subscriber on, the key that member declared, and one that leaves takes
+    # its keyexprs with it. The group still reads its records where the datagram lies, each under
+    # its member's tag, so the module's other tests, a get and its answer among them, run there too.
+    "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::group::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
@@ -736,6 +819,17 @@ transport-link-unixpipe,transport-link-ws|"
     # `rx-lent-only` with `tx-lend-only`): the router stand-in lends its links send slots, so a
     # lend-only session answers it; 130 passed on a build host (2026-11-23).
     "wz-capi-coop|hook|wz-session-core/rx-lent-only,tx-lend-only|"
+    # The crate's whole suite in the build form the C library ships: a domain of
+    # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
+    # one lap when it comes up and the engine holds no code of paced turns
+    # (`ReplayPacing::REACHABLE`). The default test build reaches a pace, so only this leg runs
+    # the lap, the refusal of a stated pace, and every reconnect and redeclare test over the lap.
+    # Scope `lane`: the environment builds the session core and every crate over it again; its
+    # seconds are not measured on a build host yet.
+    "wz-capi-coop|lane|@env:WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_ON=off|"
+    # The constant that form is chosen by, in the same environment: no snapshot of it selects
+    # `on`, and `ReplayPacing::REACHABLE` says so (`replay_pacing::`).
+    "wz-session-core|lane|@env:WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_ON=off|replay_pacing::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
@@ -747,6 +841,18 @@ transport-link-unixpipe,transport-link-ws|"
     # bound and pinned as its keys say, the group transport's room and input over loopback, and a
     # scouting window's sockets asking, reading and waiting.
     "wz-runtime-posix|hook|host-multicast|"
+    # The host's ttys as serial lines (`serial`): a pseudo-terminal set as zenoh-pico sets a tty,
+    # bytes both ways without a blocking read, the queues discarded, and each refusal's kind.
+    "wz-runtime-posix|hook|serial|"
+    # The host's TCP as the cooperative engine's WebSocket links (`ws`): a dial and a listener
+    # upgrade one loopback connection and carry a batch.
+    "wz-runtime-posix|hook|ws|ws::"
+    # The host's named FIFOs (`unixpipe`): one listener holding a request FIFO and a dial finding
+    # it, a dedicated read end reading its peer and the end of the stream, the suffix drawn.
+    "wz-runtime-posix|hook|unixpipe|"
+    # The host's raw packet sockets (`raweth`): a name no interface has refused before the socket,
+    # and the open answering as the kernel answers a bare `socket(AF_PACKET)`.
+    "wz-runtime-posix|hook|raweth|"
     # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
     # own smoke test, a loopback connection that carries bytes both ways and closes. The census
     # found it claimed by nothing when the feature arrived; the filter is its module.
@@ -851,6 +957,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         reassembly,\
         rx-in-place,\
         scouting-static,\
+        serial,\
         session-unicast,\
         session-unicast-accept,\
         session-unicast-open,\
@@ -858,7 +965,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-batching,\
         transport-keepalive,\
         transport-qos,\
-        udp-listen\
+        udp-listen,\
+        unixpipe,\
+        ws\
         |"
     # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
     # its own because the selector swaps the task pool, the join handles, the local
@@ -867,6 +976,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # full task table refuses and counts, a finished task's cell is reused, what a
     # task held is dropped once, a full timer table makes the sleep wake itself.
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast|"
+    # The WebSocket links of the slot profile (`ws` with `session-slot`, `ws_link::slot::`): a dial
+    # that waits for the upgrade, refuses a server that will not give it, and claims nothing for an
+    # end it cannot reach; an acceptor whose full handshake table leaves the next connection on the
+    # port, and lets go of a handshake that runs out of time. The slot row above with the feature.
+    "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast,ws|ws_link::slot::"
     # The links over a transport the program supplies (`app_link::`): a dial, a listener and its
     # accepted streams and sources, a datagram that goes whole or not at all, a group joined, read
     # by member and left, and a group's room answered from the table, inside the loop and out.
@@ -989,6 +1103,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         transport-link-raweth,\
         transport-link-serial,\
+        transport-link-ws,\
         transport-lowlatency,\
         transport-multilink,\
         transport-qos,\
@@ -1100,6 +1215,45 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         tx-lend-only\
         |"
+    # The lend-only send on the FIXED storage with no accepting role and none of the extensions a
+    # handshake action adds (QoS, SHM, auth, multilink, low latency, compression): a build that
+    # stages no handshake extension, the session core of the C library's client build. A SEPARATE
+    # build from the lend-only row above, which accepts: here the session holds no handshake
+    # chain, and its Init and Open are written from the parameters (`encode_init_patch_into`,
+    # `encode_open_bound_into` in `handshake_encode`), which no other row compiles into the
+    # session. Two filters, one build: the writers' own tests against the chain path
+    # (`handshake_encode::`), and the lent handshake of a session
+    # (`session_actions::bundle_tests::lent_handshake::`), whose
+    # `a_lent_opening_handshake_writes_the_bytes_of_its_chains` holds the InitSyn and the OpenSyn
+    # sent to the bytes the heap encoders write for the same chains. NOT YET MEASURED.
+    "wz-session-core|hook|\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-fixed-storage,\
+        session-unicast,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
+        |handshake_encode::"
+    "wz-session-core|hook|\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-fixed-storage,\
+        session-unicast,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::lent_handshake::"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
     # derivation for the FNV-1a and SplitMix64 one and compiles the tests of the
@@ -1199,6 +1353,20 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # sees it), and `static-link-storage` is the subject (it must not).
     "wz-link-lwip|hook|test-support|--test=link_storage_allocations"
     "wz-link-lwip|hook|static-link-storage,test-support|--test=link_storage_allocations"
+    # WebSocket links over lwIP's TCP on the slot profile (`ws`): a session over `ws/` between two
+    # nodes and an acceptor whose full handshake table leaves the next connection queued, counted by a
+    # counting allocator, so the target is its own process. The file's `required-features`, a node's
+    # real profile.
+    "wz-session-lwip|hook|\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage,\
+        transport-keepalive,\
+        ws\
+        |--test=session_ws_slot"
     # The TCP stream over lwIP's raw API (`tcp`): its connections, its listener's queue and
     # refusals, a buffer below the window. Once on each profile, as the row above: the default
     # makes a connection's state on the heap, `static-link-storage` in a cell of a pool, and
@@ -1420,6 +1588,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
     # `codec-push` the items; the row above is the slot profile, where none of this is built.
     "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
+    # And with `transport-stats`: what the pump receives and what it and the stage send are counted
+    # into the counters the holder attached, as the socket takes or hands in each datagram.
+    "wz-session-mcu|hook|codec-push,transport-multicast,transport-stats|group_drive::"
     # A node that declares liveliness tokens (`declare-token`): its tokens are declared after its
     # documents, mirrors and subscriptions, and more of them than the node declares stop it; without
     # the feature a token is refused by name. `slot_node` is built with `client-slot`.
@@ -1481,6 +1652,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # The cooperative engine's links over the program's transport (`app_link::`, `app-link`), with
     # the host's parked waits (`host-lock`), which the open bounded by the session's clock is.
     "wz-runtime-coop|hook|app-link,host-lock|app_link::"
+    # The cooperative engine's groups over raw Ethernet (`raweth`): the joiner's choice of device,
+    # a datagram framed for its entry and a frame read from a named source, and the route of a
+    # fragment a full device left (`reassembly`). The filter is the module path.
+    "wz-runtime-coop|hook|raweth,reassembly|raweth_group::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # The in-place receive that delivers only what it can lend (`rx-lent-only`, a selector): a
     # Push or a Response the lent form cannot carry is refused where it lies and counted, which the
@@ -1980,13 +2155,6 @@ a memory leg of Layer S, run by it with --ignored on each engine (8 passed guard
 a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
     "wz-capi-pico|gets_between_open_sessions_are_counted_for_their_allocations|\
 a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
-    # The conformance corpus's arm for the codecs SCE generates from its layouts
-    # (`wz-app-frame`'s `fixed_records_tests`, behind `sce-generated-codec`): it fails naming each
-    # layout whose generated codec the test module does not list, and it lists none until a build
-    # links them, so no leg of this table runs it. The corpus itself runs in the crate's default
-    # build, through the hand-written builder and opener.
-    "wz-app-frame|fixed_records_tests::generated_codec_matches_the_corpus|\
-the arm of generated codecs, which fails until each layout's codec is listed; the default build runs the corpus"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then
@@ -2002,16 +2170,25 @@ leg_feats() { local f="${1}"; echo "${f//[[:space:]]/}"; }
 # The `cargo test` arguments of a leg's feature field, in the array `LEG_FEATURE_ARGS`. The token
 # `-default` builds the package WITHOUT its default features (`--no-default-features`): the one way
 # a leg reaches code that only such a build compiles, as a profile with no allocator is for a crate
-# whose default is `alloc`. Every other token is a feature name. One function for the run and the
-# census, so the two cannot build a leg two ways.
+# whose default is `alloc`. A token `@env:NAME=VALUE` goes to the array `LEG_ENV`, the words
+# `env` is handed before cargo; one that is not a `WZ_` word set to a value fails, so a typo is no
+# leg built in the default environment. Every other token is a feature name. One function for the
+# run and the census, so the two cannot build a leg two ways.
 leg_feature_args() {
     local feats="$1" f
     local -a parts=() names=()
     LEG_FEATURE_ARGS=()
+    LEG_ENV=()
     IFS=',' read -r -a parts <<<"$feats"
     for f in "${parts[@]}"; do
         if [[ "$f" == "-default" ]]; then
             LEG_FEATURE_ARGS+=(--no-default-features)
+        elif [[ "$f" == @env:* ]]; then
+            if [[ ! "${f#@env:}" =~ ^WZ_[A-Z0-9_]+=[^=]+$ ]]; then
+                echo "nondefault-tests: FAIL -- '$f' is no \`@env:WZ_NAME=VALUE\` token" >&2
+                return 1
+            fi
+            LEG_ENV+=("${f#@env:}")
         elif [[ -n "$f" ]]; then
             names+=("$f")
         fi
@@ -2105,8 +2282,8 @@ fi
 if [[ "${1:-}" == "--list" ]]; then
     for leg in "${LEGS[@]}"; do
         IFS='|' read -r pkg scope feats filter handoff <<<"$leg"
-        leg_feature_args "$(leg_feats "$feats")"
-        echo "  [$scope] $pkg ${LEG_FEATURE_ARGS[*]} ${filter:-<whole crate>}"
+        leg_feature_args "$(leg_feats "$feats")" || exit 1
+        echo "  [$scope] ${LEG_ENV[*]+${LEG_ENV[*]} }$pkg ${LEG_FEATURE_ARGS[*]} ${filter:-<whole crate>}"
         [[ -n "$handoff" ]] && echo "          hands off to another leg: $handoff"
     done
     for row in "${SKIPS[@]}"; do
@@ -2171,6 +2348,7 @@ if [[ "${1:-}" == "--census" ]]; then
     list_names() {
         local pkg="$1" feats="$2" filter="$3" out
         local -a argv=(test -p "$pkg")
+        LEG_ENV=()
         if [[ "$feats" == "@all" ]]; then
             argv+=(--all-features)
         elif [[ "$feats" == @args:* ]]; then
@@ -2179,12 +2357,13 @@ if [[ "${1:-}" == "--census" ]]; then
             read -r -a set_argv <<<"${feats#@args:}"
             argv+=("${set_argv[@]}")
         elif [[ -n "$feats" ]]; then
-            leg_feature_args "$feats"
-            argv+=("${LEG_FEATURE_ARGS[@]}")
+            leg_feature_args "$feats" || return 1
+            argv+=(${LEG_FEATURE_ARGS[@]+"${LEG_FEATURE_ARGS[@]}"})
         fi
         leg_filter_args "$pkg" "$filter" || return 1
         argv+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
-        if ! out="$(cd "$repo/crates" && cargo "${argv[@]}" -- --list 2>"$tmp/list.err")"; then
+        if ! out="$(cd "$repo/crates" &&
+            env ${LEG_ENV[@]+"${LEG_ENV[@]}"} cargo "${argv[@]}" -- --list 2>"$tmp/list.err")"; then
             echo "nondefault-tests: FAIL -- cargo ${argv[*]} -- --list did not list:" >&2
             echo "  a census that cannot list a build cannot say what it holds." >&2
             wz_build_evidence "$tmp/list.err" 15 | sed 's/^/    /' >&2
@@ -2599,18 +2778,18 @@ for leg in "${LEGS[@]}"; do
         done < <(tr ',' '\n' <<<"$handoff")
     fi
 
-    leg_feature_args "$feats"
-    cargo_args=(test -p "$pkg" "${LEG_FEATURE_ARGS[@]}")
+    leg_feature_args "$feats" || { rc=1; continue; }
+    cargo_args=(test -p "$pkg" ${LEG_FEATURE_ARGS[@]+"${LEG_FEATURE_ARGS[@]}"})
     leg_filter_args "$pkg" "$filter" || { rc=1; continue; }
     cargo_args+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
     cargo_args+=(--quiet)
     [[ ${#skip_args[@]} -gt 0 ]] && cargo_args+=(-- "${skip_args[@]}")
 
     leg_started=$SECONDS
-    out="$(cd "$repo/crates" && cargo "${cargo_args[@]}" 2>&1)"
+    out="$(cd "$repo/crates" && env ${LEG_ENV[@]+"${LEG_ENV[@]}"} cargo "${cargo_args[@]}" 2>&1)"
     status=$?
     reap_test_executables
-    label="$pkg --features <$(awk -F, '{print NF}' <<<"$feats")> ${filter:-<whole crate>}"
+    label="${LEG_ENV[*]+${LEG_ENV[*]} }$pkg --features <$(awk -F, '{print NF}' <<<"$feats")> ${filter:-<whole crate>}"
     if [[ $status -ne 0 ]]; then
         echo "nondefault-tests: FAIL -- $label (exit $status)" >&2
         echo "$out" >&2

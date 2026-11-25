@@ -531,7 +531,7 @@ mod tests {
                 SessionInitParams {
                     whatami: WhatAmI::Peer,
                     zid: [0xa1, 0xb2].into(),
-                    seq_num_res: 2,
+                    seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                     req_id_res: 2,
                     batch_size: 1024,
                     lease_ms: 10_000,
@@ -545,7 +545,8 @@ mod tests {
                     link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
                     policy: wz_session_core::policy::SessionPolicy::defaults(),
                     limits: wz_session_core::limits::SessionLimits::BUILD,
-                    cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
+                    cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key").into(),
+                    region: None,
                 },
                 clock,
             );
@@ -648,7 +649,7 @@ mod tests {
                 SessionInitParams {
                     whatami: WhatAmI::Peer,
                     zid: [0xa1, 0xb2].into(),
-                    seq_num_res: 2,
+                    seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                     req_id_res: 2,
                     batch_size: 1024,
                     lease_ms: 10_000,
@@ -662,7 +663,8 @@ mod tests {
                     link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
                     policy: wz_session_core::policy::SessionPolicy::defaults(),
                     limits: wz_session_core::limits::SessionLimits::BUILD,
-                    cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
+                    cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key").into(),
+                    region: None,
                 },
                 clock,
             );

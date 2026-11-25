@@ -23,6 +23,7 @@
 use core::ffi::c_void;
 
 use crate::abi::z_loaned_string_t;
+use crate::bytes::{push_within, try_box, try_boxed_bytes, try_push, NoRoom};
 use crate::prelude::*;
 use crate::result::ZResult;
 
@@ -62,6 +63,7 @@ impl StringArrayEntry {
     ///
     /// The view is derived BEFORE the move, which is sound because moving a
     /// box moves the pointer and never the bytes the view points at.
+    #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
     fn new(bytes: Box<[u8]>) -> Box<Self> {
         let view = z_loaned_string_t {
             _start: bytes.as_ptr(),
@@ -75,9 +77,15 @@ impl StringArrayEntry {
 
     /// An entry over a copy of `bytes`. Never inlined: a push and both arms of a deep copy, which
     /// the compiler splits by the array's kind, make their entries through this one body.
+    /// `NoRoom` when the heap refuses the copy or the entry.
     #[inline(never)]
-    fn copy_of(bytes: &[u8]) -> Box<Self> {
-        Self::new(Box::from(bytes))
+    fn copy_of(bytes: &[u8]) -> Result<Box<Self>, NoRoom> {
+        let copy = try_boxed_bytes(bytes)?;
+        let view = z_loaned_string_t {
+            _start: copy.as_ptr(),
+            _len: copy.len(),
+        };
+        try_box(Self { _bytes: copy, view })
     }
 }
 
@@ -110,6 +118,7 @@ enum Items {
 }
 
 impl StringArrayState {
+    #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
     pub(crate) fn new(items: Vec<String>) -> Box<Self> {
         Box::new(Self {
             items: Items::Owned(
@@ -127,10 +136,11 @@ impl StringArrayState {
     /// (`z_string_array_clone`, the hello clone), and a copy that kept
     /// borrowing would silently extend the caller's lifetime obligation to an
     /// array it never pushed to.
-    pub(crate) fn copied(&self) -> Box<Self> {
+    pub(crate) fn copied(&self) -> Result<Box<Self>, NoRoom> {
         // Sized once and filled by a plain loop: a collect of the filtered views reads the first
         // apart from the rest, and carries the copy of an entry twice.
-        let mut entries = Vec::with_capacity(self.len());
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(self.len()).map_err(|_| NoRoom)?;
         for k in 0..self.len() {
             let Some(view) = self.view(k) else {
                 continue;
@@ -138,10 +148,21 @@ impl StringArrayState {
             // SAFETY: an entry's view reads its own bytes, and a lent view a live string
             // (`Self::lent`).
             let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
-            entries.push(StringArrayEntry::copy_of(bytes.unwrap_or(&[])));
+            // The room of every entry is reserved above, so a push here grows nothing.
+            push_within(
+                &mut entries,
+                StringArrayEntry::copy_of(bytes.unwrap_or(&[]))?,
+            )?;
         }
-        Box::new(Self {
+        try_box(Self {
             items: Items::Owned(entries),
+        })
+    }
+
+    /// An array of no strings, or `NoRoom` when the heap refuses its box.
+    pub(crate) fn empty() -> Result<Box<Self>, NoRoom> {
+        try_box(Self {
+            items: Items::Owned(Vec::new()),
         })
     }
 
@@ -373,9 +394,13 @@ pub unsafe extern "C" fn z_string_array_new(array: *mut z_owned_string_array_t) 
     if array.is_null() {
         return;
     }
-    *array = z_owned_string_array_t {
-        handle: Box::into_raw(StringArrayState::new(Vec::new())) as *mut c_void,
-        _pad: [core::ptr::null_mut(); 3],
+    // A full heap leaves `array` null, the one answer a call with no result has.
+    *array = match StringArrayState::empty() {
+        Ok(state) => z_owned_string_array_t {
+            handle: Box::into_raw(state) as *mut c_void,
+            _pad: [core::ptr::null_mut(); 3],
+        },
+        Err(NoRoom) => z_owned_string_array_t::null_value(),
     };
 }
 
@@ -449,7 +474,13 @@ unsafe fn string_array_push(
     let Some(bytes) = crate::abi::view_bytes(view._start, view._len) else {
         return len;
     };
-    entries.push(StringArrayEntry::copy_of(bytes));
+    // A full heap adds nothing, and the length is answered as it was.
+    let Ok(entry) = StringArrayEntry::copy_of(bytes) else {
+        return len;
+    };
+    if try_push(entries, entry).is_err() {
+        return len;
+    }
     entries.len()
 }
 
@@ -469,8 +500,12 @@ pub unsafe extern "C" fn z_string_array_clone(
     let Some(state) = string_array_state(src) else {
         return crate::result::Z_ERR_NULL;
     };
+    let copy = match state.copied() {
+        Ok(copy) => copy,
+        Err(no_room) => return no_room.code(),
+    };
     *dst = z_owned_string_array_t {
-        handle: Box::into_raw(state.copied()) as *mut c_void,
+        handle: Box::into_raw(copy) as *mut c_void,
         _pad: [core::ptr::null_mut(); 3],
     };
     crate::result::Z_OK
@@ -511,13 +546,13 @@ mod tests {
     #[test]
     fn an_entry_copied_from_bytes_views_its_own_copy() {
         let bytes = *b"udp/10.0.0.1:7447";
-        let entry = StringArrayEntry::copy_of(&bytes);
+        let entry = StringArrayEntry::copy_of(&bytes).expect("the test's heap");
         assert_ne!(entry.view._start, bytes.as_ptr());
         assert_eq!(entry.view._len, bytes.len());
         // SAFETY: the view reads the entry's own bytes, live while `entry` is.
         let read = unsafe { core::slice::from_raw_parts(entry.view._start, entry.view._len) };
         assert_eq!(read, &bytes);
-        let empty = StringArrayEntry::copy_of(&[]);
+        let empty = StringArrayEntry::copy_of(&[]).expect("no bytes to take");
         assert_eq!(empty.view._len, 0);
     }
 
@@ -680,7 +715,7 @@ mod tests {
         let views = lent_views(&strings);
         // SAFETY: `views` and `strings` outlive the array.
         let state = unsafe { StringArrayState::lent(&views) };
-        let copy = state.copied();
+        let copy = state.copied().expect("the test's heap");
         assert!(!copy.is_lent());
         assert_eq!(copy.len(), strings.len());
         assert_eq!(entries(&copy), strings.map(|s| s.as_bytes().to_vec()));

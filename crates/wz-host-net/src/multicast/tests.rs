@@ -237,8 +237,8 @@ fn a_scouting_socket_goes_on_past_a_membership_the_kernel_refuses() {
         .expect("the limit is a number");
     // The group itself and one more than the limit: past it by two.
     let first = u32::from(Ipv4Addr::new(239, 1, 0, 1));
-    let extra: Vec<String> = (0..=limit)
-        .map(|n| Ipv4Addr::from(first + n as u32).to_string())
+    let extra: Vec<IpAddr> = (0..=limit)
+        .map(|n| IpAddr::V4(Ipv4Addr::from(first + n as u32)))
         .collect();
     let crowded = SocketConfig {
         extra_joins: &extra,
@@ -256,7 +256,7 @@ fn a_scouting_socket_goes_on_past_a_membership_the_kernel_refuses() {
 /// A `#join=` of the wrong family is refused before any membership is installed.
 #[test]
 fn a_join_of_the_wrong_family_is_refused() {
-    let joins = vec!["ff02::7".to_owned()];
+    let joins = [IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 7))];
     let err = bind_joined(
         IpAddr::V4(GROUP),
         0,
@@ -393,7 +393,7 @@ fn a_link_that_chose_an_interface_opens_with_the_policy_on() {
 #[cfg(target_os = "linux")]
 fn a_link_bound_by_bind_leaves_by_the_address_it_binds() {
     let cfg = SocketConfig {
-        bind: Some("127.0.0.1:0"),
+        bind: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
         ..Default::default()
     };
     let link = bind_sender(IpAddr::V4(GROUP), 0, &cfg, true).expect("bind the link's send half");

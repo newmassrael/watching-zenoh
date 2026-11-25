@@ -68,7 +68,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/e2e_crc.rs` | S10 | |
 | `crates/wz-app-frame/src/e2e_frame.rs` | S10 | |
 | `crates/wz-app-frame/src/e2e_judge.rs` | S10, S11 | |
-| `crates/wz-app-frame/src/e2e_profile.rs` | S10 | |
 | `crates/wz-app-frame/src/e2e_receiver.rs` | S11 | |
 | `crates/wz-app-frame/src/e2e_rules_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/e2e_stream_sender.rs` | S11 | |
@@ -77,16 +76,14 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/instance_key_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/lib.rs` | S10, S11 | |
 | `crates/wz-app-frame/src/message_catalog.rs` | S11 | |
-| `crates/wz-app-frame/src/message_catalog_table.rs` | S11 | |
 | `crates/wz-app-frame/src/message_catalog_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/message_payload.rs` | S11 | |
 | `crates/wz-app-frame/src/message_payload_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/proto_decode.rs` | S11 | |
-| `crates/wz-app-frame/src/proto_lex.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_descriptor.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_descriptor_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/proto_nanopb.rs` | S11 | |
-| `crates/wz-app-frame/src/proto_parse.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_range.rs` | S11 | |
-| `crates/wz-app-frame/src/proto_schema.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_write.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_write_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/replay_admission.rs` | S11 | |
@@ -94,6 +91,18 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/segment_chain.rs` | S11 | |
 | `crates/wz-app-frame/src/segment_profile.rs` | S10 | |
 | `crates/wz-app-frame/src/segment_sender.rs` | S10 | |
+| `crates/wz-app-schema/src/catalog_plan.rs` | S11 | |
+| `crates/wz-app-schema/src/crc_table.rs` | S10 | |
+| `crates/wz-app-schema/src/e2e_profile.rs` | S10 | |
+| `crates/wz-app-schema/src/json_doc.rs` | S11 | |
+| `crates/wz-app-schema/src/judge_config.rs` | S10 | |
+| `crates/wz-app-schema/src/lib.rs` | S11 | |
+| `crates/wz-app-schema/src/message_catalog_table.rs` | S11 | |
+| `crates/wz-app-schema/src/proto_lex.rs` | S11 | |
+| `crates/wz-app-schema/src/proto_parse.rs` | S11 | |
+| `crates/wz-app-schema/src/proto_schema.rs` | S11 | |
+| `crates/wz-app-schema/src/proto_types.rs` | S11 | |
+| `crates/wz-app-schema/src/segment_profile.rs` | S10 | |
 | `crates/wz-auth/src/lib.rs` | S6 | |
 | `crates/wz-auth/src/usrpwd.rs` | S6 | |
 | `crates/wz-capi-c/src/abi.rs` | S8 | |
@@ -168,6 +177,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/query.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/registry/held.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/ticker.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/told.rs` | S7 | |
@@ -193,6 +203,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/faces.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/get.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/group.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/group_stack.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/held_keys.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/host_group.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/in_place.rs` | excluded: test | Test-only file by its name. |
@@ -202,6 +213,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/local.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/local_query.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_face.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/one_thread.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/plain_put.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/program_clock.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/queryable.rs` | excluded: test | Test-only file by its name. |
@@ -276,6 +288,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/get_to_peer.rs` | S7 | |
 | `crates/wz-capi-pico/src/handlers.rs` | S7 | |
 | `crates/wz-capi-pico/src/header_internals.rs` | S7 | |
+| `crates/wz-capi-pico/src/heap_refusal_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-pico/src/instance_key.rs` | S12 | |
 | `crates/wz-capi-pico/src/key_ids.rs` | S12 | |
 | `crates/wz-capi-pico/src/keyexpr.rs` | S7 | |
@@ -324,6 +337,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/string_array.rs` | S7 | |
 | `crates/wz-capi-pico/src/supervision.rs` | S7 | |
 | `crates/wz-capi-pico/src/sync.rs` | S7 | |
+| `crates/wz-capi-pico/src/test_heap.rs` | excluded: test | The allocator of the unit tests, which counts and refuses allocations a test asks it to; compiled only under `#[cfg(test)]` (`lib.rs`). |
 | `crates/wz-capi-pico/src/time_base.rs` | S12 | |
 | `crates/wz-capi-pico/src/whatami.rs` | S7 | |
 | `crates/wz-capi-pico/src/write_filter.rs` | S7 | |
@@ -400,6 +414,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-host-net/src/link_interfaces/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-host-net/src/multicast.rs` | S9 | |
 | `crates/wz-host-net/src/multicast/tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-host-sync/src/counter.rs` | S9 | |
 | `crates/wz-host-sync/src/in_place.rs` | S9 | |
 | `crates/wz-host-sync/src/lib.rs` | S9 | |
 | `crates/wz-host-sync/src/std_lock.rs` | S9 | |
@@ -458,13 +473,17 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/handed.rs` | S5 | |
 | `crates/wz-runtime-coop/src/ip_stack.rs` | S5 | |
 | `crates/wz-runtime-coop/src/join_handle.rs` | S5 | |
+| `crates/wz-runtime-coop/src/kept.rs` | S5 | |
 | `crates/wz-runtime-coop/src/lib.rs` | S5, S10, S12 | |
 | `crates/wz-runtime-coop/src/link_cells.rs` | S5 | |
 | `crates/wz-runtime-coop/src/link_storage.rs` | S5 | |
 | `crates/wz-runtime-coop/src/local.rs` | S5 | |
 | `crates/wz-runtime-coop/src/locator_text.rs` | S5 | |
+| `crates/wz-runtime-coop/src/raweth_group.rs` | S5 | |
 | `crates/wz-runtime-coop/src/reassembly_rx.rs` | S5 | |
 | `crates/wz-runtime-coop/src/runtime_impl.rs` | S5 | |
+| `crates/wz-runtime-coop/src/serial_link.rs` | S5 | |
+| `crates/wz-runtime-coop/src/serial_link/links.rs` | S5 | |
 | `crates/wz-runtime-coop/src/session_drive.rs` | S5 | |
 | `crates/wz-runtime-coop/src/session_runtime.rs` | S5 | |
 | `crates/wz-runtime-coop/src/static_tests.rs` | excluded: test | Test-only file by its name. |
@@ -476,6 +495,14 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/transport.rs` | S5 | |
 | `crates/wz-runtime-coop/src/transport/state.rs` | S5 | |
 | `crates/wz-runtime-coop/src/udp_link.rs` | S5 | |
+| `crates/wz-runtime-coop/src/unixpipe_link.rs` | S5 | |
+| `crates/wz-runtime-coop/src/ws_link.rs` | S5 | |
+| `crates/wz-runtime-coop/src/ws_link/handshake.rs` | S5 | |
+| `crates/wz-runtime-coop/src/ws_link/links.rs` | S5 | |
+| `crates/wz-runtime-coop/src/ws_link/links/tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-runtime-coop/src/ws_link/slot.rs` | S5 | |
+| `crates/wz-runtime-coop/src/ws_link/slot/tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-runtime-coop/src/ws_link/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-coop/src/yield_now.rs` | S10 | |
 | `crates/wz-runtime-core/src/allocator.rs` | S9 | |
 | `crates/wz-runtime-core/src/error.rs` | S9 | |
@@ -495,15 +522,20 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-posix/src/links.rs` | S9 | |
 | `crates/wz-runtime-posix/src/multicast.rs` | S9 | |
 | `crates/wz-runtime-posix/src/net.rs` | S9 | |
+| `crates/wz-runtime-posix/src/raweth.rs` | S9 | |
 | `crates/wz-runtime-posix/src/scouting.rs` | S9 | |
+| `crates/wz-runtime-posix/src/serial.rs` | S9 | |
 | `crates/wz-runtime-posix/src/slot.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/group.rs` | S9 | |
 | `crates/wz-runtime-posix/src/stream.rs` | S9 | |
+| `crates/wz-runtime-posix/src/unixpipe.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/links.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/mod.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/net.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/stream.rs` | S9 | |
+| `crates/wz-runtime-posix/src/windows/ws.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows_arith.rs` | S9 | |
+| `crates/wz-runtime-posix/src/ws.rs` | S9 | |
 | `crates/wz-runtime-tokio/src/accept_bounds.rs` | S10 | |
 | `crates/wz-runtime-tokio/src/accept_loop.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/accept_loop/discovered_links.rs` | S4 | |
@@ -776,6 +808,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/frame_encode.rs` | S1 | |
 | `crates/wz-session-core/src/get_plane.rs` | S2 | |
 | `crates/wz-session-core/src/get_plane/tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-session-core/src/group_locator.rs` | S1 | |
 | `crates/wz-session-core/src/group_membership.rs` | S1 | |
 | `crates/wz-session-core/src/group_view.rs` | S1 | |
 | `crates/wz-session-core/src/handshake_encode.rs` | S1 | |
@@ -822,6 +855,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/locality.rs` | S2 | |
 | `crates/wz-session-core/src/locator.rs` | S1 | |
 | `crates/wz-session-core/src/locator_directory.rs` | S1 | |
+| `crates/wz-session-core/src/locator_grammar.rs` | S1 | |
 | `crates/wz-session-core/src/metadata.rs` | S3 | |
 | `crates/wz-session-core/src/multicast_dispatch.rs` | S1 | |
 | `crates/wz-session-core/src/multicast_join.rs` | S1 | |
@@ -840,6 +874,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/ntp64.rs` | S1 | |
 | `crates/wz-session-core/src/observer.rs` | S3 | |
 | `crates/wz-session-core/src/oldest_instant.rs` | S10 | |
+| `crates/wz-session-core/src/once_built.rs` | S3 | |
 | `crates/wz-session-core/src/owed_replies.rs` | S3 | |
 | `crates/wz-session-core/src/parse_error.rs` | S3 | |
 | `crates/wz-session-core/src/passive.rs` | S3 | |
@@ -851,6 +886,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/peer_tables.rs` | S1 | |
 | `crates/wz-session-core/src/peer_target.rs` | S1 | |
 | `crates/wz-session-core/src/pending_get.rs` | S2 | |
+| `crates/wz-session-core/src/placed.rs` | S3 | |
 | `crates/wz-session-core/src/plain_push.rs` | S2 | |
 | `crates/wz-session-core/src/plane_lock.rs` | S2 | |
 | `crates/wz-session-core/src/policy.rs` | S3 | |
@@ -905,6 +941,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/round/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/row_callback.rs` | S2 | |
 | `crates/wz-session-core/src/row_pool.rs` | S3 | |
+| `crates/wz-session-core/src/runtime_cell.rs` | S3 | |
 | `crates/wz-session-core/src/rx_profile.rs` | S3 | |
 | `crates/wz-session-core/src/sample.rs` | S2 | |
 | `crates/wz-session-core/src/sample_kind.rs` | S2 | |
@@ -945,6 +982,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/stats.rs` | S3 | |
 | `crates/wz-session-core/src/stats_registry.rs` | S3 | |
 | `crates/wz-session-core/src/stats_registry/tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-session-core/src/step_lend.rs` | S3 | |
 | `crates/wz-session-core/src/stream_supervisor.rs` | S11, S12 | |
 | `crates/wz-session-core/src/stream_window.rs` | S1 | |
 | `crates/wz-session-core/src/supervisor.rs` | S1 | |
@@ -975,6 +1013,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/wireexpr_build.rs` | S1, S2 | |
 | `crates/wz-session-core/src/wireexpr_resolve.rs` | S1, S2 | |
 | `crates/wz-session-core/src/wrapping_ticks.rs` | S1 | |
+| `crates/wz-session-core/src/ws_link.rs` | S1 | |
+| `crates/wz-session-core/src/ws_link/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/wz_root.rs` | S3 | |
 | `crates/wz-session-core/src/zid_derivation.rs` | S12 | |
 | `crates/wz-session-core/src/zid_hex.rs` | S3 | |

@@ -360,7 +360,7 @@ async fn moving_only_the_group_leaves_a_responder_reachable_but_moving_the_port_
 async fn a_responder_answers_on_an_extra_joined_group_and_only_because_it_joined_it() {
     /// One run: a wz responder whose locator group is HOME, given `joins` as its
     /// `#join=` list, asked on `MOVED_GROUP`.
-    async fn answered_with_joins(port: u16, joins: &[String]) -> bool {
+    async fn answered_with_joins(port: u16, joins: &[std::net::IpAddr]) -> bool {
         let driver = UdpDriver::bind_multicast(
             HOME_GROUP,
             port,
@@ -388,7 +388,7 @@ async fn a_responder_answers_on_an_extra_joined_group_and_only_because_it_joined
 
     // POSITIVE: told to join the extra group, so the Scout addressed to it lands.
     assert!(
-        answered_with_joins(C_JOINED_PORT, &[C_EXTRA_GROUP.to_string()]).await,
+        answered_with_joins(C_JOINED_PORT, &[std::net::IpAddr::V4(C_EXTRA_GROUP)]).await,
         "a responder given `#join={C_EXTRA_GROUP}` did not answer a Scout sent to \
          that group, so the extra membership was never installed"
     );

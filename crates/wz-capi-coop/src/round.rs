@@ -6,15 +6,17 @@
 //! record a session is handed can take of it, and the gates that hold each link back while the
 //! round has not that room (decision Q4).
 
-use alloc::sync::Arc;
-
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
+#[cfg(test)]
+use wz_session_core::placed::Placed;
+use wz_session_core::placed::PlacedRef;
 use wz_session_core::plane_lock::LockFamily;
 use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
-use wz_session_core::sink::SampleView;
+use wz_session_core::row_callback::ThreadForm;
+use wz_session_core::sink::SampleRef;
 
 #[cfg(feature = "query")]
 use crate::engine::LegId;
@@ -42,6 +44,25 @@ pub use wz_session_core::round::{RoundCounts, RoundRowCounts};
 
 /// The engine's round of deliveries.
 pub(crate) type Round = wz_session_core::round::Round<CoopCalls>;
+
+/// How the engine's calls stand to its threads: a read task may deliver beside the program's calls
+/// (`threads`), or every call runs on the thread that steps the session.
+#[cfg(feature = "threads")]
+pub(crate) type CoopForm = wz_session_core::row_callback::Threads;
+/// How the engine's calls stand to its threads: a read task may deliver beside the program's calls
+/// (`threads`), or every call runs on the thread that steps the session.
+#[cfg(not(feature = "threads"))]
+pub(crate) type CoopForm = wz_session_core::row_callback::OneThread;
+
+/// The latch each row of the engine's tables counts its calls on: [`CoopForm`]'s.
+#[cfg(feature = "threads")]
+pub(crate) type Latch = wz_session_core::row_callback::CallLatch;
+/// The latch each row of the engine's tables counts its calls on: [`CoopForm`]'s.
+#[cfg(not(feature = "threads"))]
+pub(crate) type Latch = wz_session_core::row_callback::LocalLatch;
+
+// The latch named above is the one the form names, so a row and the round agree on the form.
+const _: fn(Latch) -> <CoopForm as ThreadForm>::Latch = |latch| latch;
 
 /// The bytes of one record of the engine's round.
 pub(crate) const RECORD_BYTES: usize = RoundRows::<CoopCalls>::RECORD_BYTES;
@@ -194,6 +215,7 @@ impl RoundCalls for CoopCalls {
     type Tally = Handed;
     #[cfg(not(all(test, feature = "std")))]
     type Tally = ();
+    type Form = CoopForm;
 }
 
 impl PlaneCalls for CoopCalls {
@@ -226,7 +248,7 @@ impl RoundCall for SubscriberCall {
 }
 
 impl SampleCall for SubscriberCall {
-    fn hand(&self, sample: &dyn SampleView) {
+    fn hand(&self, sample: &SampleRef<'_>) {
         SubscriberCall::hand(self, sample);
     }
 }
@@ -319,10 +341,11 @@ impl wz_session_core::round::RoundTally for Handed {
     }
 }
 
-/// The tables of a round holding `events` records at once, lent from an arena the test leaks, so
-/// it outlives the round.
+/// A round holding `events` records at once, placed with its tables in an arena the test leaks,
+/// its owner leaked too: never dropped, so every handle of it stays good, and the caller may change
+/// the round through it before it shares any.
 #[cfg(test)]
-fn leaked_rows(events: usize) -> RoundRows<CoopCalls> {
+pub(crate) fn leaked_placed(events: usize) -> &'static mut Placed<Round> {
     use crate::arena::{AllocatorMemory, SessionArena};
     use wz_session_core::bounded::ARENA_ALIGN;
     use wz_session_core::caps;
@@ -332,21 +355,25 @@ fn leaked_rows(events: usize) -> RoundRows<CoopCalls> {
         callbacks: caps::DELIVERY_LANE_CALLBACKS,
         longest_key: caps::MAX_KEYEXPR_BYTES,
     };
-    // Each table on a span of its own, rounded up to the next start of one.
-    let bytes_of_rows = events * RECORD_BYTES
+    // Each table and the round on a span of its own, rounded up to the next start of one.
+    let bytes = events * RECORD_BYTES
         + counts.callbacks * CALLBACK_BYTES
-        + counts.key_bytes()
-        + 3 * ARENA_ALIGN;
+        + counts.key_bytes::<CoopForm>()
+        + core::mem::size_of::<Round>()
+        + 4 * ARENA_ALIGN;
     let arena: &'static mut SessionArena = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        SessionArena::of_bytes(bytes_of_rows, &AllocatorMemory).expect("the host has the memory"),
+        SessionArena::of_bytes(bytes, &AllocatorMemory).expect("the host has the memory"),
     ));
-    RoundRows::lent(arena.arena_mut(), counts).expect("the arena has the rows")
+    let rows = RoundRows::lent(arena.arena_mut(), counts).expect("the arena has the rows");
+    let placed = Round::placed_over(arena.arena_mut(), rows).expect("the arena has the round");
+    alloc::boxed::Box::leak(alloc::boxed::Box::new(placed))
 }
 
-/// A round holding `events` records at once, its tables lent from an arena the test leaks.
+/// A handle of a round holding `events` records at once, placed by [`leaked_placed`].
 #[cfg(test)]
-pub(crate) fn leaked(events: usize) -> Arc<Round> {
-    Round::shared_over(leaked_rows(events))
+pub(crate) fn leaked(events: usize) -> PlacedRef<Round> {
+    // SAFETY: the owner is leaked, so never dropped, and nothing reaches it but this handle.
+    unsafe { leaked_placed(events).share() }
 }
 
 /// The group twin of [`RoundGate`]: whether the round has the room one record of a group can
@@ -356,10 +383,10 @@ pub(crate) fn leaked(events: usize) -> Arc<Round> {
 ///
 /// # Safety
 /// The gate it answers is asked by the session's step alone, under the session's lock, as the
-/// group's transport is driven.
+/// group's transport is driven, and `round`'s owner outlives it (`Placed::share`).
 #[cfg(feature = "group")]
 pub(crate) unsafe fn takes_a_group_read(
-    round: Arc<Round>,
+    round: PlacedRef<Round>,
     room: ReadRoom,
 ) -> impl Fn() -> bool + 'static {
     // SAFETY: the caller's contract: the session's lock is held whenever this is asked.
@@ -372,7 +399,7 @@ pub(crate) unsafe fn takes_a_group_read(
 /// the link, and the transport's flow control carries the wait back to it.
 pub(crate) struct RoundGate<P> {
     pump: P,
-    round: Arc<Round>,
+    round: PlacedRef<Round>,
     room: ReadRoom,
 }
 
@@ -380,8 +407,9 @@ impl<P> RoundGate<P> {
     /// `pump`, gated by `round` for the room `room` of one of its records.
     ///
     /// # Safety
-    /// Asked by the session's step alone, which holds the session's lock.
-    pub(crate) unsafe fn new(pump: P, round: Arc<Round>, room: ReadRoom) -> Self {
+    /// Asked by the session's step alone, which holds the session's lock, and `round`'s owner
+    /// outlives the gate (`Placed::share`).
+    pub(crate) unsafe fn new(pump: P, round: PlacedRef<Round>, room: ReadRoom) -> Self {
         Self { pump, round, room }
     }
 

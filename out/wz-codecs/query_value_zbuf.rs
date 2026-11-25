@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::encoding::EncodingView;
 use super::zbuf_slice::ZbufSliceView;
 
@@ -440,6 +440,21 @@ impl QueryValueZbufWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `QueryValueZbuf` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct QueryValueZbufWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<1> for QueryValueZbufWalk {
+    type Entry<'b> = QueryValueZbufView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 1]) -> Result<Self::Entry<'b>, CodecError> {
+        QueryValueZbufView::decode(_c, _a[0])
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {  }
+}
+
 // `QueryValueZbufView` is what a decode of `QueryValueZbuf` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `QueryValueZbuf` holds it, an embedded body or a variant arm as its
@@ -449,22 +464,14 @@ impl QueryValueZbufWire {
 // one copies a few words however long its lists may be. `decode` refuses the
 // frames `QueryValueZbuf::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
+/// How `slices` reads its entries: the walk of every list of `ZbufSliceView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct QueryValueZbufSlicesWalk;
-
-impl ListWalk<0> for QueryValueZbufSlicesWalk {
-    type Entry<'b> = ZbufSliceView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ZbufSliceView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type QueryValueZbufSlicesWalk = super::zbuf_slice::ZbufSliceWalk;
 
 /// The group `QueryValueZbufAfterShm` as `QueryValueZbufView` holds it.
 #[allow(dead_code)]
-pub type QueryValueZbufAfterShmView<'a> = QueryValueZbufAfterShm<EncodingView<'a>, Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
+pub type QueryValueZbufAfterShmView<'a> = QueryValueZbufAfterShm<EncodingView<'a>, Bounded<ListView<'a, super::zbuf_slice::ZbufSliceWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
 
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -539,7 +546,7 @@ impl<'a> QueryValueZbufView<'a> {
             None
         };
         #[allow(clippy::needless_late_init)]
-        let slices: Option<Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4294967295>>;
+        let slices: Option<Bounded<ListView<'a, super::zbuf_slice::ZbufSliceWalk, 0>, 4294967295>>;
         if (after_shm & 0x01u8) != 0 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
             let _rest = cursor.peek_slice(cursor.remaining())?;

@@ -1454,7 +1454,7 @@ pub(crate) fn init_params(
     Ok(SessionInitParams {
         whatami,
         zid,
-        seq_num_res: link_conf.tx.sn_resolution.wire_code(),
+        seq_num_res: link_conf.tx.sn_resolution,
         req_id_res: 2,
         batch_size: link_conf.tx.batch_size,
         lease_ms: link_conf.tx.lease_ms,
@@ -1465,7 +1465,8 @@ pub(crate) fn init_params(
         link_rx: link_conf.rx,
         policy: link_conf.policy,
         limits: link_conf.limits,
-        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
+        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?.into(),
+        region: None,
     })
 }
 
@@ -3928,36 +3929,35 @@ impl ResolvedGroup {
     }
 
     /// The link `endpoint` names, or `None` (logged) for one that names no group. A UDP
-    /// group's sockets take the two link policies as `policy` holds them.
+    /// group is read by the group endpoint reader every engine opens a group from, so this one
+    /// refuses what the others refuse, and its sockets take the two link policies as `policy`
+    /// holds them.
     fn link_of(endpoint: &str, policy: &SessionPolicy) -> Option<GroupLinkSpec> {
-        use wz_runtime_tokio::locator::{parse_locator, Proto};
+        use wz_session_core::group_locator::{parse_group_locator, GroupLocator};
 
-        #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
-        if endpoint.starts_with("reth/") {
-            return wz_runtime_tokio::raweth_link::parse_reth_locator(endpoint)
-                .map(GroupLinkSpec::RawEth)
-                .map_err(|e| log_open_failure(&format!("group {endpoint}"), &e))
-                .ok();
+        match parse_group_locator(endpoint) {
+            Ok(GroupLocator::Udp(group)) => Some(GroupLinkSpec::Udp {
+                group: group.group().ip(),
+                port: group.group().port(),
+                opts: wz_runtime_tokio::McastGroupOptions {
+                    keys: Some(group),
+                    ..wz_runtime_tokio::McastGroupOptions::of_policy(policy)
+                },
+            }),
+            #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
+            Ok(GroupLocator::RawEth(reth)) => Some(GroupLinkSpec::RawEth(reth)),
+            Ok(_) => {
+                log_open_failure(
+                    &format!("group {endpoint}"),
+                    &"a group of a kind this build does not join",
+                );
+                None
+            }
+            Err(e) => {
+                log_open_failure(&format!("group {endpoint}"), &e);
+                None
+            }
         }
-        let parsed = parse_locator(endpoint)
-            .map_err(|e| log_open_failure(&format!("group {endpoint}"), &e))
-            .ok()?;
-        if parsed.proto != Proto::Udp || !parsed.addr.ip().is_multicast() {
-            log_open_failure(&format!("group {endpoint}"), &"not a udp multicast group");
-            return None;
-        }
-        Some(GroupLinkSpec::Udp {
-            group: parsed.addr.ip(),
-            port: parsed.addr.port(),
-            opts: wz_runtime_tokio::McastGroupOptions {
-                iface: parsed.socket.as_ref().and_then(|s| s.iface.clone()),
-                ttl: parsed.mcast_ttl,
-                joins: parsed.mcast_join,
-                bind: parsed.socket.as_ref().and_then(|s| s.bind.clone()),
-                dscp: parsed.socket.as_ref().and_then(|s| s.dscp),
-                ..wz_runtime_tokio::McastGroupOptions::of_policy(policy)
-            },
-        })
     }
 }
 
@@ -5036,7 +5036,7 @@ mod tests {
             limits: SessionLimits::BUILD,
         };
         let params = init_params(WhatAmI::Client, [0xC1; 4].into(), stated).expect("entropy");
-        assert_eq!(params.seq_num_res, SnResolution::Bits8.wire_code());
+        assert_eq!(params.seq_num_res, SnResolution::Bits8);
         assert_eq!(params.batch_size, 2048);
         assert_eq!(params.lease_ms, 4000);
         assert_eq!(params.keep_alive, KeepAliveConf::ZENOH);
@@ -6697,10 +6697,48 @@ mod multicast_face_tests {
                 panic!("a reth/ endpoint is a raw Ethernet group");
             };
             assert_eq!(reth.smac, [0x02, 0, 0, 0, 0, 0x01]);
-            assert_eq!(reth.interface, "eth9");
+            assert_eq!(reth.interface(), "eth9");
         }
         #[cfg(not(all(feature = "raweth-transport", target_os = "linux")))]
         assert!(ResolvedGroup::link_of("reth/02:00:00:00:00:01", &policy).is_none());
+    }
+
+    /// A UDP group is read by the reader every engine opens a group from: its keys reach the
+    /// group's sockets, and what that reader refuses (metadata a group does not keep, a `join`
+    /// of the other family, an endpoint past `MAX_GROUP_ENDPOINT_LEN`) names no group here.
+    #[test]
+    fn a_udp_group_is_read_as_every_engine_reads_it() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let policy = SessionPolicy::defaults();
+        let Some(GroupLinkSpec::Udp { group, port, opts }) =
+            ResolvedGroup::link_of("udp/224.0.0.224:7447#ttl=3;join=224.0.0.225", &policy)
+        else {
+            panic!("a udp multicast endpoint names a UDP group");
+        };
+        assert_eq!(
+            (group, port),
+            (IpAddr::V4(Ipv4Addr::new(224, 0, 0, 224)), 7447)
+        );
+        let socket = opts.as_socket_config();
+        assert_eq!(socket.ttl, Some(3));
+        assert_eq!(
+            socket.extra_joins,
+            [IpAddr::V4(Ipv4Addr::new(224, 0, 0, 225))]
+        );
+        for refused in [
+            "udp/224.0.0.224:7447?rel=1",
+            "udp/224.0.0.224:7447#join=ff02::1",
+        ] {
+            assert!(
+                ResolvedGroup::link_of(refused, &policy).is_none(),
+                "{refused}"
+            );
+        }
+        let mut long = String::from("udp/224.0.0.224:7447#x=");
+        while long.len() <= wz_session_core::caps::MAX_GROUP_ENDPOINT_LEN {
+            long.push('e');
+        }
+        assert!(ResolvedGroup::link_of(&long, &policy).is_none());
     }
 
     /// A group of a session is resolved under the session's snapshot and not the build's: its
@@ -6716,7 +6754,7 @@ mod multicast_face_tests {
                 lease_ms: 10_000,
                 join_interval_ms: 100,
                 max_sessions: None,
-                seq_num_res: 0x02,
+                seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                 req_id_res: 0x02,
                 batch_size: 2_048,
                 is_qos: false,
@@ -6782,7 +6820,7 @@ mod multicast_face_tests {
                 lease_ms: 10_000,
                 join_interval_ms: 100,
                 max_sessions: None,
-                seq_num_res: 0x02,
+                seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                 req_id_res: 0x02,
                 batch_size: 2_048,
                 is_qos: false,

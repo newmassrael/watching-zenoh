@@ -51,14 +51,14 @@ use core::ffi::{c_char, CStr};
 #[cfg(feature = "config-document")]
 use wz_session_core::caps;
 #[cfg(feature = "config-document")]
-use wz_session_core::json5::{self, number_as_u64, Json5Value};
+use wz_session_core::json5::number_as_u64;
 #[cfg(feature = "config-document")]
 use wz_session_core::json5_lex::{Json5Error, Json5Keyword, Json5Str, Lexer};
 #[cfg(feature = "config-document")]
 use wz_session_core::limit_binding::{LimitValue, UNBOUNDED};
 use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "config-document")]
-use wz_session_core::limits::{RuntimeLimits, SESSION_LIMITS};
+use wz_session_core::limits::{RuntimeLimits, RUNTIME_LIMITS, RUNTIME_LIMIT_COUNT, SESSION_LIMITS};
 use wz_session_core::policy::SessionPolicy;
 #[cfg(any(feature = "config-document", all(test, feature = "config-policy")))]
 use wz_session_core::policy::POLICIES;
@@ -270,23 +270,6 @@ impl PolicyStatements {
     }
 }
 
-/// The `wz` members of the zenoh document `text`, gathered in their order as the members of a
-/// document of their own, or `Z_ERR_CONFIG_INVALID_VALUE` for text that is no JSON5 object. A
-/// `wz: null` states nothing: zenoh's spelling of a member left unset, as the zenoh-c ABI's reader
-/// of the same document takes it.
-#[cfg(feature = "config-document")]
-fn wz_members(text: &str) -> Result<Json5Value, ZResult> {
-    let Ok(Json5Value::Object(members)) = json5::parse(text) else {
-        return Err(Z_ERR_CONFIG_INVALID_VALUE);
-    };
-    Ok(Json5Value::Object(
-        members
-            .into_iter()
-            .filter(|(key, value)| key == WZ_MEMBER && !matches!(value, Json5Value::Null))
-            .collect(),
-    ))
-}
-
 /// What the `wz` member of the document `wz_ext_config_document` was handed states, read by the
 /// door into the build's own ids with no tree kept: the profile, the statements of `wz/policies`
 /// and those of `wz/limits`, each held by the build's table, and the key ids of `wz/key-ids`. `Default` is a document with no `wz` member, which states nothing.
@@ -303,6 +286,64 @@ struct DocumentRows {
 /// A document the reader refuses: `Z_ERR_CONFIG_INVALID_VALUE` at the door.
 #[cfg(feature = "config-document")]
 struct Refused;
+
+/// The limits of a runtime the `wz/limits` of a runtime's document states, each once, in the
+/// document's order: what `wz_ext_runtime_limits_document` resolves over the build's. Each id is
+/// the build's own, from its table, so the rows keep no text of the document, and the table has a
+/// row for each, so they never run out.
+#[cfg(feature = "config-document")]
+struct RuntimeRows {
+    stated: [LimitStatement<'static>; RUNTIME_LIMIT_COUNT],
+    len: usize,
+}
+
+#[cfg(feature = "config-document")]
+impl RuntimeRows {
+    /// Rows that state nothing.
+    const fn new() -> Self {
+        Self {
+            stated: [LimitStatement::new("", LimitValue::Unbounded); RUNTIME_LIMIT_COUNT],
+            len: 0,
+        }
+    }
+
+    /// What the rows state, in the document's order.
+    fn stated(&self) -> &[LimitStatement<'static>] {
+        self.stated.get(..self.len).unwrap_or_default()
+    }
+
+    /// `limit`, an id of the build's table, is to take `value`; a limit stated twice is refused,
+    /// as the resolution refuses a limit a layer states twice.
+    fn state(&mut self, limit: &'static str, value: LimitValue) -> Result<(), Refused> {
+        if self.stated().iter().any(|held| held.limit == limit) {
+            return Err(Refused);
+        }
+        let (Some(row), Some(next)) = (self.stated.get_mut(self.len), self.len.checked_add(1))
+        else {
+            return Err(Refused);
+        };
+        *row = LimitStatement::new(limit, value);
+        self.len = next;
+        Ok(())
+    }
+
+    /// The runtime's limits the rows state over the build's, as a node resolves a document that
+    /// states them and nothing else ([`policy_document::resolve_layers_under`]), or
+    /// `Z_ERR_CONFIG_INVALID_VALUE`.
+    fn resolve(&self) -> Result<RuntimeLimits, ZResult> {
+        let layers = DocumentLayers {
+            limits: StatedLimits::Read(self.stated()),
+            ..DocumentLayers::default()
+        };
+        policy_document::resolve_layers_under(
+            policy_document::Base::node(SessionPolicy::defaults()),
+            layers,
+            Overrides::default(),
+        )
+        .map(|resolved| resolved.limits.runtime)
+        .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
+    }
+}
 
 #[cfg(feature = "config-document")]
 impl From<Json5Error> for Refused {
@@ -421,7 +462,7 @@ impl DocumentRows {
     /// `Z_ERR_CONFIG_INVALID_VALUE`: the document is walked once, keeping no tree, and only its
     /// `wz` member is read; every other member is stepped over and still checked, at most
     /// `CONFIG_DOCUMENT_DEPTH` deep, the outermost object being 1.
-    fn read(&mut self, text: &str) -> Result<(), ZResult> {
+    fn read(&mut self, text: &str, runtime: Option<&mut RuntimeRows>) -> Result<(), ZResult> {
         self.profile = None;
         self.statements = PolicySet::new();
         self.limits = LimitSet::new();
@@ -429,18 +470,22 @@ impl DocumentRows {
         {
             self.key_ids = Default::default();
         }
-        self.read_document(&mut Lexer::new(text))
+        self.read_document(&mut Lexer::new(text), runtime)
             .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
 
     /// The whole document: an object, each of whose `wz` members is read, and nothing after it.
-    fn read_document(&mut self, lex: &mut Lexer<'_>) -> Result<(), Refused> {
+    fn read_document(
+        &mut self,
+        lex: &mut Lexer<'_>,
+        mut runtime: Option<&mut RuntimeRows>,
+    ) -> Result<(), Refused> {
         lex.skip_trivia()?;
         open_object(lex)?;
         let mut seen_wz = false;
         while let Some(name) = next_member(lex)? {
             if name.eq_str(WZ_MEMBER) {
-                self.read_wz(lex, &mut seen_wz)?;
+                self.read_wz(lex, &mut seen_wz, runtime.as_deref_mut())?;
             } else {
                 lex.skip_value(Self::MEMBER_DEPTH)?;
             }
@@ -456,7 +501,12 @@ impl DocumentRows {
 
     /// One `wz` member: an object, or `null`, zenoh's spelling of a member left unset, which
     /// states nothing as the zenoh-c ABI's reader of the same document takes it.
-    fn read_wz(&mut self, lex: &mut Lexer<'_>, seen_wz: &mut bool) -> Result<(), Refused> {
+    fn read_wz(
+        &mut self,
+        lex: &mut Lexer<'_>,
+        seen_wz: &mut bool,
+        mut runtime: Option<&mut RuntimeRows>,
+    ) -> Result<(), Refused> {
         if lex.peek() != Some(b'{') {
             let unset = !lex.at_string()
                 && !lex.at_number()
@@ -476,7 +526,7 @@ impl DocumentRows {
                 self.read_policies(lex)?;
             } else if name.eq_str("limits") {
                 first(&mut seen.limits)?;
-                self.read_limits(lex)?;
+                self.read_limits(lex, runtime.as_deref_mut())?;
             } else if name.eq_str("key-ids") {
                 first(&mut seen.key_ids)?;
                 // Read where it lies, into the rows of its entries, by the rules of the reader
@@ -545,10 +595,14 @@ impl DocumentRows {
         Ok(())
     }
 
-    /// `wz/limits`: an object of a limit of a session's id and its value, a whole number a
-    /// `usize` holds or `unbounded`, each limit once. A limit of a runtime is refused, as a
-    /// session holds none.
-    fn read_limits(&mut self, lex: &mut Lexer<'_>) -> Result<(), Refused> {
+    /// `wz/limits`: an object of a limit's id and its value, a whole number a `usize` holds or
+    /// `unbounded`, each limit once. A limit of a runtime is read into `runtime`, the rows of a
+    /// runtime's document, and refused in a config's (`None`), as a session holds none.
+    fn read_limits(
+        &mut self,
+        lex: &mut Lexer<'_>,
+        mut runtime: Option<&mut RuntimeRows>,
+    ) -> Result<(), Refused> {
         open_object(lex)?;
         while let Some(limit) = next_member(lex)? {
             let value = if lex.at_number() {
@@ -561,13 +615,18 @@ impl DocumentRows {
             } else {
                 return Err(Refused);
             };
-            let entry = SESSION_LIMITS
-                .iter()
-                .find(|entry| limit.eq_str(entry.id()))
-                .ok_or(Refused)?;
-            self.limits
-                .state(LimitStatement::new(entry.id(), value))
-                .map_err(|_| Refused)?;
+            if let Some(entry) = SESSION_LIMITS.iter().find(|entry| limit.eq_str(entry.id())) {
+                self.limits
+                    .state(LimitStatement::new(entry.id(), value))
+                    .map_err(|_| Refused)?;
+            } else {
+                let rows = runtime.as_deref_mut().ok_or(Refused)?;
+                let entry = RUNTIME_LIMITS
+                    .iter()
+                    .find(|entry| limit.eq_str(entry.id()))
+                    .ok_or(Refused)?;
+                rows.state(entry.id(), value)?;
+            }
             after_member(lex)?;
         }
         Ok(())
@@ -692,7 +751,7 @@ pub unsafe extern "C" fn wz_ext_config_document(
 ) -> ZResult {
     guarded(|| {
         amend(config, |statements| {
-            statements.document.read(text_of(json5)?)
+            statements.document.read(text_of(json5)?, None)
         })
     })
 }
@@ -701,30 +760,19 @@ pub unsafe extern "C" fn wz_ext_config_document(
 /// `Z_ERR_CONFIG_INVALID_VALUE`. The document states the process's runtime and nothing of a
 /// session: a profile, a policy, key ids and a limit of a session are its config's to state, and
 /// are refused here with everything the reader of a node's document refuses.
+///
+/// Read by the walker of `wz_ext_config_document`, with no tree and at most
+/// `CONFIG_DOCUMENT_DEPTH` deep, so the two doors read one document by one set of rules and the
+/// build links one reader of it.
 #[cfg(feature = "config-document")]
 fn runtime_limits_of(text: &str) -> Result<RuntimeLimits, ZResult> {
-    let document = wz_members(text)?;
-    let read = policy_document::statements_from_json5(&document)
-        .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
-    let of_a_session = read.profile.is_some()
-        || !read.statements.is_empty()
-        || read.limits.iter().any(|stated| {
-            wz_session_core::limits::SESSION_LIMITS
-                .iter()
-                .any(|entry| entry.id() == stated.limit)
-        });
-    #[cfg(feature = "shared-key-ids")]
-    let of_a_session =
-        of_a_session || read.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default();
-    if of_a_session {
+    let mut document = DocumentRows::default();
+    let mut runtime = RuntimeRows::new();
+    document.read(text, Some(&mut runtime))?;
+    if !document.states_nothing() {
         return Err(Z_ERR_CONFIG_INVALID_VALUE);
     }
-    policy_document::resolve_document(
-        policy_document::Base::node(SessionPolicy::defaults()),
-        &document,
-    )
-    .map(|resolved| resolved.limits.runtime)
-    .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
+    runtime.resolve()
 }
 
 /// States the limits of the process's runtime from a zenoh JSON5 document, of which the
@@ -738,9 +786,10 @@ fn runtime_limits_of(text: &str) -> Result<RuntimeLimits, ZResult> {
 /// `wz_ext_supervision_*` door, `wz_ext_stream_supervisor_new` or `wz_ext_message_catalog_new`.
 /// A call after it is refused with `Z_EINVAL` and the process keeps the limits it took.
 ///
-/// Text that is no JSON5 object, a `wz` member whose shape is refused, a profile, a policy, key
-/// ids, a limit of a session, a limit the build does not have, a limit only the build decides and
-/// a value the build's domain leaves out or that is over the build's value are refused with
+/// Text that is no JSON5 object, a document nested deeper than `CONFIG_DOCUMENT_DEPTH` (the
+/// outermost object being 1), a `wz` member whose shape is refused, a profile, a policy, key ids,
+/// a limit of a session, a limit the build does not have, a limit only the build decides and a
+/// value the build's domain leaves out or that is over the build's value are refused with
 /// `Z_ERR_CONFIG_INVALID_VALUE`, whenever the call comes, and the process keeps what it held. A
 /// null `json5` is `Z_ERR_NULL`.
 ///
@@ -775,6 +824,8 @@ mod tests {
     use crate::prelude::*;
     use crate::session::{resolve_policy, resolve_snapshots};
     use alloc::ffi::CString;
+    #[cfg(feature = "config-document")]
+    use wz_session_core::json5::{self, Json5Value};
     use wz_session_core::policy_binding::{Binding, PolicyEntry};
     use wz_session_core::policy_document::Origin;
 
@@ -886,6 +937,51 @@ mod tests {
             session_limits: crate::session::opening_limits(),
             runtime_limits: None,
         }
+    }
+
+    /// The `wz` members of the zenoh document `text`, gathered in their order as the members of a
+    /// document of their own, or `Z_ERR_CONFIG_INVALID_VALUE` for text that is no JSON5 object. A
+    /// `wz: null` states nothing, as the zenoh-c ABI's reader of the same document takes it.
+    #[cfg(feature = "config-document")]
+    fn wz_members(text: &str) -> Result<Json5Value, ZResult> {
+        let Ok(Json5Value::Object(members)) = json5::parse(text) else {
+            return Err(Z_ERR_CONFIG_INVALID_VALUE);
+        };
+        Ok(Json5Value::Object(
+            members
+                .into_iter()
+                .filter(|(key, value)| key == WZ_MEMBER && !matches!(value, Json5Value::Null))
+                .collect(),
+        ))
+    }
+
+    /// What the runtime's door answers for `text` when its document is read as a tree, by the
+    /// reader of a node's document the other ABIs read it with: the reference the door's walker is
+    /// held to.
+    #[cfg(feature = "config-document")]
+    fn runtime_limits_by_tree(text: &str) -> Result<RuntimeLimits, ZResult> {
+        let document = wz_members(text)?;
+        let read = policy_document::statements_from_json5(&document)
+            .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
+        let of_a_session = read.profile.is_some()
+            || !read.statements.is_empty()
+            || read.limits.iter().any(|stated| {
+                SESSION_LIMITS
+                    .iter()
+                    .any(|entry| entry.id() == stated.limit)
+            });
+        #[cfg(feature = "shared-key-ids")]
+        let of_a_session = of_a_session
+            || read.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default();
+        if of_a_session {
+            return Err(Z_ERR_CONFIG_INVALID_VALUE);
+        }
+        policy_document::resolve_document(
+            policy_document::Base::node(SessionPolicy::defaults()),
+            &document,
+        )
+        .map(|resolved| resolved.limits.runtime)
+        .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
 
     #[cfg(feature = "config-document")]
@@ -1503,6 +1599,115 @@ mod tests {
             Z_ERR_NULL
         );
         assert_eq!(wz_capi_port::runtime_limits::held(), held);
+    }
+
+    /// The runtime's door reads its document by the rules of the tree reader of a node's document:
+    /// each member of the corpus every door is held to, and each shape of the `wz` member, answers
+    /// what the tree answers, and the shapes below are taken or refused as listed. Turned red by a
+    /// walker that takes a limit of a session, a profile, a policy or key ids, that refuses an empty
+    /// `wz/policies` or `wz/key-ids` the tree takes, or that takes a runtime's limit stated twice.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn the_runtime_document_is_read_as_the_tree_reader_reads_it() {
+        use wz_session_core::limit_corpus::{cases, json5_value};
+
+        for case in cases() {
+            let text = case.document();
+            assert_eq!(
+                runtime_limits_of(&text),
+                runtime_limits_by_tree(&text),
+                "{}",
+                case.name
+            );
+        }
+
+        let mut taken: Vec<String> = [
+            "{ mode: \"peer\" }",
+            "{ wz: null }",
+            "{ wz: {} }",
+            "{ wz: { policies: {} } }",
+            "{ wz: { limits: {} } }",
+            "{ wz: { limits: {} }, wz: null }",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let mut refused: Vec<String> = [
+            "{ wz: {}, wz: {} }",
+            "{ wz: true }",
+            "{ wz: { limits: {}, limits: {} } }",
+            "{ wz: { policies: {}, policies: {} } }",
+            "{ wz: { other: 1 } }",
+            "{ wz: {} } {}",
+            "{ wz: { \"key-ids\": { dictionary: [ { id: 1, key: \"lab/a\" } ] } } }",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        #[cfg(feature = "shared-key-ids")]
+        taken.extend([
+            String::from("{ wz: { \"key-ids\": {} } }"),
+            String::from("{ wz: { \"key-ids\": { dictionary: [], links: [] } } }"),
+        ]);
+        #[cfg(not(feature = "shared-key-ids"))]
+        refused.push(String::from("{ wz: { \"key-ids\": {} } }"));
+        let runtime = RuntimeLimits::defaults();
+        if let Some(entry) = RUNTIME_LIMITS
+            .iter()
+            .find(|entry| entry.read_from_snapshot())
+        {
+            let (limit, value) = (entry.id(), json5_value(entry.value_in(&runtime)));
+            taken.push(format!("{{ wz: {{ limits: {{ {limit}: {value} }} }} }}"));
+            refused.push(format!(
+                "{{ wz: {{ limits: {{ {limit}: {value}, {limit}: {value} }} }} }}"
+            ));
+            refused.push(format!("{{ wz: {{ limits: {{ {limit}: \"many\" }} }} }}"));
+        }
+        for text in &taken {
+            assert!(runtime_limits_of(text).is_ok(), "{text}");
+            assert_eq!(
+                runtime_limits_of(text),
+                runtime_limits_by_tree(text),
+                "{text}"
+            );
+        }
+        for text in &refused {
+            assert_eq!(
+                runtime_limits_of(text),
+                Err(Z_ERR_CONFIG_INVALID_VALUE),
+                "{text}"
+            );
+            assert_eq!(
+                runtime_limits_by_tree(text),
+                Err(Z_ERR_CONFIG_INVALID_VALUE),
+                "{text}"
+            );
+        }
+    }
+
+    /// The runtime's document is held to the depth a config's is: nested `CONFIG_DOCUMENT_DEPTH`
+    /// deep it is read, and a level deeper it is refused, though the nesting is in a member neither
+    /// door reads. Turned red by a runtime's door that reads its document with no bound, as the
+    /// tree reader does.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn a_runtime_document_past_its_depth_is_refused() {
+        // The outermost object is 1, and each `{ a: .. }` in the member's value one more.
+        let nested = |depth: usize| {
+            format!(
+                "{{ mode: \"peer\", deep: {}{{}}{} }}",
+                "{ a: ".repeat(depth - 2),
+                " }".repeat(depth - 2)
+            )
+        };
+        assert_eq!(
+            runtime_limits_of(&nested(caps::CONFIG_DOCUMENT_DEPTH)),
+            Ok(RuntimeLimits::defaults())
+        );
+        assert_eq!(
+            runtime_limits_of(&nested(caps::CONFIG_DOCUMENT_DEPTH + 1)),
+            Err(Z_ERR_CONFIG_INVALID_VALUE)
+        );
     }
 
     /// A value over the build's of each limit the process's machines read is refused, by the

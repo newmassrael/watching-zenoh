@@ -17,10 +17,17 @@
 //! ([`CClosure`]), and, in a heap build, a Rust closure shared with the calls of it
 //! (`ArcCallback`).
 //!
+//! An engine whose calls all run on the thread that holds its tables counts them on a
+//! [`LocalLatch`], which has the same rules and no read-modify-write of its word; one whose calls
+//! may run on other threads (a read task beside the program's calls) counts them on a
+//! [`CallLatch`]. The engine names which by its [`ThreadForm`].
+//!
 //! [`RowCallback::begin`]: crate::row_callback::RowCallback::begin
 //! [`RowCallback::end`]: crate::row_callback::RowCallback::end
 //! [`RowCallback::retire`]: crate::row_callback::RowCallback::retire
 //! [`CallLatch`]: crate::row_callback::CallLatch
+//! [`LocalLatch`]: crate::row_callback::LocalLatch
+//! [`ThreadForm`]: crate::row_callback::ThreadForm
 //! [`RowCallback`]: crate::row_callback::RowCallback
 //! [`CClosure`]: crate::row_callback::CClosure
 
@@ -76,6 +83,30 @@ impl Word for HeldWord {
         match next(now) {
             Some(changed) => {
                 self.0.set(changed);
+                Ok(now)
+            }
+            None => Err(now),
+        }
+    }
+}
+
+/// The word of a latch whose calls all begin, end and retire on one thread ([`LocalLatch`]): read
+/// and written as two steps, so a target with no atomic read-modify-write of it needs no lock. An
+/// atomic load and store and not a cell, so a row holding it stays `Sync` as the atomic word's
+/// row is, and a misuse from two threads miscounts instead of racing.
+#[derive(Debug, Default)]
+struct LocalWord(core::sync::atomic::AtomicU32);
+
+impl Word for LocalWord {
+    fn load(&self) -> u32 {
+        self.0.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn update(&self, mut next: impl FnMut(u32) -> Option<u32>) -> Result<u32, u32> {
+        let now = self.load();
+        match next(now) {
+            Some(changed) => {
+                self.0.store(changed, core::sync::atomic::Ordering::Relaxed);
                 Ok(now)
             }
             None => Err(now),
@@ -172,6 +203,144 @@ impl CallLatch {
     pub fn retired(&self) -> bool {
         self.0.retired()
     }
+}
+
+/// The latch of a row whose calls all begin, end and retire on the thread that holds the tables
+/// ([`OneThread`]): [`CallLatch`]'s rules over a word read and written in two steps, since no
+/// other thread changes it between them.
+#[derive(Debug, Default)]
+pub struct LocalLatch(Counter<LocalWord>);
+
+impl LocalLatch {
+    /// A call ends with no lock: no other thread changes the word.
+    pub const ENDS_HELD: bool = false;
+
+    /// No call running, not retired.
+    pub const fn new() -> Self {
+        Self(Counter(LocalWord(core::sync::atomic::AtomicU32::new(0))))
+    }
+
+    /// As [`CallLatch::begin`].
+    pub fn begin(&self) -> bool {
+        self.0.begin()
+    }
+
+    /// As [`CallLatch::end`].
+    pub fn end(&self) -> bool {
+        self.0.end()
+    }
+
+    /// As [`CallLatch::retire`].
+    pub fn retire(&self) -> bool {
+        self.0.retire()
+    }
+
+    /// As [`CallLatch::drained`].
+    pub fn drained(&self) -> bool {
+        self.0.drained()
+    }
+
+    /// As [`CallLatch::retired`].
+    pub fn retired(&self) -> bool {
+        self.0.retired()
+    }
+}
+
+/// The latch a row's calls are counted on, in either form: what an engine's [`ThreadForm`] names.
+pub trait RowLatch: Default {
+    /// Whether a call is ended with the tables held.
+    const ENDS_HELD: bool;
+
+    /// Count one more call: `false` once the row is retired.
+    fn begin(&self) -> bool;
+
+    /// Count one call fewer: `true` when it was the last call of a retired row.
+    fn end(&self) -> bool;
+
+    /// Retire the row: `true` when no call runs, so it may be let go of now.
+    fn retire(&self) -> bool;
+
+    /// Whether the row is retired and no call of it runs.
+    fn drained(&self) -> bool;
+
+    /// Whether the row is retired, calls of it still running or not.
+    fn retired(&self) -> bool;
+}
+
+impl RowLatch for CallLatch {
+    const ENDS_HELD: bool = CallLatch::ENDS_HELD;
+
+    fn begin(&self) -> bool {
+        CallLatch::begin(self)
+    }
+
+    fn end(&self) -> bool {
+        CallLatch::end(self)
+    }
+
+    fn retire(&self) -> bool {
+        CallLatch::retire(self)
+    }
+
+    fn drained(&self) -> bool {
+        CallLatch::drained(self)
+    }
+
+    fn retired(&self) -> bool {
+        CallLatch::retired(self)
+    }
+}
+
+impl RowLatch for LocalLatch {
+    const ENDS_HELD: bool = LocalLatch::ENDS_HELD;
+
+    fn begin(&self) -> bool {
+        LocalLatch::begin(self)
+    }
+
+    fn end(&self) -> bool {
+        LocalLatch::end(self)
+    }
+
+    fn retire(&self) -> bool {
+        LocalLatch::retire(self)
+    }
+
+    fn drained(&self) -> bool {
+        LocalLatch::drained(self)
+    }
+
+    fn retired(&self) -> bool {
+        LocalLatch::retired(self)
+    }
+}
+
+/// How an engine's calls of its rows' callbacks stand to its threads: whether a call may run on a
+/// thread other than the one that holds the tables, and so the latch its rows count calls on.
+pub trait ThreadForm: 'static {
+    /// The latch each row counts its calls on.
+    type Latch: RowLatch;
+
+    /// Whether a call may run on another thread than the one undeclaring its row: an
+    /// undeclaration then waits for that call to end. Where every call runs on one thread, a call
+    /// still running is below the undeclarer on its own stack, and ends as that delivery ends.
+    const OTHER_THREADS: bool;
+}
+
+/// Calls run on any thread: a read task delivers while the program declares and undeclares.
+pub enum Threads {}
+
+impl ThreadForm for Threads {
+    type Latch = CallLatch;
+    const OTHER_THREADS: bool = true;
+}
+
+/// Every call runs on the one thread that steps the session and holds its tables.
+pub enum OneThread {}
+
+impl ThreadForm for OneThread {
+    type Latch = LocalLatch;
+    const OTHER_THREADS: bool = false;
 }
 
 /// A row's callback as the tables call it.
@@ -427,6 +596,48 @@ mod tests {
     #[test]
     fn the_held_latch_lets_a_retired_row_go_at_its_last_call() {
         the_last_to_leave_a_retired_row_lets_it_go::<HeldWord>();
+    }
+
+    /// Each form's latch, through the trait an engine reaches it by: a retired row begins no call,
+    /// and the one told to let it go is the retirer when no call ran, else the call that ends last.
+    fn a_forms_latch_lets_a_retired_row_go_at_its_last_call<F: ThreadForm>() {
+        let idle = F::Latch::default();
+        assert!(idle.retire(), "no call runs: the retirer lets it go");
+        assert!(idle.drained());
+        assert!(!idle.begin(), "a retired row begins no call");
+
+        let busy = F::Latch::default();
+        assert!(busy.begin() && busy.begin(), "a call inside a call");
+        assert!(!busy.retire(), "two calls run: not the retirer's");
+        assert!(busy.retired() && !busy.drained());
+        assert!(
+            !busy.begin(),
+            "retired: no call begins inside the ones that run"
+        );
+        assert!(!busy.end(), "the inner call ends, the outer one runs");
+        assert!(busy.end(), "the outer call ends last and lets the row go");
+        assert!(busy.drained());
+
+        let live = F::Latch::default();
+        assert!(live.begin());
+        assert!(!live.end(), "a live row is let go of by nobody");
+        assert!(!live.retired());
+    }
+
+    #[test]
+    fn both_forms_let_a_retired_row_go_at_its_last_call() {
+        a_forms_latch_lets_a_retired_row_go_at_its_last_call::<Threads>();
+        a_forms_latch_lets_a_retired_row_go_at_its_last_call::<OneThread>();
+    }
+
+    /// Only the form of many threads waits for a call another thread runs; the latch of one
+    /// thread ends a call with no lock.
+    #[test]
+    fn only_the_form_of_threads_waits_for_another_thread() {
+        const { assert!(<Threads as ThreadForm>::OTHER_THREADS) };
+        const { assert!(!<OneThread as ThreadForm>::OTHER_THREADS) };
+        const { assert!(!<LocalLatch as RowLatch>::ENDS_HELD) };
+        assert!(LocalLatch::new().begin(), "a new local latch begins a call");
     }
 
     /// The C form hands a call its `call` and `context`, and runs `drop(context)` once, when it

@@ -55,11 +55,12 @@ use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_session_core::app_link_table::{
-    kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, LinkInterest,
-    OpenProgress, SendGate, SendStep, StreamRead, DATAGRAM_MAX,
+    AcceptRead, AppLinkKind, DatagramRead, LinkHandle, LinkInterest, OpenProgress, SendGate,
+    SendStep, StreamRead, DATAGRAM_MAX,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
 use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
+use wz_session_core::group_locator::{GroupLocator, UdpGroup};
 
 use crate::group_transport::{GroupRx, GroupSend, GroupTransport};
 use crate::ip_stack::{heap_link, HeapLink};
@@ -70,7 +71,8 @@ use crate::session_drive::{
     OpenedLink, PendingDial, SessionLinks, StackWake, WaitOn,
 };
 use crate::stream_link::{
-    stream_ends_fit, StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
+    stream_ends_fit, StreamDial, StreamDriver, StreamEnds, StreamListen, StreamSocket,
+    STREAM_RX_CAPACITY,
 };
 use crate::udp_link::{datagram_ends_fit, DatagramSocket, Received, UdpDriver, UDP_RX_CAPACITY};
 
@@ -674,12 +676,12 @@ impl StreamSocket for AppStreamSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        self.local
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.peer
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: self.local,
+            peer: self.peer,
+        }
     }
 
     // Every byte is taken: what the program does not take now is held for it.
@@ -834,25 +836,16 @@ impl PendingDial<HeapLink> for PendingAppLink {
                         peer: self.to,
                         reads_sources: true,
                     };
-                    heap_link(
-                        self.cells.as_ref(),
-                        datagram_ends_fit(&socket, Some(self.to)),
-                        |place| {
-                            self.owner_waits.datagram(
-                                place.write(UdpDriver::initiator_in(socket, self.to, rx, tx)),
-                            )
-                        },
-                    )
+                    self.owner_waits
+                        .place_datagram(self.cells.as_ref(), socket, self.to, rx, tx)
                 } else {
                     let stream = AppStreamSocket {
                         held,
                         local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                         peer: self.to,
                     };
-                    heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
-                        self.owner_waits
-                            .stream(place.write(StreamDriver::over(stream, rx, tx)))
-                    })
+                    self.owner_waits
+                        .place_stream(self.cells.as_ref(), stream, rx, tx)
                 })
             }
         }
@@ -1278,6 +1271,36 @@ impl OwnerWaits {
         }
         link
     }
+
+    /// The datagram link over `socket` to `peer`, placed in `cells` when the session lent them.
+    /// Every datagram link these links dial, finish dialling or accept is placed here: out of
+    /// line, since the placement and the driver it builds were a copy at each of the three.
+    #[inline(never)]
+    fn place_datagram(
+        self,
+        cells: Option<&LentByteCells>,
+        socket: AppDatagramSocket,
+        peer: SocketAddr,
+        rx: RxBuffer,
+        tx: TxBuffer,
+    ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        heap_link(cells, datagram_ends_fit(&socket, Some(peer)))?
+            .open(|place| self.datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx))))
+    }
+
+    /// The stream link over `stream`, placed as [`Self::place_datagram`] places a datagram link,
+    /// for the same three callers.
+    #[inline(never)]
+    fn place_stream(
+        self,
+        cells: Option<&LentByteCells>,
+        stream: AppStreamSocket,
+        rx: RxBuffer,
+        tx: TxBuffer,
+    ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        heap_link(cells, stream_ends_fit(&stream))?
+            .open(|place| self.stream(place.write(StreamDriver::over(stream, rx, tx))))
+    }
 }
 
 impl AppLinks {
@@ -1351,31 +1374,26 @@ impl SessionLinks for AppLinks {
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The buffers are claimed before the program is asked for a link, so a session whose
         // tables are full asks it for none.
-        match to.proto {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
             LinkProto::Udp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
                 let socket = AppDatagramSocket::dial_bounded(
                     &self.transport,
                     &self.waits,
-                    to.at,
+                    ip.at,
                     self.open_bound.as_ref(),
                 )?;
-                heap_link(
-                    self.cells.as_ref(),
-                    datagram_ends_fit(&socket, Some(to.at)),
-                    |place| {
-                        self.owner_waits
-                            .datagram(place.write(UdpDriver::initiator_in(socket, to.at, rx, tx)))
-                    },
-                )
+                self.owner_waits
+                    .place_datagram(self.cells.as_ref(), socket, ip.at, rx, tx)
             }
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-                let stream = self.dial.dial(to.at)?;
-                heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
-                    self.owner_waits
-                        .stream(place.write(StreamDriver::over(stream, rx, tx)))
-                })
+                let stream = self.dial.dial(ip.at)?;
+                self.owner_waits
+                    .place_stream(self.cells.as_ref(), stream, rx, tx)
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
@@ -1388,7 +1406,10 @@ impl SessionLinks for AppLinks {
     /// buffers are claimed before the program is asked, as a waiting open's are, and go back with
     /// an open that is refused or given up.
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
-        let (kind, rx, datagram) = match to.proto {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        let (kind, rx, datagram) = match ip.proto {
             LinkProto::Udp => (AppLinkKind::Datagram, self.datagram_rx, true),
             LinkProto::Tcp => (AppLinkKind::StreamDial, STREAM_RX_CAPACITY, false),
             LinkProto::Tls => return Err(LinkOpenError::Unsupported),
@@ -1402,7 +1423,7 @@ impl SessionLinks for AppLinks {
                 waits: self.waits.wake.clone(),
             }),
             buffers: Some(buffers),
-            to: to.at,
+            to: ip.at,
             datagram,
             owner_waits: self.owner_waits,
             cells: self.cells,
@@ -1413,15 +1434,18 @@ impl SessionLinks for AppLinks {
         &self,
         at: Locator,
     ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
-        match at.proto {
+        let Some(ip) = at.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
             LinkProto::Tcp => Ok(Box::new(AppLinkListener {
-                listener: self.dial.listen(at.at)?,
+                listener: self.dial.listen(ip.at)?,
                 lent: self.lent,
                 owner_waits: self.owner_waits,
                 cells: self.cells,
             })),
             LinkProto::Udp => {
-                let locator = Locator::udp(at.at).to_string();
+                let locator = Locator::udp(ip.at).to_string();
                 let held = open_link(
                     &self.transport,
                     &self.waits,
@@ -1431,7 +1455,7 @@ impl SessionLinks for AppLinks {
                 )?;
                 Ok(Box::new(AppDatagramListener {
                     held,
-                    at: at.at,
+                    at: ip.at,
                     datagram_rx: self.datagram_rx,
                     lent: self.lent,
                     owner_waits: self.owner_waits,
@@ -1465,8 +1489,14 @@ impl SessionLinks for AppLinks {
         self.cells = Some(cells);
     }
 
-    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        if kind_for_locator(endpoint, true) != Some(AppLinkKind::Group) {
+    // A group the program joins names the interface it is joined on, as a listen on a group's
+    // address that names none is a datagram listen (`kind_for_locator`).
+    fn open_group(
+        &self,
+        endpoint: &str,
+        group: &GroupLocator,
+    ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        if group.udp().and_then(UdpGroup::iface).is_none() {
             return Err(LinkOpenError::Unsupported);
         }
         // A session that lent a table of group buffers gives the group one of them, and a group
@@ -1530,15 +1560,9 @@ impl LinkListener<HeapLink> for AppDatagramListener {
         // Claimed once the source is taken, as an IP listener claims: one the session's tables
         // have no buffers left for is let go of, not left waiting.
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-        heap_link(
-            self.cells.as_ref(),
-            datagram_ends_fit(&socket, Some(peer)),
-            |place| {
-                self.owner_waits
-                    .datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx)))
-            },
-        )
-        .map(Some)
+        self.owner_waits
+            .place_datagram(self.cells.as_ref(), socket, peer, rx, tx)
+            .map(Some)
     }
 
     // Ready when the program has accepted a source on the listener, which wakes it.
@@ -1569,11 +1593,9 @@ impl LinkListener<HeapLink> for AppLinkListener {
             return Ok(None);
         };
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-        heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
-            self.owner_waits
-                .stream(place.write(StreamDriver::over(stream, rx, tx)))
-        })
-        .map(Some)
+        self.owner_waits
+            .place_stream(self.cells.as_ref(), stream, rx, tx)
+            .map(Some)
     }
 
     fn input_wait(&self) -> Option<WaitOn> {
@@ -1587,6 +1609,11 @@ mod tests {
 
     use super::*;
     use alloc::vec::Vec;
+
+    /// The group `endpoint` names, read as the transport reads it before it asks the links.
+    fn group_of(endpoint: &str) -> GroupLocator {
+        wz_session_core::group_locator::parse_group_locator(endpoint).expect("a group endpoint")
+    }
 
     /// What `link` holds for the program, read through the offer a writer makes, with nothing
     /// taken: the front run, which is all of it while it has not wrapped.
@@ -1691,7 +1718,9 @@ mod tests {
                 String::from("tcp/192.0.2.9:7447")
             )
         );
-        assert_eq!(stream.peer(), PEER);
+        assert!(
+            matches!(stream.ends(), StreamEnds::Ip { proto: LinkProto::Tcp, peer, .. } if peer == PEER)
+        );
         drop(stream);
         assert_eq!(
             script.closes.lock().unwrap().len(),
@@ -2316,13 +2345,17 @@ mod tests {
         let (script, transport) = transport();
         let mut links = AppLinks::new(session(&transport, 64));
         links.lend_buffers(LinkTables::new(rx, tx, slot_len).with_group_rx(groups));
+        let group = group_of(GROUP);
         let mut first = links
-            .open_group(GROUP)
+            .open_group(GROUP, &group)
             .expect("a group in the table's buffer");
         assert!(first.lends_until_next_receive());
         assert_eq!(groups.in_use(), 1, "the group took the table's buffer");
         assert!(
-            matches!(links.open_group(GROUP), Err(LinkOpenError::Exhausted)),
+            matches!(
+                links.open_group(GROUP, &group),
+                Err(LinkOpenError::Exhausted)
+            ),
             "a second group finds the table held"
         );
         assert_eq!(
@@ -2339,17 +2372,17 @@ mod tests {
     fn the_links_join_a_group_through_the_program_and_refuse_what_names_none() {
         let (script, transport) = transport();
         let links = AppLinks::new(session(&transport, 64));
-        // Neither a datagram listen nor another scheme names a group: refused, with nothing asked
-        // of the program.
-        for endpoint in ["udp/192.0.2.9:7447", "tcp/239.7.7.7:7447#iface=lan7"] {
-            assert!(
-                matches!(links.open_group(endpoint), Err(LinkOpenError::Unsupported)),
-                "{endpoint}"
-            );
-        }
+        // A group that names no interface is a datagram listen on the group's address, not a
+        // group the program joins: refused, with nothing asked of the program.
+        let unpinned = "udp/239.7.7.7:7447";
+        assert!(matches!(
+            links.open_group(unpinned, &group_of(unpinned)),
+            Err(LinkOpenError::Unsupported)
+        ));
         assert!(script.opens.lock().unwrap().is_empty());
+        let pinned = "udp/239.7.7.7:7447#iface=lan7";
         let mut group = links
-            .open_group("udp/239.7.7.7:7447#iface=lan7")
+            .open_group(pinned, &group_of(pinned))
             .expect("a group the program joins");
         let (handle, kind, locator) = script.opens.lock().unwrap()[0].clone();
         assert_eq!(
@@ -2520,7 +2553,12 @@ mod tests {
             let refused = if listen {
                 links.open_listener(Locator::udp(PEER)).is_err()
             } else {
-                links.open_group("udp/239.7.7.7:7447#iface=lan7").is_err()
+                links
+                    .open_group(
+                        "udp/239.7.7.7:7447#iface=lan7",
+                        &group_of("udp/239.7.7.7:7447#iface=lan7"),
+                    )
+                    .is_err()
             };
             let took = started.elapsed();
             ended.store(true, std::sync::atomic::Ordering::SeqCst);

@@ -75,7 +75,7 @@ fn init_params(whatami: WhatAmI, zid: &[u8], lease_ms: u64) -> SessionInitParams
         whatami,
         zid: crate::session_zid::SessionZid::new(zid).expect("a 1 to 16 byte zid, not all zero"),
         // 0x0A on the wire: `seq_num_res | req_id_res << 2`.
-        seq_num_res: 2,
+        seq_num_res: crate::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 2048,
         lease_ms,
@@ -88,9 +88,11 @@ fn init_params(whatami: WhatAmI, zid: &[u8], lease_ms: u64) -> SessionInitParams
         ),
         link_rx: crate::session_init_params::LinkRxConf::default(),
         cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key"),
+            .expect("32-byte test key")
+            .into(),
         policy: crate::policy::SessionPolicy::defaults(),
         limits: crate::limits::SessionLimits::BUILD,
+        region: None,
     }
 }
 

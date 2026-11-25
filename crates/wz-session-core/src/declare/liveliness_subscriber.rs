@@ -1999,7 +1999,7 @@ impl<P: Storage> PeerTokens<P> {
                         subs,
                         cx,
                         &decl.body,
-                        peer_keyexpr_table,
+                        MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
                         decl.interest_id.is_some(),
                     );
                     if let Some(interest_id) = decl.interest_id {

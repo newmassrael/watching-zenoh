@@ -102,7 +102,11 @@ it behaves as pico behaves in both of pico's threading arms.
   application declared, which every face is dispatched against. The engine does not keep one
   observer for each peer and replay the application's registrations onto each, as the tokio
   engine's registry does, because the fixed-memory profile already separates the two kinds of
-  table and the separation is what the engine needs.
+  table and the separation is what the engine needs. D9 holds for a build that takes faces
+  beside its dial role's, one with `listen` or `group`. A build of neither holds its dial
+  role's face alone: one face in its transport's table (`OneFace`), one set of face tables
+  and no index of which face holds which (`OneHolder`), every face read in the dial role, and
+  a config that states a face beside it refused by `max_faces`.
 - **D6. The compile profile is orthogonal.** A `panic = "abort"` profile for the
   C ABI (`capi-small`) composes with either engine and is measured on its own.
 - **Superseded in part (owner, 2026-11-21).** `docs/c-abi-engine-and-memory.md` makes the
@@ -722,7 +726,11 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     `multicast-declarations` select no engine, and the cooperative engine joins a group as a face
     of its own, on the host's sockets or over a transport the program supplies, with the same
     declarations, the same keyexpr aliases and the same congestion rule on its send queue as the
-    tokio engine's group (`wz-capi-coop/src/engine/group.rs`). A `listen` that names a group
+    tokio engine's group (`wz-capi-coop/src/engine/group.rs`). With `multicast-declarations` it
+    reads each member's keyexprs by that member's own declarations, as the tokio engine's group
+    does: the group's records are still read where the datagram lies, each under the tag of the
+    member that sent it, and the face keys its aliases by tag and id, `MAX_MEMBER_KEYEXPRS` of them
+    for each member, reserved at the open and let go of when the member leaves. A `listen` that names a group
     joins it, on either engine, in a build with `multicast-transport`, and is refused as an
     unknown locator scheme in one without it.
   - `open_on_coop` hands the config's `listen` to the engine, with the handshake bound pico's

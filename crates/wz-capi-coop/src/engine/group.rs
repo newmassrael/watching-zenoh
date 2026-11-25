@@ -24,7 +24,6 @@
 //! leaves.
 
 use alloc::rc::Rc;
-use alloc::sync::Arc;
 use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
@@ -57,12 +56,15 @@ use wz_session_core::multicast_tx::{
     multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
     multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded,
 };
+use wz_session_core::placed::PlacedRef;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::session_tables::WireForm;
+#[cfg(feature = "transport-stats")]
+use wz_session_core::stats::TransportStats;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
@@ -86,7 +88,7 @@ use {
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-use super::registry::{FaceId, HeldFace, Registry};
+use super::registry::{FaceId, HeldFace};
 use crate::round::Round;
 
 /// The rows of each group's member table (`MAX_GROUP_MEMBERS`): a member whose JOIN finds them all
@@ -341,11 +343,12 @@ impl GroupLabel {
         }
     }
 
-    /// `member` as a transport: the session core's snapshot of a group member, over a UDP link.
+    /// `member` as a transport: the session core's snapshot of a group member, over the link its
+    /// group is.
     fn snapshot(&self, member: &MulticastMember) -> Option<FaceSnapshot> {
         FaceSnapshot::of_group_member(
             member,
-            GroupMemberLink::udp(&self.group, member, &self.group, &self.endpoint),
+            GroupMemberLink::of_group(&self.group, member, &self.group, &self.endpoint),
             self.is_shm,
         )
     }
@@ -384,7 +387,7 @@ struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
     took: Rc<Cell<bool>>,
     /// The session's round of deliveries.
-    lane: Arc<Round>,
+    lane: PlacedRef<Round>,
 }
 
 impl Drop for Watched {
@@ -467,6 +470,10 @@ impl GroupTransport for Watched {
     fn keep(&mut self) {
         self.inner.keep();
     }
+
+    fn frame_budget(&self) -> Option<u16> {
+        self.inner.frame_budget()
+    }
 }
 
 /// What a message of the session waits with when the group's stage has no room for it: a pass of
@@ -508,7 +515,7 @@ pub(super) struct GroupJoining {
     pub(super) input_gate: GroupInputGate,
     /// The session's round of deliveries, which reads what the group's transport lends where it
     /// lies and keeps the buffer it gives back while a record still reads it.
-    pub(super) lane: Arc<Round>,
+    pub(super) lane: PlacedRef<Round>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
     /// The session limits the session's open resolved: the group's replies are held to them.
@@ -556,6 +563,10 @@ pub(super) struct GroupFace<W> {
     stop: Rc<Cell<bool>>,
     /// The JOIN the session asks of the group between two beacons ([`Self::ask_join`]).
     join_ask: JoinAsk,
+    /// What the group's session counted of what it sent and received (`transport-stats`), shared
+    /// with its task and its stage; it leaves with the group's join.
+    #[cfg(feature = "transport-stats")]
+    stats: Rc<TransportStats>,
     /// The keyexprs this join of the group was told, and the members' asks for them the session
     /// owes an answer ([`GroupKeyexprAnswers`]).
     keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
@@ -621,8 +632,11 @@ impl<W: LinkWaits> GroupFace<W> {
         });
         // Bounded as the tokio engine bounds its group's pipeline: the queue's sizes, in batches
         // of the group's batch, one lane when it runs no QoS. The replies it holds are bounded by
-        // the session's limits.
-        let tx = GroupTxStage::with_limits(&params, &limits);
+        // the session's limits. A transport whose datagram carries less than the group's batch (a
+        // raw Ethernet frame) has the group's frames cut to it, and the group's JOIN still states
+        // its batch, as the tokio engine's group pipeline frames to its link's budget.
+        let framed = params.framed_to(transport.frame_budget());
+        let tx = GroupTxStage::with_limits(framed.as_ref().unwrap_or(&params), &limits);
         let room = transport.room_wait();
         let input = transport.input_wait();
         let due = GroupDue::default();
@@ -630,6 +644,12 @@ impl<W: LinkWaits> GroupFace<W> {
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
         let join_ask = JoinAsk::default();
+        // What the group's session receives and its beacons are counted by its task, and each
+        // datagram of the stage by whichever writer wrote it.
+        #[cfg(feature = "transport-stats")]
+        let stats = Rc::new(TransportStats::default());
+        #[cfg(feature = "transport-stats")]
+        tx.attach_stats(Rc::clone(&stats));
         // The session core's config for a group, the tokio engine's group face's too, with each
         // member's declarations kept apart: the group's events feed one session's tables.
         let config = MulticastConfig::of_group(&params, true);
@@ -651,6 +671,8 @@ impl<W: LinkWaits> GroupFace<W> {
         .with_tx_stage(tx.clone())
         .with_due(due.clone())
         .with_input_gate(input_gate);
+        #[cfg(feature = "transport-stats")]
+        let seed = seed.with_stats(Rc::clone(&stats));
         let keyexprs = Rc::new(RefCell::new(GroupKeyexprAnswers::default()));
         let on_event = answering_asks(
             noting_members(
@@ -694,6 +716,8 @@ impl<W: LinkWaits> GroupFace<W> {
             took,
             stop,
             join_ask,
+            #[cfg(feature = "transport-stats")]
+            stats,
             keyexprs,
             keyexpr_ask_owed,
             filters: RefCell::new(Vec::new()),
@@ -793,6 +817,13 @@ impl<W: LinkWaits> GroupFace<W> {
         (0..Priority::NUM)
             .map(|at| self.tx.drops(Priority::from_wire(at as u8)))
             .fold(self.tx.dropped(), u32::saturating_add)
+    }
+
+    /// What the group's session counted (`transport-stats`): the bytes and transport messages of
+    /// the datagrams it sent and received, and the network messages read out of those received.
+    #[cfg(feature = "transport-stats")]
+    pub(super) fn stats_report(&self) -> wz_session_core::stats::TransportStatsReport {
+        self.stats.report()
     }
 
     /// The group's stage, as its dispatch stages a reply on it. Read only by
@@ -1198,10 +1229,13 @@ impl<W: LinkWaits> GroupFace<W> {
     /// keyexprs (`GroupDeclarations::declares_keyexprs`), as the tokio engine's group is told it,
     /// and hold it for the members that ask for it.
     pub(super) fn announce_keyexpr(&self, id: ExprId, keyexpr: &str) {
-        if id == 0 || self.has_ended() || !self.join.declarations.declares_keyexprs() {
+        let Some(declared) = core::num::NonZero::new(id) else {
+            return;
+        };
+        if self.has_ended() || !self.join.declarations.declares_keyexprs() {
             return;
         }
-        if let Ok(declaration) = kexpr_declaration(id, keyexpr) {
+        if let Ok(declaration) = kexpr_declaration(declared, keyexpr) {
             self.keyexprs.borrow_mut().declared(id, keyexpr);
             multicast_tx_declaration(&declaration, |message| self.push_lent(message));
         }
@@ -1531,22 +1565,24 @@ pub(super) struct GroupPut<'a> {
 /// `generation`, so the answer it is owed is the group's and no link's.
 #[cfg(feature = "queryable")]
 pub(super) fn dispatch(
-    registry: Rc<RefCell<Registry>>,
+    registry: super::RegistryLend,
     face: HeldFace,
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
     use wz_session_core::response_sink::ResponseSink;
     move |event, replies| {
-        let mut registry = registry.borrow_mut();
-        plane.set_arriving(generation);
-        registry.dispatch_event(face, event);
-        registry.flush_pending_replies(face, replies);
-        for (rid, qos) in registry.take_pending_final_rids(face) {
-            if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
-                replies.send_response_final(rid, qos);
+        let dispatched = registry.with(|registry| {
+            plane.set_arriving(generation);
+            registry.dispatch_event(face, event);
+            registry.flush_pending_replies(face, replies);
+            for (rid, qos) in registry.take_pending_final_rids(face) {
+                if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
+                    replies.send_response_final(rid, qos);
+                }
             }
-        }
+        });
+        debug_assert!(dispatched.is_some(), "{}", super::UNLENT);
     }
 }
 
@@ -1554,10 +1590,13 @@ pub(super) fn dispatch(
 /// staged queued on the group at once.
 #[cfg(not(feature = "queryable"))]
 pub(super) fn dispatch(
-    registry: Rc<RefCell<Registry>>,
+    registry: super::RegistryLend,
     face: HeldFace,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
-    move |event, replies| registry.borrow_mut().dispatch(face, event, replies)
+    move |event, replies| {
+        let dispatched = registry.with(|registry| registry.dispatch(face, event, replies));
+        debug_assert!(dispatched.is_some(), "{}", super::UNLENT);
+    }
 }
 
 #[cfg(all(test, feature = "connectivity"))]

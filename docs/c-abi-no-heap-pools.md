@@ -122,9 +122,10 @@ what a program makes before any session: its configs and the hellos it keeps.
 - Bound: the counts of `wz_ext_object_pool_counts_t` are limits: `HELD_SESSIONS`,
   `HELD_SAMPLES`, `HELD_REPLIES`, `HELD_QUERIES` and `HELD_PAYLOADS` (the payload handles; the
   entities take their session limits times `HELD_SESSIONS`), `HELD_CONFIGS`, `HELD_HELLOS` and
-  `HELD_PAYLOAD_BYTES` for the bytes the payloads, strings and slices carry; NEW HELD_OBJECTS for
-  the handles of strings, slices, string arrays and encodings and owned key expressions. One
-  payload is at most the area's largest block, one key at most `MAX_KEYEXPR_BYTES`. The C struct
+  the three counts of payload blocks for the bytes the payloads, strings and slices carry; NEW
+  HELD_OBJECTS for the handles of strings, slices, string arrays and encodings and owned key
+  expressions. One payload is at most the largest payload block, one key at most
+  `MAX_KEYEXPR_BYTES`. The C struct
   stays the door that states them in C.
 - Form: the per-kind object pools for the objects (`crate::process_pool`), each slot the
   smallest of the reported sizes (16 bytes to 16 KiB) that holds its object, or for an object past
@@ -586,7 +587,7 @@ suites (C1co, Layer Z) unchanged.
 10. **U9. Handle objects and payloads from the process pools.** `wz-capi-pico` `object_slot.rs`
     (no heap fallback), `object_pool.rs` (reserved at the first call, decision Q1),
     `bytes.rs`, `string_array.rs`, `encoding.rs`, `config.rs`. Family: owned values. Tests:
-    `z_bytes_copy_from_buf` past HELD_PAYLOAD_BYTES answers the code and leaves the source; every
+    `z_bytes_copy_from_buf` past the largest payload block answers the code and leaves the source; every
     pool's count after a drop.
     Taken for the session: on the cooperative engine its handle lies in its own arena, not in a
     process pool (a table of HELD_SESSIONS places would be a count the program states nowhere for
@@ -614,16 +615,22 @@ suites (C1co, Layer Z) unchanged.
     publisher keeps its own. An encoding of no schema is its well-known constant and takes no slot,
     as zenoh-pico allocates only for a schema, and a kept sample, reply or query copies its schema
     into the payloads' area with its other bytes.
-    The bytes of payloads, strings and slices are blocks of one area beside them
-    (`HELD_PAYLOAD_BYTES`, a buddy allocator, `bytes.rs` `Block` with its count in its head in
-    place of `Arc<Backing>`); every constructor and copy is fallible and answers
+    The bytes of payloads, strings and slices are blocks of three pools of fixed blocks beside them
+    (`HELD_SMALL_PAYLOAD_BLOCKS` of `PAYLOAD_SMALL_BLOCK_BYTES`, `HELD_MEDIUM_PAYLOAD_BLOCKS` of
+    `PAYLOAD_MEDIUM_BLOCK_BYTES`, `HELD_LARGE_PAYLOAD_BLOCKS` each holding the largest message a
+    session delivers; taken and given back by the same code as a kind's slot, a payload taking the
+    smallest pool whose blocks hold it and that has one free; `bytes.rs` `Block` with its count
+    in its head in place of `Arc<Backing>`; the buddy area of `HELD_PAYLOAD_BYTES` it replaced
+    split and joined its blocks in halves); every constructor and copy is fallible and answers
     `_Z_ERR_SYSTEM_OUT_OF_MEMORY` with its output null, an alias's release run at once. A reply's and
     a query's payload and attachment are read where the view holds them, as a sample's were
     (the borrowed marshal), and copied only when kept past the callback. The doors' counts
-    gained `configs`, `hellos` and `payload_bytes`; the doors report no class for the area or for
-    a slot past the largest class. Tests: `process_pool::tests` (the area's split, join and refusal,
-    a slot past the classes), `bytes::block_tests`, `object_pool_doors` ARM 4b (a copy past the
-    area answers the code and leaves the source).
+    gained `configs` and `hellos`, and the three counts of payload blocks in place of
+    `payload_bytes`, which is refused when not zero; a class reports the payload blocks of its size
+    with the kinds' slots, and no class a slot past the largest. Tests: `process_pool::tests` (the
+    smallest free block that holds a payload, a refusal counted in its class, a slot past the
+    classes), `bytes::block_tests`, `object_pool_doors` ARM 4b (a copy no pool has a block for
+    answers the code and leaves the source).
 11. **U10. The port without heap types.** `wz-capi-port` `engine.rs`, `drive.rs`, `lib.rs`:
     methods returning `Vec` write into a caller's buffer, `Arc<dyn SessionEngine>` becomes the
     session's slot and generation, `Box<dyn SessionDrive>` the session object itself. Families:
@@ -862,7 +869,8 @@ The limits zenoh-pico has a constant for already default to it (`PICO_UNICAST_BA
 `PICO_MULTICAST_BATCH_BYTES` 2,048, `PICO_FRAG_MAX_BYTES` 4,096) and have no preset.
 `MAX_KEYEXPR_BYTES` keeps 256: zenoh-pico bounds no key, and a shorter bound would refuse keys a
 router declares and samples it delivers that zenoh-pico takes. The limits of what the peer writes
-(`MAX_INBOUND_SUB_INTERESTS`, `MAX_REMOTE_DECLS`, `MAX_PEER_KEYEXPR_ALIASES`) keep theirs too: the
+(`MAX_INBOUND_SUB_INTERESTS`, `MAX_REMOTE_DECLS`, `MAX_PEER_KEYEXPR_ALIASES`, and
+`MAX_MEMBER_KEYEXPRS`, one group member's own keyexprs, whose default is one peer's 16) keep theirs too: the
 peer, not the program, decides how many it sends, and zenoh-pico allocates each as it comes with no
 bound, so a lower preset would refuse declarations zenoh-pico accepts. Their memory is cut by the
 form of their rows instead: one pool of each kind the faces share, bounded by what the session's

@@ -52,9 +52,15 @@ use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::LostCause;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
+#[cfg(feature = "serial")]
+use wz_session_core::locator_grammar::{
+    write_serial_address_with_config, SerialAddress, SerialOptions, SERIAL_SCHEME,
+};
+#[cfg(feature = "unixpipe")]
+use wz_session_core::locator_grammar::{write_unixpipe_path_with_config, UNIXPIPE_SCHEME};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::text_out::FixedText;
+use wz_session_core::text_out::{FixedText, TextOut};
 use wz_session_core::transport_timers::TransportTimers;
 use wz_session_core::unicast_rx::{RxReassembly, UnicastRx};
 
@@ -70,6 +76,7 @@ use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
 use crate::session_runtime::{SessionEntropy, SessionHandle};
+use crate::sync::LockKind;
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
 /// What the drive loop needs from a network stack: advance its input path,
@@ -598,53 +605,302 @@ impl LinkProto {
     }
 }
 
-/// What a dial names: a protocol and the end it reaches, an IPv4 or an IPv6 address and a port:
-/// `udp/a.b.c.d:port`, `tcp/[x:y::z]:port`, `tls/...`. The address is `core::net`'s, which every
-/// stack's socket seam takes, so one locator type reaches datagram and stream links alike and a
-/// stack refuses a family it does not carry when it opens the socket.
+/// What a dial names and a listener is bound to: the kind of link and the end it reaches, each kind
+/// in the form its own locators take. Every link of this runtime is reached by one of these, so a
+/// stack is asked for any link by one type and answers for the kinds it carries; a kind it does not
+/// carry is [`LinkOpenError::Unsupported`]. The text of a locator is read in one place
+/// (`crate::locator_text`) and written in one ([`Locator::text`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Locator {
+pub enum Locator {
+    /// A link over IP: `udp/`, `tcp/` or `tls/` to an address and a port.
+    Ip(IpLocator),
+    /// A link over a serial line: `serial/` to a device or a pin pair, at a baud rate.
+    #[cfg(feature = "serial")]
+    Serial(SerialLocator),
+    /// A WebSocket link: `ws/` to an address and a port, over a TCP connection.
+    #[cfg(feature = "ws")]
+    Ws(WsLocator),
+    /// A link over a pair of named FIFOs on this host: `unixpipe/` to a base path.
+    #[cfg(feature = "unixpipe")]
+    Unixpipe(UnixpipeLocator),
+}
+
+/// The locator of a link over IP: a protocol and the end it reaches, an IPv4 or an IPv6 address
+/// and a port: `udp/a.b.c.d:port`, `tcp/[x:y::z]:port`, `tls/...`. The address is `core::net`'s,
+/// which every stack's socket seam takes, so one locator reaches datagram and stream links alike
+/// and a stack refuses a family it does not carry when it opens the socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpLocator {
     /// The protocol the link speaks.
     pub proto: LinkProto,
     /// The end the link reaches.
     pub at: SocketAddr,
 }
 
+impl IpLocator {
+    /// zenoh's text of the locator, written without `core::fmt` into text of
+    /// [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written whole. Whether a row of the
+    /// build holds it, at most [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes, is the admission's
+    /// question ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at
+    /// compile time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
+    pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
+        let mut text = FixedText::new();
+        self.write(&mut text);
+        text
+    }
+
+    /// Write zenoh's text of the locator into `out`.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at).write_src(out);
+    }
+}
+
+/// The locator of a WebSocket link, as zenoh's WebSocket link reads one: `ws/<address>:<port>`,
+/// the socket address a TCP connection is made to and the RFC 6455 upgrade runs over
+/// (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `pub async fn get_ws_addr(`). Upstream's link
+/// reads no config key and no metadata of its own, so a locator holds the end alone.
+#[cfg(feature = "ws")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsLocator {
+    /// The end the link reaches.
+    pub at: SocketAddr,
+}
+
+#[cfg(feature = "ws")]
+impl WsLocator {
+    /// Write zenoh's text of the locator into `out`: the IP form under the `ws` scheme.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        wz_session_core::link::LinkEnds::ip(wz_session_core::link::LinkKind::Ws, self.at, self.at)
+            .write_src(out);
+    }
+}
+
+/// The locator of a link over a serial line, as zenoh's serial link and zenoh-pico's read one:
+/// `serial/<line>[#baudrate=<n>[;exclusive=<b>][;tout=<us>][;release_on_close=<b>]]`, the line
+/// a device path or a `<tx>.<rx>` pin pair
+/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `pub const PORT_EXCLUSIVE_RAW: &str = "exclusive";`,
+/// `vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c` @ `_z_serial_endpoint_parse`).
+/// The grammar is the session core's (`wz_session_core::locator_grammar`), read and written there
+/// for this engine and the heap profile's leaf alike.
+#[cfg(feature = "serial")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialLocator {
+    /// The line the link runs over.
+    pub line: SerialLine,
+    /// The baud rate, as written; whether the line can run at it is the device's to answer when
+    /// it opens the line.
+    pub baudrate: u32,
+    /// The three keys of upstream's serial link beyond the baud rate.
+    pub options: SerialOptions,
+}
+
+/// The line a serial link runs over.
+#[cfg(feature = "serial")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerialLine {
+    /// A device a host opens by its path.
+    Device(SerialPath),
+    /// A UART an MCU names by its transmit and receive pins.
+    Pins {
+        /// The transmit pin.
+        tx: u32,
+        /// The receive pin.
+        rx: u32,
+    },
+}
+
+/// A path held inline so a [`Locator`] stays `Copy`: at most `N` bytes, the most a locator of
+/// its kind in a row of the build ([`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN)) can name, so a link
+/// over any path it holds can be named in its faces' rows (`SerialPath`, `UnixpipePath`).
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct LinkPath<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+}
+
+/// The path of a serial device: what a row leaves after `serial/`.
+#[cfg(feature = "serial")]
+pub type SerialPath = LinkPath<SERIAL_PATH_LEN>;
+
+/// The longest device path a [`SerialPath`] holds: what a row of
+/// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes leaves after `serial/`.
+#[cfg(feature = "serial")]
+pub const SERIAL_PATH_LEN: usize = caps::MAX_LOCATOR_LEN.saturating_sub(SERIAL_SCHEME.len() + 1);
+
+/// The base path of a unixpipe link's FIFOs.
+#[cfg(feature = "unixpipe")]
+pub type UnixpipePath = LinkPath<UNIXPIPE_PATH_LEN>;
+
+/// The longest base path a [`UnixpipePath`] holds: what a row of
+/// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes leaves after `unixpipe/` and the longest
+/// suffix a link appends to name the FIFO of one of its ends, `_downlink` and a `u32` in decimal
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `let suffix_str = suffix.to_string();`),
+/// so both ends of every link over the path are named in its faces' rows.
+#[cfg(feature = "unixpipe")]
+pub const UNIXPIPE_PATH_LEN: usize =
+    caps::MAX_LOCATOR_LEN.saturating_sub(UNIXPIPE_SCHEME.len() + 1 + UNIXPIPE_LONGEST_SUFFIX.len());
+
+/// The longest suffix a unixpipe link appends to its base path.
+#[cfg(feature = "unixpipe")]
+const UNIXPIPE_LONGEST_SUFFIX: &str = "_downlink4294967295";
+
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
+impl<const N: usize> LinkPath<N> {
+    /// The path `path`, or `None` when it is empty or longer than `N` bytes.
+    pub fn new(path: &str) -> Option<Self> {
+        let mut bytes = [0u8; N];
+        bytes
+            .get_mut(..path.len())
+            .filter(|_| !path.is_empty())?
+            .copy_from_slice(path.as_bytes());
+        Some(Self {
+            bytes,
+            len: path.len(),
+        })
+    }
+
+    /// The path's text.
+    pub fn as_str(&self) -> &str {
+        // The bytes were a `&str`'s, whole, so they are UTF-8.
+        core::str::from_utf8(self.bytes.get(..self.len).unwrap_or_default()).unwrap_or_default()
+    }
+}
+
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
+impl<const N: usize> core::fmt::Debug for LinkPath<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+/// The locator of a link over a pair of named FIFOs on this host, as zenoh's unixpipe link reads
+/// one: `unixpipe/<path>[#file_mask=<n>]`, the base path the link's FIFOs are named after and the
+/// mode they are created with (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs` @
+/// `pub const FILE_ACCESS_MASK: &str = "file_mask";`). The grammar is the session core's
+/// (`wz_session_core::locator_grammar`), read and written there for this engine and the heap
+/// profile's leaf alike.
+#[cfg(feature = "unixpipe")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnixpipeLocator {
+    /// The base path of the link's FIFOs.
+    pub path: UnixpipePath,
+    /// The mode the FIFOs are created with, as written; `None` when the locator names none and
+    /// the opener's default applies.
+    pub file_mask: Option<u32>,
+}
+
+#[cfg(feature = "unixpipe")]
+impl UnixpipeLocator {
+    /// Write zenoh's text of the locator into `out`: the scheme, the path and the mask the
+    /// locator is read back with.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        out.push_str(UNIXPIPE_SCHEME);
+        out.push_str("/");
+        write_unixpipe_path_with_config(out, self.path.as_str(), self.file_mask);
+    }
+}
+
+#[cfg(feature = "serial")]
+impl SerialLocator {
+    /// The line as the grammar writes it.
+    pub fn address(&self) -> SerialAddress<'_> {
+        match &self.line {
+            SerialLine::Device(path) => SerialAddress::Device(path.as_str()),
+            SerialLine::Pins { tx, rx } => SerialAddress::Pins { tx: *tx, rx: *rx },
+        }
+    }
+
+    /// Write zenoh's text of the locator into `out`: the scheme, the line and the config the
+    /// locator is read back from.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        out.push_str(SERIAL_SCHEME);
+        out.push_str("/");
+        write_serial_address_with_config(out, self.address(), self.baudrate, self.options);
+    }
+}
+
 impl Locator {
+    /// The locator of a link of `proto` to `at`.
+    pub const fn ip(proto: LinkProto, at: SocketAddr) -> Self {
+        Self::Ip(IpLocator { proto, at })
+    }
+
     /// A UDP locator.
     pub const fn udp(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Udp,
-            at,
-        }
+        Self::ip(LinkProto::Udp, at)
     }
 
     /// A TCP locator.
     pub const fn tcp(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Tcp,
-            at,
-        }
+        Self::ip(LinkProto::Tcp, at)
     }
 
     /// A TLS locator.
     pub const fn tls(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Tls,
-            at,
+        Self::ip(LinkProto::Tls, at)
+    }
+
+    /// A WebSocket locator.
+    #[cfg(feature = "ws")]
+    pub const fn ws(at: SocketAddr) -> Self {
+        Self::Ws(WsLocator { at })
+    }
+
+    /// The locator of an IP link, or `None` for a link of another kind, which a stack of IP links
+    /// alone refuses as [`LinkOpenError::Unsupported`].
+    pub const fn as_ip(self) -> Option<IpLocator> {
+        match self {
+            Self::Ip(ip) => Some(ip),
+            #[cfg(feature = "serial")]
+            Self::Serial(_) => None,
+            #[cfg(feature = "ws")]
+            Self::Ws(_) => None,
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe(_) => None,
+        }
+    }
+
+    /// The locator of a serial link, or `None` for a link of another kind.
+    #[cfg(feature = "serial")]
+    pub const fn as_serial(self) -> Option<SerialLocator> {
+        match self {
+            Self::Serial(serial) => Some(serial),
+            _ => None,
+        }
+    }
+
+    /// The locator of a WebSocket link, or `None` for a link of another kind.
+    #[cfg(feature = "ws")]
+    pub const fn as_ws(self) -> Option<WsLocator> {
+        match self {
+            Self::Ws(ws) => Some(ws),
+            _ => None,
+        }
+    }
+
+    /// The locator of a unixpipe link, or `None` for a link of another kind.
+    #[cfg(feature = "unixpipe")]
+    pub const fn as_unixpipe(self) -> Option<UnixpipeLocator> {
+        match self {
+            Self::Unixpipe(unixpipe) => Some(unixpipe),
+            _ => None,
         }
     }
 
     /// zenoh's text of the locator, the [`Display`](core::fmt::Display) text, written without
-    /// `core::fmt` into text of [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written
-    /// whole. Whether a row of the build holds it, at most
-    /// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes, is the admission's question
-    /// ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at compile
-    /// time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
-    pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
+    /// `core::fmt` into text that holds the longest locator of every kind the build carries.
+    pub fn text(&self) -> FixedText<LONGEST_LOCATOR_LEN> {
         let mut text = FixedText::new();
-        wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at)
-            .write_src(&mut text);
+        match self {
+            Self::Ip(ip) => ip.write(&mut text),
+            #[cfg(feature = "serial")]
+            Self::Serial(serial) => serial.write(&mut text),
+            #[cfg(feature = "ws")]
+            Self::Ws(ws) => ws.write(&mut text),
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe(unixpipe) => unixpipe.write(&mut text),
+        }
         text
     }
 }
@@ -662,15 +918,55 @@ pub const LONGEST_IPV4_LOCATOR_LEN: usize = "tcp/255.255.255.255:65535".len();
 pub const LONGEST_IP_LOCATOR_LEN: usize =
     "tcp/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".len();
 
+/// The longest serial locator text: `serial/`, the longest line, and every config key written
+/// with its widest value.
+#[cfg(feature = "serial")]
+pub const LONGEST_SERIAL_LOCATOR_LEN: usize = SERIAL_SCHEME.len()
+    + 1
+    + longest(&[SERIAL_PATH_LEN, "4294967295.4294967295".len()])
+    + "#baudrate=4294967295;exclusive=false;tout=18446744073709551615;release_on_close=false".len();
+
+/// The longest unixpipe locator text: `unixpipe/`, the longest base path, and the widest mask.
+#[cfg(feature = "unixpipe")]
+pub const LONGEST_UNIXPIPE_LOCATOR_LEN: usize =
+    UNIXPIPE_SCHEME.len() + 1 + UNIXPIPE_PATH_LEN + "#file_mask=4294967295".len();
+
+/// The longest locator text of every kind of link the build carries, which [`Locator::text`]
+/// writes into.
+pub const LONGEST_LOCATOR_LEN: usize = longest(&[
+    LONGEST_IP_LOCATOR_LEN,
+    #[cfg(feature = "serial")]
+    LONGEST_SERIAL_LOCATOR_LEN,
+    #[cfg(feature = "unixpipe")]
+    LONGEST_UNIXPIPE_LOCATOR_LEN,
+]);
+
+/// The largest of `lens`, for the constants above.
+const fn longest(lens: &[usize]) -> usize {
+    match lens {
+        [first, rest @ ..] => {
+            let rest = longest(rest);
+            if *first > rest {
+                *first
+            } else {
+                rest
+            }
+        }
+        [] => 0,
+    }
+}
+
 const _: () = assert!(
     caps::MAX_LOCATOR_LEN >= LONGEST_IPV4_LOCATOR_LEN,
     "MAX_LOCATOR_LEN cannot hold an IPv4 locator such as udp/255.255.255.255:65535 (25 bytes)"
 );
 
-/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port`.
+/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port` for an IP link:
+/// [`Locator::text`], which holds every locator the build carries whole, so printing one carries
+/// no `core::net` formatting.
 impl core::fmt::Display for Locator {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}/{}", self.proto.scheme(), self.at)
+        f.write_str(self.text().finish().map_err(|_| core::fmt::Error)?)
     }
 }
 
@@ -813,18 +1109,20 @@ pub trait SessionLinks {
         Err(LinkOpenError::Unsupported)
     }
 
-    /// The multicast group `endpoint` names, joined: the
+    /// The multicast group `group` names, joined: the
     /// [`GroupTransport`](crate::group_transport::GroupTransport) a group session runs over,
-    /// opened as the session's link when the session takes it. The endpoint is the text the
-    /// config states (a `udp/` locator naming an interface), which each stack reads as it reads
-    /// a group. A stack that joins no group, or not the one named, is
+    /// opened as the session's link when the session takes it. `group` is the endpoint as
+    /// `wz_session_core::group_locator::parse_group_locator` read it, once, for every stack;
+    /// `endpoint` is the text it was read from, which a stack whose links are a program's hands
+    /// the program as written. A stack that joins no group, or not the one named, is
     /// [`LinkOpenError::Unsupported`]: the default, so a stack without groups writes nothing here.
     #[cfg(feature = "alloc")]
     fn open_group(
         &self,
         endpoint: &str,
+        group: &wz_session_core::group_locator::GroupLocator,
     ) -> Result<Box<dyn crate::group_transport::GroupTransport>, LinkOpenError> {
-        let _ = endpoint;
+        let _ = (endpoint, group);
         Err(LinkOpenError::Unsupported)
     }
 
@@ -858,7 +1156,8 @@ pub trait LinkListener<P> {
 
     /// What a thread other than the one that accepts waits on for a connection
     /// ([`LinkWaits::wait`]); `None` when the stack gives none, and then the node looks for one
-    /// at a pace of its own.
+    /// at a pace of its own. Asked at each wait, so a listener whose answer changes (one with
+    /// work of its own under way, or no room for another connection) is waited on as it is now.
     fn input_wait(&self) -> Option<WaitOn> {
         None
     }
@@ -1032,11 +1331,12 @@ pub struct PumpFields<
     C: ClockSource,
     L,
     D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+    K: LockKind = crate::sync::Shared,
 > {
     /// The link the session reads and writes.
     pub link: L,
     /// The link's actions.
-    pub actions: SessionHandle<C, D>,
+    pub actions: SessionHandle<C, D, K>,
     /// The session's entropy source, which the engine's handshake binding holds.
     pub entropy: SessionEntropy,
     /// The session's clock.
@@ -1065,17 +1365,20 @@ pub struct PumpFields<
 ///
 /// `R` is the reassembly Router the session's receive stages its fragments in ([`RxReassembly`]):
 /// the one the pump builds for itself ([`DefaultRouter`]), or one its maker hands it.
+///
+/// `K` is how the runtime locks the values it lends the session ([`LockKind`]).
 pub struct SessionPump<
     C: ClockSource,
     L: SessionDatagramLink,
     D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
     R = DefaultRouter,
+    K: LockKind = crate::sync::Shared,
 > {
-    runtime: CoopRuntime<C, D>,
+    runtime: CoopRuntime<C, D, K>,
     link: L,
-    actions: SessionHandle<C, D>,
+    actions: SessionHandle<C, D, K>,
     clock: CoopTime<C>,
-    engine: SessionEngine<CoopRuntime<C, D>, CoopTime<C>>,
+    engine: SessionEngine<CoopRuntime<C, D, K>, CoopTime<C>>,
     /// The session's own timers: the pump asks them how long its link may wait and hands them
     /// the time, and keeps no deadline of its own.
     timers: TransportTimers,
@@ -1097,8 +1400,12 @@ pub struct SessionPump<
     max_iters: Option<usize>,
 }
 
-impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'static>
-    SessionPump<C, L, D>
+impl<
+        C: ClockSource,
+        L: SessionDatagramLink,
+        D: BoxedLinkDriver + ?Sized + 'static,
+        K: LockKind,
+    > SessionPump<C, L, D, DefaultRouter, K>
 {
     /// Build the engine, activate the configured role, and arm the
     /// handshake deadline tracker — everything `run_session` does before
@@ -1130,9 +1437,9 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
     #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
     #[inline(never)]
     pub fn new(
-        runtime: CoopRuntime<C, D>,
+        runtime: CoopRuntime<C, D, K>,
         link: L,
-        actions: SessionHandle<C, D>,
+        actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
@@ -1165,9 +1472,9 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
     #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
     #[inline(never)]
     pub fn with_reassembly_arena(
-        runtime: CoopRuntime<C, D>,
+        runtime: CoopRuntime<C, D, K>,
         link: L,
-        actions: SessionHandle<C, D>,
+        actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
@@ -1191,7 +1498,8 @@ impl<
         L: SessionDatagramLink,
         D: BoxedLinkDriver + ?Sized + 'static,
         R: RxReassembly,
-    > SessionPump<C, L, D, R>
+        K: LockKind,
+    > SessionPump<C, L, D, R, K>
 {
     /// The pump `SessionPump::new` builds, over a reassembly Router its maker built: one whose
     /// chains stage into buffers the session's arena lent, so the session's fragments cost the
@@ -1200,9 +1508,9 @@ impl<
     #[cfg(feature = "reassembly")]
     #[inline(never)]
     pub fn with_router(
-        runtime: CoopRuntime<C, D>,
+        runtime: CoopRuntime<C, D, K>,
         link: L,
-        actions: SessionHandle<C, D>,
+        actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
@@ -1224,8 +1532,8 @@ impl<
     #[cfg(feature = "reassembly")]
     pub fn with_router_in(
         place: &mut MaybeUninit<Self>,
-        runtime: CoopRuntime<C, D>,
-        fields: PumpFields<C, L, D>,
+        runtime: CoopRuntime<C, D, K>,
+        fields: PumpFields<C, L, D, K>,
         make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
     ) -> Option<&mut Self> {
         let at = place.as_mut_ptr();
@@ -1245,9 +1553,9 @@ impl<
     /// [`Self::build_in`] in a place of its own.
     #[inline(always)]
     fn build(
-        runtime: CoopRuntime<C, D>,
+        runtime: CoopRuntime<C, D, K>,
         link: L,
-        actions: SessionHandle<C, D>,
+        actions: SessionHandle<C, D, K>,
         entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
@@ -1294,8 +1602,8 @@ impl<
     #[inline(never)]
     unsafe fn build_in(
         place: &mut MaybeUninit<Self>,
-        runtime: CoopRuntime<C, D>,
-        fields: PumpFields<C, L, D>,
+        runtime: CoopRuntime<C, D, K>,
+        fields: PumpFields<C, L, D, K>,
         write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
     ) {
         let PumpFields {
@@ -1319,7 +1627,7 @@ impl<
             // The engine is made in its field (`MaybeUninit<T>` has the layout of `T`).
             let engine = new_session_engine_in(
                 &mut *core::ptr::addr_of_mut!((*at).engine)
-                    .cast::<MaybeUninit<SessionEngine<CoopRuntime<C, D>, CoopTime<C>>>>(),
+                    .cast::<MaybeUninit<SessionEngine<CoopRuntime<C, D, K>, CoopTime<C>>>>(),
                 &actions,
                 entropy,
             );
@@ -1352,7 +1660,7 @@ impl<
     /// Borrow the runtime this session was built against. The synchronous
     /// driver uses it to take the executor pass that [`Self::step`] does
     /// not.
-    pub fn runtime(&self) -> &CoopRuntime<C, D> {
+    pub fn runtime(&self) -> &CoopRuntime<C, D, K> {
         &self.runtime
     }
 
@@ -1652,13 +1960,13 @@ pub trait MakeRouter<R> {
     feature = "alloc",
     not(feature = "session-slot")
 ))]
-impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
-    for wz_session_core::unicast_rx::RouterLend<D>
+impl<D, H> MakeRouter<wz_session_core::unicast_rx::RouterLend<D, H>>
+    for wz_session_core::unicast_rx::RouterLend<D, H>
 {
     fn make_in(
         self,
-        place: &mut MaybeUninit<wz_session_core::unicast_rx::RouterLend<D>>,
-    ) -> &mut wz_session_core::unicast_rx::RouterLend<D> {
+        place: &mut MaybeUninit<wz_session_core::unicast_rx::RouterLend<D, H>>,
+    ) -> &mut wz_session_core::unicast_rx::RouterLend<D, H> {
         place.write(self)
     }
 }
@@ -1678,9 +1986,9 @@ impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
 /// Out of line: the task's future is built here, apart from the frame and body of the caller.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 #[inline(never)]
-pub fn spawn_session_with_router<C, L, R, M, F>(
+pub fn spawn_session_with_router<C, L, R, M, F, K>(
     local: &CoopLocalSet<C>,
-    fields: PumpFields<C, L>,
+    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
     make_router: M,
     on_event: F,
 ) -> Result<CoopLocalJoinHandle<DriverOutcome>, crate::executor::SpawnRefusal>
@@ -1690,9 +1998,11 @@ where
     R: RxReassembly + 'static,
     M: MakeRouter<R> + 'static,
     F: EventSink + 'static,
+    K: LockKind,
 {
-    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F>>()?;
-    let runtime = local.runtime().clone();
+    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F, K>>()?;
+    // The local set's runtime, read under the lock type of the session's values.
+    let runtime: CoopRuntime<C, dyn BoxedLinkDriver, K> = local.runtime().retyped();
     let at = task.as_mut_ptr();
     // SAFETY: the place is this claim's alone, long enough and aligned for the task. Every field of
     // the task is written in it here, once, before the task starts: the parts whole, in the place
@@ -1714,14 +2024,15 @@ where
 /// opens. It builds the session's pump in its own memory at its first poll, then steps the session
 /// once each poll and yields, as a loop of [`SessionPump::step`] and [`yield_now`] does.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub struct RouterSessionTask<C, L, R, M, F>
+pub struct RouterSessionTask<C, L, R, M, F, K = crate::sync::Shared>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
+    K: LockKind,
 {
     /// What the pump is made of until the task first runs, and then the pump, in the same bytes.
-    place: TaskPlace<C, L, R, M>,
+    place: TaskPlace<C, L, R, M, K>,
     on_event: F,
     /// The pump is built in `place` and points into itself: the task stays where it is polled.
     _pinned: core::marker::PhantomPinned,
@@ -1729,24 +2040,26 @@ where
 
 /// The place a [`RouterSessionTask`] holds its pump's parts in, and then its pump.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-type TaskPlace<C, L, R, M> = Becomes<PumpParts<C, L, M>, SessionPump<C, L, dyn BoxedLinkDriver, R>>;
+type TaskPlace<C, L, R, M, K> =
+    Becomes<PumpParts<C, L, M, K>, SessionPump<C, L, dyn BoxedLinkDriver, R, K>>;
 
 /// What a [`RouterSessionTask`] builds its pump of.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-struct PumpParts<C: ClockSource + 'static, L, M> {
-    runtime: CoopRuntime<C>,
-    fields: PumpFields<C, L>,
+struct PumpParts<C: ClockSource + 'static, L, M, K: LockKind> {
+    runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
+    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
     make_router: M,
 }
 
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-impl<C, L, R, M, F> core::future::Future for RouterSessionTask<C, L, R, M, F>
+impl<C, L, R, M, F, K> core::future::Future for RouterSessionTask<C, L, R, M, F, K>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
     M: MakeRouter<R>,
     F: EventSink,
+    K: LockKind,
 {
     type Output = DriverOutcome;
 
@@ -1785,15 +2098,16 @@ where
 /// gives its cells, so that a layer that grows is a number that follows and not a spawn that is
 /// refused ([`crate::executor::SpawnRefusal::TooLarge`]).
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub const fn router_session_task_bytes<C, L, R, M, F>() -> usize
+pub const fn router_session_task_bytes<C, L, R, M, F, K>() -> usize
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
     M: MakeRouter<R>,
     F: EventSink,
+    K: LockKind,
 {
-    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F>>()
+    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F, K>>()
 }
 
 /// The bytes a task's pump is built in, which hold what the pump is made of until it is: the parts
@@ -2495,7 +2809,7 @@ mod wake_budget_tests {
         SessionInitParams {
             whatami: wz_session_core::WhatAmI::Peer,
             zid: [0x0A, 0x0B, 0x0C, 0x0D].into(),
-            seq_num_res: 2,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size: 1024,
             lease_ms: 10_000,
@@ -2509,7 +2823,10 @@ mod wake_budget_tests {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
             limits: wz_session_core::limits::SessionLimits::BUILD,
-            cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+            cookie_signing_key: SigningKey::new(vec![7u8; 32])
+                .expect(">=32-byte key")
+                .into(),
+            region: None,
         }
     }
 

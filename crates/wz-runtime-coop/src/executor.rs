@@ -22,6 +22,10 @@
 //!   table reserved while its open lasts (`CoopRuntime::opening`) holds such cells beside the ones
 //!   it reserved. What these do is reached only through the table that has them, so a runtime
 //!   whose table is reserved links none of it.
+//! - Reserved once for one task at most (`CoopRuntime::reserved_for_one`), for an engine whose
+//!   session holds one link at a time: its passes, spawns and sweeps look at that cell alone
+//!   (`Walks`), and only the making of such a table names them, as only the making of a table of
+//!   many names theirs, so a build whose runtimes are all of one cell links no walk of many.
 //!
 //! The first two refuse a task too large for their cells, or with an alignment past
 //! [`CELL_ALIGN`], as [`SpawnRefusal::TooLarge`] with the future handed back; the third gives
@@ -67,9 +71,9 @@ use core::alloc::Layout;
 use critical_section::{CriticalSection, Mutex};
 use wz_runtime_core::RuntimeError;
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::atomic::Arc;
 use crate::atomic::{AtomicBool, Ordering};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::kept::{Kept, Shared};
 
 pub use crate::yield_now::{yield_now, YieldNow};
 
@@ -112,6 +116,9 @@ struct Ops {
 
 /// Drop the value at the buffer, of a type erased with the task that wrote it.
 type DropFn = unsafe fn(*mut u8);
+
+/// A cell taken for a task and the bytes its future goes into, or why none was.
+type CellClaim = Result<(&'static TaskCell, *mut u8), SpawnRefusal>;
 
 /// What a cell's bookkeeping holds; touched only inside a critical section.
 struct Meta {
@@ -166,10 +173,11 @@ pub struct TaskCell {
     cancel: AtomicBool,
     /// Reached only inside a critical section (`Self::with_meta`).
     meta: UnsafeCell<Meta>,
-    /// The store that owns the cell, whose count a waker and a handle hold; null for a cell of a
-    /// `static` table, which is never freed. Written when the cell is made and never after.
+    /// The count of the store that owns the cell, which a waker and a handle hold one of; null for
+    /// a cell of a `static` table, which is never freed. Written when the cell is made and never
+    /// after.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    owner: *const TaskStore,
+    owner: *const Kept,
 }
 
 // SAFETY: see the module's contract. The flags are atomics; `meta` is reached only inside a
@@ -193,7 +201,7 @@ impl TaskCell {
     /// A free cell over `cap` bytes at `buf` (none for a bare one) of the store `owner` (null for
     /// a cell no store holds).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn owned(buf: *mut u8, cap: usize, owner: *const TaskStore) -> Self {
+    fn owned(buf: *mut u8, cap: usize, owner: *const Kept) -> Self {
         let mut meta = Meta::new();
         meta.buf = buf;
         meta.cap = cap;
@@ -203,6 +211,19 @@ impl TaskCell {
             meta: UnsafeCell::new(meta),
             owner,
         }
+    }
+
+    /// Write at `place` the free cell [`Self::owned`] makes. Out of line: a store's cells are
+    /// written by one loop, and a loop of stores alone is laid out twice over and once more for
+    /// the cells left over, where one that calls is laid out once.
+    ///
+    /// # Safety
+    /// `place` is valid for a write of a cell and aligned for one.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[inline(never)]
+    unsafe fn write_owned(place: *mut Self, buf: *mut u8, cap: usize, owner: *const Kept) {
+        // SAFETY: the caller's contract.
+        unsafe { place.write(Self::owned(buf, cap, owner)) };
     }
 
     /// Run `f` on the cell's bookkeeping, inside a critical section.
@@ -249,7 +270,7 @@ fn retain(cell: &TaskCell) {
     if !cell.owner.is_null() {
         // SAFETY: the caller reached the cell through the executor or through a waker or handle
         // that holds a count, so the store is alive.
-        unsafe { Arc::increment_strong_count(cell.owner) }
+        unsafe { &*cell.owner }.retain();
     }
 }
 
@@ -263,10 +284,10 @@ fn retain(_cell: &TaskCell) {}
 /// # Safety
 /// `owner` is a cell's `owner`, and the caller holds a count on it that it gives back here.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-unsafe fn release_owner(owner: *const TaskStore) {
-    if !owner.is_null() {
+unsafe fn release_owner(owner: *const Kept) {
+    if let Some(owner) = NonNull::new(owner.cast_mut()) {
         // SAFETY: the caller's contract.
-        unsafe { Arc::decrement_strong_count(owner) }
+        unsafe { Kept::release(owner) }
     }
 }
 
@@ -308,7 +329,7 @@ impl<const TASKS: usize, const BYTES: usize> TaskTable<TASKS, BYTES> {
         for (cell, bytes) in self.cells.iter().zip(self.bytes.iter()) {
             cell.with_meta(|meta| meta.buf = bytes.0.get().cast::<u8>());
         }
-        ExecutorState::over(Cells::Table(&self.cells), Some(BYTES))
+        ExecutorState::over(Cells::Table(&self.cells), Some(BYTES), &MANY_CELLS)
     }
 }
 
@@ -330,7 +351,8 @@ impl<const TASKS: usize, const BYTES: usize> Default for TaskTable<TASKS, BYTES>
 pub(crate) struct TaskStore {
     /// The cells, at the front of the block: written by `new`, dropped by the store's drop.
     cells: *const [TaskCell],
-    /// The block, null when the store has no bytes at all, and its layout.
+    /// The block, null when the store has no bytes at all or its block is not its own to give back
+    /// (one placed in counted memory), and its layout.
     block: *mut u8,
     layout: Layout,
     /// The bytes each cell has of the block; `None` for bare cells, and for a store whose bytes
@@ -349,38 +371,109 @@ unsafe impl Send for TaskStore {}
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 unsafe impl Sync for TaskStore {}
 
+/// How a store's cells and their bytes lie in its block: the cells first, then each cell's bytes.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl TaskStore {
-    /// `count` free cells in one block: each with `bytes` of the block behind the cells, at steps
-    /// of the cells' alignment, when `bytes` is given; bare otherwise, with `unfit` to give back
-    /// what spawns give them. Bytes past the address space are not reserved: the cells are made
-    /// with none and a spawn is refused at the call, counted. A count past it makes no cells.
-    fn new(count: usize, bytes: Option<usize>, unfit: Option<fn(&[TaskCell])>) -> Arc<Self> {
+#[derive(Clone, Copy)]
+pub(crate) struct StoreLayout {
+    /// The cells: none for a count whose cells would lie past the address space.
+    count: usize,
+    /// The block, its bytes padded to its alignment.
+    layout: Layout,
+    /// Where the first cell's bytes start in the block, how far apart each cell's are and how many
+    /// each has; `None` for bare cells, and for bytes that would lie past the address space.
+    reserved: Option<(usize, usize, usize)>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl StoreLayout {
+    /// The block of `count` cells, each with `bytes` behind the cells at steps of the cells'
+    /// alignment when `bytes` is given, bare otherwise. `AT_MOST_ONE`: a count past one is held
+    /// to one.
+    pub(crate) fn of<const AT_MOST_ONE: bool>(count: usize, bytes: Option<usize>) -> Self {
+        let count = if AT_MOST_ONE { count.min(1) } else { count };
         let (count, cells_layout) = match Layout::array::<TaskCell>(count) {
             Ok(layout) => (count, layout),
             Err(_) => (0, Layout::new::<[TaskCell; 0]>()),
         };
-        // Where each cell's bytes start in the block and how far apart they are, with the layout of
-        // the block that holds them behind the cells.
         let reserved = bytes.and_then(|bytes| {
             let stride = round_up(bytes.max(1), CELL_ALIGN);
             let tail = Layout::from_size_align(stride.checked_mul(count)?, CELL_ALIGN).ok()?;
             let (layout, offset) = cells_layout.extend(tail).ok()?;
             Some((layout, offset, stride, bytes))
         });
-        let layout = reserved
-            .map_or(cells_layout, |(layout, ..)| layout)
-            .pad_to_align();
-        let block = if layout.size() == 0 {
+        Self {
+            count,
+            layout: reserved
+                .map_or(cells_layout, |(layout, ..)| layout)
+                .pad_to_align(),
+            reserved: reserved.map(|(_, offset, stride, bytes)| (offset, stride, bytes)),
+        }
+    }
+
+    /// The block's bytes and alignment.
+    pub(crate) fn layout(&self) -> Layout {
+        self.layout
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl TaskStore {
+    /// `count` free cells in one block of the heap: each with `bytes` of the block behind the
+    /// cells, at steps of the cells' alignment, when `bytes` is given; bare otherwise, with `unfit`
+    /// to give back what spawns give them. Bytes past the address space are not reserved: the cells
+    /// are made with none and a spawn is refused at the call, counted. A count past it makes no
+    /// cells. `AT_MOST_ONE`: a count past one is held to one, which the layout and the writing of
+    /// the cells are then made for.
+    fn new<const AT_MOST_ONE: bool>(
+        count: usize,
+        bytes: Option<usize>,
+        unfit: Option<fn(&[TaskCell])>,
+    ) -> Shared<Self> {
+        let laid = StoreLayout::of::<AT_MOST_ONE>(count, bytes);
+        let block = if laid.layout.size() == 0 {
             ptr::null_mut()
         } else {
             // SAFETY: the layout's size is not zero.
-            let block = unsafe { alloc::alloc::alloc(layout) };
+            let block = unsafe { alloc::alloc::alloc(laid.layout) };
             if block.is_null() {
-                alloc::alloc::handle_alloc_error(layout);
+                alloc::alloc::handle_alloc_error(laid.layout);
             }
             block
         };
+        Self::over(laid, block, true, unfit, Shared::boxed)
+    }
+
+    /// The store `laid` lays out, its count at `header` and its block at `block` (null for a
+    /// layout of no bytes), both in memory `memory` keeps: the store holds a count of it, given
+    /// back when the store's last holder lets go, and gives no block back of its own.
+    ///
+    /// # Safety
+    /// `header` is aligned and valid for a write of `Shared::<TaskStore>::layout()`, `block` for
+    /// `laid.layout`, the two apart, and nothing else uses them while a count of `memory` is held;
+    /// `memory` is live and its memory holds both.
+    pub(crate) unsafe fn placed(
+        laid: StoreLayout,
+        header: NonNull<u8>,
+        block: *mut u8,
+        memory: NonNull<Kept>,
+    ) -> Shared<Self> {
+        Self::over(laid, block, false, None, |store| {
+            // SAFETY: the caller's.
+            unsafe { Shared::placed(header, store, memory) }
+        })
+    }
+
+    /// The store of the cells `laid` lays out in `block`, held as `hold` holds it: the block is
+    /// the store's to give back when `owns`. The store is held before its cells are written, so
+    /// each cell is written once, naming the count it is held by: the store is not shared and reads
+    /// no cell until this returns it.
+    fn over(
+        laid: StoreLayout,
+        block: *mut u8,
+        owns: bool,
+        unfit: Option<fn(&[TaskCell])>,
+        hold: impl FnOnce(Self) -> Shared<Self>,
+    ) -> Shared<Self> {
         let first: *mut TaskCell = if block.is_null() {
             NonNull::dangling().as_ptr()
         } else {
@@ -389,27 +482,26 @@ impl TaskStore {
         // Where the first cell's bytes start, how far apart each cell's are and how many each has:
         // a bare cell's are at null, a step of none apart, so every cell is written by one body.
         // `wrapping_add` and not `add`: no cell's bytes are reached until a spawn takes the cell.
-        let (base, stride, cap) = match reserved {
-            Some((_, offset, stride, bytes)) => (block.wrapping_add(offset), stride, bytes),
+        let (base, stride, cap) = match laid.reserved {
+            Some((offset, stride, bytes)) => (block.wrapping_add(offset), stride, bytes),
             None => (ptr::null_mut(), 0, 0),
         };
-        // The store is made before its cells are written, so each cell is written once, naming
-        // it: the store is not shared and reads no cell until this returns it.
-        let store = Arc::new(Self {
+        let count = laid.count;
+        let store = hold(Self {
             cells: ptr::slice_from_raw_parts(first.cast_const(), count),
-            block,
-            layout,
-            cell_bytes: reserved.map(|(.., bytes)| bytes),
+            block: if owns { block } else { ptr::null_mut() },
+            layout: laid.layout,
+            cell_bytes: laid.reserved.map(|(.., bytes)| bytes),
             unfit,
         });
-        let owner = Arc::as_ptr(&store);
+        let owner = Shared::kept(&store).as_ptr().cast_const();
         for at in 0..count {
             // The strides of `count` cells were laid out without overflow, so no product wraps,
             // and each lies inside the block.
             let buf = base.wrapping_add(at.wrapping_mul(stride));
             // SAFETY: `at` is below `count`, so the place is one of the block's cells, aligned for
             // one, written once here and read by nothing before.
-            unsafe { first.add(at).write(TaskCell::owned(buf, cap, owner)) };
+            unsafe { TaskCell::write_owned(first.add(at), buf, cap, owner) };
         }
         store
     }
@@ -492,7 +584,7 @@ enum Taken {
 /// adds for what its open spawns, or the chunks a grown table adds when every cell is taken.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 struct Taking {
-    chunks: Mutex<RefCell<Vec<Arc<TaskStore>>>>,
+    chunks: Mutex<RefCell<Vec<Shared<TaskStore>>>>,
     /// A chunk is added when every cell is taken, and a free cell too small for a task is given
     /// new bytes: what a grown table does.
     grows: bool,
@@ -502,7 +594,7 @@ struct Taking {
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl Taking {
-    fn over(chunks: Vec<Arc<TaskStore>>, grows: bool) -> Self {
+    fn over(chunks: Vec<Shared<TaskStore>>, grows: bool) -> Self {
         Self {
             chunks: Mutex::new(RefCell::new(chunks)),
             grows,
@@ -572,8 +664,11 @@ impl TakesMemory for Taking {
         let (cell, buf) = match found {
             Some(taken) => taken,
             None if self.grows => {
-                let chunk =
-                    TaskStore::new(self.count().max(FIRST_CHUNK), None, Some(give_back_fitted));
+                let chunk = TaskStore::new::<false>(
+                    self.count().max(FIRST_CHUNK),
+                    None,
+                    Some(give_back_fitted),
+                );
                 let Some(first) = chunk.cells().first() else {
                     return Ok(Taken::Full { any, room });
                 };
@@ -761,12 +856,14 @@ enum Cells {
     Table(&'static [TaskCell]),
     /// A table the runtime owns: the cells it reserved (none for a grown one).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    Store(Arc<TaskStore>),
+    Store(Shared<TaskStore>),
 }
 
 /// The task pool of a runtime: a view of its table that spawns into it and polls it.
 pub struct ExecutorState {
     cells: Cells,
+    /// How passes, spawns and sweeps walk `cells`: any count of them, or one at most.
+    walks: &'static Walks,
     /// The bytes every cell of `cells` has; `None` for cells that have none (a grown table's,
     /// or a reserved one's whose bytes would lie past the address space), which take no task.
     cell_bytes: Option<usize>,
@@ -871,10 +968,38 @@ fn fit_cell(cell: &TaskCell, need: usize, align: usize) -> Option<*mut u8> {
     Some(fresh)
 }
 
+/// How an executor's passes, spawns and sweeps walk its cells: over any count of them
+/// (`MANY_CELLS`), or over one at most (`ONE_CELL`). Each is named only by the making of a table
+/// it walks, so a build that makes no table of many links none of the walks over many.
+struct Walks {
+    /// Take a free cell for a task ([`ExecutorState::claim_bytes`]).
+    claim: fn(&ExecutorState, u32, usize, usize) -> CellClaim,
+    /// Poll what was woken and sweep what was aborted ([`ExecutorState::run_until_idle`]).
+    run: fn(&ExecutorState),
+    /// Drop the tasks that have not ended (`ExecutorState::drop_live`).
+    drop_live: fn(&ExecutorState, Option<u32>),
+}
+
+/// The walks of a table of any count of cells.
+static MANY_CELLS: Walks = Walks {
+    claim: ExecutorState::claim_among,
+    run: ExecutorState::run_among,
+    drop_live: ExecutorState::drop_among,
+};
+
+/// The walks of a table of one cell at most, which takes no memory after it is made.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+static ONE_CELL: Walks = Walks {
+    claim: ExecutorState::claim_one,
+    run: ExecutorState::run_one,
+    drop_live: ExecutorState::drop_one,
+};
+
 impl ExecutorState {
-    fn over(cells: Cells, cell_bytes: Option<usize>) -> Self {
+    fn over(cells: Cells, cell_bytes: Option<usize>, walks: &'static Walks) -> Self {
         Self {
             cells,
+            walks,
             cell_bytes,
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             taking: None,
@@ -889,7 +1014,11 @@ impl ExecutorState {
     /// A table that grows when every cell is taken.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn growing() -> Self {
-        let mut state = Self::over(Cells::Store(TaskStore::new(0, None, None)), None);
+        let mut state = Self::over(
+            Cells::Store(TaskStore::new::<false>(0, None, None)),
+            None,
+            &MANY_CELLS,
+        );
         state.taking = Some(Box::new(Taking::over(Vec::new(), true)));
         state
     }
@@ -901,12 +1030,20 @@ impl ExecutorState {
     /// added cell taken. The table never holds more cells than it was made with.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn opening(tasks: usize, task_bytes: usize, added: usize) -> Self {
-        let store = TaskStore::new(tasks, Some(task_bytes), None);
+        Self::opening_in(
+            TaskStore::new::<false>(tasks, Some(task_bytes), None),
+            added,
+        )
+    }
+
+    /// [`Self::opening`] over the cells `store` reserved.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn opening_in(store: Shared<TaskStore>, added: usize) -> Self {
         let cell_bytes = store.cell_bytes;
-        let mut state = Self::over(Cells::Store(store), cell_bytes);
+        let mut state = Self::over(Cells::Store(store), cell_bytes, &MANY_CELLS);
         let mut chunks = Vec::new();
         if added > 0 {
-            chunks.push(TaskStore::new(added, None, Some(give_back_fitted)));
+            chunks.push(TaskStore::new::<false>(added, None, Some(give_back_fitted)));
         }
         state.taking = Some(Box::new(Taking::over(chunks, false)));
         state
@@ -925,9 +1062,29 @@ impl ExecutorState {
     /// refused, counted, and none allocates.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved(tasks: usize, task_bytes: usize) -> Self {
-        let store = TaskStore::new(tasks, Some(task_bytes), None);
+        Self::reserved_in(TaskStore::new::<false>(tasks, Some(task_bytes), None))
+    }
+
+    /// [`Self::reserved`] over the cells `store` reserved.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn reserved_in(store: Shared<TaskStore>) -> Self {
         let cell_bytes = store.cell_bytes;
-        Self::over(Cells::Store(store), cell_bytes)
+        Self::over(Cells::Store(store), cell_bytes, &MANY_CELLS)
+    }
+
+    /// [`Self::reserved`] for one task at most: one cell of `task_bytes`, none for `tasks` of 0,
+    /// and a count past one held to one. A spawn while the cell holds a task, or a result its
+    /// handle has not read, is refused, counted; none allocates.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn reserved_one(tasks: usize, task_bytes: usize) -> Self {
+        Self::reserved_one_in(TaskStore::new::<true>(tasks, Some(task_bytes), None))
+    }
+
+    /// [`Self::reserved_one`] over the cell `store` reserved, one at most.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn reserved_one_in(store: Shared<TaskStore>) -> Self {
+        let cell_bytes = store.cell_bytes;
+        Self::over(Cells::Store(store), cell_bytes, &ONE_CELL)
     }
 
     /// A number for a new local set, which its tasks are marked with: never 0, which marks a task
@@ -944,8 +1101,19 @@ impl ExecutorState {
 
     /// Every cell of the table, in its order: the cells it reserved, then those it took memory for.
     fn each_cell(&self) -> impl Iterator<Item = &'static TaskCell> + '_ {
-        let taken = (0..usize::MAX).map_while(move |index| self.taken_at(index));
-        self.fixed_cells().iter().chain(taken)
+        (0..usize::MAX).map_while(move |index| self.cell_at(index))
+    }
+
+    /// The cell at `index` in the table's order ([`Self::each_cell`]), `None` past the last. A walk
+    /// by place and not a chain of the two kinds of cell: one cursor, which a pass that stops at
+    /// each cell keeps in a register instead of the state of two iterators and of their join.
+    fn cell_at(&self, index: usize) -> Option<&'static TaskCell> {
+        let fixed = self.fixed_cells();
+        match fixed.get(index) {
+            Some(cell) => Some(cell),
+            // At or past the reserved cells' count, so the difference does not wrap.
+            None => self.taken_at(index.wrapping_sub(fixed.len())),
+        }
     }
 
     /// The cells the table was made with.
@@ -1049,32 +1217,59 @@ impl ExecutorState {
     }
 
     /// Take a free cell for a task of `need` bytes at `align`, or refuse, counted.
-    #[inline(never)]
-    fn claim_bytes(
-        &self,
+    fn claim_bytes(&self, set: u32, need: usize, align: usize) -> CellClaim {
+        (self.walks.claim)(self, set, need, align)
+    }
+
+    /// Take `cell` for a spawn on local set `set` when it is free, inside the section `cs`:
+    /// the cell and its bytes.
+    fn take_free(
+        cell: &'static TaskCell,
         set: u32,
-        need: usize,
-        align: usize,
-    ) -> Result<(&'static TaskCell, *mut u8), SpawnRefusal> {
+        cs: CriticalSection<'_>,
+    ) -> Option<(&'static TaskCell, *mut u8)> {
+        cell.meta_in(cs, |meta| {
+            if meta.state == State::Free {
+                meta.state = State::Spawning;
+                meta.set = set;
+                Some((cell, meta.buf))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// [`Self::claim_bytes`] over a table of one cell at most, which takes no memory after it is
+    /// made: the cell when it is free and the task fits it; refused, counted, otherwise.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn claim_one(&self, set: u32, need: usize, align: usize) -> CellClaim {
+        let fits = self.cell_bytes.is_some_and(|cap| need <= cap) && align <= CELL_ALIGN;
+        let found = match self.fixed_cells().first() {
+            Some(cell) if fits => crate::cs::with(|cs| Self::take_free(cell, set, cs)),
+            _ => None,
+        };
+        if let Some(taken) = found {
+            return Ok(taken);
+        }
+        let why = if fits {
+            SpawnRefusal::NoTaskCell
+        } else {
+            SpawnRefusal::TooLarge
+        };
+        self.refuse(why);
+        Err(why)
+    }
+
+    /// [`Self::claim_bytes`] over the cells of a table of any count of them, and the cells it
+    /// took memory for.
+    fn claim_among(&self, set: u32, need: usize, align: usize) -> CellClaim {
         let fixed = self.fixed_cells();
         // Every cell the table was made with has its bytes, so a task fits all of them or none.
         let fits = self.cell_bytes.is_some_and(|cap| need <= cap) && align <= CELL_ALIGN;
         // The search is one section: it takes the first free cell it finds, which no other context
         // may take between its look and its claim.
         let found = if fits {
-            crate::cs::with(|cs| {
-                fixed.iter().find_map(|cell| {
-                    cell.meta_in(cs, |meta| {
-                        if meta.state == State::Free {
-                            meta.state = State::Spawning;
-                            meta.set = set;
-                            Some((cell, meta.buf))
-                        } else {
-                            None
-                        }
-                    })
-                })
-            })
+            crate::cs::with(|cs| fixed.iter().find_map(|cell| Self::take_free(cell, set, cs)))
         } else {
             None
         };
@@ -1087,27 +1282,32 @@ impl ExecutorState {
         // task a taken cell fits waits for one to come free; one no cell fits never will, which is
         // the cause named.
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        if let Some(taking) = self.taking.as_deref() {
-            let why = match taking.take(set, need, align) {
-                Ok(Taken::Cell(cell, buf)) => return Ok((cell, buf)),
-                Ok(Taken::Full { any, room }) => {
-                    let room = room || (fits && !fixed.is_empty());
-                    let any = any || !fixed.is_empty();
-                    if room || !any {
-                        SpawnRefusal::NoTaskCell
-                    } else {
-                        SpawnRefusal::TooLarge
-                    }
-                }
-                Err(why) => why,
-            };
-            self.refuse(why);
-            return Err(why);
-        }
-        let why = if fits {
-            SpawnRefusal::NoTaskCell
-        } else {
-            SpawnRefusal::TooLarge
+        let taken_why = match self
+            .taking
+            .as_deref()
+            .map(|taking| taking.take(set, need, align))
+        {
+            Some(Ok(Taken::Cell(cell, buf))) => return Ok((cell, buf)),
+            Some(Ok(Taken::Full { any, room })) => {
+                let room = room || (fits && !fixed.is_empty());
+                let any = any || !fixed.is_empty();
+                Some(if room || !any {
+                    SpawnRefusal::NoTaskCell
+                } else {
+                    SpawnRefusal::TooLarge
+                })
+            }
+            Some(Err(why)) => Some(why),
+            None => None,
+        };
+        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+        let taken_why: Option<SpawnRefusal> = None;
+        // One count of every refusal, whichever cause it names: each count written where its cause
+        // is found was a copy of the section that counts it.
+        let why = match taken_why {
+            Some(why) => why,
+            None if fits => SpawnRefusal::NoTaskCell,
+            None => SpawnRefusal::TooLarge,
         };
         self.refuse(why);
         Err(why)
@@ -1217,12 +1417,66 @@ impl ExecutorState {
     /// polled before it, so a task the pass polls costs it no section of its own. The cell polled
     /// last is settled by the pass's closing section, so the table is settled when this returns.
     pub fn run_until_idle(&self) {
+        (self.walks.run)(self)
+    }
+
+    /// [`Self::run_until_idle`] over a table of one cell at most: the look at the cell and its
+    /// settling, each in a section of its own, as a pass over many takes for each cell.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn run_one(&self) {
+        let Some(cell) = self.fixed_cells().first() else {
+            return;
+        };
+        if !cell.wake.load(Ordering::Acquire) && !cell.cancel.load(Ordering::Acquire) {
+            return;
+        }
+        let act = crate::cs::with(|cs| Self::classify(cell, cs));
+        if let Some(left) = Self::carry_act(cell, act) {
+            crate::cs::with(|cs| Self::settle(cell, left, cs)).carry_out();
+        }
+    }
+
+    /// Do outside the section what the look at `cell` decided (`Self::classify`): drop the
+    /// future of a task that was aborted, or poll one that was woken. How the cell was left, for a
+    /// section to settle; `None` when there was nothing to do.
+    #[inline(always)]
+    fn carry_act(cell: &'static TaskCell, act: Act) -> Option<Left> {
+        match act {
+            Act::Nothing => None,
+            Act::Sweep(ops, buf) => {
+                // SAFETY: the cell was `Live`, so it holds a future that has
+                // not answered; it is `Polling` now, which keeps every other
+                // user off it, and it is dropped once.
+                unsafe { (ops.drop_future)(buf) };
+                Some(Left::Swept)
+            }
+            Act::Poll(ops, buf, out_off) => {
+                // The executor's own count keeps the cell while it polls: this waker holds
+                // none and gives none back, and a clone the task keeps takes its own.
+                let waker = borrowed_waker(cell);
+                let mut cx = Context::from_waker(&waker);
+                // SAFETY: the cell was `Live`, so it holds a pinned future that
+                // has not answered, and it is `Polling` now.
+                Some(match unsafe { (ops.poll)(buf, out_off, &mut cx) } {
+                    Poll::Ready(()) => Left::Answered,
+                    Poll::Pending => Left::Pending,
+                })
+            }
+        }
+    }
+
+    /// [`Self::run_until_idle`] over the cells of a table of any count of them.
+    fn run_among(&self) {
         // The cell the pass polled or swept last and how it left it, to be settled by the next
         // section.
         let mut owed: Option<(&'static TaskCell, Left)> = None;
         // Every cell in the table's order, then the end of the table, whose section settles the
-        // cell polled last.
-        for next in self.each_cell().map(Some).chain(core::iter::once(None)) {
+        // cell polled last and after which the pass returns.
+        let mut index = 0usize;
+        loop {
+            let next = self.cell_at(index);
+            // Below the count of cells the table holds, so the next place does not wrap.
+            index = index.wrapping_add(1);
             // A cell nothing woke and nothing aborted is left out of the pass's sections when no
             // cell is owed its settling: a pass over a table at rest takes no section. A flag
             // raised after this look is seen by the next pass, as one raised after the section is.
@@ -1256,29 +1510,7 @@ impl ExecutorState {
             if woke && matches!(act, Act::Nothing) && cell.wake.load(Ordering::Acquire) {
                 act = crate::cs::with(|cs| Self::classify(cell, cs));
             }
-            owed = match act {
-                Act::Nothing => None,
-                Act::Sweep(ops, buf) => {
-                    // SAFETY: the cell was `Live`, so it holds a future that has
-                    // not answered; it is `Polling` now, which keeps every other
-                    // user off it, and it is dropped once.
-                    unsafe { (ops.drop_future)(buf) };
-                    Some((cell, Left::Swept))
-                }
-                Act::Poll(ops, buf, out_off) => {
-                    // The executor's own count keeps the cell while it polls: this waker holds
-                    // none and gives none back, and a clone the task keeps takes its own.
-                    let waker = borrowed_waker(cell);
-                    let mut cx = Context::from_waker(&waker);
-                    // SAFETY: the cell was `Live`, so it holds a pinned future that
-                    // has not answered, and it is `Polling` now.
-                    let left = match unsafe { (ops.poll)(buf, out_off, &mut cx) } {
-                        Poll::Ready(()) => Left::Answered,
-                        Poll::Pending => Left::Pending,
-                    };
-                    Some((cell, left))
-                }
-            };
+            owed = Self::carry_act(cell, act).map(|left| (cell, left));
         }
     }
 
@@ -1334,22 +1566,41 @@ impl ExecutorState {
     /// any set, and on none, for `None`); a handle that still waits for one reads
     /// `JoinCancelled`. A task being polled is not one of them.
     fn drop_live(&self, set: Option<u32>) {
+        (self.walks.drop_live)(self, set)
+    }
+
+    /// [`Self::drop_live`] over the cells of a table of any count of them.
+    fn drop_among(&self, set: Option<u32>) {
         for cell in self.each_cell() {
-            let live = cell.with_meta(|meta| {
-                if meta.state != State::Live || set.is_some_and(|set| set != meta.set) {
-                    return None;
-                }
-                let ops = meta.ops?;
-                meta.state = State::Polling;
-                meta.aborted = true;
-                Some((ops, meta.buf))
-            });
-            if let Some((ops, buf)) = live {
-                // SAFETY: the cell was `Live`, so it holds a future that has not answered, and
-                // it is `Polling` now; it is dropped once.
-                unsafe { (ops.drop_future)(buf) };
-                crate::cs::with(|cs| Self::settle(cell, Left::Swept, cs)).carry_out();
+            Self::drop_cell(cell, set);
+        }
+    }
+
+    /// [`Self::drop_live`] over a table of one cell at most.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn drop_one(&self, set: Option<u32>) {
+        if let Some(cell) = self.fixed_cells().first() {
+            Self::drop_cell(cell, set);
+        }
+    }
+
+    /// Drop, where it lies, the task `cell` holds when it has not ended and was spawned on local
+    /// set `set` (on any set, and on none, for `None`).
+    fn drop_cell(cell: &'static TaskCell, set: Option<u32>) {
+        let live = cell.with_meta(|meta| {
+            if meta.state != State::Live || set.is_some_and(|set| set != meta.set) {
+                return None;
             }
+            let ops = meta.ops?;
+            meta.state = State::Polling;
+            meta.aborted = true;
+            Some((ops, meta.buf))
+        });
+        if let Some((ops, buf)) = live {
+            // SAFETY: the cell was `Live`, so it holds a future that has not answered, and it is
+            // `Polling` now; it is dropped once.
+            unsafe { (ops.drop_future)(buf) };
+            crate::cs::with(|cs| Self::settle(cell, Left::Swept, cs)).carry_out();
         }
     }
 
@@ -1747,8 +1998,8 @@ mod tests {
     #[test]
     fn every_cell_of_a_store_names_the_store() {
         for bytes in [Some(100), None] {
-            let store = TaskStore::new(3, bytes, None);
-            let owner = Arc::as_ptr(&store);
+            let store = TaskStore::new::<false>(3, bytes, None);
+            let owner = Shared::kept(&store).as_ptr().cast_const();
             assert_eq!(store.cells().len(), 3);
             for cell in store.cells() {
                 assert!(ptr::eq(cell.owner, owner), "the cell names its store");
@@ -1809,6 +2060,14 @@ mod tests {
             Err(SpawnRefusal::NoTaskCell),
             "both cells are taken and no third is added"
         );
+        assert_eq!(
+            state.refusals(),
+            Refusals {
+                no_task_cell: 1,
+                too_large: 0,
+            },
+            "a refusal the added cells answer is counted once, by its cause"
+        );
         assert_eq!(state.capacity(), 2);
         ExecutorState::release(first);
         ExecutorState::release(second);
@@ -1861,6 +2120,82 @@ mod tests {
             "the task is polled where it was written"
         );
         assert!(cell.with_meta(|meta| meta.state == State::Live));
+    }
+
+    /// A table of one task at most holds one cell whatever the count it is told, and none for a
+    /// count of 0: it places a task the cell fits while the cell is free, refuses a second for
+    /// want of a cell and a larger one as too large, each counted, polls the task a waker raised,
+    /// sweeps it when its handle aborts it, and drops a live task where it lies when it goes.
+    ///
+    /// # Control
+    ///
+    /// A table that kept the count it was told reds the capacity and the second claim; a pass that
+    /// polled a task nothing woke reds the count of polls after the second pass.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_table_of_one_task_holds_one_cell_and_walks_it_alone() {
+        static POLLS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        struct Counted;
+        impl Future for Counted {
+            type Output = ();
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                POLLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+                Poll::Pending
+            }
+        }
+        let polls = || POLLS.load(core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(ExecutorState::reserved_one(0, 64).capacity(), 0);
+        let none = ExecutorState::reserved_one(0, 64);
+        assert_eq!(
+            none.claim_bytes(0, 8, 8).map(|_| ()),
+            Err(SpawnRefusal::NoTaskCell),
+            "no cell for a count of 0"
+        );
+        let state = ExecutorState::reserved_one(3, 64);
+        assert_eq!(state.capacity(), 1, "a count past one is held to one");
+        assert_eq!(
+            state.claim_bytes(0, 65, 8).map(|_| ()),
+            Err(SpawnRefusal::TooLarge)
+        );
+        let cell = state
+            .spawn(Counted, 0)
+            .map_err(|refused| refused.why)
+            .expect("the one cell");
+        assert_eq!(
+            state.claim_bytes(0, 8, 8).map(|_| ()),
+            Err(SpawnRefusal::NoTaskCell),
+            "the task holds the one cell"
+        );
+        assert_eq!(
+            state.refusals(),
+            Refusals {
+                no_task_cell: 1,
+                too_large: 1,
+            }
+        );
+        state.run_until_idle();
+        assert_eq!(polls(), 1, "a task is ready when it is spawned");
+        state.run_until_idle();
+        assert_eq!(polls(), 1, "nothing woke it");
+        cell.wake.store(true, Ordering::Release);
+        state.run_until_idle();
+        assert_eq!(polls(), 2, "the woken task is polled");
+        cell.cancel.store(true, Ordering::Release);
+        state.run_until_idle();
+        assert_eq!(polls(), 2, "an aborted task is swept, not polled");
+        assert!(cell.with_meta(|meta| meta.state == State::Done));
+        ExecutorState::release(cell);
+        let again = state
+            .spawn(Counted, 0)
+            .map_err(|refused| refused.why)
+            .expect("the cell its handle gave back");
+        assert!(ptr::eq(again, cell), "the one cell, again");
+        state.drop_live(None);
+        assert!(
+            cell.with_meta(|meta| meta.state == State::Done && meta.aborted),
+            "a live task is dropped where it lies, its handle told"
+        );
+        ExecutorState::release(cell);
     }
 
     /// A pass polls the task a waker raised and sweeps the one its handle aborted, and leaves the

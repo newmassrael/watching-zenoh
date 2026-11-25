@@ -1252,8 +1252,13 @@ async fn r311y817_acceptor_does_not_refuse_an_init_syn_announcing_a_future_patch
             _ => None,
         })
         .expect("the acceptor answered with an InitAck carrying a cookie");
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     assert_eq!(
         carried.negotiated.patch.0,
         Some(1),
@@ -1774,6 +1779,58 @@ async fn a_message_that_is_not_a_frame_is_read_where_it_lies_and_the_datagram_re
         dispatch_pending(&actions, &mut engine).is_none(),
         "nothing of the datagram was copied to wait"
     );
+}
+
+/// An empty datagram a link lends is read once, as a unit that is no Frame, by the path that
+/// reads such a unit, which reports what it read; one the link keeps has nothing to read, so
+/// nothing is dispatched or reported and no step is noted to go on from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_datagram_is_read_once_when_lent_and_not_at_all_when_kept() {
+    use wz_session_core::drive::{dispatch_datagram, CopyReason, DatagramPath};
+    use wz_session_core::driver_loop::{EventSink, IterationEvent};
+    use wz_session_core::network_message::new_record_buf;
+
+    /// A host whose link keeps the datagram, counting what it is told.
+    #[derive(Default)]
+    struct Keeps {
+        events: usize,
+    }
+
+    impl EventSink for Keeps {
+        fn event(&mut self, _event: IterationEvent<'_, '_>) {
+            self.events += 1;
+        }
+
+        fn holds_datagram(&self) -> bool {
+            true
+        }
+    }
+
+    let mut record = new_record_buf();
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+    let mut reported = 0usize;
+    let mut lends = |_event: IterationEvent<'_, '_>| reported += 1;
+    let path = dispatch_datagram(&[], &actions, &mut engine, &mut record, &mut lends);
+    assert_eq!(
+        path,
+        DatagramPath::Copied(CopyReason::NotAFrame),
+        "a lent datagram is read from its first unit, an empty one too"
+    );
+    assert_eq!(reported, 1, "what the empty unit read as is reported once");
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+    let mut keeps = Keeps::default();
+    let path = dispatch_datagram(&[], &actions, &mut engine, &mut record, &mut keeps);
+    assert_eq!(
+        path,
+        DatagramPath::InPlace,
+        "a kept empty datagram has no unit"
+    );
+    assert_eq!(keeps.events, 0, "nothing is dispatched");
+    assert!(!actions.resumes_datagram(), "and no step is noted");
 }
 
 /// A Frame the in-place reader refuses is refused as the copying path refuses it, and read no

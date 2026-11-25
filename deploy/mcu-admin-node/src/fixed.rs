@@ -218,7 +218,7 @@ impl SessionFactory<SystickClockRef, LwipUdpDriver> for Factory {
         SessionInitParams {
             whatami: WhatAmI::Peer,
             zid: zid_bytes(&ZID),
-            seq_num_res: 2,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size: 1500,
             lease_ms: 10_000,
@@ -232,7 +232,9 @@ impl SessionFactory<SystickClockRef, LwipUdpDriver> for Factory {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
             limits: self.limits,
-            cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
+            cookie_signing_key: SigningKey::from_slice(&self.key)
+                .expect("32-byte key")
+                .into(),
         }
     }
 

@@ -549,7 +549,9 @@ pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn R
     // OUT of the C callback across this `extern "C"` boundary is UB and would
     // tear down the drive thread, so it is caught here.
     let ctx = closure.context.0;
-    let _in_callback = crate::ffi::InCallback::enter();
+    let Some(_in_callback) = crate::ffi::InCallback::enter() else {
+        return;
+    };
     let _ = crate::ffi::catch(|| unsafe {
         call(reply_ptr, ctx);
     });
@@ -1011,7 +1013,7 @@ fn get_options<'a>(ask: &GetAsk<'a>, anyke: bool) -> QueryOptionsOf<'a> {
     // carry both. A `#[cfg]` here would name a feature `wz-capi-pico` does not
     // declare, which the unexpected-cfg lint rejects outright.
     if let Some(encoding) = value_meta.encoding {
-        opts = opts.with_encoding_ref(encoding);
+        opts.set_encoding_ref(encoding);
     }
     if let Some(si) = &value_meta.source_info {
         opts = opts.with_source_info(si.clone());
@@ -1070,14 +1072,16 @@ fn get_options<'a>(ask: &GetAsk<'a>, anyke: bool) -> QueryOptionsOf<'a> {
         ));
     }
 
+    // The setters that apply on a condition set the options where they lie, so no branch moves
+    // the whole value through a setter and back.
     if !parameters.is_empty() || anyke {
-        opts = opts.with_parameters_lent_anyke(parameters, anyke);
+        opts.set_parameters_lent_anyke(parameters, anyke);
     }
     if let Some(payload) = payload {
-        opts = opts.with_payload_lent(payload.as_slice());
+        opts.set_payload_lent(payload.as_slice());
     }
     if let Some(attachment) = attachment {
-        opts = opts.with_attachment_lent(attachment.as_slice());
+        opts.set_attachment_lent(attachment.as_slice());
     }
     opts
 }
@@ -1528,7 +1532,7 @@ pub(crate) fn issue_get(
         Err(code) => return code,
     };
 
-    let opts = get_options(ask, anyke);
+    let mut opts = get_options(ask, anyke);
 
     // A target reaches here only from `wz_ext_get_to_peer`, which admitted it by the session's
     // snapshot, so only a build whose domain allows the `targeted-query` policy on can be handed
@@ -1541,10 +1545,10 @@ pub(crate) fn issue_get(
     // A get the engine refuses issues no leg and sends nothing; the fan completes it with no
     // reply, and the caller is told the code pico's get answers for the cause: a session with no
     // room to hold it pending, a closed one, or an engine that cannot address it to one node.
-    let opts = match target_peer {
-        Some(target_peer) => opts.with_target_peer(target_peer),
-        None => opts,
-    };
+    if let Some(target_peer) = target_peer {
+        // Set where the options lie, so the whole options value is not moved through a builder.
+        opts.target_peer = Some(target_peer);
+    }
     fan_get(
         engine,
         crate::object_slot::Kind::Get,
@@ -2428,7 +2432,7 @@ mod tests {
 
         // The default is MATCHING_QUERY, so the gate is ON by default.
         let gate = |ke: &str, accept| ReplyGate {
-            query_keyexpr: crate::keyexpr::KeyText::owned(ke),
+            query_keyexpr: crate::keyexpr::KeyText::owned(ke).expect("the test's heap"),
             anyke: parameters_has_anyke(&sent(b"", accept)),
         };
 
@@ -2467,7 +2471,7 @@ mod tests {
         // (`primitives.c:575-582`), so `_anyke` in the caller's own parameters
         // opens the gate even under MATCHING_QUERY.
         let g = ReplyGate {
-            query_keyexpr: crate::keyexpr::KeyText::owned("a/**"),
+            query_keyexpr: crate::keyexpr::KeyText::owned("a/**").expect("the test's heap"),
             anyke: parameters_has_anyke(&sent(b"_anyke", matching)),
         };
         assert!(g.anyke, "a hand-written _anyke selector must open the gate");
@@ -2598,7 +2602,7 @@ mod tests {
         }
         let closure = || CReplyClosure::uncounted(core::ptr::null_mut(), None, Some(counted_drop));
         let gate = || ReplyGate {
-            query_keyexpr: crate::keyexpr::KeyText::owned("demo/get"),
+            query_keyexpr: crate::keyexpr::KeyText::owned("demo/get").expect("the test's heap"),
             anyke: false,
         };
 

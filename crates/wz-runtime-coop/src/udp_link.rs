@@ -64,9 +64,11 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{RxStore, TxLender, TxStore};
+#[cfg(any(test, feature = "session-slot"))]
+use crate::session_drive::Locator;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack};
-use crate::session_drive::{LinkProto, Locator, SessionDatagramLink, LONGEST_IP_LOCATOR_LEN};
+use crate::session_drive::{IpLocator, LinkProto, SessionDatagramLink, LONGEST_IP_LOCATOR_LEN};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::{LinkWaits, NoWaits, WaitOn};
 
@@ -256,6 +258,60 @@ impl DatagramSocket for NoDatagram {
     }
 }
 
+/// The datagram socket of a stack on a platform whose sockets are `U`, in a build that links no
+/// datagram link: every `udp/` dial and listener is `LinkOpenError::Unsupported`, as on a stack
+/// that carries none ([`NoDatagram`]), and no link over `U` is made, while the stack's other
+/// links are waited on with `U`'s waits. There is no value of it.
+pub struct NoDatagramOf<U> {
+    never: core::convert::Infallible,
+    _socket: core::marker::PhantomData<fn() -> U>,
+}
+
+impl<U: DatagramSocket> DatagramSocket for NoDatagramOf<U> {
+    type Error = ();
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    type Waits = U::Waits;
+
+    const CARRIED: bool = false;
+
+    // A socket that opens nothing opens no IPv6 address either.
+    const IPV6: bool = false;
+
+    fn bind(_at: SocketAddr) -> Result<Self, ()> {
+        Err(())
+    }
+
+    // No address is ever opened, so a refused bind is never one to try again.
+    fn refuses_address(_error: &()) -> bool {
+        true
+    }
+
+    fn local(&self) -> SocketAddr {
+        match self.never {}
+    }
+
+    fn send_to(&self, _to: SocketAddr, _bytes: &[u8]) -> Result<(), ()> {
+        match self.never {}
+    }
+
+    fn wait_readable(&self, _timeout_ms: c_int) {
+        match self.never {}
+    }
+
+    fn times_out(&self) -> bool {
+        match self.never {}
+    }
+
+    fn recv_waiting(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+        match self.never {}
+    }
+
+    fn try_recv(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+        match self.never {}
+    }
+}
+
 /// The unspecified address of `ip`'s family: `0.0.0.0` or `::`.
 pub const fn unspecified_like(ip: IpAddr) -> IpAddr {
     match ip {
@@ -288,7 +344,7 @@ pub fn ends_fit(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> bool {
     caps::MAX_LOCATOR_LEN >= LONGEST_IP_LOCATOR_LEN
         || [local, peer]
             .into_iter()
-            .all(|at| Locator { proto, at }.text().demanded() <= caps::MAX_LOCATOR_LEN)
+            .all(|at| IpLocator { proto, at }.text().demanded() <= caps::MAX_LOCATOR_LEN)
 }
 
 /// Whether a datagram link over `socket` to `peer` names both its ends in the rows of the build
@@ -802,9 +858,11 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
     // The datagram is lent out of the link's own receive buffer, which the
     // stack has just written: no heap copy of it. The buffer stays borrowed
     // while `f` runs; the session's sends go through the socket, not through
-    // it, and a receive from inside `f` would be refused by the `RefCell`.
+    // it, and a receive from inside `f` finds it lent and reads nothing.
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
-        let mut buf = self.rx_buf.borrow_mut();
+        let Ok(mut buf) = self.rx_buf.try_borrow_mut() else {
+            return false;
+        };
         // A link of a pool that holds no buffer and finds none free reads nothing: its datagrams
         // wait in the stack (`SessionDatagramLink::waits_for_buffer`).
         let Some(bytes) = buf.bytes() else {
@@ -1469,8 +1527,11 @@ impl<S: DatagramSocket + 'static> Bind<FixedUdpDriver<S>> for UdpStack<S> {
     const IPV6: bool = S::IPV6;
 
     fn bind(&mut self, to: Locator) -> Result<FixedUdpDriver<S>, LinkOpenError> {
-        match to.proto {
-            LinkProto::Udp => self.bind_initiator(to.at),
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
+            LinkProto::Udp => self.bind_initiator(ip.at),
             // A stack of datagram sockets has no stream to give; one that has both is
             // `ip_stack`'s `IpStack`.
             LinkProto::Tcp | LinkProto::Tls => Err(LinkOpenError::Unsupported),
@@ -1812,7 +1873,7 @@ mod tests {
             )),
         ] {
             for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
-                let locator = Locator { proto, at };
+                let locator = Locator::ip(proto, at);
                 let printed = std::format!("{}/{at}", proto.scheme());
                 assert_eq!(locator.text().finish(), Ok(printed.as_str()));
                 assert_eq!(std::format!("{locator}"), printed);
@@ -1846,29 +1907,12 @@ mod tests {
             u32::MAX,
         ));
         for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
-            let v4 = std::format!(
-                "{}",
-                Locator {
-                    proto,
-                    at: widest_v4
-                }
-            );
-            let v6 = std::format!(
-                "{}",
-                Locator {
-                    proto,
-                    at: widest_v6
-                }
-            );
+            let v4 = std::format!("{}", Locator::ip(proto, widest_v4));
+            let v6 = std::format!("{}", Locator::ip(proto, widest_v6));
             assert_eq!(v4.len(), LONGEST_IPV4_LOCATOR_LEN, "{v4}");
             assert_eq!(v6.len(), LONGEST_IP_LOCATOR_LEN, "{v6}");
             assert_eq!(
-                Locator {
-                    proto,
-                    at: widest_v4
-                }
-                .text()
-                .finish(),
+                Locator::ip(proto, widest_v4).text().finish(),
                 Ok(v4.as_str())
             );
         }
@@ -1899,11 +1943,7 @@ mod tests {
         ));
         let short_v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, 7447));
         for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
-            let v6 = Locator {
-                proto,
-                at: widest_v6,
-            }
-            .text();
+            let v6 = Locator::ip(proto, widest_v6).text();
             assert_eq!(v6.finish().map(str::len), Ok(LONGEST_IP_LOCATOR_LEN));
             assert!(ends_fit(proto, widest_v4, widest_v4), "every IPv4 link");
             assert!(ends_fit(proto, short_v6, short_v6));
@@ -2200,6 +2240,21 @@ mod tests {
         assert_eq!(&next.bytes[..], b"second");
         assert!(link.try_recv().is_none(), "nothing is left to read");
         assert!(!link.holds_input(), "nothing is kept after the copy");
+    }
+
+    /// A receive asked from inside the lend finds the buffer lent and reads nothing, and the next
+    /// datagram waits for the next receive. Turned red by a receive that borrows its buffer with
+    /// `borrow_mut`, which panics there.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_receive_from_inside_the_lend_reads_nothing() {
+        let link = driver(Loop::default());
+        queued(&link.socket, b"first");
+        queued(&link.socket, b"second");
+        let mut inner = None;
+        assert!(link.recv_with(&mut |_| inner = Some(received(&link))));
+        assert_eq!(inner, Some(None), "the inner receive reads nothing");
+        assert_eq!(received(&link).as_deref(), Some(&b"second"[..]));
     }
 
     /// The defect this rule exists for: one datagram from another address used to point the

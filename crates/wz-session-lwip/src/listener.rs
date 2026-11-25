@@ -82,6 +82,10 @@ pub struct ListenerCounts {
     pub refused_no_pump_cell: u32,
     /// `InitSyn`s dropped because the task table refused the session's task.
     pub refused_no_task_cell: u32,
+    /// `InitSyn`s dropped because the node's sessions offer a width of sequence numbers the
+    /// build's `sn-resolution` domain leaves out: no session of the node can be accepted until
+    /// its parameters change.
+    pub refused_sn_resolution: u32,
     /// Datagrams from a peer with no session that were not an `InitSyn`.
     pub strays: u32,
 }
@@ -93,6 +97,7 @@ impl ListenerCounts {
             .saturating_add(self.refused_no_session_slot)
             .saturating_add(self.refused_no_pump_cell)
             .saturating_add(self.refused_no_task_cell)
+            .saturating_add(self.refused_sn_resolution)
     }
 }
 
@@ -108,19 +113,37 @@ pub struct AcceptPass {
     pub strays: u32,
 }
 
-/// What the image is given for an `InitSyn` it may admit: the driver of the new
-/// session, which reads and sends through the listener's socket, and the lane
-/// that keeps the session's peer apart from the others'. Both go into the
-/// session (`SessionHost::open`); dropping them, which is what a refusal does,
+/// What the image is given for an `InitSyn` it may admit: what the driver of the
+/// new session is made of, the listener's socket it reads and sends through, and
+/// the lane that keeps the session's peer apart from the others'. Both go into the
+/// session (`SessionHost::admit`), the driver made in the session's slot
+/// ([`Self::driver_in`]); dropping the admission, which is what a refusal does,
 /// gives the lane back.
 pub struct Admission {
-    /// The link driver of the session about to be built.
-    pub driver: LwipUdpDriver,
+    /// The listener's socket the session reads and sends through.
+    socket: &'static RefCell<SessionRxSocket>,
     /// The lane the session reads its datagrams through.
     pub lane: LaneGuard,
 }
 
 impl Admission {
+    /// The link driver of the session, made in `place`, the place it is kept: it
+    /// carries its link's outbound slot, which made here and moved there would be a
+    /// value in each frame it passed through.
+    pub fn driver_in<'place>(
+        socket: &'static RefCell<SessionRxSocket>,
+        peer: (u32, u16),
+        place: &'place mut core::mem::MaybeUninit<LwipUdpDriver>,
+    ) -> &'place mut LwipUdpDriver {
+        LwipUdpDriver::new_in(place, SessionSocket::listened(socket), peer.0, peer.1)
+    }
+
+    /// The listener's socket and the lane, apart, for the session's open to make
+    /// the driver from the one and keep the other.
+    pub fn into_parts(self) -> (&'static RefCell<SessionRxSocket>, LaneGuard) {
+        (self.socket, self.lane)
+    }
+
     /// The peer that sent the `InitSyn`, as lwIP names it (the address word in
     /// network byte order, and the port).
     pub fn peer(&self) -> (u32, u16) {
@@ -203,6 +226,7 @@ impl<const LANES: usize> SessionListener<LANES> {
                 refused_no_session_slot: 0,
                 refused_no_pump_cell: 0,
                 refused_no_task_cell: 0,
+                refused_sn_resolution: 0,
                 strays: 0,
             }),
             high: Cell::new(wz_session_core::pool_gauge::HighWater::new()),
@@ -329,8 +353,7 @@ impl<const LANES: usize> SessionListener<LANES> {
                 pass.refused += 1;
                 continue;
             };
-            let driver = LwipUdpDriver::new(SessionSocket::listened(socket), peer.0, peer.1);
-            match admit(Admission { driver, lane }) {
+            match admit(Admission { socket, lane }) {
                 Ok(()) => {
                     self.count(|counts| counts.admitted = counts.admitted.saturating_add(1));
                     pass.admitted += 1;
@@ -350,6 +373,10 @@ impl<const LANES: usize> SessionListener<LANES> {
                         OpenRefused::Task(_) => {
                             counts.refused_no_task_cell =
                                 counts.refused_no_task_cell.saturating_add(1);
+                        }
+                        OpenRefused::SnResolution(_) => {
+                            counts.refused_sn_resolution =
+                                counts.refused_sn_resolution.saturating_add(1);
                         }
                     });
                     pass.refused += 1;
@@ -388,5 +415,22 @@ impl<const LANES: usize> wz_session_core::pool_gauge::PoolList for SessionListen
 impl<const LANES: usize> Default for SessionListener<LANES> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ListenerCounts;
+
+    /// An `InitSyn` dropped for the node's width of sequence numbers is one the listener answered
+    /// with nothing, beside those a table refused.
+    #[test]
+    fn a_refusal_of_the_width_counts_among_the_refused() {
+        let counts = ListenerCounts {
+            refused_no_lane: 1,
+            refused_sn_resolution: 2,
+            ..ListenerCounts::default()
+        };
+        assert_eq!(counts.refused(), 3);
     }
 }

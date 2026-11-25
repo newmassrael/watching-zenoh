@@ -315,8 +315,23 @@ impl<const N: usize> core::ops::Deref for RowTextOf<N> {
 pub type RowText = RowTextOf<{ crate::caps::MAX_LOCATOR_LEN }>;
 
 /// A group's endpoint as a [`FaceLinkRow`] holds it, its socket keys included: in the row up to
-/// [`crate::caps::MAX_GROUP_ENDPOINT_LEN`] bytes.
-pub type GroupRowText = RowTextOf<{ crate::caps::MAX_GROUP_ENDPOINT_LEN }>;
+/// [`GROUP_ROW_LEN`] bytes.
+pub type GroupRowText = RowTextOf<GROUP_ROW_LEN>;
+
+/// The bytes a group endpoint's row holds: the longest endpoint the build joins a group by,
+/// [`crate::caps::MAX_GROUP_ENDPOINT_LEN`], or a raw Ethernet group's bound where the build has
+/// that transport and its bound is the longer.
+#[cfg(feature = "transport-link-raweth")]
+pub const GROUP_ROW_LEN: usize =
+    if crate::caps::MAX_RAWETH_ENDPOINT_LEN > crate::caps::MAX_GROUP_ENDPOINT_LEN {
+        crate::caps::MAX_RAWETH_ENDPOINT_LEN
+    } else {
+        crate::caps::MAX_GROUP_ENDPOINT_LEN
+    };
+
+/// The bytes a group endpoint's row holds: the longest endpoint the build joins a group by.
+#[cfg(not(feature = "transport-link-raweth"))]
+pub const GROUP_ROW_LEN: usize = crate::caps::MAX_GROUP_ENDPOINT_LEN;
 
 /// One link of an established face, with the face it is under, as a reader takes it out of the
 /// session's lock to hand on: every field is held in the row, so reading the faces one row at a
@@ -577,8 +592,8 @@ impl FaceLinkRow {
             link: 0,
             links: 1,
             src: RowText::of(src),
-            dst: udp_row(member.locator),
-            kind: Some(LinkKind::Udp),
+            dst: member_row(member.locator, endpoint),
+            kind: member_link_kind(endpoint),
             mtu: 0,
             group_endpoint: Some(GroupRowText::of(endpoint)),
             lost_after: 0,
@@ -601,7 +616,7 @@ fn ends_row(link: Option<crate::link::LinkEnds<'_>>) -> (RowText, RowText) {
 
 /// The locator of one end of a link, which `write` writes, in its row: there when it fits, on
 /// the heap past it, as [`RowTextOf::of`] keeps a text.
-#[cfg(feature = "session-unicast")]
+#[cfg(any(feature = "session-unicast", feature = "session-multicast"))]
 fn end_row(write: impl Fn(&mut dyn crate::text_out::TextOut)) -> RowText {
     let mut inline: crate::text_out::FixedText<{ crate::caps::MAX_LOCATOR_LEN }> =
         crate::text_out::FixedText::new();
@@ -619,13 +634,53 @@ fn end_row(write: impl Fn(&mut dyn crate::text_out::TextOut)) -> RowText {
 /// `udp/<at>`, the locator a group member's end is reported by, written into its row.
 #[cfg(feature = "session-multicast")]
 fn udp_row(at: core::net::SocketAddr) -> RowText {
-    use core::fmt::Write;
-    let mut inline = heapless::String::<{ crate::caps::MAX_LOCATOR_LEN }>::new();
-    if write!(inline, "udp/{at}").is_ok() {
-        RowText::Inline(inline)
-    } else {
-        RowText::Spilled(alloc::format!("udp/{at}"))
+    end_row(|out| {
+        out.push_str("udp/");
+        out.push_socket_addr(at);
+    })
+}
+
+/// The end of a member of the group joined by `endpoint`, in its row: a raweth group's member is
+/// the `reth/` locator of its MAC ([`raweth_member_text`]), any other group's its address on UDP.
+#[cfg(feature = "session-multicast")]
+fn member_row(at: core::net::SocketAddr, endpoint: &str) -> RowText {
+    #[cfg(feature = "transport-link-raweth")]
+    if endpoint.starts_with("reth/") {
+        return RowText::of(&raweth_member_text(at));
     }
+    #[cfg(not(feature = "transport-link-raweth"))]
+    let _ = endpoint;
+    udp_row(at)
+}
+
+/// The kind of a link to a member of the group joined by `endpoint`: none [`LinkKind`] names for
+/// a raweth group's, UDP for any other group's.
+#[cfg(feature = "session-multicast")]
+fn member_link_kind(endpoint: &str) -> Option<LinkKind> {
+    #[cfg(feature = "transport-link-raweth")]
+    if endpoint.starts_with("reth/") {
+        return None;
+    }
+    #[cfg(not(feature = "transport-link-raweth"))]
+    let _ = endpoint;
+    Some(LinkKind::Udp)
+}
+
+/// The `reth/` locator of the MAC a raweth group keyed its member by `at` for
+/// ([`crate::raweth_link::member_locator`]), or `reth/<at>` for an address no raweth member is
+/// keyed by, which still names it.
+#[cfg(all(feature = "session-multicast", feature = "transport-link-raweth"))]
+fn raweth_member_text(at: core::net::SocketAddr) -> String {
+    crate::raweth_link::member_locator(&at).unwrap_or_else(|| alloc::format!("reth/{at}"))
+}
+
+/// `udp/<at>`, as [`udp_row`] writes it, for a snapshot that keeps its text on the heap.
+#[cfg(feature = "session-multicast")]
+fn udp_text(at: core::net::SocketAddr) -> String {
+    use crate::text_out::TextOut as _;
+    let mut text = String::from("udp/");
+    text.push_socket_addr(at);
+    text
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -669,6 +724,29 @@ pub struct GroupMemberLink<'a> {
 
 #[cfg(feature = "session-multicast")]
 impl<'a> GroupMemberLink<'a> {
+    /// The link to `member` of the group joined by `endpoint`, of the kind the endpoint names: a
+    /// raweth group's member's end is the `reth/` locator of its MAC, which the member table keys
+    /// by an address of the MAC's own, on a link of no kind [`LinkKind`] names; any other group's
+    /// is [`Self::udp`]. Every engine labels its members by it.
+    pub fn of_group(
+        src: &'a str,
+        member: &crate::multicast_dispatch::MulticastMember,
+        group: &'a str,
+        endpoint: &'a str,
+    ) -> Self {
+        #[cfg(feature = "transport-link-raweth")]
+        if endpoint.starts_with("reth/") {
+            return Self {
+                src,
+                dst: raweth_member_text(member.locator),
+                kind: None,
+                group,
+                endpoint,
+            };
+        }
+        Self::udp(src, member, group, endpoint)
+    }
+
     /// The link to `member` of a UDP group: its end is the address its datagrams come from, as
     /// upstream records a member's locator, and the link a UDP one.
     pub fn udp(
@@ -679,7 +757,7 @@ impl<'a> GroupMemberLink<'a> {
     ) -> Self {
         Self {
             src,
-            dst: alloc::format!("udp/{}", member.locator),
+            dst: udp_text(member.locator),
             kind: Some(LinkKind::Udp),
             group,
             endpoint,
@@ -859,6 +937,18 @@ mod tests {
     /// rows that hold them in place; a locator past the bound still reads whole, from the heap,
     /// which only a heap engine's link reaches. Turned red by a row that cuts a text short or
     /// blanks it, which would name another peer, or by one that spills a text that fits.
+    /// In a build with the raweth transport a group's row holds a raw Ethernet group's endpoint
+    /// of that bound whole and in place, as it holds a UDP group's. Turned red by a row sized
+    /// from the UDP bound alone.
+    #[test]
+    #[cfg(feature = "transport-link-raweth")]
+    fn a_group_row_holds_a_raweth_endpoint_of_its_bound() {
+        let endpoint = "e".repeat(crate::caps::MAX_RAWETH_ENDPOINT_LEN);
+        let row = GroupRowText::of(&endpoint);
+        assert_eq!(row.as_str(), endpoint);
+        assert!(row.is_inline());
+    }
+
     #[test]
     fn every_text_reads_whole_from_a_row_and_one_that_fits_is_held_in_place() {
         let fits = "t".repeat(crate::caps::MAX_LOCATOR_LEN);
@@ -1008,6 +1098,74 @@ mod tests {
             ..member
         };
         assert!(FaceLinkRow::of_group_member(&unknown, group, &endpoint, true).is_none());
+    }
+
+    /// A raweth group's member reads as the `reth/` locator of its MAC on a link of no kind, in its
+    /// snapshot and in its row alike, and an address no raweth member is keyed by as `reth/` and the
+    /// address. Turned red by a raweth member labelled as a UDP one.
+    ///
+    /// # Control
+    ///
+    /// The same member over a UDP group reads as its address on a UDP link.
+    #[cfg(all(feature = "session-multicast", feature = "transport-link-raweth"))]
+    #[test]
+    fn a_raweth_group_member_is_its_mac() {
+        use crate::multicast_dispatch::MulticastMember;
+        use crate::multicast_peer_lost::MulticastPeerId;
+        let member = MulticastMember {
+            peer: MulticastPeerId::from_wire(&[0x0a, 0x0b]),
+            whatami: Some(crate::WhatAmI::Peer),
+            locator: crate::raweth_link::member_address([0x30, 0x03, 0x8c, 0xc8, 0, 0xa1]),
+        };
+        let group = "reth/30:03:8c:c8:00:a2";
+        let endpoint = "reth/30:03:8c:c8:00:a2#iface=lo";
+        let link = GroupMemberLink::of_group(group, &member, group, endpoint);
+        assert_eq!(
+            (link.dst.as_str(), link.kind),
+            ("reth/30:03:8c:c8:00:a1", None)
+        );
+        let row = FaceLinkRow::of_group_member(&member, group, endpoint, false).expect("its row");
+        assert_eq!(
+            (row.dst.as_str(), row.kind),
+            ("reth/30:03:8c:c8:00:a1", None)
+        );
+
+        let stranger = MulticastMember {
+            locator: core::net::SocketAddr::from(([192, 0, 2, 9], 7447)),
+            ..member
+        };
+        assert_eq!(
+            GroupMemberLink::of_group(group, &stranger, group, endpoint).dst,
+            "reth/192.0.2.9:7447"
+        );
+
+        let udp = "udp/224.0.0.224:7447#iface=lo";
+        let link = GroupMemberLink::of_group(group, &stranger, group, udp);
+        assert_eq!(
+            (link.dst.as_str(), link.kind),
+            ("udp/192.0.2.9:7447", Some(LinkKind::Udp))
+        );
+    }
+
+    /// A group member's end is `udp/` and the address as `Display` writes it, held in the row
+    /// when it fits and on the heap past it. Turned red by a text that differs from the
+    /// formatter's or is cut at the row's bound.
+    #[cfg(feature = "session-multicast")]
+    #[test]
+    fn a_member_end_is_written_whole_in_or_past_its_row() {
+        let widest = core::net::SocketAddr::V6(core::net::SocketAddrV6::new(
+            core::net::Ipv6Addr::new(
+                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+            ),
+            65535,
+            0,
+            u32::MAX,
+        ));
+        for at in [core::net::SocketAddr::from(([10, 0, 0, 1], 7447)), widest] {
+            let row = udp_row(at);
+            assert_eq!(row.as_str(), alloc::format!("udp/{at}"));
+            assert_eq!(row.is_inline(), row.len() <= crate::caps::MAX_LOCATOR_LEN);
+        }
     }
 
     #[cfg(feature = "session-multicast")]

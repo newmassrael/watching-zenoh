@@ -52,6 +52,34 @@ pub trait MulticastReplyEnqueue {
     fn enqueue_reply(&self, reply: MulticastTxReply<'_>) {
         self.enqueue(reply.to_item());
     }
+
+    /// Enqueue one staged reply, described by the parts its stage lends. A backing that queues
+    /// owned items builds the owned record from them (the default), and skips a reply the wire
+    /// cannot carry; one that encodes its replies where they wait writes it with the stage's lent
+    /// writer ([`crate::lent_response::ResponseWriter`]), and builds no owned record of it.
+    #[cfg(feature = "codec-response")]
+    fn enqueue_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
+            self.enqueue_reply(MulticastTxReply::Response(&response));
+        }
+    }
+
+    /// Enqueue the answer to a member's interest in liveliness tokens for the held token
+    /// `token_id` on `keyexpr`. A backing that queues owned items builds the owned `Declare` of it
+    /// (the default); one that encodes its replies where they wait writes the borrowed reply from
+    /// where it lies (`multicast_tx::multicast_tx_token_reply`), and builds no owned record of it.
+    /// A keyexpr past the protocol's bound is not answered either way: the chain's `DeclFinal`
+    /// still terminates the interest.
+    #[cfg(feature = "liveliness-token")]
+    fn enqueue_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        if let Ok(declare) =
+            crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id).and_then(
+                |reply| reply.try_into_owned_in::<crate::transport_profile::TransportStorage>(),
+            )
+        {
+            self.enqueue_reply(MulticastTxReply::DeclareReply(&declare));
+        }
+    }
 }
 
 /// The shared observer-drain reply sink: the SSOT for the staged-reply ->
@@ -87,19 +115,18 @@ impl<Q> MulticastReplySink<Q> {
     }
 }
 
-// The queryable-reply drain (R311lq): the observer hands the sink the owned
-// `Response` (drained from `pending_replies` via `QueryReply::into_response`) and
-// the terminal rid; the sink wraps each in the matching `MulticastTxItem` and
-// enqueues it. `send_response` is the one place a `wz_codecs` owned type is
-// named — here in wz-session-core (which already deps wz-codecs), not in the
-// backing crates. Every method is gated by its own codec, so a build with neither
+// The queryable-reply drain (R311lq): the observer hands the sink each staged reply as
+// its parts and the terminal rid; the sink hands the reply to the backing
+// (`MulticastReplyEnqueue::enqueue_reply_parts`) and wraps the rid in its
+// `MulticastTxItem`. Every method is gated by its own codec, so a build with neither
 // reply codec has a sink with nothing to send: a host that drains a group's whole
 // observer through one sink (`SlotObserver::flush_pending`) names it in every build.
 impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastReplySink<Q> {
+    // A staged reply goes to the backing as its parts, so that a backing that writes its replies
+    // where they wait builds no owned record of it.
     #[cfg(feature = "codec-response")]
-    fn send_response(&self, response: crate::wire::ResponseOwned) {
-        self.queue
-            .enqueue_reply(MulticastTxReply::Response(&response));
+    fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        self.queue.enqueue_reply_parts(parts);
     }
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(
@@ -109,6 +136,17 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastR
     ) {
         self.queue
             .enqueue(MulticastTxItem::ResponseFinal { request_id, qos });
+    }
+}
+
+// A reply a handler built as the owned record on the tokio engine's own path is sent as it is,
+// the one place a `wz_codecs` owned type is named for a group: here in wz-session-core, not in
+// the backing crates.
+#[cfg(feature = "codec-response")]
+impl<Q: MulticastReplyEnqueue> crate::response_sink::OwnedResponseSink for MulticastReplySink<Q> {
+    fn send_response(&self, response: crate::wire::ResponseOwned) {
+        self.queue
+            .enqueue_reply(MulticastTxReply::Response(&response));
     }
 }
 
@@ -125,18 +163,11 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastR
 // (the multicast reply loop is a `DeclareReplySink` consumer either way).
 #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
 impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for MulticastReplySink<Q> {
+    // The backing writes the reply as it keeps its replies, owned or encoded where they wait.
     #[cfg(feature = "liveliness-token")]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        // A keyexpr past the protocol's bound is not answered, as the subscriber reply
-        // below skips one: the chain's `DeclFinal` still terminates the interest.
-        if let Ok(declare) =
-            crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id).and_then(
-                |reply| reply.try_into_owned_in::<crate::transport_profile::TransportStorage>(),
-            )
-        {
-            self.queue
-                .enqueue_reply(MulticastTxReply::DeclareReply(&declare));
-        }
+        self.queue
+            .enqueue_token_reply(token_id, keyexpr, interest_id);
     }
     fn send_declare_final_reply(&self, interest_id: u64) {
         // Same UNGATED builder as the unicast sink, for the same reason: the
@@ -247,7 +278,10 @@ pub fn asks_for_declarations(event: &crate::driver_loop::IterationEvent<'_, '_>)
 ))]
 #[derive(Debug, Default)]
 pub struct GroupKeyexprAnswers {
-    declared: alloc::collections::BTreeMap<crate::wire_id::ExprId, alloc::string::String>,
+    /// One entry an id, ordered by it, so the answers go out in the order of the ids. A list and
+    /// not a tree: a session declares a handful of keyexprs to its group, and a tree would carry
+    /// insertion and rebalancing code of its own for this one map.
+    declared: alloc::vec::Vec<(crate::wire_id::ExprId, alloc::string::String)>,
     owed: alloc::vec::Vec<OwedKeyexprs>,
 }
 
@@ -278,13 +312,29 @@ struct OwedKeyexprs {
 ))]
 impl GroupKeyexprAnswers {
     /// The session declared `keyexpr` to the group as `mapping_id`.
+    /// An id declared again names the keyexpr it is declared with now.
     pub fn declared(&mut self, mapping_id: crate::wire_id::ExprId, keyexpr: &str) {
-        self.declared.insert(mapping_id, keyexpr.into());
+        match self.place_of(mapping_id) {
+            Ok(at) => {
+                if let Some((_, held)) = self.declared.get_mut(at) {
+                    *held = keyexpr.into();
+                }
+            }
+            Err(at) => self.declared.insert(at, (mapping_id, keyexpr.into())),
+        }
     }
 
     /// The session retracted declaration `mapping_id`.
     pub fn retracted(&mut self, mapping_id: crate::wire_id::ExprId) {
-        self.declared.remove(&mapping_id);
+        if let Ok(at) = self.place_of(mapping_id) {
+            self.declared.remove(at);
+        }
+    }
+
+    /// Where `mapping_id` is held, or where it goes to keep the ids in order.
+    fn place_of(&self, mapping_id: crate::wire_id::ExprId) -> Result<usize, usize> {
+        self.declared
+            .binary_search_by_key(&mapping_id, |(id, _)| *id)
     }
 
     /// Note each interest in `event` that asks for keyexprs now, owned in a batch or lent where its
@@ -433,6 +483,31 @@ mod tests {
         assert!(recorded.0.borrow().is_empty());
     }
 
+    /// A held token's answer to a member's interest reaches a backing that queues owned items as
+    /// the owned reply `build_token_reply` builds, and a keyexpr past the protocol's bound reaches
+    /// it as nothing. Turned red by a default `enqueue_token_reply` that queues another reply, or
+    /// one that queues a refused reply.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_token_reply_reaches_an_owned_backing_as_the_owned_reply() {
+        let recorded = Recorded(RefCell::new(Vec::new()));
+        let sink = MulticastReplySink::new(&recorded);
+        sink.send_declare_token_reply(9, "demo/token", 42);
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        sink.send_declare_token_reply(10, &past, 42);
+        let expected = crate::declare::local_token::build_token_reply(9, "demo/token", 42)
+            .and_then(|reply| {
+                reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
+            })
+            .expect("an owned reply");
+        let items = recorded.0.borrow();
+        assert_eq!(items.len(), 1, "the refused reply queues nothing");
+        match items.first() {
+            Some(MulticastTxItem::DeclareReply { declare }) => assert_eq!(**declare, expected),
+            _ => panic!("the answer is a declaration reply"),
+        }
+    }
+
     /// A member's current interest in keyexprs is answered with each declared keyexpr its key
     /// meets, then its final when it asks for nothing else; an interest in what is declared
     /// later only, and one naming its key by a declaration the dispatch could not resolve, are
@@ -492,5 +567,56 @@ mod tests {
         let mut again = 0usize;
         answers.take_answers(|_| again += 1);
         assert_eq!(again, 0, "an answer is taken once");
+    }
+
+    /// The keys are answered in the order of their ids, whatever order they were declared in; an
+    /// id declared again is answered once, with the key it names now; a retraction of an id never
+    /// declared changes nothing.
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-final",
+        feature = "storage-profile"
+    ))]
+    #[test]
+    fn keys_are_answered_in_id_order_and_a_redeclared_id_by_its_new_key() {
+        use crate::declare_build::{build_declare_final_reply, build_declare_kexpr_reply};
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::interest_build::{build_interest_exact, InterestKinds};
+        use crate::network_message::NetworkMessage;
+        let frame = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: alloc::vec![NetworkMessage::Interest(
+                build_interest_exact(42, InterestKinds::KEYEXPRS, true, false, None)
+                    .expect("an interest"),
+            )],
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        };
+        let mut answers = GroupKeyexprAnswers::default();
+        answers.declared(9, "k/nine");
+        answers.declared(3, "k/three");
+        answers.declared(6, "k/six");
+        answers.declared(3, "k/three/again");
+        answers.retracted(6);
+        answers.retracted(77);
+        let mut owed = false;
+        crate::driver_loop::deliver_frame(&frame, |event| owed = answers.asked(&event));
+        assert!(owed);
+        let mut replies = Vec::new();
+        answers.take_answers(|reply| match reply {
+            MulticastTxReply::DeclareReply(declare) => replies.push(declare.clone()),
+            #[cfg(feature = "codec-response")]
+            _ => panic!("an answer is a declaration reply"),
+        });
+        assert_eq!(
+            replies,
+            [
+                build_declare_kexpr_reply(42, 3, "k/three/again").expect("a reply"),
+                build_declare_kexpr_reply(42, 9, "k/nine").expect("a reply"),
+                build_declare_final_reply(42),
+            ]
+        );
     }
 }

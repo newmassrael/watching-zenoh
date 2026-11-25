@@ -43,6 +43,8 @@ use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::policy::SnResolution;
+use wz_session_core::policy_binding::OutsideDomain;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_slot::{ClaimRefused, SessionSlots, SlotClaim};
 
@@ -58,6 +60,11 @@ pub enum OpenRefused {
     PumpCell,
     /// The task table refused the task that would run the session.
     Task(SpawnRefusal),
+    /// The width of sequence numbers the session's parameters offer is one the build's
+    /// `sn-resolution` domain leaves out ([`wz_session_core::sn::sn_resolution_admitted`]): the
+    /// node's parameters are refused, not a table, so no table counts it. The session built in
+    /// the slot is dropped with the slot before its pump is claimed, having sent nothing.
+    SnResolution(OutsideDomain<SnResolution>),
 }
 
 /// Why a dial did not open a session.
@@ -186,6 +193,35 @@ where
         self.open_claimed(claim, lane, params, config, on_event)
     }
 
+    /// [`Self::open`] for a driver `make` writes in the place it is handed, the claimed slot's
+    /// (`SessionSlots::claim_with`), and lends back: the driver is made where it is kept and is
+    /// never a value in this frame or the caller's, which for a driver that carries its link's
+    /// outbound slot is a datagram's width of stack. A table with no slot free does not make the
+    /// driver: `make` is dropped unrun, as `open` drops the driver it is handed.
+    pub fn open_in<F>(
+        &self,
+        make: impl FnOnce(&mut core::mem::MaybeUninit<T::Driver>) -> &mut T::Driver,
+        lane: Option<T::Lane>,
+        entropy: E,
+        params: impl FnOnce() -> SessionInitParams,
+        config: SessionDriveConfig,
+        on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
+    ) -> Result<OpenedSession<C, T::Driver>, OpenRefused>
+    where
+        F: EventSink + 'static,
+    {
+        let made = |out: &mut core::mem::MaybeUninit<T::Driver>| {
+            make(out);
+            Ok::<(), core::convert::Infallible>(())
+        };
+        let claim = match self.sessions.claim_with(made, entropy) {
+            Ok(claim) => claim,
+            Err(ClaimRefused::Full) => return Err(OpenRefused::SessionSlot),
+            Err(ClaimRefused::Link(never)) => match never {},
+        };
+        self.open_claimed(claim, lane, params, config, on_event)
+    }
+
     /// The rest of [`Self::open`] over a slot that is claimed: the session built in it, its pump
     /// cell and its task. Shared by the two ways a slot is claimed, a driver handed in
     /// ([`Self::open`]) and a driver made in the slot ([`Self::dial`]).
@@ -203,6 +239,10 @@ where
         let runtime = self.local.runtime();
         let driver = claim.driver_handle();
         let (actions, entropy) = new_session_in_slot(claim, params, CoopTime::new(runtime));
+        // The parameters are made in the slot, so their width is read from the session built
+        // there: the one test every engine's open makes of a width it is handed.
+        wz_session_core::sn::sn_resolution_admitted(actions.offered_sn_resolution())
+            .map_err(OpenRefused::SnResolution)?;
         let pump_link = self.stack.pump(driver, lane);
         let Ok(pump) = self.pumps.claim(
             runtime.with_driver(),
@@ -243,9 +283,10 @@ where
 
     /// Dial: `bind` opens the socket of the link (a cell of the pool the image declared, a port
     /// the stack picks) and writes its driver into the place it is handed, the claimed slot's
-    /// (`Bind::bind_in`), then the session is opened over it. The socket is bound before any
-    /// table is claimed and is given back when one refuses; the `InitSyn` leaves only once the
-    /// session's task first runs. A pool with no socket is [`DialRefused::Link`].
+    /// (`Bind::bind_in`), then the session is opened over it. The socket is bound only once the
+    /// session table has a slot free, and is given back when a later table refuses; the `InitSyn`
+    /// leaves only once the session's task first runs. A pool with no socket is
+    /// [`DialRefused::Link`].
     ///
     /// `expected_zid` is the node the dial is made for, or `None` for a dial made to the locator
     /// alone (decision D4 of `docs/session-lifecycle-intent.md`). The session closes at an

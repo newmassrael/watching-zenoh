@@ -45,7 +45,11 @@ P3. **Region memory.** A session is one region sized at build time from the limi
 (`wz_config.py` generates the capacities) and reserved at open; every table is a fixed-capacity
 pool inside it addressed by a generation-checked index (slot map). Exhaustion is an error code at
 the call that asks, never a panic and never a growth. No reference counting inside a session:
-one owner (the session), borrowed by its driver.
+one owner (the session), borrowed by its driver. A value several parts of the session reach (its
+round of deliveries) lies in the region, owned by one `Placed` and reached by `PlacedRef`
+handles that count nothing; whoever takes a handle (`Placed::share`) answers that no copy of it
+is dereferenced after the owner is dropped or beside a `&mut` the owner gave, which the owner's
+place among the session's fields, dropped after every holder of a handle, keeps.
 
 P4. **Zero-copy views.** Received bytes are read where they lie; a decoded message is a view whose
 lifetime is the receive buffer's. Outgoing bytes are encoded into a lent slot. An owned message
@@ -184,7 +188,7 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
    | fact (today in `wz-capi-coop`) | owner |
    |---|---|
    | the session lock, the read task (`start_reader`), the wait set (`LinkWaits`, `IdleWait`, the waits of `LinkRooms`, the clock's wake), the task and timer tables, the reservation of the region | L0 |
-   | each face's link lifecycle (`LinkSupervisor`'s link states, `poll_face`, `dial_from`, `dial_answered`, `dial_or_wait`), making a link's session (`start_wire`: its parameters, cookie key, admission, gates, cells), the reassembly Router, the endpoints' rows, a face's send state (the held drop, `sending_on`) and the hand-off of a dropped publish to the other faces | L2 |
+   | each face's link lifecycle (`LinkSupervisor`'s link states, `poll_face`, `dial`, `redial_later`), making a link's session (`start_wire`: its parameters, cookie key, admission, gates, cells), the reassembly Router, the endpoints' rows, a face's send state (the held drop, `sending_on`) and the hand-off of a dropped publish to the other faces | L2 |
    | the entity tables and their counters, the keys and the shared key ids, the query plane and pending gets, the round of deliveries, the declaration watches, the face reports, what a face that comes up is told again (`replay`), which faces a publish goes to | L3 |
    | the places of the ABI's handle and objects | L4 |
 
@@ -237,7 +241,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (4) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (0) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -252,7 +256,11 @@ switched the lints on, on the release library's path (`pico-client-coop-nostd`):
 in-place reassembly and the datagram link; in `wz-capi-coop` the arena plan and the datagram
 scout. Paid by the generator: the buffer pools `session_slot_pool_mcu` and
 `reassembly_pool_mcu`, whose slot tables SCE reaches through a slot type with no value out of
-range. A module the text read found no site in is not in the register.
+range; `keyexpr_match`, whose algorithms compute every operation the interval analysis proved
+through the forge runtime's `proven` functions, a shift by a count below its width included
+(`proven::shl` and `proven::shr` in `keyexpr_relation_dp`); and `reset_generations`, whose
+tagged result answers the record of a case as an `Option` (`as_duplicate`) where it panicked on
+another case. A module the text read found no site in is not in the register.
 
 The classes: **open**, hand-written code not converted yet; **in flight**, a module another branch
 is restructuring now (the cooperative engine of step 4, the session core's entity modules, the pico
@@ -263,11 +271,10 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 with every feature, and its build with every feature but `session-slot`, which takes three modules
 out; those of `wz-capi-port` over its default build and its build with every feature.
 
+The register holds no row: no module of the six crates is allowed a totality lint.
+
 | id | crate | module | lints | sites | class |
 |---|---|---|---|---:|---|
-| TD-003 | `wz-session-core` | `keyexpr_match` | `indexing_slicing`, `arithmetic_side_effects` | 86 | generated |
-| TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
-| TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | generated |
 
 A `WZ_POLICY_*` value no policy takes is refused with neither a panic nor an index: the helpers of
 `policy.rs` answer `None` for such a word, a policy's value is found by its word in arrays that
@@ -275,13 +282,6 @@ share their length by type, and `policy_generated.rs`, which `wz_config.py` writ
 `None` in a constant assertion, the form `caps.rs` refuses a misspelt `WZ_LIMIT_*` value in. A
 generated key table is checked the other way: the library answers `try_new`, and the
 image's own crate, which `wz_key_set.py` writes, turns a refusal into the build error.
-
-TD-109 (`reset_generations`) is SCE output: its one `unreachable!` is the `proven_duplicate`
-accessor the generator emits for each case of a tagged result
-(`out/wz-session-core/take_generation_result.rs:58`), which the module includes and never calls,
-since it matches the result's cases itself. The hand-written module holds no site; the row is
-paid by the generator (step 7), with an accessor that answers an `Option` or none for a case
-nothing reads.
 
 SCE's forge runtime makes a list whose bounds the build checks with constructors that cannot
 fail: `Bounded::one` for a list of one entry, `Bounded::proven` for an array, and
@@ -293,12 +293,12 @@ The one QoS entry of a Push's outer chain (`lent_push::put_with_qos`) is `Bounde
 A `SessionZid` holds its bytes within one to sixteen, the bounds of the codec's zid field, and
 lends them through `Bounded::as_bytes` (`SessionZid::as_field`), so the Scout's zid
 (`scouting_host`) needs no check.
-TD-063 (`multicast_join`) still waits on the forge runtime: `encode_join` writes, over a
-`VecSink` that cannot refuse, a beacon whose QoS SN body is written through a `SliceSink` over a
-fixed array, a sink whose type refuses, and held for the `ZBuf` through `Bounded::new`. The pin
-has no sink over fixed storage whose capacity the build proves holds the widest write, and no
-constructor of a bounded byte field from such storage; with them, and the zid from
-`SessionZid::as_field`, the beacon is total.
+The multicast beacon (`multicast_join`) is total the same way: its QoS SN body is an
+`ArraySink` the build admits only where the array holds the widest write
+(`[[Vle<u64>; 2]; Priority::NUM]`, whose most bytes size the array), lent to the `ZBuf` as
+`Bytes` with no check, and its zid is `SessionZid::as_field`. `encode_join_into` then refuses
+only what its sink refuses, and `encode_join`, over a `VecSink` that refuses nothing, has no
+refusal left.
 
 The transmit buffer names its refusal (`TxBuf::Error`, `CodecError` for every buffer today). A body
 a send hands its dispatch can refuse its own message (a key or a payload past its protocol bound),

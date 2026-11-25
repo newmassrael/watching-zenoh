@@ -10,8 +10,7 @@
 //! tables, and fails instead of printing a number.
 
 use super::*;
-use crate::runtime_impl::TokioTime;
-use crate::session_glue::{new_session_actions, BoxedLinkDriver, LinkSendOutcome};
+use crate::session_glue::{BoxedLinkDriver, LinkSendOutcome};
 use crate::Reliability;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -68,19 +67,10 @@ impl BoxedLinkDriver for CountingLinkDriver {
 /// A client face whose remote is `peer`, and the count of what its link was given.
 fn client(peer: Zid) -> (Arc<SessionLinkActions>, Arc<CountingLinkDriver>) {
     let sink = Arc::new(CountingLinkDriver::default());
-    let actions = new_session_actions(
-        sink.clone(),
-        wz_runtime_tokio_test_support::fixture_session_init_params(),
-        TokioTime::new(),
-    );
-    actions.fact_remote_peer_zid(|s| {
-        *s = Some(
-            wz_session_core::session_zid::SessionZid::new(peer.as_slice())
-                .expect("a 1 to 16 byte zid, not all zero"),
-        )
-    });
-    actions.fact_peer_whatami(|s| *s = Some(0b10));
-    (actions, sink)
+    (
+        super::egress_tests::established_face(sink.clone(), peer),
+        sink,
+    )
 }
 
 /// `message` brought by `face`, as the face's drive hands a frame to the router.

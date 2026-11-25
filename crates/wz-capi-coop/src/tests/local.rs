@@ -183,8 +183,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);
-    // One Interest on the key serves the two listeners and the two filters: the session holds
-    // one per plane and key.
+    // Each listener and each filter asks an Interest of its own on the key.
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
     });
@@ -381,7 +380,9 @@ impl Drop for Dropped {
 /// An undeclaration made on another thread while a put's call of the subscriber's callback runs
 /// returns only once that call has returned and the callback was let go of (P11), as zenoh-pico's
 /// undeclare waits for the entity's lock. The CONTROL is the undeclaration while the callback is
-/// held inside its call: not returned, and the callback standing.
+/// held inside its call: not returned, and the callback standing. Only a build of threads has a
+/// call on another thread to wait for.
+#[cfg(feature = "threads")]
 #[test]
 fn an_undeclare_on_another_thread_waits_for_the_running_call() {
     use std::sync::atomic::AtomicBool;

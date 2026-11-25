@@ -5,6 +5,9 @@ mainmenu "The pico C ABI on the T2G kit: zenoh-pico's program over wz"
 
 rsource "../zephyr-common/Kconfig.wz"
 rsource "../zephyr-eth-wzmac/Kconfig.zeth"
+# The limits the session states for itself (prj.conf). Without them every table the session reserves
+# at its open is a host's size, which no switch of the image could lower.
+rsource "../Kconfig.limits"
 
 # The program is the comparison image's (deploy/zephyr-pico-compare/src/main.c), which reads the
 # router it connects to from this symbol; the default is that image's, so the two dial the same

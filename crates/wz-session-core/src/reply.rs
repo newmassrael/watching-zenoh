@@ -990,6 +990,163 @@ fn local_stamp(
     }
 }
 
+/// A reply of this session's own queryable, read where its responder described it
+/// ([`ReplyParts`](crate::reply_stage::ReplyParts)), as a requester of this session is handed it:
+/// what the owned projection (`From<QueryReply> for InboundReply`) reads, the side-bands under the
+/// same features, with no copy of the keyexpr, the payload or a side-band made to hand it.
+///
+/// A buffer of shared memory is held as the page it lends a receiver of this session, as the
+/// projection holds it, so a requester that keeps the reply ([`InboundReply::from_view`]) takes a
+/// second reference to the page. Any other payload and attachment are lent and not shareable
+/// ([`ReplyView::payload_shared`] answers `None`), so a requester that keeps the reply copies
+/// them, as the projection copied them before handing them over: either way what is kept is the
+/// requester's own and outlives the responder's buffer.
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
+pub struct LocalReplyView<'a> {
+    parts: crate::reply_stage::ReplyParts<'a>,
+    /// The page a buffer of shared memory lends a receiver of this session, when it lends one.
+    #[cfg(feature = "transport-shm")]
+    shared: Option<crate::link::RxBytes>,
+    /// The value's timestamp as the projection keeps it: none for a clock identity longer than a
+    /// timestamp carries.
+    #[cfg(feature = "pubsub-timestamp")]
+    timestamp: Option<crate::sample::TimestampHint>,
+}
+
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
+impl<'a> LocalReplyView<'a> {
+    /// The view of the reply `parts` describes.
+    pub fn new(parts: crate::reply_stage::ReplyParts<'a>) -> Self {
+        #[cfg(feature = "transport-shm")]
+        let shared = match &parts.kind {
+            crate::reply_stage::PartsKind::Reply {
+                body: crate::reply_stage::PartsBody::Shared(handle),
+                ..
+            } => handle.receiver_view(),
+            _ => None,
+        };
+        #[cfg(feature = "pubsub-timestamp")]
+        let timestamp = match &parts.kind {
+            crate::reply_stage::PartsKind::Reply { timestamp, .. } => {
+                timestamp.and_then(|stamp| crate::sample::TimestampHint::new(stamp.time, stamp.zid))
+            }
+            #[cfg(feature = "query-reply-err")]
+            crate::reply_stage::PartsKind::Err { .. } => None,
+        };
+        Self {
+            parts,
+            #[cfg(feature = "transport-shm")]
+            shared,
+            #[cfg(feature = "pubsub-timestamp")]
+            timestamp,
+        }
+    }
+}
+
+// A side-band a build does not carry is left to the trait's own answer, `None`, as the projection
+// leaves it out under the same feature.
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
+impl ReplyView for LocalReplyView<'_> {
+    fn rid(&self) -> crate::wire_id::RequestId {
+        self.parts.rid
+    }
+    fn keyexpr(&self) -> &str {
+        self.parts.keyexpr
+    }
+    fn kind(&self) -> ReplyKind {
+        use crate::reply_stage::{PartsBody, PartsKind};
+        match &self.parts.kind {
+            PartsKind::Reply {
+                body: PartsBody::Del,
+                ..
+            } => ReplyKind::Del,
+            PartsKind::Reply { .. } => ReplyKind::Put,
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err { .. } => ReplyKind::Err,
+        }
+    }
+    fn payload(&self) -> &[u8] {
+        use crate::reply_stage::{PartsBody, PartsKind};
+        match &self.parts.kind {
+            PartsKind::Reply { body, .. } => match body {
+                PartsBody::Put(payload) => payload,
+                PartsBody::Del => &[],
+                #[cfg(feature = "transport-shm")]
+                PartsBody::Shared(handle) => match &self.shared {
+                    Some(page) => page.as_slice(),
+                    None => handle.bytes(),
+                },
+            },
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err { payload, .. } => payload,
+        }
+    }
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+        // The responder names the id and the schema apart; a reply read off the wire says them as
+        // the codec does, the id shifted over the bit that tells whether a schema follows.
+        #[cfg(feature = "query-reply-err")]
+        if let crate::reply_stage::PartsKind::Err { encoding, .. } = &self.parts.kind {
+            return encoding.map(|(id, schema)| ((id << 1) | u32::from(schema.is_some()), schema));
+        }
+        None
+    }
+    #[cfg(feature = "pubsub-attachment")]
+    fn attachment(&self) -> Option<&[u8]> {
+        match &self.parts.kind {
+            crate::reply_stage::PartsKind::Reply { attachment, .. } => *attachment,
+            #[cfg(feature = "query-reply-err")]
+            crate::reply_stage::PartsKind::Err { .. } => None,
+        }
+    }
+    #[cfg(feature = "pubsub-encoding")]
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+        use crate::reply_stage::{PartsBody, PartsKind};
+        match &self.parts.kind {
+            PartsKind::Reply {
+                body: PartsBody::Del,
+                ..
+            } => None,
+            PartsKind::Reply { encoding, .. } => {
+                encoding.map(|encoding| (encoding.packed_id, encoding.schema))
+            }
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err { .. } => None,
+        }
+    }
+    #[cfg(feature = "reply-source-info")]
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        match &self.parts.kind {
+            crate::reply_stage::PartsKind::Reply { source_info, .. } => *source_info,
+            #[cfg(feature = "query-reply-err")]
+            crate::reply_stage::PartsKind::Err { .. } => None,
+        }
+    }
+    #[cfg(feature = "pubsub-timestamp")]
+    fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
+        self.timestamp.as_ref()
+    }
+    #[cfg(feature = "pubsub-timestamp")]
+    fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
+        self.timestamp
+            .as_ref()
+            .map(crate::reply_stage::TimestampParts::of)
+    }
+    #[cfg(feature = "transport-shm")]
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.shared.as_ref()
+    }
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        self.parts.responder
+    }
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        Some(self.parts.qos)
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.parts.ts_stack
+    }
+}
+
 /// Stable handle returned by [`ReplyRegistry::register`]. Carries
 /// the rid the registration was bound to so the caller can later
 /// [`ReplyRegistry::unregister`] before the Final arrives. The
@@ -1581,7 +1738,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         self.fire_final_for(response_final.request_id);
     }
 
-    /// R239 — loopback delivery of an in-process [`InboundReply`].
+    /// R239 — loopback delivery of an in-process reply: an owned [`InboundReply`], or a
+    /// reply read where its responder described it (`LocalReplyView`).
     /// Used by `crate::session::Session::query`'s loopback branch to
     /// fan a [`QueryReply`] (produced by a local queryable through
     /// [`crate::query::QueryableRegistry::local_query`]) into every
@@ -1594,8 +1752,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// (multiple registrations on the same rid, entry retained until
     /// Final) is identical across origins.
     #[cfg(feature = "alloc")]
-    pub fn deliver_local_reply(&mut self, inbound: &InboundReply) {
-        self.fire_replies_for(inbound, false);
+    pub fn deliver_local_reply(&mut self, reply: &dyn ReplyView) {
+        self.fire_replies_for(reply, false);
     }
 
     /// R311gb (Track 2) — no-heap fire entry for the reply plane: deliver
@@ -1604,7 +1762,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// owned `InboundReply` materialization), so it is the MCU no-heap
     /// reply path; the `alloc` loopback ([`deliver_local_reply`](Self::deliver_local_reply))
     /// and the wire path ([`dispatch_response`](Self::dispatch_response))
-    /// funnel their owned `InboundReply` (which impls `ReplyView`) through
+    /// funnel their replies, each a `ReplyView`, through
     /// the same `fire_replies_for` matcher (one
     /// SSOT). The terminal `on_final` no-heap entry is
     /// [`deliver_local_final`](Self::deliver_local_final) (a `Copy` rid
@@ -1952,7 +2110,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             IterationEvent::InPlace(record) => {
                 #[cfg(feature = "codec-response")]
                 if let Some(response) = record.response() {
-                    self.dispatch_response_in_place(response, peer_keyexpr_table);
+                    self.dispatch_response_in_place(
+                        response,
+                        MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
+                    );
                 }
                 #[cfg(all(
                     feature = "rx-lent-control",
@@ -4388,6 +4549,220 @@ mod tests {
             "a requester of this very session is handed the view, and no reference is taken \
              for a remote receiver that does not exist"
         );
+    }
+
+    /// What a requester of this session keeps of `reply`, handed through the registry as an
+    /// engine hands a reply of the session's own queryable (`deliver_local_reply`): the retained
+    /// form a requester makes of the view it is handed.
+    #[cfg(feature = "query-queryable")]
+    fn kept_through_the_registry(reply: &dyn ReplyView) -> InboundReply {
+        let mut reg = ReplyRegistry::new();
+        let kept: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let keep = kept.clone();
+        reg.register(
+            reply.rid(),
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |view| keep.lock().unwrap().push(InboundReply::from_view(view)),
+            |_| {},
+        )
+        .expect("no quota is stated on this table");
+        reg.deliver_local_reply(reply);
+        let mut kept = kept.lock().unwrap();
+        assert_eq!(kept.len(), 1, "the reply reaches its get once");
+        kept.remove(0)
+    }
+
+    /// What a requester of this session keeps of the reply `parts` describes, in the form an
+    /// engine hands a reply of the session's own queryable to the registry.
+    #[cfg(feature = "query-queryable")]
+    fn kept_local(parts: &crate::reply_stage::ReplyParts<'_>) -> InboundReply {
+        kept_through_the_registry(&LocalReplyView::new(*parts))
+    }
+
+    /// The owned projection of the reply `parts` describes: what an engine handed the registry
+    /// before it handed the view, and what the view is held to.
+    #[cfg(feature = "query-queryable")]
+    fn owned_local(parts: &crate::reply_stage::ReplyParts<'_>) -> InboundReply {
+        InboundReply::from(crate::query::QueryReply::from_parts(parts))
+    }
+
+    /// A Put or a Del of this session's own queryable carrying every side-band, its timestamp
+    /// stamped by the clock `stamp`.
+    #[cfg(feature = "query-queryable")]
+    fn local_data<'a>(
+        body: crate::reply_stage::PartsBody<'a>,
+        stamp: &'a [u8],
+        source: &'a crate::sample::SourceInfo,
+    ) -> crate::reply_stage::PartsKind<'a> {
+        crate::reply_stage::PartsKind::Reply {
+            body,
+            encoding: Some(crate::reply_stage::EncodingParts {
+                packed_id: 7,
+                schema: Some(&b"schema"[..]),
+            }),
+            timestamp: Some(crate::reply_stage::TimestampParts {
+                time: 42,
+                zid: stamp,
+            }),
+            attachment: Some(&b"align"[..]),
+            source_info: Some(source),
+        }
+    }
+
+    /// A reply of this session's own queryable reads, and is kept, from the view an engine hands
+    /// the registry as from the owned projection of the same parts, whatever it carries: a Put and
+    /// a Del with every side-band, a timestamp whose clock identity no timestamp carries, a bare
+    /// Put, and an Err with and without a schema. Turned red by a view that reads a side-band the
+    /// build does not carry, reads one apart from the projection, names an Err's encoding as the
+    /// responder gave it, or keeps another QoS, responder or stamp.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn a_local_reply_reads_from_its_view_as_from_its_owned_projection() {
+        use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+        let source = crate::sample::SourceInfo::new(&[1, 2, 3], 4, 5);
+        let clock = [7u8; 3];
+        let unstampable = [7u8; 17];
+        let responder = [9u8; 4];
+        let qos = crate::sample::QosLevel::from_parts(
+            crate::qos::Priority::DataHigh,
+            crate::qos::CongestionControl::Block,
+            false,
+        );
+        let kinds = [
+            local_data(PartsBody::Put(b"value"), &clock, &source),
+            local_data(PartsBody::Del, &clock, &source),
+            local_data(PartsBody::Put(b"value"), &unstampable, &source),
+            PartsKind::Reply {
+                body: PartsBody::Put(b"bare"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err {
+                encoding: Some((5, Some(&b"schema"[..]))),
+                payload: b"failed",
+            },
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err {
+                encoding: Some((5, None)),
+                payload: b"failed",
+            },
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err {
+                encoding: None,
+                payload: b"",
+            },
+        ];
+        let mut compared = 0usize;
+        for kind in kinds {
+            let parts = ReplyParts {
+                rid: 11,
+                keyexpr: "sensors/a",
+                responder: Some((&responder[..], 3)),
+                qos,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: None,
+                kind,
+            };
+            let view = LocalReplyView::new(parts);
+            let owned = owned_local(&parts);
+            assert_eq!(view.rid(), owned.rid());
+            assert_eq!(view.keyexpr(), owned.keyexpr());
+            assert_eq!(view.kind(), owned.kind());
+            assert_eq!(view.payload(), owned.payload());
+            assert_eq!(view.err_encoding(), owned.err_encoding());
+            assert_eq!(view.attachment(), owned.attachment());
+            assert_eq!(view.put_encoding(), owned.put_encoding());
+            assert_eq!(view.source_info(), owned.source_info());
+            assert_eq!(ReplyView::timestamp(&view), ReplyView::timestamp(&owned));
+            assert_eq!(view.timestamp_parts(), owned.timestamp_parts());
+            assert_eq!(view.responder(), owned.responder());
+            assert_eq!(view.qos(), owned.qos());
+            assert_eq!(kept_local(&parts), kept_through_the_registry(&owned));
+            compared += 1;
+        }
+        assert_eq!(compared, kinds.len());
+    }
+
+    /// A Put reply of this session's own queryable, described by its parts.
+    #[cfg(feature = "query-queryable")]
+    fn local_put(body: crate::reply_stage::PartsBody<'_>) -> crate::reply_stage::ReplyParts<'_> {
+        crate::reply_stage::ReplyParts {
+            rid: 11,
+            keyexpr: "sensors/a",
+            responder: None,
+            qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: crate::reply_stage::PartsKind::Reply {
+                body,
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    /// The address of a kept Put reply's payload.
+    #[cfg(feature = "query-queryable")]
+    fn kept_payload_address(kept: &InboundReply) -> usize {
+        match &kept.body {
+            InboundReplyBody::Put { payload, .. } => payload.as_slice().as_ptr() as usize,
+            other => panic!("expected Put, got {other:?}"),
+        }
+    }
+
+    /// A requester of this session keeps a plain payload of its own queryable's reply as bytes of
+    /// its own: what it keeps outlives the responder's buffer. Turned red by a delivery that hands
+    /// the requester the responder's bytes to keep as they lie.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn a_local_reply_is_kept_as_a_copy_of_a_plain_payload() {
+        let responders = b"value".to_vec();
+        let kept = kept_local(&local_put(crate::reply_stage::PartsBody::Put(&responders)));
+        assert_ne!(kept_payload_address(&kept), responders.as_ptr() as usize);
+        drop(responders);
+        assert_eq!(kept.rid, 11);
+        assert_eq!(kept.keyexpr_literal, "sensors/a");
+        match kept.body {
+            InboundReplyBody::Put { payload, .. } => assert_eq!(payload, b"value"),
+            other => panic!("expected Put, got {other:?}"),
+        }
+    }
+
+    /// A requester of this session keeps a buffer of shared memory its own queryable answered with
+    /// as the page the buffer lends a receiver, a second reference and not a copy, and no reference
+    /// is taken for a remote receiver. The plain reply beside it is the control that the address
+    /// comparison can fail. Turned red by a delivery that copies the buffer's bytes for the
+    /// requester to keep.
+    #[cfg(all(
+        feature = "query-queryable",
+        feature = "transport-shm",
+        feature = "rx-shared-bytes"
+    ))]
+    #[test]
+    fn a_local_reply_is_kept_sharing_its_buffer_of_shared_memory() {
+        use crate::extshm::send_test_support::FakeSendBuffer;
+        use crate::extshm::ShmSendHandle;
+        let (buffer, reservations) = FakeSendBuffer::new(b"hello shm!!");
+        let storage_address = buffer.storage.as_ptr() as usize;
+        let handle = ShmSendHandle::new(buffer);
+        let kept = kept_local(&local_put(crate::reply_stage::PartsBody::Shared(&handle)));
+        assert_eq!(kept_payload_address(&kept), storage_address);
+        let plain = kept_local(&local_put(crate::reply_stage::PartsBody::Put(
+            b"hello shm!!",
+        )));
+        assert_ne!(
+            kept_payload_address(&plain),
+            storage_address,
+            "control: a plain reply is its own bytes"
+        );
+        assert_eq!(reservations.counts(), (0, 0, 0));
     }
 
     /// A8b — the loopback receive twin: a `QueryReply` staged with an

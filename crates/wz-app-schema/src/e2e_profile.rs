@@ -13,7 +13,7 @@
 //! profile to the next; the CRC is taken over some of those fields and the
 //! body in an order that is FIXED by the profile and is generally not the wire
 //! order. A receiver judges each frame: CRC, then counter, then timeout
-//! ([`crate::e2e_judge`]). [`crate::e2e_frame`] builds and opens such frames.
+//! (`wz_app_frame::e2e_judge`). `wz_app_frame::e2e_frame` builds and opens such frames.
 //!
 //! # Why nothing is hard-coded
 //!
@@ -22,7 +22,7 @@
 //! every call, and the workspace's tests run on synthetic profiles whose
 //! widths, orders, masks and names are deliberately unlike any real one. The
 //! only fixed constants are the published CRC definitions in
-//! [`crate::e2e_crc`]'s tests.
+//! `wz_app_frame::e2e_crc`'s tests.
 //!
 //! # The description
 //!
@@ -67,7 +67,7 @@
 //!   accepts and the silence it tolerates. A `timeout_ms` of 0 states no limit
 //!   on the silence: a receiver never reports a timeout on a stream of the
 //!   profile, which is what a message sent on an event, with no period, needs.
-//!   A periodic message's profile states its limit (see [`crate::e2e_judge`]).
+//!   A periodic message's profile states its limit (see `wz_app_frame::e2e_judge`).
 //! * `slot` (optional) says which frames of a CAPTURE share one counter, for
 //!   the pipeline that keeps a judge per slot (`e2e_slots`, in the capture
 //!   crate); the stateless doors ignore it. A slot is the key expression the
@@ -142,16 +142,31 @@
 //! of that meaning would be a second, unchecked one. A rule that depends on a
 //! value (for instance "a result is forced to zero when the kind is a query")
 //! is the caller's: it decides the part values it passes.
+//!
+//! # Where it lives
+//!
+//! A profile is read once, when a node is handed it, so the data model and its
+//! reader are this crate's, built for size; `wz_app_frame::e2e_profile` names
+//! this module. What runs per frame under a profile (building, opening and
+//! judging a frame, the CRC digest) is `wz-app-frame`'s; the small accessors it
+//! reads the profile by are `#[inline]`, so their code is made where they are
+//! called.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use wz_session_core::json5::{self, Json5Value};
-use wz_session_core::json5_lex::{Json5Error, Lexer};
+use wz_session_core::json5::Json5Value;
 
-use crate::e2e_crc::{width_mask, Crc, CrcParams, CrcParamsError, SUPPORTED_WIDTHS};
-use crate::e2e_judge::{CounterRules, Judge, JudgeConfig};
+use crate::crc_table::{width_mask, Crc, CrcParams, CrcParamsError, SUPPORTED_WIDTHS};
+use crate::judge_config::{CounterRules, JudgeConfig};
+
+// The reader of such documents, the pointer a reader walks one with and the refusal it gives are
+// re-exported here, where the profile readers have always named them.
+pub use crate::json_doc::{
+    array, at, check_distinct, check_keys, child, object, optional, read_bool, read_json,
+    read_string, read_uint, required, DocError, Entries, Pointer, MAX_JSON_DEPTH,
+};
 
 /// Most fields a profile may declare.
 pub const MAX_FIELDS: usize = 32;
@@ -161,52 +176,6 @@ pub const MAX_PARTS: usize = 64;
 pub const MAX_NAME_BYTES: usize = 64;
 /// The `cover` entry that stands for the body.
 pub const PAYLOAD: &str = "@payload";
-/// Deepest nesting a profile or a values text may have. The deepest legitimate
-/// profile has five levels (the document, `fields`, a field, `split`, a part);
-/// a values text has three.
-pub const MAX_JSON_DEPTH: usize = 8;
-
-/// Why a document was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DocError {
-    /// The text is not JSON, and this is the byte where reading stopped.
-    Syntax {
-        /// Offset into the text.
-        offset: usize,
-        /// What the reader expected there.
-        expected: &'static str,
-    },
-    /// The text is JSON and not what was asked for.
-    Invalid {
-        /// An RFC 6901 JSON pointer to the place: empty for the document
-        /// itself, `/fields/2/split/0/lsb` for a value inside it.
-        path: String,
-        /// The reason, as a sentence.
-        reason: String,
-    },
-}
-
-impl DocError {
-    pub fn invalid(path: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::Invalid {
-            path: path.into(),
-            reason: reason.into(),
-        }
-    }
-}
-
-impl core::fmt::Display for DocError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Syntax { offset, expected } => {
-                write!(f, "not JSON at byte {offset}: expected {expected}")
-            }
-            Self::Invalid { path, reason } if path.is_empty() => f.write_str(reason),
-            Self::Invalid { path, reason } => write!(f, "{path}: {reason}"),
-        }
-    }
-}
-
 /// The source a derived value is taken from. The node's address is the only one
 /// today; the profile names it, so that a later source is a new word and not a
 /// new reading of an old one.
@@ -227,6 +196,7 @@ pub struct Derive {
 impl Derive {
     /// The value for `address`. It fits the field or part the rule is on,
     /// because the mask and the xor were refused when they did not.
+    #[inline]
     pub fn apply(&self, address: u64) -> u64 {
         (address & self.mask) ^ self.xor
     }
@@ -248,6 +218,7 @@ pub struct Part {
 
 impl Part {
     /// The largest value the part holds.
+    #[inline]
     pub fn max_value(&self) -> u64 {
         width_mask(self.width)
     }
@@ -273,6 +244,7 @@ pub struct Field {
 
 impl Field {
     /// The largest value the field holds.
+    #[inline]
     pub fn max_value(&self) -> u64 {
         width_mask((self.bytes * 8) as u8)
     }
@@ -281,6 +253,7 @@ impl Field {
     /// field, and the bits the parts own of a split one. A sender writes the
     /// others as the `xor` gives them and another sender may write them
     /// otherwise, so nothing that judges the field reads them.
+    #[inline]
     pub fn owned_bits(&self) -> u64 {
         if self.parts.is_empty() {
             return self.max_value();
@@ -305,7 +278,8 @@ pub enum Cover {
 pub struct CrcSpec {
     /// Index of the field the CRC is written to.
     pub field: usize,
-    /// The engine, built from the profile's parameters.
+    /// The engine, built from the profile's parameters once, when the profile
+    /// is read.
     pub engine: Crc,
     /// What is fed, in this order.
     pub cover: Vec<Cover>,
@@ -443,23 +417,29 @@ pub struct Profile {
 impl Profile {
     /// Read and validate a profile from JSON text.
     pub fn parse(text: &str) -> Result<Self, DocError> {
-        let root = read_json(text)?;
-        let entries = object(&root, "")?;
-        check_keys(
+        Self::from_tree(&read_json(text)?)
+    }
+
+    /// Read and validate a profile from a document already read, as [`Self::parse`] reads the
+    /// document of its text: a profile that stands inside a larger document is read where it
+    /// stands, with no text written and read again.
+    pub fn from_tree(root: &Json5Value) -> Result<Self, DocError> {
+        let doc = Pointer::text("");
+        let entries = doc.object(root)?;
+        doc.check_keys(
             entries,
             &[
                 "name", "fields", "crc", "length", "counter", "slot", "judge", "cell",
             ],
-            "",
         )?;
 
-        let name = read_name(required(entries, "name", "")?, "/name")?;
-        let fields = read_fields(required(entries, "fields", "")?)?;
+        let name = read_name(&doc.key("name"), doc.required(entries, "name")?)?;
+        let fields = read_fields(doc.required(entries, "fields")?)?;
         let header_bytes = fields.iter().map(|f| f.bytes).sum();
 
-        let crc = read_crc(required(entries, "crc", "")?, &fields)?;
-        let length = read_length(required(entries, "length", "")?, &fields)?;
-        let counter = read_counter(required(entries, "counter", "")?, &fields)?;
+        let crc = read_crc(doc.required(entries, "crc")?, &fields)?;
+        let length = read_length(doc.required(entries, "length")?, &fields)?;
+        let counter = read_counter(doc.required(entries, "counter")?, &fields)?;
         let slot = match optional(entries, "slot") {
             Some(value) => read_slot(value, &fields, [crc.field, length.field, counter.field])?,
             None => SlotSpec::default(),
@@ -471,14 +451,11 @@ impl Profile {
             (length.field, counter.field, "length and counter"),
         ] {
             if a == b {
-                return Err(DocError::invalid(
-                    "",
-                    format!(
-                        "the {what} are the same field `{}`: each of them gives a field \
-                         its own meaning",
-                        fields[a].name
-                    ),
-                ));
+                return Err(doc.refuse(format!(
+                    "the {what} are the same field `{}`: each of them gives a field \
+                     its own meaning",
+                    fields[a].name
+                )));
             }
         }
 
@@ -511,6 +488,7 @@ impl Profile {
     }
 
     /// The header fields in wire order.
+    #[inline]
     pub fn fields(&self) -> &[Field] {
         &self.fields
     }
@@ -521,36 +499,43 @@ impl Profile {
     }
 
     /// The header's size; the body starts at this offset.
+    #[inline]
     pub fn header_bytes(&self) -> usize {
         self.header_bytes
     }
 
     /// The CRC rules.
+    #[inline]
     pub fn crc(&self) -> &CrcSpec {
         &self.crc
     }
 
     /// The length rules.
+    #[inline]
     pub fn length(&self) -> &LengthSpec {
         &self.length
     }
 
     /// The counter rules.
+    #[inline]
     pub fn counter(&self) -> &CounterSpec {
         &self.counter
     }
 
     /// What the profile says about which frames share a counter.
+    #[inline]
     pub fn slot(&self) -> &SlotSpec {
         &self.slot
     }
 
     /// The rules a receiver judges a frame by beyond the CRC and the step.
+    #[inline]
     pub fn rules(&self) -> &JudgeRules {
         &self.rules
     }
 
     /// The message cell, when the profile names one.
+    #[inline]
     pub fn cell(&self) -> Option<&CellSpec> {
         self.cell.as_ref()
     }
@@ -580,17 +565,11 @@ impl Profile {
         }
     }
 
-    /// A judge for one stream of this profile's frames, configured from its
-    /// counter rules. A stream is the caller's to define, so the caller keeps
-    /// one judge per stream; see [`crate::e2e_judge`].
-    pub fn judge(&self) -> Judge {
-        Judge::with_rules(self.judge_config(), self.counter_rules())
-    }
-
     /// The value the length field carries for a body of `payload_bytes`.
     ///
     /// It may be larger than the length field can hold; the builder checks
     /// that and refuses with the numbers.
+    #[inline]
     pub fn length_for(&self, payload_bytes: usize) -> u64 {
         let total = (self.header_bytes + payload_bytes) as u64;
         match &self.length.counts {
@@ -603,187 +582,17 @@ impl Profile {
     }
 }
 
-/// The workspace's JSON reader, with its refusal in this module's terms.
-///
-/// The document is first walked by the lexer's bounded skip, which checks the
-/// whole grammar and refuses nesting past [`MAX_JSON_DEPTH`] without recursing
-/// beyond it; only then is the tree built, by a parser that has no bound of its
-/// own. Both refusals carry the byte they stopped at.
-pub fn read_json(text: &str) -> Result<Json5Value, DocError> {
-    let syntax = |e: Json5Error| DocError::Syntax {
-        offset: e.offset,
-        expected: e.expected,
-    };
-    let mut lexer = Lexer::new(text);
-    lexer.skip_trivia().map_err(syntax)?;
-    lexer.skip_value(MAX_JSON_DEPTH).map_err(syntax)?;
-    json5::parse(text).map_err(syntax)
+/// The name `path` points at: a profile's, a field's or a part's. Out of
+/// line: every kind of profile reads its names through it.
+#[inline(never)]
+pub(crate) fn read_name(path: &Pointer<'_>, value: &Json5Value) -> Result<String, DocError> {
+    let name = path.read_string(value)?;
+    check_name(name, path)?;
+    Ok(String::from(name))
 }
 
-/// Everything below reads one part of the document. A path is built as the
-/// reader descends, so every refusal names where it stands.
-pub fn child(path: &str, key: &str) -> String {
-    let mut out = String::from(path);
-    out.push('/');
-    for c in key.chars() {
-        match c {
-            '~' => out.push_str("~0"),
-            '/' => out.push_str("~1"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-pub fn at(path: &str, index: usize) -> String {
-    format!("{path}/{index}")
-}
-
-pub(crate) fn describe(value: &Json5Value) -> &'static str {
-    match value {
-        Json5Value::Null => "null",
-        Json5Value::Bool(_) => "a boolean",
-        Json5Value::Number(_) => "a number",
-        Json5Value::String(_) => "a string",
-        Json5Value::Array(_) => "an array",
-        Json5Value::Object(_) => "an object",
-    }
-}
-
-pub type Entries = [(String, Json5Value)];
-
-pub fn object<'a>(value: &'a Json5Value, path: &str) -> Result<&'a Entries, DocError> {
-    match value {
-        Json5Value::Object(entries) => Ok(entries),
-        other => Err(DocError::invalid(
-            path,
-            format!("expected an object, found {}", describe(other)),
-        )),
-    }
-}
-
-pub fn array<'a>(value: &'a Json5Value, path: &str) -> Result<&'a [Json5Value], DocError> {
-    match value {
-        Json5Value::Array(items) => Ok(items),
-        other => Err(DocError::invalid(
-            path,
-            format!("expected an array, found {}", describe(other)),
-        )),
-    }
-}
-
-/// Refuse a key outside `allowed` and a key that appears twice. The reader
-/// keeps every member, and resolving a repeat silently (last one wins) would
-/// make a typo in a profile read as a choice.
-pub fn check_keys(entries: &Entries, allowed: &[&str], path: &str) -> Result<(), DocError> {
-    for (key, _) in entries {
-        if !allowed.contains(&key.as_str()) {
-            return Err(DocError::invalid(
-                child(path, key),
-                format!("unknown key `{key}` (allowed here: {})", allowed.join(", ")),
-            ));
-        }
-    }
-    check_distinct(entries, path)
-}
-
-/// Refuse a key that appears twice, for an object whose keys are the caller's
-/// own names rather than a fixed list.
-pub fn check_distinct(entries: &Entries, path: &str) -> Result<(), DocError> {
-    for (i, (key, _)) in entries.iter().enumerate() {
-        if entries[..i].iter().any(|(earlier, _)| earlier == key) {
-            return Err(DocError::invalid(
-                child(path, key),
-                format!("the key `{key}` appears twice"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub fn optional<'a>(entries: &'a Entries, key: &str) -> Option<&'a Json5Value> {
-    entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-}
-
-pub fn required<'a>(
-    entries: &'a Entries,
-    key: &str,
-    path: &str,
-) -> Result<&'a Json5Value, DocError> {
-    optional(entries, key)
-        .ok_or_else(|| DocError::invalid(path, format!("the key `{key}` is required")))
-}
-
-/// Whether `text` is `0` or digits with no leading zero.
-fn is_plain_decimal(text: &str) -> bool {
-    !text.is_empty()
-        && text.bytes().all(|b| b.is_ascii_digit())
-        && (text.len() == 1 || !text.starts_with('0'))
-}
-
-fn uint_from_text(text: &str) -> Result<u64, String> {
-    let does_not_fit = || format!("`{text}` does not fit in 64 bits");
-    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(format!("`{text}` is not hexadecimal digits after `0x`"));
-        }
-        return u64::from_str_radix(hex, 16).map_err(|_| does_not_fit());
-    }
-    if !is_plain_decimal(text) {
-        return Err(format!(
-            "`{text}` is not an unsigned integer: write decimal digits with no sign or \
-             leading zero, or `0x` and hex digits"
-        ));
-    }
-    text.parse().map_err(|_| does_not_fit())
-}
-
-/// An unsigned integer as a profile or a values document writes one: a plain
-/// decimal JSON number, or a string of decimal or `0x` hex digits.
-pub fn read_uint(value: &Json5Value, path: &str) -> Result<u64, DocError> {
-    let result = match value {
-        Json5Value::Number(text) => {
-            if is_plain_decimal(text) {
-                uint_from_text(text)
-            } else {
-                Err(format!(
-                    "`{text}` is not a plain unsigned decimal number: write hexadecimal \
-                     as a string such as \"0x1f\""
-                ))
-            }
-        }
-        Json5Value::String(text) => uint_from_text(text),
-        other => Err(format!(
-            "expected an unsigned integer (a number, or a string of decimal or 0x hex \
-             digits), found {}",
-            describe(other)
-        )),
-    };
-    result.map_err(|reason| DocError::invalid(path, reason))
-}
-
-pub fn read_bool(value: &Json5Value, path: &str) -> Result<bool, DocError> {
-    match value {
-        Json5Value::Bool(b) => Ok(*b),
-        other => Err(DocError::invalid(
-            path,
-            format!("expected true or false, found {}", describe(other)),
-        )),
-    }
-}
-
-pub fn read_string<'a>(value: &'a Json5Value, path: &str) -> Result<&'a str, DocError> {
-    match value {
-        Json5Value::String(s) => Ok(s),
-        other => Err(DocError::invalid(
-            path,
-            format!("expected a string, found {}", describe(other)),
-        )),
-    }
-}
-
-fn check_name(name: &str, path: &str) -> Result<(), DocError> {
-    let bad = |reason: String| Err(DocError::invalid(path, reason));
+fn check_name(name: &str, path: &Pointer<'_>) -> Result<(), DocError> {
+    let bad = |reason: String| Err(path.refuse(reason));
     if name.is_empty() {
         return bad(String::from("a name cannot be empty"));
     }
@@ -804,79 +613,74 @@ fn check_name(name: &str, path: &str) -> Result<(), DocError> {
     Ok(())
 }
 
-pub(crate) fn read_name(value: &Json5Value, path: &str) -> Result<String, DocError> {
-    let name = read_string(value, path)?;
-    check_name(name, path)?;
-    Ok(String::from(name))
+/// The name and the width of the field `entries` describes at `here`, read
+/// one way for every kind of profile: a name no earlier field has (`named`
+/// answers whether one has it), and 1 to 8 bytes.
+#[inline(never)]
+pub(crate) fn read_field_head(
+    here: &Pointer<'_>,
+    entries: &Entries,
+    named: &dyn Fn(&str) -> bool,
+) -> Result<(String, usize), DocError> {
+    let name_at = here.key("name");
+    let name = read_name(&name_at, here.required(entries, "name")?)?;
+    if named(&name) {
+        return Err(name_at.refuse(format!("two fields are called `{name}`")));
+    }
+    let bytes_at = here.key("bytes");
+    let bytes = bytes_at.read_uint(here.required(entries, "bytes")?)?;
+    if !(1..=8).contains(&bytes) {
+        return Err(bytes_at.refuse(format!("a field is 1 to 8 bytes wide, this one is {bytes}")));
+    }
+    Ok((name, bytes as usize))
 }
 
 fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
-    let path = "/fields";
-    let items = array(value, path)?;
+    let path = Pointer::text("/fields");
+    let items = path.array(value)?;
     if items.is_empty() || items.len() > MAX_FIELDS {
-        return Err(DocError::invalid(
-            path,
-            format!(
-                "a profile has 1 to {MAX_FIELDS} fields, this one has {}",
-                items.len()
-            ),
-        ));
+        return Err(path.refuse(format!(
+            "a profile has 1 to {MAX_FIELDS} fields, this one has {}",
+            items.len()
+        )));
     }
     let mut fields: Vec<Field> = Vec::with_capacity(items.len());
     let mut offset = 0usize;
     for (i, item) in items.iter().enumerate() {
-        let here = at(path, i);
-        let entries = object(item, &here)?;
-        check_keys(entries, &["name", "bytes", "xor", "split", "derive"], &here)?;
+        let here = path.index(i);
+        let entries = here.object(item)?;
+        here.check_keys(entries, &["name", "bytes", "xor", "split", "derive"])?;
 
-        let name = read_name(required(entries, "name", &here)?, &child(&here, "name"))?;
-        if fields.iter().any(|f| f.name == name) {
-            return Err(DocError::invalid(
-                child(&here, "name"),
-                format!("two fields are called `{name}`"),
-            ));
-        }
-        let bytes_path = child(&here, "bytes");
-        let bytes = read_uint(required(entries, "bytes", &here)?, &bytes_path)?;
-        if !(1..=8).contains(&bytes) {
-            return Err(DocError::invalid(
-                bytes_path,
-                format!("a field is 1 to 8 bytes wide, this one is {bytes}"),
-            ));
-        }
-        let bytes = bytes as usize;
+        let named = |name: &str| fields.iter().any(|f| f.name == name);
+        let (name, bytes) = read_field_head(&here, entries, &named)?;
         let bits = (bytes * 8) as u8;
 
         let xor = match optional(entries, "xor") {
             None => 0,
             Some(v) => {
-                let xor_path = child(&here, "xor");
-                let xor = read_uint(v, &xor_path)?;
+                let xor_at = here.key("xor");
+                let xor = xor_at.read_uint(v)?;
                 if xor & !width_mask(bits) != 0 {
-                    return Err(DocError::invalid(
-                        xor_path,
-                        format!("the xor {xor:#x} does not fit the field's {bits} bits"),
-                    ));
+                    return Err(xor_at.refuse(format!(
+                        "the xor {xor:#x} does not fit the field's {bits} bits"
+                    )));
                 }
                 xor
             }
         };
         let parts = match optional(entries, "split") {
             None => Vec::new(),
-            Some(v) => read_split(v, &child(&here, "split"), bits)?,
+            Some(v) => read_split(v, &here.key("split"), bits)?,
         };
         let derive = match optional(entries, "derive") {
             None => None,
             Some(_) if !parts.is_empty() => {
-                return Err(DocError::invalid(
-                    child(&here, "derive"),
-                    format!(
-                        "the field `{name}` is split: a split field derives a value part by \
-                         part, in the part's own `derive`"
-                    ),
-                ))
+                return Err(here.key("derive").refuse(format!(
+                    "the field `{name}` is split: a split field derives a value part by \
+                     part, in the part's own `derive`"
+                )))
             }
-            Some(v) => Some(read_derive(v, &child(&here, "derive"), bits)?),
+            Some(v) => Some(read_derive(v, &here.key("derive"), bits)?),
         };
 
         fields.push(Field {
@@ -892,62 +696,49 @@ fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
     Ok(fields)
 }
 
-fn read_split(value: &Json5Value, path: &str, bits: u8) -> Result<Vec<Part>, DocError> {
-    let items = array(value, path)?;
+fn read_split(value: &Json5Value, path: &Pointer<'_>, bits: u8) -> Result<Vec<Part>, DocError> {
+    let items = path.array(value)?;
     if items.is_empty() || items.len() > MAX_PARTS {
-        return Err(DocError::invalid(
-            path,
-            format!(
-                "a split has 1 to {MAX_PARTS} parts, this one has {}",
-                items.len()
-            ),
-        ));
+        return Err(path.refuse(format!(
+            "a split has 1 to {MAX_PARTS} parts, this one has {}",
+            items.len()
+        )));
     }
     let mut parts: Vec<Part> = Vec::with_capacity(items.len());
     let mut claimed = 0u64;
     for (i, item) in items.iter().enumerate() {
-        let here = at(path, i);
-        let entries = object(item, &here)?;
-        check_keys(entries, &["name", "lsb", "width", "derive"], &here)?;
+        let here = path.index(i);
+        let entries = here.object(item)?;
+        here.check_keys(entries, &["name", "lsb", "width", "derive"])?;
 
-        let name = read_name(required(entries, "name", &here)?, &child(&here, "name"))?;
+        let name_at = here.key("name");
+        let name = read_name(&name_at, here.required(entries, "name")?)?;
         if parts.iter().any(|p| p.name == name) {
-            return Err(DocError::invalid(
-                child(&here, "name"),
-                format!("two parts of one field are called `{name}`"),
-            ));
+            return Err(name_at.refuse(format!("two parts of one field are called `{name}`")));
         }
-        let lsb_path = child(&here, "lsb");
-        let width_path = child(&here, "width");
-        let lsb = read_uint(required(entries, "lsb", &here)?, &lsb_path)?;
-        let width = read_uint(required(entries, "width", &here)?, &width_path)?;
+        let width_at = here.key("width");
+        let lsb = here.key("lsb").read_uint(here.required(entries, "lsb")?)?;
+        let width = width_at.read_uint(here.required(entries, "width")?)?;
         if width == 0 {
-            return Err(DocError::invalid(
-                width_path,
-                "a part is at least 1 bit wide",
-            ));
+            return Err(width_at.refuse("a part is at least 1 bit wide"));
         }
         if lsb >= u64::from(bits) || width > u64::from(bits) - lsb {
-            return Err(DocError::invalid(
-                &here,
-                format!(
-                    "the part `{name}` (lsb {lsb}, width {width}) does not fit the field's \
-                     {bits} bits"
-                ),
-            ));
+            return Err(here.refuse(format!(
+                "the part `{name}` (lsb {lsb}, width {width}) does not fit the field's \
+                 {bits} bits"
+            )));
         }
         let (lsb, width) = (lsb as u8, width as u8);
         let span = width_mask(width) << lsb;
         if claimed & span != 0 {
-            return Err(DocError::invalid(
-                &here,
-                format!("the part `{name}` overlaps an earlier part of the same field"),
-            ));
+            return Err(here.refuse(format!(
+                "the part `{name}` overlaps an earlier part of the same field"
+            )));
         }
         claimed |= span;
         let derive = match optional(entries, "derive") {
             None => None,
-            Some(v) => Some(read_derive(v, &child(&here, "derive"), width)?),
+            Some(v) => Some(read_derive(v, &here.key("derive"), width)?),
         };
         parts.push(Part {
             name,
@@ -963,98 +754,75 @@ fn read_split(value: &Json5Value, path: &str, bits: u8) -> Result<Vec<Part>, Doc
 /// value `bits` wide. The mask and the xor must fit those bits, so the derived
 /// value always fits; a mask of zero would take nothing from the address and is
 /// refused, since a constant is the caller's to state.
-fn read_derive(value: &Json5Value, path: &str, bits: u8) -> Result<Derive, DocError> {
-    let entries = object(value, path)?;
-    check_keys(entries, &["from", "mask", "xor"], path)?;
-    let from_path = child(path, "from");
-    let from = read_string(required(entries, "from", path)?, &from_path)?;
+fn read_derive(value: &Json5Value, path: &Pointer<'_>, bits: u8) -> Result<Derive, DocError> {
+    let entries = path.object(value)?;
+    path.check_keys(entries, &["from", "mask", "xor"])?;
+    let from_at = path.key("from");
+    let from = from_at.read_string(path.required(entries, "from")?)?;
     if from != ADDRESS_SOURCE {
-        return Err(DocError::invalid(
-            from_path,
-            format!(
-                "`{from}` is not a source a value is derived from (expected `{ADDRESS_SOURCE}`)"
-            ),
-        ));
+        return Err(from_at.refuse(format!(
+            "`{from}` is not a source a value is derived from (expected `{ADDRESS_SOURCE}`)"
+        )));
     }
     let fits = |key: &str, number: u64| -> Result<u64, DocError> {
         if number & !width_mask(bits) != 0 {
-            return Err(DocError::invalid(
-                child(path, key),
-                format!("the {key} {number:#x} does not fit the {bits} bits it derives"),
-            ));
+            return Err(path.key(key).refuse(format!(
+                "the {key} {number:#x} does not fit the {bits} bits it derives"
+            )));
         }
         Ok(number)
     };
-    let mask_path = child(path, "mask");
-    let mask = fits(
-        "mask",
-        read_uint(required(entries, "mask", path)?, &mask_path)?,
-    )?;
+    let mask_at = path.key("mask");
+    let mask = fits("mask", mask_at.read_uint(path.required(entries, "mask")?)?)?;
     if mask == 0 {
-        return Err(DocError::invalid(
-            mask_path,
-            "a mask of 0 takes nothing from the address: state the value itself",
-        ));
+        return Err(
+            mask_at.refuse("a mask of 0 takes nothing from the address: state the value itself")
+        );
     }
     let xor = match optional(entries, "xor") {
         None => 0,
-        Some(v) => fits("xor", read_uint(v, &child(path, "xor"))?)?,
+        Some(v) => fits("xor", path.key("xor").read_uint(v)?)?,
     };
     Ok(Derive { mask, xor })
 }
 
-fn field_named(fields: &[Field], name: &str, path: &str) -> Result<usize, DocError> {
-    fields
-        .iter()
-        .position(|f| f.name == name)
-        .ok_or_else(|| DocError::invalid(path, format!("no field is called `{name}`")))
-}
-
 /// A field the mechanism gives a meaning to (CRC, length, counter) carries no
 /// transformation of its own.
-fn plain(field: &Field, role: &str, path: &str) -> Result<(), DocError> {
+fn plain(field: &Field, role: &str, path: &Pointer<'_>) -> Result<(), DocError> {
     if field.xor != 0 || !field.parts.is_empty() {
-        return Err(DocError::invalid(
-            path,
-            format!(
-                "the {role} field `{}` carries an xor or a split: a {role} field is read \
-                 as a plain integer",
-                field.name
-            ),
-        ));
+        return Err(path.refuse(format!(
+            "the {role} field `{}` carries an xor or a split: a {role} field is read \
+             as a plain integer",
+            field.name
+        )));
     }
     if field.derive.is_some() {
-        return Err(DocError::invalid(
-            path,
-            format!(
-                "the {role} field `{}` is derived from the address: a {role} field is given \
-                 its value by the mechanism",
-                field.name
-            ),
-        ));
+        return Err(path.refuse(format!(
+            "the {role} field `{}` is derived from the address: a {role} field is given \
+             its value by the mechanism",
+            field.name
+        )));
     }
     Ok(())
 }
 
 /// The engine a CRC object describes: its `width`, `poly`, `init`, `refin`,
-/// `refout` and `xorout`, each refused at its own place. Shared by every
-/// profile kind that carries a CRC, so the six parameters are read and
-/// refused one way wherever a deployment writes them; the caller checks the
-/// keys of the object and reads the rest of it (which field, what is covered).
-pub(crate) fn read_crc_engine(entries: &Entries, path: &str) -> Result<Crc, DocError> {
-    let width_path = child(path, "width");
-    let width = read_uint(required(entries, "width", path)?, &width_path)?;
+/// `refout` and `xorout`, each refused at its own place. [`read_crc_object`]
+/// checks the keys of the object and reads the rest of it (which field, what
+/// is covered).
+fn read_crc_engine(entries: &Entries, path: &Pointer<'_>) -> Result<Crc, DocError> {
+    let width_at = path.key("width");
+    let width = width_at.read_uint(path.required(entries, "width")?)?;
     if !u8::try_from(width).is_ok_and(|w| SUPPORTED_WIDTHS.contains(&w)) {
-        return Err(DocError::invalid(
-            width_path,
-            format!("a CRC width of {width} bits is not supported (the engine implements 8, 16, 32 and 64)"),
-        ));
+        return Err(width_at.refuse(format!(
+            "a CRC width of {width} bits is not supported (the engine implements 8, 16, 32 and 64)"
+        )));
     }
     let number = |key: &str| -> Result<u64, DocError> {
-        read_uint(required(entries, key, path)?, &child(path, key))
+        path.key(key).read_uint(path.required(entries, key)?)
     };
     let flag = |key: &str| -> Result<bool, DocError> {
-        read_bool(required(entries, key, path)?, &child(path, key))
+        path.key(key).read_bool(path.required(entries, key)?)
     };
     let params = CrcParams {
         width: width as u8,
@@ -1065,134 +833,184 @@ pub(crate) fn read_crc_engine(entries: &Entries, path: &str) -> Result<Crc, DocE
         xorout: number("xorout")?,
     };
     Crc::new(params).map_err(|e| match e {
-        CrcParamsError::UnsupportedWidth(_) => {
-            DocError::invalid(child(path, "width"), e.to_string())
-        }
-        CrcParamsError::DoesNotFit { what, .. } => {
-            DocError::invalid(child(path, what), e.to_string())
-        }
+        CrcParamsError::UnsupportedWidth(_) => path.key("width").refuse(e.to_string()),
+        CrcParamsError::DoesNotFit { what, .. } => path.key(what).refuse(e.to_string()),
     })
 }
 
-fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
-    let path = "/crc";
-    let entries = object(value, path)?;
-    check_keys(
+/// A profile kind's header fields, as its CRC object and its roles read them.
+pub(crate) trait CrcFields {
+    /// The index of the field called `name`.
+    fn index_of(&self, name: &str) -> Option<usize>;
+    /// How many bytes the field at `index` spans.
+    fn bytes_of(&self, index: usize) -> usize;
+    /// Refuse, at `path`, the field at `index` as the one the CRC is
+    /// written to, by the kind's own rule.
+    fn may_hold_crc(&self, index: usize, path: &Pointer<'_>) -> Result<(), DocError>;
+    /// The `cover` entry that stands for the bytes after the header.
+    fn body(&self) -> &'static str;
+}
+
+impl CrcFields for &[Field] {
+    fn index_of(&self, name: &str) -> Option<usize> {
+        self.iter().position(|f| f.name == name)
+    }
+
+    fn bytes_of(&self, index: usize) -> usize {
+        self[index].bytes
+    }
+
+    fn may_hold_crc(&self, index: usize, path: &Pointer<'_>) -> Result<(), DocError> {
+        plain(&self[index], "crc", path)
+    }
+
+    fn body(&self) -> &'static str {
+        PAYLOAD
+    }
+}
+
+/// A CRC object once read: the field the CRC is written to, the engine, and
+/// what is fed in that order, `None` standing for the bytes after the header.
+pub(crate) struct CrcObject {
+    pub(crate) field: usize,
+    pub(crate) engine: Crc,
+    pub(crate) cover: Vec<Option<usize>>,
+}
+
+/// The index of the field `name` names, refused at `path` when no field has
+/// it: one body for every kind of profile and every place that names a field.
+#[inline(never)]
+pub(crate) fn field_called(
+    fields: &dyn CrcFields,
+    name: &str,
+    path: &Pointer<'_>,
+) -> Result<usize, DocError> {
+    fields
+        .index_of(name)
+        .ok_or_else(|| path.refuse(format!("no field is called `{name}`")))
+}
+
+/// The CRC object of every profile kind that carries one, read and refused
+/// one way: the kinds differ only in their fields, the rule for the field
+/// that holds the CRC, and the word for the body ([`CrcFields`]). Not
+/// generic, so one body serves every kind.
+pub(crate) fn read_crc_object(
+    value: &Json5Value,
+    path: &Pointer<'_>,
+    fields: &dyn CrcFields,
+) -> Result<CrcObject, DocError> {
+    let entries = path.object(value)?;
+    path.check_keys(
         entries,
         &[
             "field", "width", "poly", "init", "refin", "refout", "xorout", "cover",
         ],
-        path,
     )?;
 
-    let field_path = child(path, "field");
-    let field_name = read_string(required(entries, "field", path)?, &field_path)?;
-    let field = field_named(fields, field_name, &field_path)?;
-    plain(&fields[field], "crc", &field_path)?;
+    let field_at = path.key("field");
+    let field_name = field_at.read_string(path.required(entries, "field")?)?;
+    let field = field_called(fields, field_name, &field_at)?;
+    fields.may_hold_crc(field, &field_at)?;
 
     let engine = read_crc_engine(entries, path)?;
     let width = engine.params().width;
-    if usize::from(width) > fields[field].bytes * 8 {
-        return Err(DocError::invalid(
-            field_path,
-            format!(
-                "the crc field `{}` is {} bits wide, narrower than the {width}-bit CRC",
-                fields[field].name,
-                fields[field].bytes * 8
-            ),
-        ));
+    let bits = fields.bytes_of(field) * 8;
+    if usize::from(width) > bits {
+        return Err(field_at.refuse(format!(
+            "the crc field `{field_name}` is {bits} bits wide, narrower than the {width}-bit CRC"
+        )));
     }
 
-    let cover_path = child(path, "cover");
-    let items = array(required(entries, "cover", path)?, &cover_path)?;
+    let cover_at = path.key("cover");
+    let items = cover_at.array(path.required(entries, "cover")?)?;
     if items.is_empty() {
-        return Err(DocError::invalid(
-            cover_path,
-            "the cover list is empty: the CRC would take no input",
-        ));
+        return Err(cover_at.refuse("the cover list is empty: the CRC would take no input"));
     }
-    let mut cover: Vec<Cover> = Vec::with_capacity(items.len());
+    let body = fields.body();
+    let mut cover: Vec<Option<usize>> = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
-        let here = at(&cover_path, i);
-        let name = read_string(item, &here)?;
-        let entry = if name == PAYLOAD {
-            Cover::Payload
+        let here = cover_at.index(i);
+        let name = here.read_string(item)?;
+        let entry = if name == body {
+            None
         } else {
-            Cover::Field(field_named(fields, name, &here)?)
+            Some(field_called(fields, name, &here)?)
         };
-        if entry == Cover::Field(field) {
-            return Err(DocError::invalid(
-                here,
-                format!("the crc field `{name}` is never covered: it holds the result"),
-            ));
+        if entry == Some(field) {
+            return Err(here.refuse(format!(
+                "the crc field `{name}` is never covered: it holds the result"
+            )));
         }
         if cover.contains(&entry) {
-            return Err(DocError::invalid(
-                here,
-                format!("`{name}` is covered twice"),
-            ));
+            return Err(here.refuse(format!("`{name}` is covered twice")));
         }
         cover.push(entry);
     }
-
-    Ok(CrcSpec {
+    Ok(CrcObject {
         field,
         engine,
         cover,
     })
 }
 
+fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
+    let crc = read_crc_object(value, &Pointer::text("/crc"), &fields)?;
+    Ok(CrcSpec {
+        field: crc.field,
+        engine: crc.engine,
+        cover: crc
+            .cover
+            .into_iter()
+            .map(|c| c.map_or(Cover::Payload, Cover::Field))
+            .collect(),
+    })
+}
+
 fn read_length(value: &Json5Value, fields: &[Field]) -> Result<LengthSpec, DocError> {
-    let path = "/length";
-    let entries = object(value, path)?;
-    check_keys(entries, &["field", "counts", "fields"], path)?;
+    let path = Pointer::text("/length");
+    let entries = path.object(value)?;
+    path.check_keys(entries, &["field", "counts", "fields"])?;
 
-    let field_path = child(path, "field");
-    let field_name = read_string(required(entries, "field", path)?, &field_path)?;
-    let field = field_named(fields, field_name, &field_path)?;
-    plain(&fields[field], "length", &field_path)?;
+    let field_at = path.key("field");
+    let field_name = field_at.read_string(path.required(entries, "field")?)?;
+    let field = field_called(&fields, field_name, &field_at)?;
+    plain(&fields[field], "length", &field_at)?;
 
-    let counts_path = child(path, "counts");
-    let counts = read_string(required(entries, "counts", path)?, &counts_path)?;
+    let counts_at = path.key("counts");
+    let counts = counts_at.read_string(path.required(entries, "counts")?)?;
     let listed = optional(entries, "fields");
     let counts = match (counts, listed) {
         ("frame", None) => LengthCounts::Frame,
-        ("frame", Some(_)) => return Err(DocError::invalid(
-            child(path, "fields"),
+        ("frame", Some(_)) => return Err(path.key("fields").refuse(
             "`fields` belongs to `frame_minus`: a length that counts the frame subtracts nothing",
         )),
         ("frame_minus", None) => {
-            return Err(DocError::invalid(
-                path,
-                "`frame_minus` needs `fields`: the fields whose widths are not counted",
-            ))
+            return Err(path
+                .refuse("`frame_minus` needs `fields`: the fields whose widths are not counted"))
         }
         ("frame_minus", Some(v)) => {
-            let list_path = child(path, "fields");
-            let items = array(v, &list_path)?;
+            let list_at = path.key("fields");
+            let items = list_at.array(v)?;
             if items.is_empty() {
-                return Err(DocError::invalid(
-                    list_path,
-                    "the list is empty: use `frame` for a length that subtracts nothing",
-                ));
+                return Err(list_at
+                    .refuse("the list is empty: use `frame` for a length that subtracts nothing"));
             }
             let mut skipped: Vec<usize> = Vec::with_capacity(items.len());
             for (i, item) in items.iter().enumerate() {
-                let here = at(&list_path, i);
-                let name = read_string(item, &here)?;
-                let index = field_named(fields, name, &here)?;
+                let here = list_at.index(i);
+                let name = here.read_string(item)?;
+                let index = field_called(&fields, name, &here)?;
                 if skipped.contains(&index) {
-                    return Err(DocError::invalid(here, format!("`{name}` is listed twice")));
+                    return Err(here.refuse(format!("`{name}` is listed twice")));
                 }
                 skipped.push(index);
             }
             LengthCounts::FrameMinus(skipped)
         }
         (other, _) => {
-            return Err(DocError::invalid(
-                counts_path,
-                format!("`{other}` is not a length rule (expected `frame` or `frame_minus`)"),
-            ))
+            return Err(counts_at.refuse(format!(
+                "`{other}` is not a length rule (expected `frame` or `frame_minus`)"
+            )))
         }
     };
     Ok(LengthSpec { field, counts })
@@ -1203,33 +1021,30 @@ fn read_slot(
     fields: &[Field],
     judged: [usize; 3],
 ) -> Result<SlotSpec, DocError> {
-    let path = "/slot";
-    let entries = object(value, path)?;
-    check_keys(entries, &["message", "by_zid"], path)?;
+    let path = Pointer::text("/slot");
+    let entries = path.object(value)?;
+    path.check_keys(entries, &["message", "by_zid"])?;
 
     let by_zid = match optional(entries, "by_zid") {
-        Some(v) => read_bool(v, &child(path, "by_zid"))?,
+        Some(v) => path.key("by_zid").read_bool(v)?,
         None => true,
     };
     let mut message: Vec<usize> = Vec::new();
     if let Some(v) = optional(entries, "message") {
-        let list_path = child(path, "message");
-        for (i, item) in array(v, &list_path)?.iter().enumerate() {
-            let here = at(&list_path, i);
-            let name = read_string(item, &here)?;
-            let index = field_named(fields, name, &here)?;
+        let list_at = path.key("message");
+        for (i, item) in list_at.array(v)?.iter().enumerate() {
+            let here = list_at.index(i);
+            let name = here.read_string(item)?;
+            let index = field_called(&fields, name, &here)?;
             if judged.contains(&index) {
-                return Err(DocError::invalid(
-                    here,
-                    format!(
-                        "`{name}` is the crc, length or counter field: it changes from \
-                         frame to frame, so a slot keyed on it would never see a second \
-                         frame"
-                    ),
-                ));
+                return Err(here.refuse(format!(
+                    "`{name}` is the crc, length or counter field: it changes from \
+                     frame to frame, so a slot keyed on it would never see a second \
+                     frame"
+                )));
             }
             if message.contains(&index) {
-                return Err(DocError::invalid(here, format!("`{name}` is listed twice")));
+                return Err(here.refuse(format!("`{name}` is listed twice")));
             }
             message.push(index);
         }
@@ -1238,62 +1053,53 @@ fn read_slot(
 }
 
 fn read_counter(value: &Json5Value, fields: &[Field]) -> Result<CounterSpec, DocError> {
-    let path = "/counter";
-    let entries = object(value, path)?;
-    check_keys(
+    let path = Pointer::text("/counter");
+    let entries = path.object(value)?;
+    path.check_keys(
         entries,
         &["field", "max_gap", "timeout_ms", "max_gap_ceiling"],
-        path,
     )?;
 
-    let field_path = child(path, "field");
-    let field_name = read_string(required(entries, "field", path)?, &field_path)?;
-    let field = field_named(fields, field_name, &field_path)?;
-    plain(&fields[field], "counter", &field_path)?;
+    let field_at = path.key("field");
+    let field_name = field_at.read_string(path.required(entries, "field")?)?;
+    let field = field_called(&fields, field_name, &field_at)?;
+    plain(&fields[field], "counter", &field_at)?;
 
-    let gap_path = child(path, "max_gap");
-    let max_gap = read_uint(required(entries, "max_gap", path)?, &gap_path)?;
+    let gap_at = path.key("max_gap");
+    let max_gap = gap_at.read_uint(path.required(entries, "max_gap")?)?;
     // The forward step between two counters is 1 to 2^bits - 1, so a bound
     // outside that range could not mean what it says.
     if max_gap == 0 || max_gap > fields[field].max_value() {
-        return Err(DocError::invalid(
-            gap_path,
-            format!(
-                "max_gap is 1 to {} for the {}-byte counter `{}`, this one is {max_gap}",
-                fields[field].max_value(),
-                fields[field].bytes,
-                fields[field].name
-            ),
-        ));
+        return Err(gap_at.refuse(format!(
+            "max_gap is 1 to {} for the {}-byte counter `{}`, this one is {max_gap}",
+            fields[field].max_value(),
+            fields[field].bytes,
+            fields[field].name
+        )));
     }
     // Required, 0 included: a stream with no limit states it, so a profile that
     // forgot the key is still refused rather than read as never timing out.
-    let timeout_ms = read_uint(
-        required(entries, "timeout_ms", path)?,
-        &child(path, "timeout_ms"),
-    )?;
+    let timeout_ms = path
+        .key("timeout_ms")
+        .read_uint(path.required(entries, "timeout_ms")?)?;
     let max_gap_ceiling = match optional(entries, "max_gap_ceiling") {
         None => None,
         Some(v) => {
-            let ceiling_path = child(path, "max_gap_ceiling");
-            let ceiling = read_uint(v, &ceiling_path)?;
+            let ceiling_at = path.key("max_gap_ceiling");
+            let ceiling = ceiling_at.read_uint(v)?;
             if ceiling == 0 || ceiling > fields[field].max_value() {
-                return Err(DocError::invalid(
-                    ceiling_path,
-                    format!(
-                        "max_gap_ceiling is 1 to {} for the {}-byte counter `{}`, this one is \
-                         {ceiling}",
-                        fields[field].max_value(),
-                        fields[field].bytes,
-                        fields[field].name
-                    ),
-                ));
+                return Err(ceiling_at.refuse(format!(
+                    "max_gap_ceiling is 1 to {} for the {}-byte counter `{}`, this one is \
+                     {ceiling}",
+                    fields[field].max_value(),
+                    fields[field].bytes,
+                    fields[field].name
+                )));
             }
             if max_gap > ceiling {
-                return Err(DocError::invalid(
-                    gap_path,
-                    format!("max_gap {max_gap} is above the profile's max_gap_ceiling {ceiling}"),
-                ));
+                return Err(gap_at.refuse(format!(
+                    "max_gap {max_gap} is above the profile's max_gap_ceiling {ceiling}"
+                )));
             }
             Some(ceiling)
         }
@@ -1313,58 +1119,50 @@ fn read_rules(
     fields: &[Field],
     judged: [usize; 3],
 ) -> Result<JudgeRules, DocError> {
-    let path = "/judge";
-    let entries = object(value, path)?;
-    check_keys(
+    let path = Pointer::text("/judge");
+    let entries = path.object(value)?;
+    path.check_keys(
         entries,
         &["ident", "length", "counter_errors", "out_of_range"],
-        path,
     )?;
     let mut rules = JudgeRules::default();
     if let Some(v) = optional(entries, "ident") {
-        let here = child(path, "ident");
-        let name = read_string(v, &here)?;
-        let index = field_named(fields, name, &here)?;
+        let here = path.key("ident");
+        let name = here.read_string(v)?;
+        let index = field_called(&fields, name, &here)?;
         if judged.contains(&index) {
-            return Err(DocError::invalid(
-                here,
-                format!(
-                    "`{name}` is the crc, length or counter field, each judged by a rule of \
-                     its own: the identifier is another field"
-                ),
-            ));
+            return Err(here.refuse(format!(
+                "`{name}` is the crc, length or counter field, each judged by a rule of \
+                 its own: the identifier is another field"
+            )));
         }
         rules.ident = Some(index);
     }
     if let Some(v) = optional(entries, "length") {
-        rules.length = read_bool(v, &child(path, "length"))?;
+        rules.length = path.key("length").read_bool(v)?;
     }
     if let Some(v) = optional(entries, "counter_errors") {
-        let here = child(path, "counter_errors");
-        rules.counter_errors = match read_string(v, &here)? {
+        let here = path.key("counter_errors");
+        rules.counter_errors = match here.read_string(v)? {
             "apart" => CounterErrors::Apart,
             "joined" => CounterErrors::Joined,
             other => {
-                return Err(DocError::invalid(
-                    here,
-                    format!("`{other}` is not a way to report counter errors (expected `apart` or `joined`)"),
-                ))
+                return Err(here.refuse(format!(
+                    "`{other}` is not a way to report counter errors (expected `apart` or `joined`)"
+                )))
             }
         };
     }
     if let Some(v) = optional(entries, "out_of_range") {
-        let here = child(path, "out_of_range");
-        rules.out_of_range_moves_baseline = match read_string(v, &here)? {
+        let here = path.key("out_of_range");
+        rules.out_of_range_moves_baseline = match here.read_string(v)? {
             "moves_baseline" => true,
             "keeps_baseline" => false,
             other => {
-                return Err(DocError::invalid(
-                    here,
-                    format!(
-                        "`{other}` is not what a step out of range does (expected \
-                         `moves_baseline` or `keeps_baseline`)"
-                    ),
-                ))
+                return Err(here.refuse(format!(
+                    "`{other}` is not what a step out of range does (expected \
+                     `moves_baseline` or `keeps_baseline`)"
+                )))
             }
         };
     }
@@ -1374,39 +1172,32 @@ fn read_rules(
 /// The `cell` object: a split field and which of its parts are the kind, the
 /// result and the sender identity.
 fn read_cell(value: &Json5Value, fields: &[Field]) -> Result<CellSpec, DocError> {
-    let path = "/cell";
-    let entries = object(value, path)?;
-    check_keys(entries, &["field", "kind", "result", "sender"], path)?;
-    let field_path = child(path, "field");
-    let field_name = read_string(required(entries, "field", path)?, &field_path)?;
-    let field = field_named(fields, field_name, &field_path)?;
+    let path = Pointer::text("/cell");
+    let entries = path.object(value)?;
+    path.check_keys(entries, &["field", "kind", "result", "sender"])?;
+    let field_at = path.key("field");
+    let field_name = field_at.read_string(path.required(entries, "field")?)?;
+    let field = field_called(&fields, field_name, &field_at)?;
     let parts = &fields[field].parts;
     if parts.is_empty() {
-        return Err(DocError::invalid(
-            field_path,
-            format!(
-                "the cell field `{field_name}` is not split: a cell names parts of a split field"
-            ),
-        ));
+        return Err(field_at.refuse(format!(
+            "the cell field `{field_name}` is not split: a cell names parts of a split field"
+        )));
     }
     let mut taken: Vec<usize> = Vec::with_capacity(3);
     let mut part = |key: &str| -> Result<Option<usize>, DocError> {
         let Some(v) = optional(entries, key) else {
             return Ok(None);
         };
-        let here = child(path, key);
-        let name = read_string(v, &here)?;
+        let here = path.key(key);
+        let name = here.read_string(v)?;
         let Some(index) = parts.iter().position(|p| p.name == name) else {
-            return Err(DocError::invalid(
-                here,
-                format!("the field `{field_name}` has no part called `{name}`"),
-            ));
+            return Err(here.refuse(format!(
+                "the field `{field_name}` has no part called `{name}`"
+            )));
         };
         if taken.contains(&index) {
-            return Err(DocError::invalid(
-                here,
-                format!("the part `{name}` is named twice in the cell"),
-            ));
+            return Err(here.refuse(format!("the part `{name}` is named twice in the cell")));
         }
         taken.push(index);
         Ok(Some(index))
@@ -1415,10 +1206,7 @@ fn read_cell(value: &Json5Value, fields: &[Field]) -> Result<CellSpec, DocError>
     let result = part("result")?;
     let sender = part("sender")?;
     if kind.is_none() && result.is_none() && sender.is_none() {
-        return Err(DocError::invalid(
-            path,
-            "a cell names at least one of `kind`, `result` and `sender`",
-        ));
+        return Err(path.refuse("a cell names at least one of `kind`, `result` and `sender`"));
     }
     Ok(CellSpec {
         field,

@@ -10,9 +10,9 @@ protected frame is read into and judged by, and of the word-mask rule the header
 
 The corpus is the differential baseline of a generated codec. Every vector runs through the
 hand-written builder and opener of `wz_app_frame::e2e_frame` and the receiver of
-`wz_app_frame::e2e_receiver` (`src/fixed_records_tests.rs`), and the same runner holds a codec
-SCE generates from the same layouts to the same expected bytes and records, unchanged, behind the
-crate feature `sce-generated-codec`.
+`wz_app_frame::e2e_receiver` (`src/fixed_records_tests.rs`). The runner is written against one
+`Codec` interface, so a codec SCE generates from the same layouts is held to the same expected
+bytes and records unchanged.
 
 Every layout, width, mask, constant and name in the corpus is made up for it and unlike any
 deployment's. The CRCs are published catalogue entries (CRC-8/DVB-S2, CRC-32/ISCSI, CRC-16/ARC).
@@ -150,13 +150,19 @@ largest and one byte past it).
 
 ## Running a generated codec against it
 
+SCE generates no codec of these layouts: they need a word mask over bits no part owns, one value
+over several runs of a word, and checksum, length and address fields derived from other fields,
+none of which an SCE codec document can state. Until one can, no arm runs a generated codec: an
+arm with no codec to run could only fail, and it would fail every build with all features on.
+
+Once SCE generates them:
+
 1. Generate the codecs of the three layouts from codec documents that state them.
-2. In `src/fixed_records_tests.rs`, list each layout's codec in `GENERATED`: an implementation
-   of the runner's `Codec` (build, open, policy) that calls the generated adapter and fills the
-   records above.
-3. Run `cargo test -p wz-app-frame --features sce-generated-codec --lib fixed_records_tests`:
-   `generated_codec_matches_the_corpus` fails naming every layout with no codec listed, and
-   otherwise holds the generated codecs to every vector.
+2. In `src/fixed_records_tests.rs`, implement the runner's `Codec` (build, open, policy) over
+   them: call the generated adapter and fill the records above.
+3. Add the arm beside `the_hand_written_codec_meets_every_vector`, in the build that links the
+   generated codecs: `run` over that `Codec` returns `KINDS`, and a vector it misses fails at its
+   name.
 
 ## Changing the corpus
 

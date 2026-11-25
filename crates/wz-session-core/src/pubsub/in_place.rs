@@ -12,7 +12,7 @@
 //! keyexpr is resolved without a `String`
 //! ([`resolve_wireexpr_view_held_over`]), the payload, attachment and every
 //! extension are read where they lie, and the subscribers are handed a
-//! [`SampleView`] over those bytes ([`LentSample`]) through the same matcher
+//! sample over those bytes ([`SampleRef`]) through the same matcher
 //! and the same sinks the owned path uses. A subscriber's contract was already
 //! a view borrowed for the call ([`SampleDelivery::deliver`]), so no subscriber
 //! changes; one that keeps the sample copies it
@@ -36,116 +36,26 @@
 //! copying path delivers it, where the build has that path; a build that lends only
 //! (`rx-lent-only`) counts it and drops it.
 
-#[cfg(feature = "alloc")]
-use core::cell::OnceCell;
-
 use wz_codecs::lent::{Encoding, Push, PushVariant, Timestamp};
 
 use super::{LocalSubscribers, PeerDelivery, SubscriberPeer};
 use crate::bounded::Storage;
 use crate::driver_loop::InPlaceRecord;
 use crate::reliability::Reliability;
-#[cfg(feature = "alloc")]
-use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
-use crate::sink::{FanOut, SampleDelivery, SampleView};
+use crate::sink::{FanOut, SampleDelivery, SampleRef};
 #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
 use crate::wireexpr_resolve::resolve_plain_parts_over;
 #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
 use crate::wireexpr_resolve::KeyexprBuf;
 use crate::wireexpr_resolve::{resolve_wireexpr_view_held_over, ComposeRoom, KeyexprPastBound};
 
-/// The sample a Push read in place is delivered as: every field a range of the
-/// frame or a value read off it, valid for the delivery call.
+/// The body-level fields of a Put or a Del read in place, before the keyexpr is
+/// known: what `dispatch_push`'s body match projects, on the lent form.
 ///
 /// `'s` is the delivery's borrow of the decoded record; `'f` is the frame's, in
 /// which the codec's lent timestamp and encoding are invariant.
-struct LentSample<'s, 'f> {
-    keyexpr: &'s str,
-    /// The key of the session's key arena `keyexpr` is the whole text of, when it is one.
-    held: Option<&'s crate::key_arena::KeyRef>,
-    payload: &'s [u8],
-    kind: SampleKind,
-    reliability: Reliability,
-    qos: Option<QosLevel>,
-    attachment: Option<&'s [u8]>,
-    source_info: Option<SourceInfo>,
-    timestamp: Option<&'s Timestamp<'f>>,
-    #[cfg(feature = "alloc")]
-    timestamp_hint: OnceCell<TimestampHint>,
-    encoding: Option<&'s Encoding<'f>>,
-    #[cfg(feature = "alloc")]
-    encoding_hint: OnceCell<EncodingHint>,
-}
-
-impl SampleView for LentSample<'_, '_> {
-    fn keyexpr(&self) -> &str {
-        self.keyexpr
-    }
-    fn keyexpr_held(&self) -> Option<&crate::key_arena::KeyRef> {
-        self.held
-    }
-    fn payload(&self) -> &[u8] {
-        self.payload
-    }
-    fn kind(&self) -> SampleKind {
-        self.kind
-    }
-    fn reliability(&self) -> Reliability {
-        self.reliability
-    }
-    fn qos(&self) -> Option<QosLevel> {
-        self.qos
-    }
-    fn attachment(&self) -> Option<&[u8]> {
-        self.attachment
-    }
-    #[cfg(feature = "alloc")]
-    fn timestamp(&self) -> Option<&TimestampHint> {
-        let ts = self.timestamp?;
-        Some(
-            self.timestamp_hint
-                .get_or_init(|| TimestampHint::from_view(ts)),
-        )
-    }
-    #[cfg(feature = "alloc")]
-    fn encoding(&self) -> Option<&EncodingHint> {
-        let encoding = self.encoding?;
-        Some(
-            self.encoding_hint
-                .get_or_init(|| EncodingHint::from_view(encoding)),
-        )
-    }
-    // The parts are the wire's own fields, read where they lie: nothing is built to
-    // answer, so this is the accessor a build with no allocator has.
-    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
-        self.timestamp.map(|ts| (ts.time, ts.zid.into_inner()))
-    }
-    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
-        self.encoding.map(|encoding| {
-            (
-                encoding.packed_id,
-                encoding.schema.map(|schema| schema.into_inner()),
-            )
-        })
-    }
-    fn source_info(&self) -> Option<&SourceInfo> {
-        self.source_info.as_ref()
-    }
-    // A message is read in place only off a link, so it was routed to this node.
-    #[cfg(feature = "pubsub-ts-stack")]
-    fn routed(&self) -> bool {
-        true
-    }
-    // `attachment_shared` and `payload_shared` keep their `None` defaults: the
-    // bytes are the link's, lent for the call, and a subscriber that keeps them
-    // copies them, as it does a `BorrowedSample`.
-}
-
-/// The body-level fields of a Put or a Del read in place, before the keyexpr is
-/// known: what `dispatch_push`'s body match projects, on the lent form. The
-/// lifetimes are [`LentSample`]'s.
 struct LentBody<'s, 'f> {
     kind: SampleKind,
     payload: &'s [u8],
@@ -262,27 +172,28 @@ impl<Q: Storage> SubscriberPeer<Q> {
             return;
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
-        match self.deliver_lent(subs, cx, push, reliability) {
+        let sender = record.sender();
+        match self.deliver_lent(subs, cx, push, reliability, sender) {
             Ok(()) => {}
             // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
             #[cfg(feature = "pubsub-put")]
             Err(Fallback::Sliced) => {
                 self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, cx, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
             }
             Err(Fallback::KeyexprPastBound) => {
                 self.in_place_fallbacks.keyexpr_past_bound =
                     self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, cx, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
             }
             #[cfg(feature = "pubsub-ts-stack")]
             Err(Fallback::Instrumented) => {
                 self.in_place_fallbacks.instrumented =
                     self.in_place_fallbacks.instrumented.saturating_add(1);
                 #[cfg(not(feature = "rx-lent-only"))]
-                self.dispatch_owned_projection(subs, cx, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
             }
         }
     }
@@ -297,6 +208,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         cx: &mut X,
         push: &Push<'_>,
         reliability: Reliability,
+        sender: u64,
     ) -> Result<(), Fallback> {
         let Some(body) = lent_body(push)? else {
             return Ok(());
@@ -327,7 +239,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // of it into the room before the delivery writes it.
         let (keyexpr, held) = match resolve_wireexpr_view_held_over(
             &push.keyexpr.body,
-            naming.spaces(),
+            naming.spaces().from_sender(sender),
             subs.own_space(),
             ComposeRoom::buffer(compose, &mut frame),
         ) {
@@ -343,13 +255,17 @@ impl<Q: Storage> SubscriberPeer<Q> {
             .as_ref()
             .map_or(&[][..], |chain| chain.as_slice());
         #[cfg(feature = "pubsub-qos")]
-        let qos = crate::sample::extract_qos_in(outer);
+        let qos: Option<QosLevel> = crate::sample::extract_qos_in(outer);
         #[cfg(not(feature = "pubsub-qos"))]
         let qos: Option<QosLevel> = {
             let _ = outer;
             None
         };
-        let sample = LentSample {
+        // Every field a range of the frame or a value read off it, valid for the delivery call. The
+        // hints own heap fields (a schema's bytes), so they are built only when a subscriber asks
+        // for them. The attachment and the payload are the link's, lent for the call: a subscriber
+        // that keeps them copies them, as it does a `BorrowedSample`.
+        let sample = SampleRef {
             keyexpr,
             held,
             payload: body.payload,
@@ -357,19 +273,27 @@ impl<Q: Storage> SubscriberPeer<Q> {
             reliability,
             qos,
             attachment: body.attachment,
-            source_info: body.source_info,
-            timestamp: body.timestamp,
+            encoding: body.encoding.map(|encoding| {
+                (
+                    encoding.packed_id,
+                    encoding.schema.map(|schema| schema.into_inner()),
+                )
+            }),
+            timestamp: body.timestamp.map(|ts| (ts.time, ts.zid.into_inner())),
+            source_info: body.source_info.as_ref(),
+            // A message is read in place only off a link, so it was routed to this node.
+            #[cfg(feature = "pubsub-ts-stack")]
+            routed: true,
             #[cfg(feature = "alloc")]
-            timestamp_hint: OnceCell::new(),
-            encoding: body.encoding,
+            hints: Some(Default::default()),
             #[cfg(feature = "alloc")]
-            encoding_hint: OnceCell::new(),
+            source: None,
         };
         // R231 -- the self-echo rule of `dispatch_push`, on the same fields: a
         // wire-arrived sample whose source names this session is not fired.
         if let (Some(own), Some(info)) = (
             naming.own_zid.as_ref().map(|zid| zid.as_slice()),
-            sample.source_info.as_ref(),
+            sample.source_info,
         ) {
             let prefix = info.zid_prefix();
             if !prefix.is_empty() && prefix == own {
@@ -388,7 +312,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 ..PeerDelivery::default()
             },
             |id, row| {
-                cx.deliver(id, row, &sample, turn);
+                cx.deliver_ref(id, row, &sample, turn);
                 turn = FanOut::later();
             },
         );
@@ -405,12 +329,13 @@ impl<Q: Storage> SubscriberPeer<Q> {
         cx: &mut X,
         push: &Push<'_>,
         reliability: Reliability,
+        sender: u64,
     ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Push. It
         // consumes its view; the clone is of the view, not of the bytes.
         if let Ok(owned) = push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
-            self.dispatch_push(subs, cx, &owned, reliability, true);
+            self.dispatch_push(subs, cx, &owned, reliability, true, sender);
         }
     }
 }
@@ -531,7 +456,9 @@ mod tests {
     use crate::locality::Locality;
     use crate::network_message::NetworkMessage;
     use crate::pubsub::InPlaceFallbacks;
+    use crate::sample::{EncodingHint, TimestampHint};
     use crate::sink::BoxedSink;
+    use crate::sink::SampleView;
     use alloc::boxed::Box;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -1131,36 +1058,5 @@ mod tests {
         };
         let (lent, owned, _) = both_ways(&push, "demo/a", own);
         assert_eq!((lent.len(), owned.len()), (0, 0));
-    }
-
-    /// A hint that owns heap is built only when a subscriber asks for it.
-    #[test]
-    fn the_timestamp_and_encoding_hints_are_built_only_when_asked() {
-        let ts = Timestamp {
-            time: 1,
-            zid_len: 1,
-            zid: sce_forge_runtime::codec::Bounded::new(&b"\x07"[..]).unwrap(),
-        };
-        let sample = LentSample {
-            keyexpr: "k",
-            held: None,
-            payload: &[],
-            kind: SampleKind::Put,
-            reliability: Reliability::Reliable,
-            qos: None,
-            attachment: None,
-            source_info: None,
-            timestamp: Some(&ts),
-            timestamp_hint: OnceCell::new(),
-            encoding: None,
-            encoding_hint: OnceCell::new(),
-        };
-        assert!(
-            sample.timestamp_hint.get().is_none(),
-            "not built before asked"
-        );
-        assert_eq!(sample.timestamp().map(|t| t.time), Some(1));
-        assert!(sample.timestamp_hint.get().is_some(), "built once asked");
-        assert!(sample.encoding().is_none());
     }
 }

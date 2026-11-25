@@ -306,15 +306,27 @@ unsafe fn retract_listener(object: *mut MatchingListenerState) {
             (*(*link).held.get()).take()
         }
     });
-    // SAFETY: the caller's: the state stands until `retire_entity` below.
+    // SAFETY: the caller's: the state stands until `retire_listener` below.
     unsafe { (*object).shared.undeclare_matching_listener((*object).id) };
     // The place stands with its owner, so the filter's hold may go first.
     drop(held);
     // SAFETY: the caller's; the owner lets go of the place once, here.
     unsafe {
         crate::object_slot::closures_of::<MatchingListenerState, MatchingKept>(object).wait_none();
-        crate::object_slot::retire_entity::<MatchingListenerState, MatchingKept>(object);
+        retire_listener(object);
     }
+}
+
+/// Let go of a listener's state for its owner ([`retire_entity`]): one body for the undeclare,
+/// the declare refused and the background declare, which would each carry their own copy of the
+/// release, its lock and the place given back.
+///
+/// # Safety
+/// As [`retire_entity`]'s, for the state of a [`MatchingPlace`].
+#[inline(never)]
+unsafe fn retire_listener(object: *mut MatchingListenerState) {
+    // SAFETY: the caller's.
+    unsafe { retire_entity::<MatchingListenerState, MatchingKept>(object) };
 }
 
 /// Owned matching listener (pico `z_owned_matching_listener_t`, 24 B measured).
@@ -691,7 +703,7 @@ pub(crate) unsafe fn declare_on_filter(
         Err(refused) => {
             // The refusal let go of the callback, and so of the closure; the place goes back
             // with the state.
-            retire_entity::<MatchingListenerState, MatchingKept>(object);
+            retire_listener(object);
             return refusal_code(refused, Door::MatchingListener);
         }
     };
@@ -708,7 +720,7 @@ pub(crate) unsafe fn declare_on_filter(
         }
         // No handle will undeclare it: its owner lets go of it at once, and the place stays with
         // the filter's hold and the closure until the filter retracts it.
-        None => retire_entity::<MatchingListenerState, MatchingKept>(object),
+        None => retire_listener(object),
     }
     Z_OK
 }
@@ -724,7 +736,9 @@ fn hand_status(closure: &MatchingCClosure, matching: bool) {
     };
     let status = z_matching_status_t { matching };
     let ctx = closure.context.0;
-    let _in_callback = InCallback::enter();
+    let Some(_in_callback) = InCallback::enter() else {
+        return;
+    };
     // SAFETY: `context` is the caller's, alive until `drop` runs, which comes after the last
     // call (`MatchingCClosure`).
     let _ = catch(|| unsafe {

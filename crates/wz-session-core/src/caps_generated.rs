@@ -45,14 +45,23 @@ pub(super) const MAX_LINK_EVENTS_LISTENERS: usize =
 pub(super) const MAX_DECLARED_KEYEXPRS: usize =
     limit(option_env!("WZ_LIMIT_MAX_DECLARED_KEYEXPRS"), 332);
 pub(super) const HELD_SESSIONS: usize = limit(option_env!("WZ_LIMIT_HELD_SESSIONS"), 4);
+pub(super) const CALLBACK_THREADS: usize = limit(option_env!("WZ_LIMIT_CALLBACK_THREADS"), 8);
 pub(super) const HELD_SAMPLES: usize = limit(option_env!("WZ_LIMIT_HELD_SAMPLES"), 18);
 pub(super) const HELD_REPLIES: usize = limit(option_env!("WZ_LIMIT_HELD_REPLIES"), 18);
 pub(super) const HELD_QUERIES: usize = limit(option_env!("WZ_LIMIT_HELD_QUERIES"), 18);
 pub(super) const HELD_PAYLOADS: usize = limit(option_env!("WZ_LIMIT_HELD_PAYLOADS"), 32);
 pub(super) const HELD_CONFIGS: usize = limit(option_env!("WZ_LIMIT_HELD_CONFIGS"), 8);
 pub(super) const HELD_HELLOS: usize = limit(option_env!("WZ_LIMIT_HELD_HELLOS"), 16);
-pub(super) const HELD_PAYLOAD_BYTES: usize =
-    limit(option_env!("WZ_LIMIT_HELD_PAYLOAD_BYTES"), 131072);
+pub(super) const PAYLOAD_SMALL_BLOCK_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_PAYLOAD_SMALL_BLOCK_BYTES"), 64);
+pub(super) const PAYLOAD_MEDIUM_BLOCK_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_PAYLOAD_MEDIUM_BLOCK_BYTES"), 1040);
+pub(super) const HELD_SMALL_PAYLOAD_BLOCKS: usize =
+    limit(option_env!("WZ_LIMIT_HELD_SMALL_PAYLOAD_BLOCKS"), 256);
+pub(super) const HELD_MEDIUM_PAYLOAD_BLOCKS: usize =
+    limit(option_env!("WZ_LIMIT_HELD_MEDIUM_PAYLOAD_BLOCKS"), 32);
+pub(super) const HELD_LARGE_PAYLOAD_BLOCKS: usize =
+    limit(option_env!("WZ_LIMIT_HELD_LARGE_PAYLOAD_BLOCKS"), 20);
 pub(super) const HELD_ENCODINGS: usize = limit(option_env!("WZ_LIMIT_HELD_ENCODINGS"), 16);
 pub(super) const MAX_ENCODING_SCHEMA_BYTES: usize =
     limit(option_env!("WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES"), 255);
@@ -104,7 +113,11 @@ pub(super) const ADVANCED_SUBSCRIBER_PENDING_BYTES: usize = limit(
 pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
 pub(super) const MAX_GROUP_ENDPOINT_LEN: usize =
     limit(option_env!("WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN"), 96);
+pub(super) const MAX_RAWETH_ENDPOINT_LEN: usize =
+    limit(option_env!("WZ_LIMIT_MAX_RAWETH_ENDPOINT_LEN"), 160);
 pub(super) const MAX_GROUP_MEMBERS: usize = limit(option_env!("WZ_LIMIT_MAX_GROUP_MEMBERS"), 32);
+pub(super) const MAX_MEMBER_KEYEXPRS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_MEMBER_KEYEXPRS"), 16);
 pub(super) const MAX_CONNECTIVITY_REPLAY_EVENTS: usize =
     limit(option_env!("WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS"), 8);
 pub(super) const MAX_FACE_WATCH_ROWS: usize =

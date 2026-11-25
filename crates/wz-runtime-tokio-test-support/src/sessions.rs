@@ -22,6 +22,18 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
+/// A bundle over `driver` with `params`, established (`SessionLinkActions::enter_established`) as
+/// a session that completed its handshake stands, for a test whose subject is what an established
+/// session sends and not its handshake: a session refuses a data send before establishment.
+pub fn established_session_actions(
+    driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
+    params: SessionInitParams,
+) -> Arc<SessionLinkActions> {
+    let actions = new_session_actions(driver, params, TokioTime::new());
+    actions.enter_established();
+    actions
+}
+
 /// The snapshot every fixture's session is handed: the build defaults. A test that is about
 /// another value selects it in the params a fixture returns, whose queue it then rebuilds with
 /// `TxQueueConf::of_snapshot` when the value is one the queue carries.
@@ -44,7 +56,7 @@ pub fn fixture_session_init_params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [0x01; 4].into(),
-        seq_num_res: 0,
+        seq_num_res: wz_runtime_tokio::policy::SnResolution::Bits8,
         req_id_res: 0,
         batch_size: 0,
         lease_ms: 10_000,
@@ -61,7 +73,9 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         policy,
         limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key satisfies >= 32 invariant"),
+            .expect("32-byte test key satisfies >= 32 invariant")
+            .into(),
+        region: None,
     }
 }
 
@@ -94,7 +108,7 @@ pub fn zenoh_interop_session_init_params(
     SessionInitParams {
         whatami,
         zid: SessionZid::new(zid.as_ref()).expect("a fixture zid is 1 to 16 bytes"),
-        seq_num_res: 2,
+        seq_num_res: wz_runtime_tokio::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 65535,
         lease_ms: 10_000,
@@ -110,7 +124,9 @@ pub fn zenoh_interop_session_init_params(
         policy,
         limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key satisfies >= 32 invariant"),
+            .expect("32-byte test key satisfies >= 32 invariant")
+            .into(),
+        region: None,
     }
 }
 

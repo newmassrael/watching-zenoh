@@ -29,7 +29,7 @@
 //! the `ResponseFinal` until the copy is let go, as pico's `_z_query_clear`
 //! does. Either engine keeps the query under an id
 //! (`QueryHolder::keep_query`), and the copy owns its key and parameters (in
-//! the payloads' area of the process pools, or on the heap in a library without
+//! the process pools' payload blocks, or on the heap in a library without
 //! them) and holds its session weakly, as pico's `_z_query_t` owns its key and
 //! parameters and holds a weak session, so a copy kept past its session holds
 //! none of the session's memory. The family
@@ -282,7 +282,7 @@ enum QueryText<T: ?Sized> {
     /// The marshal's own, on the heap, in a library without the process pools.
     #[cfg(not(wz_process_pools))]
     Owned(Box<T>),
-    /// The marshal's own, in the block of the payloads' area `copy` holds and gives back when it
+    /// The marshal's own, in the payload block `copy` holds and gives back when it
     /// drops, the text read from it in the form it was copied from.
     #[cfg(wz_process_pools)]
     Pooled { copy: crate::bytes::ByteBuf },
@@ -331,7 +331,7 @@ impl<T: ?Sized + TextForm> QueryText<T> {
 
 #[cfg(wz_process_pools)]
 impl QueryText<str> {
-    /// A copy of `text` of the marshal's own, in the payloads' area of the process pools.
+    /// A copy of `text` of the marshal's own, in the process pools' payload blocks.
     fn pooled_text(text: &str) -> Result<Self, crate::bytes::NoRoom> {
         Ok(Self::Pooled {
             copy: crate::bytes::ByteBuf::copy_of(text.as_bytes())?,
@@ -341,7 +341,7 @@ impl QueryText<str> {
 
 #[cfg(wz_process_pools)]
 impl QueryText<[u8]> {
-    /// A copy of `bytes` of the marshal's own, in the payloads' area of the process pools.
+    /// A copy of `bytes` of the marshal's own, in the process pools' payload blocks.
     fn pooled_bytes(bytes: &[u8]) -> Result<Self, crate::bytes::NoRoom> {
         Ok(Self::Pooled {
             copy: crate::bytes::ByteBuf::copy_of(bytes)?,
@@ -577,7 +577,7 @@ impl QueryMarshal {
     }
 
     /// The key and the parameters of a copy kept past the dispatch, the copy's own: in the
-    /// payloads' area of the process pools, reserved before the first session opened, whose having
+    /// process pools' payload blocks, reserved before the first session opened, whose having
     /// no room for them refuses the copy as zenoh-pico refuses a copy it cannot allocate; on the
     /// heap in a library without the pools, as its other objects are.
     fn kept_texts(&self) -> Result<(QueryText<str>, QueryText<[u8]>), crate::bytes::NoRoom> {
@@ -863,7 +863,9 @@ fn hand_query(
         // A panic unwinding OUT of the C callback across this `extern "C"` boundary
         // is UB and would tear down the thread dispatching it, so it is caught here.
         let ctx = closure.context.0;
-        let _in_callback = crate::ffi::InCallback::enter();
+        let Some(_in_callback) = crate::ffi::InCallback::enter() else {
+            return;
+        };
         let _ = crate::ffi::catch(|| unsafe {
             call(query_ptr, ctx);
         });
@@ -1534,7 +1536,7 @@ pub(crate) fn declare_queryable_on(
     let id = wz_capi_port::SessionEngine::declare_queryable_on_wire(
         &*session.engine,
         keyexpr,
-        key.wire_holding_declaration(Arc::as_ref(&session.engine)),
+        key.wire(Arc::as_ref(&session.engine)),
         complete,
         allowed_origin,
         // A peer or router-hat session retracts the queryable naming its key
@@ -1909,6 +1911,11 @@ pub unsafe extern "C" fn z_query_reply(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_NULL;
         };
+        // A reply's key not in canon form is refused as every door refuses one, before it is
+        // judged against the query.
+        if let Err(code) = crate::keyexpr::canon_key(ke) {
+            return code;
+        }
         if !reply_keyexpr_is_covered(marshal.keyexpr.get(), ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
@@ -1981,6 +1988,9 @@ pub unsafe extern "C" fn z_query_reply_del(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_NULL;
         };
+        if let Err(code) = crate::keyexpr::canon_key(ke) {
+            return code;
+        }
         if !reply_keyexpr_is_covered(marshal.keyexpr.get(), ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
@@ -3000,14 +3010,15 @@ mod tests {
     }
 }
 
-/// The key and the parameters a kept copy owns lie in the payloads' area of the process pools, in a
-/// library that has them.
+/// The key and the parameters a kept copy owns lie in the pools of payload blocks of the process
+/// pools, in a library that has them.
 #[cfg(all(test, wz_process_pools))]
 mod pooled_text_tests {
     use super::*;
 
     /// A text copied for a kept query reads what it copied from a place of its own, and one longer
-    /// than the payloads' area holds is refused, as zenoh-pico refuses a copy it cannot allocate.
+    /// than the largest payload block holds is refused, as zenoh-pico refuses a copy it cannot
+    /// allocate.
     /// The CONTROL is the short text, copied. Turned red by a copy that lends the source's bytes,
     /// or that falls back to the heap.
     #[test]
@@ -3021,10 +3032,10 @@ mod pooled_text_tests {
         let empty = QueryText::pooled_bytes(b"").expect("no parameters take no block");
         assert!(empty.get().is_empty());
 
-        let long = "k".repeat(wz_session_core::caps::HELD_PAYLOAD_BYTES + 1);
+        let long = "k".repeat(crate::process_pool::LARGEST_BLOCK + 1);
         assert!(
             QueryText::pooled_text(&long).is_err(),
-            "a text past the payloads' area is refused"
+            "a text past the largest payload block is refused"
         );
     }
 }
@@ -3057,41 +3068,7 @@ mod kept_query_tests {
         z_view_keyexpr_t, zp_config_insert, Z_CONFIG_CONNECT_KEY,
     };
 
-    /// Every allocation of the calling thread while `run` runs, counted.
-    fn allocations(run: impl FnOnce()) -> usize {
-        COUNTING.with(|count| count.set(Some(0)));
-        run();
-        COUNTING.with(|count| count.take()).unwrap_or(0)
-    }
-
-    std::thread_local! {
-        static COUNTING: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    }
-
-    /// The test binary's allocator: the system's, counting on a thread that asked
-    /// ([`allocations`]).
-    struct Counting;
-
-    // SAFETY: every call is the system allocator's; the count is a thread's own cell.
-    unsafe impl std::alloc::GlobalAlloc for Counting {
-        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-            let _ = COUNTING.try_with(|count| {
-                if let Some(seen) = count.get() {
-                    count.set(Some(seen.saturating_add(1)));
-                }
-            });
-            // SAFETY: the caller's.
-            unsafe { std::alloc::System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, at: *mut u8, layout: std::alloc::Layout) {
-            // SAFETY: the caller's.
-            unsafe { std::alloc::System.dealloc(at, layout) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: Counting = Counting;
+    use crate::test_heap::allocations;
 
     /// The key the queryable answers and the get asks, and the parameters the get carries.
     const KEY: &core::ffi::CStr = c"demo/kept/q";

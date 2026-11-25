@@ -3294,9 +3294,7 @@ pub fn locator_scheme(locator: &AnyLocator) -> &'static str {
 pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTargetError> {
     // A name is resolved HERE so the loop never blocks on a resolver; the
     // reconstruction keeps the scheme and the socket options (`#iface=`,
-    // `#bind=`, `#dscp=`), and cannot keep
-    // the multicast tail because `Named` does not carry one (a DNS-named
-    // endpoint is not a multicast group).
+    // `#bind=`, `#dscp=`).
     let locator = match plan_endpoint(target).map_err(DialTargetError::Malformed)? {
         AnyLocator::Named {
             proto,
@@ -3317,8 +3315,6 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
                 proto,
                 addr: addrs[0],
                 socket,
-                mcast_ttl: None,
-                mcast_join: Vec::new(),
                 // R2496 — the resolved form keeps the endpoint's retry tail.
                 // The reconstruction already keeps the scheme and the bind for
                 // this reason; dropping the retry span here would mean a NAMED
@@ -4919,6 +4915,13 @@ pub enum OpenError {
     /// none at all, and the two call for different operator action (nobody is
     /// answering the group, versus the peer that answered will not accept).
     NoTargets,
+    /// The width of sequence numbers the session's parameters offer is one the build's
+    /// `sn-resolution` domain leaves out
+    /// ([`wz_session_core::sn::sn_resolution_admitted`]): the build holds no word for its ring.
+    /// Raised before the link is wired, so nothing of the session reaches the wire.
+    SnResolution(
+        wz_session_core::policy_binding::OutsideDomain<wz_session_core::policy::SnResolution>,
+    ),
 }
 
 /// Build the session action layer + SCE engine for an open path, ready for
@@ -5563,6 +5566,10 @@ async fn initiate_installing<I>(
 where
     I: FnOnce(&Arc<SessionLinkActions>),
 {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
     let actions = new_session_actions(outbound, params, clock);
@@ -5925,6 +5932,16 @@ where
 /// everything it installs is on the wire from the InitSyn onward. It returns
 /// [`OpenError`] because the accept-side twin's staging draws OS entropy, which
 /// can fail. `timeouts` are the handshake deadlines of this open.
+/// `params` with the region `offer` names: the region is part of what a session is opened with
+/// (`SessionInitParams::region`), so it reaches the session where the session is made rather than
+/// through `apply_offer`. An offer that names none leaves the parameters' own.
+fn with_offered_region(mut params: SessionInitParams, offer: &SessionOffer) -> SessionInitParams {
+    if let Some(name) = offer.region.and_then(|region| region.name()) {
+        params.region = Some(name);
+    }
+    params
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn initiator_open_offering<S>(
     connected: DialedLink,
@@ -5939,6 +5956,10 @@ async fn initiator_open_offering<S>(
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
 {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     // R311y435 — the lean wiring is chosen at RUNTIME from the offer, but ONLY in
     // a build that has the lean transport at all. Without `transport-lowlatency`,
     // `apply_offer` rejects `TransportMode::LowLatency` below, so the branch is
@@ -5967,7 +5988,7 @@ where
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
-    let actions = new_session_actions(outbound, params, clock);
+    let actions = new_session_actions(outbound, with_offered_region(params, &offer), clock);
     // Staged BEFORE the handshake drives, and BEFORE any wire byte: an offer
     // this build cannot honour fails here rather than opening a session whose
     // wire form silently differs from the configuration.
@@ -6199,6 +6220,10 @@ pub async fn accept_and_open_session(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
@@ -6241,6 +6266,10 @@ pub async fn accept_and_open_session_with_auth(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
@@ -6477,6 +6506,10 @@ async fn accept_open_offering<S>(
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
 {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     // R311y435 — same compile-time elision as the initiator twin: without
     // `transport-lowlatency` the lean branch is unreachable (`apply_offer` rejects
     // the mode) and must not be compiled, or the lean wiring stops being dead code
@@ -6498,7 +6531,8 @@ where
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    let (actions, mut engine) =
+        wire_session_engine(outbound, with_offered_region(params, &offer), clock);
     actions
         .apply_offer(&offer)
         .map_err(OpenError::UnsupportedCapability)?;
@@ -6588,6 +6622,10 @@ pub async fn accept_and_open_session_with_namespace(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
@@ -6994,6 +7032,35 @@ mod tests {
         let config = DialConfig::default().with_runtime_limits(stated);
         assert_eq!(config.runtime_limits, stated);
         assert_eq!(config.runtime_limits.max_locator_len(), Quota::at_most(2));
+    }
+
+    /// The region an offer names is the region the session is opened with, and an offer that
+    /// names none leaves the parameters' own, set or not.
+    #[test]
+    fn an_offer_names_the_region_a_session_is_opened_with() {
+        use wz_session_core::extregion::RegionName;
+        let north = RegionName::new("north").expect("a valid region name");
+        let south = RegionName::new("south").expect("a valid region name");
+        let fixture = wz_runtime_tokio_test_support::fixture_session_init_params;
+
+        let named = SessionOffer::universal().with_region(&north);
+        assert_eq!(
+            with_offered_region(fixture(), &named).region,
+            Some(north.clone())
+        );
+        assert_eq!(
+            with_offered_region(fixture(), &SessionOffer::universal()).region,
+            None
+        );
+        let mut own = fixture();
+        own.region = Some(south.clone());
+        assert_eq!(
+            with_offered_region(own, &SessionOffer::universal()).region,
+            Some(south.clone())
+        );
+        let mut own = fixture();
+        own.region = Some(south);
+        assert_eq!(with_offered_region(own, &named).region, Some(north));
     }
 
     /// R2944 — a dial's offer carries the QoS metadata of the ENDPOINT that

@@ -12,7 +12,8 @@
 //! its full name and a field by its path. [`Payload`] is that program's message:
 //! one message of a [`SchemaSet`], whose fields are set and read by path and
 //! whose bytes are what the schema says they are. The schema is read by the
-//! one schema reader ([`crate::proto_schema`]) and bytes are read by the one
+//! one schema reader (`proto_schema`, or the compiled descriptor's reader
+//! [`crate::proto_descriptor`]) and bytes are read by the one
 //! typed reader ([`crate::proto_decode`]), so this module adds the values and
 //! the writing of them, and no second reading of either.
 //!
@@ -119,9 +120,8 @@ use core::fmt;
 use crate::proto_decode::{
     FieldEvents, Item, SchemaMessage, SchemaSet, WireError, MAX_DECODE_DEPTH,
 };
-use crate::proto_parse::{Label, ScalarKind, Syntax};
 use crate::proto_range::{RangeRefusal, RangeSource, ValueRange};
-use crate::proto_schema::{FieldKind, Fld, Msg};
+use crate::proto_types::{FieldKind, Fld, Label, Msg, ScalarKind, Syntax};
 use crate::proto_write::{self, has_presence, Count, Fixed, Narrowing, Out, Wire};
 
 /// A value as the program gives it to a field.
@@ -608,8 +608,9 @@ impl<St: Storage> Table<St> {
     }
 
     /// Remove the slots `pick` names, with every slot inside one of them: the slots after move
-    /// down, keeping their order, and each parent is the slot's new place.
-    fn remove(&mut self, pick: impl Fn(usize, &Entry) -> bool) {
+    /// down, keeping their order, and each parent is the slot's new place. `pick` is dispatched:
+    /// the compaction is the same whichever slots it names.
+    fn remove(&mut self, pick: &dyn Fn(usize, &Entry) -> bool) {
         let len = self.len;
         let entries = self.store.entries_mut();
         let Some(entries) = entries.get_mut(..len) else {
@@ -652,7 +653,7 @@ impl<St: Storage> Table<St> {
     /// message at `parent`.
     fn clear_oneof(&mut self, parent: u32, holder: &Msg, field: &Fld) {
         if let Some(oneof) = field.oneof {
-            self.remove(|_, e| {
+            self.remove(&|_, e| {
                 e.parent == parent
                     && e.number != field.number
                     && !matches!(e.slot, Slot::Kept(_))
@@ -666,7 +667,7 @@ impl<St: Storage> Table<St> {
 
     /// Remove every value of field `number` of the message at `parent`.
     fn remove_field(&mut self, parent: u32, number: u64) {
-        self.remove(|_, e| {
+        self.remove(&|_, e| {
             e.parent == parent && e.number == number && !matches!(e.slot, Slot::Kept(_))
         });
     }
@@ -990,7 +991,9 @@ fn held_of<'v>(
                 (ScalarKind::Float, Given::Real(v)) => {
                     let narrow = v as f32;
                     if v.is_finite() && narrow.is_infinite() {
-                        return Err(range(format!("{v} is finite and past what a float holds")));
+                        return Err(range(String::from(
+                            "the value is finite and past what a float holds",
+                        )));
                     }
                     Ok(Value::Float(narrow))
                 }
@@ -1387,7 +1390,7 @@ impl<S: Borrow<SchemaSet>, St: Storage> Payload<S, St> {
             Some(index) if index >= len => return Err(past_end(path, &last, len)),
             Some(index) => {
                 if let Some(at) = self.table.nth(parent, number, index) {
-                    self.table.remove(|i, _| i == at);
+                    self.table.remove(&|i, _| i == at);
                 }
             }
         }
@@ -1435,7 +1438,7 @@ impl<S: Borrow<SchemaSet>, St: Storage> Payload<S, St> {
         Ok(fixed.len())
     }
 
-    fn write_to<O: Out>(&self, out: &mut O) -> Result<(), Refusal> {
+    fn write_to(&self, out: &mut dyn Out) -> Result<(), Refusal> {
         let schema: &SchemaSet = self.schema.borrow();
         let writer = Writer {
             schema,
@@ -1661,7 +1664,10 @@ impl<St: Storage> Writer<'_, St> {
 
     /// The fields of the message `msg` at `parent`, in ascending number, then what it keeps as
     /// wire bytes.
-    fn message<O: Out>(&self, msg: &Msg, parent: u32, out: &mut O) -> Result<(), Refusal> {
+    ///
+    /// The sink is dispatched, not a type parameter: a payload is measured, then written into a
+    /// growing or a fixed buffer, and the walk of its table is the same each time.
+    fn message(&self, msg: &Msg, parent: u32, out: &mut dyn Out) -> Result<(), Refusal> {
         for field in &msg.fields {
             if field.label == Label::Required && self.table.count(parent, field.number) == 0 {
                 let path = self.child_path(parent, &field.name);
@@ -1699,13 +1705,7 @@ impl<St: Storage> Writer<'_, St> {
     }
 
     /// The values field `field` of `msg` holds in the message at `parent`.
-    fn field<O: Out>(
-        &self,
-        msg: &Msg,
-        field: &Fld,
-        parent: u32,
-        out: &mut O,
-    ) -> Result<(), Refusal> {
+    fn field(&self, msg: &Msg, field: &Fld, parent: u32, out: &mut dyn Out) -> Result<(), Refusal> {
         let number = field.number;
         if field.label != Label::Repeated {
             let Some(at) = self.table.last(parent, number) else {
@@ -1748,12 +1748,12 @@ impl<St: Storage> Writer<'_, St> {
     }
 
     /// One value of `field`, at slot `at`, under its tag: a message as its length and its fields.
-    fn value<O: Out>(
+    fn value(
         &self,
         field: &Fld,
         at: usize,
         presence: bool,
-        out: &mut O,
+        out: &mut dyn Out,
     ) -> Result<(), Refusal> {
         if let Some(wire) = self.wire_of(field, self.slot(at), at)? {
             proto_write::put_singular(out, field.number, presence, &wire);

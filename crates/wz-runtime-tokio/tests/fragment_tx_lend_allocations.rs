@@ -37,9 +37,7 @@ use std::cell::{Cell, UnsafeCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_glue::new_session_actions;
-use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_runtime_tokio_test_support::{established_session_actions, fixture_session_init_params};
 use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGrant};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
@@ -220,7 +218,7 @@ const CHAIN_BUDGET: u16 = 160;
 fn measure(link: Arc<PoolLink>, budget: u16) -> usize {
     let mut params = fixture_session_init_params();
     params.batch_size = budget;
-    let actions = new_session_actions(link, params, TokioTime::new());
+    let actions = established_session_actions(link, params);
     actions
         .send_push_literal(KEY, &PAYLOAD, true)
         .expect("warm-up push");

@@ -83,7 +83,10 @@ pub mod message_catalog;
 #[cfg(feature = "message-payload")]
 #[path = "../../wz-capi-pico/src/message_payload.rs"]
 pub mod message_payload;
-#[cfg(any(feature = "instance-key", feature = "message-payload"))]
+#[cfg(all(
+    feature = "proto-text",
+    any(feature = "instance-key", feature = "message-payload")
+))]
 #[path = "../../wz-capi-pico/src/proto_file.rs"]
 pub mod proto_file;
 #[cfg(feature = "replay-cache")]

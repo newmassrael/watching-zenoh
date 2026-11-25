@@ -314,7 +314,7 @@ fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: wz_session_core::session_zid::SessionZid::from_array([zid; 4]),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -328,7 +328,8 @@ fn params(zid: u8) -> SessionInitParams {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::from_slice(&[7u8; 32]).expect("key"),
+        cookie_signing_key: SigningKey::from_slice(&[7u8; 32]).expect("key").into(),
+        region: None,
     }
 }
 
@@ -886,6 +887,89 @@ mod table {
         let bundle = core::mem::size_of::<SessionLinkActions<Rt, CoopTime<Frozen>>>();
         println!("slot {slot} B = driver {driver} B + bundle {bundle} B + rest");
         assert!(slot >= driver + bundle + core::mem::size_of::<Tracked>());
+    }
+
+    /// A claim that makes its link in the slot asks the table for a free slot first: a full
+    /// table refuses and counts it without running the link's maker, so a full node binds no
+    /// socket for a session it cannot hold. A maker that fails over a free slot is refused as
+    /// the link's failure, takes no slot and is not counted; one that succeeds builds the
+    /// driver in the slot.
+    #[test]
+    fn a_full_table_refuses_a_claim_that_makes_its_link_before_the_link_is_made() {
+        use wz_session_core::session_slot::ClaimRefused;
+        static TABLE: Table = SessionSlots::new();
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let link = Rc::new(link);
+        let first = TABLE
+            .claim(driver_on(&link, 7726), Tracked)
+            .ok()
+            .expect("the first slot");
+        let second = TABLE
+            .claim(driver_on(&link, 7727), Tracked)
+            .ok()
+            .expect("the second slot");
+        let dropped = DROPPED.with(Cell::get);
+
+        let made = Cell::new(false);
+        let refused = TABLE.claim_with(
+            |_| {
+                made.set(true);
+                Err::<(), u8>(1)
+            },
+            Tracked,
+        );
+        assert!(
+            matches!(refused, Err(ClaimRefused::Full)),
+            "a third claim on a table of two is refused as full"
+        );
+        assert!(!made.get(), "the link is not made for a table with no slot");
+        assert_eq!(
+            (TABLE.in_use(), TABLE.refused()),
+            (2, 1),
+            "the refusal is counted and takes no slot"
+        );
+        assert_eq!(
+            DROPPED.with(Cell::get),
+            dropped + 1,
+            "the entropy source handed in is dropped with the refusal"
+        );
+
+        drop(first);
+        let failed = TABLE.claim_with(|_| Err::<(), u8>(7), Tracked);
+        assert!(
+            matches!(failed, Err(ClaimRefused::Link(7))),
+            "a link that cannot be made over a free slot is refused as such"
+        );
+        assert_eq!(
+            (TABLE.in_use(), TABLE.refused()),
+            (1, 1),
+            "and takes no slot and is not counted"
+        );
+
+        let socket = bind_session_rx(&link, 7728).expect("bind");
+        let third = TABLE
+            .claim_with(
+                |place| {
+                    LwipUdpDriver::new_in(
+                        place,
+                        share_socket(socket),
+                        ipv4_addr_from_octets([127, 0, 0, 1]),
+                        7728,
+                    );
+                    Ok::<(), u8>(())
+                },
+                Tracked,
+            )
+            .ok()
+            .expect("the slot that came back takes a link made in it");
+        assert_eq!(
+            third.driver().peer().map(|peer| peer.1),
+            Some(7728),
+            "the driver made in the slot is the one the claim holds"
+        );
+        assert_eq!(TABLE.in_use(), 2);
+        drop((second, third));
+        assert_eq!(TABLE.in_use(), 0);
     }
 
     /// A claim that is never opened gives its slot back and drops what it was

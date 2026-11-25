@@ -131,6 +131,19 @@ impl HumidityPayloadSource for HumidityPayloadParts {
     }
 }
 
+#[allow(dead_code)]
+impl HumidityPayloadParts {
+    /// The parts of what `src` says, each accessor of [`HumidityPayloadSource`] read
+    /// once: the one form a codec that holds this one writes it from,
+    /// whatever form the value it is handed is in (docs/adr/0058).
+    #[doc(hidden)]
+    pub fn of<S: HumidityPayloadSource + ?Sized>(src: &S) -> Self {
+        Self {
+            percent: src.percent(),
+        }
+    }
+}
+
 impl HumidityPayloadSource for HumidityPayload {
     fn percent(&self) -> u8 {
         self.percent

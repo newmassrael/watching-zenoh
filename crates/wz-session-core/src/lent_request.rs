@@ -19,6 +19,7 @@
 //! [`GetParts`]: crate::query_parts::GetParts
 
 use sce_forge_runtime::codec::{CodecError, SceSink};
+use wz_codecs::vle::zint_len as vle_len;
 
 use crate::declare_ext_qos::QOS_EXT_HEADER;
 use crate::ext_header::{body_eid, ext_identity, EXT_ENC_Z64, EXT_FLAG_Z};
@@ -74,6 +75,28 @@ impl<'a> RequestWriter<'a> {
     /// The writer for `parts`: every query a description states, its timestamp stack included.
     pub const fn new(parts: GetParts<'a>) -> Self {
         Self { parts }
+    }
+
+    /// The parts the writer writes, which the network counters read the get by.
+    pub const fn parts(&self) -> &GetParts<'a> {
+        &self.parts
+    }
+
+    /// The bytes the network counters charge the get's payload by: the payload of its value and
+    /// its attachment, each as far as the build writes it, as the owned `Request` of the same
+    /// parts carries them.
+    #[cfg(feature = "transport-stats")]
+    pub fn payload_len(&self) -> usize {
+        let [value, _, attachment] = body_extensions(&self.parts.query);
+        let value = match value {
+            Some(BodyExtension::Value { payload, .. }) => payload.len(),
+            _ => 0,
+        };
+        let attachment = match attachment {
+            Some(BodyExtension::Attachment(bytes)) => bytes.len(),
+            _ => 0,
+        };
+        value.saturating_add(attachment)
     }
 
     /// Encode the `Request` into `sink`. `LengthOutOfRange`, before a byte is written, for what
@@ -341,17 +364,6 @@ fn source_zid(info: &SourceInfo) -> Result<&[u8], CodecError> {
         return Err(CodecError::LengthOutOfRange);
     }
     Ok(zid)
-}
-
-/// The bytes the codec's `vle_u64` writes `value` in: seven bits a byte, at most nine.
-fn vle_len(value: u64) -> usize {
-    let mut len = 1usize;
-    let mut rest = value;
-    while rest >= 0x80 && len < 9 {
-        rest = rest.checked_shr(7).unwrap_or(0);
-        len = len.saturating_add(1);
-    }
-    len
 }
 
 /// A length as the wire's integer.

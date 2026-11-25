@@ -166,7 +166,7 @@ impl InitCaps {
     /// What `params` advertises as it stands, as an InitSyn does.
     pub fn of(params: &SessionInitParams) -> Self {
         Self {
-            seq_num_res: params.seq_num_res,
+            seq_num_res: params.seq_num_res.wire_code(),
             req_id_res: params.req_id_res,
             // R311kj — the wire NEVER carries the internal 0 = "unset"
             // sentinel (a pico peer would adopt it and size a 0-byte TX
@@ -204,10 +204,102 @@ pub fn encode_init_into(
     extensions: ChainRef<'_>,
     cookie_override: Option<&[u8]>,
 ) -> Result<(), CodecError> {
-    with_parts(extensions, |parts| {
-        let message = init_message(params, caps, is_ack, parts, cookie_override)?;
-        TransportInitWire::encode_source(&message, &mut TxSink::new(&mut *buf))
+    let region = region_name(params)?;
+    let tail = region.as_ref().map(region_entry);
+    with_parts(extensions, tail, |parts| {
+        write_init(buf, params, caps, is_ack, parts, cookie_override)
     })
+}
+
+/// [`encode_init_into`] for a build that stages no handshake extension (`ext_chain`): the
+/// chain is the patch level this node announces, [`crate::extpatch::CURRENT_PATCH`], and the
+/// region name after it, presented from the parameters with no chain held for them. The bytes are
+/// those [`encode_init_into`] writes for the chain of that one entry
+/// ([`crate::extpatch::encode_patch_ext`]), which is what such a build staged on both Init
+/// roles.
+#[cfg(any(
+    all(
+        feature = "session-fixed-storage",
+        feature = "tx-lend-only",
+        feature = "storage-profile",
+        feature = "session-unicast",
+        feature = "codec-init-body",
+        feature = "session-unicast-open",
+        not(any(
+            feature = "session-unicast-accept",
+            feature = "transport-qos",
+            feature = "session-extshm",
+            feature = "session-extauth",
+            feature = "transport-multilink",
+            feature = "transport-lowlatency",
+            feature = "session-extcompression"
+        ))
+    ),
+    all(
+        test,
+        feature = "alloc",
+        feature = "codec-init-body",
+        feature = "codec-open-body"
+    )
+))]
+pub(crate) fn encode_init_patch_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    params: &SessionInitParams,
+    caps: InitCaps,
+    is_ack: bool,
+    cookie_override: Option<&[u8]>,
+) -> Result<(), CodecError> {
+    let level = wz_codecs::ext_zint::ExtZintParts {
+        value: u64::from(crate::extpatch::CURRENT_PATCH),
+    };
+    let patch = ExtEntryParts {
+        header: crate::extpatch::PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64,
+        body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtZint(&level),
+    };
+    let region = region_name(params)?;
+    match region.as_ref().map(region_entry) {
+        Some(region) => write_init(buf, params, caps, is_ack, &[patch, region], cookie_override),
+        None => write_init(buf, params, caps, is_ack, &[patch], cookie_override),
+    }
+}
+
+/// The region name this node is configured with, as the body its entry is written from. It is
+/// the node's configuration, not a staged entry: it is presented after the chain because its id
+/// (0x8) is the largest an Init carries, and the extension writer sets the continuation bit of
+/// whatever entry precedes it.
+#[cfg(feature = "codec-init-body")]
+fn region_name(
+    params: &SessionInitParams,
+) -> Result<Option<wz_codecs::ext_zbuf::ExtZbufParts<'_>>, CodecError> {
+    match &params.region {
+        Some(name) => Ok(Some(wz_codecs::ext_zbuf::ExtZbufParts {
+            value: crate::codec_owned::sent(name.as_str().as_bytes())?,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// The region name's entry ([`region_name`]), the last of an Init's chain.
+#[cfg(feature = "codec-init-body")]
+fn region_entry<'e>(zbuf: &'e wz_codecs::ext_zbuf::ExtZbufParts<'_>) -> ExtEntryParts<'e> {
+    ExtEntryParts {
+        header: crate::extregion::REGION_NAME_EXT_HEADER,
+        body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtZbuf(zbuf),
+    }
+}
+
+/// The Init with `chain` as its extensions, written by its document into `buf`.
+#[cfg(feature = "codec-init-body")]
+fn write_init(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    params: &SessionInitParams,
+    caps: InitCaps,
+    is_ack: bool,
+    chain: &[ExtEntryParts<'_>],
+    cookie_override: Option<&[u8]>,
+) -> Result<(), CodecError> {
+    let message = init_message(params, caps, is_ack, chain, cookie_override)?;
+    TransportInitWire::encode_source(&message, &mut TxSink::new(&mut *buf))
 }
 
 /// What a lend-only handshake send asks its link to lend: the most an Init or an Open can be on
@@ -298,9 +390,10 @@ const EMPTY_PARTS: ExtEntryParts<'static> = ExtEntryParts {
 /// How many held entries are presented from holders on the stack: as many as a chain a session
 /// stages holds, one entry per kind of extension the build stages (a staged chain has one place
 /// per kind, so it is that long at most). A longer chain is refused where the store does not
-/// grow, and presented from holders on the heap where it does.
+/// grow, and presented from holders on the heap where it does. The holders of the parts have
+/// one place more, for the region name an Init writes after its chain.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-const STACK_PARTS: usize = 3
+const STACK_PARTS: usize = 2
     + cfg!(feature = "transport-qos") as usize
     + cfg!(feature = "transport-lowlatency") as usize
     + cfg!(feature = "session-extcompression") as usize
@@ -308,13 +401,14 @@ const STACK_PARTS: usize = 3
     + cfg!(feature = "session-extauth") as usize
     + cfg!(feature = "transport-multilink") as usize;
 
-/// Present `entries` as parts in the holders the caller gives, and answer the parts that were
-/// filled. Out of line and not generic, so the projection is compiled once whatever the caller
-/// writes the parts with.
+/// Present `entries` as parts in the holders the caller gives, then `tail` after them, and
+/// answer the parts that were filled. Out of line and not generic, so the projection is compiled
+/// once whatever the caller writes the parts with.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 #[inline(never)]
 fn project_parts<'b, 'p>(
     entries: ChainRef<'b>,
+    tail: Option<ExtEntryParts<'b>>,
     bodies: &'b mut [HeldBody<'b>],
     parts: &'p mut [ExtEntryParts<'b>],
 ) -> &'p [ExtEntryParts<'b>] {
@@ -322,26 +416,31 @@ fn project_parts<'b, 'p>(
         *slot = HeldBody::of(entry);
     }
     let bodies: &'b [HeldBody<'b>] = bodies;
-    let filled = entries.len().min(bodies.len()).min(parts.len());
+    let mut filled = entries.len().min(bodies.len()).min(parts.len());
     for ((slot, body), entry) in parts.iter_mut().zip(bodies).zip(entries.iter()) {
         *slot = body.parts(entry.header);
+    }
+    if let (Some(tail), Some(slot)) = (tail, parts.get_mut(filled)) {
+        *slot = tail;
+        filled = filled.saturating_add(1);
     }
     parts.get(..filled).unwrap_or(&[])
 }
 
-/// Run `write` over `entries` presented as parts ([`HeldChain`]): in holders on the stack for
-/// any chain a session stages, so a handshake a lend-only session sends costs the heap nothing
-/// in either storage profile. A longer chain, which only a caller of the public encoders can
-/// hand in, is refused where the store does not grow and presented from holders of its own
-/// length on the heap where it does. `write` is called at one place, so each caller's writer
-/// is compiled once.
+/// Run `write` over `entries` presented as parts ([`HeldChain`]), and `tail` after them: in
+/// holders on the stack for any chain a session stages, so a handshake a lend-only session sends
+/// costs the heap nothing in either storage profile. A longer chain, which only a caller of the
+/// public encoders can hand in, is refused where the store does not grow and presented from
+/// holders of its own length on the heap where it does. `write` is called at one place, so each
+/// caller's writer is compiled once.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 fn with_parts<R>(
     entries: ChainRef<'_>,
+    tail: Option<ExtEntryParts<'_>>,
     write: impl FnOnce(&[ExtEntryParts<'_>]) -> Result<R, CodecError>,
 ) -> Result<R, CodecError> {
     let mut stack_bodies = [HeldBody::Unit; STACK_PARTS];
-    let mut stack_parts = [EMPTY_PARTS; STACK_PARTS];
+    let mut stack_parts = [EMPTY_PARTS; STACK_PARTS + 1];
     #[cfg(all(feature = "alloc", not(feature = "session-fixed-storage")))]
     let (mut long_bodies, mut long_parts) = (alloc::vec::Vec::new(), alloc::vec::Vec::new());
     let (bodies, parts): (&mut [HeldBody<'_>], &mut [ExtEntryParts<'_>]) =
@@ -351,7 +450,7 @@ fn with_parts<R>(
             #[cfg(all(feature = "alloc", not(feature = "session-fixed-storage")))]
             {
                 long_bodies.resize(entries.len(), HeldBody::Unit);
-                long_parts.resize(entries.len(), EMPTY_PARTS);
+                long_parts.resize(entries.len().saturating_add(1), EMPTY_PARTS);
                 (long_bodies.as_mut_slice(), long_parts.as_mut_slice())
             }
             #[cfg(any(not(feature = "alloc"), feature = "session-fixed-storage"))]
@@ -359,7 +458,7 @@ fn with_parts<R>(
                 return Err(CodecError::CapacityExceeded);
             }
         };
-    write(project_parts(entries, bodies, parts))
+    write(project_parts(entries, tail, bodies, parts))
 }
 
 /// An Init message as `transport_init` writes it: the body, and the chain where
@@ -493,7 +592,7 @@ pub fn encode_open_into(
     cookie_override: Option<&[u8]>,
     extensions: ChainRef<'_>,
 ) -> Result<(), CodecError> {
-    with_parts(extensions, |parts| {
+    with_parts(extensions, None, |parts| {
         let message = open_message(params, initial_sn, is_ack, cookie_override, parts)?;
         TransportOpenWire::encode_source(&message, &mut TxSink::new(&mut *buf))
     })
@@ -501,7 +600,7 @@ pub fn encode_open_into(
 
 /// What [`encode_open_into`] writes before the extension chain: the header byte,
 /// whose Z flag says whether a chain follows (`has_ext`), and the body with the
-/// cookie. The chain is written after it by `ext_chain::encode_ext_chain_into`.
+/// cookie. The chain is written after it by `encode_held_chain_into`.
 ///
 /// The two halves are separate for the lend-only send, which holds the cookie and
 /// the chain under two session mutexes and takes them one after the other: the
@@ -547,7 +646,17 @@ pub(crate) fn encode_open_head_into(
         feature = "tx-lend-only",
         feature = "session-unicast",
         feature = "codec-open-body",
-        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+        any(
+            not(feature = "session-fixed-storage"),
+            feature = "session-unicast-accept",
+            feature = "transport-qos",
+            feature = "session-extshm",
+            feature = "session-extauth",
+            feature = "transport-multilink",
+            feature = "transport-lowlatency",
+            feature = "session-extcompression"
+        )
     ),
     all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
@@ -555,7 +664,7 @@ pub(crate) fn encode_held_chain_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
     entries: ChainRef<'_>,
 ) -> Result<(), CodecError> {
-    with_parts(entries, |parts| {
+    with_parts(entries, None, |parts| {
         let last = parts.len().wrapping_sub(1);
         for (at, part) in parts.iter().enumerate() {
             let mut part = *part;
@@ -569,6 +678,53 @@ pub(crate) fn encode_held_chain_into(
         }
         Ok(())
     })
+}
+
+/// `encode_held_chain_into` for a build that stages no handshake extension (`ext_chain`): the
+/// chain of its Open is the bound this node announces for the peer, when it announces one,
+/// presented from the value with no chain held for it. The bytes are those
+/// `encode_held_chain_into` writes for the chain of that one entry
+/// ([`crate::extbound::encode_remote_bound_ext`]), and nothing for none, which is what such a
+/// build staged on the Open it sent.
+#[cfg(any(
+    all(
+        feature = "session-fixed-storage",
+        feature = "tx-lend-only",
+        feature = "storage-profile",
+        feature = "session-unicast",
+        feature = "codec-open-body",
+        feature = "session-unicast-open",
+        not(any(
+            feature = "session-unicast-accept",
+            feature = "transport-qos",
+            feature = "session-extshm",
+            feature = "session-extauth",
+            feature = "transport-multilink",
+            feature = "transport-lowlatency",
+            feature = "session-extcompression"
+        ))
+    ),
+    all(test, feature = "codec-init-body", feature = "codec-open-body")
+))]
+pub(crate) fn encode_open_bound_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    bound: Option<crate::extbound::Bound>,
+) -> Result<(), CodecError> {
+    let Some(bound) = bound else {
+        return Ok(());
+    };
+    let value = wz_codecs::ext_zint::ExtZintParts {
+        value: u64::from(bound as u8),
+    };
+    // The chain's last entry, so its continuation bit is clear, as the header constant has it.
+    let entry = ExtEntryParts {
+        header: crate::extbound::REMOTE_BOUND_EXT_HEADER,
+        body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtZint(&value),
+    };
+    // By reference, as the documents' chain writers hand each entry over, so the writer is the
+    // one their chains instantiate.
+    let entry = &entry;
+    wz_codecs::ext_entry::ExtEntryWire::encode_source(&entry, &mut TxSink::new(&mut *buf))
 }
 
 /// The header byte of the head [`encode_open_head_into`] writes: what
@@ -906,7 +1062,7 @@ mod tests {
         crate::session_init_params::SessionInitParams {
             whatami: WhatAmI::Peer,
             zid: crate::session_zid::SessionZid::from_array([0x01; 4]),
-            seq_num_res: 0,
+            seq_num_res: crate::policy::SnResolution::Bits8,
             req_id_res: 0,
             batch_size: 0,
             lease_ms,
@@ -919,9 +1075,11 @@ mod tests {
             ),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
-                .expect("32-byte test key"),
+                .expect("32-byte test key")
+                .into(),
             policy: crate::policy::SessionPolicy::defaults(),
             limits: crate::limits::SessionLimits::BUILD,
+            region: None,
         }
     }
 
@@ -962,6 +1120,93 @@ mod tests {
                 bare[0] & wire_const::FLAG_T_Z,
                 0,
                 "is_ack={is_ack}: no chain, no Z"
+            );
+        }
+    }
+
+    /// The region a session is opened with closes every Init it writes, the entry before it
+    /// gaining the continuation bit and the header its Z when the chain is otherwise empty, with
+    /// the rest of the message unchanged; a session opened with none writes no entry, and an Open
+    /// never carries one.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-init-body",
+        feature = "codec-open-body"
+    ))]
+    #[test]
+    fn an_init_ends_with_the_region_the_session_was_opened_with() {
+        use crate::ext_header::{EXT_ENC_Z64, EXT_FLAG_Z};
+        use crate::extpatch::{encode_patch_ext_at, CURRENT_PATCH, PATCH_EXT_ID};
+        use crate::extregion::{RegionName, REGION_NAME_EXT_HEADER};
+        let bare = open_params(10_000);
+        let mut named = open_params(10_000);
+        named.region = Some(RegionName::new("north").expect("a valid region name"));
+        let entry: &[u8] = &[REGION_NAME_EXT_HEADER, 5, b'n', b'o', b'r', b't', b'h'];
+        for is_ack in [false, true] {
+            let chain = [encode_patch_ext_at(CURRENT_PATCH)];
+            let without = super::encode_init(&bare, is_ack, &chain, None).expect("encodes");
+            let with = super::encode_init(&named, is_ack, &chain, None).expect("encodes");
+            // A build that stages no handshake extension writes the same Init from the parameters.
+            for (params, wire) in [(&bare, &without), (&named, &with)] {
+                let mut direct = alloc::vec::Vec::new();
+                super::encode_init_patch_into(
+                    &mut direct,
+                    params,
+                    super::InitCaps::of(params),
+                    is_ack,
+                    None,
+                )
+                .expect("encodes");
+                assert_eq!(
+                    &direct, wire,
+                    "is_ack={is_ack}: the patch level written from the parameters is its chain"
+                );
+            }
+            let patch_at = without.len() - 2;
+            assert_eq!(
+                &with[..patch_at],
+                &without[..patch_at],
+                "is_ack={is_ack}: the head and the body are the ones written without a region"
+            );
+            assert_eq!(
+                &with[patch_at..patch_at + 2],
+                &[PATCH_EXT_ID | EXT_ENC_Z64 | EXT_FLAG_Z, CURRENT_PATCH],
+                "is_ack={is_ack}: the patch entry is followed by another"
+            );
+            assert_eq!(
+                &with[patch_at + 2..],
+                entry,
+                "is_ack={is_ack}: the region closes the message"
+            );
+
+            let none = super::encode_init(&bare, is_ack, &[], None).expect("encodes");
+            let alone = super::encode_init(&named, is_ack, &[], None).expect("encodes");
+            assert_eq!(
+                none[0] & wire_const::FLAG_T_Z,
+                0,
+                "is_ack={is_ack}: nothing, no Z"
+            );
+            assert_eq!(
+                alone[0],
+                none[0] | wire_const::FLAG_T_Z,
+                "is_ack={is_ack}: a region alone sets Z"
+            );
+            assert_eq!(
+                &alone[1..none.len()],
+                &none[1..],
+                "is_ack={is_ack}: the same body"
+            );
+            assert_eq!(
+                &alone[none.len()..],
+                entry,
+                "is_ack={is_ack}: then the region"
+            );
+        }
+        for is_ack in [false, true] {
+            assert_eq!(
+                super::encode_open(&named, is_ack, None, &[]).expect("encodes"),
+                super::encode_open(&bare, is_ack, None, &[]).expect("encodes"),
+                "is_ack={is_ack}: an Open carries no region"
             );
         }
     }
@@ -1094,6 +1339,25 @@ mod tests {
                     );
                 }
             }
+        }
+        // A build that stages no handshake extension writes the bound it announces from the value:
+        // the chain of its one entry, closing the Open, and nothing for none.
+        use crate::extbound::{encode_remote_bound_ext, Bound, REMOTE_BOUND_EXT_HEADER};
+        for (bound, wire) in [
+            (None, &[][..]),
+            (Some(Bound::North), &[REMOTE_BOUND_EXT_HEADER, 0][..]),
+            (Some(Bound::South), &[REMOTE_BOUND_EXT_HEADER, 1][..]),
+        ] {
+            let held: alloc::vec::Vec<_> = bound.map(encode_remote_bound_ext).into_iter().collect();
+            let mut staged = alloc::vec::Vec::new();
+            super::encode_held_chain_into(&mut staged, held.as_slice().into()).expect("held");
+            let mut direct = alloc::vec::Vec::new();
+            super::encode_open_bound_into(&mut direct, bound).expect("direct");
+            assert_eq!(
+                direct, staged,
+                "bound {bound:?}: the held chain of its one entry"
+            );
+            assert_eq!(direct, wire, "bound {bound:?}");
         }
     }
 

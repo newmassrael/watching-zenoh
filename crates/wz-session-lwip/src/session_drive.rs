@@ -251,7 +251,7 @@ mod tests {
         SessionInitParams {
             whatami: WhatAmI::Peer,
             zid: [0x01, 0x02, 0x03, 0x04].into(),
-            seq_num_res: 2,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size: 1024,
             lease_ms: 10_000,
@@ -265,7 +265,10 @@ mod tests {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
             limits: wz_session_core::limits::SessionLimits::BUILD,
-            cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+            cookie_signing_key: SigningKey::new(vec![7u8; 32])
+                .expect(">=32-byte key")
+                .into(),
+            region: None,
         }
     }
 
@@ -562,8 +565,26 @@ mod tests {
         std::assert_eq!(iterations.get(), 0);
     }
 
+    /// A session over `sink` on `clock`, established as one that completed its handshake
+    /// stands (`SessionLinkActions::enter_established`), so the Push it is handed leaves: a data
+    /// send before establishment is refused.
+    #[cfg(feature = "codec-push")]
+    fn established(
+        sink: CellRc<dyn BoxedLinkDriver>,
+        clock: CoopTime<FrozenClock>,
+    ) -> SessionHandle<FrozenClock> {
+        let actions =
+            SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
+                sink,
+                test_params(),
+                clock,
+            );
+        actions.enter_established();
+        actions
+    }
+
     /// ARCHITECTURE section 9.1 on the MCU profile, the two ends joined: the real
-    /// session encodes a push straight into the pbuf the real lwIP driver lends,
+    /// session encodes a push straight into the slot the real lwIP driver lends,
     /// and the datagram that comes out is the one the same session makes through a
     /// driver that lends nothing. Each end is pinned alone (the session against a
     /// fake lender, the driver against hand-made frames); this is the join, where
@@ -571,7 +592,7 @@ mod tests {
     /// after.
     #[cfg(feature = "codec-push")]
     #[test]
-    fn a_push_encoded_into_the_lent_pbuf_is_the_datagram_a_copying_driver_sends() {
+    fn a_push_encoded_into_the_lent_slot_is_the_datagram_a_copying_driver_sends() {
         /// The same driver with the lend taken away: every default method.
         struct NoLend(Rc<LwipUdpDriver>);
         impl BoxedLinkDriver for NoLend {
@@ -588,12 +609,7 @@ mod tests {
         let push_through = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
             let runtime = CoopRuntime::new(FrozenClock);
             let clock = CoopTime::new(&runtime);
-            let actions =
-                SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
-                    driver_sink,
-                    test_params(),
-                    clock,
-                );
+            let actions = established(driver_sink, clock);
             actions
                 .send_push_literal("home/lent", payload, true)
                 .expect("push");
@@ -666,7 +682,7 @@ mod tests {
         std::assert_eq!(
             (doors.by_slot.get(), doors.by_bytes.get()),
             (1, 0),
-            "the push went through the lent pbuf and not the copying send"
+            "the push went through the lent slot and not the copying send"
         );
         let lent = delivered(&lending);
 
@@ -686,27 +702,22 @@ mod tests {
             lent[0].windows(payload.len()).any(|w| w == payload),
             "and it carries the payload"
         );
-        std::assert_eq!(
-            wz_link_lwip::tx_payloads_out(),
-            0,
-            "nothing is left out of lwIP's hands"
-        );
     }
 
     /// ARCHITECTURE section 9.1 on the MCU profile, the batching window: the
-    /// window's frame is opened in ONE slot of the transmit pool, lent through
-    /// the real lwIP driver, every message of the window is encoded into it, and
-    /// the flush sends that slot. Nothing crosses the copying send (which, with a
-    /// pool installed, would copy the flushed batch into a second slot), and the
-    /// datagram is the one the heap stage makes through a driver that lends
-    /// nothing. The pool's own lifecycle balances at the end.
+    /// window's frame is opened in the slot the real lwIP driver reserves for its
+    /// link, every message of the window is encoded into it, and the flush hands
+    /// that slot to the driver, which copies the datagram into ONE slot of the
+    /// transmit pool. Nothing crosses the session's copying send, and the datagram
+    /// is the one the heap stage makes through a driver that lends nothing. The
+    /// pool's own lifecycle balances at the end.
     ///
     /// Not in the slim profile: its socket carries 256 bytes, short of this
     /// session's 1024-byte batch, so the window is staged on the heap there by
     /// rule (a slot short of the budget is refused).
     #[cfg(all(feature = "codec-push", not(feature = "buffer-pool-session-rx-slim")))]
     #[test]
-    fn a_batch_window_leaves_from_one_pool_slot_with_nothing_copied_at_flush() {
+    fn a_batch_window_leaves_as_its_lent_slot_through_one_pool_slot() {
         use wz_link_lwip::tx_pool::{self, TxPoolStorage};
 
         /// The same driver with the lend taken away: every default method.
@@ -775,12 +786,7 @@ mod tests {
         let window = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
             let runtime = CoopRuntime::new(FrozenClock);
             let clock = CoopTime::new(&runtime);
-            let actions =
-                SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
-                    driver_sink,
-                    test_params(),
-                    clock,
-                );
+            let actions = established(driver_sink, clock);
             actions.batch_start().expect("batch_start");
             for payload in payloads {
                 actions
@@ -852,6 +858,5 @@ mod tests {
             wz_link_lwip::session_tx_pool_mcu::SLOT_COUNT,
             "and no slot is still out"
         );
-        std::assert_eq!(wz_link_lwip::tx_payloads_out(), 0);
     }
 }

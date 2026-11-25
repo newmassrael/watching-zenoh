@@ -111,10 +111,12 @@ the reference's, by its row in `deploy/pico_host_ceiling.json`:
   join outside the ceiling. A row with `ratio_at_most` null is unfilled: it fails `--check`
   with the row this run reads, and `--measure` prints the rows of every case it builds.
 - ONE TABLE, TWO LANES. The release DLL of each width of Windows has its row in the same table
-  (`pico_windows_package.CEILING_CASES`), read and graded by the Windows package job, since only
-  a Windows host builds it. The rule of a row is `pico_host_ceiling.py`'s, which both lanes
-  import; this gate holds the table to the population of both (`ceiling_cases`), so a Windows
-  row is checked for its shape on every tree, wherever it is graded.
+  (`pico_windows_package.CEILING_CASES`), and so do the like-for-like library of each width and
+  each of wz's doors over it (`pico_windows_package.FEATURE_CASES`), read and graded by the
+  Windows package job, since only a Windows host builds them. The rule of a row is
+  `pico_host_ceiling.py`'s, which both lanes import; this gate holds the table to the population
+  of both (`ceiling_cases`), so a Windows row is checked for its shape on every tree, wherever it
+  is graded.
 
 ## The hosted shards
 
@@ -202,6 +204,10 @@ GATE_RUSTFLAGS = ["-C", "linker=cc", "-C", f"link-arg={GNU_LD}"]
 # What `comment_linker` answers for a library whose `.comment` names no linker, as GNU ld's.
 NO_LINKER_NAMED = "no linker named in .comment"
 
+# The profile every artifact a deployer receives is built with (`crates/Cargo.toml`: fat LTO, one
+# codegen unit). A case measures what ships, so it is built with this profile or one inheriting it;
+# the optimized build of daily work (`release`, thin LTO) carries copies a shipped library does not.
+SHIP_PROFILE = "ship"
 # The configuration of the library without `std` (`crates/.cargo/capi-nostd.toml`), which a case
 # composes with the profile of the same name.
 NOSTD_CONFIG = ".cargo/capi-nostd.toml"
@@ -306,9 +312,9 @@ class Case:
     forbid: tuple[str, ...] = ()
     require: tuple[str, ...] = ()
     exports: int | None = None
-    # The cargo profile (`crates/Cargo.toml`). It is not a capability, so it leaves the pico
-    # reference alone: that is derived from the features only.
-    profile: str = "release"
+    # The cargo profile (`crates/Cargo.toml`): the shipping one or one inheriting it. It is not a
+    # capability, so it leaves the pico reference alone: that is derived from the features only.
+    profile: str = SHIP_PROFILE
     # Patterns no symbol the library leaves UNDEFINED may match (`nm -u`): a name the library
     # expects whoever loads it to define, which no C program linking it does.
     forbid_undefined: tuple[str, ...] = ()
@@ -593,9 +599,12 @@ CASES: tuple[Case, ...] = (
     Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 2_024_404,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 2,007,557 hosted, +9,344 on one machine.
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY, MULTICAST, COOP_ENGINE),
-         require=(SINGLE_THREADED, TOKIO_ENGINE, KECCAK, LOG_FACADE),
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED,
+                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
+         require=(SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
               "with the unstable API and the connectivity plane. Hosted reads run higher than "
@@ -623,9 +632,12 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_657_964,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,644,062 hosted, +8,004 on one machine.
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY, MULTICAST),
-         require=(SINGLE_THREADED,), profile="capi-small",
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED,
+                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
+         require=(SINGLE_THREADED, COOP_ENGINE), profile="capi-small",
          note="the pico-client build with panics aborting: the like-for-like of zenoh-pico's C. "
               "1,468,134 measured against pico-client's 1,790,361 (-18.0%). Read 1,498,558 on "
               "hosted CI on 2026-10-26 with the key set's gate and the engine port's advanced "
@@ -655,9 +667,12 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_088_660,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 2,075,981 hosted, +7,732 on one machine.
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST),
-         require=(UDP, SINGLE_THREADED),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
          note="1,894,361 on hosted CI on 2026-10-26, 1,889,713 before the key set's gate: the "
               "same growth as pico-client's, whose note attributes it. 1,910,913 on hosted CI on "
               "2026-10-27 (head `f4bdeaee5`, +16,552), the growth pico-client's note states. "
@@ -1107,8 +1122,12 @@ CASES: tuple[Case, ...] = (
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_218_864,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 3,241,530 hosted, +2,124 on one machine.
-         forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
-         require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE, KECCAK),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          note="peer implies scout and with it the UDP group"),
     # 2026-11-03, the SCE pins -- 4,356,318 on hosted run 41589047498 (4,355,414 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
@@ -1147,9 +1166,13 @@ CASES: tuple[Case, ...] = (
     Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_739_032,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 4,740,260 hosted, +8,024 on one machine.
-         forbid=(SINGLE_THREADED,),
-         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                  CONNECTIVITY, MULTICAST),
+         # 2026-11-25 -- the crate's default and the pico base name the cooperative engine (P1 of
+         # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
+         # tokio engine's until the first reading on it moves them.
+         # Gossip is off in the preset (decision Q7), and the tokio engine's own planes (its
+         # accept loop, responder and scouting glue) are not linked.
+         forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK),
+         require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN, STD_RUNTIME),
          exports=811,
          note="every capability on: the symbol count is the drop-in's. 811 with the three pico "
               "internals clang emits calls to into every program of the unstable arm "
@@ -1179,7 +1202,11 @@ CASES: tuple[Case, ...] = (
     # this day says: +3,448 on one machine; the budget moves by it and keeps its headroom.
     Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_021_848,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
-                 ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT)),
+                 ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
+         # The tokio engine's own marks, which the pico client required while its default was that
+         # engine: the zenoh-c drop-in still runs on it, with zenoh's derivation of the initial
+         # sequence number and the runtime's `log` facade.
+         require=(TOKIO_ENGINE, KECCAK, LOG_FACADE)),
     # 2026-11-03, the SCE pins -- 1,974,779 on hosted run 41589047498 (1,973,891 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +19,522 on
@@ -2067,6 +2094,39 @@ class CaseBuild:
     link_args: tuple[str, ...]
 
 
+def cargo_profiles(manifest: str) -> dict[str, dict[str, str]]:
+    """The keys of each `[profile.<name>]` table of a Cargo manifest, each value as written; the
+    tables of a profile's package overrides are not the profile's."""
+    out: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for line in manifest.splitlines():
+        head = re.match(r"^\[profile\.([\w-]+)\]\s*$", line)
+        if head:
+            current = out.setdefault(head.group(1), {})
+        elif line.startswith("["):
+            current = None
+        elif current is not None:
+            pair = re.match(r"^([\w-]+)\s*=\s*(.+?)\s*$", line)
+            if pair:
+                current[pair.group(1)] = pair.group(2)
+    return out
+
+
+def inherits_from(profile: str, base: str, profiles: Mapping[str, Mapping[str, str]]) -> bool:
+    """Whether `profile` is `base` or reaches it through its `inherits` chain in `profiles`
+    (`cargo_profiles`); a chain that loops or ends elsewhere does not."""
+    seen: set[str] = set()
+    while profile not in seen:
+        if profile == base:
+            return True
+        seen.add(profile)
+        parent = profiles.get(profile, {}).get("inherits")
+        if parent is None:
+            return False
+        profile = parent.strip('"')
+    return False
+
+
 def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
                cfg: set[str] | None = None) -> CaseBuild:
     """The build of `case` in `env` (the gate's, `build_env`). A case that names configuration
@@ -2299,11 +2359,13 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
 
 def ceiling_cases() -> list[str]:
     """The cases the ceiling holds: every pico case of this gate, the ones `report_reference`
-    builds a reference for, and the release DLL of each width of Windows, which the Windows package
-    lane builds and grades (`pico_windows_package.CEILING_CASES`). This gate holds the table to
-    all of them, so a row of either lane is checked on every tree whichever host builds it."""
+    builds a reference for, and the release DLL of each width of Windows with the like-for-like
+    library and each door over it, which the Windows package lane builds and grades
+    (`pico_windows_package.CEILING_CASES`, `pico_windows_package.FEATURE_CASES`). This gate holds
+    the table to all of them, so a row of either lane is checked on every tree whichever host
+    builds it."""
     return ([c.id for c in CASES if c.package == "wz-capi-pico"]
-            + list(pico_windows_package.CEILING_CASES))
+            + list(pico_windows_package.CEILING_CASES) + list(pico_windows_package.FEATURE_CASES))
 
 
 def measure_command(case_id: str) -> str:
@@ -2607,9 +2669,9 @@ def cmd_selftest() -> int:
     # The plan of a case's build, which the performance matrix builds its arm W by.
     plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {})
     expect("a case of no configuration file is built for the default target, by the gate's linker",
-           plain.cmd[:6] == ("cargo", "build", "--profile", "release", "-p", "wz-capi-pico")
+           plain.cmd[:6] == ("cargo", "build", "--profile", SHIP_PROFILE, "-p", "wz-capi-pico")
            and plain.cmd[-3:] == ("--no-default-features", "--features", "a,b")
-           and "--target" not in plain.cmd and plain.lib == TARGET / "release" / "libt.so"
+           and "--target" not in plain.cmd and plain.lib == TARGET / SHIP_PROFILE / "libt.so"
            and plain.link_args == (GNU_LD,)
            and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS)})
     expect("a case of the crate's default features names none",
@@ -2715,9 +2777,11 @@ def cmd_selftest() -> int:
                     reference_key("other", "cc", flags, rule),
                     reference_key("pin", "other", flags, rule)}) == 4)
     expect("a case's features are its package's as cargo resolves them",
-           {"serial-drive-own-thread", "rx-busy-poll"}
-           <= case_features(next(c for c in CASES if c.id == "pico-client"))
-           and "peer" in case_features(next(c for c in CASES if c.id == "pico-default")))
+           "engine-coop" in case_features(next(c for c in CASES if c.id == "pico-client"))
+           and not {"engine-tokio", "serial-drive-own-thread", "rx-busy-poll"}
+           & case_features(next(c for c in CASES if c.id == "pico-client"))
+           and "peer" in case_features(next(c for c in CASES if c.id == "pico-default"))
+           and "gossip" not in case_features(next(c for c in CASES if c.id == "pico-default")))
     # A profile is a compile property, not a capability: a case that differs from another only in
     # its profile must be divided by the same pico, or the ratio moves from both sides at once.
     by_id = {c.id: c for c in CASES}
@@ -2800,6 +2864,22 @@ def cmd_selftest() -> int:
     expect("every case's profile is one crates/Cargo.toml defines",
            {c.profile for c in CASES} <= {"release"} | set(
                re.findall(r"^\[profile\.([\w-]+)\]", (CRATES / "Cargo.toml").read_text(), re.M)))
+    # THE SHIPPING PROFILE: a case reads the library a deployer receives, not the daily build.
+    profiles = cargo_profiles((CRATES / "Cargo.toml").read_text(encoding="utf-8"))
+    expect("the shipping profile links one program: fat LTO and one codegen unit",
+           profiles.get(SHIP_PROFILE, {}).get("lto") == '"fat"'
+           and profiles.get(SHIP_PROFILE, {}).get("codegen-units") == "1")
+    expect("every size case is built with the shipping profile or one inheriting it",
+           all(inherits_from(c.profile, SHIP_PROFILE, profiles) for c in CASES))
+    chain = cargo_profiles('[profile.a]\nlto = "fat"\n[profile.b]\ninherits = "c"\n[profile.c]\n'
+                           'inherits = "a"\n[profile.c.package.x]\nopt-level = "s"\n'
+                           '[profile.d]\ninherits = "e"\n[profile.e]\ninherits = "d"\n')
+    expect("a profile inherits through its chain, and a loop or another base is no inheritance",
+           inherits_from("b", "a", chain) and inherits_from("a", "a", chain)
+           and not inherits_from("d", "a", chain) and not inherits_from("release", "a", chain)
+           and chain["c"] == {"inherits": '"a"'})
+    expect("the Windows lane builds its packages and its client with std by the same profile",
+           pico_windows_package.SHIP_PROFILE == SHIP_PROFILE)
     # THE PICO CEILING (D9): synthetic readings against each kind of row, and the committed table.
     def rd(wz: int, pico: int, date: str = "2026-11-21", tc: str = "cc 1") -> dict:
         return ceiling_reading(wz, pico, "e1ab223a28aa", tc, date)
@@ -2902,6 +2982,7 @@ def cmd_selftest() -> int:
            and set(ceiling_rows(committed)) == set(ceiling_cases())
            and {c.id for c in CASES if c.package == "wz-capi-pico"} <= set(ceiling_cases())
            and set(pico_windows_package.CEILING_CASES) <= set(ceiling_cases())
+           and set(pico_windows_package.FEATURE_CASES) <= set(ceiling_cases())
            and len(pico_windows_package.CEILING_CASES) == len(pico_windows_package.ARCHES))
     expect("an unfilled row names no command when its lane gives none",
            "prints the same row" not in grade_ceiling("t", unfilled, set_from)[0][0])

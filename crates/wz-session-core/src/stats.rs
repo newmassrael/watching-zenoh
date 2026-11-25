@@ -817,6 +817,17 @@ impl TransportStats {
         self.tx.inc_wire(bytes);
     }
 
+    /// Count one outbound write of `bytes` bytes that carried `transport_messages` transport
+    /// messages: a group's writer, which says how many it put in the datagram (the multicast
+    /// recorder's `datagram_sent`).
+    #[inline]
+    pub fn inc_tx_datagram(&self, bytes: usize, transport_messages: usize) {
+        self.tx.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.tx
+            .t_msgs
+            .fetch_add(transport_messages, Ordering::Relaxed);
+    }
+
     /// Count one inbound WIRE read of `bytes` bytes — the RX dispatch. Bytes
     /// only: see [`Self::inc_rx_transport_message`].
     #[inline]

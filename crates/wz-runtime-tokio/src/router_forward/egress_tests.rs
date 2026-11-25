@@ -12,8 +12,7 @@ use std::sync::{Condvar, Mutex};
 
 use super::egress::{message_cost, EgressBudget};
 use super::*;
-use crate::runtime_impl::TokioTime;
-use crate::session_glue::{new_session_actions, BoxedLinkDriver, LinkSendOutcome};
+use crate::session_glue::{BoxedLinkDriver, LinkSendOutcome};
 use crate::sync::PlainCell;
 use crate::Reliability;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -174,11 +173,17 @@ pub(super) fn zid(b: u8) -> Zid {
 
 /// A client face over `link`, whose remote peer is `peer`.
 pub(super) fn client_over(link: &Arc<RoomLink>, peer: Zid) -> Arc<SessionLinkActions> {
-    let actions = new_session_actions(
-        link.clone(),
-        fixture_session_init_params(),
-        TokioTime::new(),
-    );
+    established_face(link.clone(), peer)
+}
+
+/// A client face over `driver`, whose remote peer is `peer`, established: a router holds the
+/// face of a session that completed its handshake, and a session refuses a data send before
+/// that, so what the router forwards to a face reaches its link only once it is established.
+pub(super) fn established_face(
+    driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
+    peer: Zid,
+) -> Arc<SessionLinkActions> {
+    let actions = crate::test_fixtures::established_actions(driver, fixture_session_init_params());
     actions.fact_remote_peer_zid(|s| {
         *s = Some(
             wz_session_core::session_zid::SessionZid::new(peer.as_slice())
@@ -878,14 +883,7 @@ fn router_over_a_queue() -> (RouterForwarder, impl Sized, crate::writer_queue::O
     let (tx, mut rx) =
         crate::writer_queue::outbound_channel_with_capacity([2; Priority::NUM], 65_535);
     let link = Arc::new(QueueLink { tx });
-    let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
-    dest.fact_remote_peer_zid(|s| {
-        *s = Some(
-            wz_session_core::session_zid::SessionZid::new(zid(0xCC).as_slice())
-                .expect("a 1 to 16 byte zid, not all zero"),
-        )
-    });
-    dest.fact_peer_whatami(|s| *s = Some(0b10));
+    let dest = established_face(link, zid(0xCC));
     let fwd = RouterForwarder::new(zid(0x01));
     let quiet = RoomLink::new(false);
     fwd.register(SOURCE, &client_over(&quiet, zid(0xAA)));
@@ -1012,14 +1010,7 @@ async fn a_real_write_queue_tells_the_router_when_its_writer_makes_room() {
     // A lane that holds one frame: any frame fills it.
     let (tx, mut rx) = crate::writer_queue::outbound_channel_with_capacity([1; Priority::NUM], 4);
     let link = Arc::new(QueueLink { tx });
-    let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
-    dest.fact_remote_peer_zid(|s| {
-        *s = Some(
-            wz_session_core::session_zid::SessionZid::new(zid(0xCC).as_slice())
-                .expect("a 1 to 16 byte zid, not all zero"),
-        )
-    });
-    dest.fact_peer_whatami(|s| *s = Some(0b10));
+    let dest = established_face(link, zid(0xCC));
     let fwd = RouterForwarder::new(zid(0x01));
     let quiet = RoomLink::new(false);
     fwd.register(SOURCE, &client_over(&quiet, zid(0xAA)));

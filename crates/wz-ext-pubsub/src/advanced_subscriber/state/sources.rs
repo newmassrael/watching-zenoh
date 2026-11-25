@@ -22,6 +22,10 @@ struct Row<K, V> {
 /// The sources of one kind a subscriber orders at once.
 pub(super) struct Sources<K, V> {
     rows: [Option<Row<K, V>>; caps::MAX_ADVANCED_SOURCES],
+    /// How many rows, from the first, have held a source: every row past them is free, so a scan
+    /// stops there. A bound the compiler cannot see keeps each scan one loop, where the table's
+    /// constant length had it copied out once for each row.
+    used: usize,
     /// How many times a source was met, which orders the rows by when each was last met.
     met: u64,
 }
@@ -31,12 +35,18 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
     pub(super) fn new() -> Self {
         Self {
             rows: core::array::from_fn(|_| None),
+            used: 0,
             met: 0,
         }
     }
 
+    /// The rows that have held a source; the rest are free.
+    fn used_rows(&self) -> &[Option<Row<K, V>>] {
+        self.rows.get(..self.used).unwrap_or(&[])
+    }
+
     fn slot_of(&self, key: &K) -> Option<usize> {
-        self.rows
+        self.used_rows()
             .iter()
             .position(|row| row.as_ref().is_some_and(|row| row.key == *key))
     }
@@ -69,10 +79,11 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
         let slot = match self.slot_of(key) {
             Some(slot) => slot,
             None => {
-                let slot = match self.rows.iter().position(Option::is_none) {
+                let slot = match self.used_rows().iter().position(Option::is_none) {
                     Some(free) => free,
+                    None if self.used < self.rows.len() => self.used,
                     None => self
-                        .rows
+                        .used_rows()
                         .iter()
                         .enumerate()
                         .filter_map(|(slot, row)| row.as_ref().map(|row| (slot, row)))
@@ -85,6 +96,7 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
                     value: make(),
                     met,
                 });
+                self.used = self.used.max(slot + 1);
                 slot
             }
         };
@@ -96,8 +108,10 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
     /// Every row, with its slot and key, in the order of the slots.
     #[cfg(feature = "advanced-recovery")]
     pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &K, &mut V)> + '_ {
+        let used = self.used;
         self.rows
             .iter_mut()
+            .take(used)
             .enumerate()
             .filter_map(|(slot, row)| row.as_mut().map(|row| (slot, &row.key, &mut row.value)))
     }
@@ -107,7 +121,8 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
     #[cfg(feature = "advanced-recovery")]
     pub(super) fn retain(&mut self, mut keep: impl FnMut(usize, &mut V) -> bool) -> usize {
         let mut gone = 0;
-        for (slot, row) in self.rows.iter_mut().enumerate() {
+        let used = self.used;
+        for (slot, row) in self.rows.iter_mut().take(used).enumerate() {
             let goes = match row.as_mut() {
                 Some(held) => !keep(slot, &mut held.value),
                 None => false,
@@ -133,6 +148,7 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
             value,
             met: self.met,
         });
+        self.used = self.used.max(slot + 1);
     }
 }
 
@@ -146,5 +162,65 @@ impl<K: PartialEq + Clone, V> core::ops::Index<&K> for Sources<K, V> {
             .as_ref()
             .expect("a row's slot holds it")
             .value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The slot `key` is met in, with every row free to go.
+    fn meet(table: &mut Sources<usize, usize>, key: usize) -> Option<usize> {
+        table.entry(&key, || key, |_, _| true).map(|(slot, _)| slot)
+    }
+
+    #[test]
+    fn sources_take_the_rows_in_order_and_keep_their_own() {
+        let rows = caps::MAX_ADVANCED_SOURCES;
+        let mut table = Sources::new();
+        for key in 0..rows {
+            assert_eq!(meet(&mut table, key), Some(key));
+        }
+        assert_eq!(
+            meet(&mut table, 0),
+            Some(0),
+            "a source met again keeps its row"
+        );
+    }
+
+    #[test]
+    fn a_full_table_gives_the_row_met_longest_ago_of_those_that_may_go() {
+        let rows = caps::MAX_ADVANCED_SOURCES;
+        assert!(rows >= 4, "the case needs four rows");
+        let mut table = Sources::new();
+        for key in 0..rows {
+            meet(&mut table, key);
+        }
+        meet(&mut table, 0);
+        // Source 1 is the one met longest ago now.
+        assert_eq!(meet(&mut table, rows), Some(1));
+        // Source 2 is next, but its row may not go: source 3's goes instead.
+        let slot = table
+            .entry(&(rows + 1), || 0, |slot, _| slot != 2)
+            .map(|(slot, _)| slot);
+        assert_eq!(slot, Some(3));
+        // No row may go: the new source has none.
+        assert!(table.entry(&(rows + 2), || 0, |_, _| false).is_none());
+    }
+
+    #[cfg(feature = "advanced-recovery")]
+    #[test]
+    fn a_row_let_go_is_taken_before_one_never_held() {
+        let mut table = Sources::new();
+        for key in 0..3 {
+            meet(&mut table, key);
+        }
+        assert_eq!(table.retain(|slot, _| slot != 1), 1);
+        assert_eq!(meet(&mut table, 9), Some(1), "the row let go comes first");
+        assert_eq!(meet(&mut table, 10), Some(3), "then the first never held");
+        assert!(
+            table.iter_mut().map(|(_, key, _)| *key).eq([0, 9, 2, 10]),
+            "the rows held, in the order of the slots"
+        );
     }
 }

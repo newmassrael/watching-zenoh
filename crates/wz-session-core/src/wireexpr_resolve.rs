@@ -419,7 +419,13 @@ impl<P: Storage> OwnMappingSpace for OwnSpace<'_, P> {
 /// Closed, and not a trait object: the policy of the alias table is a type parameter, so a
 /// build reads the tables of the policies it holds and no other, and a reader never needs to
 /// know which one it is.
-pub struct PeerSpace<'a, P: Storage>(PeerSpaceRepr<'a, P>);
+pub struct PeerSpace<'a, P: Storage> {
+    repr: PeerSpaceRepr<'a, P>,
+    /// Whose declarations an id is read as: a table that holds the aliases of more than one
+    /// sender (the members of a group) keys each by its sender and id
+    /// ([`crate::wire_id::sender_peer_key`]), and a table of one peer's reads them as sender 0.
+    sender: u64,
+}
 
 impl<P: Storage> Clone for PeerSpace<'_, P> {
     fn clone(&self) -> Self {
@@ -451,23 +457,28 @@ impl<P: Storage> Clone for PeerSpaceRepr<'_, P> {
 impl<P: Storage> Copy for PeerSpaceRepr<'_, P> {}
 
 impl<'a, P: Storage> PeerSpace<'a, P> {
+    /// `repr` as a peer space, its ids read as sender 0's.
+    fn of(repr: PeerSpaceRepr<'a, P>) -> Self {
+        Self { repr, sender: 0 }
+    }
+
     /// A plain map, as a peer space.
     #[cfg(feature = "alloc")]
     fn of_map(map: &'a HashMap<u64, String>) -> Self {
-        Self(PeerSpaceRepr::Map(map))
+        Self::of(PeerSpaceRepr::Map(map))
     }
 
     /// The alias table of the session's policy, as a peer space.
     pub(crate) fn of_aliases(table: &'a PeerAliases<P>) -> Self {
-        Self(PeerSpaceRepr::Aliases(table))
+        Self::of(PeerSpaceRepr::Aliases(table))
     }
 
     /// The key the peer declared for `id`, when its table keeps it in the session's key arena (the
     /// lent policy's): the row's own key, whose block a holder may keep. `None` on any other table.
     fn held(&self, id: crate::wire_id::ExprId) -> Option<&'a crate::key_arena::KeyRef> {
-        match self.0 {
+        match self.repr {
             PeerSpaceRepr::Aliases(table) => table
-                .find(crate::wire_id::peer_key(id))
+                .find(crate::wire_id::sender_peer_key(self.sender, id))
                 .and_then(KeyBacking::held),
             #[cfg(feature = "alloc")]
             _ => None,
@@ -478,10 +489,11 @@ impl<'a, P: Storage> PeerSpace<'a, P> {
     ///
     /// A peer's table holds ids widened to 64 bits, as the id map every
     /// session table shares does (`crate::id_map::IdMap`); an `ExprId` is
-    /// looked up widened ([`crate::wire_id::peer_key`]).
+    /// looked up widened, under the sender the space reads ([`crate::wire_id::sender_peer_key`]).
+    /// Our own table standing in the sender's half is keyed by our ids alone.
     fn literal(&self, id: crate::wire_id::ExprId) -> Option<&'a str> {
-        let key = crate::wire_id::peer_key(id);
-        match self.0 {
+        let key = crate::wire_id::sender_peer_key(self.sender, id);
+        match self.repr {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Map(map) => map.get(&key).map(String::as_str),
             #[cfg(feature = "alloc")]
@@ -511,7 +523,7 @@ impl<'a, P: Storage> PeerSpaceView<'a, P> {
 
     /// How many ids the peer has declared.
     pub fn len(&self) -> usize {
-        match self.0 .0 {
+        match self.0.repr {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Map(map) => map.len(),
             #[cfg(feature = "alloc")]
@@ -546,6 +558,15 @@ impl<P: Storage> OwnMappingSpace for PeerSpaceView<'_, P> {
 }
 
 impl<'a, P: Storage, O: Storage> MappingSpaces<'a, P, O> {
+    /// This pair with the peer's half read as `sender`'s declarations, in a table that holds the
+    /// aliases of more than one sender (the members of a group): an id is looked up under its
+    /// sender ([`crate::wire_id::sender_peer_key`]). A pair is built reading sender 0, the one
+    /// peer of a table that holds one.
+    pub fn from_sender(mut self, sender: u64) -> Self {
+        self.peer.sender = sender;
+        self
+    }
+
     /// This pair without its own space: the peer's half alone, for a reader whose wire
     /// form names its key in the sender's space only (the `ext_keyexpr` of an
     /// undeclaration) and must not be handed an `M=0` half it would silently read.
@@ -682,7 +703,7 @@ impl<'a> MappingSpaces<'a, crate::bounded::Heap> {
         theirs: &'a dyn OwnMappingSpace,
     ) -> Self {
         Self {
-            peer: PeerSpace(PeerSpaceRepr::Ours(ours)),
+            peer: PeerSpace::of(PeerSpaceRepr::Ours(ours)),
             own: Some(OwnSpace::of_handle(theirs)),
             #[cfg(feature = "shared-key-ids")]
             shared: None,
@@ -1756,6 +1777,31 @@ mod mapping_bit_tests {
                 .map(text),
             Some("peers/space/temp".to_string()),
             "installing an own space must not change which table `peer()` names",
+        );
+    }
+
+    /// Two senders' declarations of one id in one table are two keys: a pair reading one sender's
+    /// ids finds that sender's literal and no other's.
+    #[test]
+    fn each_sender_reads_its_own_declaration_of_an_id() {
+        use crate::wire_id::sender_peer_key;
+        let mut table = HashMap::new();
+        table.insert(sender_peer_key(0, 7), "link/peer".to_string());
+        table.insert(sender_peer_key(5, 7), "member/five".to_string());
+        table.insert(sender_peer_key(6, 7), "member/six".to_string());
+        let spaces = MappingSpaces::peer_only(&table);
+        let read = |spaces| resolve_wireexpr_in(&sender_mapped(7, None), spaces);
+        assert_eq!(
+            read(spaces).as_deref(),
+            Some("link/peer"),
+            "a pair as it is built reads sender 0, the one peer of a link"
+        );
+        assert_eq!(read(spaces.from_sender(5)).as_deref(), Some("member/five"));
+        assert_eq!(read(spaces.from_sender(6)).as_deref(), Some("member/six"));
+        assert_eq!(
+            read(spaces.from_sender(9)),
+            None,
+            "a sender that declared nothing reads no other sender's id"
         );
     }
 

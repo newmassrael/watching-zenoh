@@ -20,7 +20,43 @@ use alloc::vec::Vec;
 /// A kind of extension a session stages on its handshake chains, one per extension id the build
 /// stages, in ascending id (zenoh's encode order). The patch level and the remote bound share id
 /// 0x7 and so one place: a chain carries at most one of them, as zenoh's carries one field per id.
-#[cfg(feature = "session-unicast")]
+/// The region name (0x8) is not staged: it is the session's configuration, which the Init
+/// encoder writes after the chain. Gated on the union of the kinds' own gates, so a build that
+/// stages no kind compiles no staging.
+#[cfg(all(
+    feature = "session-unicast",
+    any(
+        feature = "session-fixed-storage",
+        all(feature = "codec-init-body", feature = "session-unicast-accept"),
+        all(
+            feature = "codec-open-body",
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ),
+        all(
+            feature = "codec-init-body",
+            any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+            any(
+                feature = "transport-qos",
+                feature = "session-extshm",
+                feature = "session-extauth",
+                feature = "transport-multilink",
+                feature = "transport-lowlatency",
+                feature = "session-extcompression"
+            )
+        )
+    ),
+    any(
+        not(feature = "session-fixed-storage"),
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StagedExt {
     /// QoS, the unit or the z64 `QoSLink` form (id 0x1).
@@ -77,57 +113,88 @@ pub(crate) enum StagedExt {
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
     ))]
     RemoteBound,
-    /// The region name (id 0x8).
-    RegionName,
 }
 
-#[cfg(feature = "session-unicast")]
+#[cfg(all(
+    feature = "session-unicast",
+    any(
+        feature = "session-fixed-storage",
+        all(feature = "codec-init-body", feature = "session-unicast-accept"),
+        all(
+            feature = "codec-open-body",
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ),
+        all(
+            feature = "codec-init-body",
+            any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+            any(
+                feature = "transport-qos",
+                feature = "session-extshm",
+                feature = "session-extauth",
+                feature = "transport-multilink",
+                feature = "transport-lowlatency",
+                feature = "session-extcompression"
+            )
+        )
+    ),
+    any(
+        not(feature = "session-fixed-storage"),
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 impl StagedExt {
     /// The extension id the kind stages: the 4-bit id field of its entry's header.
     fn id(self) -> u8 {
-        use crate::ext_header::establishment_ext_id as id;
+        // Full paths: a build whose only kind is the remote bound names no id of this module.
         match self {
             #[cfg(all(
                 feature = "transport-qos",
                 feature = "codec-init-body",
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
-            Self::Qos => id::QOS,
+            Self::Qos => crate::ext_header::establishment_ext_id::QOS,
             #[cfg(all(
                 feature = "session-extshm",
                 feature = "codec-init-body",
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
-            Self::Shm => id::SHM,
+            Self::Shm => crate::ext_header::establishment_ext_id::SHM,
             #[cfg(all(
                 feature = "session-extauth",
                 any(feature = "codec-init-body", feature = "codec-open-body"),
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
-            Self::Auth => id::AUTH,
+            Self::Auth => crate::ext_header::establishment_ext_id::AUTH,
             #[cfg(all(
                 feature = "transport-multilink",
                 any(feature = "codec-init-body", feature = "codec-open-body"),
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
-            Self::Multilink => id::MULTILINK,
+            Self::Multilink => crate::ext_header::establishment_ext_id::MULTILINK,
             #[cfg(all(
                 feature = "transport-lowlatency",
                 feature = "codec-init-body",
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
-            Self::LowLatency => id::LOWLATENCY,
+            Self::LowLatency => crate::ext_header::establishment_ext_id::LOWLATENCY,
             #[cfg(all(
                 feature = "session-extcompression",
                 feature = "codec-init-body",
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
-            Self::Compression => id::COMPRESSION,
+            Self::Compression => crate::ext_header::establishment_ext_id::COMPRESSION,
             #[cfg(any(
                 feature = "session-fixed-storage",
                 all(feature = "codec-init-body", feature = "session-unicast-accept")
             ))]
-            Self::Patch => id::PATCH,
+            Self::Patch => crate::ext_header::establishment_ext_id::PATCH,
             #[cfg(all(
                 feature = "codec-open-body",
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
@@ -135,7 +202,6 @@ impl StagedExt {
             Self::RemoteBound => {
                 crate::ext_header::ext_id(crate::extbound::REMOTE_BOUND_EXT_HEADER)
             }
-            Self::RegionName => id::REGION_NAME,
         }
     }
 }
@@ -145,11 +211,31 @@ impl StagedExt {
 /// open (`session-fixed-storage`, which `session-slot` and the C library's cooperative presets
 /// turn on): a stager writes its own place, so the chain cannot be over-full, and holds no more
 /// than the kinds the build compiled.
+///
+/// A build with the fixed storage and the lend-only send, no accepting role and none of the
+/// extensions a handshake action adds (QoS, SHM, auth, multilink, low latency, compression) stages
+/// nothing and holds no chain: each handshake message it sends carries at most the one z64 entry
+/// of id 0x7, the patch level on an Init and the bound announced for the peer on an Open, and
+/// `handshake_encode` writes it from the parameters (`encode_init_patch_into`,
+/// `encode_open_bound_into`).
 #[cfg(all(not(feature = "session-fixed-storage"), feature = "session-unicast"))]
 pub type ExtChainBuf = Vec<ExtEntryOwned>;
 
 /// See the growable form of this alias.
-#[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+#[cfg(all(
+    feature = "session-fixed-storage",
+    feature = "session-unicast",
+    any(
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 #[derive(Debug, Clone, Default)]
 pub struct ExtChainBuf {
     #[cfg(all(
@@ -190,10 +276,22 @@ pub struct ExtChainBuf {
     compression: Option<ExtEntryOwned>,
     /// The patch level or the remote bound, which share id 0x7.
     patch_or_bound: Option<ExtEntryOwned>,
-    region: Option<ExtEntryOwned>,
 }
 
-#[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+#[cfg(all(
+    feature = "session-fixed-storage",
+    feature = "session-unicast",
+    any(
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 impl ExtChainBuf {
     /// The place of `kind`.
     fn place(&mut self, kind: StagedExt) -> &mut Option<ExtEntryOwned> {
@@ -240,7 +338,6 @@ impl ExtChainBuf {
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
             StagedExt::RemoteBound => &mut self.patch_or_bound,
-            StagedExt::RegionName => &mut self.region,
         }
     }
 
@@ -285,7 +382,6 @@ impl ExtChainBuf {
             ))]
             ids::COMPRESSION => self.compression.as_ref(),
             ids::PATCH => self.patch_or_bound.as_ref(),
-            ids::REGION_NAME => self.region.as_ref(),
             _ => None,
         }
     }
@@ -312,20 +408,46 @@ impl ExtChainBuf {
 }
 
 /// The entries of a fixed chain in ascending id ([`ExtChainBuf::iter`]).
-#[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+#[cfg(all(
+    feature = "session-fixed-storage",
+    feature = "session-unicast",
+    any(
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 #[derive(Clone)]
 pub struct StagedIter<'a> {
     chain: &'a ExtChainBuf,
     next_id: u8,
 }
 
-#[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+#[cfg(all(
+    feature = "session-fixed-storage",
+    feature = "session-unicast",
+    any(
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 impl<'a> Iterator for StagedIter<'a> {
     type Item = &'a ExtEntryOwned;
 
     fn next(&mut self) -> Option<&'a ExtEntryOwned> {
-        // The ids a chain stages run from 0x1 to the region name's, 0x8.
-        while self.next_id <= crate::ext_header::establishment_ext_id::REGION_NAME {
+        // The ids a chain stages run from 0x1 to the patch level's, 0x7.
+        while self.next_id <= crate::ext_header::establishment_ext_id::PATCH {
             let id = self.next_id;
             self.next_id = id.wrapping_add(1);
             if let Some(entry) = self.chain.staged(id) {
@@ -342,13 +464,49 @@ impl<'a> Iterator for StagedIter<'a> {
 /// `commons/zenoh-codec/src/transport/open.rs` @ `// Extensions`), whichever stager ran first.
 /// Kinds that share an id replace each other: the unit `QoS` and the z64 `QoSLink` are one kind,
 /// and the patch level and the remote bound one place, as zenoh refuses to emit both.
-#[cfg(all(not(feature = "session-fixed-storage"), feature = "session-unicast"))]
+#[cfg(all(
+    not(feature = "session-fixed-storage"),
+    feature = "session-unicast",
+    any(
+        feature = "session-fixed-storage",
+        all(feature = "codec-init-body", feature = "session-unicast-accept"),
+        all(
+            feature = "codec-open-body",
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ),
+        all(
+            feature = "codec-init-body",
+            any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+            any(
+                feature = "transport-qos",
+                feature = "session-extshm",
+                feature = "session-extauth",
+                feature = "transport-multilink",
+                feature = "transport-lowlatency",
+                feature = "session-extcompression"
+            )
+        )
+    )
+))]
 pub(crate) fn stage(chain: &mut ExtChainBuf, kind: StagedExt, entry: Option<ExtEntryOwned>) {
     stage_id_in_canonical_order(chain, kind.id(), entry);
 }
 
 /// See the growable form of this function: the kind's own place is written.
-#[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+#[cfg(all(
+    feature = "session-fixed-storage",
+    feature = "session-unicast",
+    any(
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 pub(crate) fn stage(chain: &mut ExtChainBuf, kind: StagedExt, entry: Option<ExtEntryOwned>) {
     if let Some(entry) = &entry {
         debug_assert_eq!(
@@ -363,7 +521,33 @@ pub(crate) fn stage(chain: &mut ExtChainBuf, kind: StagedExt, entry: Option<ExtE
 /// [`stage`] on the growable chain by the extension id: every entry of the id goes, then
 /// `entry` goes where the ids ascend. Removal keys on the 4-bit id field rather than the
 /// identity, so a re-stage of either form of an id replaces the other.
-#[cfg(all(not(feature = "session-fixed-storage"), feature = "session-unicast"))]
+#[cfg(all(
+    not(feature = "session-fixed-storage"),
+    feature = "session-unicast",
+    any(
+        test,
+        any(
+            feature = "session-fixed-storage",
+            all(feature = "codec-init-body", feature = "session-unicast-accept"),
+            all(
+                feature = "codec-open-body",
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            all(
+                feature = "codec-init-body",
+                any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+                any(
+                    feature = "transport-qos",
+                    feature = "session-extshm",
+                    feature = "session-extauth",
+                    feature = "transport-multilink",
+                    feature = "transport-lowlatency",
+                    feature = "session-extcompression"
+                )
+            )
+        )
+    )
+))]
 fn stage_id_in_canonical_order(chain: &mut ExtChainBuf, id: u8, entry: Option<ExtEntryOwned>) {
     chain.retain(|e| e.ext_id() != id);
     if let Some(entry) = entry {
@@ -375,7 +559,33 @@ fn stage_id_in_canonical_order(chain: &mut ExtChainBuf, id: u8, entry: Option<Ex
 
 /// Where an entry of id `id` belongs in `chain`: after every entry whose id is
 /// not greater, so a stable insert leaves a sorted chain sorted.
-#[cfg(all(not(feature = "session-fixed-storage"), feature = "session-unicast"))]
+#[cfg(all(
+    not(feature = "session-fixed-storage"),
+    feature = "session-unicast",
+    any(
+        test,
+        any(
+            feature = "session-fixed-storage",
+            all(feature = "codec-init-body", feature = "session-unicast-accept"),
+            all(
+                feature = "codec-open-body",
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            all(
+                feature = "codec-init-body",
+                any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+                any(
+                    feature = "transport-qos",
+                    feature = "session-extshm",
+                    feature = "session-extauth",
+                    feature = "transport-multilink",
+                    feature = "transport-lowlatency",
+                    feature = "session-extcompression"
+                )
+            )
+        )
+    )
+))]
 fn canonical_position(chain: &[ExtEntryOwned], id: u8) -> usize {
     chain
         .iter()
@@ -398,7 +608,20 @@ pub enum ChainRef<'a> {
     /// The entries, in order.
     Slice(&'a [ExtEntryOwned]),
     /// A staged chain's places, in ascending id.
-    #[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+    #[cfg(all(
+        feature = "session-fixed-storage",
+        feature = "session-unicast",
+        any(
+            not(feature = "tx-lend-only"),
+            feature = "session-unicast-accept",
+            feature = "transport-qos",
+            feature = "session-extshm",
+            feature = "session-extauth",
+            feature = "transport-multilink",
+            feature = "transport-lowlatency",
+            feature = "session-extcompression"
+        )
+    ))]
     Staged(&'a ExtChainBuf),
 }
 
@@ -408,7 +631,20 @@ impl<'a> ChainRef<'a> {
     pub fn iter(&self) -> ChainIter<'a> {
         match *self {
             Self::Slice(entries) => ChainIter::Slice(entries.iter()),
-            #[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+            #[cfg(all(
+                feature = "session-fixed-storage",
+                feature = "session-unicast",
+                any(
+                    not(feature = "tx-lend-only"),
+                    feature = "session-unicast-accept",
+                    feature = "transport-qos",
+                    feature = "session-extshm",
+                    feature = "session-extauth",
+                    feature = "transport-multilink",
+                    feature = "transport-lowlatency",
+                    feature = "session-extcompression"
+                )
+            ))]
             Self::Staged(chain) => ChainIter::Staged(chain.iter()),
         }
     }
@@ -417,7 +653,20 @@ impl<'a> ChainRef<'a> {
     pub fn len(&self) -> usize {
         match *self {
             Self::Slice(entries) => entries.len(),
-            #[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+            #[cfg(all(
+                feature = "session-fixed-storage",
+                feature = "session-unicast",
+                any(
+                    not(feature = "tx-lend-only"),
+                    feature = "session-unicast-accept",
+                    feature = "transport-qos",
+                    feature = "session-extshm",
+                    feature = "session-extauth",
+                    feature = "transport-multilink",
+                    feature = "transport-lowlatency",
+                    feature = "session-extcompression"
+                )
+            ))]
             Self::Staged(chain) => chain.len(),
         }
     }
@@ -426,7 +675,20 @@ impl<'a> ChainRef<'a> {
     pub fn is_empty(&self) -> bool {
         match *self {
             Self::Slice(entries) => entries.is_empty(),
-            #[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+            #[cfg(all(
+                feature = "session-fixed-storage",
+                feature = "session-unicast",
+                any(
+                    not(feature = "tx-lend-only"),
+                    feature = "session-unicast-accept",
+                    feature = "transport-qos",
+                    feature = "session-extshm",
+                    feature = "session-extauth",
+                    feature = "transport-multilink",
+                    feature = "transport-lowlatency",
+                    feature = "session-extcompression"
+                )
+            ))]
             Self::Staged(chain) => chain.is_empty(),
         }
     }
@@ -450,7 +712,18 @@ impl<'a> From<&'a Vec<ExtEntryOwned>> for ChainRef<'a> {
 }
 
 #[cfg(all(
-    all(feature = "session-fixed-storage", feature = "session-unicast"),
+    feature = "session-fixed-storage",
+    feature = "session-unicast",
+    any(
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    ),
     any(feature = "codec-init-body", feature = "codec-open-body")
 ))]
 impl<'a> From<&'a ExtChainBuf> for ChainRef<'a> {
@@ -466,7 +739,20 @@ pub enum ChainIter<'a> {
     /// A slice's.
     Slice(core::slice::Iter<'a, ExtEntryOwned>),
     /// A staged chain's.
-    #[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+    #[cfg(all(
+        feature = "session-fixed-storage",
+        feature = "session-unicast",
+        any(
+            not(feature = "tx-lend-only"),
+            feature = "session-unicast-accept",
+            feature = "transport-qos",
+            feature = "session-extshm",
+            feature = "session-extauth",
+            feature = "transport-multilink",
+            feature = "transport-lowlatency",
+            feature = "session-extcompression"
+        )
+    ))]
     Staged(StagedIter<'a>),
 }
 
@@ -477,7 +763,20 @@ impl<'a> Iterator for ChainIter<'a> {
     fn next(&mut self) -> Option<&'a ExtEntryOwned> {
         match self {
             Self::Slice(entries) => entries.next(),
-            #[cfg(all(feature = "session-fixed-storage", feature = "session-unicast"))]
+            #[cfg(all(
+                feature = "session-fixed-storage",
+                feature = "session-unicast",
+                any(
+                    not(feature = "tx-lend-only"),
+                    feature = "session-unicast-accept",
+                    feature = "transport-qos",
+                    feature = "session-extshm",
+                    feature = "session-extauth",
+                    feature = "transport-multilink",
+                    feature = "transport-lowlatency",
+                    feature = "session-extcompression"
+                )
+            ))]
             Self::Staged(entries) => entries.next(),
         }
     }
@@ -584,7 +883,9 @@ const PASSIVE_READS_EVERY_OFFER: bool = cfg!(all(
         feature = "codec-init-body",
         feature = "codec-open-body",
         feature = "codec-close",
-        feature = "codec-keep-alive"
+        feature = "codec-keep-alive",
+        // The chain of a frame read where it lies (`inbound::ReadEntries`).
+        all(feature = "alloc", feature = "codec-frame", feature = "session-unicast")
     )
 ))]
 pub(crate) const fn reads_received_ext(id: u8) -> bool {
@@ -1065,8 +1366,8 @@ fn write_ext_chain<K: sce_forge_runtime::codec::SceSink>(
 /// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
 // The Init and the Open are written by `handshake_encode` (the lend-only Open's
 // chain by `encode_held_chain_into`), and the vector form writes through the vector's
-// own sink, so this form's readers are the tests that hold the two forms to each other,
-// and its gate is theirs (`tests` below).
+// own sink, so this form's readers are the tests that hold the two forms to each other, and it is
+// compiled where they are.
 #[cfg(all(
     test,
     feature = "alloc",
@@ -1185,14 +1486,31 @@ mod tests {
 }
 
 // Every staged chain, on both forms. The fixed form holds the kinds the build stages, so the tests
-// that run on it stage the two every build has, the patch level and the region name.
-#[cfg(all(test, feature = "session-unicast"))]
+// that run on it stage the one every build has, the patch level. A build that stages no handshake
+// extension holds no chain, so there is none to test.
+#[cfg(all(
+    test,
+    feature = "session-unicast",
+    any(
+        not(feature = "session-fixed-storage"),
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    )
+))]
 mod canonical_order_tests {
     use super::*;
+    #[cfg(not(feature = "session-fixed-storage"))]
     use crate::transport_profile::ExtEntryOwnedVariant;
 
     /// A unit entry whose header is its id: the order rule reads the id only,
     /// so the body is immaterial.
+    #[cfg(not(feature = "session-fixed-storage"))]
     fn unit(id: u8) -> ExtEntryOwned {
         ExtEntryOwned {
             header: id,
@@ -1272,8 +1590,8 @@ mod canonical_order_tests {
         assert!(chain.iter().map(|e| e.ext_id()).eq([0x01, 0x08]));
     }
 
-    /// A kind staged again replaces its own entry, `None` takes it off, and the chain reads in
-    /// ascending id whatever order the kinds were staged in, on either form of the chain.
+    /// A kind staged again replaces its own entry and `None` takes it off, on either form of the
+    /// chain.
     #[cfg(any(
         feature = "session-fixed-storage",
         all(feature = "codec-init-body", feature = "session-unicast-accept")
@@ -1281,7 +1599,6 @@ mod canonical_order_tests {
     #[test]
     fn a_kind_staged_again_replaces_its_entry_and_none_takes_it_off() {
         let mut chain = ExtChainBuf::default();
-        super::stage(&mut chain, StagedExt::RegionName, Some(unit(0x08)));
         super::stage(
             &mut chain,
             StagedExt::Patch,
@@ -1292,10 +1609,10 @@ mod canonical_order_tests {
             StagedExt::Patch,
             Some(crate::extpatch::encode_patch_ext_at(2)),
         );
-        assert!(chain.iter().map(|e| e.ext_id()).eq([0x07, 0x08]));
+        assert!(chain.iter().map(|e| e.ext_id()).eq([0x07]));
         assert_eq!(crate::extpatch::peer_patch_in(chain.iter()), 2);
         super::stage(&mut chain, StagedExt::Patch, None);
-        assert!(chain.iter().map(|e| e.ext_id()).eq([0x08]));
+        assert!(chain.iter().map(|e| e.ext_id()).eq([0u8; 0]));
     }
 
     /// A chain handed over whole is ordered by the 4-bit id, not the header

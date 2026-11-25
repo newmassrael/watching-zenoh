@@ -423,10 +423,13 @@ impl InterestBodyWire {
         let _p_header_r_0: bool = src.keyexpr().is_some();
         let _n_d_header_n_0: usize = src.keyexpr().map_or(0, |_b| usize::from(super::wireexpr::WireexprWire::input_n(_b)));
         let _f_d_header_n: Option<usize> = if src.keyexpr().is_some() { Some(_n_d_header_n_0) } else { None };
-        let _d_header_m: u8 = match src.keyexpr() { Some(_x) => match super::wireexpr::WireexprSource::body(_x) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 }, None => 0 };
-        let mut _c_header: u8 = (((src.header() & !0x10) | (u8::from(_p_header_r_0) << 4)) & !0x40) | (_d_header_m << 6);
+        let _d_header_m: Option<u8> = src.keyexpr().map(|_x| match super::wireexpr::WireexprSource::body(_x) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 });
+        let mut _c_header: u8 = (src.header() & !0x10) | (u8::from(_p_header_r_0) << 4);
         if let Some(_n) = _f_d_header_n {
             _c_header = (_c_header & !0x20) | ((_n as u8) << 5);
+        }
+        if let Some(_n) = _d_header_m {
+            _c_header = (_c_header & !0x40) | (_n << 6);
         }
         if let Some(_o) = over.header_ke {
             _c_header = (_c_header & !0x1) | u8::from(_o);
@@ -491,6 +494,21 @@ impl InterestBodyWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `InterestBody` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct InterestBodyWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for InterestBodyWalk {
+    type Entry<'b> = InterestBodyView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        InterestBodyView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `InterestBodyView` is what a decode of `InterestBody` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `InterestBody` holds it, an embedded body or a variant arm as its

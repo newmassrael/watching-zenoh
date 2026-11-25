@@ -120,6 +120,27 @@ impl SessionRuntime for PlainRuntime {
     type Shared<U> = Arc<U>;
     type IterationWork = ();
     type EntropyDraw = NoEntropy;
+    type Flag = core::sync::atomic::AtomicBool;
+    type Word = core::sync::atomic::AtomicU64;
+    type Local<T>
+        = std::sync::Mutex<T>
+    where
+        T: Send + 'static;
+
+    fn new_local<T>(value: T) -> Self::Local<T>
+    where
+        T: Send + 'static,
+    {
+        Self::new_mutex(value)
+    }
+
+    // Counted as a hold of a lock, as the threaded runtimes' local is one.
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static,
+    {
+        Self::with_mutex_mut(local, f)
+    }
 
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 
@@ -195,7 +216,7 @@ fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: crate::session_zid::SessionZid::from_array([0x51; 4]),
-        seq_num_res: 2,
+        seq_num_res: crate::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -208,9 +229,11 @@ fn params() -> SessionInitParams {
         ),
         link_rx: LinkRxConf::default(),
         cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key"),
+            .expect("32-byte test key")
+            .into(),
         policy: crate::policy::SessionPolicy::defaults(),
         limits: crate::limits::SessionLimits::BUILD,
+        region: None,
     }
 }
 
@@ -657,6 +680,7 @@ mod lent_handshake {
     use crate::reliability::Reliability;
     use crate::session_actions::{SessionActionsBinding, SessionLinkActions};
     use crate::session_fsm_unicast::SessionFsmUnicastActions;
+    use crate::session_init_params::SessionInitParams;
 
     /// A link that lends one slot of a fixed width, whatever it is asked for, and records each
     /// ask and each send.
@@ -721,9 +745,20 @@ mod lent_handshake {
         Arc<SessionLinkActions<PlainRuntime, StillClock>>,
         SessionActionsBinding<PlainRuntime, StillClock>,
     ) {
+        opener_of(link, params())
+    }
+
+    /// [`opener`] over the parameters `params`.
+    fn opener_of(
+        link: &Arc<LendingLink>,
+        params: SessionInitParams,
+    ) -> (
+        Arc<SessionLinkActions<PlainRuntime, StillClock>>,
+        SessionActionsBinding<PlainRuntime, StillClock>,
+    ) {
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params, StillClock);
         let binding =
             SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions), NoEntropy);
         (actions, binding)
@@ -796,13 +831,120 @@ mod lent_handshake {
             "a bound decided away is taken off the chain"
         );
     }
+
+    /// The InitSyn and the OpenSyn a lend-only opener sends are the bytes the heap encoders write
+    /// for its chains: the patch level on the InitSyn, and on the OpenSyn the bound the session
+    /// decided. A build that stages no handshake extension writes both from its parameters
+    /// (`encode_init_patch_into`, `encode_open_bound_into`) and one that stages writes them from
+    /// its chains, and each lend-only leg runs this. Turned red by either writer putting another
+    /// entry, header or value on the wire, or leaving the bound off.
+    #[test]
+    fn a_lent_opening_handshake_writes_the_bytes_of_its_chains() {
+        use crate::extbound::{encode_remote_bound_ext, Bound};
+        use crate::handshake_encode::{encode_init_with_caps, encode_open, InitCaps};
+        let link = LendingLink::of_width(512);
+        let (actions, mut binding) = opener(&link);
+        binding.link_driver_open();
+        binding.send_init_syn();
+        actions.fact_local_remote_bound(|slot| *slot = Some(Bound::South));
+        binding.send_open_syn();
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 2, "the InitSyn and the OpenSyn");
+        let params = params();
+        // The InitSyn advertises the batch its link can receive, as the session's sender does.
+        let caps = InitCaps {
+            batch_size: actions.own_batch_advertisement(),
+            ..InitCaps::of(&params)
+        };
+        let patch = [crate::extpatch::encode_patch_ext()];
+        let init_syn = encode_init_with_caps(&params, caps, false, patch.as_slice().into(), None)
+            .expect("the InitSyn the heap encoder writes");
+        assert_eq!(
+            sent[0], init_syn,
+            "the InitSyn carries the patch level alone"
+        );
+        let bound = [encode_remote_bound_ext(Bound::South)];
+        let open_syn =
+            encode_open(&params, false, None, &bound).expect("the OpenSyn the heap encoder writes");
+        assert_eq!(sent[1], open_syn, "the OpenSyn carries the bound alone");
+    }
+
+    /// Every lend-only control message is written by one writer, which holds the initiator's
+    /// OpenSyn as it went out, and nothing of the InitSyn before it, for a replay that sends those
+    /// very bytes again. A build whose domain of `handshake-stray-message` leaves the replay out
+    /// holds nothing. Turned red by a writer that holds by a role other than the message's own
+    /// (`write_control`'s `answer`), or that holds from where the message does not start.
+    #[test]
+    fn a_lent_open_syn_is_sent_again_as_written_and_the_init_syn_is_not_held() {
+        use crate::policy::HandshakeStrayMessage;
+        let mut replaying = params();
+        let replays = replaying
+            .policy
+            .select_handshake_stray_message(HandshakeStrayMessage::IgnoreAndReplay)
+            .is_ok();
+        let link = LendingLink::of_width(512);
+        let (actions, mut binding) = opener_of(&link, replaying);
+        binding.link_driver_open();
+        binding.send_init_syn();
+        assert_eq!(actions.held_answer_len(), 0, "an InitSyn is never held");
+        assert!(
+            !actions.resend_held_answer(),
+            "and so nothing is sent again"
+        );
+        binding.send_open_syn();
+        let sent = link.sent.lock().expect("the sends").clone();
+        assert_eq!(sent.len(), 2, "the InitSyn and the OpenSyn");
+        if !replays {
+            assert_eq!(actions.held_answer_len(), 0, "no hold without the replay");
+            assert!(!actions.resend_held_answer());
+            return;
+        }
+        assert_eq!(
+            actions.held_answer_len(),
+            sent[1].len(),
+            "the OpenSyn, whole"
+        );
+        assert!(
+            actions.resend_held_answer(),
+            "the held OpenSyn is sent again"
+        );
+        let again = link.sent.lock().expect("the sends");
+        assert_eq!(again.len(), 3);
+        assert_eq!(again[2], sent[1], "as the very bytes that went out");
+    }
+
+    /// The lend-only Close goes through the same writer as the handshake: its header and
+    /// reason in a lent slot, and a slot too short for it refused and counted, with nothing
+    /// sent. Turned red by a Close written without its reason, or sent from a short slot.
+    #[cfg(feature = "codec-close")]
+    #[test]
+    fn a_lent_close_carries_its_reason_and_a_short_slot_refuses_it() {
+        let link = LendingLink::of_width(512);
+        let (actions, _binding) = opener(&link);
+        assert!(actions.send_close_lent(0x02).is_ok());
+        {
+            let sent = link.sent.lock().expect("the sends");
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0][0] & 0x1F, wz_codecs::wire_const::T_MID_CLOSE);
+            assert_eq!(&sent[0][1..], &[0x02], "the reason, and nothing after it");
+        }
+        assert_eq!(actions.tx_refusals().no_slot, 0);
+
+        let short = LendingLink::of_width(1);
+        let (actions, _binding) = opener(&short);
+        assert_eq!(
+            actions.send_close_lent(0x02),
+            Err(crate::link::LinkDropCause::NoTxSlot)
+        );
+        assert!(short.sent.lock().expect("the sends").is_empty());
+        assert_eq!(actions.tx_refusals().no_slot, 1, "the refusal is counted");
+    }
 }
 
 /// Under `tx-lend-only` a frame the link lends no slot for is refused before a byte of it is
-/// written, and the sequence number minted for it is given back: the next frame of the conduit
-/// carries it, so the reliable channel has no gap no frame fills. Turned red by the refusal that
-/// keeps its SN (the `unmint` of `open_frame_lent`'s `FrameLend::Heap` arm taken out), whose
-/// next frame carries SN 1.
+/// written, and takes no sequence number: the next frame of the conduit carries the one it would
+/// have, so the reliable channel has no gap no frame fills. Turned red by an SN taken before the
+/// slot is lent (`open_frame_lent` minting in its admission again), whose next frame carries SN 1.
 #[cfg(all(feature = "tx-lend-only", feature = "codec-push", feature = "alloc"))]
 mod lent_frame_refusal {
     use alloc::sync::Arc;
@@ -822,6 +964,18 @@ mod lent_frame_refusal {
         lends: AtomicBool,
         slot: Mutex<Vec<u8>>,
         sent: Mutex<Vec<Vec<u8>>>,
+        asked: Mutex<Vec<usize>>,
+    }
+
+    impl DryLink {
+        fn of_width(width: usize, lends: bool) -> Arc<Self> {
+            Arc::new(Self {
+                lends: AtomicBool::new(lends),
+                slot: Mutex::new(alloc::vec![0; width]),
+                sent: Mutex::new(Vec::new()),
+                asked: Mutex::new(Vec::new()),
+            })
+        }
     }
 
     impl BoxedLinkDriver for DryLink {
@@ -833,7 +987,8 @@ mod lent_frame_refusal {
 
         fn close_blocking(&self) {}
 
-        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+        fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            self.asked.lock().expect("the asks").push(want);
             self.lends.load(Ordering::SeqCst).then_some(TxSlotGrant {
                 slot: TxSlot(0),
                 headroom: 0,
@@ -880,11 +1035,7 @@ mod lent_frame_refusal {
 
     #[test]
     fn a_frame_refused_for_want_of_a_slot_gives_its_sequence_number_back() {
-        let link = Arc::new(DryLink {
-            lends: AtomicBool::new(false),
-            slot: Mutex::new(alloc::vec![0; 512]),
-            sent: Mutex::new(Vec::new()),
-        });
+        let link = DryLink::of_width(512, false);
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
@@ -902,6 +1053,175 @@ mod lent_frame_refusal {
             sent[0][1], 0,
             "the second frame carries the SN the refused one gave back"
         );
+    }
+
+    /// A frame sent whole asks its link for the whole batch budget, as a window does: nothing
+    /// measures the message before it is written into the slot. Turned red by a send that asks
+    /// for a size it counted first (`open_frame_lent` asking for anything but `emit.mtu`).
+    #[test]
+    fn a_frame_sent_whole_asks_for_the_batch_budget() {
+        let link = DryLink::of_width(512, true);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        assert_eq!(put(&actions), Some(Ok(())));
+        let (budget, _) = actions.negotiated_tx_limits_for(Reliability::Reliable);
+        assert_eq!(
+            *link.asked.lock().expect("the asks"),
+            [budget],
+            "one ask, for the budget"
+        );
+    }
+
+    /// A slot lent short of the frame took the SN the frame was written with, and gives it back
+    /// with the refusal: the next frame of the conduit carries it. Turned red by the
+    /// `unmint` of `open_frame_lent`'s `FrameLend::Heap` arm taken out, whose next frame
+    /// carries SN 1.
+    #[test]
+    fn a_frame_refused_in_a_short_slot_gives_its_sequence_number_back() {
+        let link = DryLink::of_width(4, true);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        assert_eq!(
+            put(&actions),
+            Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
+        );
+        assert_eq!(actions.tx_refusals().no_slot, 1, "the refusal is counted");
+        *link.slot.lock().expect("the slot") = alloc::vec![0; 512];
+        assert_eq!(put(&actions), Some(Ok(())));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 1, "only the second put reached the link");
+        assert_eq!(
+            sent[0][1], 0,
+            "the second frame carries the SN the refused one gave back"
+        );
+    }
+}
+
+/// A control message the link has no slot for, because the batch a data conduit holds open has
+/// its one slot, sends that batch first and then takes the slot it gave back: the control message
+/// does not overtake data the session staged before it. The session machine's Close is that case,
+/// since it does not drain the window first (the application's close does). Turned red by a
+/// control send that asks the link once and no more (`send_control_lent` over
+/// `TxLease::acquire` again), which is refused and sends nothing.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "transport-batching",
+    feature = "transport-qos",
+    feature = "codec-push",
+    feature = "codec-close",
+    feature = "alloc"
+))]
+mod lent_control_order {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    use super::{params, PlainRuntime, StillClock};
+    use crate::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::session_actions::SessionLinkActions;
+
+    /// A link of one slot, lent to one holder at a time, that keeps each message sent.
+    struct OneSlotLink {
+        lent: AtomicBool,
+        slot: Mutex<Vec<u8>>,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl BoxedLinkDriver for OneSlotLink {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            if self.lent.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            Some(TxSlotGrant {
+                slot: TxSlot(0),
+                headroom: 0,
+            })
+        }
+
+        fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+            let mut slot = self.slot.lock().expect("the slot");
+            (slot.as_mut_ptr(), slot.len())
+        }
+
+        fn tx_slot_send(
+            &self,
+            _slot: TxSlot,
+            start: usize,
+            len: usize,
+            _reliability: Reliability,
+            _priority: Priority,
+        ) -> LinkSendOutcome {
+            let written = self.slot.lock().expect("the slot")[start..start + len].to_vec();
+            self.sent.lock().expect("the sends").push(written);
+            self.lent.store(false, Ordering::SeqCst);
+            LinkSendOutcome::Sent
+        }
+
+        fn tx_slot_abort(&self, _slot: TxSlot) {
+            self.lent.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_close_with_no_slot_free_sends_the_open_data_batch_before_it() {
+        let link = Arc::new(OneSlotLink {
+            lent: AtomicBool::new(false),
+            slot: Mutex::new(alloc::vec![0; 2048]),
+            sent: Mutex::new(Vec::new()),
+        });
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        actions.enter_established();
+        assert_eq!(actions.batch_start(), Ok(()));
+        let key = crate::named_key::NamedKey::literal("home/order").expect("a key");
+        let put = actions.send_plain_put_qos(
+            key,
+            b"v",
+            None,
+            super::super::SendAs {
+                reliable: true,
+                express: false,
+                priority: Priority::DEFAULT,
+            },
+        );
+        assert_eq!(put, Some(Ok(())));
+        assert!(
+            link.sent.lock().expect("the sends").is_empty(),
+            "CONTROL: the put waits in the window's slot"
+        );
+        assert!(
+            link.lent.load(Ordering::SeqCst),
+            "CONTROL: which is the link's one slot, out"
+        );
+
+        assert_eq!(actions.send_close_lent(0x02), Ok(()));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 2, "the batch, then the Close");
+        assert_eq!(
+            sent[0][0] & 0x1F,
+            wz_codecs::wire_const::T_MID_FRAME,
+            "the data first"
+        );
+        assert_eq!(
+            sent[1][0] & 0x1F,
+            wz_codecs::wire_const::T_MID_CLOSE,
+            "the Close behind it"
+        );
+        assert_eq!(actions.tx_refusals().no_slot, 0, "nothing was refused");
     }
 }
 
@@ -935,6 +1255,63 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
         0,
         "nothing was written"
     );
+}
+
+/// A staged reply leaves through the writer of its parts in a build that reads no owned reply (no
+/// statistics; no policy or namespace is installed here): one the writer takes is written, and one
+/// it refuses is skipped with nothing built. The responder identity of no bytes is the case the
+/// owned builder asserts against, so a refused reply that fell back to the owned record would panic
+/// here.
+///
+/// Turned red by a `send_reply_parts` that sends a reply the writer refuses as an owned one.
+#[cfg(all(
+    feature = "codec-response",
+    not(feature = "transport-stats"),
+    not(feature = "tx-lend-only")
+))]
+mod staged_replies {
+    use core::sync::atomic::Ordering;
+
+    use super::bundle;
+    use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+    use crate::response_sink::ResponseSink as _;
+    use crate::sample::QosLevel;
+
+    fn staged<'a>(keyexpr: &'a str, responder: Option<(&'a [u8], u32)>) -> ReplyParts<'a> {
+        ReplyParts {
+            rid: 5,
+            keyexpr,
+            responder,
+            qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"answer"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_staged_reply_the_writer_refuses_is_skipped_and_one_it_takes_is_written() {
+        let (actions, link) = bundle();
+        actions.send_reply_parts(staged("demo/asked", Some((&[], 1))));
+        actions.send_reply_parts(staged("", None));
+        assert_eq!(
+            link.written.load(Ordering::SeqCst),
+            0,
+            "nothing of a refused reply reaches the link"
+        );
+        actions.send_reply_parts(staged("demo/asked", Some((&[1, 2, 3, 4], 5))));
+        assert_ne!(
+            link.written.load(Ordering::SeqCst),
+            0,
+            "CONTROL: a reply the writer takes is written"
+        );
+    }
 }
 
 /// The session's facts are one row under one lock: what a door writes is what the whole row reads,
@@ -971,10 +1348,10 @@ mod facts_lock {
     }
 
     /// Every fact the closed transport's handshake took is cleared in the reopen's one hold,
-    /// the peer's capabilities with the kept send limits they were computed into.
+    /// and the reopened link takes no data send until it is established again.
     #[cfg(feature = "session-reconnect")]
     #[test]
-    fn a_reopen_clears_every_handshake_fact_and_moves_the_kept_limits_tag() {
+    fn a_reopen_clears_every_handshake_fact_and_closes_the_data_send_gate() {
         let (actions, _link) = bundle();
         actions.fact_awaiting_open_ack(|slot| *slot = true);
         actions.fact_remote_peer_zid(|slot| *slot = Some([0x0B; 4].into()));
@@ -984,7 +1361,8 @@ mod facts_lock {
             req_id_res: 2,
             batch_size: 1024,
         }));
-        let tag = actions.tx_limits_cache.current_tag();
+        actions.enter_established();
+        assert!(actions.link.transport_available.is_open(), "established");
         actions.reset_for_reopen();
         let (awaiting, zid, whatami, caps) = actions.with_facts(|facts| {
             (
@@ -998,11 +1376,92 @@ mod facts_lock {
         assert_eq!(zid, None, "the routing zid is the closed transport's");
         assert_eq!(whatami, None, "the role is the closed transport's");
         assert_eq!(caps, None, "the capabilities are the closed transport's");
-        assert_ne!(
-            actions.tx_limits_cache.current_tag(),
-            tag,
-            "limits kept from the cleared capabilities are no longer served"
+        assert!(
+            !actions.link.transport_available.is_open(),
+            "the reopened link waits for its establishment"
         );
+    }
+
+    /// A data send is refused until the link is established; once it is, the send leaves with
+    /// the limits settled from the capabilities the handshake wrote, which a write after
+    /// establishment does not move until the link is established again. Turned red by a gate
+    /// open at construction, or by limits read from the capabilities at each send.
+    #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
+    #[test]
+    fn data_leaves_only_an_established_link_with_the_limits_it_was_established_with() {
+        use crate::peer_init_caps::PeerInitCaps;
+        use crate::send_wire_error::SendWireError;
+        let caps = |batch_size| PeerInitCaps {
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size,
+        };
+        let (actions, link) = bundle();
+        assert_eq!(
+            actions.send_push_literal("a/b", b"x", true),
+            Err(SendWireError::TransportUnavailable),
+            "a send before establishment is refused"
+        );
+        assert_eq!(
+            link.written.load(core::sync::atomic::Ordering::SeqCst),
+            0,
+            "and reaches no link"
+        );
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            (0, 0),
+            "no limits are settled yet"
+        );
+
+        actions.set_peer_init_caps(Some(caps(512)));
+        actions.enter_established();
+        let settled = actions.negotiated_tx_limits();
+        assert_eq!(
+            settled,
+            (
+                actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
+                actions.negotiated_sn_mask()
+            ),
+            "settled from the capabilities the handshake wrote"
+        );
+        assert_eq!(actions.send_push_literal("a/b", b"x", true), Ok(()));
+
+        actions.set_peer_init_caps(Some(caps(256)));
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            settled,
+            "a write after establishment waits for the next establishment"
+        );
+        actions.enter_established();
+        assert_eq!(
+            actions.negotiated_tx_limits().0,
+            actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
+            "established again, the limits are the new capabilities'"
+        );
+        assert_ne!(actions.negotiated_tx_limits(), settled);
+    }
+
+    /// A link no handshake runs over takes a data send once it is opened without one, with the
+    /// limits the session's own advertisement sets, and is not established. Turned red by a door
+    /// that leaves the gate shut (the send refused), settles no limits (`(0, 0)`), or stamps the
+    /// establishment.
+    #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
+    #[test]
+    fn a_link_opened_without_a_handshake_sends_with_its_own_limits_unestablished() {
+        let (actions, _link) = bundle();
+        actions.open_without_handshake();
+        let limits = actions.negotiated_tx_limits();
+        assert_eq!(
+            limits,
+            (
+                actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
+                actions.negotiated_sn_mask()
+            ),
+            "settled from the session's own advertisement"
+        );
+        assert_ne!(limits.0, 0, "a frame has room");
+        assert_eq!(actions.send_push_literal("a/b", b"x", true), Ok(()));
+        assert!(!actions.is_established(), "no handshake ran");
     }
 
     /// An awaited OpenAck is admitted, ends the wait and takes the peer's lease and bound in one

@@ -562,9 +562,11 @@ pub enum IngestOutcome {
 /// after the handshake read no InitAck, and does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnRing {
-    /// The ring's mask ([`crate::sn::mask_from_res`]) is known. A continuation
-    /// is admitted iff its SN is ring-consecutive to the chain's last
-    /// ([`crate::sn::consecutive`]).
+    /// The ring's mask is known, at the width the wire carries
+    /// ([`crate::sn::wire::mask_from_res`]): a participant's own ring and the
+    /// ring an observer read of a peer, which may be wider than any the build's
+    /// sessions run. A continuation is admitted iff its SN is ring-consecutive
+    /// to the chain's last ([`crate::sn::wire::consecutive`]).
     Known(u64),
     /// The ring is not known. A continuation is admitted iff its SN is exactly
     /// the chain's last plus one as plain integers; anything else ends the chain
@@ -588,7 +590,9 @@ impl SnRing {
     /// link was lossy, which is a claim about a ring it never saw.
     pub fn admits(self, last: u64, next: u64) -> Result<(), AbortReason> {
         match self {
-            Self::Known(mask) if crate::sn::consecutive(mask, last, next) => Ok(()),
+            // The chain keeps the SNs the wire carried, and a known ring is judged at the wire's
+            // width, as a reader that knows no ring compares them whole.
+            Self::Known(mask) if crate::sn::wire::consecutive(mask, last, next) => Ok(()),
             Self::Known(_) => Err(AbortReason::OutOfOrder),
             Self::Unknown if last.checked_add(1) == Some(next) => Ok(()),
             Self::Unknown => Err(AbortReason::Unresolvable),
@@ -1216,11 +1220,16 @@ where
     pub fn ingest<F: FnOnce(&[u8])>(
         &mut self,
         frag: Fragment<'_>,
-        sn_mask: u64,
+        sn_mask: crate::sn::Sn,
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_in_ring(frag, SnRing::Known(sn_mask), now_ms, deliver)
+        self.ingest_in_ring(
+            frag,
+            SnRing::Known(crate::sn::to_wire(sn_mask)),
+            now_ms,
+            deliver,
+        )
     }
 
     /// [`Self::ingest`] over a ring the caller may not know ([`SnRing`]).
@@ -1265,11 +1274,12 @@ where
     pub fn ingest_lending<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         frag: Fragment<'_>,
-        sn_mask: u64,
+        sn_mask: crate::sn::Sn,
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, Hand::Lend, deliver)
+        let ring = SnRing::Known(crate::sn::to_wire(sn_mask));
+        self.ingest_delivering(frag, ring, now_ms, Hand::Lend, deliver)
     }
 
     /// [`Self::ingest`], delivering the completed chain KEPT when the arena can give its buffer
@@ -1280,11 +1290,12 @@ where
     pub fn ingest_keeping<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         frag: Fragment<'_>,
-        sn_mask: u64,
+        sn_mask: crate::sn::Sn,
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, Hand::Keep, deliver)
+        let ring = SnRing::Known(crate::sn::to_wire(sn_mask));
+        self.ingest_delivering(frag, ring, now_ms, Hand::Keep, deliver)
     }
 
     /// The one ingest walk. `hand` is what the arena is asked to hand a
@@ -1321,13 +1332,15 @@ where
         hand: Hand,
         deliver: F,
     ) -> Judged {
+        let mut active = self.find_active(frag.peer_key, frag.reliable, frag.priority);
         if self.config.fragmentation_markers {
-            if let Some(judged) = self.apply_chain_boundary_markers(&frag) {
-                return judged;
-            }
+            active = match self.apply_chain_boundary_markers(&frag, active) {
+                Ok(active) => active,
+                Err(judged) => return judged,
+            };
         }
-        let admitted = match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
-            Some(idx) => self.admit_continuation(idx, &frag, ring, now_ms),
+        let admitted = match active {
+            Some(idx) => self.admit_continuation(idx, &frag, ring),
             None => self
                 .admit_chain_start(&frag, now_ms)
                 .map_err(Judged::Outcome),
@@ -1416,10 +1429,11 @@ where
     /// ahead of the SN machinery on a session whose negotiated patch level
     /// carries them ([`ReassemblyConfig::fragmentation_markers`]).
     ///
-    /// `Some(judged)` means the fragment is CONSUMED here and must not
-    /// reach the staging path; `None` means carry on to the normal
-    /// start / continuation split, whose own `find_active` re-resolves the
-    /// slot this may have just released.
+    /// `Err(judged)` means the fragment is CONSUMED here and must not
+    /// reach the staging path; `Ok(active)` means carry on to the normal
+    /// start / continuation split with the slot of the fragment's key that is
+    /// still open: `active` as it came, or none once this has evicted it, since
+    /// a key has at most one open chain.
     ///
     /// The order is zenoh's, and the order is load-bearing
     /// (`io/zenoh-transport/src/unicast/universal/rx.rs:155-170`):
@@ -1434,8 +1448,11 @@ where
     /// missing-start-marker rule rather than reported as an abort — there
     /// is nothing to abort, and the sender is announcing the end of a
     /// chain this receiver never saw the start of.
-    fn apply_chain_boundary_markers(&mut self, frag: &Fragment<'_>) -> Option<Judged> {
-        let active = self.find_active(frag.peer_key, frag.reliable, frag.priority);
+    fn apply_chain_boundary_markers(
+        &mut self,
+        frag: &Fragment<'_>,
+        active: Option<usize>,
+    ) -> Result<Option<usize>, Judged> {
         if frag.markers.first {
             // A restart supersedes whatever is staged on this key: the open
             // chain is evicted before the marked fragment is admitted.
@@ -1443,19 +1460,19 @@ where
                 self.evict_duplicate_first(idx);
             }
             // Fall through: the marked fragment itself now starts a chain.
-            return None;
+            return Ok(None);
         }
         let Some(idx) = active else {
             // No marker and no chain in progress: this is not a chain
             // start, whatever its SN says.
-            return Some(Judged::Outcome(IngestOutcome::Refused(
+            return Err(Judged::Outcome(IngestOutcome::Refused(
                 RefuseReason::MissingStartMarker,
             )));
         };
         if frag.markers.dropped {
-            return Some(Self::abort_peer_drop(idx));
+            return Err(Self::abort_peer_drop(idx));
         }
-        None
+        Ok(active)
     }
 
     /// R311y578 — the SINGLE producer of the slot FSM's `fragment.drop`
@@ -1726,20 +1743,20 @@ where
 
     /// Admit `frag` as the next fragment of the chain open in `idx`: the slot and that it does
     /// not start a chain, or the outcome of a continuation the chain cannot take, the chain
-    /// ended. A slot that holds no chain makes the fragment a start.
+    /// ended. A slot that holds no chain is refused.
     fn admit_continuation(
         &mut self,
         idx: usize,
         frag: &Fragment<'_>,
         ring: SnRing,
-        now_ms: u64,
     ) -> Result<(usize, bool), Judged> {
-        // The slot was found by its open chain; one that holds none has no
-        // chain for this fragment to continue, which makes it a start.
+        // The judge hands only the slot its key's open chain sits in. One that holds none is a
+        // slot the Router lost track of, not a chain to continue or a place to start one, and
+        // the fragment is refused with nothing opened.
         let Some(open) = self.slots.get(idx).and_then(|slot| slot.open.as_ref()) else {
-            return self
-                .admit_chain_start(frag, now_ms)
-                .map_err(Judged::Outcome);
+            return Err(Judged::Outcome(IngestOutcome::Refused(
+                RefuseReason::PoolExhausted,
+            )));
         };
         let last_sn = open.last_sn;
         // A payload the chain cannot hold is a codec error for the machine,
@@ -1998,7 +2015,7 @@ mod tests {
     }
 
     /// The default-resolution (0x02, 28-bit) ring every test compares at.
-    const MASK: u64 = crate::sn::mask_from_res(0x02);
+    const MASK: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     fn dispatcher<const S: usize, const C: usize>() -> ReassemblyDispatcher<S, C> {
         ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000))
@@ -2948,7 +2965,7 @@ mod duty_tests {
     use std::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
-    const MASK: u64 = crate::sn::mask_from_res(0x02);
+    const MASK: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     type TestSlot = Slot<1, 64, HeapStaging<1, 64>>;
 
@@ -3503,7 +3520,7 @@ mod chain_boundary_marker_tests {
     use std::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
-    const MASK: u64 = crate::sn::mask_from_res(0x02);
+    const MASK: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     /// The dispatcher under the ARMED contract — what a session whose peer
     /// negotiated patch >= 1 actually runs. One slot on purpose in the
@@ -3637,6 +3654,21 @@ mod chain_boundary_marker_tests {
             Some(&b"BBBCCC"[..]),
             "the superseded prefix must not ride along"
         );
+    }
+
+    /// A continuation is taken only onto a slot that holds a chain: a free slot where the judge
+    /// looked is refused and nothing is opened on it. This is what keeps a restart that evicted
+    /// its key's chain from reaching the evicted slot as a continuation: it starts afresh only
+    /// because the marker rules hand the judge no slot once they evicted it.
+    #[test]
+    fn a_continuation_onto_a_free_slot_is_refused_and_opens_nothing() {
+        let mut d = armed::<2, 256>();
+        let frag = marked(2, 1, b"BBB", NONE);
+        match d.admit_continuation(0, &frag, SnRing::Known(crate::sn::to_wire(MASK))) {
+            Err(Judged::Outcome(IngestOutcome::Refused(RefuseReason::PoolExhausted))) => {}
+            other => panic!("a free slot continues nothing, got {other:?}"),
+        }
+        assert_eq!(d.active_chains(), 0, "and no chain is opened");
     }
 
     /// The same sequence with the rules DISARMED delivers the merged
@@ -3951,9 +3983,9 @@ mod unknown_ring_tests {
     const PEER: &[u8] = &[0xAA; 16];
     /// The three rings the 2-bit `seq_num_res` can name below the widest, each
     /// as its mask: 7, 14 and 28 bits (`sn::mask_from_res`).
-    const RING_7: u64 = crate::sn::mask_from_res(0x00);
-    const RING_14: u64 = crate::sn::mask_from_res(0x01);
-    const RING_28: u64 = crate::sn::mask_from_res(0x02);
+    const RING_7: crate::sn::Sn = crate::sn::mask_from_res(0x00);
+    const RING_14: crate::sn::Sn = crate::sn::mask_from_res(0x01);
+    const RING_28: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     fn dispatcher<const S: usize, const C: usize>() -> ReassemblyDispatcher<S, C> {
         ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000))
@@ -4035,6 +4067,31 @@ mod unknown_ring_tests {
         }
     }
 
+    /// A known ring judges a chain's SNs by their residue on it, whatever word the build holds a
+    /// sequence number in: wire values past 32 bits one step apart on the ring continue the chain,
+    /// and two steps apart end it.
+    #[test]
+    fn a_known_ring_judges_wire_sns_past_32_bits_by_their_residue() {
+        let base = 0x1_0000_0000u64 + 5;
+        let mut d = dispatcher::<4, 64>();
+        assert_eq!(
+            d.ingest(frag(base, 1, b"a"), RING_28, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.ingest(frag(base + 1, 0, b"b"), RING_28, 0, |_| {}),
+            IngestOutcome::Reassembled
+        );
+        let mut gap = dispatcher::<4, 64>();
+        gap.ingest(frag(base, 1, b"a"), RING_28, 0, |_| {});
+        assert_eq!(
+            gap.ingest(frag(base + 2, 0, b"b"), RING_28, 0, |_| {
+                panic!("an aborted chain delivers nothing")
+            }),
+            IngestOutcome::Aborted(AbortReason::OutOfOrder)
+        );
+    }
+
     /// THE STEP ONLY A RING CAN JUDGE: `127 -> 0` is one step on the 7-bit ring,
     /// a jump on the 14 and 28-bit ones, and with no ring it is unresolvable. The
     /// three answers are the whole reason the router refuses to guess.
@@ -4046,13 +4103,16 @@ mod unknown_ring_tests {
             d.ingest_in_ring(frag(127, 1, b"b"), ring, 0, |_| {});
             d.ingest_in_ring(frag(0, 0, b"c"), ring, 0, |_| {})
         };
-        assert_eq!(seam(SnRing::Known(RING_7)), IngestOutcome::Reassembled);
         assert_eq!(
-            seam(SnRing::Known(RING_14)),
+            seam(SnRing::Known(crate::sn::to_wire(RING_7))),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(
+            seam(SnRing::Known(crate::sn::to_wire(RING_14))),
             IngestOutcome::Aborted(AbortReason::OutOfOrder)
         );
         assert_eq!(
-            seam(SnRing::Known(RING_28)),
+            seam(SnRing::Known(crate::sn::to_wire(RING_28))),
             IngestOutcome::Aborted(AbortReason::OutOfOrder)
         );
         assert_eq!(
@@ -4079,8 +4139,8 @@ mod unknown_ring_tests {
     #[test]
     fn a_known_ring_through_the_new_door_is_the_old_door() {
         let run: [(u64, u8, &[u8]); 9] = [
-            (RING_7 - 1, 1, &b"a"[..]),
-            (RING_7, 1, &b"b"[..]),
+            (crate::sn::to_wire(RING_7) - 1, 1, &b"a"[..]),
+            (crate::sn::to_wire(RING_7), 1, &b"b"[..]),
             (0, 0, &b"c"[..]),
             (5, 1, &b"d"[..]),
             (7, 1, &b"e"[..]),
@@ -4096,7 +4156,8 @@ mod unknown_ring_tests {
                 let a = old.ingest(frag(sn, more, payload), mask, 0, |m| {
                     got_old = Some(m.to_vec())
                 });
-                let b = new.ingest_in_ring(frag(sn, more, payload), SnRing::Known(mask), 0, |m| {
+                let ring = SnRing::Known(crate::sn::to_wire(mask));
+                let b = new.ingest_in_ring(frag(sn, more, payload), ring, 0, |m| {
                     got_new = Some(m.to_vec())
                 });
                 assert_eq!((a, got_old), (b, got_new), "mask {mask:#x}, sn {sn}");
@@ -4262,7 +4323,7 @@ mod one_peer_tests {
     const OTHER: &[u8] = &[0xBB; 16];
 
     /// The default-resolution (0x02, 28-bit) ring every test compares at.
-    const MASK: u64 = crate::sn::mask_from_res(0x02);
+    const MASK: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     type One = ReassemblyDispatcher<2, 64, HeapStaging<2, 64>, OnePeer>;
     type Many = ReassemblyDispatcher<2, 64>;

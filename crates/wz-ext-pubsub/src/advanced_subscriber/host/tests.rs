@@ -144,10 +144,15 @@ impl Script {
 }
 
 impl wz_capi_port::KeyHolds for Script {
-    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+    fn release_keyexpr(&self, _row: wz_session_core::session_tables::KeyexprHandle) {}
 
     // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
-    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+    fn retain_keyexpr(
+        &self,
+        _row: wz_session_core::session_tables::KeyexprHandle,
+    ) -> Result<(), wz_capi_port::HoldRefused> {
+        Err(wz_capi_port::HoldRefused::Gone)
+    }
 }
 
 impl wz_capi_port::Tickers for Script {
@@ -250,7 +255,7 @@ impl SessionEngine for Script {
             });
         self.event(format!("retract {}", known.unwrap_or_default()));
     }
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         Err(Refusal::NotBuilt)
     }
     fn declare_matching_listener(
@@ -1124,7 +1129,7 @@ fn a_history_gets_parameters_are_lent_and_take_no_memory() {
     let shared = shared_on(&script, &delivered);
 
     let before = allocations();
-    let parameters = super::GetParameters::history(Some(4), Some(1.5));
+    let parameters = super::GetParameters::history(Some(4), Some(Duration::from_millis(1_500)));
     let opts = super::get_options(&shared, &parameters);
     let parts = opts.query_parts();
     let lent = (
@@ -1146,7 +1151,13 @@ fn a_history_gets_parameters_are_lent_and_take_no_memory() {
     );
     assert_eq!(
         opts.sent_parameters().as_deref(),
-        Some(crate::advanced_subscriber::plans::history_selector(Some(4), Some(1.5)).as_bytes()),
+        Some(
+            crate::advanced_subscriber::plans::history_selector(
+                Some(4),
+                Some(Duration::from_millis(1_500))
+            )
+            .as_bytes()
+        ),
     );
 }
 

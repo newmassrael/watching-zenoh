@@ -308,8 +308,13 @@ async fn the_usrpwd_challenge_rides_the_cookie_between_init_ack_and_open_syn() {
             .to_vec(),
         other => panic!("the responder's last send is an InitAck, got {other:?}"),
     };
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     let issued = carried
         .negotiated
         .auth

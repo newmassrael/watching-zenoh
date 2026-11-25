@@ -1402,7 +1402,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
                     self.dispatch_declare_view_with_local(
                         peer,
                         &declare.body,
-                        peer_keyexpr_table,
+                        MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
                         local_matching,
                     );
                 }

@@ -3892,6 +3892,14 @@ dependencies = [
 name = "wz-app-frame"
 version = "0.1.0"
 dependencies = [
+ "wz-app-schema",
+ "wz-session-core",
+]
+
+[[package]]
+name = "wz-app-schema"
+version = "0.1.0"
+dependencies = [
  "wz-session-core",
 ]
 
@@ -3938,6 +3946,7 @@ dependencies = [
  "rustls",
  "sce-forge-runtime",
  "wz-capi-port",
+ "wz-codecs",
  "wz-ext-pubsub",
  "wz-runtime-coop",
  "wz-runtime-posix",
@@ -4041,6 +4050,7 @@ version = "0.1.0"
 dependencies = [
  "regex-automata",
  "wz-app-frame",
+ "wz-app-schema",
  "wz-codecs",
  "wz-packet-fixtures",
  "wz-session-core",

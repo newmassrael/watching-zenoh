@@ -18,8 +18,10 @@
 //! [`encode_frame_into`] writes a frame
 //! into a buffer the caller owns (the codec's `encode` over a slice sink, which
 //! this paragraph used to say the codec did not expose; it does), and
-//! `encode_frame` is that over a vector. The decode side and the reader
-//! accumulator still allocate. The host tty backend
+//! `encode_frame` is that over a vector. The decode side has the same
+//! form: [`decode_frame_in`] destuffs into a buffer the caller keeps, and
+//! [`next_frame_in`] reads frames out of an accumulator the caller keeps;
+//! [`decode_frame`] and [`SerialFrameReader`] are those over vectors. The host tty backend
 //! (`tokio-serial`) and the `LinkDriver` impl that drives this logic are
 //! a separate concern (the runtime-tokio side), exactly as `TcpDriver` /
 //! `UdpDriver` sit above the stream/datagram codecs.
@@ -255,8 +257,29 @@ pub fn encode_frame_stuffing(
 /// the compiled pico codec is `wz_decode_frame_verdict_equals_pico_on_damaged_frames`
 /// in `wz-integration-tests`.
 pub fn decode_frame(wire: &[u8]) -> Result<DecodedFrame, SerialFrameError> {
-    let mut destuffed = SceBytes::<SERIAL_MFS>::new();
-    cobs_decode(wire, &mut destuffed).map_err(|_| SerialFrameError::Cobs)?;
+    let mut destuffed = DestuffBuffer::new();
+    let (header, payload) = decode_frame_in(wire, &mut destuffed)?;
+    Ok(DecodedFrame {
+        header,
+        payload: payload.to_vec(),
+    })
+}
+
+/// The destination the generated COBS destuffer writes a frame's body into
+/// (`wz_codecs::cobs_decode`), held by the caller as [`StuffBuffer`] is for the
+/// encoder: a link that reads many frames keeps one, which on a build with an
+/// allocator grows to the largest frame once and is reused after that.
+pub type DestuffBuffer = SceBytes<SERIAL_MFS>;
+
+/// [`decode_frame`] into `destuffed`, a buffer the caller keeps: the frame's
+/// header and its payload, borrowed from `destuffed`. The verdict on every byte
+/// string is [`decode_frame`]'s, which is this over a buffer of its own.
+pub fn decode_frame_in<'d>(
+    wire: &[u8],
+    destuffed: &'d mut DestuffBuffer,
+) -> Result<(u8, &'d [u8]), SerialFrameError> {
+    cobs_decode(wire, &mut *destuffed).map_err(|_| SerialFrameError::Cobs)?;
+    let destuffed: &'d DestuffBuffer = destuffed;
     let frame = destuffed.as_slice();
     if frame.len() > SERIAL_MFS {
         return Err(SerialFrameError::TooLarge);
@@ -272,13 +295,46 @@ pub fn decode_frame(wire: &[u8]) -> Result<DecodedFrame, SerialFrameError> {
     if cursor.remaining() != 0 {
         return Err(SerialFrameError::Malformed);
     }
-    if env.crc32 != crc32(env.payload.into_inner()) {
+    let payload = env.payload.into_inner();
+    if env.crc32 != crc32(payload) {
         return Err(SerialFrameError::CrcMismatch);
     }
-    Ok(DecodedFrame {
-        header: env.header,
-        payload: env.payload.to_vec(),
-    })
+    Ok((env.header, payload))
+}
+
+/// The next frame of the bytes a link has read, `acc[..*filled]`, decoded into
+/// `destuffed`: the first span an EOP closes is read as [`decode_frame_in`] reads
+/// it and taken out of the accumulator with its EOP, what follows it moved to the
+/// front, so the link reads on into `acc[*filled..]`. `None` while no EOP is held.
+///
+/// A span that fails to decode is taken out too and answered with its error; the
+/// frames after it are read by the next call. An accumulator full with no EOP in
+/// it holds no frame (one of [`SERIAL_MAX_COBS_BUF`] bytes holds every frame and
+/// its EOP): it is emptied and answered as [`SerialFrameError::TooLarge`], and
+/// the reader resynchronises on the next EOP, as [`SerialFrameReader`] does. So a
+/// link reads without allocating: the accumulator and the destuffing buffer are
+/// the caller's, and nothing else is held between calls.
+pub fn next_frame_in<'d>(
+    acc: &mut [u8],
+    filled: &mut usize,
+    destuffed: &'d mut DestuffBuffer,
+) -> Option<Result<(u8, &'d [u8]), SerialFrameError>> {
+    let held_len = (*filled).min(acc.len());
+    let held = acc.get(..held_len).unwrap_or_default();
+    let Some(eop_at) = held.iter().position(|&byte| byte == SERIAL_EOP) else {
+        if held_len >= acc.len() {
+            *filled = 0;
+            return Some(Err(SerialFrameError::TooLarge));
+        }
+        *filled = held_len;
+        return None;
+    };
+    let decoded = decode_frame_in(held.get(..eop_at).unwrap_or_default(), destuffed);
+    // The EOP is held, so what follows it ends within what is held.
+    let after = eop_at.saturating_add(1);
+    acc.copy_within(after..held_len, 0);
+    *filled = held_len.saturating_sub(after);
+    Some(decoded)
 }
 
 /// Streaming frame boundary detector — the wz analogue of
@@ -841,6 +897,176 @@ mod tests {
             "well-formed COBS, too short to be a frame: rejected by the envelope, \
              not by the COBS check"
         );
+    }
+
+    // ─── reading into kept buffers ───
+
+    /// A frame and the reader's verdict, owned, so that two reads can be compared.
+    type Read = Option<Result<(u8, Vec<u8>), SerialFrameError>>;
+
+    fn next_owned(acc: &mut [u8], filled: &mut usize, kept: &mut DestuffBuffer) -> Read {
+        next_frame_in(acc, filled, kept).map(|read| read.map(|(h, p)| (h, p.to_vec())))
+    }
+
+    /// Turned red by a `decode_frame_in` whose checks drift from `decode_frame`'s,
+    /// or one that hands back the wrong part of the destuffed frame.
+    #[test]
+    fn a_frame_decoded_into_a_kept_buffer_reads_as_one_decoded_into_its_own() {
+        let mut kept = DestuffBuffer::new();
+        let mtu = vec![0x5A; SERIAL_MTU];
+        let long = vec![0xAB; 600];
+        let cases: [(u8, &[u8]); 4] = [
+            (0x00, b""),
+            (SERIAL_FLAG_INIT, &[0x00, 0x11, 0x00]),
+            (0x00, &long),
+            (0x00, &mtu),
+        ];
+        for (header, payload) in cases {
+            let wire = encode_frame(header, payload).expect("encode");
+            let own = decode_frame(&wire).expect("decode");
+            let (read_header, read_payload) =
+                decode_frame_in(&wire, &mut kept).expect("decode into the kept buffer");
+            assert_eq!(read_header, header);
+            assert_eq!(read_payload, payload);
+            assert_eq!(own.payload.as_slice(), payload);
+        }
+        let mut damaged = encode_frame(0x00, b"payload").expect("encode");
+        let at = damaged
+            .iter()
+            .position(|&b| b == b'y')
+            .expect("payload byte");
+        damaged[at] ^= 0x01;
+        assert_eq!(decode_frame(&damaged), Err(SerialFrameError::CrcMismatch));
+        assert_eq!(
+            decode_frame_in(&damaged, &mut kept).map(|(h, p)| (h, p.to_vec())),
+            Err(SerialFrameError::CrcMismatch)
+        );
+    }
+
+    /// Two frames and the head of a third in one read: each frame is taken in turn,
+    /// the third's head stays at the front until its EOP arrives. Turned red by a
+    /// reader that does not move the tail to the front (`copy_within`) or miscounts
+    /// what is left (`*filled`).
+    #[test]
+    fn the_kept_reader_takes_frames_one_at_a_time_and_keeps_the_tail() {
+        let first = encode_frame(0x00, b"first").expect("encode");
+        let second = encode_frame(SERIAL_FLAG_INIT, &[]).expect("encode");
+        let third = encode_frame(0x00, b"third").expect("encode");
+        let head = &third[..third.len() - 1];
+        let mut wire = first.clone();
+        wire.extend_from_slice(&second);
+        wire.extend_from_slice(head);
+        let mut acc = [0u8; SERIAL_MAX_COBS_BUF];
+        acc[..wire.len()].copy_from_slice(&wire);
+        let mut filled = wire.len();
+        let mut kept = DestuffBuffer::new();
+        assert_eq!(
+            next_owned(&mut acc, &mut filled, &mut kept),
+            Some(Ok((0x00, b"first".to_vec())))
+        );
+        assert_eq!(
+            next_owned(&mut acc, &mut filled, &mut kept),
+            Some(Ok((SERIAL_FLAG_INIT, Vec::new())))
+        );
+        assert_eq!(next_owned(&mut acc, &mut filled, &mut kept), None);
+        assert_eq!(
+            &acc[..filled],
+            head,
+            "the third frame's head waits at the front"
+        );
+        acc[filled] = SERIAL_EOP;
+        filled += 1;
+        assert_eq!(
+            next_owned(&mut acc, &mut filled, &mut kept),
+            Some(Ok((0x00, b"third".to_vec())))
+        );
+        assert_eq!(filled, 0);
+        assert_eq!(next_owned(&mut acc, &mut filled, &mut kept), None);
+    }
+
+    /// A span that fails its CRC is taken out with its error and the frame after it
+    /// is read by the next call, as the streaming reader resynchronises.
+    #[test]
+    fn a_damaged_span_is_answered_and_the_frame_after_it_is_read() {
+        let mut damaged = encode_frame(0x00, b"payload").expect("encode");
+        let at = damaged
+            .iter()
+            .position(|&b| b == b'y')
+            .expect("payload byte");
+        damaged[at] ^= 0x01;
+        let good = encode_frame(0x00, b"good").expect("encode");
+        let mut wire = damaged;
+        wire.extend_from_slice(&good);
+        let mut acc = [0u8; SERIAL_MAX_COBS_BUF];
+        acc[..wire.len()].copy_from_slice(&wire);
+        let mut filled = wire.len();
+        let mut kept = DestuffBuffer::new();
+        assert_eq!(
+            next_owned(&mut acc, &mut filled, &mut kept),
+            Some(Err(SerialFrameError::CrcMismatch))
+        );
+        assert_eq!(
+            next_owned(&mut acc, &mut filled, &mut kept),
+            Some(Ok((0x00, b"good".to_vec())))
+        );
+        assert_eq!(filled, 0);
+    }
+
+    /// An accumulator with room left and no EOP waits for more; one that is full
+    /// with no EOP is emptied and answered as too large, and the reader goes on to
+    /// the next frame. Turned red by a reader that keeps the full accumulator
+    /// (`*filled = 0`), which would never read again.
+    #[test]
+    fn a_full_accumulator_with_no_end_marker_is_emptied_as_too_large() {
+        let mut acc = [0x55u8; SERIAL_MAX_COBS_BUF];
+        let mut kept = DestuffBuffer::new();
+        let mut filled = SERIAL_MAX_COBS_BUF - 1;
+        assert_eq!(next_owned(&mut acc, &mut filled, &mut kept), None);
+        assert_eq!(filled, SERIAL_MAX_COBS_BUF - 1, "room left: it waits");
+        filled = SERIAL_MAX_COBS_BUF;
+        assert_eq!(
+            next_owned(&mut acc, &mut filled, &mut kept),
+            Some(Err(SerialFrameError::TooLarge))
+        );
+        assert_eq!(filled, 0);
+        let good = encode_frame(0x00, b"after").expect("encode");
+        acc[..good.len()].copy_from_slice(&good);
+        filled = good.len();
+        assert_eq!(
+            next_owned(&mut acc, &mut filled, &mut kept),
+            Some(Ok((0x00, b"after".to_vec())))
+        );
+    }
+
+    /// The kept reader and the streaming one give the same frames and verdicts for
+    /// one wire, frame by frame.
+    #[test]
+    fn the_kept_reader_reads_what_the_streaming_reader_reads() {
+        let mut wire = encode_frame(0x00, b"one").expect("encode");
+        wire.extend_from_slice(b"\x11\x22\x33\x00");
+        wire.extend_from_slice(
+            &encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).expect("encode"),
+        );
+        wire.extend_from_slice(&encode_frame(0x00, &[0x00; 40]).expect("encode"));
+        let mut streaming = SerialFrameReader::new();
+        let mut expected: Vec<Result<(u8, Vec<u8>), SerialFrameError>> = Vec::new();
+        for &byte in &wire {
+            match streaming.push(byte) {
+                Ok(None) => {}
+                Ok(Some(frame)) => expected.push(Ok((frame.header, frame.payload))),
+                Err(why) => expected.push(Err(why)),
+            }
+        }
+        let mut acc = [0u8; SERIAL_MAX_COBS_BUF];
+        acc[..wire.len()].copy_from_slice(&wire);
+        let mut filled = wire.len();
+        let mut kept = DestuffBuffer::new();
+        let mut read = Vec::new();
+        while let Some(verdict) = next_owned(&mut acc, &mut filled, &mut kept) {
+            read.push(verdict);
+        }
+        assert_eq!(read, expected);
+        assert_eq!(read.len(), 4);
     }
 
     // ─── handshake ───

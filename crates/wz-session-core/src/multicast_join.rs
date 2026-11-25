@@ -24,10 +24,10 @@
 use alloc::vec::Vec;
 
 #[cfg(feature = "transport-qos")]
-use sce_forge_runtime::codec::SliceSink;
+use sce_forge_runtime::codec::ArraySink;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-use sce_forge_runtime::codec::{Bounded, CodecError, SceSink};
+use sce_forge_runtime::codec::{Bounded, BoundedWrite, CodecError, SceSink, Vle};
 use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
 use wz_codecs::ext_unit::ExtUnitParts;
 use wz_codecs::ext_zbuf::ExtZbufParts;
@@ -98,8 +98,8 @@ const JOIN_PATCH_EXT_HEADER: u8 = crate::extpatch::PATCH_EXT_ID | crate::ext_hea
 #[cfg(feature = "alloc")]
 pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec<u8> {
     let mut dgram = Vec::with_capacity(JOIN_MAX_BYTES);
-    encode_join_into(params, tx_sn, &mut VecSink::new(&mut dgram))
-        .expect("a zid of 1 to 16 bytes, and a VecSink grows, so the JOIN is written");
+    // The encoder refuses only what its sink refuses, and a `VecSink` grows.
+    let Ok(()) = encode_join_into(params, tx_sn, &mut VecSink::new(&mut dgram));
     // A group that compresses (`transport/multicast/compression/enabled`) carries its beacon as
     // every other datagram, a batch with the `BatchHeader` in front: upstream's link writes the
     // JOIN through the same batch as any transport message. The sink forms below write the bare
@@ -120,12 +120,13 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
 /// [`encode_join`] is this over a `VecSink`, so the two cannot disagree about a
 /// byte, and the byte-for-byte pins against zenoh-pico (`layer3_join`,
 /// `layer3_join_qos`) hold for both. `MulticastTxConduits` and the params are read
-/// exactly as the owned form reads them. `CodecError::BufferOverflow` is the
-/// refusal of a sink too small for the datagram; an empty zid, which no cbyte
-/// states, never reaches it, as [`MulticastParams::zid`] is a `SessionZid`.
-/// Nothing is truncated and nothing falls back to a heap. [`JOIN_MAX_BYTES`] is a
-/// bound that fits every datagram this function writes whatever the zid, QoS and
-/// patch settings.
+/// exactly as the owned form reads them. The one refusal is the sink's
+/// (`CodecError::BufferOverflow` from a slice too small for the datagram): the
+/// zid is a `SessionZid`, whose bytes the cbyte always states, and the QoS SNs
+/// are written into an array the build proves holds their widest form, so no
+/// field of the datagram can be refused. Nothing is truncated and nothing falls
+/// back to a heap. [`JOIN_MAX_BYTES`] is a bound that fits every datagram this
+/// function writes whatever the zid, QoS and patch settings.
 ///
 /// It writes the bare JOIN whatever [`MulticastParams::compression`] says: the batch a
 /// compressing group beacons in is built by [`encode_join`], on a heap. A loop that holds no
@@ -134,10 +135,7 @@ pub fn encode_join_into<S: SceSink>(
     params: &MulticastParams,
     tx_sn: &MulticastTxConduits,
     out: &mut S,
-) -> Result<(), CodecError>
-where
-    CodecError: From<S::Error>,
-{
+) -> Result<(), S::Error> {
     // R311ku — the unit projection SSOT (`crate::lease`) is shared with
     // the unicast OPEN encoder; both carry the same `_Z_FLAG_T_*_T` rule.
     let (lease_in_seconds, lease) = crate::lease::lease_to_wire(params.lease_ms);
@@ -168,7 +166,7 @@ where
         // The role in the low two bits; the zid's length above them is the
         // document's, from the zid.
         cbyte: params.whatami.to_wire(),
-        zid: crate::codec_owned::sent(params.zid.as_slice())?,
+        zid: params.zid.as_field(),
         s: if params.join_advertises_caps() {
             Some(JoinS {
                 sn_res: pack_res_cbyte(params.seq_num_res, params.req_id_res),
@@ -178,8 +176,8 @@ where
             None
         },
         lease,
-        next_sn_reliable: base_r,
-        next_sn_best_effort: base_be,
+        next_sn_reliable: crate::sn::to_wire(base_r),
+        next_sn_best_effort: crate::sn::to_wire(base_be),
     };
     // R2417 — this node's protocol PATCH level rides a JOIN transport extension
     // whenever it can emit the chain-boundary markers that level promises, which
@@ -209,15 +207,11 @@ where
     // R311y227 — the per-priority QoS-SN advertisement rides a JOIN transport
     // extension when this node offers qos on the group.
     #[cfg(feature = "transport-qos")]
-    let mut sns = [0u8; QOS_EXT_BODY_BYTES];
+    let sns = params
+        .is_qos
+        .then(|| qos_sns(&tx_sn.advertise_per_priority()));
     #[cfg(feature = "transport-qos")]
-    let qos = if params.is_qos {
-        Some(ExtZbufParts {
-            value: crate::codec_owned::sent(qos_sns(&mut sns, &tx_sn.advertise_per_priority())?)?,
-        })
-    } else {
-        None
-    };
+    let qos = sns.as_ref().map(|sns| ExtZbufParts { value: sns.into() });
     #[cfg(not(feature = "transport-qos"))]
     let qos: Option<ExtZbufParts<'_>> = None;
     let (chain, entries) = join_chain(qos.as_ref(), patch.as_ref());
@@ -234,7 +228,7 @@ where
         body: &body,
         extensions: chain.get(..entries).and_then(Bounded::new),
     };
-    Ok(TransportJoinWire::encode_source(&message, out)?)
+    TransportJoinWire::encode_source(&message, out)
 }
 
 /// [`encode_join_into`] over a byte slice the caller holds: how many of `out`'s
@@ -259,27 +253,29 @@ pub fn encode_join_into_slice(
 /// extension (header and a one-byte level).
 pub const JOIN_MAX_BYTES: usize = 1 + Join::MAX_ENCODED_BYTES + 2 + QOS_EXT_BODY_BYTES + 2;
 
-/// The body of the JOIN QoS extension at its widest: `Priority::NUM * 2` SNs,
-/// each a VLE of at most nine bytes.
-const QOS_EXT_BODY_BYTES: usize = crate::qos::Priority::NUM * 2 * 9;
+/// The body of the JOIN QoS extension as a write: for each priority its reliable
+/// and its best-effort SN, each a 64-bit VLE.
+type QosSns = [[Vle<u64>; 2]; crate::qos::Priority::NUM];
+
+/// The body of the JOIN QoS extension at its widest, as its write states it.
+const QOS_EXT_BODY_BYTES: usize = <QosSns as BoundedWrite>::MAX_BYTES;
 
 /// R311y227 — the body of the JOIN QoS-SN extension (the zenoh `join::ext::QoS` /
 /// pico `_Z_MSG_EXT_ID_JOIN_QOS` ZBuf): the LIVE per-priority `next_sn` each
 /// conduit will mint (`reliable` then `best_effort` per `Priority`, ascending), so
-/// a receiver seeds its per-priority RX baseline one before each. Written into
-/// `body` and returned as the bytes it took; the ZBuf's length in front of them is
-/// the document's (`ext_zbuf.scxml`).
+/// a receiver seeds its per-priority RX baseline one before each. The ZBuf's
+/// length in front of them is the document's (`ext_zbuf.scxml`).
 #[cfg(feature = "transport-qos")]
-fn qos_sns<'b>(
-    body: &'b mut [u8; QOS_EXT_BODY_BYTES],
+fn qos_sns(
     conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM],
-) -> Result<&'b [u8], CodecError> {
-    let mut sns = SliceSink::new(body);
-    for c in conduits.iter() {
-        sns.write_vle_u64(c.next_reliable)?;
-        sns.write_vle_u64(c.next_best_effort)?;
-    }
-    Ok(sns.into_written())
+) -> ArraySink<QOS_EXT_BODY_BYTES> {
+    let sns: QosSns = conduits.each_ref().map(|c| {
+        [
+            Vle(crate::sn::to_wire(c.next_reliable)),
+            Vle(crate::sn::to_wire(c.next_best_effort)),
+        ]
+    });
+    ArraySink::written(&sns)
 }
 
 /// The extensions a Join carries at most: the QoS SNs and the patch level.
@@ -378,7 +374,13 @@ pub fn decode_join_qos(
         crate::ext_view::walked(join.extensions.as_ref()),
         crate::join_decode::JOIN_QOS_EXT_EID,
     )?;
-    crate::join_decode::qos_next_sns(qos.plain_zbuf()?)
+    let sns = crate::join_decode::qos_next_sns(qos.plain_zbuf()?)?;
+    Some(
+        sns.map(|[reliable, best_effort]| crate::sn::MulticastRxPair {
+            reliable: crate::sn::from_wire(reliable),
+            best_effort: crate::sn::from_wire(best_effort),
+        }),
+    )
 }
 
 /// The JOIN `dgram` holds with its extension chain taken away, written back by its
@@ -669,6 +671,42 @@ mod tests {
             widest <= JOIN_MAX_BYTES,
             "the bound fits the widest datagram written ({widest})"
         );
+    }
+
+    /// The QoS body is written into an array the build proves holds its widest form: SNs at the
+    /// top of a 64-bit word take nine bytes each and fill the array, at the top of a 32-bit word
+    /// five, SNs of 0 take one byte each, and in each the bytes are those the codec's own VLE
+    /// writes, reliable before best-effort, priority by priority.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn the_qos_body_holds_the_widest_sns_and_writes_what_the_vle_writes() {
+        use sce_forge_runtime::codec::SliceSink;
+        let top = crate::sn::Sn::MAX;
+        let widest = [crate::sn::TxSn {
+            mask: top,
+            next_reliable: top,
+            next_best_effort: top - 1,
+        }; crate::qos::Priority::NUM];
+        let fresh = [crate::sn::TxSn::new(top); crate::qos::Priority::NUM];
+        let widest_len = if crate::sn::SN_RESOLUTION_HAS_64 {
+            QOS_EXT_BODY_BYTES
+        } else {
+            crate::qos::Priority::NUM * 2 * 5
+        };
+        for (conduits, len) in [(widest, widest_len), (fresh, crate::qos::Priority::NUM * 2)] {
+            let body = qos_sns(&conduits);
+            let mut expected = [0u8; QOS_EXT_BODY_BYTES];
+            let mut sink = SliceSink::new(&mut expected);
+            for c in &conduits {
+                sink.write_vle_u64(crate::sn::to_wire(c.next_reliable))
+                    .expect("room for the SN");
+                sink.write_vle_u64(crate::sn::to_wire(c.next_best_effort))
+                    .expect("room for the SN");
+            }
+            assert_eq!(body.as_slice(), sink.into_written());
+            assert_eq!(body.len(), len);
+        }
+        assert_eq!(QOS_EXT_BODY_BYTES, crate::qos::Priority::NUM * 2 * 9);
     }
 
     /// A compressing group's beacon is a batch of the one JOIN: the `BatchHeader` in front, and

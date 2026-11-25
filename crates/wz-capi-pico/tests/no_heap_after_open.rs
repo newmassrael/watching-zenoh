@@ -13,14 +13,17 @@
 //! closed (`Stage`). One line per family is printed:
 //!
 //! ```text
-//! no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>
+//! no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m> grown=<g>
 //! no-heap: <family> not-built
 //! ```
 //!
 //! `allocs` and `bytes` are the window that allocated least, `max_allocs` the window that
-//! allocated most. The threads' interleaving (how many turns the receiving thread takes in a round,
-//! what one round's messages leave for the next) only adds allocations to a window and never takes
-//! away the ones the operation makes, so the least window is the operation's own cost and is what a
+//! allocated most, and `grown` the blocks the family's whole run took and still held at its end,
+//! its warm-ups' among them: a table that grows its capacity at its first use after open and keeps
+//! it allocates in a warm-up and in no counted round, which only `grown` sees. The threads'
+//! interleaving (how many turns the receiving thread takes in a round, what one round's messages
+//! leave for the next) only adds allocations to a window and never takes away the ones the
+//! operation makes, so the least window is the operation's own cost and is what a
 //! row grades; a row locked at 0 grades the most, since it claims no window allocates at all.
 //!
 //! With `WZ_NO_HEAP_READING` set, the lines are written to the file it names as well.
@@ -85,7 +88,7 @@ mod pipe_pair;
 use pipe_pair::GroupPair;
 use pipe_pair::{
     close_window, count_panics, get, mark_calling_thread, open_window, payload, put, reply_closure,
-    view, wait_for, Injecting, Pair, Seen, DATA_KEY, PANICS, WAIT_BOUND,
+    view, wait_for, Injecting, Pair, Seen, DATA_KEY, LIVE_ALLOCATIONS, PANICS, WAIT_BOUND,
 };
 
 #[global_allocator]
@@ -708,21 +711,33 @@ impl E2e {
     }
 }
 
-/// The schema of the message whose instances a keyer reads. Synthetic.
+/// The schema of the message whose instances a keyer reads, `syn/noheap.proto`, as
+/// `protoc --include_imports -o` compiles it. Synthetic.
+///
+/// ```text
+/// syntax = "proto3";
+/// package syn.noheap;
+/// message Reading {
+///   optional uint32 bay = 1;
+///   sint32 tilt = 2;
+///   bytes body = 3;
+/// }
+/// ```
 #[cfg(all(
     feature = "instance-key",
     feature = "e2e-sender",
     feature = "e2e-receiver"
 ))]
-const INSTANCE_SCHEMA: &CStr = cr#"
-syntax = "proto3";
-package syn.noheap;
-message Reading {
-  optional uint32 bay = 1;
-  sint32 tilt = 2;
-  bytes body = 3;
-}
-"#;
+const INSTANCE_SET: &[u8] = &[
+    0x0a, 0x78, 0x0a, 0x10, 0x73, 0x79, 0x6e, 0x2f, 0x6e, 0x6f, 0x68, 0x65, 0x61, 0x70, 0x2e, 0x70,
+    0x72, 0x6f, 0x74, 0x6f, 0x12, 0x0a, 0x73, 0x79, 0x6e, 0x2e, 0x6e, 0x6f, 0x68, 0x65, 0x61, 0x70,
+    0x22, 0x50, 0x0a, 0x07, 0x52, 0x65, 0x61, 0x64, 0x69, 0x6e, 0x67, 0x12, 0x15, 0x0a, 0x03, 0x62,
+    0x61, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d, 0x48, 0x00, 0x52, 0x03, 0x62, 0x61, 0x79, 0x88,
+    0x01, 0x01, 0x12, 0x12, 0x0a, 0x04, 0x74, 0x69, 0x6c, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x11,
+    0x52, 0x04, 0x74, 0x69, 0x6c, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x62, 0x6f, 0x64, 0x79, 0x18, 0x03,
+    0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x62, 0x6f, 0x64, 0x79, 0x42, 0x06, 0x0a, 0x04, 0x5f, 0x62,
+    0x61, 0x79, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+];
 
 /// Three bays and two tilts: six instances, the tilt varying fastest. Synthetic.
 #[cfg(all(
@@ -826,21 +841,16 @@ impl Keyed {
         keyed
     }
 
-    /// A keyer of `INSTANCE_DESCRIPTION` over `INSTANCE_SCHEMA`, keeping no last values.
+    /// A keyer of `INSTANCE_DESCRIPTION` over `INSTANCE_SET`, keeping no last values.
     unsafe fn keyer() -> wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t {
-        use wz_capi_pico::instance_key::wz_ext_instance_keyer_new;
-        use wz_capi_pico::proto_file::wz_ext_proto_file_t;
-        let files = [wz_ext_proto_file_t {
-            name: c"syn/noheap.proto".as_ptr(),
-            text: INSTANCE_SCHEMA.as_ptr(),
-        }];
+        use wz_capi_pico::instance_key::wz_ext_instance_keyer_from_descriptor_set;
         let mut keyer: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t =
             std::mem::zeroed();
         assert_eq!(
-            wz_ext_instance_keyer_new(
+            wz_ext_instance_keyer_from_descriptor_set(
                 &mut keyer,
-                files.as_ptr(),
-                files.len(),
+                INSTANCE_SET.as_ptr(),
+                INSTANCE_SET.len(),
                 INSTANCE_DESCRIPTION.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null_mut(),
@@ -919,22 +929,39 @@ impl Keyed {
 #[cfg(feature = "message-payload")]
 const CATALOG: &str = include_str!("../../wz-app-frame/catalog/synthetic.json5");
 
-/// The schema of the catalog message's payload. Synthetic.
+/// The schema of the catalog message's payload, `syn/noheap.proto`, as
+/// `protoc --include_imports -o` compiles it. Synthetic.
+///
+/// ```text
+/// syntax = "proto3";
+/// package syn.noheap;
+/// message Point {
+///   sint32 x = 1;
+///   sint32 y = 2;
+/// }
+/// message Pose {
+///   uint32 serial = 1;
+///   int32 offset = 2;
+///   string label = 5;
+///   Point origin = 8;
+/// }
+/// ```
 #[cfg(feature = "message-payload")]
-const PAYLOAD_SCHEMA: &CStr = cr#"
-syntax = "proto3";
-package syn.noheap;
-message Point {
-  sint32 x = 1;
-  sint32 y = 2;
-}
-message Pose {
-  uint32 serial = 1;
-  int32 offset = 2;
-  string label = 5;
-  Point origin = 8;
-}
-"#;
+const PAYLOAD_SET: &[u8] = &[
+    0x0a, 0xc4, 0x01, 0x0a, 0x10, 0x73, 0x79, 0x6e, 0x2f, 0x6e, 0x6f, 0x68, 0x65, 0x61, 0x70, 0x2e,
+    0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x0a, 0x73, 0x79, 0x6e, 0x2e, 0x6e, 0x6f, 0x68, 0x65, 0x61,
+    0x70, 0x22, 0x23, 0x0a, 0x05, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x12, 0x0c, 0x0a, 0x01, 0x78, 0x18,
+    0x01, 0x20, 0x01, 0x28, 0x11, 0x52, 0x01, 0x78, 0x12, 0x0c, 0x0a, 0x01, 0x79, 0x18, 0x02, 0x20,
+    0x01, 0x28, 0x11, 0x52, 0x01, 0x79, 0x22, 0x77, 0x0a, 0x04, 0x50, 0x6f, 0x73, 0x65, 0x12, 0x16,
+    0x0a, 0x06, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x06,
+    0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x12, 0x16, 0x0a, 0x06, 0x6f, 0x66, 0x66, 0x73, 0x65, 0x74,
+    0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52, 0x06, 0x6f, 0x66, 0x66, 0x73, 0x65, 0x74, 0x12, 0x14,
+    0x0a, 0x05, 0x6c, 0x61, 0x62, 0x65, 0x6c, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x6c,
+    0x61, 0x62, 0x65, 0x6c, 0x12, 0x29, 0x0a, 0x06, 0x6f, 0x72, 0x69, 0x67, 0x69, 0x6e, 0x18, 0x08,
+    0x20, 0x01, 0x28, 0x0b, 0x32, 0x11, 0x2e, 0x73, 0x79, 0x6e, 0x2e, 0x6e, 0x6f, 0x68, 0x65, 0x61,
+    0x70, 0x2e, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x52, 0x06, 0x6f, 0x72, 0x69, 0x67, 0x69, 0x6e, 0x62,
+    0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+];
 
 /// The room the encoded payload of a round takes, with headroom.
 #[cfg(feature = "message-payload")]
@@ -968,10 +995,9 @@ impl MessagePayload {
             wz_ext_owned_message_catalog_t,
         };
         use wz_capi_pico::message_payload::{
-            wz_ext_owned_payload_schema_t, wz_ext_payload_schema_drop, wz_ext_payload_schema_move,
-            wz_ext_payload_schema_new,
+            wz_ext_owned_payload_schema_t, wz_ext_payload_schema_drop,
+            wz_ext_payload_schema_from_descriptor_set, wz_ext_payload_schema_move,
         };
-        use wz_capi_pico::proto_file::wz_ext_proto_file_t;
         let text = std::ffi::CString::new(CATALOG).expect("no NUL in the catalog");
         let mut catalog: wz_ext_owned_message_catalog_t = std::mem::zeroed();
         assert_eq!(
@@ -979,16 +1005,12 @@ impl MessagePayload {
             Z_OK,
             "the synthetic catalog reads"
         );
-        let files = [wz_ext_proto_file_t {
-            name: c"syn/noheap.proto".as_ptr(),
-            text: PAYLOAD_SCHEMA.as_ptr(),
-        }];
         let mut schema: wz_ext_owned_payload_schema_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_payload_schema_new(
+            wz_ext_payload_schema_from_descriptor_set(
                 &mut schema,
-                files.as_ptr(),
-                files.len(),
+                PAYLOAD_SET.as_ptr(),
+                PAYLOAD_SET.len(),
                 std::ptr::null_mut()
             ),
             Z_OK,
@@ -2654,13 +2676,20 @@ unsafe fn window(open: &mut Open, round: Round, index: usize) -> Seen {
     seen
 }
 
-/// Every window of `round`.
-unsafe fn measure(open: &mut Open, round: Round) -> Vec<Seen> {
+/// Every window of `round`, and the blocks its run took and still held at its end, its warm-ups'
+/// among them: capacity a warm-up grows once is heap taken after open as well, and no counted round
+/// sees it again.
+unsafe fn measure(open: &mut Open, round: Round) -> (Vec<Seen>, u64) {
     let mut seen = Vec::with_capacity(WINDOWS);
+    let before = LIVE_ALLOCATIONS.load(Ordering::SeqCst);
     for index in 0..WINDOWS {
         seen.push(window(open, round, index));
     }
-    seen
+    let after = LIVE_ALLOCATIONS.load(Ordering::SeqCst);
+    (
+        seen,
+        u64::try_from(after.saturating_sub(before)).unwrap_or(0),
+    )
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2688,7 +2717,7 @@ fn allocations_after_open_are_counted_per_operation_family() {
     count_panics();
     mark_calling_thread();
     let (seen, balanced, dropped) = unsafe {
-        let mut seen: Vec<(Round, Vec<Seen>)> = Vec::new();
+        let mut seen: Vec<(Round, Vec<Seen>, u64)> = Vec::new();
         let (mut balanced, mut dropped) = (true, true);
         for stage in Stage::ALL {
             let rounds: Vec<Round> = Round::ALL
@@ -2702,7 +2731,8 @@ fn allocations_after_open_are_counted_per_operation_family() {
                 continue;
             };
             for round in rounds {
-                seen.push((round, measure(&mut open, round)));
+                let (windows, grown) = measure(&mut open, round);
+                seen.push((round, windows, grown));
             }
             let (closures, transports) = open.close();
             balanced &= closures;
@@ -2729,11 +2759,12 @@ fn allocations_after_open_are_counted_per_operation_family() {
 
     let mut reading = String::new();
     for (name, round, part) in FAMILIES {
-        let line = match seen.iter().find(|(of, _)| *of == round) {
-            Some((_, windows)) => {
+        let line = match seen.iter().find(|(of, _, _)| *of == round) {
+            Some((_, windows, grown)) => {
                 let (allocs, bytes, most) = reading_of(windows, part);
                 let least = format!("allocs={allocs} bytes={bytes} rounds={ROUNDS}");
-                format!("{PREFIX} {name} {least} windows={WINDOWS} max_allocs={most}")
+                let most = format!("windows={WINDOWS} max_allocs={most} grown={grown}");
+                format!("{PREFIX} {name} {least} {most}")
             }
             None => format!("{PREFIX} {name} not-built"),
         };

@@ -347,16 +347,28 @@ pub(crate) struct InCallback {
 }
 
 impl InCallback {
-    pub(crate) fn enter() -> Self {
-        Self {
-            _entered: callback_depth::enter(),
-        }
+    /// Mark the calling thread, or `None` when the build counts its callbacks in a table and
+    /// [`wz_session_core::caps::CALLBACK_THREADS`] other threads already run one: the caller then
+    /// does not call the program, since a callback run unmarked would wait for itself at a door
+    /// that waits for the program's callbacks.
+    pub(crate) fn enter() -> Option<Self> {
+        Some(Self {
+            _entered: callback_depth::enter()?,
+        })
     }
 
     /// Whether the calling thread is inside one of the program's callbacks.
     pub(crate) fn here() -> bool {
         callback_depth::here()
     }
+}
+
+/// How many of the program's callbacks the library did not run because the table that marks the
+/// threads inside one was full (`InCallback::enter` answered `None`); 0 in a build with `std`,
+/// which marks every thread and so runs every callback.
+#[no_mangle]
+pub extern "C" fn wz_ext_callbacks_refused() -> usize {
+    callback_depth::refused()
 }
 
 /// How many of the program's callbacks each thread is running: a thread-local count on a host,
@@ -372,13 +384,17 @@ mod callback_depth {
     /// One callback of the calling thread, from [`enter`] to drop.
     pub(super) struct Entered;
 
-    pub(super) fn enter() -> Entered {
+    pub(super) fn enter() -> Option<Entered> {
         IN_CALLBACK.with(|depth| depth.set(depth.get().saturating_add(1)));
-        Entered
+        Some(Entered)
     }
 
     pub(super) fn here() -> bool {
         IN_CALLBACK.with(|depth| depth.get()) > 0
+    }
+
+    pub(super) fn refused() -> usize {
+        0
     }
 
     impl Drop for Entered {
@@ -390,47 +406,136 @@ mod callback_depth {
 }
 
 /// How many of the program's callbacks each thread is running, without `std`: one entry for each
-/// callback in the process's table, keyed by the thread's identity, because an MCU kernel gives a
-/// Rust image no thread-local storage. Compiled for the host's tests too, so the table is run
-/// where the tests run.
+/// thread in a callback, keyed by the thread's word, in a table of the process whose room is fixed
+/// by the build, because an MCU kernel gives a Rust image no thread-local storage and a session
+/// takes no heap after it opens. Compiled for the host's tests too, so the table is run where the
+/// tests run.
 #[cfg(any(not(feature = "std"), test))]
 mod callback_table {
-    use alloc::vec::Vec;
-
-    use wz_capi_port::os::{self, ThreadId};
+    use wz_capi_port::os;
     use wz_capi_port::sync::Lock;
+    #[cfg(feature = "multi-thread")]
+    use wz_session_core::caps;
 
-    static IN_CALLBACK: Lock<Vec<ThreadId>> = Lock::new(Vec::new());
+    /// The threads that may be inside callbacks at once: in the multi-threaded arm the read tasks
+    /// and the program's threads, as many as the build states.
+    #[cfg(feature = "multi-thread")]
+    const ROOM: usize = caps::CALLBACK_THREADS;
+    /// In the single-threaded arm the program calls the library from one thread at a time, as
+    /// zenoh-pico's arm without threads asks, and no task of the library's runs a callback, so one
+    /// thread at most is inside callbacks, however deep they nest.
+    #[cfg(not(feature = "multi-thread"))]
+    const ROOM: usize = 1;
+
+    static IN_CALLBACK: Lock<Threads<ROOM>> = Lock::new(Threads::new());
+
+    /// The threads running one of the program's callbacks: the first `len` of `entries`, each a
+    /// thread's word ([`os::current_word`], never 0) and how many callbacks it runs, nested, and
+    /// how many callbacks a thread past the room did not run.
+    pub(super) struct Threads<const N: usize> {
+        entries: [(usize, usize); N],
+        len: usize,
+        refused: usize,
+    }
+
+    impl<const N: usize> Threads<N> {
+        pub(super) const fn new() -> Self {
+            Self {
+                entries: [(0, 0); N],
+                len: 0,
+                refused: 0,
+            }
+        }
+
+        /// Count one more callback of `thread`: `false`, counting nothing, when `thread` runs
+        /// none yet and `N` others do.
+        pub(super) fn enter(&mut self, thread: usize) -> bool {
+            let len = self.len;
+            if let Some(entry) = self
+                .entries
+                .iter_mut()
+                .take(len)
+                .find(|entry| entry.0 == thread)
+            {
+                entry.1 = entry.1.saturating_add(1);
+                return true;
+            }
+            let Some(free) = self.entries.get_mut(len) else {
+                self.refused = self.refused.saturating_add(1);
+                return false;
+            };
+            *free = (thread, 1);
+            self.len = len + 1;
+            true
+        }
+
+        pub(super) fn refused(&self) -> usize {
+            self.refused
+        }
+
+        pub(super) fn here(&self, thread: usize) -> bool {
+            self.entries
+                .iter()
+                .take(self.len)
+                .any(|entry| entry.0 == thread)
+        }
+
+        /// Count one callback of `thread` less; its entry goes with its last, the last entry
+        /// taking its place.
+        pub(super) fn leave(&mut self, thread: usize) {
+            let Some(held) = self.entries.get_mut(..self.len) else {
+                return;
+            };
+            let Some(at) = held.iter().position(|entry| entry.0 == thread) else {
+                return;
+            };
+            let Some(&last) = held.last() else {
+                return;
+            };
+            let Some(entry) = held.get_mut(at) else {
+                return;
+            };
+            entry.1 = entry.1.saturating_sub(1);
+            if entry.1 == 0 {
+                *entry = last;
+                self.len = self.len.saturating_sub(1);
+            }
+        }
+    }
 
     /// One callback of the calling thread, from [`enter`] to drop.
     pub(super) struct Entered {
-        thread: ThreadId,
+        thread: usize,
     }
 
     // Out of line, as `here` and the drop are: each takes the table's lock, and every door that
     // calls into C or waits for a callback would otherwise hold its own copy of the take.
     #[inline(never)]
-    pub(super) fn enter() -> Entered {
-        let thread = os::current();
-        IN_CALLBACK.with(|threads| threads.push(thread));
-        Entered { thread }
+    pub(super) fn enter() -> Option<Entered> {
+        let thread = os::current_word();
+        // Built only once counted: an `Entered` dropped leaves the table.
+        if IN_CALLBACK.with(|threads| threads.enter(thread)) {
+            Some(Entered { thread })
+        } else {
+            None
+        }
     }
 
     #[inline(never)]
     pub(super) fn here() -> bool {
-        let thread = os::current();
-        IN_CALLBACK.with(|threads| threads.contains(&thread))
+        let thread = os::current_word();
+        IN_CALLBACK.with(|threads| threads.here(thread))
+    }
+
+    pub(super) fn refused() -> usize {
+        IN_CALLBACK.with(|threads| threads.refused())
     }
 
     impl Drop for Entered {
         #[inline(never)]
         fn drop(&mut self) {
             let thread = self.thread;
-            IN_CALLBACK.with(|threads| {
-                if let Some(at) = threads.iter().rposition(|t| *t == thread) {
-                    threads.swap_remove(at);
-                }
-            });
+            IN_CALLBACK.with(|threads| threads.leave(thread));
         }
     }
 }
@@ -445,8 +550,8 @@ mod tests {
     #[test]
     fn the_callback_table_counts_each_thread_on_its_own() {
         assert!(!callback_table::here());
-        let outer = callback_table::enter();
-        let inner = callback_table::enter();
+        let outer = callback_table::enter().expect("the table has room for this thread");
+        let inner = callback_table::enter().expect("a nested callback takes no more room");
         assert!(callback_table::here());
         let elsewhere = std::thread::spawn(callback_table::here)
             .join()
@@ -456,6 +561,34 @@ mod tests {
         assert!(callback_table::here(), "the outer callback still runs");
         drop(outer);
         assert!(!callback_table::here());
+        assert_eq!(callback_table::refused(), 0, "no callback was refused");
+    }
+
+    #[test]
+    fn a_full_callback_table_refuses_a_new_thread_and_takes_a_nested_callback() {
+        let mut threads = callback_table::Threads::<2>::new();
+        assert!(threads.enter(1));
+        assert!(threads.enter(2));
+        assert!(
+            !threads.enter(3),
+            "a third thread is refused while two run callbacks"
+        );
+        assert!(!threads.here(3), "the refused thread is not counted");
+        assert_eq!(threads.refused(), 1, "the callback not run is counted");
+        assert!(
+            threads.enter(1),
+            "a nested callback takes no entry of its own"
+        );
+        threads.leave(1);
+        assert!(threads.here(1), "the outer callback still runs");
+        threads.leave(1);
+        assert!(!threads.here(1));
+        assert!(threads.here(2), "the other thread keeps its entry");
+        assert!(
+            threads.enter(3),
+            "the entry let go of takes the refused thread"
+        );
+        assert!(threads.here(3));
     }
 }
 

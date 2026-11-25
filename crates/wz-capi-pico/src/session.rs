@@ -105,7 +105,6 @@ use wz_session_core::WhatAmI;
 /// opens its raweth transport, a multicast session over raw Ethernet
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
-#[cfg(any(feature = "engine-tokio", feature = "peer"))]
 pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
     let (locator, metadata) = endpoint.split_once('#').unwrap_or((endpoint, ""));
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
@@ -115,10 +114,28 @@ pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
     locator.starts_with("udp/") && metadata.split(';').any(|pair| pair.starts_with("iface="))
 }
 
+/// The endpoint of the group a session joins as its one transport, read once for both engines: the
+/// locator pico opens its one transport on, the listen locator when there is one and the connect
+/// locator otherwise (`vendor/zenoh-pico/src/net/session.c` @
+/// `// First, try to open the optional listen locator.`), when that locator names a group
+/// ([`is_group_endpoint`]). pico opens a multicast or raweth transport on it whichever role
+/// named it, a client's connect too (`vendor/zenoh-pico/src/transport/manager.c` @
+/// `case Z_LINK_CAP_TRANSPORT_RAWETH:`, in both its client and its peer open). A connect locator
+/// beside a listen locator is a peer pico adds to the transport the listen locator opened, never a
+/// group of its own.
+pub(crate) fn group_endpoint<'a>(
+    listen: Option<&'a str>,
+    connect: Option<&'a str>,
+) -> Option<&'a str> {
+    listen
+        .or(connect)
+        .filter(|endpoint| is_group_endpoint(endpoint))
+}
+
 /// The batch size a unicast session of this ABI advertises in its InitSyn, on either engine:
 /// pico's `BATCH_UNICAST_SIZE` as the open's snapshot `limits` holds it
 /// (`PICO_UNICAST_BATCH_BYTES`).
-fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
+const fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
     pico_batch(limits.pico_unicast_batch_bytes())
 }
 
@@ -132,8 +149,12 @@ fn pico_multicast_batch(limits: &SessionLimits) -> u16 {
 /// A batch size of this ABI as the wire carries it, in two bytes. The domain of both batch limits
 /// is `1..=65535`, so a snapshot holds no size the field cannot carry: a batch of 0 would size a
 /// session that sends nothing, and one past `u16::MAX` does not fit the field.
-fn pico_batch(bytes: usize) -> u16 {
-    u16::try_from(bytes).unwrap_or(u16::MAX)
+const fn pico_batch(bytes: usize) -> u16 {
+    if bytes > u16::MAX as usize {
+        u16::MAX
+    } else {
+        bytes as u16
+    }
 }
 
 /// What a session of this ABI rejoins from fragments, unicast and in a group, on either engine:
@@ -267,7 +288,7 @@ fn pico_group(
         join_interval_ms: 2_500,
         // pico has no cap on a group's members: its list grows while its allocator gives.
         max_sessions: None,
-        seq_num_res: sn_resolution.wire_code(),
+        seq_num_res: sn_resolution,
         req_id_res: 0x02,
         batch_size: pico_multicast_batch(limits),
         is_qos: false,
@@ -457,9 +478,9 @@ pub(crate) fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZR
 
 /// The files [`resolve_tls_config`] reads: each of its keys that names the PEM by path, the
 /// client certificate's two only when mTLS is on, as it reads them. Read by
-/// `wz_ext_config_device_requires` only, so it is part of the unstable surface.
+/// `wz_ext_config_device_requires` only, so it is in a build with `device-requires`.
 #[cfg(all(
-    feature = "unstable-api",
+    feature = "device-requires",
     any(
         feature = "transport-link-tls",
         feature = "transport-link-quic",
@@ -485,7 +506,7 @@ pub(crate) fn tls_files_named(cfg: &ConfigState) -> Vec<String> {
 
 /// The no-TLS-backend build reads no certificate file.
 #[cfg(all(
-    feature = "unstable-api",
+    feature = "device-requires",
     not(any(
         feature = "transport-link-tls",
         feature = "transport-link-quic",
@@ -579,14 +600,48 @@ type SecuredLinks = <crate::coop_host::Links as wz_capi_coop::ComposedLinks>::Wi
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "tls-mbedtls")))]
 type SecuredLinks = crate::coop_host::Links;
 
+/// The joiner of the groups a cooperative session joins on the host: its UDP groups, and its
+/// `reth/` groups beside them where the build has the raweth transport (`raweth-transport`).
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    feature = "multicast-transport",
+    not(feature = "raweth-transport")
+))]
+type HostGroupJoiner = wz_capi_coop::host_group::HostGroups<crate::coop_host::Multicast>;
+#[cfg(all(not(feature = "engine-tokio"), feature = "raweth-transport"))]
+type HostGroupJoiner =
+    crate::coop_host::WithRaweth<wz_capi_coop::host_group::HostGroups<crate::coop_host::Multicast>>;
+
 /// The links a cooperative session opens over the host's sockets, as [`open_on_coop`] composes
 /// them: the host's, over a secure channel and joining groups where the build does either.
 #[cfg(all(not(feature = "engine-tokio"), feature = "multicast-transport"))]
-pub(crate) type HostLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<
-    wz_capi_coop::host_group::HostGroups<crate::coop_host::Multicast>,
->;
+type SocketLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<HostGroupJoiner>;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
-pub(crate) type HostLinks = SecuredLinks;
+type SocketLinks = SecuredLinks;
+
+/// The links a cooperative session opens over the host's network: its sockets', and WebSocket
+/// links over its TCP beside them where the build has them (`transport-link-ws`).
+#[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-ws"))]
+type NetLinks = crate::coop_host::WithWs<SocketLinks>;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-ws")))]
+type NetLinks = SocketLinks;
+
+/// The links a cooperative session opens over the host's network and lines: its network's, and
+/// its ttys' beside them where the build has serial links (`transport-link-serial`).
+#[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-serial"))]
+type TtyLinks = crate::coop_host::WithSerial<NetLinks>;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-serial")))]
+type TtyLinks = NetLinks;
+
+/// The links a cooperative session opens over the host: its sockets' and ttys', and its named
+/// FIFOs' beside them where the build has unixpipe links (`transport-link-unixpipe`).
+#[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-unixpipe"))]
+pub(crate) type HostLinks = crate::coop_host::WithUnixpipe<TtyLinks>;
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(feature = "transport-link-unixpipe")
+))]
+pub(crate) type HostLinks = TtyLinks;
 
 /// The links a cooperative session opens over: the host's, or with `app-transport` whichever of
 /// the host's and the program's transport the config chose. One type either way, so the engine
@@ -1053,11 +1108,7 @@ unsafe fn open_request(
     // transport.
     #[cfg(not(feature = "engine-tokio"))]
     {
-        #[cfg(feature = "peer")]
-        let joins_a_group = listen.is_some_and(is_group_endpoint);
-        #[cfg(not(feature = "peer"))]
-        let joins_a_group = false;
-        if !joins_a_group {
+        if group_endpoint(listen, connect).is_none() {
             let unicast = listen
                 .into_iter()
                 .chain(connect)
@@ -1484,19 +1535,21 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
     // `// First, try to open the optional listen locator.`).
     #[cfg(feature = "admin-space")]
     let transport_endpoint = listen.clone().or_else(|| connect.first().cloned());
-    // Open-debt item 913 — a listen endpoint that names a group is joined as the
-    // session's one transport, and a connect locator beside it opens nothing: pico adds a
+    // Open-debt item 913 — the locator pico opens its one transport on, when it names a group
+    // (`group_endpoint`), is joined as that transport, a client's connect locator too, and a
+    // connect locator beside a listened group opens nothing: pico adds a
     // peer to a unicast transport only (`vendor/zenoh-pico/src/transport/manager.c` @
     // `z_result_t _z_new_peer(`, whose other transports fall through). A build without
     // the multicast transport has no link for it, and refuses it as pico's does.
-    let joins_a_group = listen.as_deref().is_some_and(is_group_endpoint);
+    let group =
+        group_endpoint(listen.as_deref(), connect.first().map(String::as_str)).map(String::from);
     #[cfg(not(feature = "multicast-transport"))]
-    if joins_a_group {
+    if group.is_some() {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
     }
     #[cfg(feature = "multicast-transport")]
-    let (listen, connect, groups) = match listen {
-        Some(endpoint) if joins_a_group => (
+    let (listen, connect, groups) = match group {
+        Some(endpoint) => (
             None,
             Vec::new(),
             vec![wz_capi_port::group::GroupJoin {
@@ -1513,7 +1566,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 declarations: wz_capi_port::group::GroupDeclarations::Mapped,
             }],
         ),
-        listen => (listen, connect, Vec::new()),
+        None => (listen, connect, Vec::new()),
     };
     #[cfg(not(feature = "multicast-transport"))]
     let groups = Vec::new();
@@ -1869,6 +1922,55 @@ fn write_unicast_endpoints(
     Ok(())
 }
 
+/// The rows of the tables of every session a build that states no policy, listens on nothing and
+/// joins no group opens, laid out when it is compiled: such a build opens each session under the
+/// pico preset (`opening_limits`) as a client that dials at most the endpoints the build admits
+/// (`MAX_STATIC_CONNECT`), advertising the preset's batch and admitting no face besides its dial,
+/// so its open walks no plan of its own.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+const PRESET: Result<wz_capi_coop::arena::ArenaRegion, wz_capi_coop::arena::ArenaRefused> =
+    wz_capi_coop::arena::ArenaRegion::of(
+        wz_capi_coop::arena::PlanShape::dial_only(
+            wz_session_core::caps::MAX_STATIC_CONNECT,
+            pico_unicast_batch(&opening_limits()),
+        ),
+        opening_limits(),
+    );
+
+// A build whose limits lay the preset out no arena is refused when it is compiled, not at every
+// open.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+const _: () = assert!(
+    PRESET.is_ok(),
+    "the pico preset lays out no arena under this build's limits"
+);
+
+/// The preset's rows where an open refers to them.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+static PRESET_REGION: Result<wz_capi_coop::arena::ArenaRegion, wz_capi_coop::arena::ArenaRefused> =
+    PRESET;
+
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
     // What the config names, read where it lies; the texts themselves are written into the
@@ -1883,14 +1985,13 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // before this.
     #[cfg(not(feature = "peer"))]
     debug_assert!(listen.is_none());
-    // A listen endpoint that names a group is joined as the session's one transport, and a
-    // connect locator beside it opens nothing, as the tokio engine's open reads it (pico adds a
-    // peer to a unicast transport only). A build without the multicast transport refuses it.
-    #[cfg(feature = "peer")]
-    let joins_a_group = listen.is_some_and(is_group_endpoint);
-    #[cfg(not(feature = "peer"))]
-    let joins_a_group = false;
-    #[cfg(all(feature = "peer", not(feature = "multicast-transport")))]
+    // The locator pico opens its one transport on, when it names a group, is joined as that
+    // transport, and a connect locator beside a listened group opens nothing, as the tokio engine's
+    // open reads it (pico adds a peer to a unicast transport only). A build without the multicast
+    // transport refuses it.
+    let group = group_endpoint(listen, stated);
+    let joins_a_group = group.is_some();
+    #[cfg(not(feature = "multicast-transport"))]
     if joins_a_group {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
     }
@@ -1900,7 +2001,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     #[cfg(feature = "session-memory")]
     let memory = memory_basis(
-        listen,
+        group.or(listen),
         stated.is_some() || !request.scouted.is_empty(),
         &tx_queue,
         &limits,
@@ -1919,8 +2020,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // pico's config carries ONE listen locator, so the session listens on that one or none,
     // unless it names the group the session joins.
     #[cfg(feature = "multicast-transport")]
-    let groups: Vec<_> = match listen {
-        Some(endpoint) if joins_a_group => vec![wz_capi_port::group::GroupJoin {
+    let groups: Vec<_> = match group {
+        Some(endpoint) => vec![wz_capi_port::group::GroupJoin {
             endpoint: String::from(endpoint),
             profile: pico_group(sn_resolution, &limits),
             is_shm: false,
@@ -1992,11 +2093,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Err(_) => return crate::result::Z_ERR_INVALID,
     };
     // A group is joined on the host's sockets, under the session's two link policies, as the
-    // tokio engine's group sockets are.
+    // tokio engine's group sockets are, and a `reth/` group on a raw packet socket.
     #[cfg(feature = "multicast-transport")]
-    let links = links.with_groups(wz_capi_coop::host_group::HostGroups::<
-        crate::coop_host::Multicast,
-    >::of_policy(&policy));
+    let joiner =
+        wz_capi_coop::host_group::HostGroups::<crate::coop_host::Multicast>::of_policy(&policy);
+    #[cfg(feature = "raweth-transport")]
+    let joiner = crate::coop_host::with_raweth(joiner);
+    #[cfg(feature = "multicast-transport")]
+    let links = links.with_groups(joiner);
     // The word that the program's clock moved on, read before the clock is handed to the engine.
     #[cfg(feature = "time-base")]
     let clock_moves = crate::time_base::clock_moves(&clock);
@@ -2061,6 +2165,19 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // waiting in its own loop would hold the session through each tick of its wait, and a call
     // that takes the session (a get takes it more than once) would wait behind the read task
     // turn after turn.
+    let links = links.waited_by_owner();
+    // WebSocket links run over the host's TCP beside its sockets, waited for as those are, each
+    // listener answering as many opening requests at once as the session admits handshakes.
+    #[cfg(feature = "transport-link-ws")]
+    let links = crate::coop_host::with_ws(links, accept_pending).waited_by_owner();
+    // The host's ttys are links beside its sockets, waited for as those are: a `serial/` locator
+    // is dialled and listened on over them, any other over the sockets.
+    #[cfg(feature = "transport-link-serial")]
+    let links = crate::coop_host::with_serial(links).waited_by_owner();
+    // The host's named FIFOs are links beside those, waited for the same way: a `unixpipe/`
+    // locator is dialled and listened on over them.
+    #[cfg(feature = "transport-link-unixpipe")]
+    let links = crate::coop_host::with_unixpipe(links).waited_by_owner();
     #[cfg(feature = "app-transport")]
     let links = match request.app_transport {
         Some(transport) => PicoLinks::Right(app_links_on(
@@ -2071,10 +2188,25 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             .waited_by_owner(),
             &clock,
         )),
-        None => PicoLinks::Left(links.waited_by_owner()),
+        None => PicoLinks::Left(links),
     };
-    #[cfg(not(feature = "app-transport"))]
-    let links = links.waited_by_owner();
+    // A build that may state a policy, listen or join a group lays out each session's rows from
+    // its config at the open.
+    #[cfg(not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    )))]
+    let plan = match &PRESET_REGION {
+        Ok(region) => wz_capi_coop::arena::PlanFrom::Region(region),
+        Err(refused) => return coop_open_refusal(&wz_capi_coop::OpenError::Arena(*refused)),
+    };
+    #[cfg(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))]
+    let plan = wz_capi_coop::arena::PlanFrom::Config;
     let opened = wz_capi_coop::CoopEngine::open_made_in(
         links,
         clock,
@@ -2085,6 +2217,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         wz_capi_coop::arena::OpenStorage {
             memory: &wz_capi_coop::arena::AllocatorMemory,
             held: const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
+            plan,
         },
     )
     .map(wz_capi_coop::CoopEngine::into_drive);
@@ -2175,7 +2308,9 @@ fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
         // `z_open` judged the form before this (`crate::key_ids::admit_at_open`), and the engine
         // judges it again with the same rule.
         OpenError::KeyWireForm(_) => crate::result::Z_ERR_INVALID,
-        OpenError::Arena(ArenaRefused::Limit { .. }) => crate::result::Z_ERR_CONFIG_INVALID_VALUE,
+        OpenError::Arena(ArenaRefused::Limit { .. }) | OpenError::SnResolution(_) => {
+            crate::result::Z_ERR_CONFIG_INVALID_VALUE
+        }
         OpenError::Arena(
             ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. } | ArenaRefused::Lend(_),
         )
@@ -2229,6 +2364,20 @@ mod coop_open_refusal_tests {
         assert_eq!(
             coop_open_refusal(&OpenError::NoTask(SpawnRefusal::TooLarge)),
             Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+    }
+
+    /// A width of sequence numbers the build's domain leaves out is a value this build refuses,
+    /// as a limit over the build's value is.
+    #[test]
+    fn a_width_outside_the_domain_is_an_invalid_value() {
+        use wz_session_core::policy::SnResolution;
+        use wz_session_core::policy_binding::OutsideDomain;
+        assert_eq!(
+            coop_open_refusal(&OpenError::SnResolution(OutsideDomain {
+                value: SnResolution::Bits64,
+            })),
+            Z_ERR_CONFIG_INVALID_VALUE
         );
     }
 
@@ -3647,7 +3796,7 @@ mod build_numbers {
             (SnResolution::Bits64, 0x03),
         ] {
             let profile = pico_group(width, &limits);
-            assert_eq!(profile.seq_num_res, code, "{}", width.id());
+            assert_eq!(profile.seq_num_res.wire_code(), code, "{}", width.id());
             assert_eq!(profile.req_id_res, default.req_id_res);
             assert_eq!(profile.batch_size, default.batch_size);
             assert_eq!(profile.lease_ms, default.lease_ms);

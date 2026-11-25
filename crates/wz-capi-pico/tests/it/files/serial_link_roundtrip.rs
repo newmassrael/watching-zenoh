@@ -6,8 +6,9 @@
 //! put by a session that dialled another, the two ttys being the two ends of one wire.
 //!
 //! zenoh-pico builds this link under `Z_FEATURE_LINK_SERIAL` (default 0), and this crate's twin
-//! is `transport-link-serial`, off by default. As for the ws link, the refusal in a build
-//! without it is the runtime's typed `Unsupported`, held by the runtime's own tests.
+//! is `transport-link-serial`, off by default and on either engine: the tokio engine's serial
+//! link, or on the cooperative engine the host's ttys beside its sockets. A cooperative build
+//! without it fails the open of a `serial/` endpoint (`serial_link_refused`).
 //!
 //! Both ends open their device BY PATH, which is what the locator names, and one pty pair has
 //! only one path (the slave; the master is a descriptor). So the wire is two pty pairs whose
@@ -21,9 +22,10 @@
 //! path refuses the speed ioctl the serial backend issues (the runtime's serial tests record
 //! the same limit).
 //!
-//! RED reproduction: drop `wz-runtime-tokio/transport-link-serial` from this crate's
-//! `transport-link-serial` feature and from `wz-capi-core`'s, and the listener's `z_open`
-//! fails at bind.
+//! RED reproduction: on the cooperative engine, open the session over its sockets' links alone
+//! (drop `coop_host::with_serial` from `open_on_coop` in `src/session.rs`), and the listener's
+//! `z_open` fails, its `serial/` locator refused as `Unsupported`; on the tokio engine, drop
+//! `wz-runtime-tokio/transport-link-serial` from `wz-capi-core`'s `transport-link-serial`.
 
 #![cfg(feature = "peer")]
 
@@ -196,4 +198,34 @@ fn a_sample_crosses_a_serial_link_between_two_pico_sessions() {
         Some(PAYLOAD.to_bytes()),
         "nothing, or something else, reached the serial listener's subscriber: {received:?}"
     );
+}
+
+/// A pin pair names the UART pins of a board, which no tty of a host is: the cooperative engine's
+/// host line refuses it when it is dialled, as zenoh-pico's POSIX tty refuses it, and the open
+/// fails as pico's does for a link it could not open (`vendor/zenoh-pico/src/link/link.c` @
+/// `ret = _Z_ERR_TRANSPORT_OPEN_FAILED;`). Turned red by a host opener that read the pins as a
+/// path, or by a dial that took the refusal for a line still to be answered.
+#[cfg(not(feature = "engine-tokio"))]
+#[test]
+fn a_pin_pair_names_no_tty_of_the_host() {
+    use wz_capi_pico::{
+        z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
+        z_owned_session_t, zp_config_insert, Z_CONFIG_CONNECT_KEY, Z_OK,
+    };
+    // SAFETY: a fresh config, moved into the open, and a session the failed open left unopened.
+    let rc = unsafe {
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_CONNECT_KEY,
+                c"serial/12.13#baudrate=9600".as_ptr(),
+            ),
+            Z_OK
+        );
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        z_open(&mut session, z_config_move(&mut cfg), std::ptr::null())
+    };
+    assert_eq!(rc, wz_capi_pico::result::Z_ERR_TRANSPORT_OPEN_FAILED);
 }

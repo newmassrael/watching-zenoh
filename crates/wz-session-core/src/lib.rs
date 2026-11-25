@@ -148,8 +148,6 @@ pub mod keyexpr_canon;
 // (the `$*`-split paths became allocation-free peekable / head-tail
 // walks), so keyexpr matching exists on the MCU no-heap profile. The
 // alloc-gated callers (`pubsub` / `query` / `declare`) are unaffected.
-// Totality debt TD-003 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod keyexpr_match;
 
 // Ungated keyexpr non-wild-prefix SSOT (the `NonWildKeyExpr` newtype +
@@ -211,6 +209,17 @@ pub mod session_tables;
 /// them: the tables of what it declared and asked, in the engine's own types where its parts are
 /// the engine's. Unconditional, like [`session_tables`]: it is a value and needs no feature.
 pub mod session_state;
+
+/// One value placed in a span of a session's arena, owned by one owner and reached by handles that
+/// count nothing: what a session keeps in its arena that its tasks and its engine reach alike.
+/// Unconditional, like [`bounded`].
+pub mod placed;
+
+/// A place a value the session owns is lent in for the length of a step, to the tasks an executor
+/// polls with nothing but their context: the reassembly Router of a unicast receive and an
+/// engine's tables. Gated on `alloc`: the place is shared by the tasks that look in it.
+#[cfg(feature = "alloc")]
+pub mod step_lend;
 
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
 /// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
@@ -382,6 +391,9 @@ pub mod registry_error;
 // `SampleSink` but a port-threading inbound adapter (see `switchboard`,
 // R311gh).
 pub mod sink;
+
+#[cfg(feature = "alloc")]
+mod once_built;
 
 // R311gh — the switchboard: a zenoh-keyexpr -> SCXML-domain-event inbound
 // adapter (`EventInjector` DIP port over the SCE engine's
@@ -646,6 +658,12 @@ pub mod scout_static;
 // distinct from wz-codecs::locator (the wire codec).
 #[cfg(feature = "alloc")]
 pub mod locator;
+// The part of the locator grammar that needs no heap: the span split every leaf shares and the
+// serial leaf, read and written, for the heap profile's leaf above and an engine without a heap.
+pub mod locator_grammar;
+// The endpoint a session joins a multicast group by, read once into fields of fixed size, for
+// every engine that opens group sockets.
+pub mod group_locator;
 // What an open of a configuration asks of the operating system, for every reader of one
 // (docs/target-build-contract.md T9). Pure alloc over the locator parse above.
 #[cfg(feature = "alloc")]
@@ -662,12 +680,18 @@ pub mod serial_link;
 
 // R311y579 (G9) — the raweth (L2) link's FRAMING SSOT: the 16 / 20-byte
 // Ethernet header zenoh-pico's raweth transport puts a batch inside, its
-// source-MAC allow-list, and the `reth/` locator. Pure data, `no_std` +
-// alloc; the AF_PACKET socket that carries it lives in `wz-packet-socket`
+// source-MAC allow-list, and the `reth/` locator. Pure data, `no_std`, no
+// heap but the owned-frame helpers (`alloc`); the AF_PACKET socket that carries it lives in `wz-packet-socket`
 // (Round 1998 moved it out of wz-runtime-tokio, which never drove it and
 // charged every consumer a mandatory `tokio` to reach it).
 #[cfg(feature = "transport-link-raweth")]
 pub mod raweth_link;
+
+// The RFC 6455 pieces of a WebSocket link with no heap and no I/O: the opening handshake, its
+// accept value, the frame header, the mask and the mask keys. The engine with no heap reads and
+// writes its `ws/` links with these. Gated on `transport-link-ws`.
+#[cfg(feature = "transport-link-ws")]
+pub mod ws_link;
 
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_body` decoder). Pure no_std +
@@ -1193,8 +1217,13 @@ pub mod inbound;
 
 /// The flags a data send reads before any lock: a link's [`send_gate::SendGate`] and a
 /// session's [`send_gate::Latch`] for a close ordered for congestion. Unconditional, no_std and
-/// no_alloc: two `AtomicBool`s, which every target the crate builds for loads and stores.
+/// no_alloc: a gate is an `AtomicBool`, which every target the crate builds for loads and
+/// stores, and a latch is the runtime's flag ([`runtime_cell::FlagCell`]).
 pub mod send_gate;
+
+/// The flags and words a session's holders write without a lock, as an atomic or as a cell,
+/// whichever the runtime's concurrency asks for. Unconditional, no_std and no_alloc.
+pub mod runtime_cell;
 
 /// The outbound frame buffer seam (ARCHITECTURE section 9.1): [`tx_buf::TxBuf`]
 /// is what an outbound encoder writes to, `Vec<u8>` is its heap form, and
@@ -2244,8 +2273,6 @@ pub mod lifecycle_node;
 // The lifecycle reset's table of generations (decision D6): the rule is the SCE algorithm
 // `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-109 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::unreachable)]
 pub mod reset_generations;
 
 // The table every transport of the lifecycle contract is held to (decision D7), for a test of
@@ -2651,8 +2678,6 @@ mod multicast_member_scope;
     feature = "codec-join",
     feature = "storage-profile"
 ))]
-// Totality debt TD-063 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod multicast_join;
 
 // R311lv — the shared multicast RX classify + dispatch SSOT consumed by both

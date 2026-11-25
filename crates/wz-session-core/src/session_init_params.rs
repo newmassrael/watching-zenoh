@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use wz_codecs::whatami::WhatAmI;
 
 use crate::limits::SessionLimits;
-use crate::policy::SessionPolicy;
+use crate::policy::{SessionPolicy, SnResolution};
 use crate::signing_key::SigningKey;
 
 pub use crate::session_zid::{SessionZid, ZidError, ZID_MAX};
@@ -178,8 +178,9 @@ pub struct SessionInitParams {
     /// invalid zid where its parameters are made and never later. The codec
     /// encodes the length in the high 4 bits of `cbyte` as `zid_len - 1`.
     pub zid: SessionZid,
-    /// Sequence-number resolution (0..=3 → 8 / 16 / 32 / 64-bit).
-    pub seq_num_res: u8,
+    /// The width of the sequence numbers the session offers in its Init, a value of the
+    /// `sn-resolution` policy; the Init carries its two-bit code ([`SnResolution::wire_code`]).
+    pub seq_num_res: SnResolution,
     /// Request-id resolution (0..=3).
     pub req_id_res: u8,
     /// Per-link batch size (bytes). Transport.h documents 1..=65535.
@@ -222,12 +223,20 @@ pub struct SessionInitParams {
     pub cookie: SessionBytes<COOKIE_MAX>,
 
     /// Per-process secret key used by the Accepting side to MAC the
-    /// outbound cookie. Constructed via `SigningKey::new(bytes)` so
-    /// length validation (>= 32 bytes per RFC §5.M) + drop-time
-    /// zeroize are enforced by the type. Initiator side does not
-    /// consume this field; the cookie value flows inbound from the
-    /// peer's InitAck instead.
-    pub cookie_signing_key: SigningKey,
+    /// outbound cookie, held only where the session machine has that role
+    /// ([`CookieKey`]). Made from a [`SigningKey`], so length validation
+    /// (>= 32 bytes per RFC §5.M) + drop-time zeroize are enforced by that
+    /// type. Initiator side does not consume this field; the cookie value
+    /// flows inbound from the peer's InitAck instead.
+    pub cookie_signing_key: CookieKey,
+
+    /// The region this node names itself, announced by every Init the session sends as its
+    /// last extension (`0x8`, the largest id an Init carries), and by none when `None`. Part of
+    /// what the session is opened with and never changed after: upstream builds its
+    /// `RegionNameFsm` once from the configuration and returns the name from both
+    /// `send_init_syn` and `send_init_ack`
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs` @ `fn send_init_syn`).
+    pub region: Option<crate::extregion::RegionName>,
 
     /// R2924 — the session's outbound queue configuration: upstream's
     /// `transport/link/tx/queue` sizes and congestion waits. Not a codec
@@ -747,6 +756,78 @@ impl TxQueueConf {
     }
 }
 
+/// The key an accepting session signs its cookies with
+/// ([`SessionInitParams::cookie_signing_key`]).
+///
+/// Held only where the session machine has its accepting role (`session-unicast-accept`): an
+/// initiator neither signs nor checks a cookie of its own, so a build without that role holds no
+/// key, draws none and wipes none. There is no key that stands in for a missing one: without the
+/// role the value is empty, and no cookie verifies under it ([`Self::decode`]). It is made from a
+/// [`SigningKey`] or drawn ([`Self::draw`]) the same way in either build, so a caller that makes
+/// parameters names no feature.
+#[derive(Debug, Clone)]
+pub struct CookieKey {
+    #[cfg(feature = "session-unicast-accept")]
+    key: SigningKey,
+}
+
+impl CookieKey {
+    /// A key drawn from `source`, as [`SigningKey::from_entropy`] draws one. A build without the
+    /// accepting role draws nothing, and its draw is never refused.
+    #[inline]
+    pub fn draw<E: crate::entropy::EntropySource + ?Sized>(
+        source: &mut E,
+    ) -> Result<Self, crate::entropy::EntropyUnavailable> {
+        #[cfg(feature = "session-unicast-accept")]
+        {
+            Ok(Self {
+                key: SigningKey::from_entropy(source)?,
+            })
+        }
+        #[cfg(not(feature = "session-unicast-accept"))]
+        {
+            let _ = source;
+            Ok(Self {})
+        }
+    }
+
+    /// The state `cookie` carries when this node minted it under this key
+    /// ([`crate::accept_cookie::decode_accept_cookie`]): `None` when it does not verify, and
+    /// always in a build without the accepting role, which holds no key and so minted no cookie.
+    pub fn decode(&self, cookie: &[u8]) -> Option<crate::accept_cookie::AcceptCookieState> {
+        #[cfg(feature = "session-unicast-accept")]
+        {
+            crate::accept_cookie::decode_accept_cookie(&self.key, cookie).ok()
+        }
+        #[cfg(not(feature = "session-unicast-accept"))]
+        {
+            let _ = cookie;
+            None
+        }
+    }
+
+    /// The key the accepting role mints and checks its cookies with.
+    #[cfg(feature = "session-unicast-accept")]
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.key
+    }
+}
+
+#[cfg(feature = "session-unicast-accept")]
+impl From<SigningKey> for CookieKey {
+    fn from(key: SigningKey) -> Self {
+        Self { key }
+    }
+}
+
+/// A build without the accepting role keeps no key: the one handed in is wiped as it goes.
+#[cfg(not(feature = "session-unicast-accept"))]
+impl From<SigningKey> for CookieKey {
+    fn from(_key: SigningKey) -> Self {
+        Self {}
+    }
+}
+
 impl SessionInitParams {
     /// R311kj — the EFFECTIVE advertised batch budget: `0` is wz's
     /// internal "unset" sentinel and must never reach the wire — a
@@ -1233,3 +1314,76 @@ mod no_progress_tests {
 // intentionally has no `Default` impl — production callers MUST source
 // every field from `deploy.yaml` (or another configured source), and
 // the fixture stays behind the test-support crate boundary.
+
+#[cfg(test)]
+mod cookie_key_tests {
+    use super::CookieKey;
+    use crate::entropy::{EntropySource, EntropyUnavailable};
+
+    /// A source that answers nothing, and counts how often it was asked.
+    struct Dry(usize);
+
+    impl EntropySource for Dry {
+        fn try_fill_bytes(&mut self, _buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            self.0 += 1;
+            Err(EntropyUnavailable)
+        }
+    }
+
+    /// A session machine with the accepting role draws its key, so a dry source refuses it, and
+    /// a cookie minted under the key is one it reads back while bytes it never signed are not.
+    /// Turned red by a draw that holds no key where an acceptor signs with it.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn an_accepting_build_draws_its_key_and_reads_only_what_it_minted() {
+        use crate::accept_cookie::{encode_accept_cookie_into, AcceptCookieView};
+        use crate::accept_state::NegotiatedExtensions;
+        use crate::signing_key::SigningKey;
+
+        let mut dry = Dry(0);
+        assert_eq!(CookieKey::draw(&mut dry).err(), Some(EntropyUnavailable));
+        assert_eq!(dry.0, 1, "the draw asked the source");
+
+        let key = CookieKey::from(SigningKey::from_slice(&[7u8; 32]).expect("a key of 32 bytes"));
+        let view = AcceptCookieView {
+            peer_zid: &[0x51, 0x52],
+            peer_whatami: 1,
+            sn_res: 0x0a,
+            batch_size: 1024,
+            nonce: 0x0123_4567,
+            negotiated: NegotiatedExtensions::default(),
+            multilink: None,
+        };
+        let mut out = [0u8; 256];
+        let minted =
+            encode_accept_cookie_into(key.signing_key(), &view, &mut out).expect("the cookie fits");
+        let carried = key.decode(minted).expect("a cookie this key minted");
+        assert_eq!(carried.nonce, view.nonce);
+        assert!(key.decode(&[0u8; 40]).is_none(), "bytes it never signed");
+    }
+
+    /// A session machine without the accepting role holds no key: it draws nothing, so a dry
+    /// source does not refuse it, it keeps no byte of a key it is handed, and no cookie verifies
+    /// under it. Turned red by a key drawn or kept where nothing signs with it.
+    #[cfg(not(feature = "session-unicast-accept"))]
+    #[test]
+    fn a_build_without_the_accepting_role_holds_and_draws_no_key() {
+        use crate::signing_key::SigningKey;
+
+        let mut dry = Dry(0);
+        let key = CookieKey::draw(&mut dry).expect("nothing is drawn, so nothing refuses");
+        assert_eq!(dry.0, 0, "the source was not asked");
+        assert_eq!(
+            core::mem::size_of::<CookieKey>(),
+            0,
+            "no byte of a key is kept"
+        );
+        assert!(key.decode(&[0u8; 40]).is_none());
+        let handed =
+            CookieKey::from(SigningKey::from_slice(&[7u8; 32]).expect("a key of 32 bytes"));
+        assert!(
+            handed.decode(&[7u8; 40]).is_none(),
+            "a key handed in is not kept"
+        );
+    }
+}

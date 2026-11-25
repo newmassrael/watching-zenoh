@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
 use wz_capi_port::{
     BatchStep, FilterPlane, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey,
 };
@@ -20,214 +19,17 @@ use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
 };
-use wz_session_core::app_transport::{
-    AppPort, AppTransport, LockedCall, SessionTransport, TableLock,
-};
+use wz_session_core::app_transport::{AppPort, AppTransport, SessionTransport};
 use wz_session_core::locality::Locality;
-use wz_session_core::multicast_params::GroupJoinRule;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
-use wz_session_core::wire_const::T_MID_JOIN;
-use wz_session_core::WhatAmI;
 
-use super::{client_config, config_zid};
+use super::client_config;
+use super::group_stack::{
+    member_config, open_member, profile, source, Engine, MemberStack, Network, Table, GROUP,
+};
 use crate::app_link::AppLinks;
 use crate::{CoopConfig, CoopEngine, OpenError};
-
-type Engine = CoopEngine<AppLinks, PosixClock>;
-
-/// The group every member joins. Synthetic: no socket is opened for it.
-const GROUP: &str = "udp/239.7.7.7:7447#iface=lan7";
-
-/// The address a member's datagrams come from.
-fn source(member: u8) -> String {
-    format!("udp/192.0.2.{member}:7447")
-}
-
-/// The group as the members' stacks share it.
-#[derive(Default)]
-struct Network {
-    /// Each member's group link and its transport.
-    joined: Mutex<Vec<Joined>>,
-    /// How many times a member's stack was told to leave the group.
-    leaves: AtomicUsize,
-    /// Each member whose stack was asked to join the group, once per join.
-    joins: Mutex<Vec<u8>>,
-    /// Each member that sent a JOIN beacon on the group, once per beacon.
-    beacons: Mutex<Vec<u8>>,
-    /// Each datagram a member sent on the group, with the member (read by the tests of a get).
-    #[cfg(feature = "query")]
-    datagrams: Mutex<Vec<(u8, Vec<u8>)>>,
-}
-
-impl Network {
-    /// How many JOIN beacons `member` sent on the group.
-    fn beacons_of(&self, member: u8) -> usize {
-        self.beacons
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|sent| **sent == member)
-            .count()
-    }
-
-    /// How many times `member`'s stack was asked to join the group.
-    fn joins_of(&self, member: u8) -> usize {
-        self.joins
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|joined| **joined == member)
-            .count()
-    }
-
-    /// `member`'s stack loses its group link, as an interface that goes down loses it: the stack
-    /// tells the session the link is closed.
-    fn cut(&self, member: u8) {
-        let lost: Vec<Joined> = {
-            let mut joined = self.joined.lock().unwrap();
-            let (lost, kept) = joined.drain(..).partition(|j| j.member == member);
-            *joined = kept;
-            lost
-        };
-        for joined in lost {
-            if let Some(transport) = joined.transport.upgrade() {
-                let _ = transport.event(joined.link, ProgramEvent::Closed);
-            }
-        }
-    }
-}
-
-struct Joined {
-    member: u8,
-    link: LinkHandle,
-    transport: Weak<AppTransport>,
-}
-
-/// One member's stack: it joins [`GROUP`], with whatever keys follow it, and refuses anything
-/// else, and hands what its session sends on the group to every other member, from [`source`].
-struct MemberStack {
-    network: Arc<Network>,
-    member: u8,
-    /// Its own transport, given once the transport is made over this stack.
-    transport: Arc<Mutex<Weak<AppTransport>>>,
-}
-
-impl AppPort for MemberStack {
-    fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
-        if kind != AppLinkKind::Group || !locator.starts_with(GROUP) {
-            return ProgramOpen::Refused;
-        }
-        let transport = self.transport.lock().unwrap().clone();
-        self.network.joins.lock().unwrap().push(self.member);
-        self.network.joined.lock().unwrap().push(Joined {
-            member: self.member,
-            link,
-            transport,
-        });
-        ProgramOpen::Up
-    }
-
-    fn send(&self, _link: LinkHandle, bytes: &[u8]) -> ProgramSend {
-        // A beacon is sent alone in its datagram; the low five bits of a header are its id.
-        if bytes
-            .first()
-            .is_some_and(|header| header & 0x1f == T_MID_JOIN)
-        {
-            self.network.beacons.lock().unwrap().push(self.member);
-        }
-        #[cfg(feature = "query")]
-        self.network
-            .datagrams
-            .lock()
-            .unwrap()
-            .push((self.member, bytes.to_vec()));
-        let others: Vec<(LinkHandle, Arc<AppTransport>)> = self
-            .network
-            .joined
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|joined| joined.member != self.member)
-            .filter_map(|joined| Some((joined.link, joined.transport.upgrade()?)))
-            .collect();
-        let from = source(self.member);
-        for (link, transport) in others {
-            // A member that cannot take it now drops it, as a group socket does.
-            let _ = transport.received(link, bytes, Some(from.as_str()));
-        }
-        ProgramSend::Wrote(bytes.len())
-    }
-
-    fn close(&self, link: LinkHandle) {
-        self.network
-            .joined
-            .lock()
-            .unwrap()
-            .retain(|joined| !(joined.member == self.member && joined.link == link));
-        self.network.leaves.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-/// The table of a member's transport, under the host's lock.
-struct Table(Mutex<AppLinkTable>);
-
-impl TableLock for Table {
-    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
-        f(&mut self.0.lock().unwrap())
-    }
-}
-
-/// What every member's beacon advertises: zenoh-pico's terms, beaconed often so the members
-/// learn each other within the test.
-fn profile() -> GroupProfile {
-    GroupProfile {
-        lease_ms: 10_000,
-        join_interval_ms: 100,
-        max_sessions: None,
-        seq_num_res: 0x02,
-        req_id_res: 0x02,
-        batch_size: 2_048,
-        is_qos: false,
-        compression: false,
-        join_rule: GroupJoinRule::Pico,
-    }
-}
-
-/// A peer's config that dials nothing and joins `endpoint`.
-fn member_config(member: u8, endpoint: &str) -> CoopConfig {
-    CoopConfig {
-        whatami: WhatAmI::Peer,
-        zid: config_zid(member),
-        groups: vec![GroupJoin {
-            endpoint: endpoint.to_owned(),
-            profile: profile(),
-            is_shm: false,
-            declarations: GroupDeclarations::Entities,
-        }],
-        ..client_config()
-    }
-}
-
-/// Open a session for `member` over a stack of `network`.
-fn open_member(
-    network: &Arc<Network>,
-    member: u8,
-    config: CoopConfig,
-) -> Result<Arc<Engine>, OpenError> {
-    let own = Arc::new(Mutex::new(Weak::new()));
-    let transport = Arc::new(AppTransport::new(
-        Box::new(Table(Mutex::new(AppLinkTable::new()))),
-        Box::new(MemberStack {
-            network: Arc::clone(network),
-            member,
-            transport: Arc::clone(&own),
-        }),
-    ));
-    *own.lock().unwrap() = Arc::downgrade(&transport);
-    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
-    Engine::open(links, PosixClock, PosixEntropy, config)
-}
 
 /// Wait, for at most five seconds, until `done`: each session is stepped by its read task.
 fn eventually(what: &str, mut done: impl FnMut() -> bool) {
@@ -332,25 +134,71 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
     );
 }
 
-/// [`GROUP`] with keys after it, `len` bytes in all.
+/// An endpoint that names no group a session joins is refused by the reading of it, by its
+/// reason, before the stack is asked: no multicast address, metadata a group does not keep, an
+/// extra group of the other family. The CONTROL is [`GROUP`], which is joined. Turned red by a
+/// join that asks the stack before it reads the endpoint, or reads it under another reason.
+#[test]
+fn a_group_endpoint_read_as_no_group_is_refused_by_its_reason() {
+    use crate::Refusal;
+    use wz_session_core::group_locator::GroupLocatorError;
+
+    let network = Arc::new(Network::default());
+    for (endpoint, why) in [
+        (
+            "udp/192.0.2.9:7447#iface=lan7",
+            GroupLocatorError::NotAGroup,
+        ),
+        (
+            "udp/239.7.7.7:7447?rel=1#iface=lan7",
+            GroupLocatorError::MetadataNotKept,
+        ),
+        (
+            "udp/239.7.7.7:7447#iface=lan7;join=ff02::1",
+            GroupLocatorError::BadValue("join"),
+        ),
+    ] {
+        match open_member(&network, 1, member_config(1, endpoint)) {
+            Err(OpenError::Group(refused)) => {
+                assert_eq!(refused.why, Refusal::GroupEndpoint(why), "{endpoint}")
+            }
+            Err(other) => panic!("{endpoint}: refused as {other:?}"),
+            Ok(_) => panic!("{endpoint}: opened"),
+        }
+    }
+    assert!(
+        network.joins.lock().unwrap().is_empty(),
+        "the stack was not asked"
+    );
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("CONTROL: the group");
+    assert_eq!(network.joins_of(1), 1, "the stack was asked once");
+    SessionDrive::close(&*member);
+}
+
+/// [`GROUP`] with a key no group reads after it, `len` bytes in all.
 fn padded(len: usize) -> String {
-    format!("{GROUP};ttl={}", "1".repeat(len - GROUP.len() - 5))
+    format!("{GROUP};pad={}", "1".repeat(len - GROUP.len() - 5))
 }
 
 /// A group whose endpoint is one byte past `MAX_GROUP_ENDPOINT_LEN` is refused by that name before
 /// the stack is asked to join it: a member's link is reported by the endpoint in a row of that
 /// length, and this engine holds no row on the heap. The CONTROL is an endpoint of the bound, which
-/// is joined. Turned red by a join that asks the stack before it measures the endpoint.
+/// is joined. Turned red by a join that asks the stack before it reads the endpoint.
 #[test]
 fn a_group_endpoint_past_its_row_is_refused_before_the_stack_is_asked() {
     use crate::Refusal;
     use wz_session_core::caps::MAX_GROUP_ENDPOINT_LEN;
+    use wz_session_core::group_locator::GroupLocatorError;
 
     let network = Arc::new(Network::default());
     let past = padded(MAX_GROUP_ENDPOINT_LEN + 1);
     assert_eq!(past.len(), MAX_GROUP_ENDPOINT_LEN + 1);
     match open_member(&network, 1, member_config(1, &past)) {
-        Err(OpenError::Group(why)) => assert_eq!(why.why, Refusal::GroupEndpointTooLong, "{why}"),
+        Err(OpenError::Group(why)) => assert_eq!(
+            why.why,
+            Refusal::GroupEndpoint(GroupLocatorError::TooLong),
+            "{why}"
+        ),
         Err(other) => panic!("refused as {other:?}"),
         Ok(_) => panic!("opened"),
     }
@@ -427,6 +275,93 @@ fn a_group_past_the_task_cells_is_refused_for_want_of_a_task() {
     }
 }
 
+/// The endpoint a [`LateDialStack`] answers late; any other unicast endpoint it refuses.
+const LATE: &str = "tcp/192.0.2.50:7447";
+
+/// A member's stack that also dials: it joins [`GROUP`] as [`MemberStack`] does, answers a dial
+/// of [`LATE`] up only once the session has asked it and gone on, and refuses any other; each
+/// unicast endpoint it is asked to open is recorded.
+struct LateDialStack {
+    member: MemberStack,
+    dialled: Arc<Mutex<Vec<String>>>,
+}
+
+impl AppPort for LateDialStack {
+    fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+        if kind == AppLinkKind::Group {
+            return self.member.open(link, kind, locator);
+        }
+        self.dialled.lock().unwrap().push(locator.to_owned());
+        if !locator.starts_with(LATE) {
+            return ProgramOpen::Refused;
+        }
+        let transport = self.member.transport.lock().unwrap().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(transport) = transport.upgrade() {
+                let _ = transport.event(link, ProgramEvent::Connected);
+            }
+        });
+        ProgramOpen::Pending
+    }
+
+    fn send(&self, link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+        self.member.send(link, bytes)
+    }
+
+    fn close(&self, link: LinkHandle) {
+        self.member.close(link);
+    }
+}
+
+/// A session whose groups hold every task cell dials [`LATE`], which answers after the dial was
+/// begun, and then a second endpoint. The late link's session finds no task cell: a cell is not
+/// the endpoint's, so the second endpoint would be refused the same, and the dial role dials it
+/// not; the open, which redials none, ends for want of a task. Turned red by a walk that goes on
+/// to the next endpoint after a late answer whose task was refused, which dials the second
+/// endpoint and ends with that endpoint's refusal.
+#[test]
+fn a_late_answer_refused_a_task_dials_no_further_endpoint() {
+    use wz_runtime_coop::executor::SpawnRefusal;
+    use wz_session_core::caps::MAX_TASKS;
+
+    const REFUSED: &str = "tcp/192.0.2.51:7447";
+    let network = Arc::new(Network::default());
+    let mut config = member_config(1, GROUP);
+    let join = config.groups[0].clone();
+    config.groups = vec![join; MAX_TASKS];
+    config.endpoints = vec![LATE.to_owned(), REFUSED.to_owned()];
+    config.redial_ms = None;
+    let dialled = Arc::new(Mutex::new(Vec::new()));
+    let own = Arc::new(Mutex::new(Weak::new()));
+    let transport = Arc::new(AppTransport::new(
+        Box::new(Table(Mutex::new(AppLinkTable::new()))),
+        Box::new(LateDialStack {
+            member: MemberStack {
+                network: Arc::clone(&network),
+                member: 1,
+                transport: Arc::clone(&own),
+            },
+            dialled: Arc::clone(&dialled),
+        }),
+    ));
+    *own.lock().unwrap() = Arc::downgrade(&transport);
+    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
+    let opened = Engine::open(links, PosixClock, PosixEntropy, config);
+    assert_eq!(
+        opened.err(),
+        Some(OpenError::NoTask(SpawnRefusal::NoTaskCell)),
+        "the open ends for want of a task"
+    );
+    let dialled = dialled.lock().unwrap();
+    assert_eq!(
+        dialled.len(),
+        1,
+        "only the late endpoint is dialled: {dialled:?}"
+    );
+    assert!(dialled[0].starts_with(LATE), "{dialled:?}");
+}
+
 /// Declare a subscriber on `keyexpr` of `engine`, and the payloads it is handed, in order.
 fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
@@ -452,6 +387,56 @@ fn put(engine: &Engine, keyexpr: &str, payload: &[u8]) {
             &PublishOptions::put().with_locality(Locality::Remote),
         )
         .expect("a put the group carries");
+}
+
+/// What a member sends on the group is counted in its transport counters as its stack takes it:
+/// each datagram's bytes, its beacon and the put's frame a transport message each; and the put,
+/// one network message of the user space's puts by its payload, as it enters the group's queue. No
+/// read task runs, so everything is written on this thread, and the stack's record and the
+/// counters are read at one point.
+#[cfg(all(feature = "transport-stats", feature = "query"))]
+#[test]
+fn what_a_member_sends_on_the_group_is_counted_in_its_transport_stats() {
+    use wz_session_core::stats::{DirectionReport, StatMedium, StatMessage, StatSpace};
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let before = member.transport_stats().tx;
+    put(&member, "demo/group/sent", b"counted");
+    let sent: Vec<Vec<u8>> = network
+        .datagrams
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(from, _)| *from == 1)
+        .map(|(_, datagram)| datagram.clone())
+        .collect();
+    assert!(
+        sent.iter()
+            .any(|datagram| datagram.windows(7).any(|at| at == b"counted")),
+        "CONTROL: the put left on the group"
+    );
+    let counted = member.transport_stats().tx;
+    assert_eq!(
+        counted.bytes,
+        sent.iter().map(Vec::len).sum::<usize>(),
+        "each datagram's bytes"
+    );
+    assert_eq!(counted.t_msgs, sent.len(), "a transport message each");
+    assert_eq!(
+        counted.n_msgs_on(StatMedium::Net),
+        before.n_msgs_on(StatMedium::Net) + 1,
+        "the put, one network message"
+    );
+    let puts = |report: &DirectionReport| report.payload_of(StatMessage::Put, StatSpace::User);
+    assert_eq!(
+        (puts(&counted).msgs, puts(&counted).pl_bytes),
+        (
+            puts(&before).msgs + 1,
+            puts(&before).pl_bytes + b"counted".len()
+        ),
+        "counted by its class"
+    );
+    SessionDrive::close(&*member);
 }
 
 /// A member whose stack loses its group link lets the group go, and joins it again a redial
@@ -895,7 +880,7 @@ mod mapped {
     use std::sync::Arc;
 
     use wz_capi_port::group::GroupDeclarations;
-    use wz_capi_port::{FilterPlane, KeyHolds, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
 
     use super::{
         eventually, member_config, open_member, put, subscribe, until_members_know_each_other,
@@ -942,7 +927,8 @@ mod mapped {
         until_members_know_each_other(&first, &second);
         let id = first
             .acquire_keyexpr("demo/mapped/q")
-            .expect("a session with ids left declares a keyexpr");
+            .expect("a session with ids left declares a keyexpr")
+            .mapping_id();
         eventually("the declaration to leave", || {
             carried(&network, 1, b"mapped/q")
         });
@@ -1016,9 +1002,10 @@ mod mapped {
         let network = Arc::new(Network::default());
         let first = open_mapped(&network, 1).expect("the first joins");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
-        let id = first
+        let held = first
             .acquire_keyexpr("demo/mapped/b")
             .expect("a session with ids left declares a keyexpr");
+        let id = held.mapping_id();
         let second = open_mapped(&network, 2).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
         until_members_know_each_other(&first, &second);
@@ -1049,7 +1036,7 @@ mod mapped {
                 .iter()
                 .any(|payload| payload == b"by-its-literal")
         });
-        first.release_keyexpr(id);
+        held.release(&*first);
         SessionDrive::close(&*second);
         SessionDrive::close(&*first);
     }
@@ -2023,7 +2010,7 @@ mod in_place {
     }
 
     /// Member `member`'s beacon, which says its first frame is numbered 0.
-    fn beacon(member: u8) -> Vec<u8> {
+    pub(super) fn beacon(member: u8) -> Vec<u8> {
         let params = params(member);
         encode_join(
             &params,
@@ -2047,7 +2034,7 @@ mod in_place {
 
     /// Hand `datagram` to `to`'s session as its stack hands in what the group carries, from
     /// `from`'s address.
-    fn hand_in(network: &Network, to: u8, from: u8, datagram: &[u8]) {
+    pub(super) fn hand_in(network: &Network, to: u8, from: u8, datagram: &[u8]) {
         let (link, transport) = {
             let joined = network.joined.lock().unwrap();
             let to = joined
@@ -2135,11 +2122,45 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
+    /// What a member sends is counted with the session's transports (`transport-stats`): the
+    /// datagram's bytes once, its two transport messages (the member's beacon and its frame) and
+    /// each record of the frame once, whatever the walks its delivery took.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn what_a_member_sends_is_counted_in_the_sessions_transport_stats() {
+        use wz_session_core::stats::{DirectionReport, StatMedium};
+
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let heard = subscribe(&session, "demo/counted/**");
+        assert_eq!(
+            session.transport_stats().rx,
+            DirectionReport::default(),
+            "CONTROL: no member has sent anything"
+        );
+        let keys = ["demo/counted/a", "demo/counted/b", "demo/counted/c"];
+        let mut datagram = beacon(7);
+        datagram.extend_from_slice(&frame_of_puts(0, &keys));
+        hand_in(&network, 1, 7, &datagram);
+        eventually("the three samples", || heard.lock().unwrap().len() >= 3);
+        eventually("the three records counted", || {
+            session.transport_stats().rx.n_msgs_total() >= 3
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let rx = session.transport_stats().rx;
+        assert_eq!(rx.bytes, datagram.len(), "the datagram's bytes, once");
+        assert_eq!(rx.t_msgs, 2, "the beacon and the frame");
+        assert_eq!(rx.n_msgs_on(StatMedium::Net), 3, "each put once");
+        SessionDrive::close(&*session);
+    }
+
     /// Below the engine: the group's receive over a datagram its transport keeps. A host with room
     /// for no other stops the walk before the next message, and with room for one record stops it
     /// before the next record; each walk goes on from where the last stopped, the frame admitted
-    /// by its sequence number once, until the datagram is read whole.
-    #[cfg(not(feature = "transport-stats"))]
+    /// by its sequence number once, until the datagram is read whole. A build with the transport
+    /// counters walks it lent too, and counts each transport message and each record once, against
+    /// the member that sent it, however many walks it took.
     #[test]
     fn a_kept_group_datagram_is_read_on_from_where_the_host_stopped() {
         use core::net::SocketAddr;
@@ -2171,6 +2192,35 @@ mod in_place {
                 self.room > 0
             }
         }
+
+        /// The transport messages it was told of, and the member each lent record came from.
+        #[cfg(feature = "transport-stats")]
+        #[derive(Default)]
+        struct Counted {
+            transport: core::cell::Cell<usize>,
+            records: core::cell::RefCell<Vec<Vec<u8>>>,
+        }
+
+        #[cfg(feature = "transport-stats")]
+        impl wz_session_core::multicast_stats::MulticastStatsRecorder for Counted {
+            fn transport_message_received(&self) {
+                self.transport.set(self.transport.get() + 1);
+            }
+
+            fn network_record_received(
+                &self,
+                zid: &[u8],
+                _priority: wz_session_core::qos::Priority,
+                _class: &wz_session_core::stats::NetworkStatsClass,
+            ) {
+                self.records.borrow_mut().push(zid.to_vec());
+            }
+        }
+
+        #[cfg(feature = "transport-stats")]
+        let counted = &Counted::default();
+        #[cfg(not(feature = "transport-stats"))]
+        let counted = &();
 
         let keys = ["demo/kept/a", "demo/kept/b", "demo/kept/c"];
         let mut datagram = beacon(9);
@@ -2207,7 +2257,7 @@ mod in_place {
                     may_stop: true,
                 },
                 host,
-                &(),
+                counted,
             )
         };
         let stopped = walk(&mut host, None);
@@ -2232,6 +2282,19 @@ mod in_place {
         let stopped = walk(&mut host, stopped);
         assert_eq!(stopped, None, "read whole");
         assert_eq!(host.keys, keys);
+        #[cfg(feature = "transport-stats")]
+        {
+            assert_eq!(
+                counted.transport.get(),
+                3,
+                "the beacon, the keep-alive and the frame, the frame once over its three walks"
+            );
+            assert_eq!(
+                *counted.records.borrow(),
+                [[9u8; 4]; 3],
+                "each Put lent once, against the member that sent it"
+            );
+        }
 
         // CONTROL: a transport that keeps nothing has its datagram read whole at once.
         let (mut dispatcher, mut reasm) = group();
@@ -2239,6 +2302,8 @@ mod in_place {
             keys: Vec::new(),
             room: 0,
         };
+        #[cfg(feature = "transport-stats")]
+        let counted = &Counted::default();
         let stopped = dispatch_multicast_inbound_kept(
             &mut dispatcher,
             &mut reasm,
@@ -2253,9 +2318,149 @@ mod in_place {
                 may_stop: false,
             },
             &mut whole,
-            &(),
+            counted,
         );
         assert_eq!(stopped, None);
         assert_eq!(whole.keys, keys);
+        #[cfg(feature = "transport-stats")]
+        {
+            assert_eq!(counted.transport.get(), 3);
+            assert_eq!(counted.records.borrow().len(), 3, "each Put lent once");
+        }
+    }
+}
+
+/// The keyexprs the members of a group declare, read member by member (`multicast-declarations`):
+/// two members number their keyexprs from the same counter, as two zenoh-pico sessions do, and
+/// each one's keys reach the session as that member declared them.
+#[cfg(feature = "multicast-declarations")]
+mod member_keyexprs {
+    use std::sync::Arc;
+
+    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
+    use wz_session_core::declare_build::{build_declare_kexpr, build_declare_subscriber};
+    use wz_session_core::frame_encode::{encode_frame_with_declare, encode_frame_with_push};
+    use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
+    use wz_session_core::push_build::build_push_aliased;
+
+    use super::in_place::{beacon, hand_in};
+    use super::{eventually, member_config, open_member, subscribe, Network, GROUP};
+
+    /// The two members, and the key each declares under the keyexpr id 1.
+    const MEMBERS: [(u8, &str); 2] = [(9, "demo/alias/a"), (8, "demo/alias/b")];
+
+    /// Each of [`MEMBERS`] comes to member 1's session behind its beacon, with its key declared
+    /// under the id 1 in its frame numbered 0.
+    fn declare_one_id_for_two_keys(network: &Network) {
+        for (member, key) in MEMBERS {
+            let mut datagram = beacon(member);
+            datagram.extend_from_slice(&encode_frame_with_declare(
+                0,
+                build_declare_kexpr(1, key).expect("a keyexpr"),
+                true,
+            ));
+            hand_in(network, 1, member, &datagram);
+        }
+    }
+
+    /// Each member puts by the id 1, the payload its own key: each put reaches the subscriber of
+    /// the key its member declared, and only that one.
+    #[test]
+    fn a_put_by_a_members_id_reaches_the_key_that_member_declared() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let on_a = subscribe(&session, "demo/alias/a");
+        let on_b = subscribe(&session, "demo/alias/b");
+        declare_one_id_for_two_keys(&network);
+        for (member, key) in MEMBERS {
+            let push = build_push_aliased(1, None, key.as_bytes()).expect("a put by the id");
+            hand_in(&network, 1, member, &encode_frame_with_push(1, push, true));
+        }
+        eventually("each member's put on its own key", || {
+            !on_a.lock().unwrap().is_empty() && !on_b.lock().unwrap().is_empty()
+        });
+        assert!(
+            on_a.lock()
+                .unwrap()
+                .iter()
+                .all(|payload| payload == b"demo/alias/a"),
+            "the subscriber of the first member's key heard only that member's put"
+        );
+        assert!(
+            on_b.lock()
+                .unwrap()
+                .iter()
+                .all(|payload| payload == b"demo/alias/b"),
+            "the subscriber of the second member's key heard only that member's put"
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// Each member declares a subscriber by the id 1: each opens the session's write filter on
+    /// the key its own member declared.
+    #[test]
+    fn a_subscriber_by_a_members_id_opens_the_filter_on_the_key_that_member_declared() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let filter = |key: &str| {
+            session
+                .declare_write_filter(
+                    FilterPlane::Subscribers,
+                    key,
+                    &WireKey::literal(),
+                    None,
+                    false,
+                )
+                .expect("a session with ids left declares")
+        };
+        let (on_a, on_b) = (filter("demo/alias/a"), filter("demo/alias/b"));
+        assert!(
+            session.write_filter_active(on_a) && session.write_filter_active(on_b),
+            "CONTROL: no member holds a subscriber yet"
+        );
+        declare_one_id_for_two_keys(&network);
+        for (member, _) in MEMBERS {
+            let subscriber = build_declare_subscriber(2, 1, None).expect("a subscriber by the id");
+            hand_in(
+                &network,
+                1,
+                member,
+                &encode_frame_with_declare(1, subscriber, true),
+            );
+        }
+        eventually(
+            "each member's subscriber to open the filter on its own key",
+            || !session.write_filter_active(on_a) && !session.write_filter_active(on_b),
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// The first member leaves after both declared the id 1: what it declared goes with it, and
+    /// the member that stays keeps its own declaration of the same id, so its put by the id still
+    /// reaches the key it declared, and only that one.
+    #[test]
+    fn a_member_that_leaves_takes_its_keyexprs_and_the_other_keeps_its_own() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let on_a = subscribe(&session, "demo/alias/a");
+        let on_b = subscribe(&session, "demo/alias/b");
+        declare_one_id_for_two_keys(&network);
+        let [(leaving, _), (staying, _)] = MEMBERS;
+        let mut close = [0u8; 8];
+        let len = encode_multicast_close_into_slice(&mut close).expect("a close");
+        hand_in(&network, 1, leaving, &close[..len]);
+        let push = build_push_aliased(1, None, b"after").expect("a put by the id");
+        hand_in(&network, 1, staying, &encode_frame_with_push(1, push, true));
+        eventually("the staying member's put on its own key", || {
+            !on_b.lock().unwrap().is_empty()
+        });
+        assert!(
+            on_a.lock().unwrap().is_empty(),
+            "nothing reaches the key of the member that left"
+        );
+        SessionDrive::close(&*session);
     }
 }

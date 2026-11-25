@@ -129,8 +129,16 @@ wz-tls-mbedtls = { path = "../wz-tls-mbedtls", optional = true }
 # The host: `std`'s mutex, threads and sleep behind the port's `os`, and the process's lock behind
 # the runtime's critical sections. Without it the engine is `no_std` with `alloc` and the image
 # supplies both (docs/upstream-parity.md section 5a).
-default = ["std"]
+default = ["std", "key-matching-listener", "threads"]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
+# A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
+# thread of its own, so a callback's call may end on one thread while another undeclares its row,
+# and the rows count their calls on an atomic latch (`row_callback::Threads`). Off, which is
+# pico's single-threaded arm, every call runs on the thread that steps the session: the latches
+# count with no read-modify-write, an undeclaration waits for nothing, no read task starts, and a
+# program that calls one session from two threads at once orders those calls itself, as it does
+# on zenoh-pico's single-threaded arm.
+threads = []
 # The host without `std` (the pico C ABI's `os-posix` and `os-windows`): the port's `os` and the
 # runtime's critical sections made of the host's own calls (`os-sys`, `host-lock-sys`), so a host
 # library built without `std` runs the read task and holds the locks as one with `std` does, and
@@ -169,7 +177,9 @@ scout-datagram = [
 ]
 # The answering end of a query: a queryable, its replies (with their source info, encoding and
 # attachment, and the error reply) and a query a C program keeps past its callback. What
-# `wz-capi-core`'s `queryable` names on its runtime, named on session-core.
+# `wz-capi-core`'s `queryable` names on its runtime, named on session-core. A group's stage writes
+# a reply from its parts where it waits only under `wz-session-mcu`'s own name for the codec, so the
+# feature names it there too.
 queryable = [
     "wz-runtime-coop/queryable",
     "wz-session-core/declare-queryable",
@@ -184,6 +194,7 @@ queryable = [
     "wz-session-core/request-put-del",
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
+    "wz-session-mcu/codec-response",
 ]
 # Delivery to the session's own subscribers (zenoh-pico's `Z_FEATURE_LOCAL_SUBSCRIBER`): a put
 # reaches the subscribers of the session that made it, after it has gone out on the link, and a
@@ -191,6 +202,12 @@ queryable = [
 # which is pico's default build, the session delivers nothing locally. It needs nothing of
 # session-core that the engine does not already have.
 local-subscriber = []
+# A matching listener declared on a key rather than on an entity's write filter
+# (`SessionEngine::declare_matching_listener`): it judges through a write filter of its own, so
+# the session's filter table and its Interests take one row more for each matching listener. The
+# pico C ABI declares every listener on its entity's filter and leaves it out, so its tables keep
+# no such rows; without it the engine refuses the listener as not built.
+key-matching-listener = []
 # The listening role: a session that takes inbound links off the ports it listens on, each as a
 # face of its own beside the dial role's (`CoopConfig::listen`). The link layer's listener is the
 # stack's (`SessionLinks::open_listener`); a stack that gives none answers the endpoint as
@@ -235,6 +252,20 @@ group = [
 # link are one decision for both engines. It needs no `std`: a host library without it joins a
 # group as one with it does.
 group-host = ["group", "dep:wz-runtime-posix", "dep:log"]
+# The `reth/` groups of `group` joined on the host's raw packet sockets: the runtime's joiner of
+# them (`raweth_group`), re-exported for the ABI that wraps the host's groups in it beside
+# `wz_runtime_posix::raweth`'s sockets. Linux only, where zenoh-pico has its raweth transport.
+raweth = ["group-host", "wz-runtime-coop/raweth", "wz-runtime-posix/raweth"]
+# The keyexprs the members of a group declare, each member's kept apart (zenoh-pico's
+# `Z_FEATURE_MULTICAST_DECLARATIONS`, the pico ABI's `multicast-declarations`): every key a member
+# names by one of its own ids, in a put, a declaration, a query, a reply or an interest, reaches the
+# session as the literal that member declared. Two zenoh-pico members number their keyexprs from
+# the same counter, so the group's face reads each record under the tag of the member that sent it
+# (the session core's lent group walk, `MemberRecords`) and keys its aliases by tag and id; the walk
+# stays where the datagram lies. The face holds `MAX_MEMBER_KEYEXPRS` aliases for each of its
+# `MAX_GROUP_MEMBERS` members, reserved in the session's pool at the open. Off, which is pico's
+# default build, whose members declare no keyexpr on a group, the face holds one peer's aliases.
+multicast-declarations = ["group"]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the
@@ -259,10 +290,14 @@ connectivity = ["wz-runtime-coop/connectivity"]
 # The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
 # session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
 # What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.
+#
+# A group's stage writes a token reply where it waits only under `wz-session-mcu`'s own name for
+# the registry, so the feature names it there too.
 liveliness = [
     "wz-session-core/declare-token",
     "wz-session-core/liveliness-token",
     "wz-session-core/liveliness-subscriber",
+    "wz-session-mcu/liveliness-token",
 ]
 # The liveliness get: a snapshot of the tokens alive on a key, asked as an Interest and answered
 # with token declarations and a DeclFinal, ended by its deadline as a query is. It is a get of
@@ -302,8 +337,10 @@ shared-key-ids = [
 # what it sends, receives and drops, as the tokio engine's sessions do under the same session-core
 # feature, and the engine counts the publishes it drops before they reach a link. Off, which is
 # pico's build (pico has no transport counters), no counter is kept and the text has none of them.
+# A group's session counts what it sends and receives into counters of its own (`wz-session-mcu`'s
+# `transport-stats`), which the engine sums with its links'.
 # A Rust surface only: neither zenoh-c nor zenoh-pico reports transport counters through C.
-transport-stats = ["wz-session-core/transport-stats"]
+transport-stats = ["wz-session-core/transport-stats", "wz-session-mcu/transport-stats"]
 # The declaration watch (`SessionEngine::declare_decl_watch`): what the peers of the session's links
 # declare and retract, told to a watch with the session's other deliveries, outside its lock. The
 # two features are the pico ABI's of the same names, which this engine honours as the tokio engine
@@ -320,6 +357,14 @@ declarations-synced-event = []
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]
+# The plan of a session's arena laid out at the open from the config it is handed
+# (`arena::PlanFrom::Config`, `CoopEngine::open` and the opens beside it), and kept row by row
+# (`ArenaPlan::rows`). Off, every open is by a region the build laid out when it was compiled
+# (`arena::ArenaRegion`): the image carries neither the walk of the rows nor a table of them, a
+# plan keeping the bytes its rows take and the rows each layer lends from. A C ABI whose config may
+# state a policy, listen or join a group turns it on; the crate's own tests have it whatever this
+# says.
+runtime-plan = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no
@@ -327,6 +372,9 @@ tx-lend-only = ["wz-session-core/tx-lend-only"]
 time-base = []
 
 [dev-dependencies]
+# The stand-in names the subscriber of each declaration it is told, in both forms its session reads
+# one in (owned and where its frame lies), so a test of the replay reads what was told in order.
+wz-codecs = { path = "../wz-codecs", default-features = false }
 # The `tls/` provider's tests (`tests/tls_provider.rs`) make a certificate authority and its end
 # certificates, as `wz-tls-mbedtls`'s own tests do, and share that crate's helper for it.
 rcgen = "0.13"

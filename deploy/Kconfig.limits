@@ -239,6 +239,18 @@ config WZ_LIMIT_HELD_SESSIONS
 	  the pool of sessions the library reserves at its first object when the
 	  program reserved none (object-pool). One more is refused at its open.
 
+config WZ_LIMIT_CALLBACK_THREADS
+	int "CALLBACK_THREADS"
+	default 8
+	help
+	  How many threads may be inside the program's callbacks at once in a pico C
+	  ABI library built without std and with threads: the entries of the table
+	  that marks each such thread, since the library has no thread-local storage.
+	  A thread delivers as a session's read task, or as a program thread whose
+	  call delivers in place. A callback a thread past it would run is not run
+	  and is counted (wz_ext_callbacks_refused). The single-threaded arm holds
+	  one entry whatever this says, as one thread calls the library at a time.
+
 config WZ_LIMIT_HELD_SAMPLES
 	int "HELD_SAMPLES"
 	default 5 if WZ_LIMITS_ZENOH_PICO
@@ -300,17 +312,66 @@ config WZ_LIMIT_HELD_HELLOS
 	  the pool of kept hellos the library reserves at its first object. One more
 	  is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
-config WZ_LIMIT_HELD_PAYLOAD_BYTES
-	int "HELD_PAYLOAD_BYTES"
-	default 32768 if WZ_LIMITS_ZENOH_PICO
-	default 131072
+config WZ_LIMIT_PAYLOAD_SMALL_BLOCK_BYTES
+	int "PAYLOAD_SMALL_BLOCK_BYTES"
+	range 32 1073741824
+	default 64
 	help
-	  The bytes the owned payloads, strings and slices a program of the pico C ABI
-	  holds carry at once, and the keys and parameters of the queries it keeps
-	  past their callbacks: the payloads' area the library reserves at its first
-	  object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
-	  smallest that holds its bytes and a 16-byte head. A payload no free block
-	  holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
+	  The bytes of each block of the smallest of the three pools of payload blocks a
+	  program of the pico C ABI holds the bytes of its owned payloads, strings and
+	  slices in, and the keys and parameters of the queries it keeps, a 16-byte head
+	  of each block included and rounded up to 16. A payload takes a block of the
+	  smallest of the three pools whose blocks hold it and its head and that has one
+	  free. At least 32.
+
+config WZ_LIMIT_PAYLOAD_MEDIUM_BLOCK_BYTES
+	int "PAYLOAD_MEDIUM_BLOCK_BYTES"
+	range 32 1073741824
+	default 1040
+	help
+	  The bytes of each block of the middle one of the three pools of payload blocks
+	  a program of the pico C ABI holds the bytes of its owned payloads, strings and
+	  slices in, a 16-byte head of each block included and rounded up to 16. The
+	  largest pool's blocks are not stated: each holds the largest message a session
+	  of the build delivers (the larger of PICO_FRAG_MAX_BYTES,
+	  PICO_UNICAST_BATCH_BYTES and PICO_MULTICAST_BATCH_BYTES) and its head, so a
+	  payload a session hands a program always has a block that holds it. At least
+	  32.
+
+config WZ_LIMIT_HELD_SMALL_PAYLOAD_BLOCKS
+	int "HELD_SMALL_PAYLOAD_BLOCKS"
+	default 128 if WZ_LIMITS_ZENOH_PICO
+	default 256
+	help
+	  The blocks of PAYLOAD_SMALL_BLOCK_BYTES bytes a program of the pico C ABI
+	  holds payload bytes in at once: the smallest of the three pools of payload
+	  blocks the library reserves at its first object. A payload whose bytes no free
+	  block of a pool that holds them takes is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+
+config WZ_LIMIT_HELD_MEDIUM_PAYLOAD_BLOCKS
+	int "HELD_MEDIUM_PAYLOAD_BLOCKS"
+	default 8 if WZ_LIMITS_ZENOH_PICO
+	default 32
+	help
+	  The blocks of PAYLOAD_MEDIUM_BLOCK_BYTES bytes a program of the pico C ABI
+	  holds payload bytes in at once: the middle one of the three pools of payload
+	  blocks the library reserves at its first object. A payload whose bytes no free
+	  block of a pool that holds them takes is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+
+config WZ_LIMIT_HELD_LARGE_PAYLOAD_BLOCKS
+	int "HELD_LARGE_PAYLOAD_BLOCKS"
+	default 4 if WZ_LIMITS_ZENOH_PICO
+	default 20
+	help
+	  The blocks a program of the pico C ABI holds its largest payloads in at once:
+	  the largest of the three pools of payload blocks the library reserves at its
+	  first object, each block holding the largest message a session of the build
+	  delivers (the larger of PICO_FRAG_MAX_BYTES, PICO_UNICAST_BATCH_BYTES and
+	  PICO_MULTICAST_BATCH_BYTES) and a 16-byte head. A payload larger than such a
+	  block, or one no free block of a pool that holds it takes, is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
 config WZ_LIMIT_HELD_ENCODINGS
 	int "HELD_ENCODINGS"
@@ -522,8 +583,10 @@ config WZ_LIMIT_MAX_TIMERS
 	  The most timers a runtime holds: a ceiling on the timer table a
 	  fixed-memory image declares, checked as the task ceiling is, and the entries
 	  of the timer table a session of the C ABI's cooperative engine reserves when
-	  it opens. A sleep past them is refused an entry and counted, and ends by
-	  polling.
+	  it opens in a build with a feature whose task sleeps on the session's runtime.
+	  A session keeps its own deadlines, and no feature of that engine spawns a task
+	  that sleeps, so its sessions reserve no entry. A sleep past them is refused an
+	  entry and counted, and ends by polling.
 
 config WZ_LIMIT_MAX_TICKERS
 	int "MAX_TICKERS"
@@ -620,6 +683,21 @@ config WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN
 	  locator row of a node. The default holds a raweth group endpoint with an
 	  interface name of fifteen bytes and two whitelisted addresses (90 bytes).
 
+config WZ_LIMIT_MAX_RAWETH_ENDPOINT_LEN
+	int "MAX_RAWETH_ENDPOINT_LEN"
+	default 160
+	help
+	  The longest raweth group endpoint, in bytes, a session joins by, its
+	  interface, ethertype, mapping table and whitelist included (for example
+	  reth/30:03:8c:c8:00:a2#iface=lo;mapping=a#aa:bb:cc:dd:ee:01#). A longer
+	  one is refused when the group is joined, never cut short. Apart from
+	  MAX_GROUP_ENDPOINT_LEN because a raweth endpoint carries a table: the
+	  rows of its mapping, the length of a mapping key, the addresses of its
+	  whitelist and its interface name are each sized from this value, so a
+	  table that fits the endpoint fits its rows. Read only by a build with the
+	  raweth transport. The default holds an endpoint that states all four keys
+	  with two mapping entries and one whitelisted address (141 bytes).
+
 config WZ_LIMIT_MAX_GROUP_MEMBERS
 	int "MAX_GROUP_MEMBERS"
 	default 32
@@ -629,6 +707,18 @@ config WZ_LIMIT_MAX_GROUP_MEMBERS
 	  member's transport and link from, and the member table of the group's
 	  session. A JOIN from one more member is not admitted while every row is
 	  held, and is heard again once a member is lost.
+
+config WZ_LIMIT_MAX_MEMBER_KEYEXPRS
+	int "MAX_MEMBER_KEYEXPRS"
+	default 16
+	help
+	  The key expressions one member of a multicast group may have declared to
+	  this session at a time, to name them by a short id of its own. Each member
+	  holds its own, and they are let go of when it leaves. One more is refused
+	  and counted, and a message that names it is dropped, as one naming an
+	  undeclared id is. The group's face reserves this many aliases for each of
+	  its MAX_GROUP_MEMBERS members when the session opens. The default is
+	  MAX_PEER_KEYEXPR_ALIASES, one peer's.
 
 config WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS
 	int "MAX_CONNECTIVITY_REPLAY_EVENTS"

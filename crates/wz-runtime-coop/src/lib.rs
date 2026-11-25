@@ -186,8 +186,12 @@ pub(crate) mod atomic;
 // cells (see the `executor` module doc).
 #[cfg(feature = "runtime")]
 pub mod executor;
+// The count the heap forms share the runtime's state and its task table by, wherever the memory
+// holding them came from (the heap, or a span of a session's arena).
 #[cfg(feature = "runtime")]
 pub mod join_handle;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub mod kept;
 // The `!Send` view of the task pool: the same table, through a set that is itself `!Send` —
 // see the module doc.
 #[cfg(feature = "runtime")]
@@ -214,7 +218,7 @@ pub use runtime_impl::CoopRuntime;
 #[cfg(feature = "session-slot")]
 pub use runtime_impl::RuntimeCell;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use runtime_impl::RuntimeRows;
+pub use runtime_impl::{RuntimeForm, RuntimePlace, RuntimeRows};
 #[cfg(feature = "runtime")]
 pub use time::{ClockSource, CoopTime};
 #[cfg(feature = "runtime")]
@@ -242,6 +246,29 @@ pub mod session_drive;
 // runtime that dials or listens. Documented in its own `//!`.
 #[cfg(feature = "session-unicast")]
 pub mod locator_text;
+
+/// The session's link over a serial line: the line a platform opens ([`serial_link::SerialOpen`],
+/// [`serial_link::SerialDevice`]) under the session core's serial framing.
+#[cfg(feature = "serial")]
+pub mod serial_link;
+
+/// The session's link over a WebSocket: the stream link under RFC 6455's framing
+/// ([`ws_link::WsFraming`]).
+#[cfg(feature = "ws")]
+pub mod ws_link;
+
+/// The session's link over a pair of named FIFOs on this host: the FIFOs a platform opens
+/// ([`unixpipe_link::FifoOpen`], [`unixpipe_link::Fifo`]) under the stream link's framing, and
+/// the stack that opens it beside another's ([`unixpipe_link::UnixpipeLinks`]).
+#[cfg(all(feature = "unixpipe", not(feature = "session-slot")))]
+pub mod unixpipe_link;
+
+/// The multicast groups over raw Ethernet on this engine: the device a platform opens on an
+/// interface ([`raweth_group::RawEthOpen`], [`raweth_group::RawEthDevice`]) under the session
+/// core's raweth link, and the joiner that opens it beside another's
+/// ([`raweth_group::RawethJoiner`]).
+#[cfg(all(feature = "raweth", not(feature = "session-slot")))]
+pub mod raweth_group;
 
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
 /// (`alloc` without `session-slot`: `session_drive::LinkWaits`, and the `Waits` type and the

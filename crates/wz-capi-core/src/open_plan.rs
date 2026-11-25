@@ -622,7 +622,7 @@ fn zenoh_group_profile(
         // zenoh holds every group to its multicast manager's cap, 1000 unless the document
         // states another, so a zenoh session always has one.
         max_sessions: Some(node.multicast_max_sessions),
-        seq_num_res: sn_resolution.wire_code(),
+        seq_num_res: sn_resolution,
         req_id_res: BITS_32,
         batch_size: batch_size.min(ZENOH_MULTICAST_BATCH),
         is_qos: node.multicast_qos,
@@ -2705,7 +2705,7 @@ mod tests {
             (SnResolution::Bits64, 0x03),
         ] {
             let profile = zenoh_group_profile(&node, 65535, width);
-            assert_eq!(profile.seq_num_res, code, "{}", width.id());
+            assert_eq!(profile.seq_num_res.wire_code(), code, "{}", width.id());
             assert_eq!(profile.req_id_res, 0x02, "the request id is untouched");
         }
     }
@@ -3210,7 +3210,7 @@ mod tests {
             golden(
                 "role: Router\nconnect: []\nlisten: [\"tcp/127.0.0.1:7447\"]\n\
                  groups: [\"udp/224.0.0.224:7446#iface=lo GroupProfile { lease_ms: 10000, \
-                 join_interval_ms: 2500, max_sessions: Some(1000), seq_num_res: 2, \
+                 join_interval_ms: 2500, max_sessions: Some(1000), seq_num_res: Bits32, \
                  req_id_res: 2, batch_size: 8192, \
                  is_qos: false, compression: false, join_rule: Zenoh } shm=true Subscribers\"]",
                 "-1",

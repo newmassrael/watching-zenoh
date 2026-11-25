@@ -91,7 +91,7 @@ fn unicast_params(
     Ok(SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [zid; 4].into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -102,7 +102,7 @@ fn unicast_params(
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
         limits: *limits,
-        cookie_signing_key,
+        cookie_signing_key: cookie_signing_key.into(),
     })
 }
 

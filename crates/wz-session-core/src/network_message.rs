@@ -3187,6 +3187,105 @@ pub fn named_put_stats_class(keyexpr: &str, pl_bytes: usize) -> crate::stats::Ne
     )
 }
 
+/// [`push_stats_class`] for a Put or a Del a sender writes from its parts (the key's mapping `id`
+/// and `suffix`, the payload's length and the attachment's), with no owned message to read: the
+/// class [`push_stats_class`] gives the owned Push of the same parts, whose Del is sized by its
+/// attachment alone.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+pub fn publication_stats_class<F>(
+    id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    kind: crate::sample::SampleKind,
+    payload: usize,
+    attachment: usize,
+    resolve_alias: F,
+) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
+{
+    use crate::sample::SampleKind;
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
+    let space = stats_space_of_key(id, suffix, &resolve_alias);
+    match kind {
+        SampleKind::Put => NetworkStatsClass::net(
+            MessageLabel::Put,
+            StatMessage::Put,
+            space,
+            payload.saturating_add(attachment),
+        ),
+        SampleKind::Del => {
+            NetworkStatsClass::net(MessageLabel::Del, StatMessage::Del, space, attachment)
+        }
+    }
+}
+
+/// [`request_stats_class`] for a get a sender writes from its parts, with no owned `Request` to
+/// read: the class the owned `Request` of the same parts is given
+/// ([`crate::query_parts::GetParts::owned_request`]), its payload what the writer writes of the
+/// query's value and its attachment.
+#[cfg(all(feature = "transport-stats", feature = "codec-request"))]
+pub fn get_stats_class<F>(
+    writer: &crate::lent_request::RequestWriter<'_>,
+    resolve_alias: F,
+) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
+{
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
+    let key = writer.parts().key;
+    NetworkStatsClass::net(
+        MessageLabel::Query,
+        StatMessage::Query,
+        stats_space_of_key(key.id(), key.suffix(), &resolve_alias),
+        writer.payload_len(),
+    )
+}
+
+/// [`response_stats_class`] for a reply a sender writes from its parts, with no owned `Response` to
+/// read: a reply by its payload and the attachment the build writes, a Del by its attachment
+/// alone, an Err by its payload, each in the space of the literal key the reply is stamped with. A
+/// buffer of shared memory is written as its bytes, and is counted so.
+#[cfg(all(feature = "transport-stats", feature = "codec-response"))]
+pub fn reply_parts_stats_class(
+    parts: &crate::reply_stage::ReplyParts<'_>,
+) -> crate::stats::NetworkStatsClass {
+    use crate::reply_stage::{PartsBody, PartsKind};
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage, StatSpace};
+    let space = StatSpace::of_keyexpr(parts.keyexpr);
+    match &parts.kind {
+        PartsKind::Reply {
+            body, attachment, ..
+        } => {
+            #[cfg(feature = "pubsub-attachment")]
+            let attachment = attachment.map_or(0, <[u8]>::len);
+            #[cfg(not(feature = "pubsub-attachment"))]
+            let attachment = {
+                let _ = attachment;
+                0
+            };
+            let payload = match body {
+                PartsBody::Put(bytes) => bytes.len(),
+                PartsBody::Del => 0,
+                #[cfg(feature = "transport-shm")]
+                PartsBody::Shared(handle) => handle.bytes().len(),
+            };
+            NetworkStatsClass::net(
+                MessageLabel::Reply,
+                StatMessage::Reply,
+                space,
+                payload.saturating_add(attachment),
+            )
+        }
+        #[cfg(feature = "query-reply-err")]
+        PartsKind::Err { payload, .. } => NetworkStatsClass::net(
+            MessageLabel::ReplyErr,
+            StatMessage::Reply,
+            space,
+            payload.len(),
+        ),
+    }
+}
+
 /// Fold a classified body into a class, selecting the `shm` medium when the
 /// body's extension chain carries the SHM descriptor marker — the wz twin of
 /// upstream's `labels.shm`.
@@ -3194,7 +3293,7 @@ pub fn named_put_stats_class(keyexpr: &str, pl_bytes: usize) -> crate::stats::Ne
     feature = "transport-stats",
     any(
         feature = "codec-push",
-        feature = "codec-request",
+        all(feature = "codec-request", feature = "request-put-del"),
         feature = "codec-response"
     )
 ))]
@@ -3271,7 +3370,7 @@ fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, eid:
     feature = "transport-stats",
     any(
         feature = "codec-push",
-        feature = "codec-request",
+        all(feature = "codec-request", feature = "request-put-del"),
         feature = "codec-response"
     )
 ))]
@@ -3289,7 +3388,7 @@ fn put_payload_size<S: wz_codecs::msg_put::MsgPutStorage>(
     feature = "transport-stats",
     any(
         feature = "codec-push",
-        feature = "codec-request",
+        all(feature = "codec-request", feature = "request-put-del"),
         feature = "codec-response"
     )
 ))]
@@ -3305,7 +3404,7 @@ fn del_payload_size(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>) ->
     feature = "transport-stats",
     any(
         feature = "codec-push",
-        feature = "codec-request",
+        all(feature = "codec-request", feature = "request-put-del"),
         feature = "codec-response"
     )
 ))]
@@ -3393,27 +3492,43 @@ where
     // Every Request is a `query` to the registry whatever its body: upstream
     // labels by the network message, and its `Request` arm names one kind
     // (`commons/zenoh-stats/src/labels.rs` @ `NetworkBodyRef::Request(_) => MessageLabel::Query,`).
-    match &request.body {
-        V::CodecZenohMsgPut(b) => put_stats_class(MessageLabel::Query, StatMessage::Put, space, b),
-        V::CodecZenohMsgDel(b) => stats_data_class(
-            MessageLabel::Query,
-            StatMessage::Del,
-            space,
-            del_payload_size(b.extensions.entries()),
-            b.extensions.entries(),
-        ),
-        // The marker that precedes a Query's value is its own extension, not a
-        // Put's (`ext_header::body_ext_id::QUERY_SHM`), and upstream's `is_shm`
-        // for a Request reads it off the Query's value body.
-        V::CodecZenohQuery(b) | V::Default { body: b, .. } => stats_class_marked(
-            MessageLabel::Query,
-            StatMessage::Query,
-            space,
-            query_payload_size(b.extensions.entries()),
-            b.extensions.entries(),
-            crate::ext_header::body_ext_id::QUERY_SHM,
-        ),
-    }
+    let query = match &request.body {
+        #[cfg(feature = "request-put-del")]
+        V::CodecZenohMsgPut(b) => {
+            return put_stats_class(MessageLabel::Query, StatMessage::Put, space, b);
+        }
+        #[cfg(feature = "request-put-del")]
+        V::CodecZenohMsgDel(b) => {
+            return stats_data_class(
+                MessageLabel::Query,
+                StatMessage::Del,
+                space,
+                del_payload_size(b.extensions.entries()),
+                b.extensions.entries(),
+            );
+        }
+        V::CodecZenohQuery(b) => b,
+        // An unknown tag carries a Query's body. Anything else is a Put or a Del arm the codec
+        // builds for another crate of the graph where this build names neither, so it has no
+        // class here; the binding keeps the match exhaustive whichever arms the codec has.
+        other => {
+            let V::Default { body, .. } = other else {
+                return crate::stats::NetworkStatsClass::undecoded();
+            };
+            body
+        }
+    };
+    // The marker that precedes a Query's value is its own extension, not a
+    // Put's (`ext_header::body_ext_id::QUERY_SHM`), and upstream's `is_shm`
+    // for a Request reads it off the Query's value body.
+    stats_class_marked(
+        MessageLabel::Query,
+        StatMessage::Query,
+        space,
+        query_payload_size(query.extensions.entries()),
+        query.extensions.entries(),
+        crate::ext_header::body_ext_id::QUERY_SHM,
+    )
 }
 
 /// R2825 (open-debt item 820) — a Query's payload SIZE as upstream counts it:
@@ -4119,21 +4234,29 @@ fn request_body_class(
     body: &wz_codecs::request::RequestViewVariant<'_>,
     space: crate::stats::StatSpace,
 ) -> crate::stats::NetworkStatsClass {
-    use wz_codecs::request::RequestViewVariant as V;
-    if let V::CodecZenohQuery(query) | V::Default { body: query, .. } = body {
-        return query_view_class(space, query);
-    }
     #[cfg(feature = "request-put-del")]
-    {
-        use crate::stats::{MessageLabel, StatMessage};
-        if let V::CodecZenohMsgPut(put) = body {
+    use crate::stats::{MessageLabel, StatMessage};
+    use wz_codecs::request::RequestViewVariant as V;
+    let query = match body {
+        #[cfg(feature = "request-put-del")]
+        V::CodecZenohMsgPut(put) => {
             return put_view_class(MessageLabel::Query, StatMessage::Put, space, put);
         }
-        if let V::CodecZenohMsgDel(del) = body {
+        #[cfg(feature = "request-put-del")]
+        V::CodecZenohMsgDel(del) => {
             return del_view_class(MessageLabel::Query, StatMessage::Del, space, del);
         }
-    }
-    crate::stats::NetworkStatsClass::undecoded()
+        V::CodecZenohQuery(query) => query,
+        // As in `request_stats_class`: an unknown tag carries a Query's body, and a Put or a Del
+        // arm this build does not name has no class.
+        other => {
+            let V::Default { body: query, .. } = other else {
+                return crate::stats::NetworkStatsClass::undecoded();
+            };
+            query
+        }
+    };
+    query_view_class(space, query)
 }
 
 /// The class of a Query read as its view: its value without the encoding in front of it, inline
