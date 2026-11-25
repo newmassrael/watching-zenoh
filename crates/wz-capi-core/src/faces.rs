@@ -2380,7 +2380,8 @@ impl Inner {
 pub enum PlaneRefused {
     /// The host had no entropy for the plane's cookie signing key.
     EntropyUnavailable,
-    /// The runtime had no room for the plane's action bundle.
+    /// The runtime had no room for the plane's action bundle, or for the rows of its key
+    /// expression declarations.
     HeapRefused,
 }
 
@@ -2998,7 +2999,7 @@ impl SharedSession {
         // `field_reassign_with_default` refuses the latter, and gate 6 is where
         // it surfaced — `cargo check` and `cargo test` both passed, because
         // neither runs clippy.
-        let inner = Inner {
+        let mut inner = Inner {
             local_face: Some(FaceEntry {
                 session: local.clone(),
                 subs: BTreeMap::new(),
@@ -3028,6 +3029,12 @@ impl SharedSession {
             // Both upstreams number a session's first entity 1, as the table set does.
             ..Default::default()
         };
+        // A key the program holds reaches its declaration's row by address, so the rows are kept
+        // where they are put: room for the build's bound made now, and a declaration past it
+        // refused, as a session of a fixed table refuses it.
+        if !inner.tables.hold_keyexpr_rows_in_place() {
+            return Err(PlaneRefused::HeapRefused);
+        }
         Ok(Self {
             zid: zid_bytes,
             session_zid: zid,
@@ -5250,7 +5257,13 @@ impl SharedSession {
             .declare_keyexpr_where(&keyexpr, false, |id| self.mapping_id_free(id))
             .ok()?;
         self.announce_keyexpr_locked(&guard, declared.id, &keyexpr, declared.new);
-        Some(KeyHold::taken(declared.id, declared.handle))
+        let hold = KeyHold::taken(declared.id, declared.handle);
+        Some(match guard.tables.keyexprs().get(declared.handle) {
+            // SAFETY: the table of declarations was held in place at the open
+            // (`Self::new_with_resources`), so its rows stay where they are while the session does.
+            Some(row) => unsafe { hold.placed_at(row.head()) },
+            None => hold,
+        })
     }
 
     /// Let go of one holder of the declaration in row `row` ([`Self::acquire_keyexpr`]),

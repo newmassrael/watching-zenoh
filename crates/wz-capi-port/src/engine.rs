@@ -89,6 +89,14 @@ pub trait KeyHolds: Send + Sync {
         row: KeyexprHandle,
         key: &str,
     ) -> Option<(wz_session_core::wire_id::ExprId, usize)>;
+
+    /// Told of a hold taken (`1`) or given back (`-1`) at its row's address
+    /// ([`KeyHold::placed_at`](crate::KeyHold::placed_at)), which reaches the session no other
+    /// way: for an engine that keeps a tally of the holds it handed out. Nothing, the provided
+    /// answer, for one that keeps none.
+    fn counted_at_row(&self, change: isize) {
+        let _ = change;
+    }
 }
 
 /// The periodic jobs a session runs ([`crate::Ticker`]). Apart from [`SessionEngine`] for the

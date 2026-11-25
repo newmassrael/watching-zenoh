@@ -7392,6 +7392,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 }
 
+/// The hold of the declaration `id` taken in row `handle` of `tables`, naming where the row lies,
+/// so a copy of it takes its hold, and a holder that is not the last gives its own back, at the
+/// row with no lock of the session.
+fn placed_hold(tables: &CoopTables, id: ExprId, handle: KeyexprHandle) -> KeyHold {
+    let hold = KeyHold::taken(id, handle);
+    match tables.keyexprs().get(handle) {
+        // SAFETY: the session's rows lie in its region, or in the span lent at its open
+        // (`RowPolicy`), neither of which moves while the session's state stands.
+        Some(row) => unsafe { hold.placed_at(row.head()) },
+        None => hold,
+    }
+}
+
 // A key's hold and a periodic job's handle name the session by these alone, so the doors that
 // reach the engine as its own type make no table of all of its operations for them.
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::KeyHolds
@@ -7434,6 +7447,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::
     fn declared_prefix(&self, row: KeyexprHandle, key: &str) -> Option<(ExprId, usize)> {
         let core = self.live()?;
         tables(&core.0.session.registry).declared_prefix(row, key)
+    }
+
+    // The tally of the holds handed out (`Takes::holds`) counts the ones taken and given back at
+    // their rows as it counts the ones the session took and was given back.
+    #[cfg(test)]
+    fn counted_at_row(&self, change: isize) {
+        self.takes.holds.fetch_add(change, Ordering::Relaxed);
     }
 }
 
@@ -7953,7 +7973,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if !declared.new {
             #[cfg(test)]
             self.takes.holds.fetch_add(1, Ordering::Relaxed);
-            return Ok(KeyHold::taken(id, declared.handle));
+            return Ok(placed_hold(
+                tables(&core.session.registry),
+                id,
+                declared.handle,
+            ));
         }
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn. A link
@@ -7975,7 +7999,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         #[cfg(test)]
         self.takes.holds.fetch_add(1, Ordering::Relaxed);
-        Ok(KeyHold::taken(id, declared.handle))
+        Ok(placed_hold(
+            tables(&core.session.registry),
+            id,
+            declared.handle,
+        ))
     }
 
     fn key_arena(&self) -> Option<&dyn SessionKeys> {

@@ -50,8 +50,9 @@ const fn row_capacity<const N: usize>() -> usize {
 /// Resolve a loaned keyexpr to its borrowed UTF-8 string, or `None` if null /
 /// not valid UTF-8.
 ///
-/// Branchless across the view / declared arms by construction: both keep the
-/// literal at slots 0/1 (see [`z_loaned_keyexpr_t`]).
+/// Both arms keep the literal at slots 0/1 (see [`z_loaned_keyexpr_t`]). A view's text is the
+/// caller's and is checked; a key that names the object keeping it (slot 3) lies in that object's
+/// text, which was a `str` when it was kept, and is read as it is.
 ///
 /// Out of line: every door that names a key reads it here, and each copy inlined carried the
 /// UTF-8 check of its own.
@@ -63,7 +64,13 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
     if ke.is_null() {
         return None;
     }
-    crate::abi::text_of(view_bytes((*ke)._start, (*ke)._len)?)
+    let bytes = view_bytes((*ke)._start, (*ke)._len)?;
+    if (*ke)._state.is_null() {
+        return crate::abi::text_of(bytes);
+    }
+    // SAFETY: slots 0/1 of a key that names its object are that object's text, a `str` it keeps
+    // unchanged while the key is lent.
+    Some(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
 /// The key a declaration or a get names, read where the caller holds it: `Z_ERR_INVALID` when it
@@ -118,15 +125,15 @@ pub(crate) fn canon_key(text: &str) -> Result<(), ZResult> {
 /// The [`DeclaredKeyexpr`] behind a loaned keyexpr, or `None` for a view.
 ///
 /// Only the owned keyexprs this crate builds, and the loans its entities hand
-/// out over their own keys, put anything in slot 2; a view leaves it null.
+/// out over their own keys, put anything in slot 3; a view leaves it null.
 ///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
 pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'a DeclaredKeyexpr> {
-    if ke.is_null() || (*ke)._handle.is_null() {
+    if ke.is_null() || (*ke)._state.is_null() {
         return None;
     }
-    Some(&*((*ke)._handle as *const DeclaredKeyexpr))
+    Some(&*((*ke)._state as *const DeclaredKeyexpr))
 }
 
 /// How `ke` goes on `shared`'s wire: its own declaration's id and the rest of
@@ -443,9 +450,17 @@ impl DeclaredKeyexpr {
         z_loaned_keyexpr_t {
             _start: self.literal().as_ptr(),
             _len: self.literal().len(),
-            _handle: self as *const Self as *mut c_void,
-            _mapping: 0,
+            _handle: self.row_address(),
+            _state: self as *const Self as *mut c_void,
         }
+    }
+
+    /// The address of the row of the declaration that covers a prefix of the key, where the
+    /// session's table keeps it in place, `0` for none: slot 2 of the key's loan.
+    pub(crate) fn row_address(&self) -> usize {
+        self.declaration
+            .as_ref()
+            .map_or(0, |d| d.hold.row_address())
     }
 
     /// Another key sharing this one's literal and declaration — pico
@@ -517,7 +532,20 @@ impl DeclaredKeyexpr {
     /// It holds nothing: for a message sent once, or a record that keeps this key itself. The
     /// remainder is named by its length, read against this key's literal, which every engine
     /// call takes beside the wire key ([`WireKey::names_in`]), so naming it copies nothing.
+    ///
+    /// Where the session keeps the declaration's row in place, the id and the length of the
+    /// declared key are read there, with no lock of the session.
     pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
+        if let Some(d) = self.declared_on(shared) {
+            // SAFETY: the declaration is `shared`'s, which stands for the call, and this key holds
+            // it, so its row is where its hold names it.
+            if let Some(head) = unsafe { d.hold.head() } {
+                return match self.literal().len().checked_sub(head.key_len()) {
+                    Some(rest) => WireKey::aliased_tail(head.id(), rest).at_row(d.hold.row()),
+                    None => WireKey::literal(),
+                };
+            }
+        }
         match self.declared_rest(shared) {
             Some((d, rest)) => {
                 WireKey::aliased_tail(d.mapping_id(), rest.len()).at_row(d.hold.row())
@@ -939,7 +967,7 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
         }
         // Take the value out first so the owned key is released and the
         // caller's struct nulled whether or not the session resolves.
-        let handle = (*keyexpr)._this._handle;
+        let handle = (*keyexpr)._this._state;
         (*keyexpr)._this = z_owned_keyexpr_t::null_value();
         if handle.is_null() {
             return Z_ERR_INVALID;
@@ -975,7 +1003,7 @@ pub unsafe extern "C" fn z_internal_keyexpr_null(obj: *mut z_owned_keyexpr_t) {
 /// `z_internal_keyexpr_check`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_keyexpr_check(obj: *const z_owned_keyexpr_t) -> bool {
-    guard_val(false, || !obj.is_null() && !(*obj)._handle.is_null())
+    guard_val(false, || !obj.is_null() && !(*obj)._state.is_null())
 }
 
 /// Borrow a declared keyexpr (pico `z_keyexpr_loan`). The owned and loaned
@@ -1032,7 +1060,7 @@ pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
         if obj.is_null() {
             return Z_OK;
         }
-        let handle = (*obj)._this._handle;
+        let handle = (*obj)._this._state;
         if !handle.is_null() {
             // A declared key's place is a pool's, another's the heap's: `release` gives it back to
             // whichever it lies in.
@@ -1070,8 +1098,8 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 ///
 /// The `_start` slot points into the boxed `String`'s HEAP buffer, which is
 /// what makes the borrow survive the box moving — the distinction
-/// [`DeclaredKeyexpr`] documents. The declaration, if any, rides in the box;
-/// `_mapping` stays 0 because nothing reads it any more — a key's wire form is
+/// [`DeclaredKeyexpr`] documents. The declaration, if any, rides in the box, and
+/// `_handle` names its row ([`DeclaredKeyexpr::row_address`]); a key's wire form is
 /// asked of the key ([`wire_key_of`]), which is the only place that can tell a
 /// whole-key declaration from a prefix one.
 /// `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` as it was and `key` let go of, when the heap
@@ -1101,8 +1129,8 @@ unsafe fn owned_keyexpr_at(dst: *mut z_owned_keyexpr_t, key: *mut DeclaredKeyexp
     *dst = z_owned_keyexpr_t {
         _start: literal.as_ptr(),
         _len: literal.len(),
-        _handle: key as *mut c_void,
-        _mapping: 0,
+        _handle: (*key).row_address(),
+        _state: key as *mut c_void,
         _pad: [0usize; 2],
     };
 }
@@ -2077,6 +2105,90 @@ mod tests {
         );
     }
 
+    /// A copy made through a key's loan names the declaration's row by its address, as the key
+    /// does, takes its own hold there, and keeps the declaration after the key it was made from is
+    /// dropped; the wire names it by the row's id. Turned red by a loan whose slot 2 is not the
+    /// row, by a copy that takes no hold (the declaration gone with the first drop), or by a wire
+    /// key that does not read the row's id.
+    #[test]
+    fn a_copy_made_through_a_loan_holds_the_declaration_at_its_row_past_the_original() {
+        let shared = session();
+        let engine = shared.as_engine();
+        let declared = DeclaredKeyexpr::declare(&engine, "demo/kd/row", None).expect("declared");
+        let row = declared.row_address();
+        assert_ne!(row, 0, "the session's table names where the row lies");
+        let mut key = z_owned_keyexpr_t::null_value();
+        // SAFETY: `key` is a live owned key the store writes over.
+        assert_eq!(unsafe { store_owned_keyexpr(&mut key, declared) }, Z_OK);
+        let mut copy = z_owned_keyexpr_t::null_value();
+        // SAFETY: `copy` is writable and `key` a live owned key, loaned for the call.
+        assert_eq!(
+            unsafe { z_keyexpr_clone(&mut copy, z_keyexpr_loan(&key)) },
+            Z_OK
+        );
+        // SAFETY: both are live owned keys, loaned for the reads.
+        let slots = unsafe {
+            (
+                (*z_keyexpr_loan(&key))._handle,
+                (*z_keyexpr_loan(&copy))._handle,
+            )
+        };
+        assert_eq!(slots, (row, row), "both name the one row");
+        // SAFETY: `key` holds the owned key stored above, moved out once here.
+        unsafe { z_keyexpr_drop(z_keyexpr_move(&mut key)) };
+        let declarations = shared.keyexpr_declarations();
+        assert_eq!(declarations.len(), 1, "the copy holds the declaration");
+        // SAFETY: `copy` is a live owned key, loaned for the call on the session it names.
+        let wire = unsafe {
+            wire_key_of(
+                z_keyexpr_loan(&copy),
+                crate::session::EngineHold::as_ref(&engine),
+            )
+        };
+        assert_eq!(wire.mapping_id, declarations[0].0, "named by the row's id");
+        drop(wire);
+        // SAFETY: `copy` holds the owned key cloned above, moved out once here.
+        unsafe { z_keyexpr_drop(z_keyexpr_move(&mut copy)) };
+        assert!(
+            shared.keyexpr_declarations().is_empty(),
+            "the last holder retracts it"
+        );
+    }
+
+    /// The session keeps its declarations' rows where they were put up to the build's bound and
+    /// refuses one past it, as a session of a fixed table does: a key holding the first row by
+    /// its address finds it there after the table is full. Turned red by a table whose rows grow
+    /// past the bound (the declaration past it taken, or the first row moved).
+    #[test]
+    fn declarations_to_the_sessions_bound_leave_the_first_row_where_it_was() {
+        let shared = session();
+        let first = shared
+            .acquire_keyexpr("demo/kd/0".to_owned())
+            .expect("room for a declaration");
+        let at = first.row_address();
+        assert_ne!(at, 0, "the session names where the row lies");
+        let mut holds = Vec::new();
+        while let Some(hold) = shared.acquire_keyexpr(alloc::format!("demo/kd/{}", holds.len() + 1))
+        {
+            holds.push(hold);
+        }
+        assert_eq!(
+            shared.keyexpr_declarations().len(),
+            wz_session_core::caps::MAX_DECLARED_KEYEXPRS,
+            "the table is refused past the build's bound"
+        );
+        let again = shared
+            .acquire_keyexpr("demo/kd/0".to_owned())
+            .expect("a declaration held once more");
+        assert_eq!(again.row_address(), at, "the first row is where it was put");
+        again.release(&*shared);
+        first.release(&*shared);
+        for hold in holds {
+            hold.release(&*shared);
+        }
+        assert!(shared.keyexpr_declarations().is_empty());
+    }
+
     /// R2959 — the wire form: the declaration's id plus the remainder of the
     /// key, and the literal on a session that did not make the declaration.
     #[test]
@@ -2816,6 +2928,61 @@ mod arena_key_tests {
             "the last holder retracts it and its key's block goes back; the wire key held nothing"
         );
         drop(wire);
+        give_back(&engine, held);
+        close(session);
+    }
+
+    /// A key's loan names its declaration's row by the row's address, as a copy made through the
+    /// loan does; the copy takes its own hold there and keeps the declaration after the key it was
+    /// made from is dropped, and the wire names it by the row's id. Turned red by a loan whose
+    /// slot 2 is not the row, by a copy that takes no hold (the declaration's block back after the
+    /// first drop), or by a wire key that does not read the row's id.
+    #[test]
+    fn a_keys_loan_names_its_row_and_a_copy_holds_it_past_the_original() {
+        let (session, engine) = listening();
+        let text = "demo/row/a";
+        let held = fill_leaving(&engine, text.len(), 1);
+        let declared = DeclaredKeyexpr::declare(&engine, text, None).expect("declared");
+        let id = declared
+            .wire(crate::session::EngineHold::as_ref(&engine))
+            .mapping_id;
+        let row = declared.row_address();
+        assert_ne!(row, 0, "a declared key names its row");
+        let mut key = z_owned_keyexpr_t::null_value();
+        // SAFETY: `key` is a live owned key the store writes over.
+        assert_eq!(unsafe { store_owned_keyexpr(&mut key, declared) }, Z_OK);
+        let mut copy = z_owned_keyexpr_t::null_value();
+        // SAFETY: `copy` is writable and `key` a live owned key, loaned for the call.
+        assert_eq!(
+            unsafe { z_keyexpr_clone(&mut copy, z_keyexpr_loan(&key)) },
+            Z_OK
+        );
+        // SAFETY: both are live owned keys, loaned for the reads.
+        let slots = unsafe {
+            (
+                (*z_keyexpr_loan(&key))._handle,
+                (*z_keyexpr_loan(&copy))._handle,
+            )
+        };
+        assert_eq!(slots, (row, row), "both name the one row");
+        // SAFETY: `key` holds the owned key stored above, moved out once here.
+        unsafe { z_keyexpr_drop(z_keyexpr_move(&mut key)) };
+        assert!(!room_for(&engine, text.len()), "the copy holds it");
+        // SAFETY: `copy` is a live owned key, loaned for the call on the session it names.
+        let wire = unsafe {
+            wire_key_of(
+                z_keyexpr_loan(&copy),
+                crate::session::EngineHold::as_ref(&engine),
+            )
+        };
+        assert_eq!(wire.mapping_id, id, "named by the row's id");
+        drop(wire);
+        // SAFETY: `copy` holds the owned key cloned above, moved out once here.
+        unsafe { z_keyexpr_drop(z_keyexpr_move(&mut copy)) };
+        assert!(
+            room_for(&engine, text.len()),
+            "the last holder retracts it and its key's block goes back"
+        );
         give_back(&engine, held);
         close(session);
     }

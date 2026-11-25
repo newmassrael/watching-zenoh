@@ -975,12 +975,19 @@ pub enum HoldRefused {
 /// is neither copied nor cloned, so each hold is given back once, and one dropped unused is warned
 /// of where it is made. What a session records holds its declarations in the same count itself,
 /// and takes no `KeyHold` ([`WireKey`]).
+///
+/// An engine whose tables keep the row in place names its address too ([`Self::placed_at`]): a
+/// copy then takes its hold, and a holder that is not the last gives its own back, at the row
+/// itself, with no lock of the session.
 #[must_use = "a hold is given back to its session (`KeyHold::release`), or its declaration stays"]
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeyHold {
     mapping_id: wz_session_core::wire_id::ExprId,
     /// The row the hold was taken in; `None` for a copy its session took no hold for.
     row: Option<wz_session_core::session_tables::KeyexprHandle>,
+    /// The address of the row's [`KeyexprHead`](wz_session_core::session_tables::KeyexprHead),
+    /// `0` where the engine named none or the hold holds nothing.
+    head: usize,
 }
 
 impl KeyHold {
@@ -993,7 +1000,46 @@ impl KeyHold {
         Self {
             mapping_id,
             row: Some(row),
+            head: 0,
         }
+    }
+
+    /// This hold, naming `head`, the head of the row it was taken in, as where its row lies: a
+    /// copy takes its hold and a holder that is not the last gives its own back there, with no
+    /// lock of the session.
+    ///
+    /// # Safety
+    /// `head` is the head of the row this hold was taken in, and stays at its address while the
+    /// row stands and the session's tables do: the engine's table keeps its rows in place (a
+    /// region, what it was lent, or a growable table held in place at the open,
+    /// [`SessionTables::hold_keyexpr_rows_in_place`](wz_session_core::session_tables::SessionTables::hold_keyexpr_rows_in_place)).
+    pub unsafe fn placed_at(mut self, head: &wz_session_core::session_tables::KeyexprHead) -> Self {
+        if self.row.is_some() {
+            self.head = head as *const wz_session_core::session_tables::KeyexprHead as usize;
+        }
+        self
+    }
+
+    /// The address of the row's head ([`Self::placed_at`]), `0` for none: what a lent key names
+    /// its declaration by.
+    pub fn row_address(&self) -> usize {
+        self.head
+    }
+
+    /// The row's head, read with no lock of the session ([`Self::placed_at`]); `None` when the
+    /// engine named none.
+    ///
+    /// # Safety
+    /// The session this hold was taken of stands (the caller holds it), so its tables, and the
+    /// row this hold counts, are where they were.
+    pub unsafe fn head<'a>(&self) -> Option<&'a wz_session_core::session_tables::KeyexprHead> {
+        if self.head == 0 {
+            return None;
+        }
+        // SAFETY: a non-zero address is the head `placed_at` was given, which stays where it is
+        // while the row stands, and the row stands while this hold counts it in tables the caller
+        // keeps standing.
+        Some(unsafe { &*(self.head as *const wz_session_core::session_tables::KeyexprHead) })
     }
 
     /// The declaration held.
@@ -1012,8 +1058,24 @@ impl KeyHold {
     /// counted holder's going retracts. A copy of a declaration no longer held, or of one on a
     /// closed session ([`HoldRefused::Gone`]), holds nothing, so that giving it back lets go of
     /// no hold another holder took.
+    ///
+    /// Taken at the row when the hold names where it lies ([`Self::placed_at`]), with no lock of
+    /// the session; `session` stands for the call, which is what keeps the row where it is.
     pub fn share<H: KeyHolds + ?Sized>(&self, session: &H) -> Option<Self> {
-        let row = match self.row.map(|row| (row, session.retain_keyexpr(row))) {
+        let taken = self.row.map(|row| {
+            // SAFETY: `session` is the session this hold was taken of, standing for the call.
+            match unsafe { self.head() } {
+                Some(head) => {
+                    let taken = Self::retained_at(head, self.mapping_id);
+                    if taken.is_ok() {
+                        session.counted_at_row(1);
+                    }
+                    (row, taken)
+                }
+                None => (row, session.retain_keyexpr(row)),
+            }
+        });
+        let row = match taken {
             Some((row, Ok(()))) => Some(row),
             Some((_, Err(HoldRefused::Full))) => return None,
             Some((_, Err(HoldRefused::Gone))) | None => None,
@@ -1021,6 +1083,18 @@ impl KeyHold {
         Some(Self {
             mapping_id: self.mapping_id,
             row,
+            head: if row.is_some() { self.head } else { 0 },
+        })
+    }
+
+    /// One more hold of `id` taken at the row `head` heads, as the engine's count answers it.
+    fn retained_at(
+        head: &wz_session_core::session_tables::KeyexprHead,
+        id: wz_session_core::wire_id::ExprId,
+    ) -> Result<(), HoldRefused> {
+        head.retain(id).map_err(|refused| match refused {
+            wz_session_core::session_tables::RowHoldRefused::Full => HoldRefused::Full,
+            wz_session_core::session_tables::RowHoldRefused::Released => HoldRefused::Gone,
         })
     }
 
@@ -1029,15 +1103,23 @@ impl KeyHold {
         Self {
             mapping_id: self.mapping_id,
             row: None,
+            head: 0,
         }
     }
 
     /// Give the hold back to `session`, the session it was taken of; the last one retracts the
-    /// declaration.
+    /// declaration. A hold that names where its row lies and is not the last is given back there,
+    /// with no lock of the session; the last goes back to the session, whose table removes the row.
     pub fn release<H: KeyHolds + ?Sized>(self, session: &H) {
-        if let Some(row) = self.row {
-            session.release_keyexpr(row);
+        let Some(row) = self.row else {
+            return;
+        };
+        // SAFETY: `session` is the session this hold was taken of, standing for the call.
+        if unsafe { self.head() }.is_some_and(|head| head.release_shared(self.mapping_id)) {
+            session.counted_at_row(-1);
+            return;
         }
+        session.release_keyexpr(row);
     }
 
     /// Let go of a hold whose session is gone: the count it was one of went with the session, so
@@ -1046,6 +1128,7 @@ impl KeyHold {
         let Self {
             mapping_id: _,
             row: _,
+            head: _,
         } = self;
     }
 }
