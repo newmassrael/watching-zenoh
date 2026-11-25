@@ -2268,19 +2268,17 @@ mod tests {
     #[test]
     fn a_64_bit_width_is_refused_where_the_domain_leaves_it_out() {
         let stated = [Statement::new("sn-resolution", "bits-64")];
-        match resolve(SessionPolicy::defaults(), &[document(&stated)]) {
-            Ok(resolved) => {
-                assert!(
-                    crate::sn::SN_RESOLUTION_HAS_64,
-                    "bits-64 was taken outside the domain"
-                );
+        let outcome = resolve(SessionPolicy::defaults(), &[document(&stated)]);
+        match (crate::sn::SN_RESOLUTION_HAS_64, outcome) {
+            (true, Ok(resolved)) => {
                 assert_eq!(
                     resolved.policy.sn_resolution(),
                     crate::policy::SnResolution::Bits64
                 );
             }
-            Err(refusals) => {
-                assert!(!crate::sn::SN_RESOLUTION_HAS_64, "{refusals}");
+            (false, Ok(_)) => panic!("bits-64 was taken outside the domain"),
+            (true, Err(refusals)) => panic!("bits-64 was refused inside the domain: {refusals}"),
+            (false, Err(refusals)) => {
                 let refusal = only(&refusals);
                 assert!(
                     matches!(

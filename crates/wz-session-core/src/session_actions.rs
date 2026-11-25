@@ -125,6 +125,31 @@ use crate::close_reason::CloseReason;
     feature = "session-extcompression"
 ))]
 use crate::ext_chain::ExtChainBuf;
+// The union of its readers' gates: the lend-only control sends (`holds_answer`,
+// `send_init_lent`, `send_open_lent`), the owned encoders (`encode_init_with_role`,
+// `encode_open_with_role`) and the staged chains (`ext_chain_slot`, gated as
+// `ExtChainBuf` is above). A lend-only, fixed-storage build that writes no handshake
+// body reads none of them.
+#[cfg(any(
+    all(
+        feature = "tx-lend-only",
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ),
+    all(
+        feature = "alloc",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    ),
+    not(feature = "session-fixed-storage"),
+    not(feature = "tx-lend-only"),
+    feature = "session-unicast-accept",
+    feature = "transport-qos",
+    feature = "session-extshm",
+    feature = "session-extauth",
+    feature = "transport-multilink",
+    feature = "transport-lowlatency",
+    feature = "session-extcompression"
+))]
 use crate::ext_chain_role::ExtChainRole;
 #[cfg(not(feature = "session-slot"))]
 use crate::link::ShareValues;

@@ -1195,7 +1195,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                     0,
                     crate::qos::Priority::DEFAULT,
                 )
-                .from_sender(retraction.sender()),
+                .sent_by(retraction.sender()),
             );
         }
     }
@@ -2871,14 +2871,14 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
                             record.sn(),
                             record.priority(),
                         )
-                        .from_sender(tag),
+                        .sent_by(tag),
                     );
                     return;
                 }
                 Some(Err(PastBound)) => record.past_sender_bound(),
                 Some(Ok(None)) | None => record,
             };
-            self.inner.record(record.from_sender(tag));
+            self.inner.record(record.sent_by(tag));
             return;
         }
         self.inner.record(record);

@@ -833,15 +833,15 @@ impl<T: TxStore> TxLender<T> {
     /// XORed with the key byte its place names. `false` when the frame is not inside the slot.
     pub fn mask(&self, slot: TxSlot, start: usize, len: usize, key: [u8; 4]) -> bool {
         let (base, capacity) = self.storage(slot);
-        let Some(end) = start.checked_add(len).filter(|&end| end <= capacity) else {
+        if !start.checked_add(len).is_some_and(|end| end <= capacity) {
             return false;
-        };
+        }
         // SAFETY: `base` is the first byte of a slot of the store, `capacity` bytes long, and
-        // `start .. end` is within it. The session handed the slot over, so nothing else reads or
-        // writes it while the frame is masked.
-        let frame = unsafe { core::slice::from_raw_parts_mut(base.add(start), end - start) };
-        for (i, byte) in frame.iter_mut().enumerate() {
-            *byte ^= key[i & 3];
+        // `start .. start + len` is within it. The session handed the slot over, so nothing else
+        // reads or writes it while the frame is masked.
+        let frame = unsafe { core::slice::from_raw_parts_mut(base.add(start), len) };
+        for (byte, key_byte) in frame.iter_mut().zip(key.iter().cycle()) {
+            *byte ^= key_byte;
         }
         true
     }
