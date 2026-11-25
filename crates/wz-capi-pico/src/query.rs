@@ -769,6 +769,8 @@ pub struct z_owned_closure_query_t {
     pub(crate) drop: crate::pubsub::z_closure_drop_callback_t,
 }
 
+crate::abi::closure_shares_the_block!(z_owned_closure_query_t);
+
 /// Loaned query closure (pico `z_loaned_closure_query_t`), same layout.
 #[repr(C)]
 pub struct z_loaned_closure_query_t {
@@ -1055,9 +1057,7 @@ pub unsafe extern "C" fn z_closure_query_call(
 /// Zero an owned query closure (pico `z_internal_closure_query_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_closure_query_null(closure: *mut z_owned_closure_query_t) {
-    if !closure.is_null() {
-        *closure = z_owned_closure_query_t::null_value();
-    }
+    crate::abi::obj_null(closure.cast(), &crate::abi::CLOSURE);
 }
 
 /// `true` iff the closure holds a callback (pico
@@ -1066,7 +1066,7 @@ pub unsafe extern "C" fn z_internal_closure_query_null(closure: *mut z_owned_clo
 pub unsafe extern "C" fn z_internal_closure_query_check(
     closure: *const z_owned_closure_query_t,
 ) -> bool {
-    crate::ffi::guard_val(false, || !closure.is_null() && (*closure).call.is_some())
+    crate::abi::closure_check(closure.cast())
 }
 
 /// Borrow an owned query closure (pico `z_closure_query_loan`).
@@ -1092,30 +1092,14 @@ pub unsafe extern "C" fn z_closure_query_take(
     dst: *mut z_owned_closure_query_t,
     src: *mut z_moved_closure_query_t,
 ) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst).context = (*src)._this.context;
-    (*dst).call = (*src)._this.call;
-    (*dst).drop = (*src)._this.drop;
-    (*src)._this = z_owned_closure_query_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), &crate::abi::CLOSURE);
 }
 
 /// Drop an owned query closure that was never declared (pico
 /// `z_closure_query_drop`): run the C `drop(context)` and null the struct.
 #[no_mangle]
 pub unsafe extern "C" fn z_closure_query_drop(closure: *mut z_moved_closure_query_t) {
-    let _ = guarded(|| {
-        if closure.is_null() {
-            return Z_OK;
-        }
-        let owned = &mut (*closure)._this;
-        if let Some(dropfn) = owned.drop {
-            dropfn(owned.context);
-        }
-        *owned = z_owned_closure_query_t::null_value();
-        Z_OK
-    });
+    crate::abi::closure_drop(closure.cast());
 }
 
 // --- queryable options -----------------------------------------------------

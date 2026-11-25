@@ -3987,9 +3987,10 @@ mod wake_budget_tests {
         );
     }
 
-    /// An acceptor's handshake bound is armed when its timers first see its state, and its timeout
-    /// moves the machine on once the bound has passed and not a millisecond before; the loop is
-    /// told nothing of it, the machine is.
+    /// An acceptor's handshake bound is armed when its timers first see its state, counted from
+    /// the end of the millisecond they saw it in, and its timeout moves the machine on once the
+    /// bound has passed and not a millisecond before; the loop is told nothing of it, the machine
+    /// is.
     #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn the_session_timers_raise_the_handshake_timeout_at_its_deadline_and_not_before() {
@@ -4004,14 +4005,14 @@ mod wake_budget_tests {
         assert_eq!(
             pump.transport
                 .due_ms(&pump.session.engine, &pump.session.actions, now_ms),
-            Some(now_ms + window)
+            Some(now_ms + 1 + window)
         );
         let mut events = 0;
         let mut count = |_event: IterationEvent<'_, '_>| events += 1;
         pump.transport.on_time(
             &mut pump.session.engine,
             &pump.session.actions,
-            now_ms + window - 1,
+            now_ms + window,
             &mut count,
         );
         assert!(
@@ -4021,7 +4022,7 @@ mod wake_budget_tests {
         pump.transport.on_time(
             &mut pump.session.engine,
             &pump.session.actions,
-            now_ms + window,
+            now_ms + 1 + window,
             &mut count,
         );
         assert!(

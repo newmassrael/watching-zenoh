@@ -1144,6 +1144,18 @@ unsafe fn free_slice(h: *mut c_void) {
     drop(Box::from_raw(h as *mut SliceState));
 }
 
+/// # Safety
+/// `h` must be a live `Box::into_raw::<StringState>` pointer.
+unsafe fn free_string(h: *mut c_void) {
+    drop(Box::from_raw(h as *mut StringState));
+}
+
+crate::abi::impl_type_facts!(z_owned_slice_t, Some(free_slice as unsafe fn(*mut c_void)));
+crate::abi::impl_type_facts!(
+    z_owned_string_t,
+    Some(free_string as unsafe fn(*mut c_void))
+);
+
 impl_handle_ownership6!(
     z_owned_bytes_t,
     z_loaned_bytes_t,
@@ -1197,16 +1209,14 @@ pub unsafe extern "C" fn z_bytes_take_from_loaned(
 /// Zero an owned slice (pico `z_internal_slice_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_slice_null(obj: *mut z_owned_slice_t) {
-    if !obj.is_null() {
-        *obj = z_owned_slice_t::null_value();
-    }
+    crate::abi::obj_null(obj.cast(), <z_owned_slice_t>::facts());
 }
 
 /// `true` iff the owned slice holds a live handle (pico
 /// `z_internal_slice_check`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_slice_check(obj: *const z_owned_slice_t) -> bool {
-    guard_val(false, || !obj.is_null() && !(*obj).handle.is_null())
+    crate::abi::obj_check(obj.cast())
 }
 
 /// Borrow an owned slice immutably (pico `z_slice_loan`). Returns the state's
@@ -1240,28 +1250,13 @@ pub unsafe extern "C" fn z_slice_move(obj: *mut z_owned_slice_t) -> *mut z_moved
 /// Take an owned slice out of `src` into `dst` (pico `z_slice_take`).
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_take(dst: *mut z_owned_slice_t, src: *mut z_moved_slice_t) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst).handle = (*src)._this.handle;
-    (*dst)._pad = (*src)._this._pad;
-    (*src)._this = z_owned_slice_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), <z_owned_slice_t>::facts());
 }
 
 /// Drop an owned slice (pico `z_slice_drop`).
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_drop(obj: *mut z_moved_slice_t) {
-    let _ = guarded(|| {
-        if obj.is_null() {
-            return Z_OK;
-        }
-        let h = (*obj)._this.handle;
-        if !h.is_null() {
-            free_slice(h);
-            (*obj)._this = z_owned_slice_t::null_value();
-        }
-        Z_OK
-    });
+    crate::abi::obj_drop(obj.cast(), <z_owned_slice_t>::facts());
 }
 
 /// Adopt a loaned slice into an owned one, emptying the source view (pico
@@ -1607,16 +1602,14 @@ pub unsafe extern "C" fn z_slice_len(slice: *const z_loaned_slice_t) -> usize {
 /// Zero an owned string (pico `z_internal_string_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_string_null(obj: *mut z_owned_string_t) {
-    if !obj.is_null() {
-        *obj = z_owned_string_t::null_value();
-    }
+    crate::abi::obj_null(obj.cast(), <z_owned_string_t>::facts());
 }
 
 /// `true` iff the owned string holds a live handle (pico
 /// `z_internal_string_check`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_string_check(obj: *const z_owned_string_t) -> bool {
-    guard_val(false, || !obj.is_null() && !(*obj).handle.is_null())
+    crate::abi::obj_check(obj.cast())
 }
 
 /// Borrow an owned string immutably (pico `z_string_loan`). Returns the
@@ -1650,28 +1643,13 @@ pub unsafe extern "C" fn z_string_move(obj: *mut z_owned_string_t) -> *mut z_mov
 /// Take an owned string out of `src` into `dst` (pico `z_string_take`).
 #[no_mangle]
 pub unsafe extern "C" fn z_string_take(dst: *mut z_owned_string_t, src: *mut z_moved_string_t) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst).handle = (*src)._this.handle;
-    (*dst)._pad = (*src)._this._pad;
-    (*src)._this = z_owned_string_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), <z_owned_string_t>::facts());
 }
 
 /// Drop an owned string (pico `z_string_drop`).
 #[no_mangle]
 pub unsafe extern "C" fn z_string_drop(obj: *mut z_moved_string_t) {
-    let _ = guarded(|| {
-        if obj.is_null() {
-            return Z_OK;
-        }
-        let h = (*obj)._this.handle;
-        if !h.is_null() {
-            drop(Box::from_raw(h as *mut StringState));
-            (*obj)._this = z_owned_string_t::null_value();
-        }
-        Z_OK
-    });
+    crate::abi::obj_drop(obj.cast(), <z_owned_string_t>::facts());
 }
 
 /// Pointer to a string's (NUL-terminated) bytes (pico `z_string_data`).

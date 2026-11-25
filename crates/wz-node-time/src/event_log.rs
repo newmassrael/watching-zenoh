@@ -16,9 +16,7 @@
 //! format it is read with is a constant the reader holds, keyed by the source, so a record costs a
 //! few words and nothing is formatted on the node.
 
-use std::sync::OnceLock;
-
-use wz_host_sync::Mutex;
+use wz_host_sync::{Mutex, OnceLock};
 
 use wz_session_core::caps::{EVENT_RECORD_ARGS, EVENT_RING_SLOTS};
 use wz_session_core::event_ring::{EventRing, FullPolicy, Observer, Pushed, Read};

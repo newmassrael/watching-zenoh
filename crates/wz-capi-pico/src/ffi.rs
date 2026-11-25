@@ -5,12 +5,10 @@
 //!
 //! Two invariants every `#[no_mangle] extern "C"` export upholds:
 //!
-//! 1. **No unwinding across the boundary.** A Rust panic crossing an
-//!    `extern "C"` frame is undefined behaviour. [`guarded`] wraps the body in
-//!    `std::panic::catch_unwind` and converts a panic into a
-//!    [`crate::result::Z_ERR_GENERIC`] return (or the caller-chosen fallback).
-//!    Without `std` nothing unwinds: an image's panic handler stops the program
-//!    (its staticlib is built `panic = "abort"`), so the body runs as it is.
+//! 1. **No unwinding across the boundary.** A panic aborts at the C boundary in
+//!    every build: without `std` the panic handler stops the program, and with it
+//!    a panic reaching an `extern "C"` frame aborts there. [`guarded`] is a plain
+//!    call of the body, so no export carries a landing pad.
 //!
 //! 2. **Raw C pointers can be moved across threads.** The wz drive loop runs
 //!    on a worker thread; a subscriber's C `context` pointer must travel with
@@ -261,7 +259,7 @@ impl<C> Drop for CClosure<C> {
     fn drop(&mut self) {
         if let Some(dropfn) = self.drop.take() {
             // SAFETY: pico contract — drop runs once, never concurrently with
-            // call. A panic across the C boundary is UB, so guard it.
+            // call.
             let ctx = self.context.0;
             let _ = catch(|| unsafe {
                 dropfn(ctx);

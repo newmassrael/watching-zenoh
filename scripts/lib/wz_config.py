@@ -5948,12 +5948,21 @@ def cmd_selftest() -> int:
            "cooperative" in refusal_text(lambda: bench_named_features("tokio", [], good, "nostd"))
            and "alloc" in refusal_text(lambda: bench_named_features("coop", [], good, "alloc"))
            and bench_named_features("coop", [], good, "std") == bench_named_features("coop", [], good))
+    # No capability of the manifest turns std on any more (the C library has no std form, S1); the
+    # refusal is held on a table where one still does, so a capability that brings std back is named.
+    std_selecting = {name: list(feats) for name, feats in good.items()}
+    std_selecting["clock-source"] = [*std_selecting.get("clock-source", []), "std"]
+    expect("no capability of the manifest turns std on, only the engines' selectors",
+           not {name for name, feats in good.items() if "std" in feats}
+           - {"default", "engine-coop", "engine-tokio"})
     expect("a capability that turns std on is refused of a bench without it, by name",
-           "clock-source" in refusal_text(lambda: bench_named_features("coop", ["clock-source"], good, "nostd")))
+           "clock-source" in refusal_text(
+               lambda: bench_named_features("coop", ["clock-source"], std_selecting, "nostd")))
     expect("a preset's list without std names the host's form in the engine's place and keeps the rest",
            nostd_named_features(["std", "engine-coop", "peer", "query"], good)
            == [BENCH_NOSTD_FEATURE, "peer", "query"]
-           and "clock-source" in refusal_text(lambda: nostd_named_features(["engine-coop", "clock-source"], good)))
+           and "clock-source" in refusal_text(
+               lambda: nostd_named_features(["engine-coop", "clock-source"], std_selecting)))
     if kconfiglib_module() is not None:
         chooses_coop = "CONFIG_WZ_ENGINE_COOP=y" in PACKAGE_PICO_PROFILE.read_text(encoding="utf-8")
         expect("an unnamed bench engine is the one the package's profile chooses",

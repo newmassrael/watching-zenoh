@@ -1033,6 +1033,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "wz-host-sync",
+ "wz-node-time",
  "wz-session-core",
 ]
 

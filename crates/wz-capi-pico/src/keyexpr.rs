@@ -1339,19 +1339,21 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
     })
 }
 
+// A key's handle is its fourth word, not its first: null and take are the shared bodies over its
+// size, while check and drop read the handle where it lies.
+crate::abi::impl_type_facts!(z_owned_keyexpr_t, None);
+
 /// Zero an owned keyexpr in place (pico `z_internal_keyexpr_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_keyexpr_null(obj: *mut z_owned_keyexpr_t) {
-    if !obj.is_null() {
-        *obj = z_owned_keyexpr_t::null_value();
-    }
+    crate::abi::obj_null(obj.cast(), <z_owned_keyexpr_t>::facts());
 }
 
 /// `true` iff the owned keyexpr holds a live declaration (pico
 /// `z_internal_keyexpr_check`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_keyexpr_check(obj: *const z_owned_keyexpr_t) -> bool {
-    guard_val(false, || !obj.is_null() && !(*obj)._state.is_null())
+    !obj.is_null() && !(*obj)._state.is_null()
 }
 
 /// Borrow a declared keyexpr (pico `z_keyexpr_loan`). The owned and loaned
@@ -1383,11 +1385,7 @@ pub unsafe extern "C" fn z_keyexpr_move(obj: *mut z_owned_keyexpr_t) -> *mut z_m
 /// `z_keyexpr_take`).
 #[no_mangle]
 pub unsafe extern "C" fn z_keyexpr_take(dst: *mut z_owned_keyexpr_t, src: *mut z_moved_keyexpr_t) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    core::ptr::copy_nonoverlapping(&(*src)._this, dst, 1);
-    (*src)._this = z_owned_keyexpr_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), <z_owned_keyexpr_t>::facts());
 }
 
 /// Drop a declared keyexpr (pico `z_keyexpr_drop`).

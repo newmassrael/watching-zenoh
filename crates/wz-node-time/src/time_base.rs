@@ -39,8 +39,11 @@
 use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use wz_host_sync::{Mutex, MutexGuard, RwLock};
 

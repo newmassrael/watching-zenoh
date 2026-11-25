@@ -318,9 +318,7 @@ pub unsafe extern "C" fn z_string_array_get(
 /// `array` must point to writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_string_array_null(array: *mut z_owned_string_array_t) {
-    if let Some(array) = array.as_mut() {
-        *array = z_owned_string_array_t::null_value();
-    }
+    crate::abi::obj_null(array.cast(), <z_owned_string_array_t>::facts());
 }
 
 /// Whether an owned string array holds a value (pico
@@ -332,7 +330,7 @@ pub unsafe extern "C" fn z_internal_string_array_null(array: *mut z_owned_string
 pub unsafe extern "C" fn z_internal_string_array_check(
     array: *const z_owned_string_array_t,
 ) -> bool {
-    array.as_ref().is_some_and(|a| !a.handle.is_null())
+    crate::abi::obj_check(array.cast())
 }
 
 /// Borrow an owned string array (pico `z_string_array_loan`) — offset-0
@@ -358,6 +356,17 @@ pub unsafe extern "C" fn z_string_array_loan_mut(
     array as *mut z_loaned_string_array_t
 }
 
+/// # Safety
+/// `handle` must be a live `Box::into_raw::<StringArrayState>` pointer.
+unsafe fn free_string_array(handle: *mut c_void) {
+    drop(Box::from_raw(handle as *mut StringArrayState));
+}
+
+crate::abi::impl_type_facts!(
+    z_owned_string_array_t,
+    Some(free_string_array as unsafe fn(*mut c_void))
+);
+
 /// Release an owned string array (pico `z_string_array_drop`).
 ///
 /// # Safety
@@ -365,13 +374,7 @@ pub unsafe extern "C" fn z_string_array_loan_mut(
 /// nulling the slot.
 #[no_mangle]
 pub unsafe extern "C" fn z_string_array_drop(array: *mut z_moved_string_array_t) {
-    if let Some(moved) = array.as_mut() {
-        let handle = moved._this.handle;
-        moved._this = z_owned_string_array_t::null_value();
-        if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut StringArrayState));
-        }
-    }
+    crate::abi::obj_drop(array.cast(), <z_owned_string_array_t>::facts());
 }
 
 /// Move an owned string array (pico `z_string_array_move`) — offset-0 identity.
@@ -395,12 +398,7 @@ pub unsafe extern "C" fn z_string_array_take(
     dst: *mut z_owned_string_array_t,
     src: *mut z_moved_string_array_t,
 ) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst).handle = (*src)._this.handle;
-    (*dst)._pad = [core::ptr::null_mut(); 3];
-    (*src)._this = z_owned_string_array_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), <z_owned_string_array_t>::facts());
 }
 
 /// Build an EMPTY owned string array (pico `z_string_array_new`).

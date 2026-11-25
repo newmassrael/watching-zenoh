@@ -2230,7 +2230,8 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
 
     /// Evict every live peer whose hold window
     /// (`last_seen + min(advertised lease, MulticastConfig::lease_ms)`)
-    /// has elapsed at `now_ms`, driving `peer.lost` (`emit_peer_lost`) +
+    /// has wholly elapsed at `now_ms`, counted from the end of the
+    /// millisecond `last_seen` names, driving `peer.lost` (`emit_peer_lost`) +
     /// recycle into only those slots (a recycled slot is Free and cannot
     /// fire a stale lease). R311ks — each peer is held per ITS OWN
     /// JOIN-advertised lease (zenoh-pico evicts against `peer->_lease`,
@@ -2274,7 +2275,10 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                 continue;
             }
             let window = slot.lease_ms.min(cap);
-            if now_ms < slot.last_seen_ms.saturating_add(window) {
+            // `last_seen_ms` is a reading, which names the millisecond that has begun: the peer
+            // was heard anywhere in it, so the window runs from its end, and a reading of
+            // `last_seen + window` itself can be less than a window after the peer was heard.
+            if now_ms <= slot.last_seen_ms.saturating_add(window) {
                 continue;
             }
             on_evict(idx);
@@ -2886,6 +2890,12 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
 
     fn takes_another(&mut self) -> bool {
         self.inner.takes_another()
+    }
+
+    // A host that puts off what follows each record of a run does it here; a wrapper that kept it
+    // would leave a group's records owed until a record of another kind came.
+    fn end_records(&mut self) {
+        self.inner.end_records();
     }
 
     fn holds_datagram(&self) -> bool {
@@ -4044,8 +4054,9 @@ mod tests {
         assert_eq!(d.sweep(3_000), 1);
         assert_eq!(d.peer_state(&ZID_A), None);
         assert_eq!(d.peer_state(&ZID_B), Some(MulticastPeerState::Active));
-        // t=8_000: B's own deadline arrives.
-        assert_eq!(d.sweep(8_000), 1);
+        // t=8_001: B's own window has passed since the end of the millisecond it was heard in.
+        assert_eq!(d.sweep(8_000), 0);
+        assert_eq!(d.sweep(8_001), 1);
         assert_eq!(d.active_peers(), 0);
     }
 
@@ -4065,8 +4076,8 @@ mod tests {
             },
             0,
         );
-        assert_eq!(d.sweep(4_999), 0, "inside the cap");
-        assert_eq!(d.sweep(5_000), 1, "cap bounds the hold");
+        assert_eq!(d.sweep(5_000), 0, "inside the cap");
+        assert_eq!(d.sweep(5_001), 1, "cap bounds the hold");
     }
 
     /// R311ks — a re-JOIN re-stores the advertised lease (zenoh-pico
@@ -4097,9 +4108,27 @@ mod tests {
             ),
             JoinOutcome::Refreshed
         );
-        // Old window would have expired at 3_000; the new one holds to 9_000.
+        // Old window would have expired at 3_001; the new one holds through 9_000.
         assert_eq!(d.sweep(4_000), 0);
-        assert_eq!(d.sweep(9_000), 1);
+        assert_eq!(d.sweep(9_001), 1);
+    }
+
+    /// A peer heard anywhere in the millisecond a reading names is held a whole lease after the
+    /// latest instant of that millisecond: no sweep evicts it at a reading that can be less than a
+    /// lease after it was heard. Turned red by a sweep that counts the window from the reading
+    /// itself, which evicts at `last_seen + window`.
+    #[test]
+    fn sweep_never_evicts_before_the_lease_has_passed_since_the_peer_was_heard() {
+        let mut d = running_dispatcher::<4>(5_000);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 2_000);
+        // The reading 7_000 is made from 7.000 ms on; the peer may have been heard at 2.999.
+        assert_eq!(d.sweep(7_000), 0, "a reading of last_seen + lease is held");
+        assert_eq!(d.peer_state(&ZID_A), Some(MulticastPeerState::Active));
+        assert_eq!(
+            d.sweep(7_001),
+            1,
+            "the next reading is past the whole lease"
+        );
     }
 
     /// A src-attributed refresh (Frame / KeepAlive) extends a peer's lease so

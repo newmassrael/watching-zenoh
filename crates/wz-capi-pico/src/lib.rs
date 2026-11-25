@@ -417,6 +417,28 @@ compile_error!(
      `os-posix` or `os-windows` for a host library without it"
 );
 
+// wz's own doors of the observation plane, the time base, the segment sender and the admin space
+// keep process-wide state under a host's lock and read its clocks (`wz-host-sync`): `std`'s, or the
+// host's own calls beside `os-posix` or `os-windows`. An image has neither, and is refused by name.
+#[cfg(all(
+    not(feature = "std"),
+    not(feature = "os-posix"),
+    not(feature = "os-windows"),
+    any(
+        feature = "clock-source",
+        feature = "event-ring",
+        feature = "supervision",
+        feature = "resource-snapshot",
+        feature = "segment-sender",
+        feature = "time-base",
+        feature = "admin-space"
+    )
+))]
+compile_error!(
+    "wz-capi-pico: the observation doors, `time-base`, `segment-sender` and `admin-space` need a \
+     host's lock and clock: `std`, or `os-posix` or `os-windows` for a host library without it"
+);
+
 // The advanced publisher and subscriber lock their cache and state and stamp from the wall clock:
 // a host's, with `std` or beside `os-posix` or `os-windows`. An image has neither.
 #[cfg(all(

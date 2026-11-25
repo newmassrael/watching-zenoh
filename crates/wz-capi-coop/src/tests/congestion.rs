@@ -328,6 +328,28 @@ fn the_sessions_counters_are_its_links_counters() {
     assert_eq!(after.tx.n_dropped, 0, "nothing was dropped");
 }
 
+/// The session's message reading is its links': what the router sent in the handshake is counted,
+/// the engine answers it through the port as `Some`, and the reading does not fall from one read
+/// to the next. Turned red by an engine that leaves `SessionEngine::message_reading` to the
+/// port's provided `None`, or by a link that counts nothing it receives.
+#[cfg(feature = "resource-snapshot")]
+#[test]
+fn the_sessions_message_reading_counts_what_its_link_received() {
+    let router = super::Router::start(super::CatchAll::None);
+    let engine = super::open(&router);
+    let own = engine.message_reading();
+    assert!(
+        own.messages >= 1,
+        "the router's answer to the handshake was received and counted: {own:?}"
+    );
+    let ported = wz_capi_port::SessionEngine::message_reading(&*engine)
+        .expect("an engine built with the snapshot answers a reading");
+    assert!(
+        ported.messages >= own.messages,
+        "the port reads the same counter, which only grows: {ported:?} after {own:?}"
+    );
+}
+
 /// The engine over a link whose peer took the connection, brought the session up and then read
 /// nothing more: what the session sends fills the stream, and a blocking publish waits on it.
 // Its publisher and peers are stepped by their read tasks.

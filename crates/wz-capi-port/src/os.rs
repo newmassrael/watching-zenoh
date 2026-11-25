@@ -9,8 +9,8 @@
 //! An engine that the program steps still has a lock and may have a thread: the session is shared
 //! between the C session handle and every entity on it and is called from any thread, and
 //! zenoh-pico's multi-threaded arm runs a read task beside the program (`docs/upstream-parity.md`
-//! section 5a, E1). On a host these are `std`'s, or in a host library built without `std` the
-//! host's own calls' (`os-sys`, `wz-host-sync`). On an MCU they are the kernel's, reached through
+//! section 5a, E1). On a host these are the host's own calls' (`wz-host-sync`), in a build with
+//! `std` as in one without (`os-sys`). On an MCU they are the kernel's, reached through
 //! the functions below, which the image links (a Zephyr image's are in
 //! `deploy/zephyr-common/wz_os_zephyr.c`), as it links a `critical-section` implementation for
 //! [`crate::sync::Lock`].
@@ -23,7 +23,8 @@
 //! without: one lock that takes no memory when it is made, taken, waited on or notified, on every
 //! host (`std`'s own where it lies in its own bytes, the in-place one where `std`'s is a pthread
 //! object `std` boxes on its first take). A lock a panic let go is taken as it was left, as the
-//! engine always took it. The threads are `std::thread`'s with `std`.
+//! engine always took it. A thread is the system's, its body in a record of `wz-host-sync`'s static
+//! pool, so no `std` thread handle, name or thread-local is made for it in any build.
 //!
 //! A kernel's mutex and condition variable are made in their owner's memory, where they stay
 //! (`mutex_in`, `condvar_in`, `StaticMutex`, `StaticCondvar`), so making one asks nothing of a
@@ -53,9 +54,6 @@
 //! void  wz_os_sleep_ms(uint32_t ms);
 //! ```
 
-#[cfg(feature = "std")]
-pub use host::*;
-#[cfg(not(feature = "std"))]
 pub use system::*;
 
 // The host's lock and condition variable, with `std` and without (`os-sys`): the one that takes no
@@ -63,12 +61,12 @@ pub use system::*;
 #[cfg(any(feature = "std", feature = "os-sys"))]
 pub use wz_host_sync::{Condvar, Mutex, MutexGuard};
 
-// Without `std` the same names are a kernel's, through the functions an image links, or a host's
-// own calls' in a host library built without `std` (`os-sys`): the feature chooses how the names
-// are answered, not which names there are.
+// The same names are a host's own calls' (`std` or `os-sys`) or, in an image, a kernel's through
+// the functions it links: the feature chooses how the names are answered, not which names there
+// are.
 #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
 use kernel as system;
-#[cfg(all(not(feature = "std"), feature = "os-sys"))]
+#[cfg(any(feature = "std", feature = "os-sys"))]
 use sys as system;
 
 /// A mutex made in `place` around the value `make` writes in the place it is handed and lends
@@ -145,56 +143,6 @@ impl StaticCondvar {
 impl Default for StaticCondvar {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// The host's: `std`.
-#[cfg(feature = "std")]
-mod host {
-    /// The identity of a thread, comparable with another's.
-    pub type ThreadId = std::thread::ThreadId;
-
-    /// The calling thread's identity.
-    pub fn current() -> ThreadId {
-        std::thread::current().id()
-    }
-
-    /// The calling thread's identity as a word, never 0, which no other thread has while this one
-    /// runs: what an atomic can hold where [`ThreadId`] cannot. The address of a thread-local of
-    /// this thread's, as `std` gives a thread's id no number.
-    pub fn current_word() -> usize {
-        std::thread_local! {
-            static WORD: u8 = const { 0 };
-        }
-        WORD.with(|word| core::ptr::from_ref(word) as usize)
-    }
-
-    /// A thread [`spawn`] started, until it is joined.
-    pub struct JoinHandle(std::thread::JoinHandle<()>);
-
-    impl JoinHandle {
-        /// Wait until the thread has ended. A thread that panicked has ended too.
-        pub fn join(self) {
-            let _ = self.0.join();
-        }
-
-        /// Whether the thread has ended, without waiting for it.
-        pub fn is_finished(&self) -> bool {
-            self.0.is_finished()
-        }
-    }
-
-    /// Run `body` on a thread of its own: its handle and its identity, or `None` when the system
-    /// gave no thread.
-    pub fn spawn(body: impl FnOnce() + Send + 'static) -> Option<(JoinHandle, ThreadId)> {
-        let thread = std::thread::Builder::new().spawn(body).ok()?;
-        let id = thread.thread().id();
-        Some((JoinHandle(thread), id))
-    }
-
-    /// Sleep the calling thread for `ms` milliseconds.
-    pub fn sleep_ms(ms: u64) {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
 
@@ -585,17 +533,12 @@ mod kernel {
     }
 }
 
-/// A host's, over its own calls (`os-sys`): for a host library built without `std`, which runs on
-/// a system with threads but has no `std::thread` or `std::sync` to reach them by. Its lock and
-/// condition variable are `wz-host-sync`'s typed forms; a thread is the system's, its body and
+/// A host's, over its own calls, with `std` or without (`os-sys`): a library reaches the
+/// system's threads the same way in either build, so `std::thread` is not linked for them. Its lock
+/// and condition variable are `wz-host-sync`'s typed forms; a thread is the system's, its body and
 /// the word its end sets (which the system answers only by joining it) in a record of
 /// `wz-host-sync`'s static pool. Nothing here allocates.
-#[cfg(any(
-    all(not(feature = "std"), feature = "os-sys"),
-    all(test, feature = "os-sys")
-))]
-// A test build with `std` compiles this module for its own tests, which do not reach every item.
-#[cfg_attr(all(test, feature = "std"), allow(dead_code))]
+#[cfg(any(feature = "std", feature = "os-sys"))]
 mod sys {
     /// The identity of a thread, comparable with another's: the system's number of it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -714,6 +657,28 @@ mod sys {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+
+    /// A build with `std` names a thread as one without it does, by the system's number of it,
+    /// which `wz-host-sync` gives. Turned red by a thread named by a thread-local of `std`'s.
+    #[test]
+    fn a_threads_word_is_the_systems_number_of_it() {
+        assert_eq!(current_word(), wz_host_sync::current_thread());
+        let seen = alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let (handle, _) = {
+            let seen = alloc::sync::Arc::clone(&seen);
+            spawn(move || {
+                let same = current_word() == wz_host_sync::current_thread();
+                seen.store(usize::from(same) + 1, core::sync::atomic::Ordering::SeqCst);
+            })
+            .expect("a host gives a thread")
+        };
+        handle.join();
+        assert_eq!(
+            seen.load(core::sync::atomic::Ordering::SeqCst),
+            2,
+            "the spawned thread too"
+        );
+    }
 
     #[test]
     fn a_spawned_thread_is_another_thread_and_is_joined() {

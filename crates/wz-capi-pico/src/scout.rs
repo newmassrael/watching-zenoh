@@ -588,9 +588,7 @@ pub unsafe extern "C" fn z_hello_locators(
 /// `hello` must point to writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_hello_null(hello: *mut z_owned_hello_t) {
-    if let Some(hello) = hello.as_mut() {
-        *hello = z_owned_hello_t::null_value();
-    }
+    crate::abi::obj_null(hello.cast(), <z_owned_hello_t>::facts());
 }
 
 /// Whether an owned hello holds a value (pico `z_internal_hello_check`).
@@ -599,7 +597,7 @@ pub unsafe extern "C" fn z_internal_hello_null(hello: *mut z_owned_hello_t) {
 /// `hello` must be a live owned hello.
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_hello_check(hello: *const z_owned_hello_t) -> bool {
-    hello.as_ref().is_some_and(|h| !h.handle.is_null())
+    crate::abi::obj_check(hello.cast())
 }
 
 /// Borrow an owned hello (pico `z_hello_loan`) — offset-0 identity.
@@ -626,13 +624,7 @@ pub unsafe extern "C" fn z_hello_loan_mut(hello: *mut z_owned_hello_t) -> *mut z
 /// `hello` must be a live moved hello.
 #[no_mangle]
 pub unsafe extern "C" fn z_hello_drop(hello: *mut z_moved_hello_t) {
-    if let Some(moved) = hello.as_mut() {
-        let handle = moved._this.handle;
-        moved._this = z_owned_hello_t::null_value();
-        if !handle.is_null() {
-            drop_kept(handle);
-        }
-    }
+    crate::abi::obj_drop(hello.cast(), <z_owned_hello_t>::facts());
 }
 
 /// Move an owned hello (pico `z_hello_move`) — offset-0 identity.
@@ -650,12 +642,7 @@ pub unsafe extern "C" fn z_hello_move(hello: *mut z_owned_hello_t) -> *mut z_mov
 /// Both pointers must be live and non-overlapping.
 #[no_mangle]
 pub unsafe extern "C" fn z_hello_take(dst: *mut z_owned_hello_t, src: *mut z_moved_hello_t) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst).handle = (*src)._this.handle;
-    (*dst)._pad = [core::ptr::null_mut(); 6];
-    (*src)._this = z_owned_hello_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), <z_owned_hello_t>::facts());
 }
 
 /// Clone a loaned hello into owned storage (pico `z_hello_clone`). `_Z_ERR_SYSTEM_OUT_OF_MEMORY`,
@@ -801,6 +788,8 @@ unsafe fn drop_kept(handle: *mut c_void) {
     drop(Box::from_raw(handle.cast::<HelloState>()));
 }
 
+crate::abi::impl_type_facts!(z_owned_hello_t, Some(drop_kept as unsafe fn(*mut c_void)));
+
 // ---------------------------------------------------------------------------
 // z_owned_closure_hello_t
 // ---------------------------------------------------------------------------
@@ -821,6 +810,8 @@ pub struct z_owned_closure_hello_t {
     pub(crate) call: z_closure_hello_callback_t,
     pub(crate) drop: z_closure_drop_callback_t,
 }
+
+crate::abi::closure_shares_the_block!(z_owned_closure_hello_t);
 
 /// Loaned hello closure, same layout.
 #[repr(C)]
@@ -852,9 +843,7 @@ impl z_owned_closure_hello_t {
 /// `closure` must point to writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_closure_hello_null(closure: *mut z_owned_closure_hello_t) {
-    if let Some(closure) = closure.as_mut() {
-        *closure = z_owned_closure_hello_t::null_value();
-    }
+    crate::abi::obj_null(closure.cast(), &crate::abi::CLOSURE);
 }
 
 /// Whether an owned hello closure carries a callback (pico
@@ -866,7 +855,7 @@ pub unsafe extern "C" fn z_internal_closure_hello_null(closure: *mut z_owned_clo
 pub unsafe extern "C" fn z_internal_closure_hello_check(
     closure: *const z_owned_closure_hello_t,
 ) -> bool {
-    closure.as_ref().is_some_and(|c| c.call.is_some())
+    crate::abi::closure_check(closure.cast())
 }
 
 /// Borrow an owned hello closure (pico `z_closure_hello_loan`).
@@ -900,14 +889,7 @@ pub unsafe extern "C" fn z_closure_hello_move(
 /// `closure` must be a live moved hello closure.
 #[no_mangle]
 pub unsafe extern "C" fn z_closure_hello_drop(closure: *mut z_moved_closure_hello_t) {
-    if let Some(moved) = closure.as_mut() {
-        let dropper = moved._this.drop;
-        let context = moved._this.context;
-        moved._this = z_owned_closure_hello_t::null_value();
-        if let Some(dropper) = dropper {
-            dropper(context);
-        }
-    }
+    crate::abi::closure_drop(closure.cast());
 }
 
 /// Take an owned hello closure out of a moved wrapper (pico
@@ -920,15 +902,7 @@ pub unsafe extern "C" fn z_closure_hello_take(
     dst: *mut z_owned_closure_hello_t,
     src: *mut z_moved_closure_hello_t,
 ) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    *dst = z_owned_closure_hello_t {
-        context: (*src)._this.context,
-        call: (*src)._this.call,
-        drop: (*src)._this.drop,
-    };
-    (*src)._this = z_owned_closure_hello_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), &crate::abi::CLOSURE);
 }
 
 /// Invoke a loaned hello closure (pico `z_closure_hello_call`).

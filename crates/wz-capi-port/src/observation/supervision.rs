@@ -17,9 +17,9 @@
 //! checkpoints, and it watches as many of them as the process's runtime limits lend it
 //! ([`crate::runtime_limits`]), which its first door takes.
 
-use std::ffi::c_void;
-use std::sync::OnceLock;
-use std::time::Instant;
+use core::ffi::c_void;
+
+use wz_host_sync::{Instant, OnceLock};
 
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::supervision::SupervisionState;

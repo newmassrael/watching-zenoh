@@ -1955,13 +1955,41 @@ mod link_stamps {
         let holds = holds_in(|| deadline = crate::drive::lease_wake_deadline(&*actions));
         assert_eq!(
             deadline,
-            Some(250 + lease),
-            "the later stamp is the baseline"
+            Some(250 + 1 + lease),
+            "the later stamp is the baseline, counted from the end of its millisecond"
         );
         assert_eq!(
             holds, 0,
             "the stamps and the peer's lease are read under no lock"
         );
+    }
+
+    /// A receipt stamped anywhere in the millisecond its reading names has the lease expire no
+    /// sooner than a whole lease after the latest instant of that millisecond, and at most a
+    /// millisecond after it. Turned red by a deadline counted from the stamp itself, which
+    /// expires up to a millisecond before the lease has passed.
+    #[test]
+    fn the_lease_never_expires_before_it_has_passed_since_the_receipt() {
+        let (actions, _link) = bundle();
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        let stamp_ms: u64 = 4_000;
+        actions
+            .link
+            .fact_last_inbound_at(|slot| *slot = Some(stamp_ms));
+        let lease = actions.adopted_lease_ms();
+        let deadline = crate::drive::lease_wake_deadline(&*actions).expect("a lease deadline");
+        // In microseconds: the latest instant the stamp can stand for, and the earliest a reading
+        // of the deadline can be made at.
+        let latest_receipt_us = stamp_ms * 1_000 + 999;
+        assert!(
+            deadline * 1_000 >= latest_receipt_us + lease * 1_000,
+            "the lease expires at {deadline}, before {lease} ms have passed since a receipt late \
+             in the millisecond {stamp_ms}"
+        );
+        assert_eq!(deadline, stamp_ms + 1 + lease, "and no later than it must");
     }
 
     /// The watch of the peer's initial declarations counts from the establishment stamp the lease
@@ -1980,7 +2008,7 @@ mod link_stamps {
         actions
             .peer_declaration_progress_ms
             .store(0, core::sync::atomic::Ordering::Release);
-        let expiry = 100 + actions.adopted_lease_ms();
+        let expiry = 100 + 1 + actions.adopted_lease_ms();
         let watch = actions.declaration_watch_deadline();
         let mut deadline = None;
         let holds = holds_in(|| deadline = crate::drive::lease_wake_deadline(&*actions));
@@ -2016,7 +2044,7 @@ mod link_stamps {
             .lease_armed
             .store(true, core::sync::atomic::Ordering::SeqCst);
         actions.link.fact_established_at(|slot| *slot = Some(100));
-        let expiry = 100 + actions.adopted_lease_ms();
+        let expiry = 100 + 1 + actions.adopted_lease_ms();
         let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
         let mut outcomes = alloc::vec::Vec::new();
         let mut sink = |event: IterationEvent<'_, '_>| {
@@ -2125,14 +2153,14 @@ mod link_stamps {
             "a receipt counts no move"
         );
         assert!(
-            step(100 + lease).is_empty(),
+            step(100 + 1 + lease).is_empty(),
             "the deadline held comes, and the lease read again runs on"
         );
-        assert!(step(250 + lease - 1).is_empty());
+        assert!(step(250 + lease).is_empty());
         assert_eq!(
-            step(250 + lease),
+            step(250 + 1 + lease),
             [LeaseCheckOutcome::Expired],
-            "the lease ends a window after the receipt"
+            "the lease ends a window after the end of the receipt's millisecond"
         );
     }
 
@@ -2171,7 +2199,7 @@ mod link_stamps {
             "a door written counts"
         );
         assert_eq!(
-            step(10 + lease),
+            step(10 + 1 + lease),
             [LeaseCheckOutcome::Expired],
             "the earlier expiry is judged at its time"
         );
@@ -2200,7 +2228,7 @@ mod link_stamps {
             .link
             .lease_armed
             .store(true, core::sync::atomic::Ordering::SeqCst);
-        assert_eq!(step(100 + lease), [LeaseCheckOutcome::Expired]);
+        assert_eq!(step(100 + 1 + lease), [LeaseCheckOutcome::Expired]);
     }
 
     /// The first event of the peer's declarations begins their watch, which gives the lease a

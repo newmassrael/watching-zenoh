@@ -151,6 +151,8 @@ use alloc::rc::Rc;
 use core::mem::MaybeUninit;
 use wz_runtime_coop::group_transport::GroupSend;
 pub use wz_runtime_coop::group_transport::GroupTransport;
+#[cfg(feature = "resource-snapshot")]
+use wz_session_core::interval_meter::BuildIntervalMeter;
 use wz_session_core::multicast_stats::MulticastStatsRecorder;
 #[cfg(feature = "transport-stats")]
 use wz_session_core::stats::TransportStats;
@@ -1173,6 +1175,10 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
     // holder that keeps none.
     #[cfg(feature = "transport-stats")]
     stats: Option<alloc::rc::Rc<TransportStats>>,
+    // The meter the transport messages the group receives are spaced on; `None` for a holder that
+    // keeps none.
+    #[cfg(feature = "resource-snapshot")]
+    meter: Option<alloc::rc::Rc<BuildIntervalMeter>>,
 }
 
 impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
@@ -1242,6 +1248,14 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     #[cfg(feature = "transport-stats")]
     pub fn attach_stats(&mut self, stats: alloc::rc::Rc<TransportStats>) {
         self.stats = Some(stats);
+    }
+
+    /// Space on `meter`, which the holder keeps a clone of and reads, each transport message the
+    /// group receives, at the seam its counters count it (`IntervalTap`), whether or not the
+    /// build counts them.
+    #[cfg(feature = "resource-snapshot")]
+    pub fn attach_meter(&mut self, meter: alloc::rc::Rc<BuildIntervalMeter>) {
+        self.meter = Some(meter);
     }
 
     #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
@@ -1314,6 +1328,8 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             input_gate: None,
             #[cfg(feature = "transport-stats")]
             stats: None,
+            #[cfg(feature = "resource-snapshot")]
+            meter: None,
         }
     }
 
@@ -1431,6 +1447,15 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         let stats = &self.stats.as_deref();
         #[cfg(not(feature = "transport-stats"))]
         let stats = &();
+        // The low 32 bits of the microsecond clock: the meter reads spans modulo 2^32.
+        #[cfg(feature = "resource-snapshot")]
+        let tapped = wz_session_core::multicast_stats::IntervalTap::new(
+            stats,
+            self.meter.as_deref(),
+            || clock.now_monotonic_us() as u32,
+        );
+        #[cfg(feature = "resource-snapshot")]
+        let stats = &tapped;
 
         if !dispatcher.is_running() {
             return Some(MulticastOutcome::Stopped);
@@ -1879,6 +1904,8 @@ struct GroupHolding {
     input_gate: Option<GroupInputGate>,
     #[cfg(feature = "transport-stats")]
     stats: Option<alloc::rc::Rc<TransportStats>>,
+    #[cfg(feature = "resource-snapshot")]
+    meter: Option<alloc::rc::Rc<BuildIntervalMeter>>,
 }
 
 /// The loop of a multicast session task over a dispatcher it is lent: the part of
@@ -1920,6 +1947,8 @@ where
         input_gate,
         #[cfg(feature = "transport-stats")]
         stats,
+        #[cfg(feature = "resource-snapshot")]
+        meter,
     } = holding;
     let mut pump = MulticastPump::new(
         dispatcher,
@@ -1947,6 +1976,10 @@ where
     #[cfg(feature = "transport-stats")]
     if let Some(stats) = stats {
         pump.attach_stats(stats);
+    }
+    #[cfg(feature = "resource-snapshot")]
+    if let Some(meter) = meter {
+        pump.attach_meter(meter);
     }
     loop {
         // A JOIN the session's holder asked for is sent at this step.
@@ -2045,6 +2078,14 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
     #[cfg(feature = "transport-stats")]
     pub fn with_stats(mut self, stats: alloc::rc::Rc<TransportStats>) -> Self {
         self.holding.stats = Some(stats);
+        self
+    }
+
+    /// The session spaces each transport message it receives on `meter`
+    /// ([`MulticastPump::attach_meter`]): the holder keeps a clone of `meter` and reads it.
+    #[cfg(feature = "resource-snapshot")]
+    pub fn with_meter(mut self, meter: alloc::rc::Rc<BuildIntervalMeter>) -> Self {
+        self.holding.meter = Some(meter);
         self
     }
 
@@ -3014,6 +3055,55 @@ mod tests {
     /// datagram's bytes and each transport message decoded out of it, the network message a
     /// member's frame carried once the member's JOIN admitted it, and each beacon and datagram of
     /// the emit as the socket takes it, a datagram it refused not until it leaves.
+    /// Each transport message the group receives is spaced on the meter its holder attached, a
+    /// build without the counters too. Turned red by a pump that leaves the meter out of the
+    /// recorder its receive counts on.
+    #[cfg(feature = "resource-snapshot")]
+    #[test]
+    fn what_the_group_receives_is_spaced_on_the_meter_its_holder_attached() {
+        use wz_session_core::interval_meter::BuildIntervalMeter;
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let queue: RefCell<VecDeque<MulticastTxItem>> = RefCell::new(VecDeque::new());
+        let mut next_tx = || queue.borrow_mut().pop_front();
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+        let meter = Rc::new(BuildIntervalMeter::new());
+        pump.attach_meter(Rc::clone(&meter));
+        assert_eq!(meter.reading().messages, 0, "nothing received yet");
+
+        let mut theirs = params.clone();
+        theirs.zid = wz_session_core::session_zid::SessionZid::from_array([0x01, 0x02, 0x03, 0x04]);
+        let mut join = [0u8; JOIN_MAX_BYTES];
+        let len = encode_join_into_slice(
+            &theirs,
+            &MulticastTxConduits::new(mask_from_res(theirs.seq_num_res)),
+            &mut join,
+        )
+        .expect("a JOIN");
+        wire.borrow_mut().inbound.push_back(join[..len].to_vec());
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(
+            meter.reading().messages,
+            1,
+            "the member's JOIN is a transport message the group received"
+        );
+    }
+
     #[cfg(feature = "transport-stats")]
     #[test]
     fn what_the_group_receives_and_sends_is_counted_into_the_counters_its_holder_attached() {

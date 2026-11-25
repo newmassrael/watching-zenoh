@@ -61,7 +61,7 @@
 //! - A link kind pico does not have (QUIC, unixpipe, ...) reports its protocol
 //!   name as its `type`, where pico could not encode the document at all.
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine};
 use wz_host_sync::{Mutex, MutexGuard};
@@ -74,6 +74,7 @@ use wz_session_core::WhatAmI;
 
 use crate::ffi::guarded;
 use crate::link_properties::pico_link_properties;
+use crate::prelude::{format, String, ToOwned, Vec};
 use crate::query::PlainQueryable;
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 use crate::session::{engine_held, session_handle, z_loaned_session_t, PicoSessionHandle};

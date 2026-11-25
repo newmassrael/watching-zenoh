@@ -25,7 +25,7 @@
 //! doors act on too; this file is the pico ABI's names and result codes for it, and the session
 //! whose received messages the snapshot counts.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use wz_capi_port::observation::snapshot;
 use wz_capi_port::observation::Refusal;
@@ -56,7 +56,7 @@ pub const WZ_EXT_SNAPSHOT_HAS_TASKS: u8 = snapshot::AVAILABLE_TASKS;
 /// the first one: the node does not sample on its own, so there is nothing to say until it is
 /// asked to.
 #[cfg(feature = "admin-space")]
-pub(crate) fn latest_json() -> Option<String> {
+pub(crate) fn latest_json() -> Option<crate::prelude::String> {
     snapshot::latest_json()
 }
 
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn wz_ext_snapshot_read(
             return Z_ERR_NULL;
         }
         // SAFETY: `out` is writable for `capacity` bytes, the contract above.
-        let buffer = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
+        let buffer = unsafe { core::slice::from_raw_parts_mut(out, capacity) };
         match snapshot::read_latest(buffer) {
             Ok(written) => {
                 // SAFETY: `length` is writable, the contract above.

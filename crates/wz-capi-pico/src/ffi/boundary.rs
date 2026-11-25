@@ -12,25 +12,19 @@
 
 use crate::result::{ZResult, Z_ERR_GENERIC};
 
-/// Run `body`, or answer `None` when it panicked, so that no panic unwinds into the C frame that
-/// called. A body that ran to the end answers `Some`.
-#[cfg(feature = "std")]
-#[inline]
-pub(crate) fn catch<R>(body: impl FnOnce() -> R) -> Option<R> {
-    std::panic::catch_unwind(core::panic::AssertUnwindSafe(body)).ok()
-}
-
-/// Run `body`. Without `std` a panic does not unwind (the module doc), so a body that returns
-/// ran to the end.
-#[cfg(not(feature = "std"))]
-#[inline]
+/// Run `body`: a plain call in every build. A panic aborts at the C boundary (the owner's panic
+/// policy for the C libraries, as zenoh-pico is C and upstream zenoh's release profile aborts):
+/// without `std` the panic handler stops the program, and with it a panic that reaches an
+/// `extern "C"` frame aborts there, as a Rust function of the C ABI cannot unwind. So no export
+/// carries a landing pad, and a panic is a defect the no-panic gate finds, never an error code.
+/// The answer is always `Some`; the `Option` is the shape its callers read.
+#[inline(always)]
 pub(crate) fn catch<R>(body: impl FnOnce() -> R) -> Option<R> {
     Some(body())
 }
 
-/// Run an export body, converting a panic into a status code instead of
-/// unwinding across the C ABI boundary. Returns `fallback` if the body
-/// panics.
+/// Run an export body that returns a status code. `fallback` is the answer of a body that does
+/// not run to the end, which none does: [`catch`] is a plain call and a panic aborts.
 #[inline]
 pub(crate) fn guard<F>(fallback: ZResult, body: F) -> ZResult
 where
@@ -39,8 +33,7 @@ where
     catch(body).unwrap_or(fallback)
 }
 
-/// Run an export body that returns a status code, defaulting the panic
-/// fallback to [`Z_ERR_GENERIC`].
+/// Run an export body that returns a status code, its fallback [`Z_ERR_GENERIC`] ([`guard`]).
 #[inline]
 pub(crate) fn guarded<F>(body: F) -> ZResult
 where
@@ -49,8 +42,7 @@ where
     guard(Z_ERR_GENERIC, body)
 }
 
-/// Run an export body returning a value (e.g. a `usize` length); a panic
-/// yields `fallback`.
+/// Run an export body returning a value (e.g. a `usize` length), `fallback` as in [`guard`].
 #[inline]
 pub(crate) fn guard_val<F, T>(fallback: T, body: F) -> T
 where
@@ -73,3 +65,27 @@ pub(crate) struct SendPtr(pub(crate) *mut core::ffi::c_void);
 // and non-aliased across the call/drop lifecycle; moving the opaque pointer
 // to the drive thread is what a native pico read task already does.
 unsafe impl Send for SendPtr {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The boundary is a plain call in every build: a body runs once and its value is answered,
+    /// through the guards too, whatever their fallback. Turned red by a catch that drops the value
+    /// or runs the body twice.
+    #[test]
+    fn a_body_runs_once_and_is_answered_with_its_value() {
+        let mut runs = 0u8;
+        assert_eq!(
+            catch(|| {
+                runs += 1;
+                7u8
+            }),
+            Some(7)
+        );
+        assert_eq!(runs, 1);
+        assert_eq!(guard_val(0u8, || 5), 5);
+        assert_eq!(guarded(|| crate::result::Z_OK), crate::result::Z_OK);
+        assert_eq!(guard(Z_ERR_GENERIC, || 3), 3);
+    }
+}

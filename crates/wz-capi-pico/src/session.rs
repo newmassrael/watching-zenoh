@@ -71,7 +71,7 @@ use crate::config::{
     Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY, Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_BASE64_KEY,
     Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY, Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY,
 };
-use crate::ffi::{guard_val, guarded};
+use crate::ffi::guarded;
 use crate::prelude::*;
 // The read-task doors' refusals, which only the multi-threaded arm has.
 #[cfg(feature = "multi-thread")]
@@ -1007,6 +1007,11 @@ unsafe fn release_handle(val: *mut c_void) {
         give_back_session_place(core::ptr::NonNull::new_unchecked(val));
     }
 }
+
+crate::abi::impl_type_facts!(
+    z_owned_session_t,
+    Some(release_handle as unsafe fn(*mut c_void))
+);
 
 /// Read the tokio engine's [`SessionState`] behind a loaned session, or `None` if the pointer or
 /// its handle slot is null, or another engine runs the session.
@@ -2631,16 +2636,14 @@ pub unsafe extern "C" fn z_close(zs: *mut z_loaned_session_t, _options: *const c
 /// Zero an owned session (pico `z_internal_session_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_session_null(obj: *mut z_owned_session_t) {
-    if !obj.is_null() {
-        *obj = z_owned_session_t::null_value();
-    }
+    crate::abi::obj_null(obj.cast(), <z_owned_session_t>::facts());
 }
 
 /// `true` iff the owned session holds a live handle (pico
 /// `z_internal_session_check`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_session_check(obj: *const z_owned_session_t) -> bool {
-    guard_val(false, || !obj.is_null() && !(*obj)._val.is_null())
+    crate::abi::obj_check(obj.cast())
 }
 
 /// Borrow a session immutably (pico `z_session_loan`).
@@ -2668,30 +2671,14 @@ pub unsafe extern "C" fn z_session_move(obj: *mut z_owned_session_t) -> *mut z_m
 /// Take a session out of `src` into `dst` (pico `z_session_take`).
 #[no_mangle]
 pub unsafe extern "C" fn z_session_take(dst: *mut z_owned_session_t, src: *mut z_moved_session_t) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst)._val = (*src)._this._val;
-    (*dst)._cnt = (*src)._this._cnt;
-    (*src)._this = z_owned_session_t::null_value();
+    crate::abi::obj_move(dst.cast(), src.cast(), <z_owned_session_t>::facts());
 }
 
 /// Drop an owned session (pico `z_session_drop`): closes (if not already) and
 /// frees the `SessionState`.
 #[no_mangle]
 pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
-    let _ = guarded(|| {
-        if obj.is_null() {
-            return Z_OK;
-        }
-        let val = (*obj)._this._val;
-        if !val.is_null() {
-            // The engine's session closes as its drive drops (idempotent).
-            release_handle(val);
-            (*obj)._this = z_owned_session_t::null_value();
-        }
-        Z_OK
-    });
+    crate::abi::obj_drop(obj.cast(), <z_owned_session_t>::facts());
 }
 
 // --- zp_*_task: the session's background executor --------------------------
@@ -2833,7 +2820,7 @@ pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) -> bool {
     // Upstream: `if (!z_session_is_closed(zs)) { return _z_runtime_spin_once(..); } return
     // false;`, so a closed session answers `false` like a null one. The engine answers the
     // rest: one that drives itself answers "alive", one the program steps runs the turn.
-    guard_val(false, || {
+    crate::ffi::guard_val(false, || {
         session_handle(zs).is_some_and(|handle| handle.drive.spin_once())
     })
 }
