@@ -1724,6 +1724,12 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             );
             #[cfg(not(feature = "connectivity"))]
             let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy, limits);
+            // A heap with no room for the session's own state is pico's out of memory, the
+            // engine's session closed first.
+            let Some(ext) = ext else {
+                drive.close();
+                return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+            };
             // The session's own clock, which pico always gives, was refused: the bound
             // `UHLC_MAX_DELTA_MS` states is one it does not honour. The open fails as it does for
             // a stated value the build refuses, after the engine's session is closed.
@@ -2260,6 +2266,12 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     );
     #[cfg(not(feature = "connectivity"))]
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, limits);
+    // A heap with no room for the session's own state is pico's out of memory, the engine's
+    // session closed first.
+    let Some(ext) = ext else {
+        drive.close();
+        return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+    };
     // A refused session clock fails the open as the tokio engine's does, the engine's session
     // closed first.
     #[cfg(any(feature = "advanced", feature = "clock-source"))]
