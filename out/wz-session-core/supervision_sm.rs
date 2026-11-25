@@ -178,14 +178,23 @@ pub type SupervisionConfiguration = ::sce_rust_runtime::helpers::hierarchy::Boun
 /// program none of whose documents uses a feature links none of its code
 /// (docs/adr/0066).
 ///
+/// `walk` is how this machine's microsteps form their exit and entry sets
+/// (docs/adr/0125). A document with no `<history>`, no `<parallel>` and no
+/// transition of more than one target fixes them itself: the generator
+/// computed, by Appendix D's procedures, what each transition enters
+/// (`entry_paths`, each its length first, each state with whether it is
+/// entered by default) and `entry_rows` names each transition's path, so the
+/// row walk reads them. Any other document carries the general walk, which
+/// computes them, and no rows.
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const SUPERVISION_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
-        TransitionRow,
+        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
+        Target, TransitionId, TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -223,6 +232,9 @@ pub const SUPERVISION_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
         default_state: ::sce_rust_runtime::StateId(SupervisionState::Disarmed as u16),
         null_event: ::sce_rust_runtime::EventId(6),
         error_events: &[],
+        walk: &::sce_rust_runtime::ROW_WALK,
+        entry_rows: &[EntryRow::at(0), EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(6), EntryRow::at(0), EntryRow::at(4), EntryRow::at(4)],
+        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(0), false), EntryStep::count(1), EntryStep::new(StateId(3), false)],
         history: None,
         parallel: None,
     }
@@ -399,6 +411,9 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     // `_event.data` baseline); a `<Machine>Payload` sum is emitted when a
     // transition guard reads a typed `_event.data.<field>` (NL→IR C1 Path A).
     type Payload = ();
+    // docs/adr/0124: the data of the event being processed, as every guard,
+    // `<sce:arg>` and transition content reads it, queued or lent alike.
+    type EventData<'e> = ();
     // SCE Protocol-Synthesis RFC §synth-5-J-2: under no_std the std-backed `StdHal`
     // (`std::time::Instant` / `OnceLock`) does not implement `Hal`. The
     // generated machine defaults to `NoOpHal` so the no_std surface compiles
@@ -500,7 +515,10 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(4) }, 1, 5, 0>;
+    // docs/adr/0125: this document's microsteps are walked from the entry rows
+    // of its tables, which builds no set of states and walks no stack, so the
+    // workspace holds the enabled set alone.
+    type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(4) }, { ::sce_rust_runtime::record_words(4, 0) }, 0>;
     type Configuration = SupervisionConfiguration;
     // docs/adr/0096: what refuses this machine's start. One with a script
@@ -586,6 +604,8 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
         SupervisionEvent::Null
     }
 
+    // docs/adr/0124: this document's events carry no typed data.
+    fn event_data<'a>(_held: &'a ::sce_rust_runtime::CurrentEventData<'_, Self>) -> Self::EventData<'a> {}
 
     // ======================================================================
     // Instance methods - generated executable content
@@ -596,7 +616,7 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: supervision.scxml:50 :: _machine"]
 // SCE-MAP: supervision.scxml:50 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             SupervisionState::ID_Armed => {
                 // SCE-MAP: supervision.scxml:66 :: Armed :: _state_body
@@ -644,6 +664,7 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     fn execute_exit_actions(
         &mut self,
         state: ::sce_rust_runtime::StateId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -670,6 +691,7 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
         &mut self,
         state: ::sce_rust_runtime::StateId,
         event: ::sce_rust_runtime::EventId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
@@ -739,6 +761,7 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // W3C SCXML 3.13: no transition in this document has content.

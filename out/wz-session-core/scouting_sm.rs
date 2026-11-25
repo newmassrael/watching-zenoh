@@ -174,14 +174,23 @@ pub type ScoutingConfiguration = ::sce_rust_runtime::helpers::hierarchy::Bounded
 /// program none of whose documents uses a feature links none of its code
 /// (docs/adr/0066).
 ///
+/// `walk` is how this machine's microsteps form their exit and entry sets
+/// (docs/adr/0125). A document with no `<history>`, no `<parallel>` and no
+/// transition of more than one target fixes them itself: the generator
+/// computed, by Appendix D's procedures, what each transition enters
+/// (`entry_paths`, each its length first, each state with whether it is
+/// entered by default) and `entry_rows` names each transition's path, so the
+/// row walk reads them. Any other document carries the general walk, which
+/// computes them, and no rows.
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const SCOUTING_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
-        TransitionRow,
+        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
+        Target, TransitionId, TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -215,6 +224,9 @@ pub const SCOUTING_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
         default_state: ::sce_rust_runtime::StateId(ScoutingState::Idle as u16),
         null_event: ::sce_rust_runtime::EventId(5),
         error_events: &[],
+        walk: &::sce_rust_runtime::ROW_WALK,
+        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(4), EntryRow::at(2), EntryRow::at(4), EntryRow::at(4)],
+        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
         history: None,
         parallel: None,
     }
@@ -251,6 +263,21 @@ pub struct ScoutingHelloReceivedPayload {
     pub exit_on_first: u8,
 }
 
+/// The data of `hello_received_schema` as every reader reads it, owned by a queue or lent by a host alike (docs/adr/0124): one member per field, a text and a byte string borrowed. A host lends a view it decoded by filling these from it.
+#[derive(Clone, Copy, Debug)]
+pub struct ScoutingHelloReceivedRef {
+    pub exit_on_first: u8,
+}
+
+impl ScoutingHelloReceivedPayload {
+    /// This payload, read as `ScoutingHelloReceivedRef` (docs/adr/0124).
+    pub fn data(&self) -> ScoutingHelloReceivedRef {
+        ScoutingHelloReceivedRef {
+            exit_on_first: self.exit_on_first,
+        }
+    }
+}
+
 /// NL→IR Item C1 Path A: typed `_event.data` payload sum for the EventSchema-imported events whose transition guards lowered natively.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ScoutingPayload {
@@ -260,19 +287,44 @@ pub enum ScoutingPayload {
     HelloReceived(ScoutingHelloReceivedPayload),
 }
 
+/// The data of the event being processed, as every guard, `<sce:arg>` and transition content reads it: the payload a queue owns or the data a host lent, borrowed (docs/adr/0124).
+#[derive(Clone, Copy, Debug)]
+pub enum ScoutingEventData {
+    /// An event that carries no data.
+    None,
+    HelloReceived(ScoutingHelloReceivedRef),
+}
+
+impl ScoutingPayload {
+    /// The data this payload holds, read as `ScoutingEventData` (docs/adr/0124).
+    pub fn data(&self) -> ScoutingEventData {
+        match self {
+            ScoutingPayload::None => ScoutingEventData::None,
+            ScoutingPayload::HelloReceived(payload) => ScoutingEventData::HelloReceived(payload.data()),
+        }
+    }
+}
+
 /// NL→IR Item C1 Path A: per-event typed `_event.data` inject seam.
 /// Bring into scope with `use …::ScoutingInject;` to call the
-/// `raise_<event>` methods on the engine.
+/// `raise_<event>` methods on the engine, and the `process_<event>_with`
+/// methods that lend an event's data for one call (docs/adr/0124).
 pub trait ScoutingInject {
     /// Typed `_event.data` inject for `hello.received`.
     /// Binds the event name and payload variant in one call (name↔type
     /// pairing cannot be constructed inconsistently).
     fn raise_hello_received(&mut self, payload: ScoutingHelloReceivedPayload);
+    /// `hello.received` processed now with `event_data`, its data, lent for this
+    /// call alone: every reader of `_event.data` reads it in place (docs/adr/0124).
+    fn process_hello_received_with(&mut self, event_data: ScoutingHelloReceivedRef);
 }
 
 impl<A: ScoutingActions + 'static> ScoutingInject for ::sce_rust_runtime::Engine<ScoutingPolicy<A>> {
     fn raise_hello_received(&mut self, payload: ScoutingHelloReceivedPayload) {
         self.raise_external_typed(ScoutingEvent::HelloReceived, ScoutingPayload::HelloReceived(payload));
+    }
+    fn process_hello_received_with(&mut self, event_data: ScoutingHelloReceivedRef) {
+        self.process_event_with(ScoutingEvent::HelloReceived, ScoutingEventData::HelloReceived(event_data));
     }
 }
 
@@ -297,10 +349,6 @@ pub struct ScoutingPolicy<A: ScoutingActions + 'static> {
     // The generated machine dispatches each native action through this field
     // (`self.actions.<op>(…)`) instead of a runtime script engine.
     actions: A,
-    // NL→IR Item C1 Path A: typed `_event.data` payload for the current
-    // event, stored by `populate_event_payload` and read by native
-    // transition guards (`matches!(&self.pending_payload, …)`).
-    pending_payload: ScoutingPayload,
     // W3C SCXML 5.10: the session's id, bound when the machine is built and
     // never empty (docs/adr/0045). SCE Protocol-Synthesis RFC §synth-5-J-2:
     // under `--no-std` it is the text the host gave, held rather than copied,
@@ -312,7 +360,6 @@ impl<A: ScoutingActions + 'static> ScoutingPolicy<A> {
     fn build(session_id: &'static str, actions: A) -> Self {
         Self {
             actions,
-            pending_payload: ScoutingPayload::default(),
             session_id,
         }
     }
@@ -405,6 +452,9 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     // `_event.data` baseline); a `<Machine>Payload` sum is emitted when a
     // transition guard reads a typed `_event.data.<field>` (NL→IR C1 Path A).
     type Payload = ScoutingPayload;
+    // docs/adr/0124: the data of the event being processed, as every guard,
+    // `<sce:arg>` and transition content reads it, queued or lent alike.
+    type EventData<'e> = ScoutingEventData;
     // SCE Protocol-Synthesis RFC §synth-5-J-2: under no_std the std-backed `StdHal`
     // (`std::time::Instant` / `OnceLock`) does not implement `Hal`. The
     // generated machine defaults to `NoOpHal` so the no_std surface compiles
@@ -504,7 +554,10 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(3) }, 1, 5, 0>;
+    // docs/adr/0125: this document's microsteps are walked from the entry rows
+    // of its tables, which builds no set of states and walks no stack, so the
+    // workspace holds the enabled set alone.
+    type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(3) }, { ::sce_rust_runtime::record_words(3, 0) }, 0>;
     type Configuration = ScoutingConfiguration;
     // docs/adr/0096: what refuses this machine's start. One with a script
@@ -586,13 +639,15 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
         ScoutingEvent::Null
     }
 
-    // NL→IR Item C1 Path A: store the current event's typed `_event.data`
-    // payload so native transition guards can read it without a script
-    // engine. Called by the engine's pop loop for every dequeued event;
-    // events injected without a typed payload carry the `#[default] None`
-    // variant, against which the variant-specific guards simply fail.
-    fn populate_event_payload(&mut self, payload: &Self::Payload) {
-        self.pending_payload = payload.clone();
+    // docs/adr/0124: the data the engine holds for the event being processed,
+    // read as `ScoutingEventData`: a payload a queue owned, read in
+    // place, or the data a host lent, as it is. Events injected without a typed
+    // payload read as `None`, against which the variant-specific guards fail.
+    fn event_data<'a>(held: &'a ::sce_rust_runtime::CurrentEventData<'_, Self>) -> Self::EventData<'a> {
+        match held {
+            ::sce_rust_runtime::CurrentEventData::Queued(payload) => payload.data(),
+            ::sce_rust_runtime::CurrentEventData::Lent(event_data) => *event_data,
+        }
     }
 
     // ======================================================================
@@ -604,7 +659,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: scouting.scxml:103 :: _machine"]
 // SCE-MAP: scouting.scxml:103 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
     }
 
     // §scxml-3.10.2: a <history>'s default transition content, run after its
@@ -619,6 +674,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     fn execute_exit_actions(
         &mut self,
         state: ::sce_rust_runtime::StateId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -645,18 +701,19 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
         &mut self,
         state: ::sce_rust_runtime::StateId,
         event: ::sce_rust_runtime::EventId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
             ScoutingState::ID_AwaitingHello => {
                 if event == ScoutingEvent::ID_HelloReceived {
-                    if matches!(&self.pending_payload, ScoutingPayload::HelloReceived(ev) if ev.exit_on_first != 0) {
+                    if matches!(sce_event_data, ScoutingEventData::HelloReceived(ev) if ev.exit_on_first != 0) {
                         // AwaitingHello, transition 0
                         return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
                 if event == ScoutingEvent::ID_HelloReceived {
-                    if matches!(&self.pending_payload, ScoutingPayload::HelloReceived(ev) if ev.exit_on_first == 0) {
+                    if matches!(sce_event_data, ScoutingEventData::HelloReceived(ev) if ev.exit_on_first == 0) {
                         // AwaitingHello, transition 1
                         return Some(::sce_rust_runtime::TransitionId(4));
                     }
@@ -705,6 +762,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         match transition.0 {

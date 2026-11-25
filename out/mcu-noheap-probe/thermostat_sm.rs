@@ -166,14 +166,23 @@ pub type ThermostatConfiguration = ::sce_rust_runtime::helpers::hierarchy::Bound
 /// program none of whose documents uses a feature links none of its code
 /// (docs/adr/0066).
 ///
+/// `walk` is how this machine's microsteps form their exit and entry sets
+/// (docs/adr/0125). A document with no `<history>`, no `<parallel>` and no
+/// transition of more than one target fixes them itself: the generator
+/// computed, by Appendix D's procedures, what each transition enters
+/// (`entry_paths`, each its length first, each state with whether it is
+/// entered by default) and `entry_rows` names each transition's path, so the
+/// row walk reads them. Any other document carries the general walk, which
+/// computes them, and no rows.
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const THERMOSTAT_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
-        TransitionRow,
+        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
+        Target, TransitionId, TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -197,6 +206,9 @@ pub const THERMOSTAT_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
         default_state: ::sce_rust_runtime::StateId(ThermostatState::Idle as u16),
         null_event: ::sce_rust_runtime::EventId(2),
         error_events: &[],
+        walk: &::sce_rust_runtime::ROW_WALK,
+        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(2)],
+        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
         history: None,
         parallel: None,
     }
@@ -230,6 +242,21 @@ pub struct ThermostatTempReadingPayload {
     pub celsius_centi: u16,
 }
 
+/// The data of `temp_reading_schema` as every reader reads it, owned by a queue or lent by a host alike (docs/adr/0124): one member per field, a text and a byte string borrowed. A host lends a view it decoded by filling these from it.
+#[derive(Clone, Copy, Debug)]
+pub struct ThermostatTempReadingRef {
+    pub celsius_centi: u16,
+}
+
+impl ThermostatTempReadingPayload {
+    /// This payload, read as `ThermostatTempReadingRef` (docs/adr/0124).
+    pub fn data(&self) -> ThermostatTempReadingRef {
+        ThermostatTempReadingRef {
+            celsius_centi: self.celsius_centi,
+        }
+    }
+}
+
 /// NL→IR Item C1 Path A: typed `_event.data` payload sum for the EventSchema-imported events whose transition guards lowered natively.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ThermostatPayload {
@@ -239,19 +266,44 @@ pub enum ThermostatPayload {
     TempReading(ThermostatTempReadingPayload),
 }
 
+/// The data of the event being processed, as every guard, `<sce:arg>` and transition content reads it: the payload a queue owns or the data a host lent, borrowed (docs/adr/0124).
+#[derive(Clone, Copy, Debug)]
+pub enum ThermostatEventData {
+    /// An event that carries no data.
+    None,
+    TempReading(ThermostatTempReadingRef),
+}
+
+impl ThermostatPayload {
+    /// The data this payload holds, read as `ThermostatEventData` (docs/adr/0124).
+    pub fn data(&self) -> ThermostatEventData {
+        match self {
+            ThermostatPayload::None => ThermostatEventData::None,
+            ThermostatPayload::TempReading(payload) => ThermostatEventData::TempReading(payload.data()),
+        }
+    }
+}
+
 /// NL→IR Item C1 Path A: per-event typed `_event.data` inject seam.
 /// Bring into scope with `use …::ThermostatInject;` to call the
-/// `raise_<event>` methods on the engine.
+/// `raise_<event>` methods on the engine, and the `process_<event>_with`
+/// methods that lend an event's data for one call (docs/adr/0124).
 pub trait ThermostatInject {
     /// Typed `_event.data` inject for `temp_reading`.
     /// Binds the event name and payload variant in one call (name↔type
     /// pairing cannot be constructed inconsistently).
     fn raise_temp_reading(&mut self, payload: ThermostatTempReadingPayload);
+    /// `temp_reading` processed now with `event_data`, its data, lent for this
+    /// call alone: every reader of `_event.data` reads it in place (docs/adr/0124).
+    fn process_temp_reading_with(&mut self, event_data: ThermostatTempReadingRef);
 }
 
 impl ThermostatInject for ::sce_rust_runtime::Engine<ThermostatPolicy> {
     fn raise_temp_reading(&mut self, payload: ThermostatTempReadingPayload) {
         self.raise_external_typed(ThermostatEvent::TempReading, ThermostatPayload::TempReading(payload));
+    }
+    fn process_temp_reading_with(&mut self, event_data: ThermostatTempReadingRef) {
+        self.process_event_with(ThermostatEvent::TempReading, ThermostatEventData::TempReading(event_data));
     }
 }
 
@@ -260,10 +312,6 @@ impl ThermostatInject for ::sce_rust_runtime::Engine<ThermostatPolicy> {
 // ======================================================================
 
 pub struct ThermostatPolicy {
-    // NL→IR Item C1 Path A: typed `_event.data` payload for the current
-    // event, stored by `populate_event_payload` and read by native
-    // transition guards (`matches!(&self.pending_payload, …)`).
-    pending_payload: ThermostatPayload,
     // W3C SCXML 5.10: the session's id, bound when the machine is built and
     // never empty (docs/adr/0045). SCE Protocol-Synthesis RFC §synth-5-J-2:
     // under `--no-std` it is the text the host gave, held rather than copied,
@@ -274,7 +322,6 @@ pub struct ThermostatPolicy {
 impl ThermostatPolicy {
     fn build(session_id: &'static str) -> Self {
         Self {
-            pending_payload: ThermostatPayload::default(),
             session_id,
         }
     }
@@ -327,6 +374,9 @@ impl StatePolicy for ThermostatPolicy {
     // `_event.data` baseline); a `<Machine>Payload` sum is emitted when a
     // transition guard reads a typed `_event.data.<field>` (NL→IR C1 Path A).
     type Payload = ThermostatPayload;
+    // docs/adr/0124: the data of the event being processed, as every guard,
+    // `<sce:arg>` and transition content reads it, queued or lent alike.
+    type EventData<'e> = ThermostatEventData;
     // SCE Protocol-Synthesis RFC §synth-5-J-2: under no_std the std-backed `StdHal`
     // (`std::time::Instant` / `OnceLock`) does not implement `Hal`. The
     // generated machine defaults to `NoOpHal` so the no_std surface compiles
@@ -422,7 +472,10 @@ impl StatePolicy for ThermostatPolicy {
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(2) }, 1, 5, 0>;
+    // docs/adr/0125: this document's microsteps are walked from the entry rows
+    // of its tables, which builds no set of states and walks no stack, so the
+    // workspace holds the enabled set alone.
+    type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(2) }, { ::sce_rust_runtime::record_words(2, 0) }, 0>;
     type Configuration = ThermostatConfiguration;
     // docs/adr/0096: what refuses this machine's start. One with a script
@@ -496,13 +549,15 @@ impl StatePolicy for ThermostatPolicy {
         ThermostatEvent::Null
     }
 
-    // NL→IR Item C1 Path A: store the current event's typed `_event.data`
-    // payload so native transition guards can read it without a script
-    // engine. Called by the engine's pop loop for every dequeued event;
-    // events injected without a typed payload carry the `#[default] None`
-    // variant, against which the variant-specific guards simply fail.
-    fn populate_event_payload(&mut self, payload: &Self::Payload) {
-        self.pending_payload = payload.clone();
+    // docs/adr/0124: the data the engine holds for the event being processed,
+    // read as `ThermostatEventData`: a payload a queue owned, read in
+    // place, or the data a host lent, as it is. Events injected without a typed
+    // payload read as `None`, against which the variant-specific guards fail.
+    fn event_data<'a>(held: &'a ::sce_rust_runtime::CurrentEventData<'_, Self>) -> Self::EventData<'a> {
+        match held {
+            ::sce_rust_runtime::CurrentEventData::Queued(payload) => payload.data(),
+            ::sce_rust_runtime::CurrentEventData::Lent(event_data) => *event_data,
+        }
     }
 
     // ======================================================================
@@ -514,7 +569,7 @@ impl StatePolicy for ThermostatPolicy {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: thermostat.scxml:24 :: _machine"]
 // SCE-MAP: thermostat.scxml:24 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
     }
 
     // §scxml-3.10.2: a <history>'s default transition content, run after its
@@ -529,6 +584,7 @@ impl StatePolicy for ThermostatPolicy {
     fn execute_exit_actions(
         &mut self,
         state: ::sce_rust_runtime::StateId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -555,6 +611,7 @@ impl StatePolicy for ThermostatPolicy {
         &mut self,
         state: ::sce_rust_runtime::StateId,
         event: ::sce_rust_runtime::EventId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
@@ -569,7 +626,7 @@ impl StatePolicy for ThermostatPolicy {
             }
             ThermostatState::ID_Idle => {
                 if event == ThermostatEvent::ID_TempReading {
-                    if matches!(&self.pending_payload, ThermostatPayload::TempReading(ev) if ev.celsius_centi > 3000) {
+                    if matches!(sce_event_data, ThermostatEventData::TempReading(ev) if ev.celsius_centi > 3000) {
                         // idle, transition 0
                         return Some(::sce_rust_runtime::TransitionId(0));
                     }
@@ -588,6 +645,7 @@ impl StatePolicy for ThermostatPolicy {
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // W3C SCXML 3.13: no transition in this document has content.

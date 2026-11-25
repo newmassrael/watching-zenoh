@@ -250,14 +250,23 @@ pub type SessionFsmUnicastConfiguration = ::sce_rust_runtime::helpers::hierarchy
 /// program none of whose documents uses a feature links none of its code
 /// (docs/adr/0066).
 ///
+/// `walk` is how this machine's microsteps form their exit and entry sets
+/// (docs/adr/0125). A document with no `<history>`, no `<parallel>` and no
+/// transition of more than one target fixes them itself: the generator
+/// computed, by Appendix D's procedures, what each transition enters
+/// (`entry_paths`, each its length first, each state with whether it is
+/// entered by default) and `entry_rows` names each transition's path, so the
+/// row walk reads them. Any other document carries the general walk, which
+/// computes them, and no rows.
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
-        TransitionRow,
+        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
+        Target, TransitionId, TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -383,6 +392,30 @@ pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables<'static
         #[cfg(not(feature = "session-unicast-accept"))] null_event: ::sce_rust_runtime::EventId(15),
         #[cfg(feature = "session-unicast-accept")] null_event: ::sce_rust_runtime::EventId(19),
         error_events: &[],
+        walk: &::sce_rust_runtime::ROW_WALK,
+        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(5), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(9),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(12), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(11),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(14), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(16), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(18), #[cfg(feature = "session-unicast-accept")] EntryRow::at(14), #[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), EntryRow::NONE, #[cfg(feature = "session-unicast-accept")] EntryRow::NONE, #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(13),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(20),],
+        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(2), #[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(5), true), #[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(6), false), #[cfg(feature = "session-unicast-accept")] EntryStep::count(2), EntryStep::new(StateId(2), true), EntryStep::new(StateId(3), false), EntryStep::count(1), #[cfg(not(feature = "session-unicast-accept"))] EntryStep::new(StateId(6), false),
+#[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(10), false), EntryStep::count(1), #[cfg(not(feature = "session-unicast-accept"))] EntryStep::new(StateId(7), false),
+#[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(11), false), EntryStep::count(1), EntryStep::new(StateId(4), false), EntryStep::count(1), #[cfg(not(feature = "session-unicast-accept"))] EntryStep::new(StateId(5), false),
+#[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(9), false), EntryStep::count(1), #[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(7), false), #[cfg(feature = "session-unicast-accept")] EntryStep::count(1), #[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(8), false), #[cfg(feature = "session-unicast-accept")] EntryStep::count(1), EntryStep::new(StateId(0), false),],
         history: None,
         parallel: None,
     }
@@ -586,6 +619,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // `_event.data` baseline); a `<Machine>Payload` sum is emitted when a
     // transition guard reads a typed `_event.data.<field>` (NL→IR C1 Path A).
     type Payload = ();
+    // docs/adr/0124: the data of the event being processed, as every guard,
+    // `<sce:arg>` and transition content reads it, queued or lent alike.
+    type EventData<'e> = ();
     // SCE Protocol-Synthesis RFC §synth-5-J-2: under no_std the std-backed `StdHal`
     // (`std::time::Instant` / `OnceLock`) does not implement `Hal`. The
     // generated machine defaults to `NoOpHal` so the no_std surface compiles
@@ -697,7 +733,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
-    // the runtime keeps is a bit vector of this document's 12 state(s); a
+    // the runtime keeps is a bit vector of this document's 8 state(s); a
     // configuration holds 2 state(s) at most, the capacity of the
     // `Configuration` a host reads; a selection enables 1 transition(s) at most, one from each atomic state
     // of one configuration; a microstep owes 0 history default(s) at most;
@@ -708,8 +744,10 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    #[cfg(not(feature = "session-unicast-accept"))] type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(8) }, 1, 7, 0>;
-    #[cfg(feature = "session-unicast-accept")] type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(12) }, 1, 7, 0>;
+    // docs/adr/0125: this document's microsteps are walked from the entry rows
+    // of its tables, which builds no set of states and walks no stack, so the
+    // workspace holds the enabled set alone.
+    type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     #[cfg(not(feature = "session-unicast-accept"))] type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(8) }, { ::sce_rust_runtime::record_words(8, 0) }, 0>;
     #[cfg(feature = "session-unicast-accept")] type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(12) }, { ::sce_rust_runtime::record_words(12, 0) }, 0>;
     type Configuration = SessionFsmUnicastConfiguration;
@@ -838,6 +876,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         SessionFsmUnicastEvent::Null
     }
 
+    // docs/adr/0124: this document's events carry no typed data.
+    fn event_data<'a>(_held: &'a ::sce_rust_runtime::CurrentEventData<'_, Self>) -> Self::EventData<'a> {}
 
     // ======================================================================
     // Instance methods - generated executable content
@@ -848,7 +888,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: session_fsm_unicast.scxml:118 :: _machine"]
 // SCE-MAP: session_fsm_unicast.scxml:118 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             SessionFsmUnicastState::ID_Closed => {
                 // SCE-MAP: session_fsm_unicast.scxml:257 :: Closed :: _state_body
@@ -958,6 +998,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     fn execute_exit_actions(
         &mut self,
         state: ::sce_rust_runtime::StateId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -1000,6 +1041,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         &mut self,
         state: ::sce_rust_runtime::StateId,
         event: ::sce_rust_runtime::EventId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
@@ -1241,6 +1283,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
+        sce_event_data: Self::EventData<'_>,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         match transition.0 {
