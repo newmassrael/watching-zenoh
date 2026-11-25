@@ -1147,11 +1147,17 @@ mod tests {
     /// address, so a holder takes a second reference to that storage and copies nothing. A sample
     /// of parts holds none. Turned red by a `SampleRef` that answers no shared value for a view
     /// that has one, or answers one of its own.
+    ///
+    /// The owned sample holds lent storage, as a received one does: an owned `Vec` has no
+    /// storage a second reference can share, and its clone is a copy.
     #[cfg(feature = "alloc")]
     #[test]
     fn the_sample_of_an_owned_sample_shares_its_payload_and_attachment() {
-        let owned = crate::sample::Sample::new_put("demo/shared", std::vec![1u8, 2, 3])
-            .with_attachment(std::vec![4u8, 5]);
+        let owned = crate::sample::Sample::new_put_shared(
+            "demo/shared",
+            crate::link::RxBytes::lend(std::vec![1u8, 2, 3]),
+        )
+        .with_attachment_shared(crate::link::RxBytes::lend(std::vec![4u8, 5]));
         let held_attachment = owned.attachment.as_ref().expect("an attachment");
         let sample = SampleRef::of(&owned);
         let hidden = sample.without_timestamp();
@@ -1164,6 +1170,9 @@ mod tests {
                 "the same storage"
             );
             let kept = view.payload_shared_owned().expect("a second reference");
+            assert_eq!(kept.as_slice(), owned.payload.as_slice());
+            // Without `rx-shared-bytes` a lent payload is owned, and a reference to it a copy.
+            #[cfg(feature = "rx-shared-bytes")]
             assert_eq!(kept.as_slice().as_ptr(), owned.payload.as_slice().as_ptr());
             let attachment = view
                 .attachment_shared()
