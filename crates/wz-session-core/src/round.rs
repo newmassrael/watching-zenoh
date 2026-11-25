@@ -2412,7 +2412,11 @@ impl<C: RoundCalls> Round<C> {
     /// row marked before it, its latch drained before the mark was set; a row whose last call ends
     /// after the asking sets it again, for the next walk.
     pub fn take_marked(&self) -> bool {
-        self.released.marked.swap(false, Ordering::AcqRel)
+        // A load first: a mark is rare, and asking while none is set takes no locked operation. A
+        // mark set as this reads is left set for the next asking, as an exchange ordered before
+        // it would leave it.
+        self.released.marked.load(Ordering::Relaxed)
+            && self.released.marked.swap(false, Ordering::AcqRel)
     }
 
     /// Count the drop of a row the session took out of its tables, under its lock, as under way
@@ -2449,10 +2453,14 @@ impl<C: RoundCalls> Round<C> {
     /// there was anything to hand. Nothing of the session is held; a delivery that finds the table
     /// not sealed, or taken by another, hands nothing.
     pub fn deliver(&self) -> bool {
-        if self
-            .state
-            .compare_exchange(SEALED, DELIVERING, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
+        // A load first: the last pass of every delivery finds the table not sealed, and is
+        // answered without a locked operation. A table sealed as this reads is left for the next
+        // delivery, as an exchange ordered before the seal would leave it.
+        if self.state.load(Ordering::Relaxed) != SEALED
+            || self
+                .state
+                .compare_exchange(SEALED, DELIVERING, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
         {
             return false;
         }
