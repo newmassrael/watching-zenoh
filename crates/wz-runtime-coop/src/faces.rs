@@ -796,18 +796,28 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
         unsafe { self.site.as_ref() }
     }
 
-    /// `f` on the wire of the parts when the place lends them now, else `absent`. Out of line,
-    /// and handed `f` as a pointer, so each kind of answer has one body of the lend and its pay
-    /// whichever fact it reads: a read of the session reads its faces at several places.
+    /// `f` on the wire of the parts when the place lends them now, else `absent`: the answer
+    /// is written by `f` where it lies, through the one body of the lend (`Self::read_wire`).
+    #[inline(always)]
+    fn read<U: Send>(&self, absent: U, f: impl Fn(&P::Wire) -> U + Send) -> U {
+        let mut answer = absent;
+        let out = &mut answer;
+        self.read_wire(&mut move |wire: &P::Wire| *out = f(wire));
+        answer
+    }
+
+    /// `read` on the wire of the parts when the place lends them now. Out of line, and handed
+    /// `read` by reference, so every fact a handle reads, whatever its answer, goes through one
+    /// body of the lend and its pay: a read of the session reads its faces at several places.
     #[inline(never)]
-    fn read<U: Send>(&self, absent: U, f: fn(&P::Wire) -> U) -> U {
-        match self
-            .site()
-            .try_lend(|held| held.lend(|parts| parts.wire().map(f)))
-        {
-            Lend::Lent(Some(answer)) => answer,
-            Lend::Lent(None) | Lend::Empty | Lend::Held => absent,
-        }
+    fn read_wire(&self, read: &mut (dyn FnMut(&P::Wire) + Send)) {
+        let _ = self.site().try_lend(|held| {
+            held.lend(|parts| {
+                if let Some(wire) = parts.wire() {
+                    read(wire);
+                }
+            })
+        });
     }
 }
 
@@ -832,12 +842,7 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceSession for FaceAt<K, P, E> {
 
     #[cfg(any(feature = "listen", feature = "group"))]
     fn input_seen(&self, ready: bool) {
-        let seen: fn(&P::Wire) = if ready {
-            |wire| wire.input_seen(true)
-        } else {
-            |wire| wire.input_seen(false)
-        };
-        self.read((), seen);
+        self.read((), move |wire| wire.input_seen(ready));
     }
 
     /// Read through the count the handle keeps ([`Self::counted_by`]), with no lend of the place.
