@@ -743,18 +743,13 @@ impl OpenKeyIds {
 /// What the open lent the engine apart from the session's state ([`CoopEngine::assemble`]): the
 /// place of the ABI's handle, the places of the publishes kept for the session's other faces,
 /// which a publish reaches with the session held by another, and the ring of the advanced
-/// publishers' caches, which the engine locks apart from the state.
-struct LentApart<L: CoopLinks + 'static, C: ClockSource + 'static> {
+/// publishers' caches, which the engine locks apart from the state. The read slots of the faces
+/// past the dial role's are handed beside it ([`CoopEngine::engine_of`]): they are the only part
+/// of the type of the links, and a build that takes no such face names none.
+struct LentApart {
     /// The Router of the dial role's link, which the read steps itself (`direct`).
     #[cfg(not(wz_round))]
     router: SessionReassembly,
-    /// The read slots and send places of the faces past the dial role's, made in the rows the
-    /// open lent them (`direct`), in a build that takes faces beside the dial role's.
-    #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
-    taken: direct::TakenFaces<L, C>,
-    /// A build whose links run as tasks lends nothing of a face's link apart from the state.
-    #[cfg(wz_round)]
-    _of: core::marker::PhantomData<fn() -> (L, C)>,
     /// The place the engine is written at.
     engine: EnginePlace,
     handle_place: Option<HandlePlace>,
@@ -6263,10 +6258,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let apart = LentApart {
             #[cfg(not(wz_round))]
             router: lent.router,
-            #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
-            taken,
-            #[cfg(wz_round)]
-            _of: core::marker::PhantomData,
             engine: lent.engine,
             handle_place: lent.handle_place,
             lodgings: lent.lodgings,
@@ -6275,24 +6266,33 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(feature = "advanced-cache")]
             cache: lent.cache,
         };
-        Ok(Self::engine_of(core, apart, row))
+        Ok(Self::engine_of(
+            core,
+            apart,
+            #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+            taken,
+            row,
+        ))
     }
 
     /// The engine over `core`, written at the place the open lent it in the session's arena and
     /// counted by its holders there, put in the row `row` the open claimed for it, which reaches
     /// it without holding it ([`EngineHandle`]), with what the open lent apart from the state
-    /// (`apart`). Out of line, so the open's measure shows it apart.
+    /// (`apart`) and the read slots of the faces past the dial role's (`taken`). Out of line,
+    /// so the open's measure shows it apart.
     #[inline(never)]
-    fn engine_of(core: Core<L, C>, apart: LentApart<L, C>, row: RowClaim) -> EngineHold<Self> {
+    fn engine_of(
+        core: Core<L, C>,
+        apart: LentApart,
+        #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+        taken: direct::TakenFaces<L, C>,
+        row: RowClaim,
+    ) -> EngineHold<Self> {
         // The place is a span of the arena, aligned as a span starts.
         const { assert!(Shared::<Self>::layout().align() <= wz_session_core::bounded::ARENA_ALIGN) };
         let LentApart {
             #[cfg(not(wz_round))]
             router,
-            #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
-            taken,
-            #[cfg(wz_round)]
-                _of: _,
             engine: place,
             handle_place,
             lodgings,
