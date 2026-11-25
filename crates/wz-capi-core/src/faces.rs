@@ -5203,6 +5203,12 @@ impl SharedSession {
         self.retract_keyexpr_locked(&mut guard, mapping_id);
     }
 
+    /// Mint key expression ids from `next` on, past the last to 1 as every mint goes on: for a
+    /// test that reaches the wrap of the id space without spending it.
+    pub fn expr_ids_from(&self, next: ExprId) {
+        self.lock().tables.expr_ids_from(next);
+    }
+
     /// The retraction itself, for a caller that already holds the registry lock
     /// — [`Self::undeclare_keyexpr`] and [`Self::release_keyexpr`], which must
     /// not let it go between deciding and doing.
@@ -8593,8 +8599,10 @@ mod matching_aggregate_tests {
 
     /// An entry lets go of the declarations it held by their rows, not by their ids: a declaration
     /// retracted whatever held it, whose id a later declaration takes again once the ids wrap, is
-    /// not the one the entry's going lets go of. Turned red by an entry that lets go by the id
-    /// (`release_named` through `release_keyexpr`), which retracts the new declaration.
+    /// not the one the entry's going lets go of. The ids are minted from the last, so they wrap at
+    /// the next declaration and the id comes again within as many as it is from 1. Turned red by
+    /// an entry that lets go by the id (`release_named` through `release_keyexpr`), which
+    /// retracts the new declaration.
     #[test]
     fn an_entrys_going_spares_a_declaration_that_took_a_retracted_id_again() {
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
@@ -8615,9 +8623,10 @@ mod matching_aggregate_tests {
             .expect("declared");
         // Retracted whatever holds it, as the program's undeclaration of its key does.
         shared.undeclare_keyexpr(old);
-        // The ids are minted onward and wrap: declarations made and let go of come to the
-        // retracted id again.
-        let again = (0..=u32::from(u16::MAX))
+        // The last id, then 1 onward: declarations made and let go of come to the retracted id
+        // again.
+        shared.expr_ids_from(ExprId::MAX);
+        let again = (0..=old)
             .find_map(|_| {
                 let hold = shared
                     .acquire_keyexpr("wz/held/new".to_owned())
