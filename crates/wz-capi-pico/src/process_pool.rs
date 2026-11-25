@@ -1501,20 +1501,35 @@ const fn counts_of(limits: &SessionLimits, held: &Held) -> Result<Counts, Unplan
 /// nor refuses it. Refused only by counts past the address space, or by a limit of no bound over
 /// an entity the build has a pool of.
 const fn open_plan(limits: &SessionLimits, held: &Held) -> Result<Plan, Unplanned> {
-    let Held([samples, replies, queries, encodings, hellos, small, middle, largest]) = *held;
     let entities = planned!(pooled_entities(limits, caps::HELD_SESSIONS));
-    Ok(Plan::laid(&Counts {
-        sessions: caps::HELD_SESSIONS,
-        samples,
-        replies,
-        queries,
-        configs: caps::HELD_CONFIGS,
-        hellos,
-        payload_blocks: [small, middle, largest],
-        encodings,
-        ..entities
-    }))
+    // Copied whole and then given the counts the open states, each in its own pool: a plan written
+    // pool by pool spells out the count of every pool, the many an open leaves at none included.
+    let mut plan = OPEN_FRAME;
+    let mut rows: (&[HeldRow], &[usize]) = (&HELD_ROWS, &held.0);
+    while let ([row, rows_rest @ ..], [count, counts_rest @ ..]) = rows {
+        put(&mut plan.slots, row.pool, *count);
+        rows = (rows_rest, counts_rest);
+    }
+    // The entities' pools, which the frame leaves at none: a pool the build lays of no entity is
+    // none here too, and its count, known when the library is compiled, writes nothing.
+    let listed = Plan::listed(&entities).slots;
+    let mut pools: (&mut [usize], &[usize]) = (&mut plan.slots, &listed);
+    while let ([slot, slots_rest @ ..], [count, counts_rest @ ..]) = pools {
+        if *count != 0 {
+            *slot = *count;
+        }
+        pools = (slots_rest, counts_rest);
+    }
+    Ok(plan)
 }
+
+/// The plan of an open before the counts it states: `HELD_SESSIONS` sessions' places and
+/// `HELD_CONFIGS` configs, every other pool at none ([`open_plan`]).
+const OPEN_FRAME: Plan = Plan::laid(&Counts {
+    sessions: caps::HELD_SESSIONS,
+    configs: caps::HELD_CONFIGS,
+    ..Counts::NONE
+});
 
 /// The entities of `sessions` sessions under `limits` that lie in the process pools, every other
 /// count none: each session's declared keys, and on the tokio engine every entity of a session,
