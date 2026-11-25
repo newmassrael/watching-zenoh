@@ -562,7 +562,7 @@ mod callback_table {
                 let at = self
                     .used
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                        (used < N).then_some(used + 1)
+                        used.checked_add(1).filter(|&next| next <= N)
                     })
                     .ok()?;
                 if self.entries.get(at)?.claim(thread) {
