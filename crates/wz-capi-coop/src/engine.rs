@@ -1713,8 +1713,6 @@ impl LinkLeg<'_> {
         #[cfg(not(feature = "listen"))]
         let _ = how;
         let mut outcome = Ok(0);
-        #[cfg(test)]
-        let mut headed = false;
         // Each link names the key as its own key-wire form says. A publication is written from
         // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
         // own shorter writer, unless the session or the build leaves it to the owned send below.
@@ -1772,20 +1770,17 @@ impl LinkLeg<'_> {
                 AfterProbe::SendAsOwn => {}
             }
         }
+        // A link that names the key by the declaration the head was written for is sent the head,
+        // the payload's length and the payload; any other is sent the Put's parts.
+        let head = head.filter(|head| plain && (planned || head.names(key.wire())));
         let lent = if plain {
             let send = wz_session_core::session_actions::SendAs {
                 reliable,
                 express,
                 priority,
             };
-            // A link that names the key by the declaration the head was written for is sent
-            // the head, the payload's length and the payload; any other is sent the Put's parts.
-            match head.filter(|head| planned || head.names(key.wire())) {
-                Some(head) => {
-                    #[cfg(test)]
-                    headed = true;
-                    actions.send_put_with_head(key, payload, &head, send)
-                }
+            match head {
+                Some(head) => actions.send_put_with_head(key, payload, &head, send),
                 None => actions.send_plain_put_qos(key, payload, meta.qos, send),
             }
         } else {
@@ -1839,7 +1834,7 @@ impl LinkLeg<'_> {
             outcome,
             stop: false,
             #[cfg(test)]
-            planned: headed,
+            planned: head.is_some(),
         }
     }
 }
