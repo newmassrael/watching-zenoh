@@ -2811,7 +2811,7 @@ mod tests {
         let plan = first_plan().expect("the test binary's counts make pools");
         let mut aside = Pools::unlaid(NonNull::dangling(), Origin::Unfound);
         // SAFETY: laid out for its table alone; nothing is taken from it.
-        unsafe { aside.lay(&plan, Some(Stage::Open)) };
+        unsafe { aside.lay(plan, Some(Stage::Open)) };
         let mut reserved = Reserved::NONE;
         let pools = reserved
             .stage(Stage::Open)
