@@ -703,6 +703,11 @@ impl<F: CellFlag> TxStore for TxBuffer<F> {
     }
 }
 
+/// The receive and the send buffer of one heap profile's link, of tables whose flags take the
+/// form `F`.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub(crate) type LinkBuffers<F> = (RxBuffer<F>, TxBuffer<F>);
+
 /// The buffers of a heap profile's link that opens now: claimed from its session's tables when the
 /// session lent some, and refused as exhausted when they have none left, so a session whose tables
 /// are full opens no link; otherwise allocated, a receive buffer of `rx` bytes and the slots
@@ -713,7 +718,7 @@ pub(crate) fn heap_link_buffers<F: CellFlag>(
     rx: usize,
     tx_slots: usize,
     tx_len: usize,
-) -> Result<(RxBuffer<F>, TxBuffer<F>), crate::session_drive::LinkOpenError> {
+) -> Result<LinkBuffers<F>, crate::session_drive::LinkOpenError> {
     match lent {
         Some(tables) => {
             let (rx, tx) = tables

@@ -107,6 +107,10 @@ type CountOf<T> = <<T as TransportFaces>::Lock as LockKind>::LinkCount;
 /// entropy): as the lock kind counts them (`LockKind::SharedCount`).
 type SharedOf<T> = <<T as TransportFaces>::Lock as LockKind>::SharedCount;
 
+/// The handle on the link a session over the transport of `T` sends and reads by, counted as the
+/// link's parts are.
+type LinkOf<T> = CellRc<dyn SessionDatagramLink, CountOf<T>>;
+
 /// What a session's transport is made of: the session's clock, the network its links are opened
 /// on, and the engine's records of the session's half of a link, of a face and of a group it
 /// joined (`group`).
@@ -279,7 +283,7 @@ pub struct OpenedAs<'e> {
 /// ([`TransportState::place_wire`]).
 pub struct PumpPlace<'p, T: TransportFaces, E> {
     /// The place the pump is built in, which its owner drops it in.
-    pub place: &'p mut MaybeUninit<LinkPump<T, CellRc<dyn SessionDatagramLink, CountOf<T>>>>,
+    pub place: &'p mut MaybeUninit<LinkPump<T, LinkOf<T>>>,
     /// How the owner tells the link's session ended, and ends it.
     pub end: E,
 }
@@ -292,21 +296,16 @@ pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock>, E>
     /// What the owner hands each step of the pump.
     pub dispatch: K::Dispatch,
     /// The pump, in its place.
-    pub pump: &'p mut LinkPump<T, CellRc<dyn SessionDatagramLink, CountOf<T>>>,
+    pub pump: &'p mut LinkPump<T, LinkOf<T>>,
 }
 
 /// What the making of a link's session builds before the session runs
 /// ([`TransportState::build_wire`]).
 struct WireBuilt<T: TransportFaces, D, S> {
-    fields: PumpFields<
-        T::Clock,
-        CellRc<dyn SessionDatagramLink, CountOf<T>>,
-        dyn BoxedLinkDriver,
-        T::Lock,
-    >,
+    fields: PumpFields<T::Clock, LinkOf<T>, dyn BoxedLinkDriver, T::Lock>,
     dispatch: D,
     session: S,
-    link: CellRc<dyn SessionDatagramLink, CountOf<T>>,
+    link: LinkOf<T>,
     input_wait: Option<WaitOn>,
     room_wait: Option<WaitOn>,
 }

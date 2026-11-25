@@ -32,7 +32,7 @@ use super::{WsFraming, WsSource, WS_MTU};
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::HeapLink;
 use crate::link_cells::{CellRc, CountKind, OneTask};
-use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
+use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
     SessionLinks, WaitOn, WsLocator,
@@ -91,7 +91,7 @@ impl<N: CountKind> Default for WsShape<N> {
 
 impl<N: CountKind> WsShape<N> {
     /// The buffers of one link, claimed as every link's of the stack are.
-    fn buffers(&self) -> Result<(RxBuffer<N::Flag>, TxBuffer<N::Flag>), LinkOpenError> {
+    fn buffers(&self) -> Result<LinkBuffers<N::Flag>, LinkOpenError> {
         heap_link_buffers(
             self.lent.as_ref(),
             WS_RX_CAPACITY,

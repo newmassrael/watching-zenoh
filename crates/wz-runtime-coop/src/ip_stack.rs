@@ -46,7 +46,7 @@ use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
 use crate::link_cells::{CellClaim, CellRc, CountKind, OneTask};
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
+use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::SessionDatagramLink;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
@@ -520,7 +520,7 @@ impl<N: CountKind> LinkShape<N> {
     /// The buffers of a link that opens now, its own receive buffer `rx` bytes long: claimed from
     /// the session's tables when it lent some, and [`LinkOpenError::Exhausted`] when they have none
     /// left, so a session whose tables are full opens no link; allocated otherwise.
-    fn buffers(&self, rx: usize) -> Result<(RxBuffer<N::Flag>, TxBuffer<N::Flag>), LinkOpenError> {
+    fn buffers(&self, rx: usize) -> Result<LinkBuffers<N::Flag>, LinkOpenError> {
         heap_link_buffers(self.lent.as_ref(), rx, self.tx_slots, self.tx_capacity)
     }
 }
@@ -922,7 +922,7 @@ where
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
     socket: Option<P>,
-    buffers: Option<(RxBuffer<N::Flag>, TxBuffer<N::Flag>)>,
+    buffers: Option<LinkBuffers<N::Flag>>,
     place: LinkPlace<N>,
 }
 

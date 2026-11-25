@@ -65,7 +65,7 @@ use wz_session_core::group_locator::{GroupLocator, UdpGroup};
 use crate::group_transport::{GroupRx, GroupSend, GroupTransport};
 use crate::ip_stack::{heap_link, HeapLink};
 use crate::link_cells::{CellRc, CountKind, OneTask};
-use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
+use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     Dialled, LinkListener, LinkOpenError, LinkProto, LinkWait, LinkWaits, Locator, NoWaits,
     OpenedLink, PendingDial, SessionLinks, StackWake, WaitOn,
@@ -805,7 +805,7 @@ impl<N: CountKind> From<OpenedLink<HeapLink<N>, N>> for AppDial<N> {
 /// program is told to close.
 struct PendingAppLink<N: CountKind> {
     held: Option<Held>,
-    buffers: Option<(RxBuffer<N::Flag>, TxBuffer<N::Flag>)>,
+    buffers: Option<LinkBuffers<N::Flag>>,
     to: SocketAddr,
     /// A `udp/` link once up, else a `tcp/` one.
     datagram: bool,
