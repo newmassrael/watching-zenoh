@@ -54,7 +54,10 @@ use crate::arena::{
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::form::{LockForm, StateGuard, StateLock};
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(all(
+    not(any(feature = "threads", feature = "listen", feature = "group")),
+    wz_round
+))]
 use crate::round::LendingLink;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
@@ -3002,8 +3005,17 @@ impl<C: ClockSource + 'static> LinkGates for C {
     // The read steps the one link itself and hands each record out as it is read, so nothing
     // holds the link back from its session; the read tells the round where the datagram it lends
     // lies, which the round reads each record's parts in (`direct`).
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(all(
+        not(any(feature = "threads", feature = "listen", feature = "group")),
+        wz_round
+    ))]
     type Gate = LendingLink<CellRc<dyn SessionDatagramLink>>;
+    // A build that puts nothing in the round (`wz_round`) tells it nothing: the link is the pump.
+    #[cfg(all(
+        not(any(feature = "threads", feature = "listen", feature = "group")),
+        not(wz_round)
+    ))]
+    type Gate = CellRc<dyn SessionDatagramLink>;
 }
 
 /// The gates of a link of a session on the clock `C` ([`LinkGates`]).
@@ -3316,11 +3328,23 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let _ = key_form;
     }
 
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(all(
+        not(any(feature = "threads", feature = "listen", feature = "group")),
+        wz_round
+    ))]
     fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, _actions: &LinkHandle<C>) -> LinkGate<C> {
         // Each record is handed out as it is read, so nothing holds the link back; where the
         // datagram it lends lies is kept for the read to tell the round.
         LendingLink::new(pump)
+    }
+
+    // A build that puts nothing in the round (`wz_round`) tells it nothing: the link is the pump.
+    #[cfg(all(
+        not(any(feature = "threads", feature = "listen", feature = "group")),
+        not(wz_round)
+    ))]
+    fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, _actions: &LinkHandle<C>) -> LinkGate<C> {
+        pump
     }
 
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -3390,6 +3414,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
             // The registry holds the face before its link is made (`Registry::add_face`).
             face: self.session.registry.held(face),
             // What the read tells the round of the datagram a record of it lies in.
+            #[cfg(wz_round)]
             link: gate.clone(),
             actions: actions.clone(),
             // SAFETY: the records are held beside the link's session in the engine's face, which
@@ -3400,9 +3425,16 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
             generation,
             // SAFETY: as the plane's: the engine's face lets the records go before the state,
             // whose round's owner changes it no more.
+            #[cfg(wz_round)]
             lane: unsafe { self.session.lane.share() },
             after_pushes: false,
         };
+        // A read that tells no round where a datagram lies keeps no handle on the link.
+        #[cfg(all(
+            not(any(feature = "threads", feature = "listen", feature = "group")),
+            not(wz_round)
+        ))]
+        let _ = gate;
         // The wire keeps a handle on the gates to admit the link through them, and to tell them
         // what each wait found in the link's stack.
         #[cfg(all(feature = "threads", not(any(feature = "listen", feature = "group"))))]

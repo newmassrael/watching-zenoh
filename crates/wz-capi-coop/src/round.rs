@@ -7,9 +7,22 @@
 //! round has not that room (decision Q4), or, where the read hands each record out as it is read,
 //! that tell the round where the datagram a link lends lies.
 
-#[cfg(any(feature = "listen", feature = "group", not(feature = "threads")))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(not(feature = "threads"), wz_round)
+))]
 use core::cell::Cell;
 
+// What a link is gated or lent through: the round's gate, and the lending link of a read that
+// tells the round where a datagram lies.
+#[cfg(any(
+    test,
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    wz_round
+))]
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 #[cfg(any(
     feature = "threads",
@@ -25,6 +38,13 @@ use wz_session_core::limit_binding::Quota;
     feature = "liveliness"
 ))]
 use wz_session_core::limits::SessionLimits;
+#[cfg(any(
+    test,
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    wz_round
+))]
 use wz_session_core::link::{LostCause, RxFrame};
 #[cfg(test)]
 use wz_session_core::placed::Placed;
@@ -672,8 +692,12 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
 /// The round reads a record's parts only where a link it was told of lends them, and keeps no area
 /// to copy them into, so the link keeps where the datagram it lends lies for as long as it lends
 /// it, and the read tells the round under the session's lock as it dispatches each record of it
-/// ([`Self::lend_to`]): the link's receive runs with nothing of the session held.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+/// ([`Self::lend_to`]): the link's receive runs with nothing of the session held. A build that
+/// puts nothing in the round (`wz_round`) tells it nothing, and its link is the pump alone.
+#[cfg(all(
+    not(any(feature = "threads", feature = "listen", feature = "group")),
+    wz_round
+))]
 pub(crate) struct LendingLink<P> {
     pump: P,
     /// The first byte and the length of the datagram the link lends now: set for the length of
@@ -682,7 +706,10 @@ pub(crate) struct LendingLink<P> {
     lent: Cell<Option<(*const u8, usize)>>,
 }
 
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(all(
+    not(any(feature = "threads", feature = "listen", feature = "group")),
+    wz_round
+))]
 impl<P> LendingLink<P> {
     /// `pump`, lending nothing yet.
     pub(crate) fn new(pump: P) -> Self {
@@ -707,7 +734,10 @@ impl<P> LendingLink<P> {
     }
 }
 
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(all(
+    not(any(feature = "threads", feature = "listen", feature = "group")),
+    wz_round
+))]
 impl<P: SessionDatagramLink> SessionDatagramLink for LendingLink<P> {
     fn service(&self) {
         self.pump.service()
