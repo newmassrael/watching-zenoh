@@ -104,8 +104,9 @@ pub trait SessionFaces {
     /// and its tokens, retracted as the round of deliveries takes each.
     fn lose_face(&mut self, face: u64);
 
-    /// When the earliest get pending on any face is due.
-    fn next_get_deadline_ms(&self) -> Option<u64>;
+    /// When the earliest get pending on any face is due. To write: the faces may keep a bound of
+    /// it that an end of a get was not told to, which the read brings up to date ([`DueIndex`]).
+    fn next_get_deadline_ms(&mut self) -> Option<u64>;
 
     /// Retract the tokens the peers of lost links declared, a token at a time while `room` says
     /// the round of deliveries takes its `Delete` now: whether none is owed any more. Faces that
@@ -368,7 +369,7 @@ mod tests {
 
             fn lose_face(&mut self, _face: u64) {}
 
-            fn next_get_deadline_ms(&self) -> Option<u64> {
+            fn next_get_deadline_ms(&mut self) -> Option<u64> {
                 None
             }
         }
@@ -386,7 +387,7 @@ mod tests {
 
             fn lose_face(&mut self, _face: u64) {}
 
-            fn next_get_deadline_ms(&self) -> Option<u64> {
+            fn next_get_deadline_ms(&mut self) -> Option<u64> {
                 None
             }
         }

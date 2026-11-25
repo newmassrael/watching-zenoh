@@ -193,8 +193,9 @@ where
     }
 
     /// When the earliest pending get is due: a query's or a liveliness snapshot's, on any face.
-    pub fn next_get_deadline_ms(&self) -> Option<u64> {
-        P::faces(&self.registry).next_get_deadline_ms()
+    /// To write, as the faces bring their bound of it up to date as they read it.
+    pub fn next_get_deadline_ms(&mut self) -> Option<u64> {
+        P::faces_mut(&mut self.registry).next_get_deadline_ms()
     }
 }
 
@@ -312,7 +313,7 @@ mod tests {
             self.lost.push(face);
         }
 
-        fn next_get_deadline_ms(&self) -> Option<u64> {
+        fn next_get_deadline_ms(&mut self) -> Option<u64> {
             Some(40)
         }
 

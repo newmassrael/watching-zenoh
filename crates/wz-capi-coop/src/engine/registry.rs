@@ -95,7 +95,7 @@ use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
 #[cfg(feature = "query")]
-use wz_session_core::pending_get::LegTables;
+use wz_session_core::pending_get::{DueIndex, DueRow, LegTables};
 use wz_session_core::pending_get::{GetKind, SessionFaces};
 use wz_session_core::session_tables::{PeerDeclarations, Plane};
 
@@ -152,6 +152,11 @@ pub(super) type PeerRoom = wz_session_core::pubsub::LentRoom<RowPolicy>;
 pub(super) struct FaceTables {
     pub(super) peer: Peer,
     pub(super) gets: Gets,
+    /// The set's row of the index of the earliest deadline of the session's gets
+    /// (`RegistryOf::dues`): the index keeps a leaf for each set, free or held, so its rows are
+    /// lent with the sets and none is added or removed as faces come and go.
+    #[cfg(feature = "query")]
+    due: DueRow,
     /// The face's link was lost and the tokens its peer declared are still to be retracted to the
     /// liveliness subscribers: they stay in `peer` until each `Delete` is taken, by the round of
     /// deliveries (`Registry::retract_owed`) or by a read that hands each itself
@@ -177,6 +182,8 @@ impl FaceTables {
             let Self {
                 peer: _,
                 gets: _,
+                #[cfg(feature = "query")]
+                    due: _,
                 #[cfg(feature = "liveliness")]
                     retracting: _,
             } = set;
@@ -187,6 +194,8 @@ impl FaceTables {
         // whole when it is lent.
         let set = unsafe {
             ptr::write(addr_of_mut!((*at).gets), Gets::default());
+            #[cfg(feature = "query")]
+            ptr::write(addr_of_mut!((*at).due), DueRow::NEVER);
             #[cfg(feature = "liveliness")]
             ptr::write(addr_of_mut!((*at).retracting), false);
             Peer::init_in(&mut *addr_of_mut!((*at).peer).cast::<MaybeUninit<Peer>>());
@@ -577,6 +586,10 @@ pub(super) struct RegistryOf<H: Holders> {
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
+    /// The row of the session's own gets in the index of the gets' deadlines, its leaf the one
+    /// after the sets' (`Self::dues`).
+    #[cfg(feature = "local-queryable")]
+    local_due: DueRow,
     /// The program's watches of what the peers declare, which the application layer's observers
     /// hold events for while a link's frame is dispatched (`decl_watch`).
     #[cfg(any(
@@ -634,12 +647,10 @@ impl<H: Holders> SessionFaces for RegistryOf<H> {
         self.lose_tokens(face);
     }
 
-    fn next_get_deadline_ms(&self) -> Option<u64> {
+    fn next_get_deadline_ms(&mut self) -> Option<u64> {
         #[cfg(feature = "query")]
         {
-            self.all_gets()
-                .filter_map(LegTables::next_deadline_ms)
-                .min()
+            self.dues().earliest()
         }
         #[cfg(not(feature = "query"))]
         {
@@ -653,6 +664,84 @@ impl<H: Holders> SessionFaces for RegistryOf<H> {
     ))]
     fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
         RegistryOf::retract_owed(self, room)
+    }
+}
+
+/// The index of the earliest deadline of the session's gets over the rows the sets and the
+/// session's own gets keep: a leaf for each set, in the order of the sets, then the session's own
+/// gets'. Each table keeps its earliest deadline as its entries come and go, so a leaf's table is
+/// read with no walk of its entries.
+#[cfg(feature = "query")]
+struct Dues<'a> {
+    sets: &'a mut [FaceTables],
+    #[cfg(feature = "local-queryable")]
+    local: (&'a mut DueRow, &'a mut Gets),
+}
+
+#[cfg(feature = "query")]
+impl Dues<'_> {
+    /// The gets of leaf `leaf`, to write.
+    fn gets_mut(&mut self, leaf: usize) -> Option<&mut Gets> {
+        let sets = self.sets.len();
+        if leaf < sets {
+            return self.sets.get_mut(leaf).map(|set| &mut set.gets);
+        }
+        #[cfg(feature = "local-queryable")]
+        if leaf == sets {
+            return Some(&mut *self.local.1);
+        }
+        None
+    }
+}
+
+#[cfg(feature = "query")]
+impl DueIndex for Dues<'_> {
+    fn leaves(&self) -> usize {
+        self.sets
+            .len()
+            .wrapping_add(usize::from(cfg!(feature = "local-queryable")))
+    }
+
+    fn row(&self, at: usize) -> Option<&DueRow> {
+        let sets = self.sets.len();
+        if at < sets {
+            return self.sets.get(at).map(|set| &set.due);
+        }
+        #[cfg(feature = "local-queryable")]
+        if at == sets {
+            return Some(&*self.local.0);
+        }
+        None
+    }
+
+    fn row_mut(&mut self, at: usize) -> Option<&mut DueRow> {
+        let sets = self.sets.len();
+        if at < sets {
+            return self.sets.get_mut(at).map(|set| &mut set.due);
+        }
+        #[cfg(feature = "local-queryable")]
+        if at == sets {
+            return Some(&mut *self.local.0);
+        }
+        None
+    }
+
+    fn due(&self, leaf: usize) -> u64 {
+        let sets = self.sets.len();
+        let gets = if leaf < sets {
+            self.sets.get(leaf).map(|set| &set.gets)
+        } else {
+            #[cfg(feature = "local-queryable")]
+            {
+                (leaf == sets).then_some(&*self.local.1)
+            }
+            #[cfg(not(feature = "local-queryable"))]
+            {
+                None
+            }
+        };
+        gets.and_then(LegTables::next_deadline_ms)
+            .unwrap_or(u64::MAX)
     }
 }
 
@@ -732,7 +821,7 @@ impl<H: Holders> RegistryOf<H> {
             not(any(feature = "threads", feature = "listen", feature = "group"))
         ))]
         let decl_watches = DeclWatches::under(limits)?;
-        Ok(Self {
+        let mut registry = Self {
             app: ManuallyDrop::new(app),
             delivery,
             sets: ManuallyDrop::new(sets),
@@ -745,6 +834,8 @@ impl<H: Holders> RegistryOf<H> {
             pools,
             #[cfg(feature = "local-queryable")]
             local,
+            #[cfg(feature = "local-queryable")]
+            local_due: DueRow::NEVER,
             #[cfg(any(
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
@@ -761,7 +852,16 @@ impl<H: Holders> RegistryOf<H> {
             pushes: (0, 0, 0),
             #[cfg(all(test, feature = "std", feature = "queryable"))]
             drains_within_frames: 0,
-        })
+        };
+        registry.index_dues();
+        Ok(registry)
+    }
+
+    /// Index the gets of every set and the session's own as an open finds them, none holding a
+    /// deadline: what a registry is made with, whichever form holds it.
+    fn index_dues(&mut self) {
+        #[cfg(feature = "query")]
+        self.dues().reset();
     }
 
     /// The count [`Self::peers_declare`]'s answers are good for: one taken while this read the
@@ -888,7 +988,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", any(feature = "liveliness-get", test)))]
     pub(super) fn all_gets(&self) -> impl Iterator<Item = &Gets> {
         let gets = self.faces().map(|face| &face.gets);
         #[cfg(feature = "local-queryable")]
@@ -897,7 +997,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// [`Self::all_gets`], to write.
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", any(feature = "liveliness-get", test)))]
     pub(super) fn all_gets_mut(&mut self) -> impl Iterator<Item = &mut Gets> {
         let gets = self
             .sets
@@ -919,6 +1019,81 @@ impl<H: Holders> RegistryOf<H> {
             return Some(&mut self.local);
         }
         self.face_mut(id).map(|face| &mut face.gets)
+    }
+
+    /// The index of the earliest deadline of the session's gets, over the rows the sets and the
+    /// session's own gets keep.
+    #[cfg(feature = "query")]
+    fn dues(&mut self) -> Dues<'_> {
+        let Self {
+            sets,
+            #[cfg(feature = "local-queryable")]
+            local,
+            #[cfg(feature = "local-queryable")]
+            local_due,
+            ..
+        } = self;
+        Dues {
+            sets,
+            #[cfg(feature = "local-queryable")]
+            local: (local_due, local),
+        }
+    }
+
+    /// The leaf of the index of the gets' deadlines that the gets of face `id` are, or the
+    /// session's own for [`LOCAL_FACE`], while the session holds them.
+    #[cfg(feature = "query")]
+    fn gets_leaf(&self, id: FaceId) -> Option<usize> {
+        #[cfg(feature = "local-queryable")]
+        if id == LOCAL_FACE {
+            return Some(self.sets.len());
+        }
+        self.held_at(id)
+    }
+
+    /// Write the pending gets of face `id`, or the session's own for [`LOCAL_FACE`], by `write`,
+    /// while the session holds them: a deadline `write` adds lowers their leaf of the index of the
+    /// gets' deadlines at once, so no get is due before the index says. Every get is held through
+    /// here; an end needs no telling, as it only moves a table's deadline later.
+    #[cfg(feature = "query")]
+    pub(super) fn write_gets<R>(
+        &mut self,
+        id: FaceId,
+        write: impl FnOnce(&mut Gets) -> R,
+    ) -> Option<R> {
+        let leaf = self.gets_leaf(id)?;
+        if leaf < self.sets.len() {
+            // As every hand-out of a face's tables to write is counted (`Self::face_mut`).
+            self.writing();
+        }
+        let mut dues = self.dues();
+        let wrote = write(dues.gets_mut(leaf)?);
+        dues.lower(leaf);
+        Some(wrote)
+    }
+
+    /// End the gets whose deadline passed by `now_ms`, each with its timeout: the index names the
+    /// tables one is due in, so a table without one is not visited. A table swept holds no
+    /// deadline at or before `now_ms` and is not named again, so each is swept once at most.
+    #[cfg(feature = "query")]
+    pub(super) fn sweep_due_gets(&mut self, now_ms: u64) {
+        let mut dues = self.dues();
+        for _ in 0..dues.leaves() {
+            let Some(leaf) = dues.due_by(now_ms) else {
+                break;
+            };
+            let Some(gets) = dues.gets_mut(leaf) else {
+                break;
+            };
+            if now_ms >= gets.replies.due_ms() {
+                gets.replies.sweep_timed_out(now_ms);
+            }
+            // Its terminated ids are staged for a reconnect cache, which the caller drains.
+            #[cfg(feature = "liveliness-get")]
+            if now_ms >= gets.liveliness_gets.due_ms() {
+                gets.liveliness_gets.sweep_timed_out(now_ms);
+            }
+        }
     }
 
     /// How many places the open lent a set for: the places of every table of the session's faces.
@@ -3318,6 +3493,37 @@ mod tests {
             assert_eq!(held.registry.all_gets_mut().count(), walked);
         }
     }
+    /// The index of the gets' deadlines keeps a leaf for each set the open lent, held or free, and
+    /// one for the session's own gets after them: a face's gets are its set's leaf, a face not held
+    /// has none and is not written, and a registry made with no get pending answers no deadline.
+    /// Turned red by an index made a leaf short or over, or by a face's gets found at another
+    /// set's leaf.
+    #[cfg(feature = "query")]
+    #[test]
+    fn the_index_of_the_gets_deadlines_keeps_a_leaf_for_each_set() {
+        let mut held = held(4);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
+        let own = usize::from(cfg!(feature = "local-queryable"));
+        assert_eq!(held.registry.dues().leaves(), 4 + own);
+        assert_eq!(held.registry.gets_leaf(DIAL_FACE), Some(0));
+        let added = held.registry.gets_leaf(5);
+        assert_eq!(added, held.registry.held_at(5));
+        assert!(added.is_some_and(|leaf| leaf > 0 && leaf < 4), "{added:?}");
+        assert_eq!(held.registry.gets_leaf(9), None, "a face not held");
+        #[cfg(feature = "local-queryable")]
+        assert_eq!(held.registry.gets_leaf(LOCAL_FACE), Some(4));
+        let mut written = false;
+        assert_eq!(held.registry.write_gets(9, |_| written = true), None);
+        assert!(!written, "the gets of a face not held were written");
+        assert_eq!(
+            SessionFaces::next_get_deadline_ms(&mut held.registry),
+            None,
+            "CONTROL: no get is pending"
+        );
+    }
+
     /// A session of its dial role's face alone holds that face in the first set and no other, and
     /// keeps no index of held sets: a face that is not the dial role's finds no set, no call counts
     /// another face, and neither removing the dial role's face nor every accepted face empties its
