@@ -204,7 +204,7 @@ impl PicoSubscriberForms {
     /// when the last holder of the previous one is letting go of its room on another thread.
     fn anchor(
         &self,
-        shared: &Arc<Engine>,
+        shared: &crate::session::EngineHold,
         entity: Entity,
         keyexpr: &str,
     ) -> Option<Strong<Anchor>> {

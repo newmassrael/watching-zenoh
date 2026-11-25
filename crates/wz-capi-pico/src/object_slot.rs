@@ -129,7 +129,7 @@ impl<T> Slot<T> {
     /// when every one is held, or the kind or `T` is not one the open laid places out for. On the
     /// tokio engine it is a place of the kind's pool ([`Self::take`]).
     #[cfg(not(feature = "engine-tokio"))]
-    pub(crate) fn take_entity(engine: &Arc<crate::session::Engine>, kind: Kind) -> Option<Self> {
+    pub(crate) fn take_entity(engine: &crate::session::EngineHold, kind: Kind) -> Option<Self> {
         let lender = Lender::lend(engine, kind, InSession::<T>::LAYOUT)?;
         Some(Self {
             place: lender.place.as_ptr().cast(),
@@ -140,7 +140,7 @@ impl<T> Slot<T> {
     /// A place for the object of one of `engine`'s entities of `kind`: on the tokio engine, a
     /// place of the kind's pool ([`Self::take`]).
     #[cfg(feature = "engine-tokio")]
-    pub(crate) fn take_entity(engine: &Arc<crate::session::Engine>, kind: Kind) -> Option<Self> {
+    pub(crate) fn take_entity(engine: &crate::session::EngineHold, kind: Kind) -> Option<Self> {
         let _ = engine;
         Self::take(kind)
     }
@@ -215,7 +215,7 @@ impl<T> Drop for Slot<T> {
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) struct Lender {
     place: wz_capi_port::EntityPlace,
-    engine: Arc<crate::session::Engine>,
+    engine: crate::session::EngineHold,
 }
 
 /// No session lends a place on the tokio engine: its entities' objects lie in the pools.
@@ -230,7 +230,7 @@ impl Lender {
     /// each declare, so the layout is a value rather than each object's own copy of the take.
     #[inline(never)]
     fn lend(
-        engine: &Arc<crate::session::Engine>,
+        engine: &crate::session::EngineHold,
         kind: Kind,
         needed: core::alloc::Layout,
     ) -> Option<Self> {
@@ -980,7 +980,7 @@ mod tests {
         };
 
         // How many publisher places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<crate::session::Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Publisher)).collect();
             claimed.len()
@@ -1069,7 +1069,7 @@ mod tests {
         let handle = unsafe { session_handle(z_session_loan(&session)) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many querier places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<crate::session::Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Querier)).collect();
             claimed.len()
@@ -1137,7 +1137,7 @@ mod tests {
         let handle = unsafe { session_handle(z_session_loan(&session)) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many querier places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<crate::session::Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Querier)).collect();
             claimed.len()

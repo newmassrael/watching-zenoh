@@ -487,9 +487,7 @@ mod tests {
 
     /// The engine behind `session`, whichever the build has.
     #[cfg(feature = "peer")]
-    unsafe fn engine_of(
-        session: &crate::session::z_owned_session_t,
-    ) -> std::sync::Arc<crate::session::Engine> {
+    unsafe fn engine_of(session: &crate::session::z_owned_session_t) -> crate::session::EngineHold {
         let handle = crate::session::session_handle(crate::session::z_session_loan(session))
             .expect("an open session");
         crate::session::engine_held(handle).clone()

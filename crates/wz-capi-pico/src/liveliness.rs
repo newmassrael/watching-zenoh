@@ -54,7 +54,7 @@ use crate::pubsub::{
 };
 use crate::refusal::{refusal_code, Door};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
-use crate::session::{engine_held, z_loaned_session_t, Engine};
+use crate::session::{engine_held, z_loaned_session_t, EngineHold};
 use crate::write_filter::PicoSession;
 
 /// pico `z_liveliness_token_options_t` — a single `uint8_t __dummy`
@@ -114,7 +114,7 @@ impl z_owned_liveliness_token_t {
 /// explicit `z_liveliness_undeclare_token` and the implicit `z_drop` take the
 /// identical path — the two must not be able to diverge.
 pub(crate) struct TokenState {
-    shared: Arc<Engine>,
+    shared: EngineHold,
     id: TokenId,
     /// R2959 — the token's key with the whole-key declaration pico makes for
     /// it; dropped after the token, so its retraction follows the token's.
@@ -417,7 +417,7 @@ unsafe fn declare_liveliness_subscriber_with(
 /// `existing` is the caller's own key when it is already a declaration; `closure` is counted in
 /// no owner yet (`CClosure::uncounted`).
 pub(crate) unsafe fn declare_liveliness_subscriber_in(
-    engine: &Arc<Engine>,
+    engine: &EngineHold,
     slot: crate::object_slot::Slot<SubscriberPlace>,
     keyexpr: &str,
     existing: Option<&DeclaredKeyexpr>,

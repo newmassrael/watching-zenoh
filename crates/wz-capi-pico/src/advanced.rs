@@ -444,7 +444,7 @@ impl ze_owned_advanced_publisher_t {
 /// implicit `z_drop` and an explicit `ze_undeclare_advanced_publisher` take the
 /// identical path.
 pub(crate) struct AdvPubState {
-    engine: Arc<Engine>,
+    engine: crate::session::EngineHold,
     publisher: AdvancedPublisherOn<PicoPlane>,
     /// R311y559 — the cached `{ start, len }` view of the publisher's key, so
     /// `ze_advanced_publisher_keyexpr` has stable storage to borrow. Bound
@@ -1115,7 +1115,7 @@ impl MissRooms {
 /// Behind a `ze_owned_advanced_subscriber_t` handle, in a place of its session's
 /// ([`AdvSubPlace`]).
 pub(crate) struct AdvSubState {
-    engine: Arc<Engine>,
+    engine: crate::session::EngineHold,
     /// The subscriber the engine hosts, until its owner lets go of it. Dropping it retracts
     /// everything it declared, in the order the runtime's own subscriber does; a background
     /// subscriber is taken out to run on with its entities standing. Hosted on the engine as the
@@ -2970,7 +2970,7 @@ mod tests {
         let handle = unsafe { session_handle(loaned) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many advanced publisher places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedPublisher))
                     .collect();
@@ -3062,7 +3062,7 @@ mod tests {
         let handle = unsafe { session_handle(loaned) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many places of `kind` `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>, kind: Kind| {
+        let free = |engine: &crate::session::EngineHold, kind: Kind| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, kind)).collect();
             claimed.len()
@@ -3200,7 +3200,7 @@ mod tests {
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many advanced subscribers' places `engine` has free: each claimed, then all given
         // back.
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedSubscriber))
                     .collect();
@@ -3284,7 +3284,7 @@ mod tests {
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedSubscriber))
                     .collect();
@@ -3359,7 +3359,7 @@ mod tests {
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedSubscriber))
                     .collect();
@@ -3451,7 +3451,7 @@ mod tests {
         let handle = unsafe { session_handle(loaned) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many places of `kind` `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>, kind: Kind| {
+        let free = |engine: &crate::session::EngineHold, kind: Kind| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, kind)).collect();
             claimed.len()

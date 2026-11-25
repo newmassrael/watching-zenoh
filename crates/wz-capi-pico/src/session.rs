@@ -752,7 +752,7 @@ pub(crate) type SessionPlace = crate::session_place::HeldPlace<PicoSessionHandle
 pub(crate) struct SessionTail {
     open: crate::ffi::OpenClosures,
     #[cfg(not(feature = "engine-tokio"))]
-    arena: core::mem::ManuallyDrop<alloc::sync::Arc<Engine>>,
+    arena: core::mem::ManuallyDrop<EngineHold>,
 }
 
 impl SessionTail {
@@ -909,10 +909,15 @@ pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) type Engine = wz_capi_coop::CoopEngine<PicoLinks, SessionClockOf>;
 
+/// A count of the session's engine: what an entity whose object lies in the session's arena holds,
+/// so the arena stands while the object does, and what reaches the engine as `&Engine` by
+/// `Deref`. The one name every module holds the engine by, whichever engine the build runs.
+pub(crate) type EngineHold = alloc::sync::Arc<Engine>;
+
 /// The engine behind a session handle as the session holds it, for the length of one call: a door
 /// that only passes it on, or keeps it in an object that clones it, takes no count of its own, and
 /// so has none to let go of on each of its ways out.
-pub(crate) fn engine_held(handle: &PicoSessionHandle) -> &alloc::sync::Arc<Engine> {
+pub(crate) fn engine_held(handle: &PicoSessionHandle) -> &EngineHold {
     handle.drive.engine_hold()
 }
 

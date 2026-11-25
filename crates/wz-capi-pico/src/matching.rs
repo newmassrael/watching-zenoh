@@ -121,7 +121,7 @@ type MatchingCClosure = CClosure<z_closure_matching_status_callback_t>;
 /// listener's undeclare retracts. It lies in the listener's place, a place of the session's own
 /// for the kind (`crate::object_slot::Kind::MatchingListener`).
 pub(crate) struct MatchingListenerState {
-    shared: Arc<Engine>,
+    shared: crate::session::EngineHold,
     id: MatchId,
 }
 
@@ -944,7 +944,7 @@ mod tests {
 
     /// How many listener places `engine` has free: each claimed, then all given back.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
-    fn free_places(engine: &Arc<Engine>) -> usize {
+    fn free_places(engine: &crate::session::EngineHold) -> usize {
         let claimed: crate::prelude::Vec<Slot<u64>> =
             core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::MatchingListener))
                 .collect();
@@ -953,7 +953,7 @@ mod tests {
 
     /// A listener's place taken from `engine` and filled as a declare fills it, on no list.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
-    fn placed(engine: &Arc<Engine>) -> *mut MatchingListenerState {
+    fn placed(engine: &crate::session::EngineHold) -> *mut MatchingListenerState {
         Slot::<MatchingPlace>::take_entity(engine, Kind::MatchingListener)
             .expect("a listener's place")
             .fill(Answering::keeping(

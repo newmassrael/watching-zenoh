@@ -49,7 +49,7 @@ use crate::refusal::{refusal_code, Door};
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
-use crate::session::{engine_held, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, session_handle, z_loaned_session_t, EngineHold};
 
 /// The peer declared an entity.
 pub const WZ_EXT_DECL_DECLARED: u8 = 0;
@@ -121,7 +121,7 @@ type WatchClosure = CClosure<Option<wz_ext_decl_watch_fn>>;
 /// which the watch's drop retracts. It lies in the watch's place, a place of the session's own for
 /// the kind (`crate::object_slot::Kind::DeclWatch`).
 pub(crate) struct WatchState {
-    engine: Arc<Engine>,
+    engine: EngineHold,
     id: DeclWatchId,
 }
 
@@ -510,7 +510,7 @@ mod tests {
         let handle = unsafe { session_handle(loaned) }.expect("an open session has its handle");
         let engine = engine_held(handle).clone();
         // How many watch places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &EngineHold| {
             let claimed: alloc::vec::Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::DeclWatch)).collect();
             claimed.len()

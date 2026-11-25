@@ -76,7 +76,7 @@ impl PicoPlane {
 
 /// The ring a session's caches keep their samples in, holding the session's engine so the ring
 /// stands for as long as a cache in it does.
-struct SessionCacheBytes(Arc<crate::session::Engine>);
+struct SessionCacheBytes(crate::session::EngineHold);
 
 impl CacheBytes for SessionCacheBytes {
     fn with_bytes(&self, with: &mut dyn FnMut(&mut [u8])) {

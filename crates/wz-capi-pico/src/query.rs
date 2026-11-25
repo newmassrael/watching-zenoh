@@ -1328,7 +1328,7 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 /// (→ the C `drop(context)`). It lies in its place ([`QueryablePlace`]) beside the C
 /// closure the row calls, which outlives it until the row lets go of it.
 pub(crate) struct QueryableState {
-    engine: Arc<Engine>,
+    engine: crate::session::EngineHold,
     /// The declaration, once made: the place is filled before the queryable is declared, as the
     /// closure its row calls lies in it, and one whose declaration was refused is let go of with
     /// none.
@@ -1553,7 +1553,7 @@ pub(crate) fn declare_queryable_on(
 /// than a C closure (an advanced publisher's cache, the admin space).
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 pub(crate) struct PlainQueryable {
-    engine: Arc<Engine>,
+    engine: crate::session::EngineHold,
     id: QblId,
     /// Dropped after the queryable, so the retraction follows.
     _key: DeclaredKeyexpr,
@@ -2950,7 +2950,7 @@ mod tests {
         let handle = unsafe { session_handle(z_session_loan(&session)) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many queryable places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Queryable)).collect();
             claimed.len()
