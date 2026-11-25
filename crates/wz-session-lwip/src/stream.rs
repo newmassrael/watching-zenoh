@@ -237,7 +237,9 @@ where
 /// and anything else is the other end not taking the link.
 fn open_error(why: TcpError) -> LinkOpenError {
     match why {
-        TcpError::PcbExhausted | TcpError::SlotsExhausted => LinkOpenError::Exhausted,
+        TcpError::PcbExhausted | TcpError::SlotsExhausted | TcpError::HeapRefused => {
+            LinkOpenError::Exhausted
+        }
         TcpError::RxBelowWindow { .. } => LinkOpenError::Unsupported,
         _ => LinkOpenError::Refused,
     }
@@ -820,6 +822,18 @@ mod tests {
             carry(&server, &client, &[4u8; 700]).as_deref(),
             Some(&[4u8; 700][..]),
             "server to client"
+        );
+    }
+
+    /// A connect the heap has no room for is worth a retry, as one the stack has no pcb for.
+    /// Turned red by `open_error` reading `HeapRefused` as the other end refusing.
+    #[test]
+    fn a_connect_the_heap_refuses_is_read_as_an_exhausted_stack() {
+        assert_eq!(open_error(TcpError::HeapRefused), LinkOpenError::Exhausted);
+        assert_eq!(open_error(TcpError::PcbExhausted), LinkOpenError::Exhausted);
+        assert_eq!(
+            open_error(TcpError::ConnectFailed(-4)),
+            LinkOpenError::Refused
         );
     }
 }
