@@ -31,17 +31,12 @@
 //! ([`AfPacketCarrier`](crate::raweth_group::AfPacketCarrier) is the one a session opens).
 
 use std::io;
-use std::sync::Arc;
-#[cfg(feature = "reassembly")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::unix::AsyncFd;
 use wz_packet_socket::raweth_socket::AfPacketSocket;
 use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
-use wz_session_core::raweth_link::{
-    deframe, frame, leading_message_key, mac_text, RawEthHeader, RethLocator, ETH_HEADER_LEN,
-    ETH_VLAN_HEADER_LEN, MAX_ETH_FRAME_SIZE,
-};
+use wz_session_core::raweth_link::{frame, mac_text, RethLocator, RethRoutes, MAX_ETH_FRAME_SIZE};
 // A member's key is the session core's, which both engines' raweth groups name it by.
 pub use wz_session_core::raweth_link::{member_address, member_locator};
 use wz_session_core::reliability::Reliability;
@@ -108,8 +103,7 @@ impl RawEthCarrier for AfPacketCarrier {
 pub struct RawEthGroupDriver<C> {
     carrier: Option<Arc<C>>,
     endpoint: Arc<RethLocator>,
-    #[cfg(feature = "reassembly")]
-    routes: Arc<Mutex<FragmentRoutes>>,
+    routes: Arc<Mutex<RethRoutes>>,
 }
 
 impl<C: RawEthCarrier> RawEthGroupDriver<C> {
@@ -118,24 +112,9 @@ impl<C: RawEthCarrier> RawEthGroupDriver<C> {
         Self {
             carrier: Some(Arc::new(carrier)),
             endpoint: Arc::new(endpoint),
-            #[cfg(feature = "reassembly")]
-            routes: Arc::new(Mutex::new(FragmentRoutes::default())),
+            routes: Arc::new(Mutex::new(RethRoutes::default())),
         }
     }
-}
-
-/// The mapping entry the fragments of the message on each channel go by, from its first
-/// fragment until its last: pico picks a message's destination once, by its key, and sends
-/// every fragment of it there (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
-/// `// The message does not fit in the current batch, let's fragment it`). One message is
-/// fragmented at a time on a channel, so a channel holds one route. A build without
-/// `reassembly` has no fragment to route: the group's sender cuts none, and the wire form of
-/// one is not decoded.
-#[cfg(feature = "reassembly")]
-#[derive(Default)]
-struct FragmentRoutes {
-    reliable: Option<usize>,
-    best_effort: Option<usize>,
 }
 
 impl RawEthGroupDriver<AfPacketCarrier> {
@@ -182,17 +161,9 @@ impl<C: RawEthCarrier> LinkDriver for RawEthGroupDriver<C> {
                     }
                 }
             };
-            // Whatever does not deframe is another protocol on the interface.
-            let Ok((header, payload)) = deframe(&buf[..n]) else {
-                continue;
-            };
-            if !self.endpoint.whitelist.accepts(&header.smac) {
-                continue;
+            if let Some((payload, src)) = self.endpoint.admit(&buf[..n]) {
+                return LinkEvent::Rx(RxFrame::with_src(payload.to_vec(), src));
             }
-            return LinkEvent::Rx(RxFrame::with_src(
-                payload.to_vec(),
-                member_address(header.smac),
-            ));
         }
     }
 }
@@ -207,7 +178,6 @@ impl<C: RawEthCarrier> MulticastLinkDriver for RawEthGroupDriver<C> {
         Ok(RawEthGroupSender {
             carrier,
             endpoint: self.endpoint.clone(),
-            #[cfg(feature = "reassembly")]
             routes: self.routes.clone(),
         })
     }
@@ -222,12 +192,7 @@ impl<C: RawEthCarrier> MulticastLinkDriver for RawEthGroupDriver<C> {
 
     /// The frame less the widest header a mapping entry makes.
     fn frame_budget(&self) -> Option<u16> {
-        let header = if self.endpoint.mapping().any(|entry| entry.vlan.is_some()) {
-            ETH_VLAN_HEADER_LEN
-        } else {
-            ETH_HEADER_LEN
-        };
-        u16::try_from(MAX_ETH_FRAME_SIZE - header).ok()
+        Some(self.endpoint.frame_budget())
     }
 }
 
@@ -236,71 +201,23 @@ impl<C: RawEthCarrier> MulticastLinkDriver for RawEthGroupDriver<C> {
 pub struct RawEthGroupSender<C> {
     carrier: Arc<C>,
     endpoint: Arc<RethLocator>,
-    #[cfg(feature = "reassembly")]
-    routes: Arc<Mutex<FragmentRoutes>>,
+    routes: Arc<Mutex<RethRoutes>>,
 }
 
 impl<C: RawEthCarrier> RawEthGroupSender<C> {
-    /// The index of the mapping entry `datagram` goes by: a frame's by the key of the message it
-    /// carries, a fragment's by the key of the message it is part of, read off the chain's
-    /// first fragment, and anything else (a JOIN, a declaration) by the first entry, as pico
-    /// sends a message that names no key (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
-    /// `// Store default value into socket`).
+    /// The index of the mapping entry `datagram` goes by
+    /// ([`RethRoutes`](wz_session_core::raweth_link::RethRoutes)).
     fn route(&self, datagram: &[u8]) -> usize {
-        use wz_session_core::inbound::{parse_inbound, InboundFrame};
-        // A mapping of one entry sends everything one way, and the key need not be read.
-        if self.endpoint.mapping_len() < 2 {
-            return 0;
-        }
-        match parse_inbound(datagram) {
-            Ok(InboundFrame::Frame { payload, .. }) => self
-                .endpoint
-                .mapping_index_for(leading_message_key(&payload)),
-            #[cfg(feature = "reassembly")]
-            Ok(InboundFrame::Fragment {
-                reliable,
-                more,
-                payload,
-                markers,
-                ..
-            }) => {
-                let mut routes = self
-                    .routes
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let slot = if reliable {
-                    &mut routes.reliable
-                } else {
-                    &mut routes.best_effort
-                };
-                // A chain's first fragment, by its marker where the chain carries one and by
-                // the channel holding no route where it does not, picks the route.
-                if markers.first || slot.is_none() {
-                    *slot = Some(
-                        self.endpoint
-                            .mapping_index_for(leading_message_key(&payload)),
-                    );
-                }
-                let index = slot.unwrap_or(0);
-                // The last fragment, or the one that abandons the chain, ends it.
-                if !more || markers.dropped {
-                    *slot = None;
-                }
-                index
-            }
-            _ => 0,
-        }
+        self.routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .route(&self.endpoint, datagram)
     }
 }
 
 impl<C: RawEthCarrier> MulticastDatagramSender for RawEthGroupSender<C> {
     fn send(&self, datagram: &[u8]) -> impl core::future::Future<Output = io::Result<()>> + Send {
-        let entry = self.endpoint.mapping_at(self.route(datagram));
-        let mut header =
-            RawEthHeader::new(entry.dmac, self.endpoint.smac, self.endpoint.ethtype, 0);
-        if let Some(tag) = entry.vlan {
-            header = header.with_vlan(tag);
-        }
+        let header = self.endpoint.header_for(self.route(datagram));
         let framed = frame(&header, datagram)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()));
         let carrier = self.carrier.clone();
@@ -312,7 +229,7 @@ impl<C: RawEthCarrier> MulticastDatagramSender for RawEthGroupSender<C> {
 mod tests {
     use super::*;
     use tokio::net::UnixDatagram;
-    use wz_session_core::raweth_link::parse_reth_locator;
+    use wz_session_core::raweth_link::{deframe, parse_reth_locator, RawEthHeader};
 
     /// Two ends of a datagram pair stand in for the medium: one send, one receive.
     struct PairCarrier(UnixDatagram);

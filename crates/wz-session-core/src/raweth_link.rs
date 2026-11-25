@@ -322,26 +322,43 @@ fn take<const N: usize>(bytes: &[u8]) -> Option<([u8; N], &[u8])> {
     Some((*head, rest))
 }
 
-/// Build one raweth frame: the header (with `data_length` set from `payload`)
-/// followed by the payload.
+/// Write one raweth frame at the front of `out`: the header (with `data_length`
+/// set from `payload`) followed by the payload, returning the frame's length.
+/// Nothing is written into a buffer too small for the whole frame.
 ///
 /// `header.data_length` is OVERWRITTEN from `payload.len()` rather than
 /// trusted. A length field that can disagree with the bytes it describes is
 /// the one field a caller must not be able to get wrong, and pico computes it
 /// the same way (tx.c:134/145) rather than accepting it.
-#[cfg(feature = "alloc")]
-pub fn frame(header: &RawEthHeader, payload: &[u8]) -> Result<alloc::vec::Vec<u8>, RawEthError> {
+pub fn frame_into(
+    header: &RawEthHeader,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, RawEthError> {
     let total = header.len().saturating_add(payload.len());
     if total > MAX_ETH_FRAME_SIZE {
         return Err(RawEthError::FrameTooLarge { size: total });
     }
+    let got = out.len();
+    let out = out
+        .get_mut(..total)
+        .ok_or(RawEthError::BufferTooSmall { need: total, got })?;
     let mut sized = *header;
+    // Under MAX_ETH_FRAME_SIZE, checked above.
     sized.data_length = payload.len() as u16;
-    let mut out = alloc::vec::Vec::with_capacity(total);
-    out.resize(sized.len(), 0);
-    let n = sized.encode_into(&mut out)?;
-    out.truncate(n);
-    out.extend_from_slice(payload);
+    let n = sized.encode_into(out)?;
+    out.get_mut(n..)
+        .ok_or(RawEthError::BufferTooSmall { need: total, got })?
+        .copy_from_slice(payload);
+    Ok(total)
+}
+
+/// [`frame_into`] a buffer of the frame's own, handed back.
+#[cfg(feature = "alloc")]
+pub fn frame(header: &RawEthHeader, payload: &[u8]) -> Result<alloc::vec::Vec<u8>, RawEthError> {
+    let total = header.len().saturating_add(payload.len());
+    let mut out = alloc::vec![0u8; total.min(MAX_ETH_FRAME_SIZE)];
+    frame_into(header, payload, &mut out)?;
     Ok(out)
 }
 
@@ -513,6 +530,42 @@ impl RethLocator {
             .unwrap_or(0)
     }
 
+    /// The header of a frame sent by the entry at `index` of [`Self::mapping`]: from the link's
+    /// own MAC to the entry's, tagged as the entry is. Its `data_length` is set as the frame is
+    /// written ([`frame_into`]).
+    pub fn header_for(&self, index: usize) -> RawEthHeader {
+        let entry = self.mapping_at(index);
+        let header = RawEthHeader::new(entry.dmac, self.smac, self.ethtype, 0);
+        match entry.vlan {
+            Some(tag) => header.with_vlan(tag),
+            None => header,
+        }
+    }
+
+    /// The bytes of a datagram one frame of this link carries: [`MAX_ETH_FRAME_SIZE`] less the
+    /// widest header its mapping makes, so a group frames its batches to what every entry's frame
+    /// holds.
+    pub fn frame_budget(&self) -> u16 {
+        let header = if self.routes.iter().any(|route| route.vlan.is_some()) {
+            ETH_VLAN_HEADER_LEN
+        } else {
+            ETH_HEADER_LEN
+        };
+        // A frame less its header is under 1514.
+        (MAX_ETH_FRAME_SIZE - header) as u16
+    }
+
+    /// The datagram `frame` carries and the member it came from, as a group of this link reads
+    /// one; `None` for a frame that does not deframe, which is another protocol on the interface
+    /// (nothing filters on the ethertype, as pico's `ETH_P_ALL` socket does not), and for one from
+    /// a source the whitelist does not name.
+    pub fn admit<'f>(&self, frame: &'f [u8]) -> Option<(&'f [u8], core::net::SocketAddr)> {
+        let (header, payload) = deframe(frame).ok()?;
+        self.whitelist
+            .accepts(&header.smac)
+            .then(|| (payload, member_address(header.smac)))
+    }
+
     /// `route` with its key read out of the text.
     fn entry(&self, route: &Route) -> RawEthMapping<'_> {
         let (start, end) = route.key;
@@ -562,6 +615,70 @@ pub fn leading_message_key(payload: &[u8]) -> Option<&str> {
     let len = usize::try_from(cursor.read_vle_u64().ok()?).ok()?;
     let suffix = cursor.peek_slice(len).ok()?;
     core::str::from_utf8(suffix).ok()
+}
+
+/// Which entry of a group's mapping each datagram it sends goes by: a frame's by the key of the
+/// message it carries, a fragment's by the key of the message it is part of, read off the chain's
+/// first fragment, and anything else (a JOIN, a declaration) by the first entry, as pico sends a
+/// message that names no key (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
+/// `// Store default value into socket`). Every engine's raweth group sends by it.
+///
+/// It holds the entry each channel's fragment chain goes by, from its first fragment until its
+/// last: pico picks a message's destination once, by its key, and sends every fragment of it there
+/// (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
+/// `// The message does not fit in the current batch, let's fragment it`). One message is
+/// fragmented at a time on a channel, so a channel holds one route. A build without `reassembly`
+/// decodes no fragment, and holds nothing.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RethRoutes {
+    #[cfg(feature = "reassembly")]
+    reliable: Option<usize>,
+    #[cfg(feature = "reassembly")]
+    best_effort: Option<usize>,
+}
+
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+impl RethRoutes {
+    /// The index in `endpoint`'s [`RethLocator::mapping`] of the entry `datagram` goes by.
+    pub fn route(&mut self, endpoint: &RethLocator, datagram: &[u8]) -> usize {
+        use crate::inbound::{parse_inbound, InboundFrame};
+        // A mapping of one entry sends everything one way, and the key need not be read.
+        if endpoint.mapping_len() < 2 {
+            return 0;
+        }
+        match parse_inbound(datagram) {
+            Ok(InboundFrame::Frame { payload, .. }) => {
+                endpoint.mapping_index_for(leading_message_key(&payload))
+            }
+            #[cfg(feature = "reassembly")]
+            Ok(InboundFrame::Fragment {
+                reliable,
+                more,
+                payload,
+                markers,
+                ..
+            }) => {
+                let slot = if reliable {
+                    &mut self.reliable
+                } else {
+                    &mut self.best_effort
+                };
+                // A chain's first fragment, by its marker where the chain carries one and by
+                // the channel holding no route where it does not, picks the route.
+                if markers.first || slot.is_none() {
+                    *slot = Some(endpoint.mapping_index_for(leading_message_key(&payload)));
+                }
+                let index = slot.unwrap_or(0);
+                // The last fragment, or the one that abandons the chain, ends it.
+                if !more || markers.dropped {
+                    *slot = None;
+                }
+                index
+            }
+            _ => 0,
+        }
+    }
 }
 
 /// Parse a `reth/<smac>[#key=value;...]` endpoint as zenoh-pico does.
@@ -1076,6 +1193,155 @@ mod tests {
             parse_reth_locator(&macs).unwrap().whitelist.len(),
             RETH_WHITELIST_CAPACITY
         );
+    }
+
+    /// A frame is written whole into a buffer that holds it, and a buffer one byte short is
+    /// refused by the length it needed, with nothing written. Turned red by a check that lets the
+    /// header in before it finds the payload has no room.
+    #[test]
+    fn a_frame_is_written_whole_or_not_at_all() {
+        let header = RawEthHeader::new(A, B, DEFAULT_ETHTYPE, 0).with_vlan(7);
+        let mut out = [0u8; ETH_VLAN_HEADER_LEN + 3];
+        assert_eq!(
+            frame_into(&header, b"abc", &mut out),
+            Ok(ETH_VLAN_HEADER_LEN + 3)
+        );
+        let (read, payload) = deframe(&out).unwrap();
+        assert_eq!(
+            (read.vlan, read.data_length, payload),
+            (Some(7), 3, &b"abc"[..])
+        );
+        let mut short = [0u8; ETH_VLAN_HEADER_LEN + 2];
+        assert_eq!(
+            frame_into(&header, b"abc", &mut short),
+            Err(RawEthError::BufferTooSmall {
+                need: ETH_VLAN_HEADER_LEN + 3,
+                got: ETH_VLAN_HEADER_LEN + 2
+            })
+        );
+        assert_eq!(short, [0u8; ETH_VLAN_HEADER_LEN + 2]);
+    }
+
+    /// A frame is sent by its entry's header, from the link's own MAC, and framed to what the
+    /// widest header of the mapping leaves; a frame read back is admitted from a source the
+    /// whitelist names, as the member that source's MAC keys, and nothing else is. Turned red by
+    /// a budget that takes off the narrow header when an entry is tagged.
+    #[test]
+    fn a_link_sends_by_its_entries_and_admits_by_its_whitelist() {
+        let l = parse_reth_locator(
+            "reth/01:02:03:04:05:06#ethtype=1234;\
+             mapping=a#11:12:13:14:15:16#,b#01:02:03:04:05:06#0005;\
+             whitelist=11:12:13:14:15:16",
+        )
+        .unwrap();
+        assert_eq!(l.header_for(0), RawEthHeader::new(B, A, 0x1234, 0));
+        assert_eq!(
+            l.header_for(1),
+            RawEthHeader::new(A, A, 0x1234, 0).with_vlan(5)
+        );
+        assert_eq!(
+            usize::from(l.frame_budget()),
+            MAX_ETH_FRAME_SIZE - ETH_VLAN_HEADER_LEN
+        );
+        let untagged = parse_reth_locator("reth/01:02:03:04:05:06").unwrap();
+        assert_eq!(
+            usize::from(untagged.frame_budget()),
+            MAX_ETH_FRAME_SIZE - ETH_HEADER_LEN
+        );
+
+        let mut buf = [0u8; 64];
+        let n = frame_into(
+            &RawEthHeader::new(A, B, DEFAULT_ETHTYPE, 0),
+            b"hi",
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(l.admit(&buf[..n]), Some((&b"hi"[..], member_address(B))));
+        let n = frame_into(
+            &RawEthHeader::new(B, A, DEFAULT_ETHTYPE, 0),
+            b"hi",
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(
+            l.admit(&buf[..n]),
+            None,
+            "a source the whitelist does not name"
+        );
+        assert_eq!(l.admit(&buf[..8]), None, "a frame that does not deframe");
+    }
+
+    /// The put a frame carries is sent by the entry its key meets, the first entry when none
+    /// does, and a datagram that is no frame by the first entry; a mapping of one entry sends
+    /// everything by it. Turned red by a route that reads the key of a put as none.
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
+    #[test]
+    fn a_datagram_goes_by_the_entry_its_message_key_meets() {
+        let l = parse_reth_locator(
+            "reth/01:02:03:04:05:06#mapping=demo/a#11:12:13:14:15:16#,demo/b/**#01:02:03:04:05:06#",
+        )
+        .unwrap();
+        let put = |key: &str| {
+            crate::frame_encode::encode_frame_with_push(
+                0,
+                crate::push_build::build_push_literal(key, b"x").unwrap(),
+                true,
+            )
+        };
+        let mut routes = RethRoutes::default();
+        assert_eq!(routes.route(&l, &put("demo/b/x")), 1);
+        assert_eq!(routes.route(&l, &put("demo/a")), 0);
+        assert_eq!(routes.route(&l, &put("other")), 0, "a key no entry meets");
+        assert_eq!(routes.route(&l, &[0x00]), 0, "a datagram that is no frame");
+        let one = parse_reth_locator("reth/01:02:03:04:05:06").unwrap();
+        assert_eq!(routes.route(&one, &put("demo/b/x")), 0);
+    }
+
+    /// Every fragment of a put that does not fit one frame goes by the entry the put's key meets,
+    /// and the chain's route ends with it: a put after it on a key no entry meets goes by the
+    /// first entry.
+    ///
+    /// # Control
+    ///
+    /// The chain's later fragments carry no key of their own: a route read off each fragment
+    /// alone sends them by the first entry and reds the assert.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-push",
+        feature = "transport-fragmentation"
+    ))]
+    #[test]
+    fn the_fragments_of_a_message_go_by_the_entry_its_key_meets() {
+        let l = parse_reth_locator(
+            "reth/01:02:03:04:05:06#mapping=demo/a#11:12:13:14:15:16#,demo/b/**#01:02:03:04:05:06#",
+        )
+        .unwrap();
+        let big = crate::frame_encode::encode_frame_with_push(
+            0,
+            crate::push_build::build_push_literal("demo/b/x", &[7u8; 600]).unwrap(),
+            true,
+        );
+        let mut conduits = crate::sn::MulticastTxConduits::new(u64::from(u32::MAX));
+        let fragments = crate::frame_encode::multicast_frame_or_fragments(
+            big,
+            0,
+            true,
+            200,
+            &mut conduits,
+            None,
+        );
+        assert!(fragments.len() > 2, "the put is cut into a chain");
+        let mut routes = RethRoutes::default();
+        for (i, fragment) in fragments.iter().enumerate() {
+            assert_eq!(routes.route(&l, fragment), 1, "fragment {i}");
+        }
+        assert_eq!(routes, RethRoutes::default(), "the chain's route ended");
+        let keyless = crate::frame_encode::encode_frame_with_push(
+            1,
+            crate::push_build::build_push_literal("other/key", b"x").unwrap(),
+            true,
+        );
+        assert_eq!(routes.route(&l, &keyless), 0);
     }
 
     #[cfg(feature = "alloc")]
