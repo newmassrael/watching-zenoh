@@ -17,6 +17,12 @@
 //! shares with every other reader it calls: an extension entry (`ExtEntryView::decode`, which
 //! every walk of a chain decodes), a timestamp, an encoding, a shared-memory slice, a Del body,
 //! and a number longer than a byte.
+//!
+//! Each entry of a chain and each slice it decodes goes to a sink (`EntrySink`) as it is decoded.
+//! A walk that lends the view keeps nothing there (`Lending`), and its reading compiles to the
+//! reader alone; the owned parse builds its record's lists there (`read_push_owned`), so the
+//! record is filled from the one decode of each entry and not from a second walk of the view. A
+//! build without an allocator has no owned parse, and links the lending reading alone.
 
 use sce_forge_runtime::codec::{Bounded, Chain, CodecError, ListView, SceCursor, Without};
 use wz_codecs::encoding::EncodingView;
@@ -27,6 +33,17 @@ use wz_codecs::push::{PushUnknownTag, PushView, PushViewVariant};
 use wz_codecs::timestamp::TimestampView;
 use wz_codecs::wireexpr::WireexprViewVariant;
 use wz_codecs::zbuf_slice::ZbufSliceView;
+
+#[cfg(feature = "alloc")]
+use sce_forge_runtime::codec::{Entries, HoldsList, Placed, SceList};
+#[cfg(feature = "alloc")]
+use wz_codecs::ext_entry::ExtEntryOwned;
+#[cfg(feature = "alloc")]
+use wz_codecs::msg_put::{MsgPutExtensionsField, MsgPutIn, MsgPutSlicesField};
+#[cfg(feature = "alloc")]
+use wz_codecs::push::{PushExtensionsField, PushIn, PushVariantIn};
+#[cfg(feature = "alloc")]
+use wz_codecs::zbuf_slice::ZbufSliceOwned;
 
 use crate::ext_admit::{ExtAdmission, ExtCarrier, NetworkEnvelope, ZenohBody};
 
@@ -85,6 +102,45 @@ fn vle_u16(cursor: &mut SceCursor<'_>) -> Result<u16, CodecError> {
     }
 }
 
+/// Where the reader puts what it decodes of a Push's lists, each part once, in the order of the
+/// wire: the entries of the Push's own chain, the entries of its Put's chain with the place of
+/// that chain's first shared-memory marker, and the Put's slices.
+pub(crate) trait EntrySink<'f> {
+    /// The next entry of the Push's own chain.
+    fn push_entry(&mut self, entry: &ExtEntryView<'f>) -> Result<(), CodecError>;
+    /// The next entry of the Put's chain other than its first shared-memory marker.
+    fn put_entry(&mut self, entry: &ExtEntryView<'f>) -> Result<(), CodecError>;
+    /// The Put chain's first shared-memory marker, after the entries before it: the codec holds
+    /// it as the place it stands among the others, not as one of them.
+    fn put_marker(&mut self);
+    /// The next slice of a Put whose payload is laid out as slices.
+    fn slice(&mut self, slice: &ZbufSliceView<'f>) -> Result<(), CodecError>;
+}
+
+/// The sink of a walk that lends the view: it keeps nothing, the view holding each list as the
+/// bytes it lies in.
+pub(crate) struct Lending;
+
+impl<'f> EntrySink<'f> for Lending {
+    #[inline(always)]
+    fn push_entry(&mut self, _entry: &ExtEntryView<'f>) -> Result<(), CodecError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn put_entry(&mut self, _entry: &ExtEntryView<'f>) -> Result<(), CodecError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn put_marker(&mut self) {}
+
+    #[inline(always)]
+    fn slice(&mut self, _slice: &ZbufSliceView<'f>) -> Result<(), CodecError> {
+        Ok(())
+    }
+}
+
 /// The admission rule over a chain read one entry at a time: what
 /// [`judge_ext_chain`](crate::ext_admit::judge_ext_chain) answers for the whole chain, its first
 /// offender, without a second walk of the chain to find it.
@@ -111,12 +167,14 @@ impl Judge {
 
 /// The extension chain at the cursor, to the entry whose `Z` flag is clear, as the list the
 /// codec's view holds it as: the bytes from its first entry to the end of the frame, and how many
-/// entries it has. Each entry's header is judged in order. A Put's chain (`shm`) is judged with
-/// the shared-memory marker's own header at the place of its first entry of that kind, as the
-/// rule reads a Put that holds the marker as a place, and says whether it carried one.
-fn read_chain<'f>(
+/// entries it has. Each entry's header is judged in order, and each entry goes to `sink` as it is
+/// decoded. A Put's chain (`shm`) is judged with the shared-memory marker's own header at the
+/// place of its first entry of that kind, as the rule reads a Put that holds the marker as a
+/// place, and says whether it carried one; the Push's own chain is the one with no `shm`.
+fn read_chain<'f, S: EntrySink<'f>>(
     cursor: &mut SceCursor<'f>,
     judge: &mut Judge,
+    sink: &mut S,
     mut shm: Option<&mut bool>,
 ) -> Result<Bounded<ListView<'f, ExtEntryWalk, 0>, { usize::MAX }, 1>, CodecError> {
     let rest = cursor.peek_slice(cursor.remaining())?;
@@ -127,8 +185,16 @@ fn read_chain<'f>(
             Some(seen) if !*seen && entry.header & 0x7f == SHM_MARKER => {
                 *seen = true;
                 judge.header(MsgPutExtensionsHas0x12Key::named().header);
+                sink.put_marker();
             }
-            _ => judge.header(entry.header),
+            Some(_) => {
+                judge.header(entry.header);
+                sink.put_entry(&entry)?;
+            }
+            None => {
+                judge.header(entry.header);
+                sink.push_entry(&entry)?;
+            }
         }
         // An entry is a byte at least, so no frame holds `u32::MAX` of them.
         count = count.saturating_add(1);
@@ -140,13 +206,15 @@ fn read_chain<'f>(
 }
 
 /// The Push at the cursor, read into `out`, and the verdict on its chains: its own, then its
-/// body's. The cursor is past the record on success; on an error `out` is not to be read.
-pub(super) fn read_push_view<'f>(
+/// body's. Each entry of a chain and each slice goes to `sink` as it is decoded. The cursor is
+/// past the record on success; on an error neither `out` nor `sink` is to be read.
+pub(super) fn read_push_view<'f, S: EntrySink<'f>>(
     cursor: &mut SceCursor<'f>,
     out: &mut PushView<'f>,
+    sink: &mut S,
 ) -> Result<ExtAdmission, CodecError> {
-    let own = read_envelope(cursor, out)?;
-    read_body(cursor, out, own)
+    let own = read_envelope(cursor, out, sink)?;
+    read_body(cursor, out, sink, own)
 }
 
 /// The envelope of the Push at the cursor, read into `out`: its header, its key and its own
@@ -154,15 +222,16 @@ pub(super) fn read_push_view<'f>(
 /// lane reads the envelope alone: what it keeps of a record's prefix ends at that header, and the
 /// body of a plain Put is the header and the payload `read_payload` reads.
 #[inline(always)]
-pub(crate) fn read_envelope<'f>(
+pub(crate) fn read_envelope<'f, S: EntrySink<'f>>(
     cursor: &mut SceCursor<'f>,
     out: &mut PushView<'f>,
+    sink: &mut S,
 ) -> Result<ExtAdmission, CodecError> {
     let header = byte(cursor)?;
     read_key(cursor, header, &mut out.keyexpr.body)?;
     let mut own = Judge::new(ExtCarrier::Network(NetworkEnvelope::Push));
     out.extensions = if header & FLAG_Z != 0 {
-        Some(read_chain(cursor, &mut own, None)?)
+        Some(read_chain(cursor, &mut own, sink, None)?)
     } else {
         None
     };
@@ -173,9 +242,10 @@ pub(crate) fn read_envelope<'f>(
 /// The body of the Push whose envelope `read_envelope` read into `out` with the verdict
 /// `own`, read into `out`, and the verdict on the record's chains: `own`, then the body's.
 #[inline(always)]
-fn read_body<'f>(
+fn read_body<'f, S: EntrySink<'f>>(
     cursor: &mut SceCursor<'f>,
     out: &mut PushView<'f>,
+    sink: &mut S,
     own: ExtAdmission,
 ) -> Result<ExtAdmission, CodecError> {
     let tag = cursor.peek_u8()? & 0x1f;
@@ -191,7 +261,7 @@ fn read_body<'f>(
     };
     let body = match &mut out.body {
         PushViewVariant::CodecZenohMsgPut(put) | PushViewVariant::Default { body: put, .. } => {
-            read_put(cursor, put)?
+            read_put(cursor, put, sink)?
         }
         PushViewVariant::CodecZenohMsgDel(del) => {
             MsgDelView::decode_into(cursor, del)?;
@@ -247,10 +317,12 @@ fn read_key<'f>(
     Ok(())
 }
 
-/// The Put body at the cursor, read into `put`, and the verdict on its chain.
-fn read_put<'f>(
+/// The Put body at the cursor, read into `put`, and the verdict on its chain. The entries of its
+/// chain and its slices go to `sink` as they are decoded.
+fn read_put<'f, S: EntrySink<'f>>(
     cursor: &mut SceCursor<'f>,
     put: &mut MsgPutView<'f>,
+    sink: &mut S,
 ) -> Result<ExtAdmission, CodecError> {
     let header = byte(cursor)?;
     if header & PUT_FLAG_T != 0 {
@@ -266,7 +338,7 @@ fn read_put<'f>(
     let mut judge = Judge::new(ExtCarrier::Zenoh(ZenohBody::Put));
     let mut sliced = false;
     let extensions = if header & FLAG_Z != 0 {
-        Some(read_chain(cursor, &mut judge, Some(&mut sliced))?)
+        Some(read_chain(cursor, &mut judge, sink, Some(&mut sliced))?)
     } else {
         None
     };
@@ -274,7 +346,8 @@ fn read_put<'f>(
         let count = cursor.read_vle_u32()?;
         let rest = cursor.peek_slice(cursor.remaining())?;
         for _ in 0..count {
-            ZbufSliceView::decode(cursor)?;
+            let slice = ZbufSliceView::decode(cursor)?;
+            sink.slice(&slice)?;
         }
         let slices =
             Bounded::new(ListView::new(rest, count, [])).ok_or(CodecError::TooManyElements)?;
@@ -325,6 +398,165 @@ pub(crate) fn read_payload<'f>(cursor: &mut SceCursor<'f>) -> Result<(u64, &'f [
     Ok((length, payload))
 }
 
+/// The lent record at the heap's capacity, which the owned parse projects its owned message from.
+#[cfg(feature = "alloc")]
+type Kept<'f> = super::LentHeap<'f>;
+
+/// A list of `Kept`'s field `F`, of the entries `T`.
+#[cfg(feature = "alloc")]
+type KeptList<'f, F, T> = <Kept<'f> as HoldsList<F>>::List<T>;
+
+/// The Push at the cursor, read into `out`, the record the owned parse projects its owned
+/// message from, and the verdict on its chains, as `read_push_view` reads them. Each entry of the
+/// Push's chain and of its Put's, and each slice, is built into the record's lists as the reader
+/// decodes it. A Del's chain is the codec's Del reader's, and is built from the view's walk of it.
+#[cfg(feature = "alloc")]
+pub(super) fn read_push_owned<'f>(
+    cursor: &mut SceCursor<'f>,
+    out: &mut PushIn<Kept<'f>>,
+) -> Result<ExtAdmission, CodecError> {
+    let mut view = PushView::default();
+    let mut kept = Owning::default();
+    let verdict = read_push_view(cursor, &mut view, &mut kept)?;
+    kept.fill(&view, out)?;
+    Ok(verdict)
+}
+
+/// The sink of the owned parse: the entries of the Push's own chain, and what its Put's body keeps.
+#[cfg(feature = "alloc")]
+#[derive(Default)]
+struct Owning<'f> {
+    push: KeptList<'f, PushExtensionsField, ExtEntryOwned<Kept<'f>>>,
+    put: PutKept<'f>,
+}
+
+/// What the owned parse keeps of a Put's body: the entries of its chain other than its first
+/// shared-memory marker, the marker's place among them, and its slices.
+#[cfg(feature = "alloc")]
+#[derive(Default)]
+struct PutKept<'f> {
+    chain: KeptList<'f, MsgPutExtensionsField, ExtEntryOwned<Kept<'f>>>,
+    marker: usize,
+    slices: KeptList<'f, MsgPutSlicesField, ZbufSliceOwned<Kept<'f>>>,
+}
+
+/// `list` with one more entry, built where it is held by `build`.
+#[cfg(feature = "alloc")]
+fn push_built<T: Default, L: SceList<T>>(
+    list: &mut L,
+    build: impl FnOnce(&mut T) -> Result<(), CodecError>,
+) -> Result<(), CodecError> {
+    list.try_push(T::default())?;
+    if let Some(slot) = list.last_mut() {
+        build(slot)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "alloc")]
+impl<'f> EntrySink<'f> for Owning<'f> {
+    fn push_entry(&mut self, entry: &ExtEntryView<'f>) -> Result<(), CodecError> {
+        push_built(&mut self.push, |slot: &mut ExtEntryOwned<Kept<'f>>| {
+            entry.into_builder(slot)
+        })
+    }
+
+    fn put_entry(&mut self, entry: &ExtEntryView<'f>) -> Result<(), CodecError> {
+        push_built(&mut self.put.chain, |slot: &mut ExtEntryOwned<Kept<'f>>| {
+            entry.into_builder(slot)
+        })
+    }
+
+    fn put_marker(&mut self) {
+        self.put.marker = self.put.chain.entry_count();
+    }
+
+    fn slice(&mut self, slice: &ZbufSliceView<'f>) -> Result<(), CodecError> {
+        push_built(
+            &mut self.put.slices,
+            |slot: &mut ZbufSliceOwned<Kept<'f>>| slice.into_builder(slot),
+        )
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<'f> Owning<'f> {
+    /// `out` filled with what `view`, the reading these lists were kept from, says: every field
+    /// the view holds, and each list from what was kept of it.
+    fn fill(self, view: &PushView<'f>, out: &mut PushIn<Kept<'f>>) -> Result<(), CodecError> {
+        let Self { push, put } = self;
+        out.header = view.header;
+        view.keyexpr.into_builder(&mut out.keyexpr)?;
+        out.extensions = if view.extensions.is_some() {
+            Some(Bounded::new(push).ok_or(CodecError::TooManyElements)?)
+        } else {
+            None
+        };
+        match &view.body {
+            PushViewVariant::CodecZenohMsgPut(body) => {
+                out.body = PushVariantIn::CodecZenohMsgPut(Default::default());
+                if let PushVariantIn::CodecZenohMsgPut(record) = &mut out.body {
+                    put.fill(body, record)?;
+                }
+            }
+            PushViewVariant::Default { tag, body } => {
+                out.body = PushVariantIn::Default {
+                    tag: *tag,
+                    body: Default::default(),
+                };
+                if let PushVariantIn::Default { body: record, .. } = &mut out.body {
+                    put.fill(body, record)?;
+                }
+            }
+            PushViewVariant::CodecZenohMsgDel(body) => {
+                out.body = PushVariantIn::CodecZenohMsgDel(Default::default());
+                if let PushVariantIn::CodecZenohMsgDel(record) = &mut out.body {
+                    body.into_builder(record)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<'f> PutKept<'f> {
+    /// `out` filled with what `view`, the Put these lists were kept from, says: its arm by the
+    /// shared-memory marker, as the view's, with the chain and the slices kept of it.
+    fn fill(self, view: &MsgPutView<'f>, out: &mut MsgPutIn<Kept<'f>>) -> Result<(), CodecError> {
+        out.header = view.header;
+        match &view.timestamp {
+            Some(timestamp) => timestamp.into_builder(out.timestamp.insert(Default::default()))?,
+            None => out.timestamp = None,
+        }
+        match &view.encoding {
+            Some(encoding) => encoding.into_builder(out.encoding.insert(Default::default()))?,
+            None => out.encoding = None,
+        }
+        out.extensions_has_0x12 = match &view.extensions_has_0x12 {
+            MsgPutExtensionsHas0x12::Has0x12 { .. } => MsgPutExtensionsHas0x12::Has0x12 {
+                extensions: Placed::new(self.chain, self.marker)
+                    .ok_or(CodecError::PresentIfMismatch)?,
+                slices: Bounded::new(self.slices).ok_or(CodecError::TooManyElements)?,
+            },
+            MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions,
+                payload,
+            } => MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: if extensions.is_some() {
+                    Some(Chain::new(self.chain).ok_or(CodecError::PresentIfMismatch)?)
+                } else {
+                    None
+                },
+                payload: *payload,
+            },
+        };
+        out.payload_len = view.payload_len;
+        out.slice_count = view.slice_count;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{judge_headers, judge_put_view, then_judge};
@@ -334,8 +566,29 @@ mod tests {
     fn reading(bytes: &[u8]) -> Result<(PushView<'_>, usize, ExtAdmission), CodecError> {
         let mut cursor = SceCursor::new(bytes);
         let mut view = PushView::default();
-        let admission = read_push_view(&mut cursor, &mut view)?;
+        let admission = read_push_view(&mut cursor, &mut view, &mut Lending)?;
         Ok((view, bytes.len() - cursor.remaining(), admission))
+    }
+
+    /// What the owned read makes of `bytes`: the record at the heap's capacity its sink built as
+    /// the reader decoded each entry, how far it read and the verdict.
+    #[cfg(feature = "alloc")]
+    fn kept(bytes: &[u8]) -> Result<(PushIn<Kept<'_>>, usize, ExtAdmission), CodecError> {
+        let mut cursor = SceCursor::new(bytes);
+        let mut record = PushIn::default();
+        let admission = read_push_owned(&mut cursor, &mut record)?;
+        Ok((record, bytes.len() - cursor.remaining(), admission))
+    }
+
+    /// What the generated codec decodes `bytes` to at the heap's capacity, with how far the
+    /// codec's view reads and the verdict the rule gives it: the reading the owned read is held to.
+    #[cfg(feature = "alloc")]
+    fn kept_through_the_codec(
+        bytes: &[u8],
+    ) -> Result<(PushIn<Kept<'_>>, usize, ExtAdmission), CodecError> {
+        let (_, consumed, admission) = through_the_codec(bytes)?;
+        let record = PushIn::<Kept<'_>>::decode(&mut SceCursor::new(bytes))?;
+        Ok((record, consumed, admission))
     }
 
     /// What the generated codec reads from `bytes` and the verdict the rule gives the view it
@@ -496,15 +749,17 @@ mod tests {
         }
     }
 
-    /// The reader against the codec over `bytes`; with an allocator, the owned parse against the
-    /// codec's owned decode where the first record is a Push (the verdict it judged as it read
-    /// against the owned message's own), and the plain lane over the whole of
-    /// `bytes` as a frame against the codec's reading of each record: what each case below is held
-    /// to.
+    /// The reader with each sink against the codec over `bytes`: the lending reading against the
+    /// codec's view, and with an allocator the owned read's record against the codec's decode at
+    /// the heap's capacity; with an allocator also the owned parse against the codec's owned
+    /// decode where the first record is a Push (the verdict it judged as it read against the owned
+    /// message's own), and the plain lane over the whole of `bytes` as a frame against the codec's
+    /// reading of each record: what each case below is held to.
     fn agree(bytes: &[u8], case: &dyn core::fmt::Debug) {
         assert_eq!(reading(bytes), through_the_codec(bytes), "{case:?}");
         #[cfg(feature = "alloc")]
         {
+            assert_eq!(kept(bytes), kept_through_the_codec(bytes), "{case:?}");
             if bytes
                 .first()
                 .is_some_and(|header| header & 0x1f == wz_codecs::wire_const::N_MID_PUSH)

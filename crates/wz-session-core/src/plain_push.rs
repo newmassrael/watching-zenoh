@@ -93,7 +93,7 @@ fn read_plain_put<'f>(frame: &'f [u8], cursor: &mut SceCursor<'f>) -> Option<Rea
         return None;
     }
     let mut view = wz_codecs::push::PushView::default();
-    push_read::read_envelope(cursor, &mut view).ok()?;
+    push_read::read_envelope(cursor, &mut view, &mut push_read::Lending).ok()?;
     let qos = match &view.extensions {
         None => None,
         Some(chain) if chain.inner().len() == 1 => {

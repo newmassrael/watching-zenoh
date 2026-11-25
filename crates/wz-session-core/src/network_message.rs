@@ -1998,7 +1998,7 @@ fn lend_push<'f>(
     // judges the chains as it reads them. It reads into the binding that lends it, at the frame's
     // lifetime, in which a view is invariant.
     let mut push = wz_codecs::push::PushView::<'f>::default();
-    let admission = push_read::read_push_view(cursor, &mut push)
+    let admission = push_read::read_push_view(cursor, &mut push, &mut push_read::Lending)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(admission)?;
     each.take_record(WalkedRecord::Push(&push))
@@ -2644,14 +2644,13 @@ fn decode_one_record(
             out.put(NetworkMessage::Request(Box::new(own_wire!(req, origin))))?;
         }
         // A Push is read by the one reader every walk reads it with (`push_read`), which judges
-        // its chains as it reads them, and its view is filled into the record at the heap's
-        // capacity, which the owned message is projected from. The verdict goes back with it.
+        // its chains as it reads them and builds each entry into the record at the heap's capacity
+        // as it decodes it; the owned message is projected from that record. The verdict goes back
+        // with it.
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
-            let mut view = wz_codecs::push::PushView::default();
-            let verdict = push_read::read_push_view(cursor, &mut view)?;
             let mut push = wz_codecs::push::PushIn::<LentHeap<'_>>::default();
-            view.into_builder(&mut push)?;
+            let verdict = push_read::read_push_owned(cursor, &mut push)?;
             out.put(NetworkMessage::Push(Box::new(own_wire!(push, origin))))?;
             return Ok(Decoded::Judged(verdict));
         }
