@@ -15,6 +15,8 @@ use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::EventSink;
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
+use wz_session_core::group_locator::GroupLocatorError;
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::policy::KeyWireForm;
 use wz_session_core::response_sink::ResponseSink;
@@ -25,6 +27,7 @@ use crate::link_cells::CellRc;
 use crate::locator_text::DialRefused;
 use crate::session_drive::{LinkOpenError, LinkWait, SessionDatagramLink};
 use crate::session_runtime::SessionHandle;
+use crate::sync::LockKind;
 use crate::ClockSource;
 
 // The transport's state over the session's one reassembly Router, which the engine's builds keep.
@@ -97,9 +100,10 @@ pub enum Refusal {
     /// The endpoint's text is longer than a row of the session's endpoints, `MAX_LOCATOR_LEN`
     /// bytes.
     TextTooLong,
-    /// The group's endpoint is longer than the row a member's link is reported in,
-    /// `MAX_GROUP_ENDPOINT_LEN` bytes.
-    GroupEndpointTooLong,
+    /// The group's endpoint names no group a session joins, read before any stack is asked: it is
+    /// longer than the row a member's link is reported in (`MAX_GROUP_ENDPOINT_LEN` bytes), is no
+    /// multicast group, or states a key no group is joined with.
+    GroupEndpoint(GroupLocatorError),
 }
 
 impl From<HandshakeEnd> for Refusal {
@@ -132,9 +136,7 @@ impl core::fmt::Display for EndpointRefusal {
                 f.write_str("the session holds as many faces as max_faces admits")
             }
             Refusal::TextTooLong => f.write_str("the endpoint is longer than MAX_LOCATOR_LEN"),
-            Refusal::GroupEndpointTooLong => {
-                f.write_str("the group endpoint is longer than MAX_GROUP_ENDPOINT_LEN")
-            }
+            Refusal::GroupEndpoint(why) => write!(f, "{why}"),
         }
     }
 }
@@ -162,10 +164,12 @@ pub enum TransportRefusal {
 
 /// What the transport reads of the session's half of a link beyond what its supervisor asks
 /// ([`FaceSession`]): the actions the session sends over the link through, and whether a query
-/// the link carried is answered over it.
-pub trait TransportSession<C: ClockSource + 'static>: FaceSession {
+/// the link carried is answered over it. `K` is how the session's runtime locks what it lends.
+pub trait TransportSession<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>:
+    FaceSession
+{
     /// The actions of the link's session.
-    fn actions(&self) -> &SessionHandle<C>;
+    fn actions(&self) -> &SessionHandle<C, dyn BoxedLinkDriver, K>;
 
     /// Whether a query that came in under `generation` came over this link, so that its answer
     /// goes back over it. A session that answers no query names no link for one.
@@ -179,7 +183,7 @@ pub trait TransportSession<C: ClockSource + 'static>: FaceSession {
 /// ([`TransportState::make_wire`]): the transport makes the link's actions, its cells and its task;
 /// the session tells its tables of the link, puts the link's pump behind its gates, and says what
 /// the link's task hands its reads to and what its face keeps of the link.
-pub trait LinkCalls<C: ClockSource + 'static> {
+pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared> {
     /// The gates the session puts a link's pump behind, placed in the link's cell of its table.
     type Gate: SessionDatagramLink + 'static;
     /// What a link's task hands what its session reads to.
@@ -193,21 +197,24 @@ pub trait LinkCalls<C: ClockSource + 'static> {
     fn link_made(
         &mut self,
         face: FaceId,
-        actions: &SessionHandle<C>,
+        actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
         key_form: Option<KeyWireForm>,
     );
 
     /// The gates over `pump`, the link's one shared handle, whose session sends through
     /// `actions`.
-    fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, actions: &SessionHandle<C>)
-        -> Self::Gate;
+    fn gate(
+        &self,
+        pump: CellRc<dyn SessionDatagramLink>,
+        actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
+    ) -> Self::Gate;
 
     /// What the task of the link of face `face` hands its reads to, and what the face keeps of the
     /// link: its actions and its gates, placed in their cell.
     fn wire_parts(
         &self,
         face: FaceId,
-        actions: SessionHandle<C>,
+        actions: SessionHandle<C, dyn BoxedLinkDriver, K>,
         gate: &CellRc<Self::Gate>,
     ) -> (Self::Dispatch, Self::Session);
 }

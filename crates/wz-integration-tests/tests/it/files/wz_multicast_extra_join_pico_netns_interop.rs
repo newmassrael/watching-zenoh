@@ -189,7 +189,7 @@ async fn multicast_extra_join_is_what_delivers_a_foreign_group_across_a_namespac
             .expect("spawn z_pub inside the namespace"),
     );
 
-    let extra = [EXTRA_GROUP.to_string()];
+    let extra = [std::net::IpAddr::V4(EXTRA_GROUP)];
 
     let (unjoined, _) = receive(
         McastSocketConfig {

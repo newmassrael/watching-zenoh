@@ -275,7 +275,8 @@ impl AdvancedPublisherPlane for PicoPlane {
     fn retained_key(&self, publisher: &PlainPublisher) -> Option<Retained> {
         // The cached sample holds a reference to the key it was published on, as
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
-        // the key stays declared until the ring lets the sample go.
+        // the key stays declared until the ring lets the sample go. A key whose declaration's
+        // count has no room keeps nothing, as a plane whose key is not a declaration does.
         Some(Retained::new(Arc::new(publisher.key().share().ok()?)))
     }
 }

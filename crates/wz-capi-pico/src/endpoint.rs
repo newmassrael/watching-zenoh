@@ -186,9 +186,10 @@ pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZRes
 /// last arm is `ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`). The cooperative engine dials and
 /// listens on `tcp/` in every build, as pico's TCP link is in every build of it; `udp/` with
 /// pico's unicast UDP link (`link-udp`, `Z_FEATURE_LINK_UDP_UNICAST`), `tls/` with its secure
-/// channel (`tls-mbedtls`), `serial/` with the host's ttys (`transport-link-serial`) and
+/// channel (`tls-mbedtls`), `serial/` with the host's ttys (`transport-link-serial`),
 /// `unixpipe/`, which pico has no link for, with the host's named FIFOs
-/// (`transport-link-unixpipe`). A group is no unicast endpoint and is not judged here.
+/// (`transport-link-unixpipe`), and `ws/` with WebSocket links over the host's TCP
+/// (`transport-link-ws`). A group is no unicast endpoint and is not judged here.
 #[cfg(not(feature = "engine-tokio"))]
 fn link_built(scheme: &str) -> bool {
     match scheme {
@@ -196,6 +197,7 @@ fn link_built(scheme: &str) -> bool {
         "udp" => cfg!(feature = "link-udp"),
         "tls" => cfg!(feature = "tls-mbedtls"),
         "serial" => cfg!(feature = "transport-link-serial"),
+        "ws" => cfg!(feature = "transport-link-ws"),
         "unixpipe" => cfg!(feature = "transport-link-unixpipe"),
         _ => false,
     }
@@ -458,12 +460,7 @@ mod tests {
     /// build opens, or by a built one refused.
     #[test]
     fn a_scheme_without_a_link_in_this_build_is_unknown() {
-        for unknown in [
-            "quic/127.0.0.1:7447",
-            "ws/127.0.0.1:7447",
-            "reth/eth0",
-            "tlsx/127.0.0.1:7447",
-        ] {
+        for unknown in ["quic/127.0.0.1:7447", "reth/eth0", "tlsx/127.0.0.1:7447"] {
             assert_eq!(
                 checked_endpoint(unknown),
                 Err(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN),
@@ -480,6 +477,7 @@ mod tests {
                 "serial//dev/ttyS0#baudrate=9600",
                 cfg!(feature = "transport-link-serial"),
             ),
+            ("ws/127.0.0.1:7447", cfg!(feature = "transport-link-ws")),
             (
                 "unixpipe//tmp/wz-pipe#file_mask=384",
                 cfg!(feature = "transport-link-unixpipe"),

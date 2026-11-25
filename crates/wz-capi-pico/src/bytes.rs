@@ -547,12 +547,13 @@ impl ByteBuf {
 
     /// A payload of the `like.len` bytes at `start` of `block`, holding a share of it, with
     /// `like`'s segment ends: a part of a block that holds more than one ([`Block::kept_parts`]).
-    /// An empty one holds no block, as an empty payload does.
+    /// An empty one holds no block, as an empty payload does, and needs none made for it.
     ///
     /// # Safety
-    /// The `like.len` bytes at `start` lie in `block`'s own room and are written.
+    /// For a `like` that is not empty, `block` is one and the `like.len` bytes at `start` lie in
+    /// its own room and are written.
     pub(crate) unsafe fn part_of(
-        block: &Block,
+        block: Option<&Block>,
         start: *const u8,
         like: &ByteBuf,
     ) -> Result<Self, NoRoom> {
@@ -560,7 +561,7 @@ impl ByteBuf {
             Some(start) if like.len != 0 => Self {
                 start,
                 len: like.len,
-                block: ManuallyDrop::new(Some(block.share().ok_or(NoRoom)?)),
+                block: ManuallyDrop::new(Some(block.and_then(Block::share).ok_or(NoRoom)?)),
                 bounds: ManuallyDrop::new(Vec::new()),
             },
             _ => Self::new(),
@@ -2393,7 +2394,8 @@ mod block_tests {
         let mut starts = [core::ptr::null::<u8>(); 2];
         let block = Block::kept_parts(&parts, &mut starts).expect("room");
         // SAFETY: `kept_parts` wrote "cd" at `starts[1]` of `block`.
-        let mut part = unsafe { ByteBuf::part_of(&block, starts[1], &like) }.expect("a share");
+        let mut part =
+            unsafe { ByteBuf::part_of(Some(&block), starts[1], &like) }.expect("a share");
         assert_eq!(part.holders(), 2);
         drop(block);
         assert_eq!(part.as_slice(), b"cd");
@@ -2402,7 +2404,7 @@ mod block_tests {
 
         let block = Block::kept_parts(&parts, &mut starts).expect("room");
         // SAFETY: as above.
-        let kept = unsafe { ByteBuf::part_of(&block, starts[1], &like) }.expect("a share");
+        let kept = unsafe { ByteBuf::part_of(Some(&block), starts[1], &like) }.expect("a share");
         drop(block);
         let slice = SliceState::boxed(kept).expect("room");
         // SAFETY: the slice's own view of its block.

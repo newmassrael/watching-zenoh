@@ -160,7 +160,7 @@ use wz_session_core::ext_chain_role::ExtChainRole;
 use wz_session_core::extpatch::{encode_patch_ext_at, CURRENT_PATCH, NO_PATCH};
 use wz_session_core::initial_sn::derive_initial_sn;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::sn::mask_from_res;
+use wz_session_core::sn::wire::mask_from_res;
 use wz_session_core::transport_mode::{SessionOffer, TransportMode};
 
 const ITER_CAP: usize = 4096;
@@ -394,7 +394,7 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
     // what wz advertised. `ChildGuard` kills on drop, so a panic here still
     // reaps the router and the subscriber.
     assert_eq!(
-        opened.actions.negotiated_sn_mask(),
+        wz_session_core::sn::to_wire(opened.actions.negotiated_sn_mask()),
         mask_from_res(res_code),
         "wz did not settle on the ring a genuine zenohd negotiated at \
          sequence_number_resolution={resolution} (wire code {res_code}). wz \
@@ -458,7 +458,7 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
         }
     );
 
-    let negotiated_mask = opened.actions.negotiated_sn_mask();
+    let negotiated_mask = wz_session_core::sn::to_wire(opened.actions.negotiated_sn_mask());
     let negotiated_patch = opened.actions.negotiated_patch();
     let patch_was_negotiated = opened.actions.patch_was_negotiated();
     let negotiated_req_id_res = opened.actions.init_ack_params().req_id_res;
@@ -595,8 +595,13 @@ fn assert_ring(arm: &ArmOutcome, res_code: u8, other_res_code: u8, what: &str) {
     //    ring origin that happened to be equal under both masks would make
     //    assertion 3 pass for the wrong reason, and this is where that is
     //    caught rather than assumed away.
-    let expected_first = derive_initial_sn(&arm.own_zid, &arm.peer_zid, expected_mask);
-    let counterfactual = derive_initial_sn(&arm.own_zid, &arm.peer_zid, other_mask);
+    // As the wire carries them, where the relay reads the first frame's SN.
+    let origin = |mask| {
+        let mask = wz_session_core::sn::from_wire(mask);
+        wz_session_core::sn::to_wire(derive_initial_sn(&arm.own_zid, &arm.peer_zid, mask))
+    };
+    let expected_first = origin(expected_mask);
+    let counterfactual = origin(other_mask);
     assert_ne!(
         expected_first, counterfactual,
         "{what}: the ring origin is the SAME under both masks for this zid pair, \

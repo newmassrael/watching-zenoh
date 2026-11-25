@@ -96,9 +96,10 @@ const LARGEST_MESSAGE: usize = larger(
 
 /// The bytes of each block of the largest pool of payload blocks: the largest message and the
 /// head of the block it lies in, so every payload a session hands a program has a block that holds
-/// it, whatever the counts.
+/// it, whatever the counts. A build whose longest key is longer than its largest message sizes the
+/// block by the key: a kept sample's key takes a block of its own.
 pub(crate) const LARGEST_BLOCK: usize =
-    block_of(LARGEST_MESSAGE.saturating_add(crate::bytes::HEAD));
+    block_of(larger(LARGEST_MESSAGE, caps::MAX_KEYEXPR_BYTES).saturating_add(crate::bytes::HEAD));
 
 /// The bytes of each block of the three pools of payload blocks, in the order their counts are
 /// stated: the two the limits state, and the largest.
@@ -1259,14 +1260,16 @@ mod tests {
     }
 
     /// The largest payload block holds the largest message a session hands a program and its
-    /// head, whichever of the rejoining ceiling and the two batches is the largest. Turned red by
-    /// a largest block sized by one of them alone, or without the head.
+    /// head, whichever of the rejoining ceiling and the two batches is the largest, and the longest
+    /// key the session holds should it be longer. Turned red by a largest block sized by one of
+    /// them alone, or without the head.
     #[test]
     fn the_largest_block_holds_the_largest_message_and_its_head() {
-        let largest = caps::PICO_FRAG_MAX_BYTES
+        let message = caps::PICO_FRAG_MAX_BYTES
             .max(caps::PICO_UNICAST_BATCH_BYTES)
             .max(caps::PICO_MULTICAST_BATCH_BYTES);
-        assert_eq!(LARGEST_MESSAGE, largest);
+        assert_eq!(LARGEST_MESSAGE, message);
+        let largest = message.max(caps::MAX_KEYEXPR_BYTES);
         assert!(LARGEST_BLOCK >= largest + crate::bytes::HEAD);
         assert!(LARGEST_BLOCK < largest + crate::bytes::HEAD + SLOT_ALIGN);
         assert_eq!(PAYLOAD_BLOCKS[PAYLOAD_CLASSES - 1], LARGEST_BLOCK);

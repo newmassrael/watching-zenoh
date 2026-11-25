@@ -3929,9 +3929,11 @@ impl ResolvedGroup {
     }
 
     /// The link `endpoint` names, or `None` (logged) for one that names no group. A UDP
-    /// group's sockets take the two link policies as `policy` holds them.
+    /// group is read by the group endpoint reader every engine opens a group from, so this one
+    /// refuses what the others refuse, and its sockets take the two link policies as `policy`
+    /// holds them.
     fn link_of(endpoint: &str, policy: &SessionPolicy) -> Option<GroupLinkSpec> {
-        use wz_runtime_tokio::locator::{parse_locator, Proto};
+        use wz_session_core::group_locator::{parse_group_locator, GroupLocator};
 
         #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
         if endpoint.starts_with("reth/") {
@@ -3940,25 +3942,20 @@ impl ResolvedGroup {
                 .map_err(|e| log_open_failure(&format!("group {endpoint}"), &e))
                 .ok();
         }
-        let parsed = parse_locator(endpoint)
-            .map_err(|e| log_open_failure(&format!("group {endpoint}"), &e))
-            .ok()?;
-        if parsed.proto != Proto::Udp || !parsed.addr.ip().is_multicast() {
-            log_open_failure(&format!("group {endpoint}"), &"not a udp multicast group");
-            return None;
+        match parse_group_locator(endpoint) {
+            Ok(GroupLocator::Udp(group)) => Some(GroupLinkSpec::Udp {
+                group: group.group().ip(),
+                port: group.group().port(),
+                opts: wz_runtime_tokio::McastGroupOptions {
+                    keys: Some(group),
+                    ..wz_runtime_tokio::McastGroupOptions::of_policy(policy)
+                },
+            }),
+            Err(e) => {
+                log_open_failure(&format!("group {endpoint}"), &e);
+                None
+            }
         }
-        Some(GroupLinkSpec::Udp {
-            group: parsed.addr.ip(),
-            port: parsed.addr.port(),
-            opts: wz_runtime_tokio::McastGroupOptions {
-                iface: parsed.socket.as_ref().and_then(|s| s.iface.clone()),
-                ttl: parsed.mcast_ttl,
-                joins: parsed.mcast_join,
-                bind: parsed.socket.as_ref().and_then(|s| s.bind.clone()),
-                dscp: parsed.socket.as_ref().and_then(|s| s.dscp),
-                ..wz_runtime_tokio::McastGroupOptions::of_policy(policy)
-            },
-        })
     }
 }
 
@@ -6702,6 +6699,44 @@ mod multicast_face_tests {
         }
         #[cfg(not(all(feature = "raweth-transport", target_os = "linux")))]
         assert!(ResolvedGroup::link_of("reth/02:00:00:00:00:01", &policy).is_none());
+    }
+
+    /// A UDP group is read by the reader every engine opens a group from: its keys reach the
+    /// group's sockets, and what that reader refuses (metadata a group does not keep, a `join`
+    /// of the other family, an endpoint past `MAX_GROUP_ENDPOINT_LEN`) names no group here.
+    #[test]
+    fn a_udp_group_is_read_as_every_engine_reads_it() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let policy = SessionPolicy::defaults();
+        let Some(GroupLinkSpec::Udp { group, port, opts }) =
+            ResolvedGroup::link_of("udp/224.0.0.224:7447#ttl=3;join=224.0.0.225", &policy)
+        else {
+            panic!("a udp multicast endpoint names a UDP group");
+        };
+        assert_eq!(
+            (group, port),
+            (IpAddr::V4(Ipv4Addr::new(224, 0, 0, 224)), 7447)
+        );
+        let socket = opts.as_socket_config();
+        assert_eq!(socket.ttl, Some(3));
+        assert_eq!(
+            socket.extra_joins,
+            [IpAddr::V4(Ipv4Addr::new(224, 0, 0, 225))]
+        );
+        for refused in [
+            "udp/224.0.0.224:7447?rel=1",
+            "udp/224.0.0.224:7447#join=ff02::1",
+        ] {
+            assert!(
+                ResolvedGroup::link_of(refused, &policy).is_none(),
+                "{refused}"
+            );
+        }
+        let mut long = String::from("udp/224.0.0.224:7447#x=");
+        while long.len() <= wz_session_core::caps::MAX_GROUP_ENDPOINT_LEN {
+            long.push('e');
+        }
+        assert!(ResolvedGroup::link_of(&long, &policy).is_none());
     }
 
     /// A group of a session is resolved under the session's snapshot and not the build's: its

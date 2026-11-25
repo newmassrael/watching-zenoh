@@ -17,13 +17,15 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 #[cfg(any(feature = "group", feature = "connectivity"))]
 use alloc::vec::Vec;
+use core::ops::Deref;
 
 use wz_session_core::byte_cells::LentByteCells;
-#[cfg(feature = "group")]
-use wz_session_core::caps;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "connectivity")]
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
+#[cfg(feature = "group")]
+use wz_session_core::group_locator::parse_group_locator;
+use wz_session_core::link::BoxedLinkDriver;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::LinkAdmission;
 #[cfg(feature = "queryable")]
@@ -34,6 +36,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::session_zid::SessionZid;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::LinkKeyForms;
+use wz_session_core::step_lend::LendCell;
 use wz_session_core::unicast_rx::RouterLend;
 
 #[cfg(feature = "group")]
@@ -58,15 +61,28 @@ use crate::session_drive::{
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use crate::session_runtime::{SessionEntropy, SessionHandle};
+use crate::sync::LockKind;
 use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
-/// The two halves of the actions of a link on the session's clock `C`, not yet made.
-type LinkHalves<C> = HalvesMaking<CoopRuntime<C>, CoopTime<C>>;
+/// The runtime of a link's session over the transport of `T`, read under the lock type of the
+/// values it lends the session.
+type LinkRuntime<T> =
+    CoopRuntime<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
 
-/// A handle on each half of the actions of a link on the session's clock `C`, as they hold them.
-type HalvesHeld<C> = (
-    CellRc<LinkState<CoopRuntime<C>>>,
-    CellRc<SessionCore<CoopRuntime<C>, CoopTime<C>>>,
+/// The handle on the actions of a link's session over the transport of `T`.
+type LinkHandle<T> =
+    SessionHandle<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
+
+/// The session's clock over the transport of `T`.
+type LinkTime<T> = CoopTime<<T as TransportFaces>::Clock>;
+
+/// The two halves of the actions of a link over the transport of `T`, not yet made.
+type LinkHalves<T> = HalvesMaking<LinkRuntime<T>, LinkTime<T>>;
+
+/// A handle on each half of the actions of a link over the transport of `T`, as they hold them.
+type HalvesHeld<T> = (
+    CellRc<LinkState<LinkRuntime<T>>>,
+    CellRc<SessionCore<LinkRuntime<T>, LinkTime<T>>>,
 );
 
 /// What a session's transport is made of: the session's clock, the network its links are opened
@@ -75,10 +91,12 @@ type HalvesHeld<C> = (
 pub trait TransportFaces {
     /// The clock the session's links run on.
     type Clock: ClockSource + 'static;
+    /// How the session's runtime locks the values it lends each link's session.
+    type Lock: LockKind;
     /// The network the session's links, ports and groups are opened on.
     type Links: SessionLinks + 'static;
     /// The session's half of one link.
-    type Session: TransportSession<Self::Clock>;
+    type Session: TransportSession<Self::Clock, Self::Lock>;
     /// The engine's record of one face.
     type Face: FaceRecord<
         Session = Self::Session,
@@ -91,6 +109,9 @@ pub trait TransportFaces {
     /// The engine's record of one group the session joined.
     #[cfg(feature = "group")]
     type Group: GroupRecord;
+    /// The handle on the place the session lends its Router in ([`TransportState::lend`]): a
+    /// counted cell, or one the session's arena holds.
+    type RouterPlace: Deref<Target = LendCell<SessionReassembly>> + Clone + 'static;
 }
 
 /// A dial under way over the network of `T`.
@@ -152,7 +173,7 @@ pub struct TransportState<T: TransportFaces> {
     pub router: SessionReassembly,
     /// Where the session lends its Router to its links' receives, each link's task holding the
     /// place: lent for the length of a pass of the tasks and at no other time.
-    pub lend: RouterLend<SessionReassembly>,
+    pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
 }
 
 /// What a step reads of a face and decides for it ([`TransportState::face_step`]): the face's
@@ -230,7 +251,7 @@ impl<T: TransportFaces> TransportState<T> {
     /// The actions of every face whose link is up, which is what the session sends through. A
     /// face whose link is dialled or waits to be is not among them: what is declared then is
     /// declared when it comes up.
-    pub fn ups(&self) -> impl Iterator<Item = &SessionHandle<T::Clock>> {
+    pub fn ups(&self) -> impl Iterator<Item = &LinkHandle<T>> {
         self.links.faces().filter_map(|face| match face.link() {
             Link::Up(wire) => Some(wire.actions()),
             _ => None,
@@ -239,7 +260,7 @@ impl<T: TransportFaces> TransportState<T> {
 
     /// [`Self::ups`], each with its face's place, which the session's other tables of the face
     /// keep too, and its id.
-    pub fn ups_at(&self) -> impl Iterator<Item = (usize, FaceId, &SessionHandle<T::Clock>)> {
+    pub fn ups_at(&self) -> impl Iterator<Item = (usize, FaceId, &LinkHandle<T>)> {
         self.links
             .placed()
             .filter_map(|(at, face)| match face.link() {
@@ -289,7 +310,7 @@ impl<T: TransportFaces> TransportState<T> {
 
     /// The actions of face `id` while its link is up.
     #[cfg(feature = "query")]
-    pub fn up_actions(&self, id: FaceId) -> Option<&SessionHandle<T::Clock>> {
+    pub fn up_actions(&self, id: FaceId) -> Option<&LinkHandle<T>> {
         self.links.faces().find_map(|face| match face.link() {
             Link::Up(wire) if face.id() == id => Some(wire.actions()),
             _ => None,
@@ -377,13 +398,12 @@ impl<T: TransportFaces> TransportState<T> {
     #[inline(always)]
     pub fn place_actions(
         &self,
-        actions: SessionLinkActions<CoopRuntime<T::Clock>, CoopTime<T::Clock>>,
+        actions: SessionLinkActions<LinkRuntime<T>, LinkTime<T>>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<SessionHandle<T::Clock>, TransportRefusal> {
-        let actions: SessionHandle<T::Clock> =
-            CellRc::in_cells(self.actions_cells.as_ref(), actions)
-                .map_err(|_| self.cells_exhausted(endpoint))?;
+    ) -> Result<LinkHandle<T>, TransportRefusal> {
+        let actions: LinkHandle<T> = CellRc::in_cells(self.actions_cells.as_ref(), actions)
+            .map_err(|_| self.cells_exhausted(endpoint))?;
         #[cfg(feature = "listen")]
         actions.install_link_admission(
             Arc::clone(&self.admission),
@@ -402,16 +422,15 @@ impl<T: TransportFaces> TransportState<T> {
     #[inline(always)]
     pub fn place_halves(
         &self,
-        halves: LinkHalves<T::Clock>,
+        halves: LinkHalves<T>,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<HalvesHeld<T::Clock>, TransportRefusal> {
-        let write =
-            |link: *mut LinkState<CoopRuntime<T::Clock>>,
-             kernel: *mut SessionCore<CoopRuntime<T::Clock>, CoopTime<T::Clock>>| {
-                // SAFETY: `halves_in` hands the two fields of the pair its cell holds: each of its
-                // half's type, apart from the other and holding nothing yet.
-                unsafe { halves.write(link, kernel) }
-            };
+    ) -> Result<HalvesHeld<T>, TransportRefusal> {
+        let write = |link: *mut LinkState<LinkRuntime<T>>,
+                     kernel: *mut SessionCore<LinkRuntime<T>, LinkTime<T>>| {
+            // SAFETY: `halves_in` hands the two fields of the pair its cell holds: each of its
+            // half's type, apart from the other and holding nothing yet.
+            unsafe { halves.write(link, kernel) }
+        };
         // SAFETY: `HalvesMaking::write` leaves a whole value at each place when it returns.
         unsafe { CellRc::halves_in(self.halves_cells.as_ref(), write) }
             .ok_or_else(|| self.cells_exhausted(endpoint))
@@ -453,7 +472,7 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn spawn_link<P, D>(
         &self,
         local: &CoopLocalSet<T::Clock>,
-        fields: PumpFields<T::Clock, P>,
+        fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
         dispatch: D,
     ) -> Result<CoopLocalJoinHandle<DriverOutcome>, TransportRefusal>
     where
@@ -464,22 +483,21 @@ impl<T: TransportFaces> TransportState<T> {
             .map_err(TransportRefusal::NoTask)
     }
 
-    /// Open the link of the group `endpoint` names (`group`). A member's link is reported by the
-    /// endpoint the group was joined by, in a row of `MAX_GROUP_ENDPOINT_LEN` bytes: a longer one
-    /// is refused before the group is joined, so no row of this engine is held on the heap.
+    /// Open the link of the group `endpoint` names (`group`), read here once for every stack
+    /// (`parse_group_locator`). A member's link is reported by the endpoint the group was joined
+    /// by, in a row of `MAX_GROUP_ENDPOINT_LEN` bytes: the reading refuses a longer one before the
+    /// group is joined, so no row of this engine is held on the heap.
     #[cfg(feature = "group")]
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, TransportRefusal> {
-        if endpoint.len() > caps::MAX_GROUP_ENDPOINT_LEN {
-            return Err(TransportRefusal::Group(EndpointRefusal::new(
-                endpoint,
-                Refusal::GroupEndpointTooLong,
-            )));
-        }
-        self.links.links().open_group(endpoint).map_err(|why| {
-            TransportRefusal::Group(EndpointRefusal::new(endpoint, Refusal::Link(why)))
-        })
+        let refused = |why| TransportRefusal::Group(EndpointRefusal::new(endpoint, why));
+        let group =
+            parse_group_locator(endpoint).map_err(|why| refused(Refusal::GroupEndpoint(why)))?;
+        self.links
+            .links()
+            .open_group(endpoint, &group)
+            .map_err(|why| refused(Refusal::Link(why)))
     }
 
     /// Hold the group the session joined as the face whose id was the next (`group`).
@@ -701,7 +719,7 @@ impl<T: TransportFaces> TransportState<T> {
     // Always inlined: its one caller is never inlined, so what is built here lies in that frame,
     // which has returned before the link's task first runs.
     #[inline(always)]
-    pub fn make_wire<K: LinkCalls<T::Clock>>(
+    pub fn make_wire<K: LinkCalls<T::Clock, T::Lock>>(
         &self,
         calls: &mut K,
         face: FaceId,
@@ -720,7 +738,7 @@ impl<T: TransportFaces> TransportState<T> {
         } = making;
         // The link's halves lie in its cell of the session's table, as its actions do: a link made
         // after the open takes no memory of the heap for them.
-        let actions = SessionLinkActions::<CoopRuntime<T::Clock>, CoopTime<T::Clock>>::build_held(
+        let actions = SessionLinkActions::<LinkRuntime<T>, LinkTime<T>>::build_held(
             sink,
             params,
             clock.clone(),

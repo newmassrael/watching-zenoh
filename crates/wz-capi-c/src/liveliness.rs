@@ -258,7 +258,7 @@ pub(crate) unsafe fn declare_token_on(
         };
         // `declare_liveliness_token` is this call with no restriction, the literal wire key and
         // the default options, so a token that states no links is declared as it always was.
-        let Some(id) = state.shared.declare_liveliness_token_on_links(
+        let Ok(id) = state.shared.declare_liveliness_token_on_links(
             ke,
             WireKey::literal(),
             LivelinessOptions::new(),
@@ -495,7 +495,7 @@ pub(crate) unsafe fn declare_subscriber_on(
         // key, so a subscriber that states no links is declared as it always was.
         // A session that has handed out every entity id refuses the subscriber, as it refuses a
         // token above.
-        let Some(id): Option<SubId> = state.shared.declare_liveliness_subscriber_on_links(
+        let Ok(id): Result<SubId, _> = state.shared.declare_liveliness_subscriber_on_links(
             ke,
             WireKey::literal(),
             opts,

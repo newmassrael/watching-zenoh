@@ -266,6 +266,11 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN",
         96,
     ),
+    (
+        "MAX_RAWETH_ENDPOINT_LEN",
+        "WZ_LIMIT_MAX_RAWETH_ENDPOINT_LEN",
+        160,
+    ),
     ("MAX_GROUP_MEMBERS", "WZ_LIMIT_MAX_GROUP_MEMBERS", 32),
     ("MAX_MEMBER_KEYEXPRS", "WZ_LIMIT_MAX_MEMBER_KEYEXPRS", 16),
     (

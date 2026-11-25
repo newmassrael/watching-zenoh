@@ -1210,7 +1210,7 @@ async fn an_ipv6_group_datagram_arrives_through_its_membership_and_only_through_
     async fn arrives(
         nic: &str,
         group: Ipv6Addr,
-        joins: &[String],
+        joins: &[std::net::IpAddr],
         dest: Ipv6Addr,
         port: u16,
     ) -> bool {
@@ -1252,7 +1252,14 @@ async fn an_ipv6_group_datagram_arrives_through_its_membership_and_only_through_
 
     let joined = arrives(&nic, JOINED, &[], JOINED, PORT).await;
     let not_joined = arrives(&nic, OTHER_JOINED, &[], NOBODY_JOINS, PORT + 1).await;
-    let extra = arrives(&nic, JOINED, &[EXTRA.to_string()], EXTRA, PORT + 2).await;
+    let extra = arrives(
+        &nic,
+        JOINED,
+        &[std::net::IpAddr::V6(EXTRA)],
+        EXTRA,
+        PORT + 2,
+    )
+    .await;
 
     assert!(
         joined,

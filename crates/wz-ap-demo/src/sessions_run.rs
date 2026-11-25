@@ -587,12 +587,19 @@ async fn run_group(
     access: Option<&crate::sessions_access::AccessSpec>,
     mut stop: watch::Receiver<bool>,
 ) -> SessionEnd {
-    use wz::runtime_tokio::{McastSocketConfig, UdpDriver};
+    use wz::runtime_tokio::group_locator::{parse_group_locator, GroupLocator};
+    use wz::runtime_tokio::{McastGroupOptions, UdpDriver};
 
-    let Some((group, port, iface)) = group_address(endpoint) else {
-        eprintln!("wz-ap-demo session {name}: failed: {endpoint} is not a group endpoint");
-        return SessionEnd::Failed;
+    // Read by the reader every engine opens a group from, so a document's group is refused or
+    // joined as any other engine's is.
+    let read = match parse_group_locator(endpoint) {
+        Ok(GroupLocator::Udp(read)) => read,
+        Err(e) => {
+            eprintln!("wz-ap-demo session {name}: failed: {endpoint} is not a group endpoint: {e}");
+            return SessionEnd::Failed;
+        }
     };
+    let (group, port) = (read.group().ip(), read.group().port());
     // One bind for the first join and every re-join, so a re-join installs
     // exactly the membership the first one did. Each join's session binds it
     // when it asks for its link. The link is upstream's shape: the group is read
@@ -604,23 +611,18 @@ async fn run_group(
     // The node's snapshot: the two link policies of the group's sockets, and what the group's
     // parameters carry to its loop and its session.
     let snapshot = crate::args::resolve_policy();
-    let bind = || {
-        UdpDriver::bind_multicast_link(
-            group,
-            port,
-            McastSocketConfig {
-                iface: iface.as_deref(),
-                ..McastSocketConfig::of_policy(&snapshot)
-            },
-        )
+    let options = McastGroupOptions {
+        keys: Some(read),
+        ..McastGroupOptions::of_policy(&snapshot)
     };
+    let bind = || UdpDriver::bind_multicast_link(group, port, options.as_socket_config());
     serve_group(
         endpoint,
         &group_params(zid, join_interval_ms, lease_ms, &snapshot),
         bind,
         access.map(|access| GroupPolicy {
             access,
-            iface: iface.as_deref(),
+            iface: options.as_socket_config().iface,
         }),
         &mut stop,
         |line| eprintln!("wz-ap-demo session {name}: {line}"),
@@ -866,27 +868,6 @@ async fn run_group(
     SessionEnd::Failed
 }
 
-/// `udp/<group>:<port>[#iface=<name|addr>]` as the address, the port and the
-/// interface. The rules have already admitted the text.
-#[cfg(feature = "transport-multicast")]
-fn group_address(endpoint: &str) -> Option<(std::net::IpAddr, u16, Option<String>)> {
-    let (locator, meta) = match endpoint.split_once('#') {
-        Some((l, m)) => (l, Some(m)),
-        None => (endpoint, None),
-    };
-    let (host, port) = locator.strip_prefix("udp/")?.rsplit_once(':')?;
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    let iface = meta.and_then(|m| {
-        m.split(';')
-            .find_map(|pair| pair.strip_prefix("iface="))
-            .map(str::to_string)
-    });
-    Some((host.parse().ok()?, port.parse().ok()?, iface))
-}
-
 /// The report of a session whose peer ended while the process was stopping.
 #[cfg(test)]
 mod stop_order_tests {
@@ -916,19 +897,23 @@ mod stop_order_tests {
 }
 
 #[cfg(all(test, feature = "transport-multicast"))]
-mod group_address_tests {
-    use super::group_address;
+mod group_endpoint_tests {
+    use wz::runtime_tokio::group_locator::{parse_group_locator, GroupLocator};
 
+    /// The group endpoints a sessions document admits are read by the one group reader into
+    /// the address, the port and the interface a group session joins by.
     #[test]
-    fn a_group_endpoint_splits_into_address_port_and_interface() {
-        assert_eq!(
-            group_address("udp/224.0.0.224:7446"),
-            Some(("224.0.0.224".parse().unwrap(), 7446, None))
-        );
-        assert_eq!(
-            group_address("udp/[ff02::1]:7447#iface=lo"),
-            Some(("ff02::1".parse().unwrap(), 7447, Some("lo".to_string())))
-        );
+    fn a_documents_group_endpoint_is_read_by_the_group_reader() {
+        let Ok(GroupLocator::Udp(v4)) = parse_group_locator("udp/224.0.0.224:7446") else {
+            panic!("an IPv4 group endpoint");
+        };
+        assert_eq!(v4.group(), "224.0.0.224:7446".parse().unwrap());
+        assert_eq!(v4.iface(), None);
+        let Ok(GroupLocator::Udp(v6)) = parse_group_locator("udp/[ff02::1]:7447#iface=lo") else {
+            panic!("an IPv6 group endpoint");
+        };
+        assert_eq!(v6.group(), "[ff02::1]:7447".parse().unwrap());
+        assert_eq!(v6.iface(), Some("lo"));
     }
 }
 

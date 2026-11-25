@@ -14,6 +14,7 @@
 use alloc::boxed::Box;
 
 use wz_session_core::byte_cells::LentByteCells;
+use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{LostCause, RxFrame};
 
 use crate::group_transport::GroupTransport;
@@ -279,8 +280,12 @@ impl<A: SessionLinks, B: SessionLinks> SessionLinks for EitherLinks<A, B> {
         Ok(Box::new(listener))
     }
 
-    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        on_side!(EitherLinks, self, links => links.open_group(endpoint))
+    fn open_group(
+        &self,
+        endpoint: &str,
+        group: &GroupLocator,
+    ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        on_side!(EitherLinks, self, links => links.open_group(endpoint, group))
     }
 
     // Each side shares its pump as its own stack does, so a stack whose pump is already a shared
@@ -554,8 +559,10 @@ mod tests {
             left().open_listener(at),
             Err(LinkOpenError::Unsupported)
         ));
+        let group = "udp/239.1.2.3:7447#iface=lo";
+        let read = wz_session_core::group_locator::parse_group_locator(group).expect("a group");
         assert!(matches!(
-            left().open_group("udp/239.1.2.3:7447#iface=lo"),
+            left().open_group(group, &read),
             Err(LinkOpenError::Unsupported)
         ));
     }

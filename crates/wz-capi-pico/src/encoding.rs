@@ -151,6 +151,7 @@ impl EncodingState {
     /// callback holds. A schema is copied into a payload block, as the kept value's
     /// payload and attachment are, refused with [`NoRoom`] when the area has none free; an
     /// encoding of no schema, or of an empty one, takes none.
+    #[cfg(any(test, feature = "queryable"))]
     pub(crate) fn kept(&self) -> Result<Self, NoRoom> {
         let (schema_start, block) = match self.view().schema {
             None => (core::ptr::null(), None),
@@ -178,10 +179,11 @@ impl EncodingState {
     /// a share the block cannot give.
     ///
     /// # Safety
-    /// The schema's bytes, when it has some, are written at `schema_start` of `block`.
+    /// The schema's bytes, when it has some, are written at `schema_start` of `block`, which is
+    /// then one.
     pub(crate) unsafe fn kept_in(
         &self,
-        block: &Block,
+        block: Option<&Block>,
         schema_start: *const u8,
     ) -> Result<Self, NoRoom> {
         let (schema_start, block) = match self.view().schema {
@@ -191,7 +193,10 @@ impl EncodingState {
                 core::ptr::NonNull::<u8>::dangling().as_ptr().cast_const(),
                 None,
             ),
-            Some(_) => (schema_start, Some(block.share().ok_or(NoRoom)?)),
+            Some(_) => (
+                schema_start,
+                Some(block.and_then(Block::share).ok_or(NoRoom)?),
+            ),
         };
         Ok(Self {
             packed_id: self.packed_id,

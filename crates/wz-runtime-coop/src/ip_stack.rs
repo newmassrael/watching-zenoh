@@ -30,6 +30,8 @@ use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::byte_cells::ByteSource;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use wz_session_core::byte_cells::LentByteCells;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkEnds, LinkSendOutcome, LostCause, RoomAnswer, RoomWait, TxSlot,
     TxSlotGrant,
@@ -759,17 +761,21 @@ where
         }
     }
 
-    /// The group `endpoint` names, joined by the host's joiner the links were given
+    /// The group `group` names, joined by the host's joiner the links were given
     /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported. A group of links
     /// whose session lent a table of group buffers ([`LinkTables::group_rx`]) receives into one of
     /// them, and finding every one held is [`LinkOpenError::Exhausted`]; without the table the
     /// transport makes its own.
-    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+    fn open_group(
+        &self,
+        _endpoint: &str,
+        group: &GroupLocator,
+    ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         let rx = match self.shape.lent.and_then(|tables| tables.group_rx()) {
             Some(table) => Some(table.claim().ok_or(LinkOpenError::Exhausted)?),
             None => None,
         };
-        self.groups.join(endpoint, rx)
+        self.groups.join(group, rx)
     }
 
     /// A link of these is shared already: the pump is the handle the sink is a clone of.
@@ -1948,10 +1954,17 @@ mod tests {
     #[test]
     fn heap_links_that_join_no_group_refuse_a_group_endpoint() {
         let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
+        let endpoint = "udp/239.1.2.3:7447#iface=lo";
         assert!(matches!(
-            links.open_group("udp/239.1.2.3:7447#iface=lo"),
+            links.open_group(endpoint, &group_of(endpoint)),
             Err(LinkOpenError::Unsupported)
         ));
+    }
+
+    /// The group `endpoint` names, read as the transport reads it before it asks the links.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn group_of(endpoint: &str) -> wz_session_core::group_locator::GroupLocator {
+        wz_session_core::group_locator::parse_group_locator(endpoint).expect("a group endpoint")
     }
 
     /// Links lent a table of group buffers hand each group they join one of them, and refuse a
@@ -1994,7 +2007,7 @@ mod tests {
         impl GroupJoiner for Joiner {
             fn join(
                 &self,
-                _endpoint: &str,
+                _group: &wz_session_core::group_locator::GroupLocator,
                 rx: Option<ByteBuf>,
             ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
                 self.lent.borrow_mut().push(rx.is_some());
@@ -2005,9 +2018,10 @@ mod tests {
             lent: RefCell::new(Vec::new()),
         };
 
+        let group = group_of(GROUP);
         let plain = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_groups(joiner());
         let _own = plain
-            .open_group(GROUP)
+            .open_group(GROUP, &group)
             .expect("CONTROL: a group with a buffer of its own");
         assert_eq!(
             *plain.groups.lent.borrow(),
@@ -2041,11 +2055,14 @@ mod tests {
         let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_groups(joiner());
         links.lend_buffers(LinkTables::new(rx, tx, slot_len).with_group_rx(groups));
         let mut first = links
-            .open_group(GROUP)
+            .open_group(GROUP, &group)
             .expect("a group in the table's buffer");
         assert_eq!(groups.in_use(), 1, "the group took the table's buffer");
         assert!(
-            matches!(links.open_group(GROUP), Err(LinkOpenError::Exhausted)),
+            matches!(
+                links.open_group(GROUP, &group),
+                Err(LinkOpenError::Exhausted)
+            ),
             "a second group finds the table held"
         );
         assert_eq!(
@@ -2062,19 +2079,20 @@ mod tests {
         drop(buf);
         assert_eq!(groups.in_use(), 0, "the table has its buffer again");
         let _next = links
-            .open_group(GROUP)
+            .open_group(GROUP, &group)
             .expect("the buffer serves the next group");
         assert_eq!(*links.groups.lent.borrow(), [true, true]);
     }
 
-    /// Links given a joiner hand it the group endpoint as the config states it and answer what it
-    /// answers: the group it joined, or its refusal. The secure channel given after it keeps it.
+    /// Links given a joiner hand it the group as the transport read it and answer what it answers:
+    /// the group it joined, or its refusal. The secure channel given after it keeps it.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn heap_links_given_a_joiner_join_the_group_it_joins() {
-        use alloc::string::String;
         use alloc::vec::Vec;
         use core::cell::RefCell;
+        use core::net::Ipv4Addr;
+        use wz_session_core::group_locator::GroupLocator;
 
         /// A group that carries nothing, for the joiner below to hand out.
         struct Quiet;
@@ -2093,19 +2111,20 @@ mod tests {
             }
         }
 
-        /// Joins the one group it names, and records every endpoint it was asked for.
+        /// Joins the one group it names, and records every group it was asked for.
         struct Joiner {
-            asked: RefCell<Vec<String>>,
+            asked: RefCell<Vec<SocketAddr>>,
         }
         impl GroupJoiner for Joiner {
             fn join(
                 &self,
-                endpoint: &str,
+                group: &GroupLocator,
                 rx: Option<ByteBuf>,
             ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
                 assert!(rx.is_none(), "links lent no group table");
-                self.asked.borrow_mut().push(endpoint.into());
-                if endpoint.starts_with("udp/239.1.2.3:7447") {
+                let at = group.udp().expect("a udp group").group();
+                self.asked.borrow_mut().push(at);
+                if at.ip() == Ipv4Addr::new(239, 1, 2, 3) {
                     Ok(Box::new(Quiet))
                 } else {
                     Err(LinkOpenError::Refused)
@@ -2118,18 +2137,22 @@ mod tests {
                 asked: RefCell::new(Vec::new()),
             })
             .with_tls(Dial);
+        let (joins, refused) = ("udp/239.1.2.3:7447#iface=lo", "udp/239.9.9.9:7447#iface=lo");
         let mut joined = links
-            .open_group("udp/239.1.2.3:7447#iface=lo")
+            .open_group(joins, &group_of(joins))
             .expect("the joiner joins the group it names");
         assert!(joined.open());
         assert!(matches!(
-            links.open_group("udp/239.9.9.9:7447#iface=lo"),
+            links.open_group(refused, &group_of(refused)),
             Err(LinkOpenError::Refused)
         ));
         assert_eq!(
             *links.groups.asked.borrow(),
-            ["udp/239.1.2.3:7447#iface=lo", "udp/239.9.9.9:7447#iface=lo"],
-            "each endpoint reaches the joiner as written"
+            [
+                SocketAddr::from((Ipv4Addr::new(239, 1, 2, 3), 7447)),
+                SocketAddr::from((Ipv4Addr::new(239, 9, 9, 9), 7447))
+            ],
+            "each group reaches the joiner as the transport read it"
         );
     }
 

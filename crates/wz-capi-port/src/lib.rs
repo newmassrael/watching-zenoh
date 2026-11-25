@@ -776,6 +776,16 @@ impl core::fmt::Debug for WireKey {
     }
 }
 
+/// Why a session took no more hold of a declaration ([`KeyHolds::retain_keyexpr`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldRefused {
+    /// The declaration's count holds as many holders as it can.
+    Full,
+    /// The declaration is no longer held (its row went) or the session is closed: there is
+    /// nothing to hold.
+    Gone,
+}
+
 /// One hold on a keyexpr declaration of a session, counted by the engine's own count of the
 /// declaration's holders ([`KeyHolds::retain_keyexpr`], [`KeyHolds::release_keyexpr`]).
 ///
@@ -818,14 +828,22 @@ impl KeyHold {
         self.row
     }
 
-    /// One more hold on the same declaration, taken of `session`, the session this one is on: one
-    /// that holds nothing when the session took none ([`KeyHolds::retain_keyexpr`]), so that
-    /// giving it back lets go of no hold another holder took.
-    pub fn share<H: KeyHolds + ?Sized>(&self, session: &H) -> Self {
-        Self {
+    /// One more hold on the same declaration, taken of `session`, the session this one is on.
+    /// `None`, taking nothing, when the declaration's count holds as many holders as it can
+    /// ([`HoldRefused::Full`]): a copy that held nothing would name a declaration the last
+    /// counted holder's going retracts. A copy of a declaration no longer held, or of one on a
+    /// closed session ([`HoldRefused::Gone`]), holds nothing, so that giving it back lets go of
+    /// no hold another holder took.
+    pub fn share<H: KeyHolds + ?Sized>(&self, session: &H) -> Option<Self> {
+        let row = match self.row.map(|row| (row, session.retain_keyexpr(row))) {
+            Some((row, Ok(()))) => Some(row),
+            Some((_, Err(HoldRefused::Full))) => return None,
+            Some((_, Err(HoldRefused::Gone))) | None => None,
+        };
+        Some(Self {
             mapping_id: self.mapping_id,
-            row: self.row.filter(|&row| session.retain_keyexpr(row)),
-        }
+            row,
+        })
     }
 
     /// A copy of a hold whose session is gone, which holds nothing.
@@ -1358,12 +1376,13 @@ mod tests {
 
     /// A session's count of a declaration's holders as a test keeps it: each hold taken and each
     /// given back, by the bits of its row, in order, up to four of each; it refuses every hold
-    /// asked once `full` is set.
+    /// asked once `refuses` is set.
     #[derive(Default)]
     struct CountedHolds {
         retained: Rows,
         released: Rows,
-        full: core::sync::atomic::AtomicBool,
+        /// 0 takes every hold; 1 refuses as full; 2 as gone.
+        refuses: core::sync::atomic::AtomicU8,
     }
 
     /// Up to four rows, as the bits of their handles, in the order they were written.
@@ -1388,17 +1407,34 @@ mod tests {
         }
     }
 
+    impl CountedHolds {
+        fn refuse(&self, why: HoldRefused) {
+            let code = match why {
+                HoldRefused::Full => 1,
+                HoldRefused::Gone => 2,
+            };
+            self.refuses
+                .store(code, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     impl KeyHolds for CountedHolds {
         fn release_keyexpr(&self, row: wz_session_core::session_tables::KeyexprHandle) {
             self.released.push(row);
         }
 
-        fn retain_keyexpr(&self, row: wz_session_core::session_tables::KeyexprHandle) -> bool {
-            if self.full.load(core::sync::atomic::Ordering::SeqCst) {
-                return false;
+        fn retain_keyexpr(
+            &self,
+            row: wz_session_core::session_tables::KeyexprHandle,
+        ) -> Result<(), HoldRefused> {
+            match self.refuses.load(core::sync::atomic::Ordering::SeqCst) {
+                1 => Err(HoldRefused::Full),
+                2 => Err(HoldRefused::Gone),
+                _ => {
+                    self.retained.push(row);
+                    Ok(())
+                }
             }
-            self.retained.push(row);
-            true
         }
     }
 
@@ -1419,7 +1455,7 @@ mod tests {
     fn a_hold_is_shared_and_given_back_once_to_its_session() {
         let session = CountedHolds::default();
         let named = KeyHold::taken(4, row());
-        let shared = named.share(&session);
+        let shared = named.share(&session).expect("a count with room");
         assert_eq!(session.retained.read(), [ROW_BITS]);
         assert_eq!(shared.mapping_id(), 4);
         assert_eq!(shared.row(), Some(row()));
@@ -1429,24 +1465,27 @@ mod tests {
         assert_eq!(session.released.read(), [ROW_BITS, ROW_BITS]);
     }
 
-    /// A copy the session took no hold for, and the copy of a hold whose session is gone, hold
-    /// nothing and give nothing back: a hold given back by such a copy would let go of one another
-    /// holder took. Turned red by a `KeyHold::share` that keeps the row its session refused, or an
-    /// `unheld` copy that keeps the row (`released` not empty).
+    /// A share past a full count is refused, and a copy of a declaration no longer held, or of a
+    /// hold whose session is gone, holds nothing and gives nothing back: a hold given back by such
+    /// a copy would let go of one another holder took. Turned red by a `KeyHold::share` that makes
+    /// a copy past a full count (`Some`), or a copy that keeps a row its session took no hold of
+    /// (`released` not empty).
     #[test]
-    fn a_copy_the_session_took_no_hold_for_gives_nothing_back() {
+    fn a_share_past_a_full_count_is_refused_and_an_unheld_copy_gives_nothing_back() {
         let session = CountedHolds::default();
         let named = KeyHold::taken(4, row());
-        session
-            .full
-            .store(true, core::sync::atomic::Ordering::SeqCst);
-        let refused = named.share(&session);
-        assert_eq!(refused.mapping_id(), 4, "the copy names the declaration");
-        assert_eq!(refused.row(), None);
-        let gone = named.unheld();
+        session.refuse(HoldRefused::Full);
+        assert_eq!(named.share(&session), None, "no copy past a full count");
+        session.refuse(HoldRefused::Gone);
+        let gone = named
+            .share(&session)
+            .expect("a copy of what is no longer held");
+        assert_eq!(gone.mapping_id(), 4, "the copy names the declaration");
         assert_eq!(gone.row(), None);
-        refused.release(&session);
+        let outlived = named.unheld();
+        assert_eq!(outlived.row(), None);
         gone.release(&session);
+        outlived.release(&session);
         assert!(session.retained.read().is_empty());
         assert!(session.released.read().is_empty());
         named.release(&session);
