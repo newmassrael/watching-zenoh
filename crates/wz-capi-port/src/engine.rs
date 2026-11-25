@@ -19,7 +19,9 @@
 //! joins this trait when a second engine implements it.
 
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::ops::Deref;
 
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::face::{FaceEventSink, FaceLinkRow, FaceRowSink, FaceSnapshot};
@@ -818,5 +820,40 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     ) -> Result<usize, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg)
+    }
+}
+
+/// What holds a session's engine for as long as it is held, and reaches it without holding it
+/// ([`Self::Handle`]): a count of an engine of the heap (`Arc`, reached by a `Weak`), or of one an
+/// engine places in its session's own memory, reached through a row of the process's table
+/// ([`crate::reach::ReachEngine`]). What keeps an engine generic over this keeps either, so an
+/// engine that takes no memory of the heap is not made to take it for its holders.
+pub trait EngineHolder: Clone + Send + Sync + Deref<Target: SessionEngine> {
+    /// What reaches the engine without keeping it standing.
+    type Handle: Clone + Send + Sync;
+
+    /// A reach of the engine `this` holds.
+    fn downgrade(this: &Self) -> Self::Handle;
+
+    /// A holder of the engine `handle` reaches, while it can be: `None` once it can no longer.
+    fn upgrade(handle: &Self::Handle) -> Option<Self>;
+
+    /// Whether the two hold the same engine.
+    fn ptr_eq(this: &Self, other: &Self) -> bool;
+}
+
+impl<E: SessionEngine + ?Sized> EngineHolder for Arc<E> {
+    type Handle = Weak<E>;
+
+    fn downgrade(this: &Self) -> Weak<E> {
+        Arc::downgrade(this)
+    }
+
+    fn upgrade(handle: &Weak<E>) -> Option<Self> {
+        handle.upgrade()
+    }
+
+    fn ptr_eq(this: &Self, other: &Self) -> bool {
+        Arc::ptr_eq(this, other)
     }
 }

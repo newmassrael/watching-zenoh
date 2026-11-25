@@ -691,7 +691,7 @@ fn an_engine_of_its_own_type_hosts_the_subscriber_as_the_port_object_does() {
         )
     };
     let concrete = Script::new(1);
-    let subscriber: EngineSubscriber<Script> =
+    let subscriber: EngineSubscriber<Arc<Script>> =
         EngineSubscriber::declare(&concrete, "demo/data", options(), |_| {})
             .expect("the subscriber declares on the scripted engine as its own type");
     drop(subscriber);
@@ -976,7 +976,7 @@ fn a_subscriber_is_named_by_its_engines_session_zid() {
 fn shared_on(
     script: &Arc<Script>,
     delivered: &Arc<Mutex<Vec<u8>>>,
-) -> Strong<super::Shared<dyn SessionEngine>> {
+) -> Strong<super::Shared<Arc<dyn SessionEngine>>> {
     shared_on_key(script, delivered, "demo/data")
 }
 
@@ -985,7 +985,7 @@ fn shared_on_key(
     script: &Arc<Script>,
     delivered: &Arc<Mutex<Vec<u8>>>,
     base: &str,
-) -> Strong<super::Shared<dyn SessionEngine>> {
+) -> Strong<super::Shared<Arc<dyn SessionEngine>>> {
     let d = Arc::clone(delivered);
     let state = State::new(
         Box::new(move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0])),
@@ -1063,7 +1063,7 @@ fn the_subscribers_own_callback_takes_no_memory_and_holds_it() {
     let shared = shared_on(&script, &delivered);
 
     let before = allocations();
-    let sink = super::own_sink(&shared, super::on_live::<dyn SessionEngine>);
+    let sink = super::own_sink(&shared, super::on_live::<Arc<dyn SessionEngine>>);
     let during = allocations() - before;
 
     assert_eq!(during, 0, "the callback allocates nothing");
@@ -1499,7 +1499,7 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
             )
     };
     let given = AtomicU64::new(0);
-    let mut core = SubscriberCore::<dyn SessionEngine>::vacant();
+    let mut core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
     let script = Script::new(1);
     // SAFETY: `core` is free and outlives the subscriber and every holder of its part; `given`
     // outlives the give-back.
@@ -1536,7 +1536,7 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
     assert_eq!(given.load(Ordering::SeqCst), 1, "the place goes back once");
 
     let refused_back = AtomicU64::new(0);
-    let mut refused_core = SubscriberCore::<dyn SessionEngine>::vacant();
+    let mut refused_core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
     let script = Script::new(1);
     // SAFETY: as above.
     let lent = unsafe {

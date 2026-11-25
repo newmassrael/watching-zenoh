@@ -77,7 +77,7 @@ use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
     Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
-use crate::session::{engine_held, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, session_handle, z_loaned_session_t, EngineHold};
 use crate::write_filter::PicoSession;
 use crate::zid::z_id_t;
 
@@ -1120,7 +1120,7 @@ pub(crate) struct AdvSubState {
     /// everything it declared, in the order the runtime's own subscriber does; a background
     /// subscriber is taken out to run on with its entities standing. Hosted on the engine as the
     /// build names it, so a build of one engine makes no table of the session's operations for it.
-    subscriber: Option<EngineSubscriber<Engine>>,
+    subscriber: Option<EngineSubscriber<EngineHold>>,
     /// R311y559 — as `AdvPubState`, for `ze_advanced_subscriber_keyexpr`: a borrow of the key the
     /// subscriber keeps, which no copy of this state's doubles.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
@@ -1151,7 +1151,7 @@ pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, AdvSubK
 /// anchors those names stand on, each anchor keeping the place while it stands.
 pub(crate) struct AdvSubKept {
     sample: SubscriberKept,
-    core: SubscriberCore<Engine>,
+    core: SubscriberCore<EngineHold>,
     core_hold: core::mem::MaybeUninit<crate::ffi::HeldIn>,
     miss: core::mem::MaybeUninit<Lodging<MissRooms>>,
     miss_keep: core::mem::MaybeUninit<crate::ffi::KeptIn>,

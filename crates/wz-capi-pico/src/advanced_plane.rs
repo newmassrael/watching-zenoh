@@ -114,7 +114,7 @@ impl AdvancedPublisherPlane for PicoPlane {
     /// periodic jobs, whose publisher then declares and sends no heartbeat. The job names the
     /// engine as the session holds it, so a build that reaches its engine as its own type makes no
     /// table of the engine's periodic jobs for it.
-    type Timer = Option<Ticker<crate::session::Engine>>;
+    type Timer = Option<Ticker<crate::session::EngineHold>>;
 
     fn node_hlc(&self) -> &NodeHlc {
         &self.hlc
@@ -124,7 +124,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         &self,
         period: Duration,
         tick: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Option<Ticker<crate::session::Engine>> {
+    ) -> Option<Ticker<crate::session::EngineHold>> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
         Ticker::start_on(self.session.engine.clone(), period_ms, tick).ok()
@@ -293,7 +293,7 @@ mod timer_tests {
     fn the_beacon_timer_holds_the_engine_as_the_session_does() {
         assert_eq!(
             TypeId::of::<<PicoPlane as AdvancedPublisherPlane>::Timer>(),
-            TypeId::of::<Option<Ticker<crate::session::Engine>>>()
+            TypeId::of::<Option<Ticker<crate::session::EngineHold>>>()
         );
         assert_ne!(
             TypeId::of::<<PicoPlane as AdvancedPublisherPlane>::Timer>(),
