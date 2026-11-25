@@ -441,7 +441,8 @@ where
 
 /// Classify one inbound multicast datagram by its transport MID and apply the
 /// §3.2 dispatch that needs no reassembly state: JOIN -> validate + admit (own
-/// zid filtered, since multicast loopback echoes our own beacon); Frame -> the
+/// zid filtered, since a link that cannot tell its own source echoes our own
+/// beacon); Frame -> the
 /// per-channel SN gate + (on Admit) fan the NetworkMessage batch to `on_event`
 /// as an [`IterationEvent::Poll`]; KeepAlive -> lease refresh. Close and
 /// Fragment are returned via [`MulticastRxNext`] for the caller's
@@ -505,8 +506,11 @@ where
             // admit / refresh the peer at this address. Filter our own zid: a
             // node is not its own peer.
             if let Some((join, zid)) = decode_join_named(bytes) {
-                // R2848 — counted before the own-zid filter: the loopback echo
-                // of our own beacon is a message this link received.
+                // R2848 — counted before the own-zid filter, as upstream counts
+                // what its link hands over. A host link drops what its own send
+                // socket sent before it gets here, as upstream's link does, so a
+                // JOIN of this node's zid came over a link that cannot tell its
+                // own source from a member's, and that link received it.
                 stats.transport_message_received();
                 if join.zid != params.zid.as_slice() {
                     // zenoh asks whether its table has room for a new member before it reads
