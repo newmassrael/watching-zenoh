@@ -208,7 +208,7 @@ pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>
     /// `actions`.
     fn gate(
         &self,
-        pump: CellRc<dyn SessionDatagramLink>,
+        pump: CellRc<dyn SessionDatagramLink, K::Count>,
         actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
     ) -> Self::Gate;
 
@@ -218,7 +218,7 @@ pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>
         &self,
         face: FaceId,
         actions: SessionHandle<C, dyn BoxedLinkDriver, K>,
-        gate: &CellRc<Self::Gate>,
+        gate: &CellRc<Self::Gate, K::Count>,
     ) -> (Self::Dispatch, Self::Session);
 }
 

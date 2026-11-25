@@ -101,7 +101,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> ShareVa
     for CoopRuntime<C, D, K>
 {
     fn share<U>(value: U) -> Self::Shared<U> {
-        crate::link_cells::CellRc::boxed(value)
+        crate::link_cells::CellRc::on_heap(value)
     }
 }
 
@@ -114,9 +114,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     type Driver = D;
 
     // The sink is a counted handle on the cell the link's driver lives in, lent from the session's
-    // arena or, for a link no table lends one, on the heap (`crate::link_cells`).
+    // arena or, for a link no table lends one, on the heap (`crate::link_cells`), counted as the
+    // lock kind counts what its session's holders share (`LockKind::Count`).
     #[cfg(not(feature = "session-slot"))]
-    type LinkSink = crate::link_cells::CellRc<D>;
+    type LinkSink = crate::link_cells::CellRc<D, K::Count>;
 
     // Fixed-memory step S5 — under `session-slot` the sink is a reference to the
     // driver the session's own slot holds (`wz_session_core::session_slot`), not
@@ -130,7 +131,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     // writes a link's halves in one of them (`CellRc::halves_in`), and the same type names halves
     // on the heap (`ShareValues::share`).
     #[cfg(not(feature = "session-slot"))]
-    type Shared<U> = crate::link_cells::CellRc<U>;
+    type Shared<U> = crate::link_cells::CellRc<U, K::Count>;
 
     // Fixed-memory step S9c -- the slot profile holds no shared pointer: the bundle
     // is one value in its slot, with its kernel and its link as its own fields
@@ -179,7 +180,8 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     // an engine that lent a table of cells places the bundle in one of them
     // (`CellRc::place`) and the same type names a bundle on the heap.
     #[cfg(not(feature = "session-slot"))]
-    type ActionsHandle<T: TimeSource> = crate::link_cells::CellRc<SessionLinkActions<Self, T>>;
+    type ActionsHandle<T: TimeSource> =
+        crate::link_cells::CellRc<SessionLinkActions<Self, T>, K::Count>;
 
     // Fixed-memory step S5 — under `session-slot` the handle is a counted
     // reference to the session in its slot, which the slot table hands out and
@@ -192,7 +194,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
 
     #[cfg(not(feature = "session-slot"))]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
-        crate::link_cells::CellRc::boxed(actions)
+        crate::link_cells::CellRc::on_heap(actions)
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &D {

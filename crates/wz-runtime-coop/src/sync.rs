@@ -642,6 +642,35 @@ mod many_threads_tests {
         let handle: CellRc<u32, <Kind as LockKind>::Count> = CellRc::<u32, Atomic>::shared(5);
         assert_eq!(*handle, 5);
     }
+
+    /// What a session runtime of several threads shares is a handle counted as an `Arc`'s is,
+    /// so a shared value is let go of on another thread and the count stays whole. Turned red by
+    /// a runtime whose `SessionRuntime::Shared` is counted for one task (`session_runtime`).
+    #[cfg(not(feature = "session-slot"))]
+    #[test]
+    fn a_runtime_of_several_threads_shares_by_atomic_handles() {
+        extern crate std;
+        use crate::link_cells::{Atomic, CellRc};
+        use wz_session_core::link::{BoxedLinkDriver, ShareValues};
+
+        struct Still;
+
+        impl crate::ClockSource for Still {
+            fn now_us(&self) -> u64 {
+                0
+            }
+        }
+
+        type Runtime = crate::CoopRuntime<Still, dyn BoxedLinkDriver, Kind>;
+        let shared: CellRc<u32, Atomic> = <Runtime as ShareValues>::share(7);
+        let other = shared.clone();
+        assert_eq!(CellRc::handles(&shared), 2);
+        std::thread::spawn(move || assert_eq!(*other, 7))
+            .join()
+            .expect("the other thread read the shared value");
+        assert_eq!(CellRc::handles(&shared), 1);
+        assert_eq!(*shared, 7);
+    }
 }
 
 #[cfg(all(

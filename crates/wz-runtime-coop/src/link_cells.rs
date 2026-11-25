@@ -660,17 +660,17 @@ impl<T: ?Sized, N: CountKind> CellRc<T, N> {
     }
 }
 
-impl<K: BoxedLinkDriver + 'static> CellRc<K> {
+impl<K: BoxedLinkDriver + 'static, N: CountKind> CellRc<K, N> {
     /// This handle as the one the session's actions send through.
-    pub fn into_sink(self) -> CellRc<dyn BoxedLinkDriver> {
+    pub fn into_sink(self) -> CellRc<dyn BoxedLinkDriver, N> {
         // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
         unsafe { self.unsize(|value| -> NonNull<dyn BoxedLinkDriver> { value }) }
     }
 }
 
-impl<K: SessionDatagramLink + 'static> CellRc<K> {
+impl<K: SessionDatagramLink + 'static, N: CountKind> CellRc<K, N> {
     /// This handle as the link the session's drive loop pumps.
-    pub fn into_link(self) -> CellRc<dyn SessionDatagramLink> {
+    pub fn into_link(self) -> CellRc<dyn SessionDatagramLink, N> {
         // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
         unsafe { self.unsize(|value| -> NonNull<dyn SessionDatagramLink> { value }) }
     }

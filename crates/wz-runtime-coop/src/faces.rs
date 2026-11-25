@@ -32,7 +32,7 @@ use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::same_zid;
 
 use crate::face_life::{FaceRole, Phase, Signals};
-use crate::link_cells::CellRc;
+use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
     SessionDatagramLink, SessionLinks, WaitOn,
@@ -74,7 +74,7 @@ pub trait FaceSession {
 
 /// One face as the session keeps it: the face's number and its link, beside whatever else the
 /// session keeps of the face. The supervisor reads and replaces the link alone.
-pub trait FaceRecord {
+pub trait FaceRecord<N: CountKind = OneTask> {
     /// The session's half of the face's link.
     type Session: FaceSession;
 
@@ -82,7 +82,7 @@ pub trait FaceRecord {
     type Pump;
 
     /// A dial under way of the face's link ([`SessionLinks::Dial`]).
-    type Dial: PendingDial<Self::Pump>;
+    type Dial: PendingDial<Self::Pump, N>;
 
     /// The face's number.
     fn id(&self) -> FaceId;
@@ -92,10 +92,10 @@ pub trait FaceRecord {
     type End: LinkEnd;
 
     /// The face's link.
-    fn link(&self) -> &Link<Self::Session, Self::Dial, Self::End>;
+    fn link(&self) -> &Link<Self::Session, Self::Dial, Self::End, N>;
 
     /// The face's link, to replace.
-    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Dial, Self::End>;
+    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Dial, Self::End, N>;
 }
 
 /// How a face's owner tells that the session of a link ended, and ends it ([`Wire`]). A
@@ -128,10 +128,10 @@ impl LinkEnd for TaskEnd {
 /// the link as the session's step reads it, and what its owner waits on for its input and its
 /// room, read off the link when it is made. It reads as the session's half (`Deref`): what the
 /// session sends over the link is that half's.
-pub struct Wire<S, E = TaskEnd> {
+pub struct Wire<S, E = TaskEnd, N: CountKind = OneTask> {
     session: S,
     end: E,
-    link: CellRc<dyn SessionDatagramLink>,
+    link: CellRc<dyn SessionDatagramLink, N>,
     input: Option<WaitOn>,
     room: Option<WaitOn>,
 }
@@ -139,7 +139,7 @@ pub struct Wire<S, E = TaskEnd> {
 /// Whether `link` has input in its stack it cannot read until another link gives a receive buffer
 /// back (`SessionDatagramLink::waits_for_buffer`): never in a build that only dials, whose links
 /// read into buffers of their own.
-fn waits_for_buffer(link: &CellRc<dyn SessionDatagramLink>) -> bool {
+fn waits_for_buffer<N: CountKind>(link: &CellRc<dyn SessionDatagramLink, N>) -> bool {
     #[cfg(feature = "session-unicast-accept")]
     {
         link.waits_for_buffer()
@@ -151,7 +151,7 @@ fn waits_for_buffer(link: &CellRc<dyn SessionDatagramLink>) -> bool {
     }
 }
 
-impl<S, E: LinkEnd> Wire<S, E> {
+impl<S, E: LinkEnd, N: CountKind> Wire<S, E, N> {
     /// The link whose session half is `session`, ended by `end`: `link` is what the session's
     /// step reads, behind whatever gates the session put on it, and `input_wait` and `room_wait`
     /// what its owner waits on for its input and its room, read off the link without the gates
@@ -159,7 +159,7 @@ impl<S, E: LinkEnd> Wire<S, E> {
     pub fn new(
         session: S,
         end: E,
-        link: CellRc<dyn SessionDatagramLink>,
+        link: CellRc<dyn SessionDatagramLink, N>,
         input_wait: Option<WaitOn>,
         room_wait: Option<WaitOn>,
     ) -> Self {
@@ -198,7 +198,7 @@ impl<S, E: LinkEnd> Wire<S, E> {
     }
 }
 
-impl<S, E> Deref for Wire<S, E> {
+impl<S, E, N: CountKind> Deref for Wire<S, E, N> {
     type Target = S;
 
     fn deref(&self) -> &S {
@@ -209,15 +209,15 @@ impl<S, E> Deref for Wire<S, E> {
 /// A face's link: up, in its handshake, being dialled, waiting to be dialled, or standing by. A
 /// dial under way is held in its face's link, so a face has one dial at most and the faces' table
 /// is the dials' table too.
-pub enum Link<S, D, E = TaskEnd> {
+pub enum Link<S, D, E = TaskEnd, N: CountKind = OneTask> {
     /// Established: the session's sends go through it.
-    Up(Wire<S, E>),
+    Up(Wire<S, E, N>),
     /// A handshake under way, given up at `deadline_us`. The dial role's face has dialled the
     /// endpoint before `next` and goes on to the one after; another face holds a link it dialled
     /// once or took off a port, and is removed when the handshake fails.
     Opening {
         /// The link in its handshake.
-        wire: Wire<S, E>,
+        wire: Wire<S, E, N>,
         /// The endpoint the dial role dials next when this one fails.
         next: usize,
         /// When the handshake is given up.
@@ -247,9 +247,9 @@ pub enum Link<S, D, E = TaskEnd> {
     },
 }
 
-impl<S, D, E> Link<S, D, E> {
+impl<S, D, E, N: CountKind> Link<S, D, E, N> {
     /// The link's wire while it is up or in its handshake.
-    pub fn wire(&self) -> Option<&Wire<S, E>> {
+    pub fn wire(&self) -> Option<&Wire<S, E, N>> {
         match self {
             Link::Up(wire) | Link::Opening { wire, .. } => Some(wire),
             _ => None,
@@ -443,9 +443,9 @@ impl<D> Dial<D> {
     /// Ask the dial whether its link is made: the link, the refusal, or `None` while it is still
     /// being made. What a session's driver reads of a dial at each move of its face
     /// (`face_life::Signals::dial`).
-    pub fn answer<P>(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>>
+    pub fn answer<P, N: CountKind>(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>>
     where
-        D: PendingDial<P>,
+        D: PendingDial<P, N>,
     {
         self.pending.poll()
     }
@@ -453,7 +453,7 @@ impl<D> Dial<D> {
 
 /// The answer of a face's dial under way: the link it made, the refusal, or `None` while it is
 /// still being made.
-pub type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
+pub type DialAnswer<P, N = OneTask> = Option<Result<OpenedLink<P, N>, LinkOpenError>>;
 
 /// What a session reads of a face at a step ([`LinkSupervisor::read_face`]): its role, where its
 /// link stands, and what it did since. The answer of its dial, kept for the link it made, is
@@ -481,8 +481,8 @@ pub enum HandshakeEnd {
 
 /// A port the session listens on, and the row of the endpoint its links are stated for, when the
 /// session states one.
-struct Listening<P> {
-    listener: Box<dyn LinkListener<P>>,
+struct Listening<P, N: CountKind> {
+    listener: Box<dyn LinkListener<P, N>>,
     endpoint: Option<usize>,
     /// What the port gave the last read's wait to wait on, when the port is asked for a
     /// connection only once a wait found it ready (`LinkListener::asked_when_ready`); `None` for
@@ -493,9 +493,9 @@ struct Listening<P> {
 }
 
 /// What a link taken off a port came to ([`LinkSupervisor::accept_at`]).
-pub enum Accepted<P> {
+pub enum Accepted<P, N: CountKind = OneTask> {
     /// A connection, with the endpoint its port is stated for.
-    Link(OpenedLink<P>, Option<DialEndpoint>),
+    Link(OpenedLink<P, N>, Option<DialEndpoint>),
     /// No connection waits on the port now, no wait found it ready since it last had none, or the
     /// stack had nothing left to take one with.
     Idle,
@@ -805,14 +805,14 @@ impl<F> FacePlaces<F> for OneFace<F> {
 /// A session's faces, dials and ports over the network `L`, each face kept as the session's
 /// record `F` at a place of its own in the table `P`. The first place is the dial role's face's,
 /// which is never taken out.
-pub struct LinkSupervisor<L: SessionLinks, F, P = ManyFaces<F>> {
+pub struct LinkSupervisor<L: SessionLinks<N>, F, P = ManyFaces<F>, N: CountKind = OneTask> {
     links: L,
     /// The faces by their places, the table made whole at the open for as many places as the
     /// session holds faces at and never grown: a face keeps the place it was put at until it is
     /// taken out, so its place names it for that whole time, and the session names the face's
     /// other tables by the same place. A place no face holds is free for the next.
     faces: P,
-    listeners: Vec<Listening<L::Pump>>,
+    listeners: Vec<Listening<L::Pump, N>>,
     /// The one buffer a read's waits are gathered in, reserved at the open for every link, port
     /// and wake a read waits on at once; `None` while a read waits with it, so that a read on
     /// another thread then makes no buffer of its own after the open.
@@ -826,8 +826,12 @@ pub struct LinkSupervisor<L: SessionLinks, F, P = ManyFaces<F>> {
     records: core::marker::PhantomData<fn() -> F>,
 }
 
-impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlaces<F>>
-    LinkSupervisor<L, F, P>
+impl<
+        L: SessionLinks<N>,
+        F: FaceRecord<N, Pump = L::Pump, Dial = L::Dial>,
+        P: FacePlaces<F>,
+        N: CountKind,
+    > LinkSupervisor<L, F, P, N>
 {
     /// The faces of a session over `links`, `dial` the dial role's at the first place: `places`
     /// places in all (one at least, the dial role's), each face with a dial under way at most, and
@@ -983,7 +987,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
 
     /// Take a connection off the port at `at`: `None` past the last port. A port broken for good
     /// is let go of, so the port after it is then at `at`.
-    pub fn accept_at(&mut self, at: usize) -> Option<Accepted<L::Pump>> {
+    pub fn accept_at(&mut self, at: usize) -> Option<Accepted<L::Pump, N>> {
         let listening = self.listeners.get_mut(at)?;
         // A port a wait names is asked only once a wait found it ready: under a stream of input
         // a step a batch would otherwise ask the stack for a connection that is not there.
@@ -1006,7 +1010,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     }
 
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
-    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial, F::End>) {
+    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial, F::End, N>) {
         if let Some(face) = self.face_mut(at) {
             *face.link_mut() = link;
         }
@@ -1068,7 +1072,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         &mut self,
         at: usize,
         id: FaceId,
-        answer: &mut DialAnswer<L::Pump>,
+        answer: &mut DialAnswer<L::Pump, N>,
     ) -> FaceRead {
         // A session that takes no face besides its dial has the dial role alone: a place past the
         // first holds a departed face's tomb there, which never moves.
