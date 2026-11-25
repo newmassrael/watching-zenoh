@@ -26,7 +26,10 @@
 //! For every owned value type we store our Rust handle (`Box::into_raw`) in
 //! the leading pointer slot and zero-pad the remainder. The C side never
 //! reads the padding directly — it only passes the struct (by pointer) back
-//! to our exported accessors — so this is safe and forward-compatible.
+//! to our exported accessors — so this is safe and forward-compatible. bytes
+//! is the one exception: its payload is the value's own first three words and
+//! its last word the borrow tag (`HandleOwnership`), so a payload takes no
+//! place apart from the value.
 //!
 //! Publisher / subscriber owned structs are also stack-allocated by a real
 //! pico program, but their exact size is `Z_FEATURE`-flag dependent; Round 1
@@ -39,14 +42,12 @@ use core::ffi::c_void;
 // A raw pointer used as an FFI handle slot. Zeroed = "null / not present".
 type Handle = *mut c_void;
 
-/// The sentinel a handle value type parks in `_pad[0]` to say "slot 0 is a
-/// BORROW, not an owned `Box`".
+/// The sentinel a bytes value parks in its last word to say "the payload in the
+/// words before is a BORROW, not the value's own".
 ///
-/// `1` is chosen because it is not a valid `Box::into_raw` result for any type
-/// this crate boxes (all are over-aligned relative to 1) and because every
-/// producer of an owned struct already zeroes the padding — so the tag is
-/// unforgeable by accident, and its absence is the pre-existing default rather
-/// than something each constructor has to opt into.
+/// The last word is past the payload the value holds (`crate::bytes::ByteBuf`, three words),
+/// and every producer of an owned value zeroes it — so the tag is unforgeable by accident, and
+/// its absence is the default rather than something each constructor has to opt into.
 pub(crate) const HANDLE_BORROWED_TAG: usize = 1;
 
 /// Whether an owned handle struct's slot 0 is a BORROW that its `drop` must not
@@ -59,8 +60,8 @@ pub(crate) const HANDLE_BORROWED_TAG: usize = 1;
 /// — which bitwise-copies a value the sample still owns. pico survives this
 /// because its `_z_bytes_t` is an `_z_arc_slice_svec_t` carrying an `_aliased`
 /// flag, and its `_z_svec_clear` skips the free when that flag is set. This
-/// trait is the same discipline in wz's handle model: the flag lives in
-/// `_pad[0]` instead of inside a vector header, and the ownership family reads
+/// trait is the same discipline in wz's handle model: the flag lives in the
+/// value's last word instead of inside a vector header, and the ownership family reads
 /// it in exactly the two places ownership transfers — `drop` and the
 /// take-the-payload path.
 ///
@@ -68,7 +69,7 @@ pub(crate) const HANDLE_BORROWED_TAG: usize = 1;
 /// values only ever come from a wz constructor. A type overrides it when a C
 /// program can obtain one of its values by reading pico's own struct layout.
 pub(crate) trait HandleOwnership {
-    /// `true` iff slot 0 is borrowed and `z_*_drop` must leave it alone.
+    /// `true` iff what the value holds is borrowed and `z_*_drop` must leave it alone.
     fn handle_is_borrowed(&self) -> bool {
         false
     }
@@ -142,22 +143,36 @@ impl HandleOwnership for crate::serde::ze_owned_serializer_t {}
 /// [`HandleOwnership`] and `SampleMarshal`'s pico-layout prefix.
 impl HandleOwnership for z_owned_bytes_t {
     fn handle_is_borrowed(&self) -> bool {
-        self._pad[0] as usize == HANDLE_BORROWED_TAG
+        self._pad[2] as usize == HANDLE_BORROWED_TAG
     }
 }
 
 impl z_owned_bytes_t {
-    /// A BORROWED bytes value over `buf`, the shape `SampleMarshal` parks at
-    /// pico's `offsetof(_z_sample_t, payload)` so a C program reading that field
-    /// gets something wz can recognise on the way back in.
-    pub(crate) fn borrowed(buf: *const c_void) -> Self {
+    /// A BORROWED bytes value over `buf`: a copy of its words, bit for bit, tagged so that no
+    /// drop lets go of what `buf`'s holder lets go of. The shape `SampleMarshal` parks at pico's
+    /// `offsetof(_z_sample_t, payload)`, so a C program reading that field gets something wz can
+    /// recognise on the way back in, and every loaned payload view a marshal hands out.
+    pub(crate) fn borrowed(buf: &crate::bytes::ByteBuf) -> Self {
+        let mut value = Self::null_value();
+        // SAFETY: a payload is the first three words of the value (`crate::bytes` asserts the
+        // layout), and the copy written there is never dropped: the tag below says it is a borrow.
+        unsafe {
+            core::ptr::from_mut(&mut value)
+                .cast::<crate::bytes::ByteBuf>()
+                .write(core::ptr::read(buf))
+        };
+        value._pad[2] = HANDLE_BORROWED_TAG as *mut c_void;
+        value
+    }
+}
+
+impl z_loaned_bytes_t {
+    /// A loaned view of `buf`, a borrow as [`z_owned_bytes_t::borrowed`] makes.
+    pub(crate) fn borrowed(buf: &crate::bytes::ByteBuf) -> Self {
+        let value = z_owned_bytes_t::borrowed(buf);
         Self {
-            handle: buf as *mut c_void,
-            _pad: [
-                HANDLE_BORROWED_TAG as *mut c_void,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            ],
+            handle: value.handle,
+            _pad: value._pad,
         }
     }
 }
@@ -469,6 +484,34 @@ macro_rules! impl_handle_ownership7 {
     ($Owned:ty, $Loaned:ty, $Moved:ty, $free:path,
      $null:ident, $check:ident, $loan:ident, $loan_mut:ident,
      $mv:ident, $take:ident, $drop:ident) => {
+        $crate::abi::impl_handle_ownership6!(
+            $Owned, $Loaned, $Moved, $null, $check, $loan, $loan_mut, $mv, $take
+        );
+
+        /// Drop the owned value (pico `z_*_drop`). Idempotent on a null
+        /// handle, and a NO-OP on a BORROWED one (see `HandleOwnership`).
+        #[no_mangle]
+        pub unsafe extern "C" fn $drop(obj: *mut $Moved) {
+            let borrowed =
+                !obj.is_null() && $crate::abi::HandleOwnership::handle_is_borrowed(&(*obj)._this);
+            $crate::abi::drop_block(
+                obj.cast(),
+                ::core::mem::size_of::<$Owned>(),
+                borrowed,
+                $free,
+            );
+        }
+    };
+}
+
+pub(crate) use impl_handle_ownership7;
+
+/// The 7-function core but `drop`, for a type whose value is not a handle that a free function
+/// takes (bytes, whose payload is the value's own words).
+macro_rules! impl_handle_ownership6 {
+    ($Owned:ty, $Loaned:ty, $Moved:ty,
+     $null:ident, $check:ident, $loan:ident, $loan_mut:ident,
+     $mv:ident, $take:ident) => {
         /// Zero the owned struct in place (pico `z_internal_*_null`).
         #[no_mangle]
         pub unsafe extern "C" fn $null(obj: *mut $Owned) {
@@ -511,24 +554,10 @@ macro_rules! impl_handle_ownership7 {
         pub unsafe extern "C" fn $take(dst: *mut $Owned, src: *mut $Moved) {
             $crate::abi::take_block(dst.cast(), src.cast(), ::core::mem::size_of::<$Owned>());
         }
-
-        /// Drop the owned value (pico `z_*_drop`). Idempotent on a null
-        /// handle, and a NO-OP on a BORROWED one (see `HandleOwnership`).
-        #[no_mangle]
-        pub unsafe extern "C" fn $drop(obj: *mut $Moved) {
-            let borrowed =
-                !obj.is_null() && $crate::abi::HandleOwnership::handle_is_borrowed(&(*obj)._this);
-            $crate::abi::drop_block(
-                obj.cast(),
-                ::core::mem::size_of::<$Owned>(),
-                borrowed,
-                $free,
-            );
-        }
     };
 }
 
-pub(crate) use impl_handle_ownership7;
+pub(crate) use impl_handle_ownership6;
 
 /// The full-DEF value-type family: the 7-function core plus
 /// `take_from_loaned` (pico `_Z_OWNED_FUNCTIONS_DEF` minus the per-type
@@ -880,17 +909,43 @@ mod tests {
         assert_eq!(words(&obj), [0; 4]);
     }
 
-    /// Through an export: a bytes value that borrows its handle (the shape a sample's payload
-    /// field holds) is dropped without being freed and left null.
+    /// Through an export: a bytes value that borrows its payload (the shape a sample's payload
+    /// field holds) is dropped without letting it go and left null; the payload's own holder lets
+    /// it go once. Turned red by a borrow tag the drop does not read, or one in a word the payload
+    /// takes.
     #[test]
     fn a_borrowed_bytes_value_is_dropped_without_a_free() {
-        let storage = [0u8; 8];
-        let mut bytes = z_owned_bytes_t::borrowed(storage.as_ptr().cast());
+        unsafe extern "C" fn count(_value: *mut c_void, context: *mut c_void) {
+            (*context.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst);
+        }
+        let released = AtomicUsize::new(0);
+        let storage = [7u8; 8];
+        // SAFETY: `storage` and `released` outlive the payload, dropped below.
+        let held = unsafe {
+            crate::bytes::ByteBuf::aliased(
+                storage.as_ptr(),
+                storage.len(),
+                crate::bytes::Release::new(
+                    Some(count),
+                    core::ptr::null_mut(),
+                    core::ptr::from_ref(&released).cast_mut().cast(),
+                ),
+            )
+        }
+        .expect("room for the record of the bytes");
+        let mut bytes = z_owned_bytes_t::borrowed(&held);
         // SAFETY: a borrowed value, which the drop leaves to its owner.
         unsafe {
             assert!(crate::bytes::z_internal_bytes_check(&bytes));
             crate::bytes::z_bytes_drop(crate::bytes::z_bytes_move(&mut bytes));
             assert!(!crate::bytes::z_internal_bytes_check(&bytes));
         }
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            0,
+            "the borrow let go of nothing"
+        );
+        drop(held);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 }

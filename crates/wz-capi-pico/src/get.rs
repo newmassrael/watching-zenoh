@@ -306,12 +306,11 @@ impl ReplyMarshal {
     }
 
     /// Point every cached view at this marshal's own fields. MUST run only once
-    /// the marshal sits at its FINAL address — `loaned_err_payload.handle`
-    /// stores the address of the `Vec` STRUCT, which moves with the struct.
+    /// the marshal sits at its FINAL address, as the sample's views point into it;
+    /// `loaned_err_payload` is a borrowed copy of the error payload's words.
     fn bind(&mut self) {
         self.sample.bind();
-        self.loaned_err_payload.handle =
-            &self.err_payload as *const crate::bytes::ByteBuf as *mut c_void;
+        self.loaned_err_payload = z_loaned_bytes_t::borrowed(&self.err_payload);
     }
 
     /// An INDEPENDENT copy, for `z_reply_take_from_loaned` to escape the

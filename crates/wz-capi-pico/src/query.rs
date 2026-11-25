@@ -645,10 +645,10 @@ impl QueryMarshal {
     /// Point the cached views at this marshal's own fields.
     ///
     /// MUST run only once the marshal sits at its FINAL address, and must not
-    /// be folded back into [`Self::new`]. `loaned_payload.handle` /
-    /// `loaned_attachment.handle` store the address of the `ByteBuf` STRUCT
-    /// (that is what [`crate::abi::handle_ref`] reconstructs a `&ByteBuf` from),
-    /// and a struct field's address moves with the struct. `new` returns `Self` by
+    /// be folded back into [`Self::new`]. `loaned_payload` / `loaned_attachment` are
+    /// borrowed copies of the payloads' words, which hold where their bytes lie, and
+    /// `loaned_keyexpr` and `loaned_encoding` point into this marshal, whose
+    /// address moves with the struct. `new` returns `Self` by
     /// value, so binding inside it would record `new`'s frame and hand C a
     /// pointer into a dead frame the moment the value is moved out — return-
     /// value optimisation is not a language guarantee and does not save it.
@@ -667,9 +667,8 @@ impl QueryMarshal {
     fn bind(&mut self) {
         self.loaned_keyexpr =
             z_loaned_keyexpr_t::borrowed(self.keyexpr.get().as_ptr(), self.keyexpr.get().len());
-        self.loaned_payload.handle = &self.payload as *const crate::bytes::ByteBuf as *mut c_void;
-        self.loaned_attachment.handle =
-            &self.attachment as *const crate::bytes::ByteBuf as *mut c_void;
+        self.loaned_payload = z_loaned_bytes_t::borrowed(&self.payload);
+        self.loaned_attachment = z_loaned_bytes_t::borrowed(&self.attachment);
         if let Some(encoding) = self.encoding.as_ref() {
             self.loaned_encoding.handle =
                 encoding as *const crate::encoding::EncodingState as *mut c_void;
@@ -2352,13 +2351,13 @@ mod tests {
 
         assert_eq!(
             marshal.loaned_payload.handle as usize,
-            &marshal.payload as *const crate::bytes::ByteBuf as usize,
-            "the cached payload view must address THIS marshal's Vec, not a moved-from copy's"
+            marshal.payload.as_slice().as_ptr() as usize,
+            "the cached payload view must read THIS marshal's payload"
         );
         assert_eq!(
             marshal.loaned_attachment.handle as usize,
-            &marshal.attachment as *const crate::bytes::ByteBuf as usize,
-            "the cached attachment view must address THIS marshal's Vec"
+            marshal.attachment.as_slice().as_ptr() as usize,
+            "the cached attachment view must read THIS marshal's attachment"
         );
         assert_eq!(
             marshal.loaned_keyexpr._start as usize,
@@ -2369,15 +2368,12 @@ mod tests {
         // The accessors built on those views resolve to the query's bytes.
         let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
         unsafe {
-            // Read as the type the handle IS. This used to say `Vec<u8>` and
-            // passed only because `ByteBuf`'s first field was one — a type pun
-            // that R2964's storage change turned into an empty read.
-            let buf = handle_ref::<z_loaned_bytes_t, crate::bytes::ByteBuf>(z_query_payload(query))
+            // Read through the one reader of a loaned payload, which knows its words.
+            let buf = crate::bytes::bytes_ref(z_query_payload(query))
                 .expect("the cached payload view must resolve");
             assert_eq!(buf.as_slice(), b"value-payload");
-            let buf =
-                handle_ref::<z_loaned_bytes_t, crate::bytes::ByteBuf>(z_query_attachment(query))
-                    .expect("the cached attachment view must resolve");
+            let buf = crate::bytes::bytes_ref(z_query_attachment(query))
+                .expect("the cached attachment view must resolve");
             assert_eq!(buf.as_slice(), b"att");
             assert_eq!(
                 crate::keyexpr::keyexpr_str(z_query_keyexpr(query)),

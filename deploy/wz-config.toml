@@ -2904,32 +2904,6 @@ value = 3
 reason = "zenoh-pico bounds its queries by no count; its example that keeps queries in a channel is asked once by each get of the one querier it runs beside (`vendor/zenoh-pico/examples/unix/c11/z_queryable_channel.c` @ `z_ring_channel_query_new(&closure, &handler, 10);`): the one kept, the one handed in and the one the program took, three. Its API tests take each query before the next get."
 
 [[limit]]
-id = "HELD_PAYLOADS"
-kconfig = "WZ_LIMIT_HELD_PAYLOADS"
-kind = "bound"
-driven = "local"
-default = 32
-storage = "capacity"
-scope = "runtime"
-binding_heap = "build"
-binding_fixed = "build"
-wire = "none"
-help = '''
-The owned payloads (z_owned_bytes_t) a program of the pico C ABI holds at
-once: the slots of the pool of payloads the library reserves at its first
-object when the program reserved none (object-pool). A constructor past it
-answers out of memory and leaves its payload null.
-'''
-
-[limit.upstream]
-zenoh = "none"
-reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. A payload takes a slot from the constructor or clone that makes it until it is moved into a put, a reply or a writer, or dropped; a held sample's or reply's payload is part of that object and takes none. zenoh-pico's programs hold three at once at the most (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), a writer's result coming after the three are moved into it and a put's payload moved as it is sent. Thirty-two, more than ten such sets, is room for a host program whose threads each build theirs at once; the pico preset holds zenoh-pico's own three."
-
-[limit.pico_preset]
-value = 3
-reason = "zenoh-pico bounds its payloads by no count; its examples hold three at once at the most, the parts a writer joins (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), and its API tests no more. A held sample's or reply's payload is its own and takes none of these."
-
-[[limit]]
 id = "HELD_CONFIGS"
 kconfig = "WZ_LIMIT_HELD_CONFIGS"
 kind = "bound"
@@ -3053,7 +3027,7 @@ _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. 256 blocks of 64 bytes are 16 KiB, an eighth of the 128 KiB the three pools of the default hold together: eight short payloads, strings or kept query texts for each of HELD_PAYLOADS's thirty-two payloads."
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. 256 blocks of 64 bytes are 16 KiB, an eighth of the 128 KiB the three pools of the default hold together: eight short payloads, strings or kept query texts for each of the thirty-two payloads a host program whose threads each build theirs holds at once."
 
 [limit.pico_preset]
 value = 128
@@ -3080,7 +3054,7 @@ _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Thirty-two blocks are one for each of HELD_PAYLOADS's thirty-two payloads, about a quarter of the 128 KiB the three pools of the default hold together."
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Thirty-two blocks are one for each of the thirty-two payloads a host program whose threads each build theirs holds at once, more than ten sets of the three zenoh-pico's programs hold, about a quarter of the 128 KiB the three pools of the default hold together."
 
 [limit.pico_preset]
 value = 8
@@ -3140,7 +3114,7 @@ _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the encodings a program holds, and zenoh-pico copies each schema onto the heap with no constant (`vendor/zenoh-pico/src/api/encoding.c` @ `encoding->schema = _z_string_copy_from_substr(schema, len);`); sixteen is half of HELD_PAYLOADS's thirty-two, an encoding beside every other payload a host program builds."
+reason = "No key of upstream's configuration bounds the encodings a program holds, and zenoh-pico copies each schema onto the heap with no constant (`vendor/zenoh-pico/src/api/encoding.c` @ `encoding->schema = _z_string_copy_from_substr(schema, len);`); sixteen is half of the thirty-two payloads a host program holds at once, an encoding beside every other payload it builds."
 
 [limit.pico_preset]
 value = 2

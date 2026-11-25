@@ -132,8 +132,9 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
     // SAFETY: every owned value below is made and dropped through the library's own doors, once.
     unsafe {
         // ARM 1: nothing reserved, so the first payload reserves the build's pools and takes a
-        // slot of them; dropped, it gives the slot back once, and a second drop of its moved-from
-        // handle gives nothing. Empty, the build's pools are given up.
+        // payload block of them for its bytes, the payload itself lying in its own value; dropped,
+        // it gives the block back once, and a second drop of its moved-from value gives nothing.
+        // Empty, the build's pools are given up.
         assert_eq!(
             slots(),
             0,
@@ -144,9 +145,9 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         let (mut early, code) = payload(c"made before any reservation");
         assert_eq!(code, Z_OK);
         assert!(slots() > 0, "the first object reserved the build's pools");
-        assert_eq!(in_use(), 2, "its slot and its payload block lie in them");
+        assert_eq!(in_use(), 1, "its payload block lies in them, and no slot");
         let unused = wz_ext_object_pool_counts_t {
-            bytes: 1,
+            configs: 1,
             ..Default::default()
         };
         assert_eq!(
@@ -155,7 +156,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             "the build's pools are reserved already"
         );
         z_bytes_drop(z_bytes_move(&mut early));
-        assert_eq!(in_use(), 0, "a dropped payload gives its slot back");
+        assert_eq!(in_use(), 0, "a dropped payload gives its block back");
         z_bytes_drop(z_bytes_move(&mut early));
         assert_eq!(in_use(), 0, "and only once");
         assert_eq!(wz_ext_object_pool_release(), Z_OK);
@@ -189,8 +190,9 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         }
         assert_eq!(slots(), 0, "a refused plan reserves nothing");
 
-        // ARM 3: one of each entity for one session, two payloads and four small payload blocks,
-        // and the config each open of the arms below is made from, one at a time.
+        // ARM 3: one of each entity for one session, a count of two payloads, which no pool reads,
+        // four small payload blocks, and the config each open of the arms below is made from, one
+        // at a time.
         let counts = wz_ext_object_pool_counts_t {
             sessions: 1,
             publishers: 1,
@@ -258,8 +260,8 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
                 + 2 * usize::from(cfg!(feature = "liveliness"))
                 + usize::from(cfg!(feature = "query")));
         // The session, the publisher and the subscriber where they are pooled, the planes', the
-        // two payloads, the declared key expression, the config and the four payload blocks.
-        let reported = 1 + 2 * pooled + held_by_plane + 2 + 1 + configs_reported + 4;
+        // declared key expression, the config and the four payload blocks: no slot for a payload.
+        let reported = 1 + 2 * pooled + held_by_plane + 1 + configs_reported + 4;
         assert_eq!(slots(), reported);
         let laid: usize = classes().iter().map(|class| class.bytes).sum();
         assert_eq!(
@@ -268,15 +270,18 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             "the reservation is the bytes the door answered"
         );
 
-        // ARM 4: two payloads fit, each a slot and a block; the third is refused, counted, and left
-        // null, the block it took first given back.
+        // ARM 4: four payloads fit, each a block; the fifth is refused, counted, and left null.
         let (mut first, code) = payload(c"first");
         assert_eq!(code, Z_OK);
         let (mut second, code) = payload(c"second");
         assert_eq!(code, Z_OK);
-        let (third, code) = payload(c"third");
+        let (mut third, code) = payload(c"third");
+        assert_eq!(code, Z_OK);
+        let (mut fourth, code) = payload(c"fourth");
+        assert_eq!(code, Z_OK);
+        let (fifth, code) = payload(c"fifth");
         assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        assert!(!z_internal_bytes_check(&third));
+        assert!(!z_internal_bytes_check(&fifth));
         assert_eq!((in_use(), refused()), (4, 1));
 
         // ARM 4b: a payload no pool of payload blocks has a block for (the small blocks are too
@@ -298,7 +303,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
 
         // ARM 6: a pooled payload let go makes room for the next.
         z_bytes_drop(z_bytes_move(&mut second));
-        assert_eq!(in_use(), 2);
+        assert_eq!(in_use(), 3);
         let (mut again, code) = payload(c"again");
         assert_eq!(code, Z_OK);
         assert_eq!(in_use(), 4);
@@ -405,29 +410,31 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         }
 
         // ARM 9: everything let go, the pools are given up, and the next object reserves the
-        // build's pools again: three payloads fit where the program's pools held two.
+        // build's pools again: five payloads fit where the program's pools held four.
         for publisher in &mut declared {
             z_publisher_drop(z_publisher_move(publisher));
         }
         z_session_drop(z_session_move(&mut session));
         z_bytes_drop(z_bytes_move(&mut first));
+        z_bytes_drop(z_bytes_move(&mut third));
+        z_bytes_drop(z_bytes_move(&mut fourth));
         z_bytes_drop(z_bytes_move(&mut again));
         assert_eq!(in_use(), 0);
         assert_eq!(wz_ext_object_pool_release(), Z_OK);
         assert_eq!(slots(), 0);
         assert_eq!(wz_ext_object_pool_release(), Z_OK, "nothing to give up");
-        let mut after: Vec<z_owned_bytes_t> = (0..3)
+        let mut after: Vec<z_owned_bytes_t> = (0..5)
             .map(|_| {
                 let (bytes, code) = payload(c"after");
                 assert_eq!(
                     code, Z_OK,
-                    "the build's pools, past the two the program's held"
+                    "the build's pools, past the four the program's held"
                 );
                 bytes
             })
             .collect();
         assert!(slots() > 0, "the build's pools are reserved again");
-        assert_eq!(in_use(), 6, "three slots and three blocks");
+        assert_eq!(in_use(), 5, "five blocks and no slot");
         for bytes in &mut after {
             z_bytes_drop(z_bytes_move(bytes));
         }
@@ -451,7 +458,6 @@ unsafe fn region_arms() {
     let mut region = Region([0; 4096]);
     let base = region.0.as_mut_ptr();
     let counts = wz_ext_object_pool_counts_t {
-        bytes: 2,
         small_payload_blocks: 2,
         ..Default::default()
     };
@@ -475,7 +481,7 @@ unsafe fn region_arms() {
     );
     assert_eq!(slots(), 0);
 
-    // ARM R2: placed, the payloads lie in the program's memory, and the third is refused.
+    // ARM R2: placed, the payloads' bytes lie in the program's memory, and the third is refused.
     assert_eq!(wz_ext_object_pool_place(base.cast(), needed, &counts), Z_OK);
     assert_eq!(
         wz_ext_object_pool_reserve(&counts),
@@ -487,9 +493,9 @@ unsafe fn region_arms() {
     let (mut second, code) = payload(c"second");
     assert_eq!(code, Z_OK);
     for bytes in [&first, &second] {
-        // The handle is the owned struct's first word (pico's layout).
-        let handle = *(bytes as *const z_owned_bytes_t as *const *const u8);
-        let at = handle as usize - base as usize;
+        // The owned value's first word is where the payload's bytes start, in their block.
+        let start = *(bytes as *const z_owned_bytes_t as *const *const u8);
+        let at = start as usize - base as usize;
         assert!(at < needed, "inside the program's memory");
     }
     let (third, code) = payload(c"third");

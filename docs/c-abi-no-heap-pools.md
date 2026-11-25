@@ -120,9 +120,10 @@ string arrays, encodings and their schema, owned key expressions not declared on
 what a program makes before any session: its configs and the hellos it keeps.
 
 - Bound: the counts of `wz_ext_object_pool_counts_t` are limits: `HELD_SESSIONS`,
-  `HELD_SAMPLES`, `HELD_REPLIES`, `HELD_QUERIES` and `HELD_PAYLOADS` (the payload handles; the
-  entities take their session limits times `HELD_SESSIONS`), `HELD_CONFIGS`, `HELD_HELLOS` and
-  the three counts of payload blocks for the bytes the payloads, strings and slices carry; NEW
+  `HELD_SAMPLES`, `HELD_REPLIES` and `HELD_QUERIES` (the entities take their session limits
+  times `HELD_SESSIONS`), `HELD_CONFIGS`, `HELD_HELLOS` and the three counts of payload blocks
+  for the bytes the payloads, strings and slices carry (an owned payload lies in its own value
+  and takes no place of its own); NEW
   HELD_OBJECTS for the handles of strings, slices, string arrays and encodings and owned key
   expressions. One payload is at most the largest payload block, one key at most
   `MAX_KEYEXPR_BYTES`. The C struct

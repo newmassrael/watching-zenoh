@@ -285,10 +285,6 @@ pub const HELD_REPLIES: usize = generated::HELD_REPLIES;
 /// queries, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_QUERIES: usize = generated::HELD_QUERIES;
 
-/// The owned payloads a program holds through the C ABI at once: the slots of the process's pool of
-/// payloads, reserved as [`HELD_SESSIONS`]'s is.
-pub const HELD_PAYLOADS: usize = generated::HELD_PAYLOADS;
-
 /// The configs a program holds through the C ABI at once: the slots of the process's pool of
 /// configs, each the size of one config of the build, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_CONFIGS: usize = generated::HELD_CONFIGS;
