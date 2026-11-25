@@ -156,7 +156,7 @@ pub unsafe extern "C" fn ze_internal_closure_miss_null(closure: *mut ze_owned_cl
 pub unsafe extern "C" fn ze_internal_closure_miss_check(
     closure: *const ze_owned_closure_miss_t,
 ) -> bool {
-    guard_val(false, || !closure.is_null() && (*closure).call.is_some())
+    guard_val(|| !closure.is_null() && (*closure).call.is_some())
 }
 
 /// Build an owned miss closure (pico `ze_closure_miss`).
@@ -644,7 +644,7 @@ pub unsafe extern "C" fn ze_internal_advanced_publisher_null(
 pub unsafe extern "C" fn ze_internal_advanced_publisher_check(
     pub_: *const ze_owned_advanced_publisher_t,
 ) -> bool {
-    guard_val(false, || !pub_.is_null() && !(*pub_).handle.is_null())
+    guard_val(|| !pub_.is_null() && !(*pub_).handle.is_null())
 }
 
 /// Borrow an advanced publisher (pico `ze_advanced_publisher_loan`).
@@ -1646,9 +1646,7 @@ pub unsafe extern "C" fn ze_internal_advanced_subscriber_null(
 pub unsafe extern "C" fn ze_internal_advanced_subscriber_check(
     subscriber: *const ze_owned_advanced_subscriber_t,
 ) -> bool {
-    guard_val(false, || {
-        !subscriber.is_null() && !(*subscriber).handle.is_null()
-    })
+    guard_val(|| !subscriber.is_null() && !(*subscriber).handle.is_null())
 }
 
 /// Borrow an advanced subscriber (pico `ze_advanced_subscriber_loan`).
@@ -1836,9 +1834,7 @@ pub unsafe extern "C" fn ze_internal_sample_miss_listener_null(
 pub unsafe extern "C" fn ze_internal_sample_miss_listener_check(
     listener: *const ze_owned_sample_miss_listener_t,
 ) -> bool {
-    guard_val(false, || {
-        !listener.is_null() && !(*listener).handle.is_null()
-    })
+    guard_val(|| !listener.is_null() && !(*listener).handle.is_null())
 }
 
 /// Borrow a sample-miss listener.

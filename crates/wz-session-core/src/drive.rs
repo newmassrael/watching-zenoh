@@ -1747,11 +1747,22 @@ enum HeadAdmission {
     Ended,
 }
 
+/// What the gates of [`refuse_frame`] read off the head of a `Frame` or a `Fragment` read where
+/// it lies, and when its datagram was received ([`admit_head_in_place`]).
+#[cfg(feature = "codec-frame")]
+#[derive(Clone, Copy)]
+struct HeadGates {
+    priority: crate::qos::Priority,
+    reliable: bool,
+    sn: u64,
+    received_ms: u64,
+}
+
 /// The head of a `Frame` or a `Fragment` read where it lies ([`dispatch_datagram`]), judged in
-/// one body for both: the unit counted and the link's receive stamp moved, then the gates of
-/// [`refuse_frame`], a refusal reported to `on_event` as the copying path reports it. The path
-/// holds no decoded message, so the engine takes the event of a link that ends at once, before the
-/// report.
+/// one body for both: the unit counted and the link's receive stamp moved to when its datagram was
+/// received, then the gates of [`refuse_frame`], a refusal reported to `on_event` as the copying
+/// path reports it. The path holds no decoded message, so the engine takes the event of a link
+/// that ends at once, before the report.
 #[cfg(feature = "codec-frame")]
 fn admit_head_in_place<
     R: SessionRuntime,
@@ -1761,13 +1772,17 @@ fn admit_head_in_place<
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
     engine: &mut SessionEngine<R, T>,
-    priority: crate::qos::Priority,
-    reliable: bool,
-    sn: u64,
+    head: HeadGates,
     on_event: &mut F,
 ) -> HeadAdmission {
+    let HeadGates {
+        priority,
+        reliable,
+        sn,
+        received_ms,
+    } = head;
     account_unit_in_place(unit, actions);
-    actions.stamp_rx_activity();
+    actions.stamp_rx_activity_at(received_ms);
     let mut to_engine = None;
     let Some(refused) = refuse_frame(actions, &mut to_engine, priority, reliable, sn) else {
         return HeadAdmission::Admitted;
@@ -2059,6 +2074,10 @@ const REASSEMBLED_RECORD_FORM: crate::network_message::RecordForm = RECORD_FORM;
 /// `reader` is what the caller keeps from one datagram to the next ([`DatagramReader`]): the
 /// record each record is decoded into, and where the last dispatch of a datagram its link keeps
 /// stopped, which this call reads on from and notes again where it stops, if it does.
+///
+/// `now_ms` is when the datagram was received, in the session's monotonic milliseconds: the
+/// time of the turn of input that reads it, which its owner read once for the turn. A `Frame` or
+/// a `Fragment` admitted stamps it as the link's last receipt, so a datagram reads no clock.
 #[cfg(feature = "codec-frame")]
 pub fn dispatch_datagram<
     R: SessionRuntime,
@@ -2069,6 +2088,7 @@ pub fn dispatch_datagram<
     actions: &SessionLinkActions<R, T>,
     engine: &mut SessionEngine<R, T>,
     reader: &mut DatagramReader,
+    now_ms: u64,
     on_event: &mut F,
 ) -> DatagramPath {
     // A link that keeps its datagram is read where it lies and stopped where the host has no
@@ -2079,7 +2099,12 @@ pub fn dispatch_datagram<
     let kept = false;
     let DatagramReader { record, resume } = reader;
     dispatch_units(unit, resume, kept, on_event, |unit, from, on_event| {
-        dispatch_datagram_unit(unit, from, kept, actions, engine, record, on_event)
+        let step = UnitStep {
+            resume: from,
+            may_stop: kept,
+            received_ms: now_ms,
+        };
+        dispatch_datagram_unit(unit, step, actions, engine, record, on_event)
     })
 }
 
@@ -2158,7 +2183,7 @@ fn dispatch_units<F: crate::driver_loop::EventSink + ?Sized>(
 /// consume what is left of the datagram by construction; a `Frame` consumes its records, and
 /// a handshake message, a KeepAlive or a Close their own length, which a build with no
 /// allocator reads and goes on from. For a datagram the link keeps (`kept`), a `Frame` may stop
-/// before a record, the bytes it consumed then being where that record starts, and `resume` is
+/// before a record, the bytes it consumed then being where that record starts, and `step` says
 /// where its records go on from on a later step ([`frame_in_place`]).
 #[cfg(feature = "codec-frame")]
 fn dispatch_datagram_unit<
@@ -2167,8 +2192,7 @@ fn dispatch_datagram_unit<
     F: crate::driver_loop::EventSink + ?Sized,
 >(
     unit: &[u8],
-    resume: Option<usize>,
-    kept: bool,
+    step: UnitStep,
     actions: &SessionLinkActions<R, T>,
     engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
@@ -2179,7 +2203,7 @@ fn dispatch_datagram_unit<
             let (_, used, stopped) = frame_in_place(
                 unit,
                 head,
-                FrameRead::of(payload_at, resume, kept),
+                step.frame_at(payload_at),
                 actions,
                 engine,
                 record,
@@ -2328,7 +2352,12 @@ where
     };
     let DatagramReader { record, resume } = reader;
     dispatch_units(unit, resume, kept, on_event, |unit, from, on_event| {
-        dispatch_datagram_reassembling_unit(unit, from, kept, engine, record, &mut rejoin, on_event)
+        let step = UnitStep {
+            resume: from,
+            may_stop: kept,
+            received_ms: now_ms,
+        };
+        dispatch_datagram_reassembling_unit(unit, step, engine, record, &mut rejoin, on_event)
     })
 }
 
@@ -2346,8 +2375,7 @@ fn dispatch_datagram_reassembling_unit<
     F: crate::driver_loop::EventSink + ?Sized,
 >(
     unit: &[u8],
-    resume: Option<usize>,
-    kept: bool,
+    step: UnitStep,
     engine: &mut SessionEngine<R, T>,
     record: &mut crate::network_message::RecordBuf,
     rejoin: &mut Rejoin<'_, R, T, SLOTS, CAP, S, P>,
@@ -2371,7 +2399,7 @@ where
             let (admitted, used, stopped) = frame_in_place(
                 unit,
                 head,
-                FrameRead::of(payload_at, resume, kept),
+                step.frame_at(payload_at),
                 actions,
                 engine,
                 record,
@@ -2727,8 +2755,9 @@ fn frame_records_extent(payload: &[u8], record: &mut crate::network_message::Rec
 /// The admissible `Frame` at the front of a unit, read where it lies: what the gates made of its
 /// head ([`admit_head_in_place`]), how far into the unit the read went, and whether it stopped
 /// before a record of the `Frame` because the host had no room for it (`may_stop`, a link that
-/// keeps its datagram). `resume` is where the next record starts in a `Frame` an earlier step
-/// stopped in: its head was admitted then, and its records are read on from there.
+/// keeps its datagram). `read` names where the next record starts in a `Frame` an earlier step
+/// stopped in (its head was admitted then, and its records are read on from there) and when the
+/// datagram was received, the stamp an admitted head moves the link's last receipt to.
 #[cfg(feature = "codec-frame")]
 fn frame_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::EventSink + ?Sized>(
     unit: &[u8],
@@ -2745,6 +2774,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Event
         records_at,
         resumed,
         may_stop,
+        received_ms,
     } = read;
     let priority = head.priority();
     let crate::inbound::FrameHead {
@@ -2766,7 +2796,13 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Event
     let admitted = if resumed {
         HeadAdmission::Admitted
     } else {
-        admit_head_in_place(unit, actions, engine, priority, reliable, sn, on_event)
+        let gates = HeadGates {
+            priority,
+            reliable,
+            sn,
+            received_ms,
+        };
+        admit_head_in_place(unit, actions, engine, gates, on_event)
     };
     match admitted {
         HeadAdmission::Admitted => {}
@@ -2827,24 +2863,38 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Event
 
 /// Where a `Frame`'s records are read from in its unit and how ([`frame_in_place`]): from
 /// where its payload starts, or, resumed (`resumed`), from where an earlier step stopped, its
-/// head admitted then; and whether the read may stop before a record the host has no room for.
+/// head admitted then; whether the read may stop before a record the host has no room for; and
+/// when its datagram was received.
 #[cfg(feature = "codec-frame")]
 #[derive(Clone, Copy)]
 struct FrameRead {
     records_at: usize,
     resumed: bool,
     may_stop: bool,
+    received_ms: u64,
+}
+
+/// How [`dispatch_units`] has one unit of a datagram read: where the next record of a `Frame` an
+/// earlier step stopped in starts, whether the read may stop before a record the host has no room
+/// for, and when the datagram was received (`now_ms` of [`dispatch_datagram`]).
+#[cfg(feature = "codec-frame")]
+#[derive(Clone, Copy)]
+struct UnitStep {
+    resume: Option<usize>,
+    may_stop: bool,
+    received_ms: u64,
 }
 
 #[cfg(feature = "codec-frame")]
-impl FrameRead {
-    /// The read of a `Frame` whose payload starts at `payload_at`, resumed at `resume` when an
-    /// earlier step stopped in it, and which may stop when `may_stop`.
-    fn of(payload_at: usize, resume: Option<usize>, may_stop: bool) -> Self {
-        Self {
-            records_at: resume.unwrap_or(payload_at),
-            resumed: resume.is_some(),
-            may_stop,
+impl UnitStep {
+    /// The read of the unit's `Frame`, whose payload starts at `payload_at`: resumed where the
+    /// earlier step stopped in it, if one did.
+    fn frame_at(self, payload_at: usize) -> FrameRead {
+        FrameRead {
+            records_at: self.resume.unwrap_or(payload_at),
+            resumed: self.resume.is_some(),
+            may_stop: self.may_stop,
+            received_ms: self.received_ms,
         }
     }
 }
@@ -3188,7 +3238,13 @@ where
     // The copying `Fragment` arm's two gates, in its order; a fragment the SN gate drops clears
     // its channel's chain, as the copying loop's report does.
     let reasm = &mut *rejoin.reasm;
-    match admit_head_in_place(unit, actions, engine, priority, reliable, sn, on_event) {
+    let gates = HeadGates {
+        priority,
+        reliable,
+        sn,
+        received_ms: now_ms,
+    };
+    match admit_head_in_place(unit, actions, engine, gates, on_event) {
         HeadAdmission::Admitted => {}
         HeadAdmission::Dropped => {
             abort_rejected_channel(reasm, actions, priority, reliable);

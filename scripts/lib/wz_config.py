@@ -4927,9 +4927,30 @@ def configuration_of(abi: str, presets: list[pathlib.Path]):
     return resolve(presets) if presets else resolve([], original=ORIGINAL_OF_ABI[abi])
 
 
-def build_of(decl: dict, abi: str, presets: list[pathlib.Path]) -> tuple[list[str], list[str]]:
-    """The build of `abi` the presets name (`resolved_build` of `configuration_of`)."""
-    return resolved_build(decl, abi, configuration_of(abi, presets))
+def with_capabilities(decl: dict, kconf, turn_on: list[str]):
+    """`kconf` with each capability of `turn_on` turned on, as a line `CONFIG_<symbol>=y` merged
+    after every preset would turn it on: what it selects comes with it. A capability the declaration
+    does not have, or one the configuration's dependencies keep off, is refused, never dropped (C9)."""
+    problems: list[str] = []
+    for cid in turn_on:
+        cap = decl["caps"].get(cid)
+        if cap is None:
+            problems.append(f"`{cid}` is no capability of the declaration")
+            continue
+        sym = kconf.syms[cap["kconfig"]]
+        sym.set_value(2)
+        if sym.tri_value != 2:
+            problems.append(f"{cap['kconfig']} was turned on but got the value '{sym.str_value}'")
+    if problems:
+        raise PresetError("; ".join(problems))
+    return kconf
+
+
+def build_of(decl: dict, abi: str, presets: list[pathlib.Path],
+             turn_on: list[str] | None = None) -> tuple[list[str], list[str]]:
+    """The build of `abi` the presets name (`resolved_build` of `configuration_of`), with the
+    capabilities of `turn_on` turned on over it (`with_capabilities`)."""
+    return resolved_build(decl, abi, with_capabilities(decl, configuration_of(abi, presets), turn_on or []))
 
 
 # The conformance statement of one build, in the
@@ -7724,6 +7745,21 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
                    and {f"{declared[lid]['kconfig']}={value}"
                         for lid, value in limit_presets(decl["limits"]).items()
                         if value != declared[lid]["default"]} <= set(shipped_env))
+            doors_args, _ = build_of(decl, "pico", [], ["device-requires"])
+
+            def features_of(args: list[str]) -> set[str]:
+                return set(args[args.index("--features") + 1].split(",")) if "--features" in args else set()
+
+            expect("a capability turned on over a defconfig adds its features to that build",
+                   "device-requires" in features_of(doors_args) - features_of(shipped_args)
+                   and features_of(shipped_args) <= features_of(doors_args))
+            try:
+                build_of(decl, "pico", [], ["no-such-capability"])
+                turned = None
+            except PresetError as exc:
+                turned = str(exc)
+            expect(f"a capability the declaration does not have is refused ({turned})",
+                   turned is not None and "no capability" in turned)
             carried = None
             for pol in decl["policies"]:
                 if pol["kind"] != "bool" or pol["default"] == "on":

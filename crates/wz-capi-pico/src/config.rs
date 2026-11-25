@@ -472,7 +472,7 @@ pub unsafe extern "C" fn zp_config_insert(
 /// it.
 #[no_mangle]
 pub unsafe extern "C" fn zp_config_get(config: *const z_loaned_config_t, key: u8) -> *const c_char {
-    crate::ffi::guard_val(core::ptr::null(), || {
+    crate::ffi::guard_val(|| {
         if config.is_null() {
             return core::ptr::null();
         }

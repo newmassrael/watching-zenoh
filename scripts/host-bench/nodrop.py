@@ -104,9 +104,11 @@ def children_seconds() -> float:
 
 
 def trial(bin_dir: str, pub: str, sub: str, size: int, rate: float, seconds: int,
-          pub_cpus: str, sub_cpus: str, wz_env: str) -> dict:
-    """One trial: the result is a dict with `passed`, the figures and the `foreign` share of the pinned CPUs
-    (what ran there besides the two processes), or a `why` it could not run."""
+          pub_cpus: str, sub_cpus: str, wz_env: str, sleep_wait: bool = False) -> dict:
+    """One trial: the result is a dict with `passed`, the figures, the `foreign` share of the pinned CPUs
+    (what ran there besides the two processes) and `cpu_s`, the CPU time of the two processes, or a `why`
+    it could not run. With `sleep_wait` the publisher sleeps between its slots (paced_pub -w), so `cpu_s`
+    is the libraries' and not the pacer's spin."""
     cpus = sorted(set(cpu_list(pub_cpus)) | set(cpu_list(sub_cpus)))
     busy0, own0, wall0 = busy_seconds(cpus), children_seconds(), time.monotonic()
     port = 20000 + random.randrange(20000)
@@ -117,7 +119,7 @@ def trial(bin_dir: str, pub: str, sub: str, size: int, rate: float, seconds: int
     pub_cmd = command(pub, pub_cpus, wz_env,
                       ["timeout", str(seconds + 12), os.path.join(bin_dir, f"paced_pub_{pub}"),
                        "-m", "peer", "-e", endpoint, "-s", str(size), "-r", f"{rate:.1f}",
-                       "-t", str(seconds), *(["-b"] if BATCH else [])])
+                       "-t", str(seconds), *(["-b"] if BATCH else []), *(["-w"] if sleep_wait else [])])
     sub_proc = subprocess.Popen(sub_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         time.sleep(2.0)
@@ -147,7 +149,7 @@ def trial(bin_dir: str, pub: str, sub: str, size: int, rate: float, seconds: int
     if puts < 0.98 * rate * seconds:
         reasons.append(f"{puts} put of {rate * seconds:.0f} offered")
     return {"passed": not reasons, "why": "; ".join(reasons), "put": puts, "counted": counted,
-            "elapsed": elapsed, "late": late, "foreign": foreign}
+            "elapsed": elapsed, "late": late, "foreign": foreign, "cpu_s": children_seconds() - own0}
 
 
 def valid_trial(bin_dir: str, pub: str, sub: str, size: int, rate: float, seconds: int,

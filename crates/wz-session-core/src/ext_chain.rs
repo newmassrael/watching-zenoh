@@ -45,17 +45,7 @@ use alloc::vec::Vec;
             )
         )
     ),
-    any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    )
+    wz_ext_chains
 ))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StagedExt {
@@ -137,17 +127,7 @@ pub(crate) enum StagedExt {
             )
         )
     ),
-    any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    )
+    wz_ext_chains
 ))]
 impl StagedExt {
     /// The extension id the kind stages: the 4-bit id field of its entry's header.
@@ -217,7 +197,9 @@ impl StagedExt {
 /// nothing and holds no chain: each handshake message it sends carries at most the one z64 entry
 /// of id 0x7, the patch level on an Init and the bound announced for the peer on an Open, and
 /// `handshake_encode` writes it from the parameters (`encode_init_patch_into`,
-/// `encode_open_bound_into`).
+/// `encode_open_bound_into`). A build with the fixed storage that writes neither an Init nor an
+/// Open body holds no chain either: those bodies are the only readers of a fixed chain. The cfg
+/// `wz_ext_chains`, which `build.rs` sets, is the one statement of which builds hold one.
 #[cfg(all(not(feature = "session-fixed-storage"), feature = "session-unicast"))]
 pub type ExtChainBuf = Vec<ExtEntryOwned>;
 
@@ -229,16 +211,7 @@ pub type ExtChainBuf = Vec<ExtEntryOwned>;
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
-    any(
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    )
+    wz_ext_chains
 ))]
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
@@ -352,17 +325,7 @@ pub const STAGED_CHAIN_MAX: usize = 1
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
-    any(
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    ),
-    any(feature = "codec-init-body", feature = "codec-open-body")
+    wz_ext_chains
 ))]
 const _: () = assert!(
     core::mem::size_of::<ExtChainBuf>()
@@ -373,16 +336,7 @@ const _: () = assert!(
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
-    any(
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    )
+    wz_ext_chains
 ))]
 impl ExtChainBuf {
     /// The place of `kind`.
@@ -503,16 +457,7 @@ impl ExtChainBuf {
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
-    any(
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    )
+    wz_ext_chains
 ))]
 #[derive(Clone)]
 pub struct StagedIter<'a> {
@@ -523,16 +468,7 @@ pub struct StagedIter<'a> {
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
-    any(
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    )
+    wz_ext_chains
 ))]
 impl<'a> Iterator for StagedIter<'a> {
     type Item = &'a ExtEntryOwned;
@@ -588,16 +524,7 @@ pub(crate) fn stage(chain: &mut ExtChainBuf, kind: StagedExt, entry: Option<ExtE
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
-    any(
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    )
+    wz_ext_chains
 ))]
 pub(crate) fn stage(chain: &mut ExtChainBuf, kind: StagedExt, entry: Option<ExtEntryOwned>) {
     if let Some(entry) = &entry {
@@ -703,16 +630,7 @@ pub enum ChainRef<'a> {
     #[cfg(all(
         feature = "session-fixed-storage",
         feature = "session-unicast",
-        any(
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        )
+        wz_ext_chains
     ))]
     Staged(&'a ExtChainBuf),
 }
@@ -726,16 +644,7 @@ impl<'a> ChainRef<'a> {
             #[cfg(all(
                 feature = "session-fixed-storage",
                 feature = "session-unicast",
-                any(
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                )
+                wz_ext_chains
             ))]
             Self::Staged(chain) => ChainIter::Staged(chain.iter()),
         }
@@ -748,16 +657,7 @@ impl<'a> ChainRef<'a> {
             #[cfg(all(
                 feature = "session-fixed-storage",
                 feature = "session-unicast",
-                any(
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                )
+                wz_ext_chains
             ))]
             Self::Staged(chain) => chain.len(),
         }
@@ -770,16 +670,7 @@ impl<'a> ChainRef<'a> {
             #[cfg(all(
                 feature = "session-fixed-storage",
                 feature = "session-unicast",
-                any(
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                )
+                wz_ext_chains
             ))]
             Self::Staged(chain) => chain.is_empty(),
         }
@@ -806,17 +697,7 @@ impl<'a> From<&'a Vec<ExtEntryOwned>> for ChainRef<'a> {
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
-    any(
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    ),
-    any(feature = "codec-init-body", feature = "codec-open-body")
+    wz_ext_chains
 ))]
 impl<'a> From<&'a ExtChainBuf> for ChainRef<'a> {
     fn from(chain: &'a ExtChainBuf) -> Self {
@@ -834,16 +715,7 @@ pub enum ChainIter<'a> {
     #[cfg(all(
         feature = "session-fixed-storage",
         feature = "session-unicast",
-        any(
-            not(feature = "tx-lend-only"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        )
+        wz_ext_chains
     ))]
     Staged(StagedIter<'a>),
 }
@@ -858,16 +730,7 @@ impl<'a> Iterator for ChainIter<'a> {
             #[cfg(all(
                 feature = "session-fixed-storage",
                 feature = "session-unicast",
-                any(
-                    not(feature = "tx-lend-only"),
-                    feature = "session-unicast-accept",
-                    feature = "transport-qos",
-                    feature = "session-extshm",
-                    feature = "session-extauth",
-                    feature = "transport-multilink",
-                    feature = "transport-lowlatency",
-                    feature = "session-extcompression"
-                )
+                wz_ext_chains
             ))]
             Self::Staged(entries) => entries.next(),
         }
@@ -1702,21 +1565,7 @@ mod tests {
 // Every staged chain, on both forms. The fixed form holds the kinds the build stages, so the tests
 // that run on it stage the one every build has, the patch level. A build that stages no handshake
 // extension holds no chain, so there is none to test.
-#[cfg(all(
-    test,
-    feature = "session-unicast",
-    any(
-        not(feature = "session-fixed-storage"),
-        not(feature = "tx-lend-only"),
-        feature = "session-unicast-accept",
-        feature = "transport-qos",
-        feature = "session-extshm",
-        feature = "session-extauth",
-        feature = "transport-multilink",
-        feature = "transport-lowlatency",
-        feature = "session-extcompression"
-    )
-))]
+#[cfg(all(test, feature = "session-unicast", wz_ext_chains))]
 mod canonical_order_tests {
     use super::*;
     #[cfg(not(feature = "session-fixed-storage"))]

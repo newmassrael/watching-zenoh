@@ -126,10 +126,10 @@ impl RxReassembly for () {
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         reader: &mut DatagramReader,
-        _now_ms: u64,
+        now_ms: u64,
         on_event: &mut F,
     ) -> DatagramPath {
-        crate::drive::dispatch_datagram(unit, actions, engine, reader, on_event)
+        crate::drive::dispatch_datagram(unit, actions, engine, reader, now_ms, on_event)
     }
 }
 

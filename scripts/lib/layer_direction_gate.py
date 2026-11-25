@@ -282,10 +282,13 @@ EXTENSION_DOORS: frozenset[str] = frozenset(
 EXTENSION_INTERFACE = "ext_interface"
 
 # Helpers of a core module that hold no state of the core: a panic guard and a pointer marked
-# `Send`. Each library compiles them for itself; `ffi`'s other items (the in-callback mark, the
-# closures' release latches) are the core's state, which the interface carries.
+# `Send`, and the writer of a struct the program sized (`sized`, with its test of a short struct).
+# Each library compiles them for itself (`wz-capi-pico-ext`'s crate root names their files);
+# `ffi`'s other items (the in-callback mark, the closures' release latches) are the core's state,
+# which the interface carries.
 BOUNDARY_TOOLKIT: dict[str, frozenset[str]] = {
-    "ffi": frozenset({"catch", "guard", "guarded", "guard_val", "SendPtr"}),
+    "ffi": frozenset({"catch", "guarded", "guard_val", "SendPtr"}),
+    "sized": frozenset({"Out", "SizedOut", "a_short_struct_is_refused_untouched"}),
 }
 # Re-exports of `alloc` for a build without `std`.
 TOOLKIT_MODULES = frozenset({"prelude"})

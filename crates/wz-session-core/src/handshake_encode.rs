@@ -219,21 +219,11 @@ pub fn encode_init_into(
 /// roles.
 #[cfg(any(
     all(
-        feature = "session-fixed-storage",
-        feature = "tx-lend-only",
+        not(wz_ext_chains),
         feature = "storage-profile",
         feature = "session-unicast",
         feature = "codec-init-body",
-        feature = "session-unicast-open",
-        not(any(
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        ))
+        feature = "session-unicast-open"
     ),
     all(
         test,
@@ -660,16 +650,7 @@ pub(crate) fn encode_open_head_into(
         feature = "session-unicast",
         feature = "codec-open-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept"),
-        any(
-            not(feature = "session-fixed-storage"),
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        )
+        wz_ext_chains
     ),
     all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
@@ -701,21 +682,11 @@ pub(crate) fn encode_held_chain_into(
 /// build staged on the Open it sent.
 #[cfg(any(
     all(
-        feature = "session-fixed-storage",
-        feature = "tx-lend-only",
+        not(wz_ext_chains),
         feature = "storage-profile",
         feature = "session-unicast",
         feature = "codec-open-body",
-        feature = "session-unicast-open",
-        not(any(
-            feature = "session-unicast-accept",
-            feature = "transport-qos",
-            feature = "session-extshm",
-            feature = "session-extauth",
-            feature = "transport-multilink",
-            feature = "transport-lowlatency",
-            feature = "session-extcompression"
-        ))
+        feature = "session-unicast-open"
     ),
     all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
