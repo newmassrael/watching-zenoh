@@ -100,6 +100,10 @@ host-multicast = ["alloc", "dep:log"]
 # `PosixSerialLine`, set as zenoh-pico's POSIX tty sets one, on Linux and Android). The heap
 # profile's, as the engine's serial links are.
 serial = ["alloc", "wz-runtime-coop/serial"]
+# The host's TCP connections, clock and entropy as what the cooperative engine's `ws/` links open
+# with (`ws`: `PosixWsOpen` on a POSIX host, `windows::ws::WindowsWsOpen` on Windows). The heap
+# profile's, as the engine's WebSocket links are.
+ws = ["alloc", "wz-runtime-coop/ws"]
 
 # The host's named FIFOs as the ends of the cooperative engine's `unixpipe/` links (`unixpipe`:
 # `PosixFifo`, opened and locked as zenoh's unixpipe link opens its own, on Linux and Android).

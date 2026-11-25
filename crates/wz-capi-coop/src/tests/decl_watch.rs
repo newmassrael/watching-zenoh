@@ -142,6 +142,73 @@ mod watched {
         }
     }
 
+    /// A catch-up longer than a round of one thread holds is told whole, in the order the peer's
+    /// table hands it, with nothing lost, and a sample its link brought before the watch came is
+    /// handed after it: the link is read no further while the catch-up is owed. A round of threads
+    /// takes it at once. Turned red by a catch-up a round too small for it tells as a loss, or one a
+    /// sample overtakes.
+    #[test]
+    fn a_catch_up_longer_than_a_round_is_told_whole_and_in_order_before_what_follows() {
+        use wz_capi_port::{SubscriberSink, WireKey};
+        use wz_session_core::locality::Locality;
+        use wz_session_core::round::ONE_THREAD_RECORDS;
+        use wz_session_core::sink::SampleView;
+
+        const KEYS: [&str; 4] = ["demo/w/a", "demo/w/b", "demo/w/c", "demo/w/d"];
+        const _: () = assert!(KEYS.len() > ONE_THREAD_RECORDS);
+        let router = Router::start(CatchAll::None);
+        let engine = open(&router);
+        let order: Arc<Mutex<Vec<String>>> = Arc::default();
+        let into = Arc::clone(&order);
+        engine
+            .declare_subscriber_on_wire(
+                "demo/w/push",
+                WireKey::literal(),
+                Locality::Any,
+                None,
+                SubscriberSink::shared(move |_: &dyn SampleView| {
+                    into.lock().unwrap().push("sample".to_owned());
+                }),
+            )
+            .expect("the session declares the subscriber");
+        let early = Log::new();
+        watch(&engine, DeclPlane::Subscribers, &early);
+        for (id, key) in (1..).zip(KEYS) {
+            router.send(Command::DeclareSubscriber(id, key));
+        }
+        let last = Seen::Declared(4, "demo/w/d".to_owned());
+        until(&engine, "the router's declarations", || early.has(&last));
+
+        // Read by nothing until the late watch is declared, the sample waits in the link.
+        router.send(Command::Push("demo/w/push", b"p"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let into = Arc::clone(&order);
+        let late: SharedCall = Arc::new(move |event: DeclWatchEvent<'_>| {
+            let what = match event {
+                DeclWatchEvent::Declared { id, keyexpr, .. } => format!("declared {id} {keyexpr}"),
+                DeclWatchEvent::Lost { count } => format!("lost {count}"),
+                _ => "other".to_owned(),
+            };
+            into.lock().unwrap().push(what);
+        });
+        engine
+            .declare_decl_watch(DeclPlane::Subscribers, DeclWatchSink::Shared(late))
+            .expect("a watch of a kind this build hears");
+        until(&engine, "the sample", || {
+            order.lock().unwrap().iter().any(|seen| seen == "sample")
+        });
+        let mut told: Vec<String> = (1..)
+            .zip(KEYS)
+            .map(|(id, key): (u64, &str)| format!("declared {id} {key}"))
+            .collect();
+        told.push("sample".to_owned());
+        assert_eq!(
+            *order.lock().unwrap(),
+            told,
+            "every declaration once, in order, none lost, and the sample after them"
+        );
+    }
+
     /// A watch of queryables is told the router's queryable live, with the router as its peer; a
     /// second watch declared after is told it first, from what the router holds; both are told the
     /// next one and its retraction; a watch of subscribers is told none of it.

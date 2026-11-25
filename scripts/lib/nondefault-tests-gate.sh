@@ -377,6 +377,9 @@ transport-link-ws|"
     # sockets, a sample across two pty pairs this process pumps into each other, and a pin pair,
     # which names no tty of a host, refused at the dial. Nothing leaves the host.
     "wz-capi-pico|hook|transport-link-serial|files::serial_link_roundtrip::"
+    # The `ws/` link on the cooperative engine, the default one: WebSocket links over the host's
+    # TCP beside its sockets, a sample across a loopback ws listener. Nothing leaves the host.
+    "wz-capi-pico|hook|transport-link-ws,peer|files::ws_link_roundtrip::"
     # The `unixpipe/` link on the cooperative engine, the default one: the host's named FIFOs
     # beside its sockets, a listen that holds its request FIFO, and a sample across the pair a
     # dial reserved and the listener confirmed. Nothing leaves the host.
@@ -712,6 +715,18 @@ transport-link-ws|"
     # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
     # in this form too.
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
+    # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
+    # round with the links held, which the watch's tests prove only where they run in it.
+    "wz-capi-coop|hook|-default,std,liveliness,query,queryable,remote-declaration-watch|"
+    # The features that hold more than one link, face or session, in the same form: each session
+    # is opened, called and read on a thread of its own (`tests::one_thread::OwnThread`). The
+    # `listen` ones (a listener, one face, the outbound pool, a dial under way) run in the row
+    # above; the dictionary of key ids and the group of the program's transport here.
+    "wz-capi-coop|hook|-default,std,listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::one_thread::shared_key_ids::"
+    "wz-capi-coop|hook|-default,std,app-transport,group|tests::one_thread::group::"
+    # The host's group in the same form: the joiner's tests run here; the engine's, which needs a
+    # multicast route as its twin of `threads` does, Layer M runs with `--ignored` in this form.
+    "wz-capi-coop|hook|-default,std,group-host|host_group::"
     # The default build less `key-matching-listener`, as the pico C ABI builds the engine: a matching
     # listener declared on a key is refused as not built, its sink let go of, while one on an
     # entity's filter is taken. No other row builds without it, so this one runs the refusal.
@@ -810,6 +825,9 @@ transport-link-ws|"
     # The host's ttys as serial lines (`serial`): a pseudo-terminal set as zenoh-pico sets a tty,
     # bytes both ways without a blocking read, the queues discarded, and each refusal's kind.
     "wz-runtime-posix|hook|serial|"
+    # The host's TCP as the cooperative engine's WebSocket links (`ws`): a dial and a listener
+    # upgrade one loopback connection and carry a batch.
+    "wz-runtime-posix|hook|ws|ws::"
     # The host's named FIFOs (`unixpipe`): one listener holding a request FIFO and a dial finding
     # it, a dedicated read end reading its peer and the end of the stream, the suffix drawn.
     "wz-runtime-posix|hook|unixpipe|"

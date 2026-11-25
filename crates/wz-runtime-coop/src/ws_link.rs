@@ -346,5 +346,10 @@ impl StreamFraming for WsFraming {
     }
 }
 
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+mod links;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub use links::{WsDial, WsLinks, WsLinksDial, WsOpen, WS_RX_CAPACITY};
+
 #[cfg(all(test, not(feature = "session-slot")))]
 mod tests;

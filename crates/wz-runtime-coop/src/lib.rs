@@ -186,8 +186,12 @@ pub(crate) mod atomic;
 // cells (see the `executor` module doc).
 #[cfg(feature = "runtime")]
 pub mod executor;
+// The count the heap forms share the runtime's state and its task table by, wherever the memory
+// holding them came from (the heap, or a span of a session's arena).
 #[cfg(feature = "runtime")]
 pub mod join_handle;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub mod kept;
 // The `!Send` view of the task pool: the same table, through a set that is itself `!Send` —
 // see the module doc.
 #[cfg(feature = "runtime")]
@@ -214,7 +218,7 @@ pub use runtime_impl::CoopRuntime;
 #[cfg(feature = "session-slot")]
 pub use runtime_impl::RuntimeCell;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use runtime_impl::RuntimeRows;
+pub use runtime_impl::{RuntimeForm, RuntimePlace, RuntimeRows};
 #[cfg(feature = "runtime")]
 pub use time::{ClockSource, CoopTime};
 #[cfg(feature = "runtime")]

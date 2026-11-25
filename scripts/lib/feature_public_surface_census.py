@@ -1132,8 +1132,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "serial links open and this crate's own tests run; `unixpipe` gates the host's named FIFOs "
         "(`unixpipe`), which the cooperative engine's unixpipe links open and this crate's own "
         "tests run; `raweth` gates the host's raw packet sockets (`raweth`), which the "
-        "cooperative engine's `reth/` groups open and this crate's own tests run",
-        frozenset({"host-multicast", "raweth", "serial", "session-slot", "unixpipe"}),
+        "cooperative engine's `reth/` groups open and this crate's own tests run; `ws` gates "
+        "the opener of the cooperative engine's WebSocket links over the host's TCP (`ws`), "
+        "which this crate's own tests run",
+        frozenset({"host-multicast", "raweth", "serial", "session-slot", "unixpipe", "ws"}),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -1582,7 +1584,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # the axis could take it for free. `raweth` gates one crate-root `pub mod raweth` behind
     # `all(raweth, not(session-slot))`, the compound `wz-runtime-coop`'s `app-link` site has.
     "wz-runtime-posix": frozenset(
-        {"host-multicast", "raweth", "serial", "session-slot", "unixpipe"}
+        {"host-multicast", "raweth", "serial", "session-slot", "unixpipe", "ws"}
     ),
     # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind

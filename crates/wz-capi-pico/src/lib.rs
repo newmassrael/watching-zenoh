@@ -280,20 +280,18 @@ compile_error!(
      named FIFO in src/coop_host.rs: drop the feature from this library, or give that file the \
      target's FIFOs"
 );
+// The cooperative engine's WebSocket links run over the host's TCP (`wz-runtime-posix`'s `ws`,
+// on a POSIX host and on Windows); a Zephyr image has no opener in `src/coop_host.rs` yet and is
+// refused by name rather than by the missing opener.
 #[cfg(all(
     feature = "transport-link-ws",
-    any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
-    )
+    feature = "os-zephyr",
+    not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-ws` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-ws` on the cooperative engine opens WebSocket links over the \
+     host's TCP, and a Zephyr image has no WebSocket link in src/coop_host.rs: drop the feature \
+     from this library, or give that file the target's opener"
 );
 #[cfg(all(
     feature = "engine-tokio",
@@ -308,8 +306,7 @@ compile_error!(
         feature = "rx-busy-poll",
         feature = "serial-drive-own-thread",
         feature = "transport-link-quic",
-        feature = "transport-link-tls",
-        feature = "transport-link-ws"
+        feature = "transport-link-tls"
     ))
 ))]
 compile_error!(
@@ -651,6 +648,8 @@ pub mod querier;
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+#[cfg(test)]
+mod heap_refusal_tests;
 mod refusal;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
@@ -663,6 +662,8 @@ pub mod reply_keyexpr;
 pub mod result;
 #[cfg(any(feature = "scout", feature = "scout-mcu"))]
 pub mod scout;
+#[cfg(test)]
+mod test_heap;
 // The sending side of a declared segment profile: wz doors (`wz_ext.h`) of the unstable surface,
 // over the piece writer the zenoh-c ABI's doors of the same capability write with.
 #[cfg(feature = "segment-sender")]

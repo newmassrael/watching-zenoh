@@ -1547,6 +1547,79 @@ fn an_entity_holds_the_declaration_of_its_own_key_its_form_states() {
     );
 }
 
+/// An entity whose row would hold a declaration whose count of holders is full is refused, and
+/// takes nothing: no row, no entity id, no hold. Whether the declaration is the one its key is
+/// named by, the one of its own key its form states, or the one its named retraction names. A
+/// declaration that went is held by nothing and refuses nothing.
+///
+/// # Control
+///
+/// `Declaring::holdable` answering `Ok` for a full count reds the three refusals (a row that names
+/// the declaration and holds nothing); the declaration once one holder let it go is declared.
+#[test]
+fn an_entity_whose_declaration_has_no_room_for_a_holder_is_refused() {
+    let mut tables = Tables::new();
+    let full = tables.declare_keyexpr("demo/f").unwrap();
+    while tables.retain_keyexpr(full.handle) {}
+    assert_eq!(
+        tables.keyexprs().get(full.handle).unwrap().holds(),
+        KeyexprHolds::MAX
+    );
+    let next = tables.next_entity_id();
+    let by_prefix = KeyForm {
+        prefix: Some(full.handle),
+        own: None,
+        retraction: Retraction::ById,
+    };
+    assert_eq!(
+        tables.declare_token("demo/f/x", by_prefix).map(|_| ()),
+        Err(RegisterError::KeyexprHoldsFull)
+    );
+    let by_own = KeyForm::default().owning(Some(full.handle));
+    let Err(refused) = tables.declare_subscriber("demo/f/x", Locality::Any, by_own, 7) else {
+        panic!("a subscriber holding the full declaration was declared");
+    };
+    assert_eq!(refused.why, RegisterError::KeyexprHoldsFull);
+    assert_eq!(refused.callback, 7, "the callback is handed back");
+    let by_retraction = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(full.id, "/x")),
+    };
+    assert_eq!(
+        tables.declare_token("demo/f/x", by_retraction).map(|_| ()),
+        Err(RegisterError::KeyexprHoldsFull)
+    );
+    assert_eq!(tables.next_entity_id(), next, "no entity id was taken");
+    assert_eq!(
+        tables.keyexprs().get(full.handle).unwrap().holds(),
+        KeyexprHolds::MAX,
+        "no hold was taken"
+    );
+    assert_eq!(tables.subscribers().iter().count(), 0);
+    // CONTROL: a holder lets go, and the entity takes the room it left.
+    assert_eq!(tables.undeclare_keyexpr(full.handle), None);
+    let token = tables.declare_token("demo/f/x", by_prefix).unwrap();
+    assert_eq!(
+        tables.keyexprs().get(full.handle).unwrap().holds(),
+        KeyexprHolds::MAX
+    );
+    let row = tables.tokens().get(token.handle).unwrap().key();
+    assert_eq!(tables.wire_of(row).mapping, full.id);
+    // A declaration that went is held by nothing, and the key goes whole.
+    let gone = tables.declare_keyexpr("demo/g").unwrap();
+    assert_eq!(tables.retract_keyexpr(gone.handle), Some(gone.id));
+    let whole = KeyForm {
+        prefix: Some(gone.handle),
+        own: Some(gone.handle),
+        retraction: Retraction::ById,
+    };
+    let token = tables.declare_token("demo/g/x", whole).unwrap();
+    let row = tables.tokens().get(token.handle).unwrap().key();
+    assert_eq!(row.holds(), (None, None));
+    assert_eq!(tables.wire_of(row).mapping, 0);
+}
+
 #[test]
 fn a_retracted_declaration_goes_whatever_holds_it() {
     let mut tables = Tables::new();

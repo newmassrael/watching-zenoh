@@ -16,6 +16,7 @@ pub(super) type TransportState<L, C> = wz_runtime_coop::transport::TransportStat
 /// and the group a session joins (`group`).
 impl<C: ClockSource + 'static, L: SessionLinks + 'static> TransportFaces for Face<C, L> {
     type Clock = C;
+    type Lock = SessionLock;
     type Links = L;
     type Session = LinkSession<C>;
     type Face = Self;
@@ -27,6 +28,7 @@ impl<C: ClockSource + 'static, L: SessionLinks + 'static> TransportFaces for Fac
     type Places = wz_runtime_coop::faces::OneFace<Self>;
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
+    type RouterPlace = super::RouterPlace;
 }
 
 /// What the session tells the groups it joined of its entities (`group`): this engine's, since

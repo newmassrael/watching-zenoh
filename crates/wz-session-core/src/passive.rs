@@ -1073,7 +1073,7 @@ impl FlowContext {
     /// — whether the Fragment `First` / `Drop` markers may be enforced on this
     /// flow ([`crate::extfragment`]). `false` while no Init has been seen.
     /// R311y583 (A5) — the SN ring mask this session's fragment chains are
-    /// compared at ([`crate::sn::mask_from_res`]).
+    /// compared at, at the width the wire carries ([`crate::sn::wire::mask_from_res`]).
     ///
     /// `None` until an InitAck has been observed, and a caller must NOT
     /// substitute a default: a mask that is too WIDE reads a legitimate
@@ -1088,7 +1088,8 @@ impl FlowContext {
     /// the same; `None` when two senders state different rings, whose frames
     /// are judged each on its own ([`Self::sn_mask_of`]).
     pub fn sn_mask(&self) -> Option<u64> {
-        self.agreed(|c| c.seq_num_res).map(crate::sn::mask_from_res)
+        self.agreed(|c| c.seq_num_res)
+            .map(crate::sn::wire::mask_from_res)
     }
 
     /// R311y585 (A5) — the batch ceiling the acceptor agreed to, `None` until
@@ -1112,7 +1113,7 @@ impl FlowContext {
     /// with [`Self::sn_mask`]'s rule that an unknown ring is `None`.
     pub fn sn_mask_of(&self, direction: Direction) -> Option<u64> {
         self.caps_of(direction)
-            .map(|c| crate::sn::mask_from_res(c.seq_num_res))
+            .map(|c| crate::sn::wire::mask_from_res(c.seq_num_res))
     }
 
     /// The batch ceiling `direction`'s units are held to ([`Self::caps_of`]).
@@ -3266,15 +3267,15 @@ impl PassiveSession {
 
     /// The SN ring mask, with the floor the sequence numbers put under it: the
     /// narrowest ring a session can negotiate that holds the largest SN either
-    /// direction sent ([`crate::sn::narrowest_mask_covering`]). The narrowest
+    /// direction sent ([`crate::sn::wire::narrowest_mask_covering`]). The narrowest
     /// ring of all is no floor, since every session holds at least that.
     pub fn sn_mask_floor(&self) -> FloorReading {
-        let narrowest = crate::sn::mask_from_res(0);
+        let narrowest = crate::sn::wire::mask_from_res(0);
         let largest = self.unit_extents.iter().filter_map(|e| e.largest_sn).max();
         FloorReading::of(
             self.context.sn_mask(),
             largest
-                .map(crate::sn::narrowest_mask_covering)
+                .map(crate::sn::wire::narrowest_mask_covering)
                 .filter(|&mask| mask > narrowest),
         )
     }
@@ -3480,7 +3481,7 @@ impl PassiveSession {
         let verdict = match *slot {
             None => SnVerdict::Baseline,
             Some(last) if (sn & mask) == (last & mask) => SnVerdict::Duplicate,
-            Some(last) if !crate::sn::precedes(mask, last, sn) => SnVerdict::OutOfWindow,
+            Some(last) if !crate::sn::wire::precedes(mask, last, sn) => SnVerdict::OutOfWindow,
             Some(last) => {
                 // `precedes` held, so the modular distance is in `1..=half`.
                 let step = sn.wrapping_sub(last) & mask;
@@ -3869,7 +3870,6 @@ impl PassiveSession {
     ) {
         use crate::ext_view::ExtEntryView as _;
         use crate::qos::Priority;
-        use crate::sn::MulticastRxPair;
         let last = side_mut(&mut self.sn_last, seat);
         *last = [None; SN_CONDUITS];
         // The SNs kept before this sender had a ring belong to no ring; the
@@ -3878,12 +3878,12 @@ impl PassiveSession {
         let Some(caps) = *side(&self.context.joined_caps, seat) else {
             return;
         };
-        let mask = crate::sn::mask_from_res(caps.seq_num_res);
-        let mut start = |priority: Priority, next: MulticastRxPair| {
-            for (reliable, sn) in [(true, next.reliable), (false, next.best_effort)] {
+        let mask = crate::sn::wire::mask_from_res(caps.seq_num_res);
+        let mut start = |priority: Priority, [next_reliable, next_best_effort]: [u64; 2]| {
+            for (reliable, sn) in [(true, next_reliable), (false, next_best_effort)] {
                 if sn & !mask == 0 {
                     if let Some(slot) = last.get_mut(sn_conduit(priority, reliable)) {
-                        *slot = Some(crate::sn::decrement(mask, sn));
+                        *slot = Some(crate::sn::wire::decrement(mask, sn));
                     }
                 }
             }
@@ -3898,10 +3898,7 @@ impl PassiveSession {
             }
             None => start(
                 Priority::DEFAULT,
-                MulticastRxPair {
-                    reliable: body.next_sn_reliable,
-                    best_effort: body.next_sn_best_effort,
-                },
+                [body.next_sn_reliable, body.next_sn_best_effort],
             ),
         }
     }
@@ -7252,7 +7249,10 @@ mod tests {
         // `decode_wire_caps` applies, not values this test invented.
         assert_eq!(caps.seq_num_res, 2);
         assert_eq!(caps.batch_size, 65535);
-        assert_eq!(s.context().sn_mask(), Some(crate::sn::mask_from_res(2)));
+        assert_eq!(
+            s.context().sn_mask(),
+            Some(crate::sn::wire::mask_from_res(2))
+        );
     }
 
     /// The flow's protocol version is the initiator's claim until the acceptor
@@ -8372,6 +8372,54 @@ mod tests {
         }
     }
 
+    /// The observer judges a peer's ring at the width the wire carries, whatever ring the build's
+    /// own sessions run: the 64-bit ring (`0x03`) the Inits state is the 63-bit mask, a step
+    /// past 32 bits is continuous, and the ring's seam is a wrap rather than a jump.
+    #[test]
+    fn a_64_bit_ring_is_judged_whatever_ring_the_build_runs() {
+        let mut s = PassiveSession::new();
+        s.push(
+            Direction::A,
+            &framed(&init_wire_stating(false, 0x03, 1_024, 0), 2),
+        );
+        s.push(
+            Direction::B,
+            &framed(&init_wire_stating(true, 0x03, 1_024, 0), 2),
+        );
+        s.next_frame(Direction::A).expect("init syn");
+        s.next_frame(Direction::B).expect("init ack");
+        let mask = u64::MAX >> 1;
+        assert_eq!(s.context().sn_mask(), Some(mask));
+        let far = 1u64 << 40;
+        for (direction, first, second) in [(Direction::A, far, far + 1), (Direction::B, mask, 0)] {
+            for sn in [first, second] {
+                s.push(direction, &framed(&frame_wire(sn, &oam_record(0)), 2));
+            }
+            assert_eq!(
+                s.next_frame(direction).expect("frame").sn_verdict,
+                Some(SnVerdict::Baseline)
+            );
+            assert_eq!(
+                s.next_frame(direction).expect("frame").sn_verdict,
+                Some(SnVerdict::Continuous),
+                "{first:#x} -> {second:#x}"
+            );
+        }
+    }
+
+    /// An SN past 32 bits on a link with no handshake puts the 64-bit ring under the session,
+    /// whatever ring the build's own sessions run.
+    #[test]
+    fn an_sn_past_32_bits_floors_the_ring_at_64_bits() {
+        let mut s = PassiveSession::new();
+        s.push(
+            Direction::A,
+            &framed(&frame_wire(1u64 << 40, &oam_record(0)), 2),
+        );
+        s.next_frame(Direction::A).expect("a data unit");
+        assert_eq!(s.sn_mask_floor().at_least, Some(u64::MAX >> 1));
+    }
+
     /// With no handshake in the capture nothing is stated, and the bytes give
     /// the floors: the longest unit of either direction, and the narrowest
     /// negotiable ring that holds the largest SN, which is no floor at all
@@ -9467,7 +9515,10 @@ mod join_ring_tests {
         );
         let acc = s.sn_accounting(Direction::A);
         assert_eq!((acc.missing, acc.gaps, acc.without_resolution), (1, 1, 1));
-        assert_eq!(s.context().sn_mask(), Some(crate::sn::mask_from_res(2)));
+        assert_eq!(
+            s.context().sn_mask(),
+            Some(crate::sn::wire::mask_from_res(2))
+        );
         assert_eq!(
             s.context().batch_size(),
             Some(crate::peer_init_caps::DEFAULT_MULTICAST_BATCH_SIZE),
@@ -9621,7 +9672,7 @@ mod join_ring_tests {
         assert_eq!(s.context().sn_mask_of(Direction::A), Some(127));
         assert_eq!(
             s.context().sn_mask_of(Direction::B),
-            Some(crate::sn::mask_from_res(2))
+            Some(crate::sn::wire::mask_from_res(2))
         );
         assert_eq!(
             read(&mut s, Direction::A, &[data(127), data(1)]),

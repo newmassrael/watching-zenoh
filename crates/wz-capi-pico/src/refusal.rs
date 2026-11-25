@@ -10,7 +10,7 @@
 use wz_capi_port::Refusal;
 
 use crate::result::{
-    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_ERR_GENERIC, Z_ERR_SESSION_CLOSED,
+    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_ERR_GENERIC, Z_ERR_OVERFLOW, Z_ERR_SESSION_CLOSED,
     Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TRANSPORT_TX_FAILED,
 };
 
@@ -59,6 +59,12 @@ pub(crate) enum Door {
 pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
     if matches!(refusal, Refusal::NotBuilt | Refusal::NotHonoured(_)) {
         return WZ_EXT_ERR_UNSUPPORTED;
+    }
+    // An entity copies its key, which takes one more holder of the key's declaration, and pico
+    // refuses that copy at every door with its code for a count past its bound
+    // (`vendor/zenoh-pico/src/collections/refcount.c` @ `_Z_ERROR_RETURN(_Z_ERR_OVERFLOW);`).
+    if refusal == Refusal::KeyHoldsFull {
+        return Z_ERR_OVERFLOW;
     }
     match door {
         // A listener pico has no room for is `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
@@ -168,6 +174,26 @@ mod tests {
                 wz_capi_port::StatementNotHonoured::TargetPeer
             )),
             WZ_EXT_ERR_UNSUPPORTED
+        );
+    }
+
+    /// A declaration whose count of holders is full refuses the entity that would hold it with
+    /// pico's code for a count past its bound, at every door an entity is declared at. Turned red by
+    /// a `refusal_code` that reads it as a full table (out of memory).
+    #[test]
+    fn a_full_count_of_holders_answers_picos_overflow_at_every_door() {
+        for door in [Door::Keyexpr, Door::Entity, Door::WriteFilter] {
+            assert_eq!(refusal_code(Refusal::KeyHoldsFull, door), Z_ERR_OVERFLOW);
+        }
+        #[cfg(feature = "liveliness")]
+        assert_eq!(
+            refusal_code(Refusal::KeyHoldsFull, Door::Token),
+            Z_ERR_OVERFLOW
+        );
+        assert_eq!(
+            refusal_code(Refusal::TableFull, Door::Entity),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            "CONTROL: a full table keeps its own code"
         );
     }
 

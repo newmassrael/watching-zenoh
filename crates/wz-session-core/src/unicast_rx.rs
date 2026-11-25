@@ -204,14 +204,27 @@ where
 /// length and puts it back. A receive asks [`RxReassembly::ready`] before it takes input, which
 /// is `false` outside a step and inside another receive's call, so it never takes a unit it
 /// could not stage; a call made anyway does nothing with the Router.
+///
+/// The handle on the place is `H`, as a [`StepLend`](crate::step_lend::StepLend)'s is: a counted
+/// one by default.
 #[cfg(feature = "alloc")]
-pub struct RouterLend<D>(crate::step_lend::StepLend<D>);
+pub struct RouterLend<D, H = alloc::rc::Rc<crate::step_lend::LendCell<D>>>(
+    crate::step_lend::StepLend<D, H>,
+);
 
 #[cfg(feature = "alloc")]
 impl<D> RouterLend<D> {
-    /// A place nothing is lent in yet.
+    /// A place nothing is lent in yet, on a counted cell of its own.
     pub fn new() -> Self {
         Self(crate::step_lend::StepLend::new())
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<D, H: core::ops::Deref<Target = crate::step_lend::LendCell<D>>> RouterLend<D, H> {
+    /// The place `place` names, whatever it holds now.
+    pub fn over(place: H) -> Self {
+        Self(crate::step_lend::StepLend::over(place))
     }
 
     /// Lend `router` to every receive that holds this place for the length of `f`, and take it
@@ -241,14 +254,18 @@ impl<D> Default for RouterLend<D> {
 }
 
 #[cfg(feature = "alloc")]
-impl<D> Clone for RouterLend<D> {
+impl<D, H: Clone> Clone for RouterLend<D, H> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<D: RxReassembly> RxReassembly for RouterLend<D> {
+impl<D, H> RxReassembly for RouterLend<D, H>
+where
+    D: RxReassembly,
+    H: core::ops::Deref<Target = crate::step_lend::LendCell<D>>,
+{
     fn ready(&self) -> bool {
         self.is_lent()
     }

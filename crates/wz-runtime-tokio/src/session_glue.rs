@@ -4407,11 +4407,11 @@ mod derived_initial_sn_tests {
 
         assert_eq!(
             announced,
-            derive_initial_sn(
+            wz_session_core::sn::to_wire(derive_initial_sn(
                 &[0x01; 4],
                 &FIXTURE_LISTENER_ZID,
                 wz_session_core::sn::mask_from_res(2)
-            ),
+            )),
             "OpenSyn must announce compute_sn(own, peer, negotiated mask)"
         );
         assert_ne!(announced, 0, "the pre-R311y816 constant origin");
@@ -4436,14 +4436,14 @@ mod derived_initial_sn_tests {
 
         assert_eq!(
             announced,
-            derive_initial_sn(
+            wz_session_core::sn::to_wire(derive_initial_sn(
                 &[0x01; 4],
                 &FIXTURE_PEER_ZID,
                 // The crafted InitSyn advertises sn_res 0, so the negotiated
                 // ring is min(2, 0) = 0 — the mask this arm must use, and a
                 // seam that masked with its OWN advertisement would fail here.
                 wz_session_core::sn::mask_from_res(0)
-            ),
+            )),
             "OpenAck must announce compute_sn(own, peer, negotiated mask)"
         );
         assert_ne!(announced, 0, "the pre-R311y816 constant origin");

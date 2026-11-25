@@ -1692,17 +1692,17 @@ impl MulticastTxLanes {
 /// one conduit a producer holds ([`MulticastTxConduit`]).
 pub trait MulticastTxMint {
     /// Mint the next SN on the `(priority, reliable)` conduit.
-    fn mint(&mut self, priority: Priority, reliable: bool) -> u64;
+    fn mint(&mut self, priority: Priority, reliable: bool) -> crate::sn::Sn;
     /// The SN ring's mask.
-    fn mask(&self) -> u64;
+    fn mask(&self) -> crate::sn::Sn;
 }
 
 impl MulticastTxMint for crate::sn::MulticastTxConduits {
-    fn mint(&mut self, priority: Priority, reliable: bool) -> u64 {
+    fn mint(&mut self, priority: Priority, reliable: bool) -> crate::sn::Sn {
         crate::sn::MulticastTxConduits::mint(self, priority, reliable)
     }
 
-    fn mask(&self) -> u64 {
+    fn mask(&self) -> crate::sn::Sn {
         crate::sn::MulticastTxConduits::mask(self)
     }
 }
@@ -1724,7 +1724,7 @@ impl<'a> MulticastTxConduit<'a> {
 }
 
 impl MulticastTxMint for MulticastTxConduit<'_> {
-    fn mint(&mut self, priority: Priority, reliable: bool) -> u64 {
+    fn mint(&mut self, priority: Priority, reliable: bool) -> crate::sn::Sn {
         assert_eq!(
             priority, self.priority,
             "a push minted on a conduit its producer does not hold"
@@ -1732,7 +1732,7 @@ impl MulticastTxMint for MulticastTxConduit<'_> {
         self.sn.mint(reliable)
     }
 
-    fn mask(&self) -> u64 {
+    fn mask(&self) -> crate::sn::Sn {
         self.sn.mask
     }
 }
@@ -1860,6 +1860,8 @@ where
         return PushOutcome::Congested;
     }
     let sn = tx_sn.mint(priority, reliable);
+    // The SN as the frame head writes it and as a datagram on the queue names it.
+    let wire_sn = crate::sn::to_wire(sn);
     let flags = crate::frame_encode::frame_flags(reliable);
     // A compressing group does not lend: a lent frame is written once, into the slot the link
     // sends, and the batch around it is built from the frame's bytes. Nor does a window: a
@@ -1879,9 +1881,10 @@ where
             // A slot longer than the batch refuses the frame where it crosses the batch, before
             // the payload that would carry it past is copied in.
             slot.hold_to(mtu);
-            crate::frame_encode::encode_frame_envelope_into(slot, sn, flags, ext_qos, &body).is_ok()
+            crate::frame_encode::encode_frame_envelope_into(slot, wire_sn, flags, ext_qos, &body)
+                .is_ok()
         };
-        if queue.enqueue_lent(priority, reliable, sn, want, &mut fill) {
+        if queue.enqueue_lent(priority, reliable, wire_sn, want, &mut fill) {
             return PushOutcome::Pushed;
         }
         // A build that cuts no chain sends a frame past the batch as the heap path does.
@@ -1920,7 +1923,8 @@ where
                         )
                         .is_ok()
                     };
-                    if !queue.enqueue_lent(priority, reliable, span.sn, mtu, &mut write) {
+                    let span_sn = crate::sn::to_wire(span.sn);
+                    if !queue.enqueue_lent(priority, reliable, span_sn, mtu, &mut write) {
                         // A queue whose lend this fragment did not fit builds it on the heap.
                         let mut bytes = Vec::new();
                         if write_fragment(
@@ -1938,7 +1942,7 @@ where
                                 MulticastTxDatagram {
                                     priority,
                                     reliable,
-                                    sn: span.sn,
+                                    sn: span_sn,
                                     bytes,
                                 },
                             );
@@ -1959,7 +1963,7 @@ where
     if !express {
         if let Some(open) = window.as_deref_mut() {
             let opened = open.open_with(reliable, sn, mtu, |buf| {
-                crate::frame_encode::encode_frame_envelope_into(buf, sn, flags, ext_qos, &body)
+                crate::frame_encode::encode_frame_envelope_into(buf, wire_sn, flags, ext_qos, &body)
                     .is_ok()
             });
             if opened {
@@ -1969,21 +1973,22 @@ where
     }
     // The vector refuses no write, but the body can refuse its message: nothing is queued then,
     // and the SN minted for it is skipped, as a chain its drop marker stops skips the rest.
-    let frame =
-        match crate::frame_encode::encode_frame_envelope(sn, flags, worst_case, ext_qos, &body) {
-            Ok(frame) => frame,
-            Err(refused) => return PushOutcome::Refused(refused),
-        };
+    let frame = match crate::frame_encode::encode_frame_envelope(
+        wire_sn, flags, worst_case, ext_qos, &body,
+    ) {
+        Ok(frame) => frame,
+        Err(refused) => return PushOutcome::Refused(refused),
+    };
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
-        let body = crate::frame_encode::frame_wire_body(&frame, sn, ext_qos);
+        let body = crate::frame_encode::frame_wire_body(&frame, wire_sn, ext_qos);
         let mut chain =
             crate::frame_encode::FragmentChain::new(body, reliable, mtu, sn, tx_sn.mask(), ext_qos);
         let mut emitted = 0usize;
         while chain.remaining_fragments() > 0 {
             // The SN the fragment this iteration sends carries — and the one
             // the stop marker takes if there is no room for it.
-            let this_sn = chain.next_sn();
+            let this_sn = crate::sn::to_wire(chain.next_sn());
             if emitted > 0 {
                 if !has_room(queue, &mut deadline) {
                     let marker =
@@ -2034,7 +2039,7 @@ where
             MulticastTxDatagram {
                 priority,
                 reliable,
-                sn,
+                sn: wire_sn,
                 bytes: frame,
             },
         ),
@@ -2080,7 +2085,7 @@ pub struct MulticastBatch {
 #[derive(Debug, Clone, Copy)]
 struct OpenFrame {
     reliable: bool,
-    sn: u64,
+    sn: crate::sn::Sn,
 }
 
 #[cfg(all(
@@ -2139,7 +2144,8 @@ impl MulticastBatch {
             let mut fill = |slot: &mut crate::tx_buf::SliceTxBuf<'_>| {
                 crate::tx_buf::TxBuf::append(slot, bytes).is_ok()
             };
-            if queue.enqueue_lent(priority, open.reliable, open.sn, bytes.len(), &mut fill) {
+            let sn = crate::sn::to_wire(open.sn);
+            if queue.enqueue_lent(priority, open.reliable, sn, bytes.len(), &mut fill) {
                 self.len = 0;
                 return;
             }
@@ -2151,7 +2157,7 @@ impl MulticastBatch {
             MulticastTxDatagram {
                 priority,
                 reliable: open.reliable,
-                sn: open.sn,
+                sn: crate::sn::to_wire(open.sn),
                 bytes,
             },
         );
@@ -2198,7 +2204,7 @@ impl MulticastBatch {
     fn open_with(
         &mut self,
         reliable: bool,
-        sn: u64,
+        sn: crate::sn::Sn,
         mtu: usize,
         write: impl FnOnce(&mut crate::tx_buf::EncodeBuf<'_>) -> bool,
     ) -> bool {
@@ -2259,7 +2265,7 @@ impl MulticastBatch {
 
     /// Hold `bytes`, a whole frame on the `reliable` channel that took `sn`, open: one past the
     /// batch, which a build that cuts no chain holds as it is.
-    fn hold(&mut self, reliable: bool, sn: u64, bytes: alloc::vec::Vec<u8>) {
+    fn hold(&mut self, reliable: bool, sn: crate::sn::Sn, bytes: alloc::vec::Vec<u8>) {
         debug_assert!(self.open.is_none(), "one frame is open at a time");
         self.len = bytes.len();
         self.buf = bytes;
@@ -2597,9 +2603,15 @@ pub fn multicast_tx_emit_lent(
     let whole = {
         let mut buf = SliceTxBuf::new(&mut *datagram);
         buf.hold_to(mtu);
-        crate::frame_encode::encode_frame_envelope_into(&mut buf, sn, flags, ext_qos, body)
-            .ok()
-            .map(|()| TxBuf::len(&buf))
+        crate::frame_encode::encode_frame_envelope_into(
+            &mut buf,
+            crate::sn::to_wire(sn),
+            flags,
+            ext_qos,
+            body,
+        )
+        .ok()
+        .map(|()| TxBuf::len(&buf))
     };
     // The length is what the buffer over `datagram` holds.
     if let Some(frame) = whole.and_then(|len| datagram.get(..len)) {
@@ -3242,14 +3254,14 @@ mod push_tests {
         assert_eq!(outcome, PushOutcome::Pushed);
         assert_eq!(queue.enqueued, emitted.datagrams);
         assert_eq!(
-            tx.advertise_default().next_reliable,
+            crate::sn::to_wire(tx.advertise_default().next_reliable),
             emitted.datagrams.len() as u64
         );
         // Against the whole-chain producer the pre-R2928 emit used.
         let mut whole_tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
         let sn = whole_tx.mint(Priority::DEFAULT, true);
         let frame = crate::frame_encode::encode_frame_with_push_qos(
-            sn,
+            crate::sn::to_wire(sn),
             crate::push_build::build_push_literal("k", &payload).unwrap(),
             true,
             None,

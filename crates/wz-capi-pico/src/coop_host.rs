@@ -59,6 +59,18 @@ mod posix_host {
         WithSerial::<S>::new(links, wz_runtime_posix::serial::PosixSerialOpen)
     }
 
+    /// The links `S` with WebSocket links over the host's TCP beside them, which `ws/` locators
+    /// are dialled and listened on with.
+    #[cfg(feature = "transport-link-ws")]
+    pub(crate) type WithWs<S> = wz_runtime_posix::ws::PosixWsLinks<S>;
+
+    /// `links`, and WebSocket links over the host's TCP beside them, whose listeners answer as
+    /// many opening requests at once as `handshakes`, the session's `accept_pending`.
+    #[cfg(feature = "transport-link-ws")]
+    pub(crate) fn with_ws<S>(links: S, handshakes: usize) -> WithWs<S> {
+        WithWs::<S>::new(links, wz_runtime_posix::ws::PosixWsOpen, handshakes)
+    }
+
     /// The links `S` with links over the host's named FIFOs beside them, which `unixpipe/`
     /// locators are dialled and listened on with.
     #[cfg(feature = "transport-link-unixpipe")]
@@ -137,6 +149,22 @@ mod windows_host {
 
     pub(crate) fn tcp_dial() -> TcpDial {
         wz_runtime_posix::windows::stream::WindowsTcpDial
+    }
+
+    /// The links `S` with WebSocket links over Winsock's TCP beside them, which `ws/` locators
+    /// are dialled and listened on with.
+    #[cfg(feature = "transport-link-ws")]
+    pub(crate) type WithWs<S> = wz_runtime_posix::windows::ws::WindowsWsLinks<S>;
+
+    /// `links`, and WebSocket links over Winsock's TCP beside them, whose listeners answer as
+    /// many opening requests at once as `handshakes`, the session's `accept_pending`.
+    #[cfg(feature = "transport-link-ws")]
+    pub(crate) fn with_ws<S>(links: S, handshakes: usize) -> WithWs<S> {
+        WithWs::<S>::new(
+            links,
+            wz_runtime_posix::windows::ws::WindowsWsOpen,
+            handshakes,
+        )
     }
 
     pub(crate) fn clock() -> Clock {

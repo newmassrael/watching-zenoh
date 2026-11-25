@@ -562,10 +562,12 @@ pub enum IngestOutcome {
 /// after the handshake read no InitAck, and does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnRing {
-    /// The ring's mask ([`crate::sn::mask_from_res`]) is known. A continuation
-    /// is admitted iff its SN is ring-consecutive to the chain's last
-    /// ([`crate::sn::consecutive`]).
-    Known(crate::sn::Sn),
+    /// The ring's mask is known, at the width the wire carries
+    /// ([`crate::sn::wire::mask_from_res`]): a participant's own ring and the
+    /// ring an observer read of a peer, which may be wider than any the build's
+    /// sessions run. A continuation is admitted iff its SN is ring-consecutive
+    /// to the chain's last ([`crate::sn::wire::consecutive`]).
+    Known(u64),
     /// The ring is not known. A continuation is admitted iff its SN is exactly
     /// the chain's last plus one as plain integers; anything else ends the chain
     /// as [`AbortReason::Unresolvable`].
@@ -588,17 +590,9 @@ impl SnRing {
     /// link was lossy, which is a claim about a ring it never saw.
     pub fn admits(self, last: u64, next: u64) -> Result<(), AbortReason> {
         match self {
-            // The chain keeps the SNs the wire carried, which a reader that knows no ring compares
-            // whole; on a known ring the word's low bits are the residue the ring judges.
-            Self::Known(mask)
-                if crate::sn::consecutive(
-                    mask,
-                    crate::sn::from_wire(last),
-                    crate::sn::from_wire(next),
-                ) =>
-            {
-                Ok(())
-            }
+            // The chain keeps the SNs the wire carried, and a known ring is judged at the wire's
+            // width, as a reader that knows no ring compares them whole.
+            Self::Known(mask) if crate::sn::wire::consecutive(mask, last, next) => Ok(()),
             Self::Known(_) => Err(AbortReason::OutOfOrder),
             Self::Unknown if last.checked_add(1) == Some(next) => Ok(()),
             Self::Unknown => Err(AbortReason::Unresolvable),
@@ -1230,7 +1224,12 @@ where
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_in_ring(frag, SnRing::Known(sn_mask), now_ms, deliver)
+        self.ingest_in_ring(
+            frag,
+            SnRing::Known(crate::sn::to_wire(sn_mask)),
+            now_ms,
+            deliver,
+        )
     }
 
     /// [`Self::ingest`] over a ring the caller may not know ([`SnRing`]).
@@ -1279,7 +1278,8 @@ where
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, Hand::Lend, deliver)
+        let ring = SnRing::Known(crate::sn::to_wire(sn_mask));
+        self.ingest_delivering(frag, ring, now_ms, Hand::Lend, deliver)
     }
 
     /// [`Self::ingest`], delivering the completed chain KEPT when the arena can give its buffer
@@ -1294,7 +1294,8 @@ where
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, Hand::Keep, deliver)
+        let ring = SnRing::Known(crate::sn::to_wire(sn_mask));
+        self.ingest_delivering(frag, ring, now_ms, Hand::Keep, deliver)
     }
 
     /// The one ingest walk. `hand` is what the arena is asked to hand a
@@ -3663,7 +3664,7 @@ mod chain_boundary_marker_tests {
     fn a_continuation_onto_a_free_slot_is_refused_and_opens_nothing() {
         let mut d = armed::<2, 256>();
         let frag = marked(2, 1, b"BBB", NONE);
-        match d.admit_continuation(0, &frag, SnRing::Known(MASK)) {
+        match d.admit_continuation(0, &frag, SnRing::Known(crate::sn::to_wire(MASK))) {
             Err(Judged::Outcome(IngestOutcome::Refused(RefuseReason::PoolExhausted))) => {}
             other => panic!("a free slot continues nothing, got {other:?}"),
         }
@@ -4102,13 +4103,16 @@ mod unknown_ring_tests {
             d.ingest_in_ring(frag(127, 1, b"b"), ring, 0, |_| {});
             d.ingest_in_ring(frag(0, 0, b"c"), ring, 0, |_| {})
         };
-        assert_eq!(seam(SnRing::Known(RING_7)), IngestOutcome::Reassembled);
         assert_eq!(
-            seam(SnRing::Known(RING_14)),
+            seam(SnRing::Known(crate::sn::to_wire(RING_7))),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(
+            seam(SnRing::Known(crate::sn::to_wire(RING_14))),
             IngestOutcome::Aborted(AbortReason::OutOfOrder)
         );
         assert_eq!(
-            seam(SnRing::Known(RING_28)),
+            seam(SnRing::Known(crate::sn::to_wire(RING_28))),
             IngestOutcome::Aborted(AbortReason::OutOfOrder)
         );
         assert_eq!(
@@ -4152,7 +4156,8 @@ mod unknown_ring_tests {
                 let a = old.ingest(frag(sn, more, payload), mask, 0, |m| {
                     got_old = Some(m.to_vec())
                 });
-                let b = new.ingest_in_ring(frag(sn, more, payload), SnRing::Known(mask), 0, |m| {
+                let ring = SnRing::Known(crate::sn::to_wire(mask));
+                let b = new.ingest_in_ring(frag(sn, more, payload), ring, 0, |m| {
                     got_new = Some(m.to_vec())
                 });
                 assert_eq!((a, got_old), (b, got_new), "mask {mask:#x}, sn {sn}");

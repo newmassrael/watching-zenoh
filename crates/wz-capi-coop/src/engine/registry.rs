@@ -252,6 +252,7 @@ pub(super) struct HeldFace {
 impl HeldFace {
     /// The key of face `id` whose set lies at `at`: the place the face keeps in every table of
     /// the session while it is held.
+    #[cfg(any(feature = "listen", feature = "group", test))]
     pub(super) const fn new(at: usize, id: FaceId) -> Self {
         Self { at, id }
     }
@@ -778,6 +779,7 @@ impl<H: Holders> RegistryOf<H> {
     /// The tables of `face`, gone with the face and left, emptied, where they lie for the next
     /// face: its place is free. The dial role's face is never removed, and the key of a face that
     /// is not held removes nothing.
+    #[cfg(any(feature = "listen", feature = "group", test))]
     pub(super) fn remove_face(&mut self, face: HeldFace) {
         self.let_go(face, NO_FACE);
     }
@@ -818,6 +820,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// Empty the set `face` holds, its row then reading `row`.
+    #[cfg(any(feature = "listen", feature = "group", test))]
     fn let_go(&mut self, face: HeldFace, row: FaceId) {
         if face.id == DIAL_FACE {
             return;

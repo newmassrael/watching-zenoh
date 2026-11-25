@@ -81,6 +81,20 @@ pub(crate) use core::sync::atomic::AtomicBool;
 #[cfg(not(target_has_atomic = "8"))]
 pub(crate) use portable_atomic::AtomicBool;
 
+// The count of a value's holders (`crate::kept`), which only the heap forms share by count.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub(crate) use core::sync::atomic::AtomicUsize;
+#[cfg(all(
+    not(target_has_atomic = "ptr"),
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub(crate) use portable_atomic::AtomicUsize;
+
 // Keyed as `Ordering` is, so its loads and stores take the `Ordering` re-exported below.
 #[cfg(target_has_atomic = "8")]
 pub(crate) use core::sync::atomic::AtomicPtr;

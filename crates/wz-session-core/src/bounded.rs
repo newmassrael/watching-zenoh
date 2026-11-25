@@ -1759,7 +1759,7 @@ impl Arena {
     /// The next span of the arena, of `bytes` bytes rounded up to [`ARENA_ALIGN`], for the caller
     /// to lay rows out in. Refused, taking nothing, past what is left or when `bytes` is `None`
     /// (past the address space).
-    pub(crate) fn lend_span(&mut self, bytes: Option<usize>) -> Result<NonNull<u8>, LendRefused> {
+    pub fn lend_span(&mut self, bytes: Option<usize>) -> Result<NonNull<u8>, LendRefused> {
         // `lent` never passes `bytes`.
         let left = self.bytes.wrapping_sub(self.lent);
         let span = match bytes.and_then(Self::span) {

@@ -115,10 +115,12 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use wz_runtime_coop::faces::EndpointTexts;
+use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
+use wz_runtime_coop::RuntimePlace;
 use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
@@ -139,11 +141,13 @@ use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-use crate::engine::{CoopTables, FACE_SET_BYTES};
+use crate::engine::{
+    CoopTables, FACE_SET_BYTES, REGISTRY_LEND_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES,
+};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
-use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
+use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReply;
@@ -224,6 +228,10 @@ pub enum ArenaPart {
     DeliveryCallbacks,
     DeliveryKeys,
     DeliveryRound,
+    RegistryLend,
+    RouterLend,
+    LinkRooms,
+    RoomPlaces,
     ReassemblyFlags,
     ReassemblyBuffers,
     HandedLegFlags,
@@ -286,6 +294,8 @@ pub enum ArenaPart {
     AdvancedSubscriberPlaces,
     LinkEventsListenerPlaceFlags,
     LinkEventsListenerPlaces,
+    ArenaKeep,
+    RuntimeState,
 }
 
 impl ArenaPart {
@@ -323,6 +333,10 @@ impl ArenaPart {
             Self::DeliveryCallbacks => ("delivery callbacks", "DELIVERY_LANE_CALLBACKS"),
             Self::DeliveryKeys => ("delivery keys", "MAX_KEYEXPR_BYTES"),
             Self::DeliveryRound => ("delivery round", ""),
+            Self::RegistryLend => ("registry lend", ""),
+            Self::RouterLend => ("router lend", ""),
+            Self::LinkRooms => ("link rooms", ""),
+            Self::RoomPlaces => ("room places", "MAX_FACES + 1"),
             Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
             Self::ReassemblyBuffers => ("reassembly buffers", "PICO_FRAG_MAX_BYTES"),
             Self::HandedLegFlags => ("handed leg flags", "HANDED_LEG_BYTES"),
@@ -419,6 +433,8 @@ impl ArenaPart {
             Self::LinkEventsListenerPlaces => {
                 ("link events listener places", "MAX_LINK_EVENTS_LISTENERS")
             }
+            Self::ArenaKeep => ("arena keep", ""),
+            Self::RuntimeState => ("runtime state", "MAX_TASKS + MAX_TIMERS"),
         }
     }
 }
@@ -435,6 +451,8 @@ const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 /// The round's records, the callbacks they owe, its keys and the round itself: the round keeps no
 /// area, since every record is read where it lies.
 const LANE_ROWS: usize = 4;
+/// The places the session lends its registry and its reassembly Router in for a step.
+const STEP_LEND_ROWS: usize = 2;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
@@ -454,6 +472,9 @@ const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
 /// The faces' sets, and the index of the held ones where the build takes faces beside its dial
 /// role's (`TAKES_FACES`): a session of that face alone knows it holds the first set.
 const FACE_ROWS: usize = 1 + TAKES_FACES as usize;
+/// The faces' rooms, laid out at the open ([`ArenaPlan::holding_rooms`]), and their places, one
+/// for each set of face tables.
+const ROOM_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
 const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
@@ -494,6 +515,7 @@ const ENTITY_PLACE_ROWS: usize = 2
 pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LINK_ROWS
     + LANE_ROWS
+    + STEP_LEND_ROWS
     + REASSEMBLY_ROWS
     + GROUP_RX_ROWS
     + PORT_RX_ROWS
@@ -501,6 +523,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + OBSERVER_ROWS
     + GET_ROWS
     + FACE_ROWS
+    + ROOM_ROWS
     + PEER_ROWS
     + OWED_ROWS
     + ENTITY_ROWS
@@ -508,13 +531,17 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + HANDLE_ROWS
     + ENTITY_PLACE_ROWS
     + CACHE_RING_ROWS
-    + FINAL_ROWS;
+    + FINAL_ROWS
+    + RUNTIME_ROWS;
 
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
 const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
 /// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`).
 const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
+/// The count the arena is kept by and the span the session's runtime is placed in
+/// ([`ArenaPlan::holding_runtime`]).
+const RUNTIME_ROWS: usize = 2;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -1422,6 +1449,9 @@ pub struct ArenaPlan {
     session: SessionRows,
     /// The rows of the ABI's places.
     places: PlaceRows,
+    /// The bytes of the span the session's runtime is placed in, `0` for none
+    /// ([`Self::holding_runtime`]).
+    runtime_bytes: usize,
 }
 
 impl ArenaPlan {
@@ -1438,6 +1468,7 @@ impl ArenaPlan {
             transport: TransportRows::NONE,
             session: SessionRows::NONE,
             places: PlaceRows::NONE,
+            runtime_bytes: 0,
         }
     }
 
@@ -1680,7 +1711,11 @@ impl ArenaPlan {
             self.session.round.callbacks,
             CALLBACK_BYTES,
         );
-        self.put(ArenaPart::DeliveryKeys, 1, self.session.round.key_bytes());
+        self.put(
+            ArenaPart::DeliveryKeys,
+            1,
+            self.session.round.key_bytes::<CoopForm>(),
+        );
         // The round itself, placed beside its tables (`Round::placed_over`): its one owner and
         // the handles of it that count nothing.
         self.put(
@@ -1688,6 +1723,10 @@ impl ArenaPlan {
             1,
             core::mem::size_of::<crate::round::Round>(),
         );
+        // The places the session lends its registry and its Router in for a step, a place each
+        // (`crate::engine::StepPlaces`).
+        self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
+        self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
         self.put_table(
             [ArenaPart::ReassemblyFlags, ArenaPart::ReassemblyBuffers],
@@ -1844,6 +1883,13 @@ impl ArenaPlan {
             ArenaPart::HeldFaces,
             self.session.peers.sets(),
             HELD_SET_BYTES,
+        );
+        // What the face holding each set names for a wait for its room, a place for each set
+        // (`crate::engine::LinkRooms`).
+        self.put(
+            ArenaPart::RoomPlaces,
+            self.session.peers.sets(),
+            ROOM_PLACE_BYTES,
         );
         let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
         self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
@@ -2196,6 +2242,31 @@ impl ArenaPlan {
         }
         self.transport.cell_bytes = LinkCells::from_array(laid);
         self.transport.cells_held = held;
+        self.settled()
+    }
+
+    /// Lay out the place of the faces' rooms, `bytes` large: what each face that is up names for a
+    /// wait for its room, which the open places in the arena (`crate::engine::LinkRooms`). Their
+    /// size is the stack's waits', which the plan of the session's limits does not know, so it is
+    /// laid out at the open, once, as the links' cells are ([`Self::holding_cells`]). The plan is
+    /// laid out where it lies; a refused one is no plan to open by.
+    pub fn holding_rooms(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
+        self.put(ArenaPart::LinkRooms, 1, bytes);
+        self.settled()
+    }
+
+    /// Lay out the span of `bytes` the session's runtime is placed in, and the count its arena is
+    /// kept by beside it (`SessionArena::runtime_place`): its state, its task table and its timer
+    /// table lie in the arena, and the arena's memory is given back once the session and the
+    /// runtime's last holder (a waker or a join handle kept past the session among them) have let
+    /// go. Laid out after every other row, once; a size of `0` adds none. The plan is laid out
+    /// where it lies; a refused one is no plan to open by.
+    pub fn holding_runtime(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
+        if bytes != 0 && self.runtime_bytes == 0 {
+            self.runtime_bytes = bytes;
+            self.put(ArenaPart::ArenaKeep, 1, core::mem::size_of::<ArenaKept>());
+            self.put(ArenaPart::RuntimeState, 1, bytes);
+        }
         self.settled()
     }
 
@@ -3049,6 +3120,34 @@ pub(crate) struct SessionArena {
     base: NonNull<u8>,
     layout: Layout,
     memory: &'static dyn ArenaMemory,
+    /// The count the arena's memory is kept by once a value placed in it may outlive the session
+    /// (`Self::runtime_place`): the session's, which the drop gives back, and one for each such
+    /// value. `None` until then, the memory given back by the drop.
+    kept: Option<NonNull<Kept>>,
+}
+
+/// The count a session's arena is kept by, and what its last holder gives back: lent from the arena
+/// itself, the count first, so a pointer to the count is a pointer to the whole.
+#[repr(C)]
+struct ArenaKept {
+    kept: Kept,
+    base: NonNull<u8>,
+    layout: Layout,
+    memory: &'static dyn ArenaMemory,
+}
+
+/// The last holder of a session's arena let go: its memory goes back to what reserved it.
+///
+/// # Safety
+/// `kept` is the count of an `ArenaKept` `SessionArena::keep` placed, which no holder is left of.
+unsafe fn give_arena_back(kept: NonNull<Kept>) {
+    let held = kept.cast::<ArenaKept>().as_ptr();
+    // SAFETY: the caller's: the count's place is read whole before the memory that holds it goes,
+    // and the memory is given back once, here; every value lent from it was dropped first.
+    unsafe {
+        let (base, layout, memory) = ((*held).base, (*held).layout, (*held).memory);
+        memory.release(base, layout);
+    }
 }
 
 impl SessionArena {
@@ -3081,7 +3180,42 @@ impl SessionArena {
             base,
             layout,
             memory,
+            kept: None,
         })
+    }
+
+    /// The count the arena's memory is kept by, lent from the arena on the first ask: the session
+    /// holds one, given back when it lets the arena go.
+    fn keep(&mut self) -> Result<NonNull<Kept>, LendRefused> {
+        if let Some(kept) = self.kept {
+            return Ok(kept);
+        }
+        let held = ArenaKept {
+            kept: Kept::new(give_arena_back),
+            base: self.base,
+            layout: self.layout,
+            memory: self.memory,
+        };
+        // The count is the arena's own, ended by its last holder and not by an owner: it has
+        // nothing to drop.
+        let placed = self.arena.place(held)?;
+        let kept = NonNull::from(&*placed).cast::<Kept>();
+        core::mem::forget(placed);
+        self.kept = Some(kept);
+        Ok(kept)
+    }
+
+    /// The span of `bytes` a session's runtime is placed in ([`ArenaPlan::holding_runtime`]), on
+    /// the arena's alignment, and the count that keeps the arena's memory for it: the memory goes
+    /// back once the session lets the arena go and the runtime's last holder lets go, whichever
+    /// is last. Refused past what the arena has left.
+    pub(crate) fn runtime_place(&mut self, bytes: usize) -> Result<RuntimePlace, LendRefused> {
+        let memory = self.keep()?;
+        let at = self.arena.lend_span(Some(bytes))?;
+        // SAFETY: the span is `bytes` of the arena's memory, lent to the runtime alone, and the
+        // memory stands while a count of `memory` is held, which the session holds until it lets
+        // the arena go, after the runtime is made.
+        Ok(unsafe { RuntimePlace::new(at, bytes, memory) })
     }
 
     /// The bytes reserved: the plan's.
@@ -3111,9 +3245,13 @@ impl SessionArena {
 
 impl Drop for SessionArena {
     fn drop(&mut self) {
-        // SAFETY: `base` is what the memory gave for `layout`, given back here once, and the
-        // session that held the arena dropped every table lent from it first.
-        unsafe { self.memory.release(self.base, self.layout) }
+        match self.kept {
+            // SAFETY: the session's count, given back once; the memory goes with the last count.
+            Some(kept) => unsafe { Kept::release(kept) },
+            // SAFETY: `base` is what the memory gave for `layout`, given back here once, and the
+            // session that held the arena dropped every table lent from it first.
+            None => unsafe { self.memory.release(self.base, self.layout) },
+        }
     }
 }
 
@@ -3504,5 +3642,71 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), all.len(), "two limits share a name");
+    }
+
+    /// What the arena of `an_arena_a_runtime_is_placed_in_goes_back_after_its_last_holder` is
+    /// reserved from: the allocator, counting what it is given back.
+    struct CountedReleases;
+
+    static RELEASES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    impl ArenaMemory for CountedReleases {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            AllocatorMemory.reserve(layout)
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            RELEASES.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            // SAFETY: the caller's contract, handed on to the allocator that reserved it.
+            unsafe { AllocatorMemory.release(base, layout) }
+        }
+    }
+
+    /// A clock that does not move.
+    struct Still;
+
+    impl wz_runtime_coop::ClockSource for Still {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    /// A plan holds the runtime's span and the arena's count once, and an arena a runtime is placed
+    /// in is given back once, after both the session and the runtime's last holder let go: the
+    /// session letting go first gives nothing back. Turned red by a session that gives the arena
+    /// back while the runtime still lies in it, by a runtime that never gives its count back, or by
+    /// a plan that lays the rows out twice.
+    #[test]
+    fn an_arena_a_runtime_is_placed_in_goes_back_after_its_last_holder() {
+        use wz_runtime_coop::{CoopRuntime, RuntimeForm, RuntimeRows};
+        let rows = RuntimeRows {
+            tasks: 2,
+            task_bytes: 64,
+            timers: 0,
+        };
+        let bytes = CoopRuntime::<Still>::placed_layout(rows, RuntimeForm::Reserved)
+            .expect("a span of these rows")
+            .size();
+        let mut plan = ArenaPlan::vacant();
+        plan.holding_runtime(bytes).expect("the span fits");
+        plan.holding_runtime(bytes).expect("held already");
+        assert_eq!(plan.rows().count(), 2, "the count and the span, once");
+        let mut arena = SessionArena::reserve(&plan, &CountedReleases).expect("the host has it");
+        let place = arena.runtime_place(bytes).expect("the plan holds the span");
+        let runtime =
+            CoopRuntime::placed(Still, rows, RuntimeForm::Reserved, place).expect("the span fits");
+        let before = RELEASES.load(core::sync::atomic::Ordering::SeqCst);
+        drop(arena);
+        assert_eq!(
+            RELEASES.load(core::sync::atomic::Ordering::SeqCst),
+            before,
+            "the runtime keeps the arena"
+        );
+        drop(runtime);
+        assert_eq!(
+            RELEASES.load(core::sync::atomic::Ordering::SeqCst),
+            before + 1,
+            "its last holder gives it back, once"
+        );
     }
 }
