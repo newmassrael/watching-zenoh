@@ -3005,11 +3005,11 @@ _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. 256 blocks of 64 bytes are 16 KiB, about an eighth of the 134 KiB the three pools of the default hold together: eight short payloads, strings or kept query texts for each of HELD_PAYLOADS's thirty-two payloads."
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. 256 blocks of 64 bytes are 16 KiB, an eighth of the 128 KiB the three pools of the default hold together: eight short payloads, strings or kept query texts for each of HELD_PAYLOADS's thirty-two payloads."
 
 [limit.pico_preset]
 value = 128
-reason = "zenoh-pico bounds its payloads by no count. 128 blocks of 64 bytes are 8 KiB, about a quarter of the 33 KiB the three pools of the preset hold together: the held samples, replies and queries of its examples (HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES) and their key texts carry a few tens of bytes each."
+reason = "zenoh-pico bounds its payloads by no count. 128 blocks of 64 bytes are 8 KiB, a quarter of the 32 KiB the three pools of the preset hold together: the held samples, replies and queries of its examples (HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES) and their key texts carry a few tens of bytes each."
 
 [[limit]]
 id = "HELD_MEDIUM_PAYLOAD_BLOCKS"
@@ -3032,11 +3032,11 @@ _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Thirty-two blocks are one for each of HELD_PAYLOADS's thirty-two payloads, about a quarter of the 134 KiB the three pools of the default hold together."
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Thirty-two blocks are one for each of HELD_PAYLOADS's thirty-two payloads, about a quarter of the 128 KiB the three pools of the default hold together."
 
 [limit.pico_preset]
 value = 8
-reason = "zenoh-pico bounds its payloads by no count. Eight blocks of 1,040 bytes are 8 KiB, about a quarter of the 33 KiB the three pools of the preset hold together: the three payloads its examples hold at once (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), the encodings they keep and the samples they take out of a channel."
+reason = "zenoh-pico bounds its payloads by no count. Eight blocks of 1,040 bytes are 8 KiB, a quarter of the 32 KiB the three pools of the preset hold together: the three payloads its examples hold at once (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), the encodings they keep and the samples they take out of a channel."
 
 [[limit]]
 id = "HELD_LARGE_PAYLOAD_BLOCKS"
@@ -3052,21 +3052,20 @@ wire = "none"
 help = '''
 The blocks a program of the pico C ABI holds its largest payloads in at once:
 the largest of the three pools of payload blocks the library reserves at its
-first object, each block holding the largest sample a session of the build
-delivers, kept whole: the largest message (the larger of PICO_FRAG_MAX_BYTES,
-PICO_UNICAST_BATCH_BYTES and PICO_MULTICAST_BATCH_BYTES), a key of
-MAX_KEYEXPR_BYTES and a 16-byte head. A payload larger than such a
+first object, each block holding the largest message a session of the build
+delivers (the larger of PICO_FRAG_MAX_BYTES, PICO_UNICAST_BATCH_BYTES and
+PICO_MULTICAST_BATCH_BYTES) and a 16-byte head. A payload larger than such a
 block, or one no free block of a pool that holds it takes, is refused with
 _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Twenty blocks of the default's 4,368 bytes (PICO_FRAG_MAX_BYTES's 4,096, a key of MAX_KEYEXPR_BYTES's 256 and the head) are about 85 KiB, which with the two smaller pools makes about 134 KiB: the 128 KiB the default held for its payloads before the pools of blocks and the room of a key in each largest block, so a sample kept whole takes one block. A whole sample for each of HELD_SAMPLES's eighteen samples and two more."
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Twenty blocks of the default's 4,112 bytes (PICO_FRAG_MAX_BYTES's 4,096 and the head) are about 80 KiB, which with the two smaller pools makes the 128 KiB the default held for its payloads before the pools of blocks, a whole message for each of HELD_SAMPLES's eighteen samples and two more."
 
 [limit.pico_preset]
 value = 4
-reason = "zenoh-pico bounds its payloads by no count; the largest it holds is a whole message of FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`). A sample kept whole adds its key, so each block holds 4,096, a key of 256 and the head. Four blocks of 4,368 bytes are about 17 KiB, about half of the 33 KiB the three pools of the preset hold together, as the half the preset held for one such payload before the pools of blocks."
+reason = "zenoh-pico bounds its payloads by no count; the largest it holds is a whole message of FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`). Four blocks of 4,112 bytes are 16 KiB, half of the 32 KiB the three pools of the preset hold together, as the half the preset held for one such payload before the pools of blocks."
 
 [[limit]]
 id = "HELD_ENCODINGS"

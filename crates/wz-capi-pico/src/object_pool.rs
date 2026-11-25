@@ -43,8 +43,7 @@
 //! blocks, small, middle and largest, whose counts the program states
 //! (`small_payload_blocks`, `medium_payload_blocks`, `large_payload_blocks`). The sizes are the
 //! build's: `PAYLOAD_SMALL_BLOCK_BYTES`, `PAYLOAD_MEDIUM_BLOCK_BYTES`, and a largest block that
-//! holds the largest sample a session of the build delivers, its message and a key of
-//! `MAX_KEYEXPR_BYTES`, kept whole. `payload_bytes`, which stated one
+//! holds the largest message a session of the build delivers. `payload_bytes`, which stated one
 //! area of blocks split and joined in halves, is refused with `Z_EINVAL` when it is not zero: its
 //! bytes say nothing of how many blocks of each size they are, and are not read as if they did.
 //!
@@ -146,8 +145,8 @@ pub struct wz_ext_object_pool_counts_t {
     pub small_payload_blocks: usize,
     /// Blocks of `PAYLOAD_MEDIUM_BLOCK_BYTES` bytes, the middle pool of payload blocks.
     pub medium_payload_blocks: usize,
-    /// Blocks of the largest pool of payload blocks, each holding the largest sample a session of
-    /// the build delivers, its message and a key of `MAX_KEYEXPR_BYTES`, and its 16-byte head.
+    /// Blocks of the largest pool of payload blocks, each holding the largest message a session of
+    /// the build delivers and its 16-byte head.
     pub large_payload_blocks: usize,
 }
 

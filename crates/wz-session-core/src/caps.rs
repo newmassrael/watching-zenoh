@@ -294,8 +294,7 @@ pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
 pub const PAYLOAD_SMALL_BLOCK_BYTES: usize = generated::PAYLOAD_SMALL_BLOCK_BYTES;
 
 /// The bytes of each block of the middle pool of payload blocks of the C ABI, its head included.
-/// The largest pool's blocks are no limit: each holds the largest sample a session delivers, kept
-/// whole, its message and a key of [`MAX_KEYEXPR_BYTES`].
+/// The largest pool's blocks are no limit: each holds the largest message a session delivers.
 pub const PAYLOAD_MEDIUM_BLOCK_BYTES: usize = generated::PAYLOAD_MEDIUM_BLOCK_BYTES;
 
 /// The blocks of [`PAYLOAD_SMALL_BLOCK_BYTES`] a program holds payload bytes in at once, reserved
@@ -307,8 +306,8 @@ pub const HELD_SMALL_PAYLOAD_BLOCKS: usize = generated::HELD_SMALL_PAYLOAD_BLOCK
 pub const HELD_MEDIUM_PAYLOAD_BLOCKS: usize = generated::HELD_MEDIUM_PAYLOAD_BLOCKS;
 
 /// The blocks of the largest pool of payload blocks a program holds payload bytes in at once, each
-/// holding the largest sample a session delivers, its message and a key of [`MAX_KEYEXPR_BYTES`],
-/// and its head, reserved as [`HELD_SESSIONS`]'s pool is.
+/// holding the largest message a session delivers and its head, reserved as [`HELD_SESSIONS`]'s
+/// pool is.
 pub const HELD_LARGE_PAYLOAD_BLOCKS: usize = generated::HELD_LARGE_PAYLOAD_BLOCKS;
 
 /// The encodings a program holds through the C ABI at once: the slots of the process's pool of

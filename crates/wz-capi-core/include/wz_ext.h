@@ -2012,10 +2012,9 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * lie beside the pools, in three pools of fixed blocks: small_payload_blocks
  * blocks of PAYLOAD_SMALL_BLOCK_BYTES, medium_payload_blocks blocks of
  * PAYLOAD_MEDIUM_BLOCK_BYTES, and large_payload_blocks blocks that each hold
- * the largest sample a session of the build delivers, kept whole: the
- * largest message (the larger of PICO_FRAG_MAX_BYTES and the batch sizes)
- * and a key of MAX_KEYEXPR_BYTES, each block's bytes counting a 16-byte
- * head. A payload takes a block of the smallest pool whose blocks
+ * the largest message a session of the build delivers (the larger of
+ * PICO_FRAG_MAX_BYTES and the batch sizes), each block's bytes counting a
+ * 16-byte head. A payload takes a block of the smallest pool whose blocks
  * hold it and that has one free. One no free block holds is refused, and
  * counted in the class of the smallest pool whose blocks hold it, or of its
  * own bytes when none does. payload_bytes is refused with Z_EINVAL when it is

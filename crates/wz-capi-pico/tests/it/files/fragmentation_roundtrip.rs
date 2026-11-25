@@ -140,8 +140,8 @@ unsafe fn put(session: &z_owned_session_t, key: &std::ffi::CStr, payload: &[u8])
 }
 
 /// `size` letters kept for as long as the program runs, for a payload that lends their bytes
-/// rather than copies them: a payload past the receiving ceiling, which the release form's largest
-/// payload block holds only up to the longest key past it (the largest sample a session delivers).
+/// rather than copies them: one past the receiving ceiling, which no payload block of the release
+/// form holds, as its largest holds the largest message a session delivers.
 fn lent_letters(size: usize) -> &'static std::ffi::CStr {
     let text: Vec<u8> = (0..size).map(|i| b'a' + (i % 26) as u8).collect();
     Box::leak(
@@ -488,8 +488,8 @@ fn a_put_past_every_ceiling_is_sent_as_pico_sends_it_and_dropped_by_the_receiver
 
     // Twice this door's receiving ceiling (pico's FRAG_MAX_SIZE): a chain only the receiver's
     // drop can answer for. Its bytes are lent, not copied: the release form keeps a copied payload
-    // in a block of its process pools, the largest of which holds the largest sample a session
-    // delivers, the ceiling and a key, and so no payload of twice the ceiling. The size of the put is not what this test asks
+    // in a block of its process pools, the largest of which holds the largest message a session
+    // delivers and so no payload past the ceiling. The size of the put is not what this test asks
     // about, the sender's answer past the ceiling is.
     const TOO_BIG: usize = 2 * CEILING;
     let lent = lent_letters(TOO_BIG);
