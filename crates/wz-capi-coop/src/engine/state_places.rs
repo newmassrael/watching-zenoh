@@ -12,8 +12,14 @@
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, NonNull};
 
+#[cfg(any(feature = "query", feature = "queryable"))]
+use wz_session_core::bounded::BoundedVec;
 use wz_session_core::bounded::ZeroEmpty;
+#[cfg(any(feature = "query", feature = "queryable"))]
+use wz_session_core::caps;
 use wz_session_core::placed::Placed;
+#[cfg(feature = "query")]
+use wz_session_core::reply_hold::{HeldReplies, HeldReplyPlaces};
 use wz_session_core::round::RoundRowPlaces;
 use wz_session_core::step_lend::LendCell;
 
@@ -25,8 +31,44 @@ use super::GetPlane;
 use super::QueryPlane;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use super::Registry;
+#[cfg(feature = "queryable")]
+use super::{query, FinalHold, RefusedFinal};
+#[cfg(feature = "query")]
+use super::{Ended, LegRow, PendingGet, Rows};
 use super::{SessionReassembly, StepPlaces};
+#[cfg(any(feature = "query", feature = "queryable"))]
+use crate::arena::SessionRows;
 use crate::round::{CoopCalls, Round, RoundRowCounts, RoundRows};
+
+/// The legs a region keeps a row of each table of for: one for each get its tables of pending gets
+/// hold, the dial role's face's and, with `local-queryable`, the session's own
+/// (`RegistryRegion`).
+#[cfg(feature = "query")]
+const LEG_ROWS: usize = (caps::MAX_PENDING_QUERIES
+    + if cfg!(feature = "liveliness-get") {
+        caps::MAX_PENDING_LIVELINESS_GETS
+    } else {
+        0
+    })
+    * (1 + cfg!(feature = "local-queryable") as usize);
+
+/// The plain tables of the session's state over the rows of its region
+/// ([`StatePlaces::tables`]): what an arena lends a session whose shape the open plans.
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub(super) struct PlacedTables {
+    #[cfg(feature = "query")]
+    pub(super) legs: Rows<Ended, { usize::MAX }>,
+    #[cfg(feature = "query")]
+    pub(super) leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
+    #[cfg(feature = "query")]
+    pub(super) pending_gets: Rows<PendingGet, { usize::MAX }>,
+    #[cfg(feature = "query")]
+    pub(super) held_replies: HeldReplies<u64, wz_session_core::bounded::Lent>,
+    #[cfg(feature = "queryable")]
+    pub(super) held_finals: query::HeldFinals,
+    #[cfg(feature = "queryable")]
+    pub(super) refused_finals: query::RefusedFinals,
+}
 
 /// The places of a session's region its state's own values are written in: see the module
 /// documentation.
@@ -46,10 +88,25 @@ pub(crate) struct StatePlaces {
     queries: MaybeUninit<QueryPlane>,
     #[cfg(feature = "connectivity")]
     faces: MaybeUninit<FacePlane>,
+    /// The rows of the session's plain tables, each table's at the build's bound: the ends of the
+    /// legs, their callbacks, the session's note of each leg pending and the replies the gets that
+    /// consolidate hold, and the Finals the queryables' plane holds and the requests it refused.
+    #[cfg(feature = "query")]
+    legs: [MaybeUninit<Ended>; LEG_ROWS],
+    #[cfg(feature = "query")]
+    leg_rows: [MaybeUninit<Option<LegRow>>; LEG_ROWS],
+    #[cfg(feature = "query")]
+    pending_gets: [MaybeUninit<PendingGet>; LEG_ROWS],
+    #[cfg(feature = "query")]
+    held_replies: HeldReplyPlaces<u64>,
+    #[cfg(feature = "queryable")]
+    held_finals: [MaybeUninit<FinalHold>; caps::MAX_PENDING_FINALS],
+    #[cfg(feature = "queryable")]
+    refused_finals: [MaybeUninit<RefusedFinal>; caps::MAX_PENDING_FINALS],
 }
 
-// SAFETY: every field is a `MaybeUninit`, which holds no value at any bytes, or the round's rows,
-// which are `ZeroEmpty`.
+// SAFETY: every field is a `MaybeUninit` or an array of them, which holds no value at any bytes, or
+// the round's rows, which are `ZeroEmpty`.
 unsafe impl ZeroEmpty for StatePlaces {}
 
 /// Where the value of the field at `field` is to lie.
@@ -107,6 +164,56 @@ impl StatePlaces {
         unsafe { Round::placed_at(value_at(addr_of_mut!((*at).round)), rows) }
     }
 
+    /// The session's plain tables over the rows of their fields of the places at `at`, each of the
+    /// rows `rows` count, at most the region's.
+    ///
+    /// # Safety
+    /// As [`Self::steps`], for the tables' fields: each is reached by the one table placed over it
+    /// here, which the session's planes and its state drop before the region goes.
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    pub(super) unsafe fn tables(at: NonNull<Self>, rows: &SessionRows) -> PlacedTables {
+        let at = at.as_ptr();
+        // A count past the address space is held to the region's rows as any other.
+        #[cfg(feature = "query")]
+        let legs = rows.gets().legs().unwrap_or(usize::MAX);
+        // SAFETY: the caller's contract; each field holds no value, and a field of a value at a
+        // pointer that is not null is not null either.
+        unsafe {
+            PlacedTables {
+                #[cfg(feature = "query")]
+                legs: BoundedVec::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).legs)),
+                    legs,
+                ),
+                #[cfg(feature = "query")]
+                leg_rows: BoundedVec::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).leg_rows)),
+                    legs,
+                ),
+                #[cfg(feature = "query")]
+                pending_gets: BoundedVec::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).pending_gets)),
+                    legs,
+                ),
+                #[cfg(feature = "query")]
+                held_replies: HeldReplies::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).held_replies)),
+                    rows.held_replies(),
+                ),
+                #[cfg(feature = "queryable")]
+                held_finals: BoundedVec::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).held_finals)),
+                    rows.held_queries(),
+                ),
+                #[cfg(feature = "queryable")]
+                refused_finals: BoundedVec::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).refused_finals)),
+                    rows.held_queries(),
+                ),
+            }
+        }
+    }
+
     /// The gets' `plane`, written in its field of the places at `at`.
     ///
     /// # Safety
@@ -147,5 +254,59 @@ impl StatePlaces {
                 place.write(plane)
             })
         }
+    }
+}
+
+#[cfg(all(test, feature = "std", any(feature = "query", feature = "queryable")))]
+mod tests {
+    use super::*;
+    use crate::arena::{ArenaPlan, PlanShape};
+    use wz_session_core::limits::SessionLimits;
+
+    /// The plain tables placed over a region's places take the rows the build's plan counts, which
+    /// the region keeps every one of, and lie in the places. Turned red by a field of fewer rows
+    /// than the plan counts (`LEG_ROWS`), by a table held to other counts than the plan's, or by
+    /// one placed anywhere but the places.
+    #[test]
+    fn the_plain_tables_take_the_plans_rows_in_the_places() {
+        let shape = PlanShape::dial_only(1, 1024);
+        let plan = ArenaPlan::planned(shape, &SessionLimits::BUILD).expect("the build's client");
+        let rows = plan.session();
+        let mut places = std::boxed::Box::new(MaybeUninit::<StatePlaces>::uninit());
+        let at = NonNull::from(&mut *places).cast::<StatePlaces>();
+        let start = at.as_ptr() as usize;
+        let within = start..=start + core::mem::size_of::<StatePlaces>();
+        // SAFETY: the places are this test's box, holding no value and reached by the tables alone,
+        // which are dropped before it.
+        let tables = unsafe { StatePlaces::tables(at, rows) };
+        #[cfg(feature = "query")]
+        {
+            let legs = rows.gets().legs().expect("within the address space");
+            assert!(
+                legs <= LEG_ROWS,
+                "the region keeps every leg the plan counts"
+            );
+            assert_eq!(tables.legs.free_slots(), legs);
+            assert_eq!(tables.leg_rows.free_slots(), legs);
+            assert_eq!(tables.pending_gets.free_slots(), legs);
+            assert!(tables.held_replies.is_empty());
+            for table in [
+                tables.legs.as_ptr() as usize,
+                tables.leg_rows.as_ptr() as usize,
+                tables.pending_gets.as_ptr() as usize,
+            ] {
+                assert!(within.contains(&table), "the rows are the region's");
+            }
+        }
+        #[cfg(feature = "queryable")]
+        {
+            let held = rows.held_queries();
+            assert!(held <= caps::MAX_PENDING_FINALS);
+            assert_eq!(tables.held_finals.free_slots(), held);
+            assert_eq!(tables.refused_finals.free_slots(), held);
+            assert!(within.contains(&(tables.held_finals.as_ptr() as usize)));
+            assert!(within.contains(&(tables.refused_finals.as_ptr() as usize)));
+        }
+        drop(tables);
     }
 }

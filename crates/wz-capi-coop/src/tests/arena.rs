@@ -1360,24 +1360,46 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     let gets = plan.gets();
     let legs = gets.tables * (gets.rows.queries + gets.rows.liveliness_gets);
     assert_eq!(gets.legs(), Some(legs));
-    assert_eq!(row(&plan, "ended legs").count, legs);
+    // A build of the region's form keeps these rows in its region at the build's bound
+    // (`StatePlaces::tables`): its arena lays out none of them.
+    #[cfg(not(feature = "runtime-plan"))]
+    for part in [
+        "ended legs",
+        "leg callbacks",
+        "pending legs",
+        "held replies",
+    ] {
+        assert!(
+            plan.rows().all(|laid| laid.part() != part),
+            "the region holds the {part}"
+        );
+    }
+    #[cfg(feature = "runtime-plan")]
+    the_arena_lends_a_row_for_the_end_of_each_get(&plan, legs);
+}
+
+/// The rows of the ends of `legs` legs, their callbacks, the session's notes of them and the
+/// replies the gets hold, as `plan` lays them out where the arena lends them.
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
+fn the_arena_lends_a_row_for_the_end_of_each_get(plan: &ArenaPlan, legs: usize) {
+    assert_eq!(row(plan, "ended legs").count, legs);
     assert_eq!(
-        row(&plan, "ended legs").entry_bytes,
+        row(plan, "ended legs").entry_bytes,
         core::mem::size_of::<crate::engine::Ended>()
     );
-    assert_eq!(row(&plan, "leg callbacks").count, legs);
+    assert_eq!(row(plan, "leg callbacks").count, legs);
     assert_eq!(
-        row(&plan, "leg callbacks").entry_bytes,
+        row(plan, "leg callbacks").entry_bytes,
         core::mem::size_of::<Option<crate::engine::LegRow>>()
     );
-    assert_eq!(row(&plan, "pending legs").count, legs);
+    assert_eq!(row(plan, "pending legs").count, legs);
     assert_eq!(
-        row(&plan, "pending legs").entry_bytes,
+        row(plan, "pending legs").entry_bytes,
         core::mem::size_of::<crate::engine::PendingGet>()
     );
     // The replies held to their Finals are a row each, as many as the session holds at once, of
     // the rows the engine lends them (`HeldReplies::lent`).
-    let held = row(&plan, "held replies");
+    let held = row(plan, "held replies");
     assert_eq!(held.count, plan.session().held_replies());
     assert_eq!(
         held.span(),
@@ -1399,18 +1421,24 @@ fn the_plan_holds_the_queries_its_limit_resolves() {
 }
 
 /// The Finals held for those queries and the requests a dispatch refused lie in rows of the
-/// arena, one of each for each query the session holds at once, as its limit resolves it. Turned
-/// red by rows sized by the build's ceiling, or by a plan that lays out none.
+/// arena, one of each for each query the session holds at once, as its limit resolves it, where
+/// the arena lends them; a build of the region's form keeps them in its region
+/// (`StatePlaces::tables`) and its arena lays out none. Turned red by rows sized by the build's
+/// ceiling, by a plan that lends none, or by a region's plan that lends them again.
 #[cfg(feature = "queryable")]
 #[test]
 fn the_plan_lends_a_row_of_held_and_refused_finals_for_each_query_held() {
     let lowered = lowered(|l| l.select_max_pending_finals(Quota::at_most(3)));
     let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    assert_eq!(plan.held_queries(), 3, "the limit is held either way");
     let finals: Vec<_> = plan
         .rows()
         .filter(|row| row.part().ends_with(" finals"))
         .map(|row| (row.part(), row.count, row.entry_bytes))
         .collect();
+    #[cfg(not(feature = "runtime-plan"))]
+    assert!(finals.is_empty(), "{finals:?}");
+    #[cfg(feature = "runtime-plan")]
     assert_eq!(
         finals,
         [

@@ -72,7 +72,7 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::placed::{Placed, PlacedRef};
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{RowCallback, ThreadForm};
 #[cfg(feature = "local-queryable")]
@@ -243,6 +243,11 @@ pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
+#[cfg(all(
+    any(feature = "query", feature = "queryable"),
+    not(feature = "runtime-plan")
+))]
+use state_places::PlacedTables;
 #[cfg(not(feature = "runtime-plan"))]
 pub(crate) use state_places::StatePlaces;
 
@@ -761,20 +766,22 @@ struct SessionLent {
 }
 
 /// The plain tables of a session's state, lent by an open's one lender
-/// (`SessionRows::lent_from`): the key arena, and the ends of its legs, their callbacks and the
-/// session's note of each leg pending.
+/// (`SessionRows::lent_from`): the ends of its legs, their callbacks and the session's note of
+/// each leg pending, and the Finals its queryables hold, where the arena lends them
+/// (`runtime-plan`; a region holds them otherwise, `StatePlaces::tables`), and the ring of the
+/// advanced publishers' caches.
 struct StateTables {
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     legs: Rows<Ended, { usize::MAX }>,
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     /// The Finals the queryables' plane holds and the requests a dispatch refused, a row of each
     /// for each query held at once (`query::FinalHolds`).
-    #[cfg(feature = "queryable")]
+    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     held_finals: query::HeldFinals,
-    #[cfg(feature = "queryable")]
+    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     refused_finals: query::RefusedFinals,
     #[cfg(feature = "advanced-cache")]
     cache: Option<LentByteCells>,
@@ -784,22 +791,28 @@ impl SessionRows {
     /// The session's plain tables, lent by `lend` in the order the plan laid them out, each key
     /// at most `longest` bytes. A count past the address space is a table the lender refuses.
     fn lent_from(&self, lend: &mut TableLender<'_>) -> StateTables {
-        // A build that asks and answers no query and caches no sample lends the state no plain
-        // table: its lender is asked nothing.
-        #[cfg(not(any(feature = "query", feature = "queryable", feature = "advanced-cache")))]
+        // A build that asks and answers no query from the arena and caches no sample lends the
+        // state no plain table: its lender is asked nothing.
+        #[cfg(not(any(
+            all(
+                any(feature = "query", feature = "queryable"),
+                feature = "runtime-plan"
+            ),
+            feature = "advanced-cache"
+        )))]
         let _ = lend;
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         let legs = self.gets().legs().unwrap_or(usize::MAX);
         StateTables {
-            #[cfg(feature = "query")]
+            #[cfg(all(feature = "query", feature = "runtime-plan"))]
             legs: lend.table(legs),
-            #[cfg(feature = "query")]
+            #[cfg(all(feature = "query", feature = "runtime-plan"))]
             leg_rows: lend.table(legs),
-            #[cfg(feature = "query")]
+            #[cfg(all(feature = "query", feature = "runtime-plan"))]
             pending_gets: lend.table(legs),
-            #[cfg(feature = "queryable")]
+            #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
             held_finals: lend.table(self.held_queries()),
-            #[cfg(feature = "queryable")]
+            #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
             refused_finals: lend.table(self.held_queries()),
             #[cfg(feature = "advanced-cache")]
             cache: (self.cache_bytes() != 0).then(|| lend.byte_cells(self.cache_bytes(), 1)),
@@ -845,15 +858,15 @@ fn lend_session(
         config.limits.max_keyexpr_bytes_held(),
     );
     let StateTables {
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         legs,
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         leg_rows,
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         pending_gets,
-        #[cfg(feature = "queryable")]
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         held_finals,
-        #[cfg(feature = "queryable")]
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         refused_finals,
         #[cfg(feature = "advanced-cache")]
         cache,
@@ -876,6 +889,34 @@ fn lend_session(
     // by what this hands back and then by the session's state.
     #[cfg(not(feature = "runtime-plan"))]
     let keys = unsafe { StateRegion::place(state.as_ptr(), resolve_limits(config)) };
+    // The plane, the round, the step places, the queryables' plane and the plain tables' rows lie
+    // in the region where the build fixes the session's shape, each in a field of it no other
+    // owner reaches.
+    // SAFETY: the region was placed above, and nothing reaches its places' fields but this open,
+    // which writes each once; the block is held after every owner written in it (`SessionLent`,
+    // then `Core`), and neither moves nor goes back before them.
+    #[cfg(not(feature = "runtime-plan"))]
+    let region_places = unsafe { StateRegion::places_at(state.as_ptr()) };
+    // SAFETY: as above, for the plain tables' fields: each table is held by the plane or the
+    // state it is moved into, both dropped before the block.
+    #[cfg(all(
+        any(feature = "query", feature = "queryable"),
+        not(feature = "runtime-plan")
+    ))]
+    let PlacedTables {
+        #[cfg(feature = "query")]
+        legs,
+        #[cfg(feature = "query")]
+        leg_rows,
+        #[cfg(feature = "query")]
+        pending_gets,
+        #[cfg(feature = "query")]
+        held_replies,
+        #[cfg(feature = "queryable")]
+        held_finals,
+        #[cfg(feature = "queryable")]
+        refused_finals,
+    } = unsafe { StatePlaces::tables(region_places, plan.session()) };
     let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
     let cache = cache
@@ -892,7 +933,7 @@ fn lend_session(
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
     // The rows the gets that consolidate hold their replies in, lent beside the round's.
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     let held_replies = HeldReplies::lent(arena.arena_mut(), plan.session().held_replies())
         .map_err(ArenaRefused::Lend)?;
     // What the gets share: placed here, so the round is told whose legs' callbacks its replies'
@@ -904,14 +945,7 @@ fn lend_session(
         .arena_mut()
         .place(get_plane)
         .map_err(ArenaRefused::Lend)?;
-    // The plane, the round, the step places and the queryables' plane lie in the region where the
-    // build fixes the session's shape, each in a field of it no other owner reaches.
-    // SAFETY: the region was placed above, and nothing reaches its places' fields but this open,
-    // which writes each once; the block is held after every owner written in it (`SessionLent`,
-    // then `Core`), and neither moves nor goes back before them.
-    #[cfg(not(feature = "runtime-plan"))]
-    let region_places = unsafe { StateRegion::places_at(state.as_ptr()) };
-    // SAFETY: as above, for the gets' field.
+    // SAFETY: as for the region's places above, for the gets' field.
     #[cfg(all(feature = "query", not(feature = "runtime-plan")))]
     let gets = unsafe { StatePlaces::gets(region_places, get_plane) };
     // The round lies beside its tables, owned by the session's state and reached by handles that

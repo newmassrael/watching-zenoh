@@ -121,7 +121,10 @@ use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
-#[cfg(any(feature = "runtime-plan", feature = "query"))]
+#[cfg(any(
+    feature = "runtime-plan",
+    all(feature = "liveliness", any(feature = "listen", feature = "group"))
+))]
 use wz_session_core::bounded::Lent;
 use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
@@ -167,7 +170,7 @@ use crate::open_source::EndpointList;
 use crate::round::{CoopForm, CALLBACK_BYTES};
 use crate::round::{RoundRowCounts, RECORD_BYTES};
 use crate::CoopConfig;
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_hold::HeldReply;
 
 /// `?` where a const fn reads a result: the value of an `Ok`, or the `Err` handed back as it is.
@@ -503,11 +506,11 @@ const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) 
 /// The application's tables apart from the session's one table set: the declaration watchers,
 /// where the arena lends them (`runtime-plan`).
 const OBSERVER_ROWS: usize = cfg!(feature = "runtime-plan") as usize;
-/// The ends of the legs, the legs' callbacks, the session's note of each leg pending, the replies
-/// the gets that consolidate hold and, where the arena lends them (`runtime-plan`), the pending
-/// gets, all of a build that asks (`query`): one that asks nothing holds no table of gets.
-const GET_ROWS: usize =
-    (4 + cfg!(feature = "runtime-plan") as usize) * cfg!(feature = "query") as usize;
+/// The pending gets, the ends of the legs, the legs' callbacks, the session's note of each leg
+/// pending and the replies the gets that consolidate hold, of a build that asks (`query`), where
+/// the arena lends them (`runtime-plan`): one that asks nothing holds no table of gets, and a
+/// region holds them otherwise (`crate::engine::StatePlaces`).
+const GET_ROWS: usize = 5 * cfg!(all(feature = "query", feature = "runtime-plan")) as usize;
 /// The faces' sets where the arena lends them (`runtime-plan`), and the index of the held ones
 /// where the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face
 /// alone knows it holds the first set.
@@ -581,8 +584,9 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
 const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
-/// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`).
-const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
+/// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`), where
+/// the arena lends them (`runtime-plan`); a region holds them otherwise.
+const FINAL_ROWS: usize = 2 * cfg!(all(feature = "queryable", feature = "runtime-plan")) as usize;
 /// The count the arena is kept by and the span the session's runtime is placed in
 /// ([`ArenaPlan::holding_runtime`]).
 const RUNTIME_ROWS: usize = 2;
@@ -1908,8 +1912,10 @@ impl ArenaPlan {
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
         }
         // The ends of the legs, the rows of their callbacks and the session's note of each leg
-        // pending, a row of each for each get every table holds (`GetTables::legs`).
-        #[cfg(feature = "query")]
+        // pending, a row of each for each get every table holds (`GetTables::legs`). A build of
+        // the region's form holds them in its region, at the build's bound
+        // (`crate::engine::StatePlaces`).
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         {
             let legs = self.sized(self.session.gets.legs());
             self.put(
@@ -1930,6 +1936,7 @@ impl ArenaPlan {
         }
         // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
         // table shared by every get, each tagged with its leg (`engine::get::LegHold`).
+        // The limit is held either way, so a config over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
             self.session.held_replies = self.lent(
@@ -1937,6 +1944,7 @@ impl ArenaPlan {
                 limits.max_pending_replies(),
                 caps::MAX_PENDING_REPLIES,
             );
+            #[cfg(feature = "runtime-plan")]
             self.put(
                 ArenaPart::HeldReplies,
                 self.session.held_replies,
@@ -2029,8 +2037,9 @@ impl ArenaPlan {
             0
         };
         // The Finals held for those queries and the requests a dispatch refused for want of a
-        // row, a row of each for each query held (`wz_session_core::query_plane::FinalHolds`).
-        #[cfg(feature = "queryable")]
+        // row, a row of each for each query held (`wz_session_core::query_plane::FinalHolds`),
+        // where the arena lends them; a build of the region's form holds them in its region.
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         {
             let held = self.session.held_queries;
             self.put(
