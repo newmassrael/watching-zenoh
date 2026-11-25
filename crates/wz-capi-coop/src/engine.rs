@@ -2914,6 +2914,35 @@ type LinkTx<'a, C> = core::marker::PhantomData<&'a Wire<C>>;
 struct Holding<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     core: &'a Core<L, C>,
     tx: LinkTx<'a, C>,
+    /// Whether what is sent through the holding was decided by an earlier face's leg of the same
+    /// put (`CoopEngine::put_through_filter`), which this leg sends as it was decided.
+    decided: bool,
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> Clone for Holding<'_, L, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> Copy for Holding<'_, L, C> {}
+
+/// What a put through a write filter came to over the faces so far (`before`), with the next
+/// face's leg (`leg`) folded in: the first leg's answer decides, the counts of the faces sent add
+/// up and the last failure is kept. A leg after the first that sends nothing (the filter's row
+/// went meanwhile) leaves the answer as it was: that face is sent nothing.
+#[cfg(not(wz_round))]
+fn fold_filtered(before: Option<FilteredPut>, leg: FilteredPut) -> FilteredPut {
+    match (before, leg) {
+        (Some(FilteredPut::Sent(Ok(sent))), FilteredPut::Sent(Ok(more))) => {
+            FilteredPut::Sent(Ok(sent.saturating_add(more)))
+        }
+        (Some(FilteredPut::Sent(Err(failed))), FilteredPut::Sent(Ok(_))) => {
+            FilteredPut::Sent(Err(failed))
+        }
+        (Some(before), FilteredPut::Suppressed | FilteredPut::NotPlain) => before,
+        (_, leg) => leg,
+    }
 }
 
 /// What a face holds of its link while the link is up or in its handshake: the link's session
@@ -8775,9 +8804,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> FilteredPut {
         let core = on.core;
         // A put one of the session's own subscribers wants is not plain: the general publish
-        // sends it and delivers it there.
+        // sends it and delivers it there. A leg the first face's leg decided sends as that one
+        // did, and is not asked again.
         #[cfg(feature = "local-subscriber")]
-        if params.destination.allows_local()
+        if !on.decided
+            && params.destination.allows_local()
             && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
                 tables(&core.session.registry),
                 keyexpr,
@@ -8790,7 +8821,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         // A group is sent a put by the general publish, which pushes it onto the group's stage.
         #[cfg(feature = "group")]
-        if !core.transport.groups.is_empty() {
+        if !on.decided && !core.transport.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
         // The key as the session's tables name it, read at the declaration's row where the caller
@@ -8808,15 +8839,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// filter's answer, the key's naming and each link's form of it taken as the plan found them.
     fn put_planned(
         &self,
-        core: &Core<L, C>,
+        on: Holding<'_, L, C>,
         planned: &wz_session_core::session_tables::PlannedPut<'_>,
         payload: &[u8],
-        tx: LinkTx<'_, C>,
     ) -> FilteredPut {
         #[cfg(test)]
         self.takes.plans.fetch_add(1, Ordering::Relaxed);
         self.send_plain(
-            Holding { core, tx },
+            on,
             planned.key(),
             payload,
             &planned.params(),
@@ -10940,7 +10970,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
     /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
-    /// one take of the session, as zenoh-pico's put reads its filter's state and takes only its
+    /// one take of the session for each face, as zenoh-pico's put reads its filter's state and takes only its
     /// transmit lock (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
     #[inline(never)]
     fn put_through_filter(
@@ -10950,24 +10980,61 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         payload: &[u8],
         given: Option<(KeyexprRef, PlainPutParams)>,
     ) -> FilteredPut {
-        // The one link's place is taken before the session, as every send on it takes them.
+        // Each face's place is taken before the session, as every send on it takes them, one
+        // face at a time: the first face's leg decides the put, and each leg after it sends as
+        // that leg decided.
+        #[cfg(not(wz_round))]
+        {
+            let mut answer: Option<FilteredPut> = None;
+            let _ = self.on_faces(|tx| {
+                if matches!(
+                    answer,
+                    Some(FilteredPut::Suppressed | FilteredPut::NotPlain)
+                ) {
+                    return Ok(0);
+                }
+                let Some(core) = self.live() else {
+                    return Ok(0);
+                };
+                let on = Holding {
+                    core: &core.0,
+                    tx,
+                    decided: answer.is_some(),
+                };
+                let sent = self.put_through_filter_in(on, filter, keyexpr, payload, given);
+                answer = Some(fold_filtered(answer.take(), sent));
+                Ok(0)
+            });
+            if let Some(answer) = answer {
+                return answer;
+            }
+        }
+        // No face holds a link: the session alone decides, and a put a subscriber of the session
+        // wants is still answered as one the general publish delivers.
         self.live_on_link(|core, tx| {
-            self.put_through_filter_in(core, filter, keyexpr, payload, given, tx)
+            let on = Holding {
+                core,
+                tx,
+                decided: false,
+            };
+            self.put_through_filter_in(on, filter, keyexpr, payload, given)
         })
         .unwrap_or(FilteredPut::Sent(Ok(0)))
     }
 
-    /// [`Self::put_through_filter`] on `core`, through `tx`, what the caller holds of the one
-    /// link.
+    /// [`Self::put_through_filter`] on what the caller holds (`on`). A leg the first face's leg
+    /// decided (`Holding::decided`) asks neither the filter, nor a subscriber of the session,
+    /// nor a group again, so every face of one put is sent it as the first was, and keeps no
+    /// plan: the first leg keeps it.
     fn put_through_filter_in(
         &self,
-        core: &Core<L, C>,
+        on: Holding<'_, L, C>,
         filter: FilterId,
         keyexpr: &str,
         payload: &[u8],
         given: Option<(KeyexprRef, PlainPutParams)>,
-        tx: LinkTx<'_, C>,
     ) -> FilteredPut {
+        let Holding { core, tx, decided } = on;
         // The registry itself, not its holder: the filter reads it as what the peers declare.
         let registry: &Registry = &core.session.registry;
         // The filter's row is looked up once, for its plan, its answer and the plain way it keeps.
@@ -10983,15 +11050,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let groups_left = true;
         if given.is_none() && groups_left {
             if let Some(planned) = row.and_then(|row| row.planned_put(epoch)) {
-                return self.put_planned(core, &planned, payload, tx);
+                return self.put_planned(on, &planned, payload);
             }
         }
-        if !Self::filters_left_unasked(core)
+        if !decided
+            && !Self::filters_left_unasked(core)
             && row.is_some_and(|row| !tables(registry).write_filter_row_open(row, registry))
         {
             return FilteredPut::Suppressed;
         }
-        let planning = given.is_none();
+        let planning = given.is_none() && !decided;
         // The plain way a publisher's declare stated carries the Put's head it wrote then. A way
         // the caller gives is written from that head too, on each link where the head names the
         // way's key and carries its QoS, which the send checks, and from its parts elsewhere.
@@ -11010,7 +11078,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 (way.key, way.params, way.head)
             }
         };
-        let sent = self.put_plain_in(Holding { core, tx }, keyexpr, key, payload, &params, head);
+        let sent = self.put_plain_in(on, keyexpr, key, payload, &params, head);
         // The row's own way, sent plain to the peers of a filter that counts subscribers, is
         // planned at this epoch when every link names the filter's key as the session does, by
         // the head's declaration alone: the epoch counts the session's own subscribers, the
@@ -11555,5 +11623,44 @@ mod up_facts_tests {
         up.ended = true;
         assert!(up.standing().is_none(), "its session ended");
         assert!(up.row.is_some(), "kept for the loss");
+    }
+}
+
+#[cfg(all(test, not(wz_round)))]
+mod fold_filtered_tests {
+    use super::{fold_filtered, FanoutError, FilteredPut};
+
+    /// The first face's leg decides, the faces' counts add up and a failure stays the answer.
+    /// Turned red by a fold that keeps only the last leg's count, or lets a later success hide an
+    /// earlier failure.
+    #[test]
+    fn the_first_leg_decides_and_the_faces_add_up() {
+        assert_eq!(
+            fold_filtered(None, FilteredPut::NotPlain),
+            FilteredPut::NotPlain
+        );
+        assert_eq!(
+            fold_filtered(None, FilteredPut::Suppressed),
+            FilteredPut::Suppressed
+        );
+        let two = fold_filtered(Some(FilteredPut::Sent(Ok(1))), FilteredPut::Sent(Ok(1)));
+        assert_eq!(two, FilteredPut::Sent(Ok(2)));
+        let failed = FilteredPut::Sent(Err(FanoutError::ExceedsCapacity));
+        assert_eq!(fold_filtered(Some(two), failed), failed);
+        assert_eq!(
+            fold_filtered(Some(failed), FilteredPut::Sent(Ok(1))),
+            failed,
+            "a later face's success hid an earlier face's failure"
+        );
+    }
+
+    /// A leg after the first whose row went sends nothing and changes nothing of the answer: the
+    /// caller is not sent to the general publish for a put the faces before were sent. Turned red
+    /// by a fold that answers `NotPlain` there, which would send the put twice.
+    #[test]
+    fn a_later_leg_that_sends_nothing_keeps_the_answer() {
+        let sent = FilteredPut::Sent(Ok(1));
+        assert_eq!(fold_filtered(Some(sent), FilteredPut::NotPlain), sent);
+        assert_eq!(fold_filtered(Some(sent), FilteredPut::Suppressed), sent);
     }
 }
