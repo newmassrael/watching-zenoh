@@ -13,7 +13,7 @@
 //!   receive ([`UnicastRx`]), which dispatches it, stages its fragments and reports each
 //!   outcome. The pump keeps no state of the receive between two datagrams.
 //! - deadlines: the session's own timers
-//!   ([`TransportTimers`](wz_session_core::transport_timers::TransportTimers))
+//!   ([`wz_session_core::transport_timers::TransportTimers`])
 //!   say how long the link may wait and judge the handshake, lease and
 //!   keep-alive deadlines when the loop hands them the time; the loop keeps
 //!   none of its own.

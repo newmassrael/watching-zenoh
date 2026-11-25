@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The WebSocket links of the slot profile: [`WsStack`], the stack of the session host whose
-//! `ws/` dials open the stack's own plain streams and frame them with [`WsFraming`], and
+//! `ws/` dials open the stack's own plain streams and frame them with `WsFraming`, and
 //! [`WsAcceptor`], which answers the opening requests of the connections a listener takes. A link
 //! is the [`IpDriver`] the stack's other links are, so a session slot holds one type for every
 //! protocol and the session host runs it unchanged. Nothing here touches a heap: a link's buffers

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! One value placed in a span of a session's arena, owned by one [`Placed`] and reached by
-//! [`PlacedRef`] handles that count nothing (docs/c-abi-architecture.md, P3: one owner, no
+//! One value placed in a span of a session's arena, owned by one `Placed` and reached by
+//! `PlacedRef` handles that count nothing (docs/c-abi-architecture.md, P3: one owner, no
 //! reference counting inside a session).
 //!
 //! The value lies where the arena lent it for as long as its owner lives, so moving the owner

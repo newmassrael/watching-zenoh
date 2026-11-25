@@ -5,7 +5,7 @@
 //! ([`StreamDriver`](crate::stream_link::StreamDriver)) over a TCP connection,
 //! each batch one BINARY message of RFC 6455 as zenoh's WebSocket link writes it
 //! (`io/zenoh-links/zenoh-link-ws/src/unicast.rs` @ `let msg = buffer.into();`), its frames read
-//! and written by [`WsFraming`] with the session core's pieces (`wz_session_core::ws_link`).
+//! and written by `WsFraming` with the session core's pieces (`wz_session_core::ws_link`).
 //!
 //! A message is read whole into the link's receive buffer: the frames of a fragmented one are
 //! joined where they lie, and a masked one is unmasked there, so a batch is lent from the buffer
