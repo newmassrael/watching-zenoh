@@ -556,8 +556,8 @@ pub(super) struct GroupFace<W> {
     stop: Rc<Cell<bool>>,
     /// The JOIN the session asks of the group between two beacons ([`Self::ask_join`]).
     join_ask: JoinAsk,
-    /// What the group's session counted of what it received (`transport-stats`), shared with its
-    /// task; it leaves with the group's join.
+    /// What the group's session counted of what it sent and received (`transport-stats`), shared
+    /// with its task and its stage; it leaves with the group's join.
     #[cfg(feature = "transport-stats")]
     stats: Rc<TransportStats>,
     /// The keyexprs this join of the group was told, and the members' asks for them the session
@@ -634,8 +634,12 @@ impl<W: LinkWaits> GroupFace<W> {
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
         let join_ask = JoinAsk::default();
+        // What the group's session receives and its beacons are counted by its task, and each
+        // datagram of the stage by whichever writer wrote it.
         #[cfg(feature = "transport-stats")]
         let stats = Rc::new(TransportStats::default());
+        #[cfg(feature = "transport-stats")]
+        tx.attach_stats(Rc::clone(&stats));
         // The session core's config for a group, the tokio engine's group face's too, with each
         // member's declarations kept apart: the group's events feed one session's tables.
         let config = MulticastConfig::of_group(&params, true);
@@ -803,9 +807,8 @@ impl<W: LinkWaits> GroupFace<W> {
             .fold(self.tx.dropped(), u32::saturating_add)
     }
 
-    /// What the group's session counted of what it received (`transport-stats`): the bytes of
-    /// its datagrams and the transport and network messages read out of them, in the inbound
-    /// half, as a link's session counts what it receives.
+    /// What the group's session counted (`transport-stats`): the bytes and transport messages of
+    /// the datagrams it sent and received, and the network messages read out of those received.
     #[cfg(feature = "transport-stats")]
     pub(super) fn stats_report(&self) -> wz_session_core::stats::TransportStatsReport {
         self.stats.report()

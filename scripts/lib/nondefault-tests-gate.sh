@@ -1556,8 +1556,8 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
     # `codec-push` the items; the row above is the slot profile, where none of this is built.
     "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
-    # And with `transport-stats`: what the pump receives is counted into the counters its holder
-    # attached, a datagram's bytes and each transport and network message read out of it.
+    # And with `transport-stats`: what the pump receives and what it and the stage send are counted
+    # into the counters the holder attached, as the socket takes or hands in each datagram.
     "wz-session-mcu|hook|codec-push,transport-multicast,transport-stats|group_drive::"
     # A node that declares liveliness tokens (`declare-token`): its tokens are declared after its
     # documents, mirrors and subscriptions, and more of them than the node declares stop it; without

@@ -333,7 +333,7 @@ shared-key-ids = [
 # what it sends, receives and drops, as the tokio engine's sessions do under the same session-core
 # feature, and the engine counts the publishes it drops before they reach a link. Off, which is
 # pico's build (pico has no transport counters), no counter is kept and the text has none of them.
-# A group's session counts what it receives into counters of its own (`wz-session-mcu`'s
+# A group's session counts what it sends and receives into counters of its own (`wz-session-mcu`'s
 # `transport-stats`), which the engine sums with its links'.
 # A Rust surface only: neither zenoh-c nor zenoh-pico reports transport counters through C.
 transport-stats = ["wz-session-core/transport-stats", "wz-session-mcu/transport-stats"]

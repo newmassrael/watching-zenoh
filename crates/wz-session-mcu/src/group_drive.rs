@@ -151,7 +151,6 @@ use alloc::rc::Rc;
 use core::mem::MaybeUninit;
 use wz_runtime_coop::group_transport::GroupSend;
 pub use wz_runtime_coop::group_transport::GroupTransport;
-#[cfg(feature = "transport-stats")]
 use wz_session_core::multicast_stats::MulticastStatsRecorder;
 #[cfg(feature = "transport-stats")]
 use wz_session_core::stats::TransportStats;
@@ -1050,24 +1049,35 @@ impl TxBacklog {
 
     /// Offer the socket what it had no room for before, in order, until it has none again:
     /// whether something is still held back.
-    fn offer_held<T: GroupTransport>(&mut self, transport: &mut T) -> bool {
+    fn offer_held<T: GroupTransport, R: MulticastStatsRecorder + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        stats: &R,
+    ) -> bool {
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         while let Some(datagram) = self.held.front() {
             match transport.try_send_to_group(datagram) {
-                GroupSend::Sent => {}
+                GroupSend::Sent => stats.datagram_sent(datagram.len(), 1),
                 GroupSend::Full => return true,
                 GroupSend::Failed => self.lost = self.lost.saturating_add(1),
             }
             self.held.pop_front();
         }
         #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
-        let _ = transport;
+        let _ = (transport, stats);
         false
     }
 
     /// Offer the socket one datagram of the emit, behind any held back (`full`): whether the
-    /// socket is full from here on in this step.
-    fn send<T: GroupTransport>(&mut self, transport: &mut T, datagram: &[u8], full: bool) -> bool {
+    /// socket is full from here on in this step. Each datagram of the emit is one transport
+    /// message, counted into `stats` once the socket took it.
+    fn send<T: GroupTransport, R: MulticastStatsRecorder + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        datagram: &[u8],
+        full: bool,
+        stats: &R,
+    ) -> bool {
         // A socket already full is not offered more, so the datagrams leave in their order.
         let sent = if full {
             GroupSend::Full
@@ -1075,7 +1085,10 @@ impl TxBacklog {
             transport.try_send_to_group(datagram)
         };
         match sent {
-            GroupSend::Sent => false,
+            GroupSend::Sent => {
+                stats.datagram_sent(datagram.len(), 1);
+                false
+            }
             GroupSend::Full => {
                 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
                 self.held.push_back(datagram.to_vec());
@@ -1156,7 +1169,8 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
     // handed what arrives.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     input_gate: Option<GroupInputGate>,
-    // The counters what the group receives is counted into; `None` for a holder that keeps none.
+    // The counters what the group receives and the pump sends are counted into; `None` for a
+    // holder that keeps none.
     #[cfg(feature = "transport-stats")]
     stats: Option<alloc::rc::Rc<TransportStats>>,
 }
@@ -1220,9 +1234,11 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         self.input_gate = Some(gate);
     }
 
-    /// Count what the group receives into `stats`, which the holder keeps a clone of and reads:
+    /// Count into `stats`, which the holder keeps a clone of and reads, what the group receives:
     /// the bytes of each datagram once, however many steps its walk takes, and each transport
-    /// message and network message decoded out of it.
+    /// message and network message decoded out of it; and what the pump sends itself, its beacons,
+    /// its Close and what it frames from its pull seam, each datagram one transport message,
+    /// counted as the socket takes it. A stage's datagrams are its writer's to count.
     #[cfg(feature = "transport-stats")]
     pub fn attach_stats(&mut self, stats: alloc::rc::Rc<TransportStats>) {
         self.stats = Some(stats);
@@ -1471,6 +1487,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                 .and_then(|len| dgram.get(..len))
             {
                 transport.send_to_group(close);
+                stats.datagram_sent(close.len(), 1);
             }
             // Pump before returning so the datagram actually LEAVES. The body
             // does the same after its TX drain, and for the same reason: on a
@@ -1534,7 +1551,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         // What the socket had no room for at an earlier step goes first. A JOIN waits behind it:
         // the beacon advertises the sequence numbers those datagrams carry as sent, and a member
         // that read it first would drop them as stale when they came.
-        let mut full = tx_backlog.offer_held(&mut *transport);
+        let mut full = tx_backlog.offer_held(&mut *transport, stats);
         // A stage's writer offers first what it took and the socket refused, the same way.
         #[cfg(all(
             feature = "alloc",
@@ -1594,6 +1611,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                 .and_then(|len| beacon.get(..len))
             {
                 transport.send_to_group(join);
+                stats.datagram_sent(join.len(), 1);
             }
             *next_join_ms = now.saturating_add(params.join_interval_ms);
         }
@@ -1648,7 +1666,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                 break;
             };
             multicast_tx_emit_offer(offer, tx_sn, params, tx_scratch, &mut |datagram| {
-                full = tx_backlog.send(&mut *transport, datagram, full);
+                full = tx_backlog.send(&mut *transport, datagram, full, stats);
             });
         }
 
@@ -2021,8 +2039,9 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
         self
     }
 
-    /// The session counts what it receives into `stats` ([`MulticastPump::attach_stats`]): the
-    /// holder keeps a clone of `stats` and reads it.
+    /// The session counts what it receives and what it sends itself into `stats`
+    /// ([`MulticastPump::attach_stats`]): the holder keeps a clone of `stats` and reads it. A
+    /// stage is given the same counters apart (`GroupTxStage::attach_stats`).
     #[cfg(feature = "transport-stats")]
     pub fn with_stats(mut self, stats: alloc::rc::Rc<TransportStats>) -> Self {
         self.holding.stats = Some(stats);
@@ -2991,15 +3010,16 @@ mod tests {
         assert_eq!(pump.next_due_us(), 5_000);
     }
 
-    /// What the group receives is counted into the counters its holder attached: each datagram's
-    /// bytes and each transport message decoded out of it, and the network message a member's
-    /// frame carried once the member's JOIN admitted it. What the pump sends is not counted here.
+    /// What the group receives and sends is counted into the counters its holder attached: each
+    /// datagram's bytes and each transport message decoded out of it, the network message a
+    /// member's frame carried once the member's JOIN admitted it, and each beacon and datagram of
+    /// the emit as the socket takes it, a datagram it refused not until it leaves.
     #[cfg(feature = "transport-stats")]
     #[test]
-    fn what_the_group_receives_is_counted_into_the_counters_its_holder_attached() {
+    fn what_the_group_receives_and_sends_is_counted_into_the_counters_its_holder_attached() {
         use wz_session_core::frame_encode::encode_frame_with_push;
         use wz_session_core::push_build::build_push_literal;
-        use wz_session_core::stats::{DirectionReport, StatMedium, TransportStats};
+        use wz_session_core::stats::{StatMedium, TransportStats};
 
         let wire = Rc::new(RefCell::new(Wire::default()));
         let mut socket = Socket(Rc::clone(&wire));
@@ -3056,10 +3076,26 @@ mod tests {
             1,
             "the member's put, counted once"
         );
-        assert_eq!(
-            report.tx,
-            DirectionReport::default(),
-            "the beacons the pump sent are not counted here"
-        );
+
+        // The counters against what the socket took: its bytes and its datagrams.
+        let matches_the_wire = || {
+            let sent = stats.report().tx;
+            let wire = wire.borrow();
+            let bytes: usize = wire.seen.iter().map(Vec::len).sum();
+            (sent.bytes, sent.t_msgs) == (bytes, wire.seen.len())
+        };
+        assert_eq!(taken(&wire), ["join", "join"]);
+        assert!(matches_the_wire(), "a beacon at each step");
+
+        // The socket has no room: the put is held, and not counted.
+        queue.borrow_mut().push_back(put("first"));
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join", "join", "join"]);
+        assert!(matches_the_wire(), "nothing refused is counted");
+
+        wire.borrow_mut().room = 1;
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join", "join", "join", "first", "join"]);
+        assert!(matches_the_wire(), "the held put once, as it left");
     }
 }

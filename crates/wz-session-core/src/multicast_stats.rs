@@ -270,14 +270,20 @@ impl<R: MulticastStatsRecorder + ?Sized> MulticastStatsRecorder for &R {
     }
 }
 
-/// A session's counters as a group's receive reports into them, in their inbound half: the bytes of
-/// each datagram, each transport message decoded out of it, and each network message a member
-/// sent, classified as the tokio engine's group recorder classifies one, with no alias table. A
+/// A session's counters as a group reports into them: the bytes and transport messages of each
+/// datagram its writers sent and of each it received, and each network message a member sent,
+/// classified as the tokio engine's group recorder classifies one, with no alias table. A
 /// session's counters hold no partition per member, so who sent a message, and who came and
-/// went, is not kept. What the group sends is not reported here: the group's writer is not this
-/// seam's caller.
+/// went, is not kept.
 #[cfg(feature = "transport-stats")]
 impl MulticastStatsRecorder for crate::stats::TransportStats {
+    fn datagram_sent(&self, bytes: usize, transport_messages: u64) {
+        self.inc_tx_datagram(
+            bytes,
+            usize::try_from(transport_messages).unwrap_or(usize::MAX),
+        );
+    }
+
     fn datagram_received(&self, bytes: usize) {
         self.inc_rx(bytes);
     }
@@ -501,6 +507,36 @@ mod session_counter_tests {
         none.datagram_received(40);
         none.transport_message_received();
         none.network_record_received(&[1, 2, 3, 4], Priority::DEFAULT, &put);
+        assert_eq!(
+            counters.report(),
+            report,
+            "a host that holds no counters counts nothing"
+        );
+    }
+
+    /// What a group's writers sent counts into the outbound half: each datagram's bytes and the
+    /// transport messages its writer says it carried. With none held, nothing is counted.
+    #[test]
+    fn a_groups_send_counts_into_the_outbound_half_of_a_sessions_counters() {
+        let counters = TransportStats::default();
+        let held = Some(&counters);
+        held.datagram_sent(24, 1);
+        held.datagram_sent(100, 3);
+        let report = counters.report();
+        assert_eq!((report.tx.bytes, report.tx.t_msgs), (124, 4));
+        assert_eq!(
+            report.tx.n_msgs_total(),
+            0,
+            "a datagram is not a network message"
+        );
+        assert_eq!(
+            report.rx,
+            DirectionReport::default(),
+            "nothing was received"
+        );
+
+        let none: Option<&TransportStats> = None;
+        none.datagram_sent(24, 1);
         assert_eq!(
             counters.report(),
             report,

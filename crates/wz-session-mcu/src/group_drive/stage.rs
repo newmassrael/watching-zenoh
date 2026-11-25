@@ -62,6 +62,11 @@ use wz_session_core::multicast_tx::{
 use wz_session_core::qos::Priority;
 use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::tx_deadline::PushOutcome;
+#[cfg(feature = "transport-stats")]
+use {
+    wz_session_core::multicast_stats::MulticastStatsRecorder,
+    wz_session_core::stats::TransportStats,
+};
 
 /// What a producer that may wait for room does while the lane its message takes is full: the
 /// host runs its tasks, the group's pump among them, which writes what the group's socket takes;
@@ -133,6 +138,10 @@ struct Writer {
     held: Option<Taken>,
     on_wire: MulticastTxConduits,
     lost: u32,
+    /// The counters each datagram the socket took is counted into (`transport-stats`); `None`
+    /// for a holder that keeps none.
+    #[cfg(feature = "transport-stats")]
+    stats: Option<Rc<TransportStats>>,
 }
 
 /// What was pushed while another push held the conduits, kept until they are let go, in the order
@@ -587,6 +596,8 @@ impl GroupTxStage {
                     held: None,
                     on_wire: MulticastTxConduits::new(mask),
                     lost: 0,
+                    #[cfg(feature = "transport-stats")]
+                    stats: None,
                 }),
             }),
             quota,
@@ -901,6 +912,13 @@ impl GroupTxStage {
         self.batch_flush();
     }
 
+    /// Count each datagram of the stage the socket takes into `stats`, whoever writes it, the pump
+    /// or the holder: its bytes, and one transport message, the frame or fragment it is.
+    #[cfg(feature = "transport-stats")]
+    pub fn attach_stats(&self, stats: Rc<TransportStats>) {
+        self.inner.writer.borrow_mut().stats = Some(stats);
+    }
+
     /// Whether the writer holds a datagram the socket had no room for: what is queued after it
     /// waits behind it.
     pub fn holds(&self) -> bool {
@@ -954,7 +972,13 @@ impl GroupTxStage {
                 return true;
             }
             GroupSend::Failed => writer.lost = writer.lost.saturating_add(1),
-            GroupSend::Sent => {}
+            GroupSend::Sent =>
+            {
+                #[cfg(feature = "transport-stats")]
+                if let Some(stats) = writer.stats.as_deref() {
+                    stats.datagram_sent(taken.record.len, 1);
+                }
+            }
         }
         // A datagram whose send failed is done with too: its sequence number will never arrive,
         // and advertising past it keeps a member from waiting for it.
@@ -1785,6 +1809,67 @@ mod tests {
         assert_eq!(taken(&wire), ["join", "first", "second", "join", "third"]);
         assert_eq!(advertised(&wire), [0, 2], "written, not minted (3)");
         assert_eq!(pump.tx_lost(), 0);
+    }
+
+    /// What the group sends is counted into the counters its holder attached, as the socket takes
+    /// it: each beacon the pump sends and each datagram of the stage, a transport message each, by
+    /// its bytes. A datagram the socket had no room for is counted when it leaves, and not before.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn what_the_socket_took_of_the_group_is_counted_once_as_it_leaves() {
+        use wz_session_core::stats::TransportStats;
+
+        let wire = Rc::new(RefCell::new(Wire {
+            room: 1,
+            ..Wire::default()
+        }));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let runtime = CoopRuntime::new(Frozen);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let stats = Rc::new(TransportStats::default());
+        let stage = GroupTxStage::new(&params);
+        stage.attach_stats(Rc::clone(&stats));
+        for payload in PAYLOADS {
+            push_at_once(&stage, Put::of(payload));
+        }
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut nothing = || None;
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+        pump.attach_tx_stage(stage);
+        pump.attach_stats(Rc::clone(&stats));
+        // The counters against what the socket took: its bytes and its datagrams.
+        let matches_the_wire = || {
+            let sent = stats.report().tx;
+            let wire = wire.borrow();
+            let bytes: usize = wire.seen.iter().map(Vec::len).sum();
+            (sent.bytes, sent.t_msgs) == (bytes, wire.seen.len())
+        };
+
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first"]);
+        assert!(matches_the_wire(), "the beacon and the first put");
+
+        // Full: the datagram held is not counted while the socket refuses it.
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first"]);
+        assert!(matches_the_wire(), "nothing refused is counted");
+
+        wire.borrow_mut().room = 2;
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first", "second", "join", "third"]);
+        assert!(matches_the_wire(), "each datagram once, as it left");
+        assert_eq!(stats.report().tx.t_msgs, 5);
     }
 
     /// Each datagram asks its lane for room by its own bytes: a push on a lane with room is

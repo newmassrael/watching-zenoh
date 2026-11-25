@@ -347,6 +347,39 @@ fn put(engine: &Engine, keyexpr: &str, payload: &[u8]) {
         .expect("a put the group carries");
 }
 
+/// What a member sends on the group is counted in its transport counters as its stack takes it:
+/// each datagram's bytes, its beacon and the put's frame a transport message each. No read task
+/// runs, so everything is written on this thread, and the stack's record and the counters are read
+/// at one point.
+#[cfg(all(feature = "transport-stats", feature = "query"))]
+#[test]
+fn what_a_member_sends_on_the_group_is_counted_in_its_transport_stats() {
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    put(&member, "demo/group/sent", b"counted");
+    let sent: Vec<Vec<u8>> = network
+        .datagrams
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(from, _)| *from == 1)
+        .map(|(_, datagram)| datagram.clone())
+        .collect();
+    assert!(
+        sent.iter()
+            .any(|datagram| datagram.windows(7).any(|at| at == b"counted")),
+        "CONTROL: the put left on the group"
+    );
+    let counted = member.transport_stats().tx;
+    assert_eq!(
+        counted.bytes,
+        sent.iter().map(Vec::len).sum::<usize>(),
+        "each datagram's bytes"
+    );
+    assert_eq!(counted.t_msgs, sent.len(), "a transport message each");
+    SessionDrive::close(&*member);
+}
+
 /// A member whose stack loses its group link lets the group go, and joins it again a redial
 /// period later with a session of its own: the stack is asked to join a second time, the members
 /// learn each other again by their JOINs, and a put crosses the group again. A member that
