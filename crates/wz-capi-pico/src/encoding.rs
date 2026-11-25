@@ -178,10 +178,11 @@ impl EncodingState {
     /// a share the block cannot give.
     ///
     /// # Safety
-    /// The schema's bytes, when it has some, are written at `schema_start` of `block`.
+    /// The schema's bytes, when it has some, are written at `schema_start` of `block`, which is
+    /// then one.
     pub(crate) unsafe fn kept_in(
         &self,
-        block: &Block,
+        block: Option<&Block>,
         schema_start: *const u8,
     ) -> Result<Self, NoRoom> {
         let (schema_start, block) = match self.view().schema {
@@ -191,7 +192,10 @@ impl EncodingState {
                 core::ptr::NonNull::<u8>::dangling().as_ptr().cast_const(),
                 None,
             ),
-            Some(_) => (schema_start, Some(block.share().ok_or(NoRoom)?)),
+            Some(_) => (
+                schema_start,
+                Some(block.and_then(Block::share).ok_or(NoRoom)?),
+            ),
         };
         Ok(Self {
             packed_id: self.packed_id,
