@@ -37,6 +37,8 @@ use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId};
 
 use super::{RouterKept, RouterState};
 use crate::caller_span::CallerSpan;
+use crate::deliveries::Deliveries;
+use crate::faces::{Released, SinkRelease};
 
 /// A job that runs `tick` every period on a thread of its own, until `tick` answers `false` or this
 /// is dropped. Dropping tells the thread, which ends at its next wake and is not waited for: the
@@ -87,10 +89,12 @@ impl Drop for PeriodicJob {
 /// What a subscription the engine holds is, in the one id space the port gives subscribers and
 /// liveliness subscribers together.
 enum Held {
-    /// A subscriber hosted on the node's data plane, by its id there.
-    Plain(u64),
-    /// A liveliness subscriber of the node's own face, by its id there.
-    Liveliness(u64),
+    /// A subscriber hosted on the node's data plane, by its id there, with what tells when its
+    /// callback has been let go of.
+    Plain(u64, SinkRelease),
+    /// A liveliness subscriber of the node's own face, by its id there, with what tells when its
+    /// callback has been let go of.
+    Liveliness(u64, SinkRelease),
 }
 
 /// What the node keeps to be an engine: the clock, the ids, the subscriptions and the periodic
@@ -118,6 +122,9 @@ pub(super) struct EngineState {
     /// The queries the program keeps past the handlers of the node's queryables, each under the
     /// id its keep answers ([`wz_capi_port::QueryHolder::keep_query`]).
     kept: Arc<HeldSlab<RouterKept>>,
+    /// The deliveries of the node's own session: every callback the node calls for the program
+    /// runs as one, so an undeclare made inside one does not wait for a call it may be under.
+    deliveries: Deliveries,
 }
 
 impl EngineState {
@@ -132,6 +139,7 @@ impl EngineState {
             jobs: Mutex::new(HashMap::new()),
             told: wz_capi_port::os::Mutex::new(wz_capi_port::told::ToldLedger::new()),
             kept: Arc::new(HeldSlab::new()),
+            deliveries: Deliveries::new(),
         }
     }
 
@@ -328,20 +336,26 @@ impl SessionEngine for RouterState {
     ) -> Result<SubId, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        let deliveries = self.engine.deliveries;
+        let (sink, release) = Released::new(sink, deliveries);
         // One callback for the node's one data plane, where a registry mints one for each face.
         let host = self.forwarder.host_subscriber_from(
             keyexpr,
             allowed_origin,
-            Box::new(move |sample: &dyn wz_session_core::sink::SampleView| sink.call(sample)),
+            Box::new(move |sample: &dyn wz_session_core::sink::SampleView| {
+                deliveries.within(|| sink.call(sample));
+            }),
         );
         self.engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, Held::Plain(host));
+            .insert(id, Held::Plain(host, release));
         Ok(id)
     }
 
+    // Returns once the callback has been let go of after its last call, unless this thread
+    // delivers for the node now (`SinkRelease::wait`).
     fn undeclare_subscriber(&self, id: SubId) {
         let held = self
             .engine
@@ -350,10 +364,14 @@ impl SessionEngine for RouterState {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
         match held {
-            Some(Held::Plain(host)) => {
+            Some(Held::Plain(host, release)) => {
                 self.forwarder.unhost_subscriber(host);
+                release.wait();
             }
-            Some(Held::Liveliness(face)) => self.liveliness.unsubscribe(face),
+            Some(Held::Liveliness(face, release)) => {
+                self.liveliness.unsubscribe(face);
+                release.wait();
+            }
             None => {}
         }
     }
@@ -375,11 +393,12 @@ impl SessionEngine for RouterState {
         } else {
             Locality::Remote
         };
+        let deliveries = self.engine.deliveries;
         Ok(self.watch_matching(
             plane_of(plane),
             keyexpr,
             origin,
-            Box::new(move |matching| sink.call(matching)),
+            Box::new(move |matching| deliveries.within(|| sink.call(matching))),
         ))
     }
 
@@ -390,11 +409,12 @@ impl SessionEngine for RouterState {
         sink: MatchingSink,
         locality: Locality,
     ) -> Result<MatchId, Refusal> {
+        let deliveries = self.engine.deliveries;
         Ok(self.watch_matching(
             plane_of(plane),
             keyexpr,
             locality,
-            Box::new(move |matching| sink.call(matching)),
+            Box::new(move |matching| deliveries.within(|| sink.call(matching))),
         ))
     }
 
@@ -502,6 +522,7 @@ impl SessionEngine for RouterState {
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         // The node's queries are held through the node itself, which the one sink is called with.
         let holder = self.query_holder();
+        let deliveries = self.engine.deliveries;
         let host = self.forwarder.host_queryable_from(
             keyexpr,
             complete,
@@ -509,7 +530,7 @@ impl SessionEngine for RouterState {
             Box::new(
                 move |query: &dyn wz_session_core::query_sink::QueryView,
                       out: &mut dyn wz_session_core::query_sink::ReplyOut| {
-                    sink.call(query, out, &*holder);
+                    deliveries.within(|| sink.call(query, out, &*holder));
                 },
             ),
         );
@@ -591,12 +612,14 @@ impl SessionEngine for RouterState {
     ) -> Result<SubId, Refusal> {
         // The id first, so a session with none left subscribes nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        let deliveries = self.engine.deliveries;
+        let (sink, release) = Released::new(sink, deliveries);
         let face = self.liveliness.subscribe(
             keyexpr,
             history,
             Box::new(
                 move |sample: wz_session_core::declare::liveliness_sample::LivelinessSample<'_>| {
-                    sink.call(sample)
+                    deliveries.within(|| sink.call(sample));
                 },
             ),
         );
@@ -604,7 +627,7 @@ impl SessionEngine for RouterState {
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, Held::Liveliness(face));
+            .insert(id, Held::Liveliness(face, release));
         Ok(id)
     }
 
@@ -625,12 +648,13 @@ impl SessionEngine for RouterState {
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
         let callback = leg();
+        let deliveries = self.engine.deliveries;
         let id = self
             .get_numbered(
                 keyexpr,
                 opts,
                 None,
-                Box::new(move |view| callback.call(view)),
+                Box::new(move |view| deliveries.within(|| callback.call(view))),
                 Box::new(|| {}),
             )
             // The one way the node fails to ask: a query its codec cannot build.
@@ -660,13 +684,14 @@ impl SessionEngine for RouterState {
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).
         let callback = leg();
+        let deliveries = self.engine.deliveries;
         let id = self
             .get_numbered_shm(
                 keyexpr,
                 opts,
                 value,
                 None,
-                Box::new(move |view| callback.call(view)),
+                Box::new(move |view| deliveries.within(|| callback.call(view))),
                 Box::new(|| {}),
             )
             // The node fails to ask a query its codec cannot build, or a chunk it cannot send.
@@ -699,17 +724,20 @@ impl SessionEngine for RouterState {
         let told = Arc::clone(&callback);
         let ended = Arc::clone(&callback);
         let face = Arc::clone(&self.liveliness);
+        let deliveries = self.engine.deliveries;
         let on_key: KeyHandler = Box::new(move |key: &str| {
             let held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(callback) = held.as_ref() {
-                callback.call(&wz_runtime_tokio::reply_sink::BorrowedReply {
-                    rid: 0,
-                    keyexpr: key,
-                    kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
-                    payload: &[],
-                    err_encoding: None,
-                    attachment: None,
-                    put_encoding: None,
+                deliveries.within(|| {
+                    callback.call(&wz_runtime_tokio::reply_sink::BorrowedReply {
+                        rid: 0,
+                        keyexpr: key,
+                        kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
+                        payload: &[],
+                        err_encoding: None,
+                        attachment: None,
+                        put_encoding: None,
+                    });
                 });
             }
         });

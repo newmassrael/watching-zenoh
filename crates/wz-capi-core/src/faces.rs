@@ -224,13 +224,15 @@ pub(crate) fn face_sink(
 
 /// A port's callback that says when it has been let go of: set after its drop has run, so a
 /// [`SinkRelease`] that reads it set reads a drop that is over, not one under way.
-struct Released<S> {
+pub(crate) struct Released<S> {
     sink: core::mem::ManuallyDrop<S>,
     done: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<S> Released<S> {
-    fn new(sink: S, deliveries: Deliveries) -> (Self, SinkRelease) {
+    /// `sink`, and what tells when it has been let go of, waited for outside a delivery of the
+    /// session of `deliveries`.
+    pub(crate) fn new(sink: S, deliveries: Deliveries) -> (Self, SinkRelease) {
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release = SinkRelease {
             done: Arc::clone(&done),

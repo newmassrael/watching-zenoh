@@ -1576,3 +1576,157 @@ mod shared_memory {
         node.close();
     }
 }
+
+/// Sets its flag when dropped: what a C closure's `drop(context)` stands for.
+struct LetGoFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for LetGoFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// What a subscriber [`subscribe_holding`] declared tells: whether its call began, and in it
+/// whether it ran as a delivery of the node; whether its callback was let go of; and what lets
+/// its call end.
+#[derive(Default)]
+struct Holding {
+    entered: std::sync::atomic::AtomicBool,
+    inside: std::sync::atomic::AtomicBool,
+    go: std::sync::atomic::AtomicBool,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A subscriber of `node` on `key` whose call holds until `holding.go` is set, five seconds at
+/// most, so a wait that should not happen ends rather than hangs.
+fn subscribe_holding(node: &Arc<RouterState>, key: &str, holding: &Arc<Holding>) -> SubId {
+    use wz_capi_port::EngineDeliveries;
+    use wz_session_core::sink::SampleView;
+
+    let held = LetGoFlag(Arc::clone(&holding.dropped));
+    let told = Arc::clone(holding);
+    let deliveries = node.engine.deliveries;
+    node.as_engine()
+        .declare_subscriber_on_wire(
+            key,
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                let _ = &held;
+                told.inside
+                    .store(deliveries.delivers_here(), Ordering::SeqCst);
+                told.entered.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !told.go.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }),
+        )
+        .expect("an open node declares")
+}
+
+/// Put on `key` of `node` from a thread of its own.
+fn put_elsewhere(node: &Arc<RouterState>, key: &'static str) -> std::thread::JoinHandle<()> {
+    let engine = node.as_engine();
+    std::thread::spawn(move || {
+        engine
+            .publish_on_wire_all(
+                key,
+                &WireKey::literal(),
+                b"x",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("the node takes its own put");
+    })
+}
+
+/// The node's undeclare of a subscriber returns with its callback let go of. Turned red by an
+/// undeclare that returns while the callback is held.
+#[test]
+fn a_nodes_undeclare_returns_with_the_callback_let_go_of() {
+    let node = open_node();
+    let holding = Arc::new(Holding::default());
+    holding.go.store(true, Ordering::SeqCst);
+    let id = subscribe_holding(&node, "wz/node/release", &holding);
+    assert!(
+        !holding.dropped.load(Ordering::SeqCst),
+        "held while declared"
+    );
+    node.as_engine().undeclare_subscriber(id);
+    assert!(
+        holding.dropped.load(Ordering::SeqCst),
+        "let go of when the undeclare returns"
+    );
+    node.close();
+}
+
+/// An undeclare made inside a delivery of the node returns at once while the subscriber's call
+/// runs on another thread, the callback still held, and the call is itself a delivery of the
+/// node. Turned red by a sample callback that does not enter the node's delivery, or an
+/// undeclare that waits there (five seconds, and returns with the callback let go of).
+#[test]
+fn an_undeclare_inside_a_delivery_of_the_node_returns_at_once() {
+    let node = open_node();
+    let holding = Arc::new(Holding::default());
+    let id = subscribe_holding(&node, "wz/node/inside", &holding);
+    let putter = put_elsewhere(&node, "wz/node/inside");
+    assert!(
+        eventually(|| holding.entered.load(Ordering::SeqCst)),
+        "the subscriber's call began"
+    );
+    assert!(
+        holding.inside.load(Ordering::SeqCst),
+        "the call is a delivery of the node"
+    );
+    let engine = node.as_engine();
+    node.engine
+        .deliveries
+        .within(|| engine.undeclare_subscriber(id));
+    assert!(
+        !holding.dropped.load(Ordering::SeqCst),
+        "the undeclare returned while the call held the callback"
+    );
+    holding.go.store(true, Ordering::SeqCst);
+    putter.join().expect("the putting thread");
+    assert!(
+        eventually(|| holding.dropped.load(Ordering::SeqCst)),
+        "let go of as the call ended"
+    );
+    node.close();
+}
+
+/// An undeclare made inside another session's callback waits for the subscriber's call on
+/// another thread, and returns with the callback let go of. Turned red by an undeclare that
+/// does not wait outside the node's own deliveries.
+#[test]
+fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
+    let node = open_node();
+    let holding = Arc::new(Holding::default());
+    let id = subscribe_holding(&node, "wz/node/other", &holding);
+    let putter = put_elsewhere(&node, "wz/node/other");
+    assert!(
+        eventually(|| holding.entered.load(Ordering::SeqCst)),
+        "the subscriber's call began"
+    );
+    let releaser = {
+        let holding = Arc::clone(&holding);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            holding.go.store(true, Ordering::SeqCst);
+        })
+    };
+    let engine = node.as_engine();
+    crate::deliveries::Deliveries::new().within(|| engine.undeclare_subscriber(id));
+    assert!(
+        holding.go.load(Ordering::SeqCst),
+        "the undeclare returned before the call could end"
+    );
+    assert!(
+        holding.dropped.load(Ordering::SeqCst),
+        "let go of when the undeclare returns"
+    );
+    releaser.join().expect("the releasing thread");
+    putter.join().expect("the putting thread");
+    node.close();
+}
