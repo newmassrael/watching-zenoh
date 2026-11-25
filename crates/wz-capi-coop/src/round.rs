@@ -73,7 +73,7 @@ pub(crate) type Round = wz_session_core::round::Round<CoopCalls>;
 
 /// How the engine's calls stand to its threads, and the latch its rows count calls on: the
 /// engine's form ([`crate::form`]).
-pub(crate) use crate::form::{CoopForm, Latch};
+use crate::form::CoopForm;
 
 /// The bytes of one record of the engine's round.
 pub(crate) const RECORD_BYTES: usize = RoundRows::<CoopCalls>::RECORD_BYTES;

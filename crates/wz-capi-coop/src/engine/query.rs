@@ -67,7 +67,8 @@ use wz_session_core::sample::QosLevel;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::sample::{EncodingHint, SourceInfo};
 
-use crate::round::{CoopCalls, Latch};
+use crate::form::Latch;
+use crate::round::CoopCalls;
 
 use super::{key_on_link, CoopEngine};
 
@@ -181,7 +182,7 @@ pub(crate) struct QueryableCall {
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
 // no one writes after the declaration (its id) and what is made for every thread that may make a
-// call (`crate::round::CoopForm`): its latch, and its callback, which is `Send + Sync` and called
+// call (`crate::form::CoopForm`): its latch, and its callback, which is `Send + Sync` and called
 // through a shared borrow. The row lies in the session's arena, which
 // the tables never move a row in, until its last call ended.
 unsafe impl Send for QueryableCall {}
