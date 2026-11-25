@@ -2205,21 +2205,18 @@ unsafe impl<T> Send for Confined<T> {}
 /// What a lend of a link's parts or of its session takes in from the thread that lends them: the
 /// engine and the session's own values, which no lend lets out. Made only to be moved into the
 /// closure of such a lend, which runs on the lending thread and returns before the lend does.
-#[cfg(any(feature = "interest-answer", not(wz_round)))]
 struct OnThisThread<T>(T);
 
 // SAFETY: a carrier is moved only into a closure run by a lend of a link's parts
 // (`FaceHeld::lend`, and `FaceSite::send`, which runs it through this thread's seat or such a
-// lend) or of its session (`LendsSession::try_session`), each of which runs its closure on the
-// calling thread and returns before it returns: what is carried in or out never
-// reaches another thread. A handle on a cell of the link made in such a lend is kept in the parts,
-// as the parts' contract asks (`direct::DirectParts`), and what is carried in keeps none of the
-// session's handles it is lent: what leaves a lend in a carrier is the session's own values and
-// the link's waits.
-#[cfg(any(feature = "interest-answer", not(wz_round)))]
+// lend) or of its session (`LendsSession::try_session`, the send of `send_on` among them), each of
+// which runs its closure on the calling thread and returns before it returns: what is carried in
+// or out never reaches another thread. A handle on a cell of the link made in such a lend is kept
+// in the parts, as the parts' contract asks (`direct::DirectParts`), and what is carried in keeps
+// none of the session's handles it is lent: what leaves a lend in a carrier is the session's own
+// values and the link's waits.
 unsafe impl<T> Send for OnThisThread<T> {}
 
-#[cfg(any(feature = "interest-answer", not(wz_round)))]
 impl<T> OnThisThread<T> {
     /// The value carried, taken whole, so a lend's closure captures the carrier and not a part.
     fn get(self) -> T {
@@ -3019,18 +3016,20 @@ fn found_held<U>(lent: &Lend<U>) {
 
 /// Send `send` over the link `wire` holds, where each face's record holds its link: the link's
 /// session is lent to it in place, under the session's lock with the caller
-/// ([`LendsSession::try_session`]). `send` was made of the session's state under its lock and
-/// reads only what may be shared across threads (text and ids read off the session's rows), so it
-/// holds no handle on a cell of the link or of the session. `Some` with whether the link took
-/// it; `None` while the link holds no session. A step of the link that answers yes or no (a
-/// batch's, or how the link names a key) is lent through it too.
+/// ([`LendsSession::try_session`]). `send` reads the session's state it was made under, its
+/// tables among them, on the calling thread the lend runs it on, and keeps no handle on a cell of
+/// the link or of the session, so it is carried into the lend as that thread's own
+/// (`OnThisThread`). `Some` with whether the link took it; `None` while the link holds no
+/// session. A step of the link that answers yes or no (a batch's, or how the link names a key) is
+/// lent through it too.
 // Out of line and over `dyn`: one body lends a link for every send of the session.
 #[inline(never)]
 fn send_on<C: ClockSource + 'static>(
     wire: &impl LendsSession<Session = LinkSession<C>>,
-    send: &(dyn SendTo<C> + Sync),
+    send: &dyn SendTo<C>,
 ) -> Option<bool> {
-    let lent = wire.try_session(|session| send.send_to(&session.actions));
+    let send = OnThisThread(send);
+    let lent = wire.try_session(move |session| send.get().send_to(&session.actions));
     found_held(&lent);
     match lent {
         Lend::Lent(took) => Some(took),
@@ -3396,7 +3395,7 @@ fn get_key_on_link<C: ClockSource + 'static, U>(
 fn send_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
     wire: &direct::DirectWire<L, C>,
     tx: LinkTx<'_, C>,
-    send: &(dyn SendTo<C> + Sync),
+    send: &dyn SendTo<C>,
 ) -> Option<bool> {
     match tx.held_wire(wire) {
         Some(held) => held.map(|held| send.send_to(&held.actions)),
@@ -3410,7 +3409,7 @@ fn send_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
 fn send_through<C: ClockSource + 'static>(
     wire: &impl LendsSession<Session = LinkSession<C>>,
     _tx: LinkTx<'_, C>,
-    send: &(dyn SendTo<C> + Sync),
+    send: &dyn SendTo<C>,
 ) -> Option<bool> {
     send_on(wire, send)
 }

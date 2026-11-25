@@ -42,11 +42,8 @@ use wz_runtime_coop::faces::LendsSession;
 use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link_life::LinkPhase;
-use wz_session_core::named_key::NamedKey;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
-#[cfg(feature = "liveliness")]
-use wz_session_core::session_tables::WireForm;
 use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
 use wz_session_core::slot_map::Handle;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -230,32 +227,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Tell the peer of the face at `at` of the declaration at `place` through the link's wire
-    /// `tx` ([`super::send_through`]): whether the link took it, a place with nothing to send
-    /// counting as taken. `None` while the face holds no link, or `tx` no wire.
+    /// `tx` ([`super::send_through`]), read off its row as it is sent ([`tell`]): whether the
+    /// link took it, a place with nothing to send counting as taken. `None` while the face holds
+    /// no link, or `tx` no wire.
     fn emit(&self, at: usize, place: usize, tx: super::LinkTx<'_, C>) -> Option<bool> {
         let wire = self.transport.links.face(at)?.link.wire()?;
-        let tell = self.tell_at(place);
-        super::send_through(wire, tx, &|actions: &LinkActions<C>| {
-            tell.is_none_or(|tell| tell.send(actions))
-        })
-    }
-
-    /// The declaration at `place` in the replay's order, read off its row; `None` for a place
-    /// with nothing to send.
-    fn tell_at(&self, place: usize) -> Option<Tell<'_>> {
         let tables = super::tables(&self.session.registry);
-        let mut left = place;
-        for &table in ORDER {
-            let slots = tables.slots_of(table);
-            let Some(rest) = left.checked_sub(slots.len()) else {
-                return slots
-                    .nth_live(left)
-                    .and_then(|row| Tell::of(tables, DeclaredRow { table, row }));
-            };
-            left = rest;
-        }
-        // A place past the sequence is a defect of the cursor and has nothing to send.
-        None
+        let declared = declared_at(tables, place);
+        super::send_through(wire, tx, &|actions: &LinkActions<C>| {
+            declared.is_none_or(|declared| tell(tables, actions, declared))
+        })
     }
 
     /// The link of the face at `at` has been established: begin to tell its peer what the session
@@ -381,12 +362,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         tx: super::LinkTx<'_, C>,
     ) -> bool {
         let place = self.place_of(declared);
-        let tell = Tell::of(super::tables(&self.session.registry), declared);
+        let registry = &self.session.registry;
         announce_on(
             self.transport.links.places_mut(),
             place,
             on_refusal,
-            &|actions: &LinkActions<C>| tell.is_none_or(|tell| tell.send(actions)),
+            &|actions: &LinkActions<C>| tell(super::tables(registry), actions, declared),
             undo,
             tx,
         )
@@ -482,6 +463,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 }
 
+/// The declaration at `place` in the replay's order of `tables`; `None` for a place with nothing
+/// to send.
+fn declared_at(tables: &super::CoopTables, place: usize) -> Option<DeclaredRow> {
+    let mut left = place;
+    for &table in ORDER {
+        let slots = tables.slots_of(table);
+        let Some(rest) = left.checked_sub(slots.len()) else {
+            return slots.nth_live(left).map(|row| DeclaredRow { table, row });
+        };
+        left = rest;
+    }
+    // A place past the sequence is a defect of the cursor and has nothing to send.
+    None
+}
+
 /// How many declarations the session holds in the tables before `end` in the replay's order, or
 /// in every table when `end` is `None`: the place of `end`'s first declaration, or the length
 /// of the sequence. The counts are of declarations the session holds in memory, so no sum of them
@@ -495,128 +491,73 @@ fn held_before(tables: &super::CoopTables, end: Option<DeclaredTable>) -> usize 
         .fold(0, usize::saturating_add)
 }
 
-/// A declaration as a link is told it, read off its row ([`Tell::of`]): its id and its key's text
-/// and wire form, borrowed from the session's tables. Its send reads nothing else of the session's
-/// state, so it is made over a link lent apart from that state ([`super::send_through`]). One value
-/// for every kind, so a turn of the replay and a declaration announced to the faces build each
-/// kind's message here alone. A key the tables name no more is `None`, and refused.
-#[derive(Clone, Copy)]
-enum Tell<'a> {
-    Keyexpr {
-        id: ExprId,
-        key: &'a str,
-    },
-    Subscriber {
-        id: EntityId,
-        key: Option<NamedKey<'a>>,
-    },
-    Interest(super::InterestTell<'a>),
-    #[cfg(feature = "queryable")]
-    Queryable {
-        id: EntityId,
-        key: Option<NamedKey<'a>>,
-        complete: bool,
-    },
-    #[cfg(feature = "liveliness")]
-    Token {
-        id: EntityId,
-        key: Option<NamedKey<'a>>,
-    },
-    #[cfg(feature = "liveliness")]
-    LivelinessSubscriber {
-        id: EntityId,
-        key: &'a str,
-        form: WireForm<'a>,
-        history: bool,
-    },
+/// Tell the peer over `actions` of the declaration `declared` names, read from its row in
+/// `tables`: whether the link took it. One body for every kind, which reads the kind, so a turn of
+/// the replay and a declaration announced to the faces build each kind's message here alone. A row
+/// that names none has nothing to send, which counts as taken.
+fn tell<C: ClockSource + 'static>(
+    tables: &super::CoopTables,
+    actions: &LinkActions<C>,
+    declared: DeclaredRow,
+) -> bool {
+    told(tables, actions, declared).unwrap_or(true)
 }
 
-impl<'a> Tell<'a> {
-    /// The declaration `declared` names, read from its row in `tables`; `None` when it names no
-    /// row, which has nothing to send.
-    fn of(tables: &'a super::CoopTables, declared: DeclaredRow) -> Option<Self> {
-        let bits = declared.row;
-        Some(match declared.table {
-            DeclaredTable::Keyexprs => {
-                let row = tables.keyexprs().get(Handle::from_bits(bits)?)?;
-                Self::Keyexpr {
-                    id: row.id(),
-                    key: row.key(),
-                }
-            }
-            DeclaredTable::Subscribers => {
-                let row = tables.subscribers().get(Handle::from_bits(bits)?)?;
-                Self::Subscriber {
-                    id: row.id(),
-                    key: tables.named(row.key()),
-                }
-            }
-            DeclaredTable::Interests => {
-                let row = tables.interests().get(Handle::from_bits(bits)?)?;
-                Self::Interest(super::InterestTell::of(row))
-            }
-            #[cfg(feature = "queryable")]
-            DeclaredTable::Queryables => {
-                let row = tables.queryables().get(Handle::from_bits(bits)?)?;
-                Self::Queryable {
-                    id: row.id(),
-                    key: tables.named(row.key()),
-                    complete: row.complete(),
-                }
-            }
-            #[cfg(feature = "liveliness")]
-            DeclaredTable::Tokens => {
-                let row = tables.tokens().get(Handle::from_bits(bits)?)?;
-                Self::Token {
-                    id: row.id(),
-                    key: tables.named(row.key()),
-                }
-            }
-            #[cfg(feature = "liveliness")]
-            DeclaredTable::LivelinessSubscribers => {
-                let row = tables
-                    .liveliness_subscribers()
-                    .get(Handle::from_bits(bits)?)?;
-                Self::LivelinessSubscriber {
-                    id: row.id(),
-                    key: row.key().as_str(),
-                    form: tables.wire_of(row.key()),
-                    history: row.history(),
-                }
-            }
-            // A kind the build keeps no table of holds no row.
-            #[cfg(not(feature = "queryable"))]
-            DeclaredTable::Queryables => return None,
-            #[cfg(not(feature = "liveliness"))]
-            DeclaredTable::Tokens | DeclaredTable::LivelinessSubscribers => return None,
-        })
-    }
-
-    /// Tell it over `actions`: whether the link took it.
-    fn send<C: ClockSource + 'static>(self, actions: &LinkActions<C>) -> bool {
-        match self {
-            Self::Keyexpr { id, key } => actions.send_declare_keyexpr(id, key).is_ok(),
-            Self::Subscriber { id, key } => {
-                key.is_some_and(|key| super::SubscriberRow::declare(id, key, actions))
-            }
-            Self::Interest(interest) => super::send_interest(interest, actions),
-            #[cfg(feature = "queryable")]
-            Self::Queryable { id, key, complete } => {
-                key.is_some_and(|key| super::QueryableRow::declare(id, key, complete, actions))
-            }
-            #[cfg(feature = "liveliness")]
-            Self::Token { id, key } => {
-                key.is_some_and(|key| super::liveliness::declare_token(actions, id, key))
-            }
-            #[cfg(feature = "liveliness")]
-            Self::LivelinessSubscriber {
-                id,
-                key,
-                form,
-                history,
-            } => super::liveliness::ask(actions, id, key, form, history),
+/// [`tell`], `None` when `declared` names no row. A key the tables name no more is refused.
+fn told<C: ClockSource + 'static>(
+    tables: &super::CoopTables,
+    actions: &LinkActions<C>,
+    declared: DeclaredRow,
+) -> Option<bool> {
+    let bits = declared.row;
+    Some(match declared.table {
+        DeclaredTable::Keyexprs => {
+            let row = tables.keyexprs().get(Handle::from_bits(bits)?)?;
+            actions.send_declare_keyexpr(row.id(), row.key()).is_ok()
         }
-    }
+        DeclaredTable::Subscribers => {
+            let row = tables.subscribers().get(Handle::from_bits(bits)?)?;
+            tables
+                .named(row.key())
+                .is_some_and(|key| super::SubscriberRow::declare(row.id(), key, actions))
+        }
+        DeclaredTable::Interests => {
+            let row = tables.interests().get(Handle::from_bits(bits)?)?;
+            super::send_interest(super::InterestTell::of(row), actions)
+        }
+        #[cfg(feature = "queryable")]
+        DeclaredTable::Queryables => {
+            let row = tables.queryables().get(Handle::from_bits(bits)?)?;
+            tables.named(row.key()).is_some_and(|key| {
+                super::QueryableRow::declare(row.id(), key, row.complete(), actions)
+            })
+        }
+        #[cfg(feature = "liveliness")]
+        DeclaredTable::Tokens => {
+            let row = tables.tokens().get(Handle::from_bits(bits)?)?;
+            tables
+                .named(row.key())
+                .is_some_and(|key| super::liveliness::declare_token(actions, row.id(), key))
+        }
+        #[cfg(feature = "liveliness")]
+        DeclaredTable::LivelinessSubscribers => {
+            let row = tables
+                .liveliness_subscribers()
+                .get(Handle::from_bits(bits)?)?;
+            super::liveliness::ask(
+                actions,
+                row.id(),
+                row.key().as_str(),
+                tables.wire_of(row.key()),
+                row.history(),
+            )
+        }
+        // A kind the build keeps no table of holds no row.
+        #[cfg(not(feature = "queryable"))]
+        DeclaredTable::Queryables => return None,
+        #[cfg(not(feature = "liveliness"))]
+        DeclaredTable::Tokens | DeclaredTable::LivelinessSubscribers => return None,
+    })
 }
 
 /// A retraction as a link is told it: the id of what went and, for an entity whose declaration
@@ -715,7 +656,7 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     faces: &mut impl FacePlaces<Face<C, L>>,
     place: usize,
     on_refusal: OnRefusal,
-    send: &(dyn SendTo<C> + Sync),
+    send: &dyn SendTo<C>,
     undo: Option<Retract<'_>>,
     tx: super::LinkTx<'_, C>,
 ) -> bool {
