@@ -51,6 +51,22 @@ for inlined code is the file of the inlined function, and the FILE is placed by 
 The copies of a generic go to the file that defines it, as they go to its owner in the symbol
 reading.
 
+Inlined STANDARD LIBRARY code is the exception (owner's ruling, 2026-11-25). A byte whose line
+names a file of core, alloc, std or a crate they vendor (`/rustc/<hash>/library/..`) goes to the
+file of the innermost call in its inline chain written outside the standard library: the caller.
+What `ptr::write`, `Option::map` or a slice index inlines into a wz function is that function's
+code, as in C the same work is the operators and macros of the caller's own line, which the line
+table already gives the caller. Only a standard library function's own body, a function left out
+of line, keeps its file, and is language support. The chain is read from `.debug_info`: each
+DW_TAG_inlined_subroutine's addresses (DW_AT_low_pc and DW_AT_high_pc, or DW_AT_ranges) and the
+file of its call (DW_AT_call_file, in its unit's line table), the calls of a function the linker
+discarded left out as its rows are. A call whose file the table does not name ends the walk and
+the byte keeps its file. A standard library macro expanded in wz code is not in the chain, but the
+toolchain collapses an external macro's lines to its call site, so its bytes are the caller's line
+already. `--explain` says per area how many bytes this moved into it. zenoh-pico's lines name no
+standard library file, so its inline tree is not read: its toolchain headers' inline functions stay
+`toolchain/..`.
+
 The line tables are read from the build's bytes, DWARF 2 to 5, with `.debug_info` giving each
 unit's compilation directory, which a relative path is read from. A sequence that starts outside
 the library's executable sections is the table of a function the linker discarded (GNU ld writes
@@ -131,7 +147,8 @@ ratio and fails: its rules give that side none of its code.
 
 `--explain` reads the same case as `--measure` (the same builds, so after a measure it builds
 nothing again) and says, for each area, what holds its bytes, and how many bytes the symbol reading
-gives it: on the wz side the owner modules and the source files by bytes, the bodies by their bytes
+gives it, and how many bytes of inlined standard library code it counts by their caller's file: on
+the wz side the owner modules and the source files by bytes, the bodies by their bytes
 in the area with the name each is shown by and how many other names its address carries, and the
 generic functions with more than one copy (a demangled name with every generic argument list
 removed is one function); on the zenoh-pico side the source files by bytes. The unclassified and
@@ -652,13 +669,33 @@ def pico_symbols(listing: str, definitions: Mapping[str, set[str]],
 SHF_EXECINSTR = elf_facts.SHF_EXECINSTR
 SHF_COMPRESSED = 0x800
 ELFCOMPRESS_ZLIB = 1
-# The sections the line reader reads: the tables, the units that name their directories, and the
-# strings either can point into.
+# The sections the line reader reads: the tables, the units that name their directories and hold
+# the inline trees, the strings either can point into, and the address and range tables an inlined
+# call's addresses are read from.
 DWARF_SECTIONS = (".debug_line", ".debug_info", ".debug_abbrev", ".debug_str", ".debug_line_str",
-                  ".debug_str_offsets")
+                  ".debug_str_offsets", ".debug_addr", ".debug_ranges", ".debug_rnglists")
+DW_TAG_INLINED_SUBROUTINE = 0x1D
+DW_TAG_COMPILE_UNIT = 0x11
+DW_TAG_SUBPROGRAM = 0x2E
+DW_TAG_PARTIAL_UNIT = 0x3C
+DW_UT_COMPILE = 1
+DW_UT_PARTIAL = 3
 DW_AT_STMT_LIST = 0x10
+DW_AT_LOW_PC = 0x11
+DW_AT_HIGH_PC = 0x12
 DW_AT_COMP_DIR = 0x1B
+DW_AT_RANGES = 0x55
+DW_AT_CALL_FILE = 0x58
 DW_AT_STR_OFFSETS_BASE = 0x72
+DW_AT_ADDR_BASE = 0x73
+DW_AT_RNGLISTS_BASE = 0x74
+# The attributes the inline reader keeps of an entry: where its code is and the file of its call.
+_PLACE_ATTRIBUTES = frozenset((DW_AT_STMT_LIST, DW_AT_LOW_PC, DW_AT_HIGH_PC, DW_AT_RANGES,
+                               DW_AT_CALL_FILE, DW_AT_ADDR_BASE, DW_AT_RNGLISTS_BASE))
+DW_FORM_ADDR = 0x01
+DW_FORM_RNGLISTX = 0x23
+# addrx, addrx1 to addrx4: an index into the unit's table of .debug_addr.
+_ADDRX_FORMS = frozenset((0x1B, 0x29, 0x2A, 0x2B, 0x2C))
 DW_LNCT_PATH = 1
 DW_LNCT_DIRECTORY_INDEX = 2
 # The forms whose value is a fixed number of bytes (DWARF 5, section 7.5.6).
@@ -783,14 +820,17 @@ def _form_value(cur: _Cursor, form: int, offsets: int, address: int,
     raise DwarfError(f"the form {form:#x} at {cur.pos:#x} is no form of DWARF 2 to 5")
 
 
-def _abbreviations(data: bytes, offset: int) -> dict[int, list[tuple[int, int, int]]]:
-    """The abbreviation table at `offset` of `.debug_abbrev`: each code -> its (attribute, form,
-    implicit constant) list."""
+Abbreviation = tuple[int, bool, list[tuple[int, int, int]]]
+
+
+def _abbreviations(data: bytes, offset: int) -> dict[int, Abbreviation]:
+    """The abbreviation table at `offset` of `.debug_abbrev`: each code -> its tag, whether its
+    entry has children, and its (attribute, form, implicit constant) list."""
     cur = _Cursor(data, True, offset)
-    table: dict[int, list[tuple[int, int, int]]] = {}
+    table: dict[int, Abbreviation] = {}
     while (code := cur.uleb()) != 0:
-        cur.uleb()  # the tag
-        cur.u(1)  # whether it has children
+        tag = cur.uleb()
+        children = cur.u(1) != 0
         attributes: list[tuple[int, int, int]] = []
         while True:
             name, form = cur.uleb(), cur.uleb()
@@ -798,23 +838,33 @@ def _abbreviations(data: bytes, offset: int) -> dict[int, list[tuple[int, int, i
             if name == 0 and form == 0:
                 break
             attributes.append((name, form, implicit))
-        table[code] = attributes
+        table[code] = (tag, children, attributes)
     return table
 
 
-def unit_directories(sections: Mapping[str, bytes], little: bool) -> dict[int, str]:
-    """Each line table's offset in `.debug_line` -> the compilation directory of the unit of
-    `.debug_info` that names it (DW_AT_stmt_list, DW_AT_comp_dir), read from each unit's first
-    entry."""
-    info = sections.get(".debug_info", b"")
-    abbrev = sections.get(".debug_abbrev", b"")
-    tables: dict[int, dict[int, list[tuple[int, int, int]]]] = {}
-    out: dict[int, str] = {}
+@dataclass(frozen=True)
+class _Unit:
+    """The header of one unit of `.debug_info`: where it starts and ends, the size of its offsets,
+    its version, its kind (DW_UT_*; a unit of DWARF 2 to 4 is a compile unit), the size of its
+    addresses, its abbreviation table's offset in `.debug_abbrev` and where its first entry is."""
+    at: int
+    end: int
+    offsets: int
+    version: int
+    kind: int
+    address: int
+    abbrev: int
+    entries: int
+
+
+def _units(info: bytes, little: bool) -> Iterator[_Unit]:
+    """Each unit of `.debug_info`, in order."""
     at = 0
     while at < len(info):
         cur = _Cursor(info, little, at)
         end, offsets = cur.unit()
         version = cur.u(2)
+        kind = DW_UT_COMPILE
         if version >= 5:
             kind, address, table_at = cur.u(1), cur.u(1), cur.u(offsets)
             if kind in (2, 6):  # a type unit: its signature and its type's offset
@@ -825,24 +875,50 @@ def unit_directories(sections: Mapping[str, bytes], little: bool) -> dict[int, s
             table_at, address = cur.u(offsets), cur.u(1)
         else:
             raise DwarfError(f"the unit at {at:#x} of .debug_info is DWARF version {version}")
+        yield _Unit(at, end, offsets, version, kind, address, table_at, cur.pos)
+        at = end
+
+
+def _unit_cursor(info: bytes, little: bool, unit: _Unit) -> _Cursor:
+    """A cursor at the unit's first entry, which no read takes past the unit."""
+    cur = _Cursor(info, little, unit.entries)
+    cur.end = unit.end
+    return cur
+
+
+def _shape(tables: dict[int, dict[int, Abbreviation]], abbrev: bytes, unit: _Unit,
+           code: int) -> Abbreviation:
+    """The abbreviation `code` of the unit's table, read once per table."""
+    if unit.abbrev not in tables:
+        tables[unit.abbrev] = _abbreviations(abbrev, unit.abbrev)
+    if code not in tables[unit.abbrev]:
+        raise DwarfError(f"the unit at {unit.at:#x} of .debug_info uses the abbreviation {code}, "
+                         f"which its table does not have")
+    return tables[unit.abbrev][code]
+
+
+def unit_directories(sections: Mapping[str, bytes], little: bool) -> dict[int, str]:
+    """Each line table's offset in `.debug_line` -> the compilation directory of the unit of
+    `.debug_info` that names it (DW_AT_stmt_list, DW_AT_comp_dir), read from each unit's first
+    entry."""
+    info = sections.get(".debug_info", b"")
+    abbrev = sections.get(".debug_abbrev", b"")
+    tables: dict[int, dict[int, Abbreviation]] = {}
+    out: dict[int, str] = {}
+    for unit in _units(info, little):
+        cur = _unit_cursor(info, little, unit)
         code = cur.uleb()
         if code:
-            if table_at not in tables:
-                tables[table_at] = _abbreviations(abbrev, table_at)
-            if code not in tables[table_at]:
-                raise DwarfError(f"the unit at {at:#x} of .debug_info uses the abbreviation "
-                                 f"{code}, which its table does not have")
-            values = {name: _form_value(cur, form, offsets, address, sections, implicit)
-                      for name, form, implicit in tables[table_at][code]}
+            values = {name: _form_value(cur, form, unit.offsets, unit.address, sections, implicit)
+                      for name, form, implicit in _shape(tables, abbrev, unit, code)[2]}
             directory = values.get(DW_AT_COMP_DIR)
             if isinstance(directory, tuple):
                 base = values.get(DW_AT_STR_OFFSETS_BASE)
-                directory = (_strx(sections, base, directory[1], offsets, little)
+                directory = (_strx(sections, base, directory[1], unit.offsets, little)
                              if isinstance(base, int) else None)
             stmt = values.get(DW_AT_STMT_LIST)
             if isinstance(stmt, int) and isinstance(directory, str):
                 out[stmt] = directory
-        at = end
     return out
 
 
@@ -871,14 +947,25 @@ def _full_path(name: str, directory: str | None, base: str | None) -> str:
     return posixpath.normpath(path)
 
 
+LineSequence = tuple[list[LineRow], int]
+FileNames = Callable[[int], "str | None"]
+
+
+def _no_file(index: int) -> str | None:
+    """The file names of a line table with no files."""
+    return None
+
+
 def line_table(data: bytes, at: int, little: bool, base: str | None,
-               sections: Mapping[str, bytes]) -> tuple[list[tuple[list[LineRow], int]], int]:
+               sections: Mapping[str, bytes]) -> tuple[list[LineSequence], int, FileNames]:
     """The sequences of the line table at `at` of `.debug_line`, each its rows and the address it
-    ends at, and the offset of the next table. `base` is the unit's compilation directory."""
+    ends at, the offset of the next table, and the table's file names: a file index (a row's, or
+    an inlined call's DW_AT_call_file) -> its path, None for an index the table has no file for.
+    `base` is the unit's compilation directory."""
     cur = _Cursor(data, little, at)
     end, offsets = cur.unit()
     if end == cur.pos:
-        return [], end
+        return [], end, _no_file
     version = cur.u(2)
     if not 2 <= version <= 5:
         raise DwarfError(f"the line table at {at:#x} is DWARF version {version}")
@@ -983,7 +1070,7 @@ def line_table(data: bytes, at: int, little: bool, base: str | None,
         else:  # the column, the statement and block flags, the ISA: nothing of the source
             for _ in range(operands[op - 1]):
                 cur.uleb()
-    return sequences, end
+    return sequences, end, source
 
 
 def _entries(cur: _Cursor, offsets: int, address: int,
@@ -994,25 +1081,35 @@ def _entries(cur: _Cursor, offsets: int, address: int,
              for content, form in formats} for _ in range(cur.uleb())]
 
 
-def line_sequences(sections: Mapping[str, bytes],
-                   little: bool) -> list[tuple[list[LineRow], int]]:
-    """Every sequence of every line table of `.debug_line`."""
+def line_tables(sections: Mapping[str, bytes],
+                little: bool) -> dict[int, tuple[list[LineSequence], FileNames]]:
+    """Each line table of `.debug_line` by its offset (a unit's DW_AT_stmt_list): its sequences and
+    its file names (`line_table`)."""
     data = sections.get(".debug_line", b"")
     directories = unit_directories(sections, little)
-    out: list[tuple[list[LineRow], int]] = []
+    out: dict[int, tuple[list[LineSequence], FileNames]] = {}
     at = 0
     while at < len(data):
-        found, at = line_table(data, at, little, directories.get(at), sections)
-        out += found
+        found, end, names = line_table(data, at, little, directories.get(at), sections)
+        out[at] = (found, names)
+        at = end
     return out
+
+
+def line_sequences(sections: Mapping[str, bytes], little: bool) -> list[LineSequence]:
+    """Every sequence of every line table of `.debug_line`."""
+    return [sequence for found, _ in line_tables(sections, little).values() for sequence in found]
 
 
 @dataclass(frozen=True)
 class Span:
-    """Code bytes [start, end) of one row: the source the row names, None when it names none."""
+    """Code bytes [start, end) of one row: the source the row names, None when it names none.
+    `inlined` is the standard library file the row names for bytes `to_callers` gave to the
+    file of the call that inlined them, which is then `source`; None for bytes it left alone."""
     start: int
     end: int
     source: str | None
+    inlined: str | None = None
 
 
 def live_spans(sequences: Iterable[tuple[list[LineRow], int]],
@@ -1040,6 +1137,269 @@ def live_spans(sequences: Iterable[tuple[list[LineRow], int]],
     return out
 
 
+# ── the inline tree ────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Inline:
+    """Code bytes [start, end) of one inlined call (DW_TAG_inlined_subroutine): how deep it is in
+    its function's inline tree (1 for a call inlined into the function itself) and the file of the
+    call, in its caller (DW_AT_call_file; None when the unit's line table has no such file)."""
+    start: int
+    end: int
+    depth: int
+    call: str | None
+
+
+def _number(entry: tuple[int, object], unit: _Unit) -> int:
+    if not isinstance(entry[1], int):
+        raise DwarfError(f"an attribute of form {entry[0]:#x} in the unit at {unit.at:#x} is no "
+                         f"number")
+    return entry[1]
+
+
+class _Places:
+    """Where the entries of one unit are: DW_AT_low_pc with DW_AT_high_pc, or DW_AT_ranges, read
+    against the unit's base address (its own DW_AT_low_pc) and its tables in `.debug_addr`
+    (DW_AT_addr_base) and `.debug_rnglists` (DW_AT_rnglists_base) for DWARF 5, or
+    `.debug_ranges` for DWARF 2 to 4."""
+
+    def __init__(self, sections: Mapping[str, bytes], little: bool, unit: _Unit,
+                 values: Mapping[int, tuple[int, object]]) -> None:
+        self.sections = sections
+        self.little = little
+        self.unit = unit
+        self.addr_base = (_number(values[DW_AT_ADDR_BASE], unit)
+                          if DW_AT_ADDR_BASE in values else None)
+        self.rnglists_base = (_number(values[DW_AT_RNGLISTS_BASE], unit)
+                              if DW_AT_RNGLISTS_BASE in values else None)
+        low = values.get(DW_AT_LOW_PC)
+        self.base = self.address(low) if low is not None else 0
+
+    def indexed(self, index: int) -> int:
+        """The address at `index` of the unit's table in `.debug_addr`."""
+        if self.addr_base is None:
+            raise DwarfError(f"the unit at {self.unit.at:#x} indexes .debug_addr and names no "
+                             f"DW_AT_addr_base")
+        size = self.unit.address
+        return _Cursor(self.sections.get(".debug_addr", b""), self.little,
+                       self.addr_base + index * size).u(size)
+
+    def address(self, entry: tuple[int, object]) -> int:
+        value = _number(entry, self.unit)
+        return self.indexed(value) if entry[0] in _ADDRX_FORMS else value
+
+    def ranges(self, values: Mapping[int, tuple[int, object]]) -> list[tuple[int, int]]:
+        """The address ranges of an entry; none for an entry that states none."""
+        low, high = values.get(DW_AT_LOW_PC), values.get(DW_AT_HIGH_PC)
+        if low is not None and high is not None:
+            start = self.address(low)
+            if high[0] == DW_FORM_ADDR or high[0] in _ADDRX_FORMS:
+                return [(start, self.address(high))]
+            return [(start, start + _number(high, self.unit))]
+        listed = values.get(DW_AT_RANGES)
+        if listed is None:
+            return []
+        offset = _number(listed, self.unit)
+        if listed[0] == DW_FORM_RNGLISTX:
+            if self.rnglists_base is None:
+                raise DwarfError(f"the unit at {self.unit.at:#x} indexes .debug_rnglists and "
+                                 f"names no DW_AT_rnglists_base")
+            at = _Cursor(self.sections.get(".debug_rnglists", b""), self.little,
+                         self.rnglists_base + offset * self.unit.offsets)
+            offset = self.rnglists_base + at.u(self.unit.offsets)
+        if self.unit.version >= 5:
+            return self.range_list(offset)
+        return self.range_pairs(offset)
+
+    def range_list(self, offset: int) -> list[tuple[int, int]]:
+        """A range list of `.debug_rnglists` (DWARF 5, section 7.25)."""
+        cur = _Cursor(self.sections.get(".debug_rnglists", b""), self.little, offset)
+        size = self.unit.address
+        base = self.base
+        out: list[tuple[int, int]] = []
+        while (kind := cur.u(1)) != 0:  # DW_RLE_end_of_list
+            if kind == 1:  # base_addressx
+                base = self.indexed(cur.uleb())
+            elif kind == 2:  # startx_endx
+                start = self.indexed(cur.uleb())
+                out.append((start, self.indexed(cur.uleb())))
+            elif kind == 3:  # startx_length
+                start = self.indexed(cur.uleb())
+                out.append((start, start + cur.uleb()))
+            elif kind == 4:  # offset_pair
+                start = base + cur.uleb()
+                out.append((start, base + cur.uleb()))
+            elif kind == 5:  # base_address
+                base = cur.u(size)
+            elif kind == 6:  # start_end
+                start = cur.u(size)
+                out.append((start, cur.u(size)))
+            elif kind == 7:  # start_length
+                start = cur.u(size)
+                out.append((start, start + cur.uleb()))
+            else:
+                raise DwarfError(f"the range list at {offset:#x} of .debug_rnglists has the "
+                                 f"unknown entry kind {kind:#x}")
+        return out
+
+    def range_pairs(self, offset: int) -> list[tuple[int, int]]:
+        """A range list of `.debug_ranges` (DWARF 2 to 4): pairs of addresses from the base, a
+        pair whose first is the largest address selecting a new base, two zeros ending it."""
+        cur = _Cursor(self.sections.get(".debug_ranges", b""), self.little, offset)
+        size = self.unit.address
+        top = (1 << (8 * size)) - 1
+        base = self.base
+        out: list[tuple[int, int]] = []
+        while True:
+            start, end = cur.u(size), cur.u(size)
+            if start == 0 and end == 0:
+                return out
+            if start == top:
+                base = end
+            else:
+                out.append((base + start, base + end))
+
+
+def inline_calls(sections: Mapping[str, bytes], little: bool, code: list[tuple[int, int]],
+                 files: Mapping[int, FileNames]) -> list[Inline]:
+    """Every inlined call of the compile units of `.debug_info` whose function has code in the
+    library (`code`, its executable sections' ranges; a function the linker discarded has its
+    address outside them, as `live_spans` reads), with the file of each call read from its unit's
+    line table (`files`, by DW_AT_stmt_list)."""
+    info = sections.get(".debug_info", b"")
+    abbrev = sections.get(".debug_abbrev", b"")
+    tables: dict[int, dict[int, Abbreviation]] = {}
+    out: list[Inline] = []
+    for unit in _units(info, little):
+        if unit.kind not in (DW_UT_COMPILE, DW_UT_PARTIAL):
+            continue
+        cur = _unit_cursor(info, little, unit)
+        places: _Places | None = None
+        names: FileNames = _no_file
+        # Per open entry with children: its depth in an inline tree, and whether its code is live.
+        open_: list[tuple[int, bool]] = []
+        while cur.pos < unit.end:
+            code_ = cur.uleb()
+            if code_ == 0:
+                if open_:
+                    open_.pop()
+                continue
+            tag, children, attributes = _shape(tables, abbrev, unit, code_)
+            values: dict[int, tuple[int, object]] = {}
+            for name, form, implicit in attributes:
+                value = _form_value(cur, form, unit.offsets, unit.address, sections, implicit)
+                if name in _PLACE_ATTRIBUTES:
+                    values[name] = (form, value)
+            depth, live = open_[-1] if open_ else (0, False)
+            if tag in (DW_TAG_COMPILE_UNIT, DW_TAG_PARTIAL_UNIT):
+                places = _Places(sections, little, unit, values)
+                stmt = values.get(DW_AT_STMT_LIST)
+                if stmt is not None and isinstance(stmt[1], int) and stmt[1] in files:
+                    names = files[stmt[1]]
+                depth, live = 0, False
+            elif tag == DW_TAG_SUBPROGRAM and places is not None:
+                depth = 0
+                live = any(lo <= start < hi for start, end in places.ranges(values) if end > start
+                           for lo, hi in code)
+            elif tag == DW_TAG_INLINED_SUBROUTINE:
+                depth += 1
+                if live and places is not None:
+                    call = values.get(DW_AT_CALL_FILE)
+                    where = (names(call[1]) if call is not None and isinstance(call[1], int)
+                             else None)
+                    out += [Inline(start, end, depth, where)
+                            for start, end in places.ranges(values) if end > start]
+            if children:
+                open_.append((depth, live))
+    return out
+
+
+def inline_chains(inlines: Iterable[Inline]) -> list[tuple[int, int, tuple[str | None, ...]]]:
+    """The address ranges inlined code covers, sorted, none overlapping, each with the files of the
+    calls that inlined its bytes, the innermost call first: within one range the same calls hold
+    every byte."""
+    calls = [call for call in inlines if call.end > call.start]
+    opened: dict[int, list[int]] = {}
+    closed: dict[int, list[int]] = {}
+    for n, call in enumerate(calls):
+        opened.setdefault(call.start, []).append(n)
+        closed.setdefault(call.end, []).append(n)
+    points = sorted(set(opened) | set(closed))
+    held: set[int] = set()
+    out: list[tuple[int, int, tuple[str | None, ...]]] = []
+    for at, point in enumerate(points):
+        held.difference_update(closed.get(point, ()))
+        held.update(opened.get(point, ()))
+        if held and at + 1 < len(points):
+            chain = tuple(calls[n].call for n in sorted(held, key=lambda n: (-calls[n].depth, n)))
+            out.append((point, points[at + 1], chain))
+    return out
+
+
+def caller_file(chain: Iterable[str | None]) -> str | None:
+    """The file of the innermost call in `chain` (innermost first) written outside the standard
+    library, or None when every call is the standard library's (the bytes are of a standard
+    library function's own body) or one call's file is unknown before such a call is reached."""
+    for call in chain:
+        if call is None:
+            return None
+        if not standard_library_file(call):
+            return call
+    return None
+
+
+def to_callers(spans: list[Span], inlines: Iterable[Inline]) -> list[Span]:
+    """`spans` with the bytes of every standard library file inlined into code written outside it
+    given to the file of the innermost such call (`caller_file`), the line table's file kept in
+    `inlined`; the bytes of a standard library function's own body keep their file. Module doc,
+    "Who wrote a byte"."""
+    chains = inline_chains(inlines)
+    starts = [chain[0] for chain in chains]
+    out: list[Span] = []
+
+    def put(span: Span) -> None:
+        last = out[-1] if out else None
+        if (last is not None and last.end == span.start and last.source == span.source
+                and last.inlined == span.inlined):
+            out[-1] = Span(last.start, span.end, last.source, last.inlined)
+        else:
+            out.append(span)
+
+    for span in spans:
+        if span.source is None or not standard_library_file(span.source):
+            out.append(span)
+            continue
+        at = max(bisect.bisect_right(starts, span.start) - 1, 0)
+        pos = span.start
+        while pos < span.end:
+            while at < len(chains) and chains[at][1] <= pos:
+                at += 1
+            if at < len(chains) and chains[at][0] <= pos:
+                stop = min(chains[at][1], span.end)
+                caller = caller_file(chains[at][2])
+            else:
+                stop = min(chains[at][0], span.end) if at < len(chains) else span.end
+                caller = None
+            put(Span(pos, stop, caller, span.source) if caller is not None
+                else Span(pos, stop, span.source))
+            pos = stop
+    return out
+
+
+def dwarf_spans(dwarf: Mapping[str, bytes], little: bool,
+                code: list[tuple[int, int]]) -> list[Span]:
+    """The line spans of a library's code (`live_spans`), its inlined standard library code given
+    to its callers (`to_callers`). The inline tree is read only when a span names a standard
+    library file, so a library of none (zenoh-pico) is read from its line tables alone."""
+    tables = line_tables(dwarf, little)
+    spans = live_spans([sequence for found, _ in tables.values() for sequence in found], code)
+    if not any(span.source is not None and standard_library_file(span.source) for span in spans):
+        return spans
+    files = {at: names for at, (_, names) in tables.items()}
+    return to_callers(spans, inline_calls(dwarf, little, code, files))
+
+
 def _section_data(data: bytes, section: elf_facts.Section) -> bytes:
     """A section's bytes, inflated when the linker compressed it (SHF_COMPRESSED with zlib)."""
     raw = elf_facts.section_bytes(data, section)
@@ -1064,14 +1424,14 @@ def code_ranges(sections: Iterable[elf_facts.Section]) -> list[tuple[int, int]]:
 
 
 def read_spans(lib: pathlib.Path) -> list[Span]:
-    """The line spans of a library's code (`live_spans`), or a DwarfError saying why none."""
+    """The line spans of a library's code (`dwarf_spans`), or a DwarfError saying why none."""
     data = lib.read_bytes()
     sections = elf_facts.sections(data)
     dwarf = {s.name: _section_data(data, s) for s in sections if s.name in DWARF_SECTIONS}
     if not dwarf.get(".debug_line"):
         raise DwarfError(f"{lib} has no .debug_line: its line tables were not written or were "
                          f"stripped, so no byte of it names its source")
-    return live_spans(line_sequences(dwarf, data[5] == 1), code_ranges(sections))
+    return dwarf_spans(dwarf, data[5] == 1, code_ranges(sections))
 
 
 # ── who wrote a source file ────────────────────────────────────────────────────────────────────
@@ -1120,6 +1480,12 @@ def module_of_file(rel: str, root_file: str) -> list[str] | None:
         return None
     parts = rel[:-3].split("/")
     return parts[:-1] if parts[-1] == "mod" else parts
+
+
+def standard_library_file(path: str) -> bool:
+    """Whether `path` is a file of the standard library (core, alloc, std and the crates below
+    `library/`) or of a crate it vendors, as the toolchain's own build names it."""
+    return _STD_SOURCE.search(path) is not None or _STD_VENDORED.match(path) is not None
 
 
 def std_owner(path: str) -> str | None:
@@ -1408,6 +1774,9 @@ class Piece:
     source: str | None
     owner: str | None
     area: str | None
+    # Whether these are bytes of the standard library inlined here and given to the file of the
+    # call that inlined them (`to_callers`).
+    inlined: bool = False
 
 
 def name_area(rules: Rules, body: Body, areas: list[str]) -> tuple[str | None, set[str]]:
@@ -1434,7 +1803,8 @@ def attribute(bodies: Iterable[Body], spans: list[Span],
     """Each body's bytes by the source the line table gives them (module doc, "Who wrote a byte"):
     a byte of the body's own file goes to the area a name rule gives the body when one does, every
     other byte to the owner rule of its file's owner; a byte of line 0 or of no row is
-    unattributed. Returns the pieces and the rules that placed a byte."""
+    unattributed. `spans` are `dwarf_spans`, so the file of inlined standard library code is
+    its caller's. Returns the pieces and the rules that placed a byte."""
     starts = [span.start for span in spans]
     pieces: list[Piece] = []
     used: set[str] = set()
@@ -1442,7 +1812,7 @@ def attribute(bodies: Iterable[Body], spans: list[Span],
         own = source_at(spans, starts, body.address)
         named, by_name = name_area(rules, body, areas)
         low, high = body.address, body.address + body.size
-        sizes: dict[tuple[str | None, str | None, str | None], int] = {}
+        sizes: dict[tuple[str | None, str | None, str | None, bool], int] = {}
         covered = 0
         at = max(bisect.bisect_right(starts, low) - 1, 0)
         while at < len(spans) and spans[at].start < high:
@@ -1452,21 +1822,24 @@ def attribute(bodies: Iterable[Body], spans: list[Span],
             if count <= 0:
                 continue
             covered += count
+            moved = span.inlined is not None
             if span.source is None:
-                key: tuple[str | None, str | None, str | None] = (None, None, None)
+                key: tuple[str | None, str | None, str | None, bool] = (None, None, None, False)
             else:
                 owner = owners.get(span.source, (None, None))[0]
                 if named is not None and span.source == own:
                     used |= by_name
-                    key = (span.source, owner, named)
+                    key = (span.source, owner, named, moved)
                 else:
                     prefix = owner_rule(rules, owner) if owner is not None else None
                     if prefix is not None:
                         used.add(f"owners {prefix}")
-                    key = (span.source, owner, rules.owners[prefix] if prefix is not None else None)
+                    key = (span.source, owner,
+                           rules.owners[prefix] if prefix is not None else None, moved)
             sizes[key] = sizes.get(key, 0) + count
         if covered < body.size:
-            sizes[(None, None, None)] = sizes.get((None, None, None), 0) + body.size - covered
+            unlined = (None, None, None, False)
+            sizes[unlined] = sizes.get(unlined, 0) + body.size - covered
         pieces += [Piece(body, count, *key) for key, count in sizes.items()]
     return pieces, used
 
@@ -1799,15 +2172,20 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
     """What holds one side's bytes of one area: its owners (a wz module, a zenoh-pico file), its
     bodies by their bytes here, and on the wz side its source files and its generic functions with
     more than one copy; each list whole, largest first. `by_symbol` is what the symbol reading
-    gives the area."""
+    gives the area, and `inlined` the bytes of standard library code inlined into the area's
+    functions that are counted in it by the file of the call (`to_callers`), in
+    `inlined_bodies` bodies."""
     owners: dict[str, dict[int, int]] = {}
     files: dict[str, dict[int, int]] = {}
     generics: dict[str, dict[int, int]] = {}
     held: dict[int, tuple[Body, dict[str, int]]] = {}
     total = 0
+    inlined: dict[int, int] = {}
     for piece in pieces:
         total += piece.size
         body = piece.body
+        if piece.inlined:
+            inlined[body.address] = inlined.get(body.address, 0) + piece.size
         label = piece_label(piece)
         name = demangled.get(body.lead.name, body.lead.name)
         for groups, key in ((owners, label), (files, piece.source or NO_LINE),
@@ -1822,6 +2200,7 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
                for body, by_owner in held.values()]
     symbols.sort(key=lambda row: (-row["bytes"], row["name"]))
     out = {"bytes": total, "by_symbol": by_symbol, "bodies": len(symbols),
+           "inlined": sum(inlined.values()), "inlined_bodies": len(inlined),
            "owners": _ranked(owners, "owner"), "symbols": symbols}
     if side == "wz":
         out["files"] = _ranked(files, "file")
@@ -1913,6 +2292,9 @@ def explain_lines(report: dict, previous: object) -> list[str]:
             said.append(f"{label} {now['bytes']} B in {now['bodies']} bodies{symbol}{delta}")
         lines.append(f"  size-ledger explain: {area}: {', '.join(said)}")
         wz, pico = sides["wz"], sides["pico"]
+        lines.append(f"    standard library code inlined into wz functions and counted here by "
+                     f"its caller's file: {wz.get('inlined', 0)} B in "
+                     f"{wz.get('inlined_bodies', 0)} bodies")
         lines += explain_table("wz modules", wz["owners"], EXPLAIN_OWNERS,
                                ("bytes", "bodies"), lambda row: row["owner"])
         lines += explain_table("wz source files", wz["files"], EXPLAIN_OWNERS,
@@ -2093,8 +2475,8 @@ def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
     wz = tally_pieces(*pieces["wz"], areas)
     pico = tally_pieces(*pieces["pico"], areas)
     print(f"  size-ledger: {case.id}: function bytes by area, each byte by the source its line "
-          f"table names, against zenoh-pico {read.pin} as the same build ({read.toolchain}; both "
-          f"linked by {linker})")
+          f"table names (inlined standard library code by its caller's), against zenoh-pico "
+          f"{read.pin} as the same build ({read.toolchain}; both linked by {linker})")
     for line in table_lines(table, wz, pico):
         print(line)
     notes: list[str] = []
@@ -2731,6 +3113,146 @@ def cmd_selftest() -> int:
            and "z_open" in over[0]
            and len(unset := unattributed_findings("wz", lines_read, None)) == 1
            and "null" in unset[0] and "24 bytes" in unset[0])
+
+    # Inlined standard library code goes to its caller's file; a library body keeps its own.
+    wz_rs, ptr_rs = "/wz/crates/wz-x/src/lib.rs", "/rustc/abc/library/core/src/ptr/mod.rs"
+    opt_rs = "/rustc/abc/library/core/src/option.rs"
+    expect("a standard library file is one of the toolchain's library or a crate it vendors",
+           standard_library_file(ptr_rs)
+           and standard_library_file("/x/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs")
+           and standard_library_file("/rust/deps/hashbrown-0.15.2/src/raw/mod.rs")
+           and not standard_library_file(wz_rs)
+           and not standard_library_file("/cargo/registry/src/i/heapless-0.8.0/src/vec.rs"))
+
+    def q8(value: int) -> bytes:
+        return struct.pack("<Q", value)
+
+    def u4(value: int) -> bytes:
+        return struct.pack("<I", value)
+
+    # DWARF 4: a unit, a namespace, functions by low_pc and high_pc, calls by both and by ranges.
+    abbrev4 = (uleb(1) + uleb(0x11) + b"\x01" + uleb(0x10) + uleb(0x17) + uleb(0x11) + uleb(0x01)
+               + b"\x00\x00"
+               + uleb(2) + uleb(0x2E) + b"\x01" + uleb(0x11) + uleb(0x01) + uleb(0x12) + uleb(0x06)
+               + b"\x00\x00"
+               + uleb(3) + uleb(0x1D) + b"\x00" + uleb(0x11) + uleb(0x01) + uleb(0x12) + uleb(0x06)
+               + uleb(0x58) + uleb(0x0B) + b"\x00\x00"
+               + uleb(4) + uleb(0x1D) + b"\x01" + uleb(0x55) + uleb(0x17) + uleb(0x58) + uleb(0x0B)
+               + b"\x00\x00"
+               + uleb(5) + uleb(0x39) + b"\x01" + b"\x00\x00" + b"\x00")
+
+    def function(low: int, size: int) -> bytes:
+        return uleb(2) + q8(low) + u4(size)
+
+    def call(low: int, size: int, file_: int) -> bytes:
+        return uleb(3) + q8(low) + u4(size) + bytes([file_])
+
+    entries4 = (uleb(1) + u4(0) + q8(0) + uleb(5)
+                + function(0x1000, 0x40) + call(0x1010, 8, 1)
+                + uleb(4) + u4(0) + bytes([1]) + call(0x1018, 8, 3) + b"\x00"
+                + call(0x1030, 8, 1) + b"\x00"
+                + function(0x1100, 0x20) + call(0x1110, 0x10, 3) + b"\x00"
+                + function(0, 0x10) + call(0, 8, 1) + b"\x00"
+                + b"\x00" + b"\x00")
+    unit_4 = struct.pack("<HIB", 4, 0, 8) + entries4
+    ranges4 = q8(2 ** 64 - 1) + q8(0x1000) + q8(0x18) + q8(0x28) + q8(0) + q8(0)
+    # DWARF 5: a function by an index into .debug_addr, a call by an index into .debug_rnglists.
+    abbrev5 = (uleb(1) + uleb(0x11) + b"\x01" + uleb(0x10) + uleb(0x17) + uleb(0x11) + uleb(0x01)
+               + uleb(0x73) + uleb(0x17) + uleb(0x74) + uleb(0x17) + b"\x00\x00"
+               + uleb(2) + uleb(0x2E) + b"\x01" + uleb(0x11) + uleb(0x1B) + uleb(0x12) + uleb(0x06)
+               + b"\x00\x00"
+               + uleb(3) + uleb(0x1D) + b"\x00" + uleb(0x55) + uleb(0x23) + uleb(0x58) + uleb(0x0B)
+               + b"\x00\x00" + b"\x00")
+    entries5 = (uleb(1) + u4(0) + q8(0) + u4(8) + u4(12)
+                + uleb(2) + uleb(0) + u4(0x100) + uleb(3) + uleb(0) + b"\x00" + b"\x00" + b"\x00")
+    unit_5 = struct.pack("<HBBI", 5, 1, 8, len(abbrev4)) + entries5
+    addr5 = struct.pack("<IHBB", 0, 5, 8, 0) + q8(0x2000) + q8(0x2010)
+    rnglists5 = (struct.pack("<IHBBI", 0, 5, 8, 0, 1) + u4(4)
+                 + bytes([1]) + uleb(1) + bytes([4]) + uleb(0) + uleb(8)
+                 + bytes([3]) + uleb(0) + uleb(4) + b"\x00")
+    inline_tree = {".debug_info": struct.pack("<I", len(unit_4)) + unit_4
+            + struct.pack("<I", len(unit_5)) + unit_5,
+            ".debug_abbrev": abbrev4 + abbrev5, ".debug_ranges": ranges4,
+            ".debug_addr": addr5, ".debug_rnglists": rnglists5}
+    named = {0: "/wz/crates/wz-y/src/lib.rs", 1: wz_rs, 3: opt_rs}.get
+    calls = inline_calls(inline_tree, True, [(0x1000, 0x1200), (0x2000, 0x2100)], {0: named})
+    expect("each inlined call is read with its depth and its call's file, by high_pc, by a range "
+           "list of either version and by an address index; a discarded function's calls are none",
+           [(c.start, c.end, c.depth, c.call) for c in calls]
+           == [(0x1010, 0x1018, 1, wz_rs), (0x1018, 0x1028, 1, wz_rs), (0x1018, 0x1020, 2, opt_rs),
+               (0x1030, 0x1038, 1, wz_rs), (0x1110, 0x1120, 1, opt_rs),
+               (0x2010, 0x2018, 1, "/wz/crates/wz-y/src/lib.rs"),
+               (0x2000, 0x2004, 1, "/wz/crates/wz-y/src/lib.rs")])
+    bare_unit = _Unit(0, 0, 4, 5, DW_UT_COMPILE, 8, 0, 0)
+    expect("an index into .debug_addr or .debug_rnglists with no base named is refused",
+           _raises(lambda: _Places({}, True, bare_unit, {}).address((0x1B, 0)))
+           and _raises(lambda: _Places({}, True, bare_unit, {}).ranges(
+               {DW_AT_RANGES: (DW_FORM_RNGLISTX, 0)})))
+    expect("the calls at an address are its chain, the innermost call first",
+           inline_chains(calls[:5])
+           == [(0x1010, 0x1018, (wz_rs,)), (0x1018, 0x1020, (opt_rs, wz_rs)),
+               (0x1020, 0x1028, (wz_rs,)), (0x1030, 0x1038, (wz_rs,)),
+               (0x1110, 0x1120, (opt_rs,))]
+           and caller_file((opt_rs, wz_rs)) == wz_rs and caller_file((opt_rs,)) is None
+           and caller_file((None, wz_rs)) is None and caller_file(()) is None)
+    homed = to_callers(
+        [Span(0x1000, 0x1010, wz_rs), Span(0x1010, 0x1018, ptr_rs), Span(0x1018, 0x1020, ptr_rs),
+         Span(0x1020, 0x1028, opt_rs), Span(0x1028, 0x1030, wz_rs), Span(0x1030, 0x1040, ptr_rs),
+         Span(0x1100, 0x1110, opt_rs), Span(0x1110, 0x1120, ptr_rs), Span(0x1200, 0x1208, None)],
+        calls)
+    expect("inlined standard library bytes go to the innermost caller outside it, a body of its "
+           "own and its own inlines keep their file, and a span half inlined is split",
+           [(s.start, s.end, s.source, s.inlined) for s in homed]
+           == [(0x1000, 0x1010, wz_rs, None), (0x1010, 0x1020, wz_rs, ptr_rs),
+               (0x1020, 0x1028, wz_rs, opt_rs), (0x1028, 0x1030, wz_rs, None),
+               (0x1030, 0x1038, wz_rs, ptr_rs), (0x1038, 0x1040, ptr_rs, None),
+               (0x1100, 0x1110, opt_rs, None), (0x1110, 0x1120, ptr_rs, None),
+               (0x1200, 0x1208, None, None)])
+    line_head = (shape + b"/wz/crates/wz-x/src\x00\x00"
+                 + b"lib.rs\x00" + uleb(1) + b"\x00\x00" + ptr_rs.encode() + b"\x00" + uleb(0)
+                 + b"\x00\x00" + b"\x00")
+    line_program = (at(0x1000) + special(0, 0) + b"\x04\x02" + special(0x10, 1)
+                    + b"\x04\x01" + special(8, 1) + b"\x02\x08" + end_sequence)
+    line_body = struct.pack("<HI", 4, len(line_head)) + line_head + line_program
+    read_tree = {**inline_tree, ".debug_line": struct.pack("<I", len(line_body)) + line_body}
+    expect("a library's spans take the call's file from its unit's line table",
+           [(s.start, s.end, s.source, s.inlined)
+            for s in dwarf_spans(read_tree, True, [(0x1000, 0x1200)])]
+           == [(0x1000, 0x1010, wz_rs, None), (0x1010, 0x1018, wz_rs, ptr_rs),
+               (0x1018, 0x1020, wz_rs, None)])
+    # A unit whose entries after its first the inline reader refuses (an unknown abbreviation).
+    broken = {**dwarf, ".debug_info": struct.pack("<I", len(unit4) + 1) + unit4 + b"\x7f"
+              + struct.pack("<I", len(unit5)) + unit5}
+    expect("a library whose lines name no standard library file is its line spans alone, its "
+           "inline tree unread",
+           _raises(lambda: inline_calls(broken, True, [(0x1000, 0x1100)], {}))
+           and dwarf_spans(broken, True, [(0x1000, 0x1100), (0x3000, 0x3100)]) == spans)
+    irules = Rules((), {"wz_x": "x", "core": "language"}, "::")
+    ibodies, _ = place_bodies([Symbol(0x1000, 0x40, "_Ra", ("wz_x::f",)),
+                               Symbol(0x1100, 0x20, "_Rb", ("core::option::g",))],
+                              irules, ["x", "language"])
+    isources = {wz_rs: ("wz_x", BY_PATH), ptr_rs: ("core::ptr", BY_PATH),
+                opt_rs: ("core::option", BY_PATH)}
+    ipieces, iused = attribute(ibodies, homed, isources, irules, ["x", "language"])
+    iread = tally_pieces(ipieces, iused, ["x", "language"])
+    unhomed, _ = attribute(ibodies, [Span(0x1000, 0x1010, wz_rs), Span(0x1010, 0x1028, ptr_rs),
+                                     Span(0x1028, 0x1030, wz_rs), Span(0x1030, 0x1040, ptr_rs),
+                                     Span(0x1100, 0x1120, opt_rs)],
+                           isources, irules, ["x", "language"])
+    expect("a wz function's inlined core is in the function's area, a core body's bytes language",
+           iread.by_area == {"x": 0x38, "language": 0x28}
+           and tally_pieces(unhomed, set(), ["x", "language"]).by_area
+           == {"x": 0x18, "language": 0x48})
+    ireport = explain_report(
+        "c", "p", "cc 1", "d", ["x", "language"], {"wz": ipieces, "pico": []}, {},
+        {"wz": tally(sum((list(b.names) for b in ibodies), []), irules, ["x", "language"]),
+         "pico": Tally({"x": 0, "language": 0})}, {"wz": isources, "pico": {}})
+    expect("--explain says per area how many bytes of inlined standard library code it counts",
+           ireport["areas"]["x"]["wz"]["inlined"] == 0x20
+           and ireport["areas"]["x"]["wz"]["inlined_bodies"] == 1
+           and ireport["areas"]["language"]["wz"]["inlined"] == 0
+           and "    standard library code inlined into wz functions and counted here by its "
+               "caller's file: 32 B in 1 bodies" in explain_lines(ireport, None))
 
     # --explain: the names, the groups and the report.
     xrules = Rules((), {"wz_x": "x"}, "::")

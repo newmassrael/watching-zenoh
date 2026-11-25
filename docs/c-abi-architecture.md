@@ -169,7 +169,10 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
 1. **Ledger gate (P9).** `scripts/lib/size_ledger_gate.py`: area classification of both
    libraries, a ratio ratchet per area in `deploy/size_ledger.json`, run in Layer C1cs beside the
    total. Each byte of a function goes to the source file its line table names (the innermost
-   location, so a helper fat LTO inlined into a door stays in the helper's area), read from the
+   location, so a helper fat LTO inlined into a door stays in the helper's area; inlined Rust
+   core, alloc and std code goes to its innermost caller outside them, as the same work in C is
+   the caller's own operators and macros, and only an out-of-line standard library body is
+   language support), read from the
    library's one build, which carries its line tables and is measured and shipped with its debug
    information taken off (its executable sections held to the build's byte for byte); that file's crate::module (wz) or export path (zenoh-pico) is placed by
    the owner rules, and bytes of no source line are counted apart under a limit of their own. The
