@@ -32,6 +32,12 @@ committed rows.
         configuration files, its linker), its library copied to DIR/lib-ARM and pico's headers to
         DIR/include-ARM: the reference export's (`reference` first), with the config.h of the build's
         feature list (`wz_config.pico_config_header`) in place of the reference's
+    perf_matrix.py preset-arm --out DIR --original ORIGINAL --stdlib STDLIB
+        arm W of the parity matrix's pico family (scripts/pico-compare.sh parity pico): wz-capi-pico for
+        configs/ORIGINAL_defconfig alone (`wz_config.original_features`), under its limits and policies
+        (`wz_config.original_env`), with STDLIB (`bench-stdlib`), built as
+        the size gate builds the case of that form, as `wz-arm` builds its own; its library copied to
+        DIR/lib-W, its log to DIR/build-wz.log, and two lines naming the build printed for the run's record
     perf_matrix.py pico-sys-include REPORT
         the include directory of the one zenoh-pico-sys build cargo's JSON REPORT names
     perf_matrix.py external-record OUT [WHY]
@@ -1106,6 +1112,52 @@ def cmd_wz_arm(out: pathlib.Path, arm: str, engine: str, stdlib: str, asked: lis
     return 0
 
 
+def cmd_preset_arm(out: pathlib.Path, original: str, stdlib: str) -> int:
+    """Arm W of the parity matrix (docs/upstream-parity.md section 5b) for the pico family: wz-capi-pico for
+    configs/<original>_defconfig alone (`wz_config.original_features`), under the limits and policies it sets
+    (`wz_config.original_env`), with `stdlib`, built as the size gate
+    builds the case of that form (`bench_case`, `capability_cost_gate.case_build` in the gate's `build_env`), so
+    the parity's size cells read the library a release ships unless told another form; its library copied to
+    OUT/lib-W and its build's log to OUT/build-wz.log. The two lines it prints are the run record's."""
+    import capability_cost_gate as cost
+    import wz_config
+
+    if wz_config.BASE_ABI.get(original) != "pico":
+        print(f"perf-matrix: NOT-MEASURED, `{original}` is no original built through the pico ABI", flush=True)
+        return 2
+    table = wz_config.manifest_features(cost.CRATES / "wz-capi-pico" / "Cargo.toml")
+    try:
+        named = wz_config.original_features(original)
+        engine = wz_config.statement_engine("pico", wz_config.enabled_features(table, named))
+        if engine != "coop":
+            raise Refused(f"configs/{original}_defconfig builds the {engine} engine, and arm W is built in a "
+                          "form of the cooperative one")
+        if stdlib == "nostd":
+            named = wz_config.nostd_named_features(named, table)
+        case = bench_case("W", engine, stdlib, named)
+        preset_env = wz_config.original_env(original)
+        env, _ = cost.build_env()
+    except (wz_config.PresetError, KeyError, ValueError, OSError, Refused) as error:
+        print(f"perf-matrix: NOT-MEASURED, arm W of {original}: {error}", flush=True)
+        return 2
+    plan = cost.case_build(case, {**env, **dict(line.split("=", 1) for line in preset_env)})
+    with (out / "build-wz.log").open("w", encoding="utf-8") as stream:
+        built = subprocess.run(list(plan.cmd), cwd=cost.CRATES, env=dict(plan.env), stdout=stream,
+                               stderr=subprocess.STDOUT)
+    if built.returncode != 0:
+        print(f"perf-matrix: NOT-MEASURED, wz-capi-pico for {original} did not build (see {out / 'build-wz.log'})",
+              flush=True)
+        return 2
+    lib = out / "lib-W"
+    lib.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(plan.lib, lib / plan.lib.name)
+    print(f"wz_build=-p {case.package} --features {case.features}; stdlib {stdlib}, profile {case.profile}, "
+          f"cargo configuration {list(case.cargo_configs) or 'none'}, linker arguments {list(plan.link_args)} "
+          f"(the size gate's {SHAPE_CASES[(engine, stdlib)]})", flush=True)
+    print(f"wz_build_env={' '.join(preset_env)}", flush=True)
+    return 0
+
+
 # -- arm X: an external library of the pico API ------------------------------------------------------------
 
 #: The variables that name arm X. The library and its headers are a deployment's; the repository holds only
@@ -2053,6 +2105,10 @@ def cmd_selftest() -> int:
            and bench_case("Wapp", "tokio", "std", ["app-transport"]).features == "default,app-transport"
            and bench_case("W", "tokio", "std", []).features == "default")
     expect("a form no size case builds is refused", refused_call(lambda: bench_case("W", "tokio", "nostd", [])))
+    with contextlib.redirect_stdout(io.StringIO()) as said:
+        not_pico = cmd_preset_arm(pathlib.Path("."), "zenoh-c", "nostd")
+    expect("the parity's preset arm is built for an original of the pico ABI only, and refuses another unbuilt",
+           not_pico == 2 and "no original built through the pico ABI" in said.getvalue())
     nostd_reference = cost.reference_build(cost.case_build(bare, {}, "x86_64-unknown-linux-gnu",
                                                            {"unix", 'target_os="linux"', 'target_env="gnu"',
                                                             'target_family="unix"'}).link_args)
@@ -2462,6 +2518,13 @@ def main(argv: list[str]) -> int:
             return cmd_reference(pathlib.Path(asked.out), asked.engine, asked.stdlib)
         return cmd_wz_arm(pathlib.Path(asked.out), asked.arm, asked.engine, asked.stdlib,
                           [f for f in asked.features.split(",") if f])
+    if len(argv) >= 2 and argv[1] == "preset-arm":
+        preset = argparse.ArgumentParser(prog="perf_matrix.py preset-arm")
+        preset.add_argument("--out", required=True)
+        preset.add_argument("--original", required=True)
+        preset.add_argument("--stdlib", required=True, choices=STDLIBS)
+        asked = preset.parse_args(argv[2:])
+        return cmd_preset_arm(pathlib.Path(asked.out), asked.original, asked.stdlib)
     if len(argv) == 4 and argv[1] == "pin-sides":
         return cmd_pin_sides(argv[2:])
     if 2 <= len(argv) <= 4 and argv[1] == "idle-cpus":
