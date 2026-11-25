@@ -130,7 +130,9 @@ pub trait LockKind: 'static {
 
     /// Whether [`Self::with`] can wait for a hold another thread has: a lock of the value's own
     /// can, a kind whose values one engine's lock keeps to one thread ([`Confined`]) never does.
-    /// A face's place asks it before a lend that waits ([`FacePlace::lend`]).
+    /// A face's place asks it before a lend that waits ([`FacePlace::lend`]), and a face's site
+    /// before it looks, as its holder lets go, for a debt another thread owed meanwhile
+    /// (`crate::faces::FaceSite`): with no other thread, no debt comes after the holder paid.
     const WAITS: bool = true;
 
     /// The calling thread's number as this kind tells threads apart, never 0: a face's place keeps
@@ -299,8 +301,16 @@ impl LockKind for Shared {
 /// the one frame that owns the value, and nothing that holds such a value is handed out of that
 /// lock to be used without it. A runtime the engine confines to its lock is bound by the contract
 /// of `CoopRuntime::confine_tasks`, which its call states.
+///
+/// An owner whose [`Self::TRIED_INSIDE`] is `false` also makes no try of a value from inside a
+/// hold of the same value: its try takes the value at once.
 #[cfg(feature = "runtime")]
-pub unsafe trait ConfinedOwner: 'static {}
+pub unsafe trait ConfinedOwner: 'static {
+    /// Whether a value of this owner may be tried from inside its own hold, where its try finds
+    /// it held ([`OwnerHeld::try_with`]). An owner that tries none there has its try be the take
+    /// itself, and marks a hold in a debug build alone, to fail a take nested in one.
+    const TRIED_INSIDE: bool = true;
+}
 
 /// No lock of the value's own: the values are [`OwnerHeld`], reached under the lock of `O`'s
 /// engine ([`ConfinedOwner`]). A lock here would be a second one around what that lock already
@@ -446,6 +456,10 @@ unsafe impl<T: Send, O: ConfinedOwner> Sync for OwnerHeld<T, O> {}
 
 #[cfg(feature = "runtime")]
 impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
+    /// Whether a hold of the value is marked: where a try inside it reads the mark, and in a
+    /// debug build, which fails a take nested in a hold.
+    const MARKS: bool = O::TRIED_INSIDE || cfg!(debug_assertions);
+
     fn new(value: T) -> Self {
         Self {
             value: UnsafeCell::new(value),
@@ -457,7 +471,7 @@ impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
     /// Run `f` on the value.
     #[inline]
     pub fn with<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
-        let _inside = Inside::enter(&self.inside);
+        let _inside = Self::MARKS.then(|| Inside::enter(&self.inside));
         // SAFETY: one thread at a time calls this (`O`'s contract), and the value is not taken
         // inside its own hold (checked in a debug build), so no other reference to it lives while
         // `f` runs.
@@ -465,10 +479,12 @@ impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
     }
 
     /// [`Self::with`], or `None` with `f` not run when the calling thread is inside a hold of
-    /// the value now: the one holder a value no other thread reaches can have.
+    /// the value now: the one holder a value no other thread reaches can have. An owner that
+    /// tries nothing inside a hold ([`ConfinedOwner::TRIED_INSIDE`]) has none to find, and `f`
+    /// always runs.
     #[inline]
     pub fn try_with<U>(&self, f: impl FnOnce(&mut T) -> U) -> Option<U> {
-        if self.inside.get() {
+        if O::TRIED_INSIDE && self.inside.get() {
             return None;
         }
         Some(self.with(f))
@@ -484,7 +500,8 @@ struct Inside<'a>(&'a Cell<bool>);
 #[cfg(feature = "runtime")]
 impl<'a> Inside<'a> {
     fn enter(inside: &'a Cell<bool>) -> Self {
-        // Set in every build: a try inside the hold reads it (`OwnerHeld::try_with`).
+        // Set wherever a try inside the hold reads it (`OwnerHeld::try_with`), not only where
+        // a debug build checks it.
         let nested = inside.replace(true);
         debug_assert!(
             !nested,
@@ -855,6 +872,14 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
         }
     }
 
+    /// Whether the calling thread stands in the place's seat: its read holds the place, lent, and
+    /// what it reaches of the place meanwhile goes through the seat, or is the holder's to do as
+    /// it lets go.
+    #[inline]
+    pub(crate) fn seated_here(&self) -> bool {
+        self.seat_thread.load(core::sync::atomic::Ordering::Acquire) == K::current_thread()
+    }
+
     /// The seat this thread stands in, taken for a send of a send part of type `T`.
     ///
     /// # Safety
@@ -865,7 +890,7 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
         use core::sync::atomic::Ordering;
         // Another thread never reads its own number here unless it wrote it, so a seat is found
         // by the thread that stands in it alone.
-        if self.seat_thread.load(Ordering::Acquire) != K::current_thread() {
+        if !self.seated_here() {
             return AtSeat::None;
         }
         let taken = self.seat_tx.load(Ordering::Acquire);
@@ -1064,6 +1089,44 @@ pub(crate) mod tests {
             Some(5),
             "an unwound hold is not found"
         );
+    }
+
+    /// The owner of the values the tests below make that tries none of them inside its own hold.
+    struct TakingOwner;
+
+    // SAFETY: a value of a `Confined<TakingOwner>` runtime is made and reached by one test's
+    // thread alone and never handed to another, and it is tried inside its own hold only by the
+    // test of a debug build, which fails at the mark before the value is lent a second time.
+    unsafe impl ConfinedOwner for TakingOwner {
+        const TRIED_INSIDE: bool = false;
+    }
+
+    type Taken = Confined<TakingOwner>;
+
+    /// A try of a value whose owner tries none inside a hold takes it at once, each time, and sees
+    /// what the hold before it left. Turned red by a try that finds such a value held outside every
+    /// hold (a mark left set where no try reads it).
+    #[test]
+    fn a_try_of_an_owner_that_tries_nothing_inside_a_hold_takes_the_value() {
+        let value = Taken::wrap(3u8);
+        assert_eq!(Taken::try_with(&value, |held| *held), Some(3));
+        Taken::with(&value, |held| *held += 1);
+        assert_eq!(
+            Taken::try_with(&value, |held| *held),
+            Some(4),
+            "a try after the hold sees what it left"
+        );
+    }
+
+    /// A debug build still marks each hold of a value whose owner tries none inside one, and fails
+    /// a try made there before the value is lent again. Turned red by a mark kept only where a try
+    /// reads it (`OwnerHeld::MARKS` without `debug_assertions`).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "taken again inside its own hold")]
+    fn a_debug_build_fails_a_try_inside_a_hold_of_an_owner_that_tries_none_there() {
+        let value = Taken::wrap(0u8);
+        Taken::with(&value, |_| Taken::try_with(&value, |_| ()));
     }
 
     /// A debug build fails a value taken inside its own hold, where a lock would wait on itself.
