@@ -41,10 +41,7 @@ pub(crate) enum Unit {
 /// engine port's sleeps are too: `nanosleep` on a Unix, slept again for what a signal cuts short,
 /// and `Sleep` on Windows in whole milliseconds, a part of one rounded up as pico's `z_sleep_us`
 /// rounds.
-#[cfg(all(
-    any(feature = "std", feature = "os-posix", feature = "os-windows"),
-    any(unix, windows)
-))]
+#[cfg(all(any(feature = "engine-tokio", feature = "os-host"), any(unix, windows)))]
 pub(crate) fn sleep(unit: Unit, time: usize) {
     wz_host_sync::sleep_us(micros_of(unit, time));
 }
@@ -52,10 +49,7 @@ pub(crate) fn sleep(unit: Unit, time: usize) {
 /// `count` of `unit` in microseconds; a count past the `u64` microseconds, some half a million
 /// years, is read as the longest sleep there is.
 #[cfg(any(
-    all(
-        any(feature = "std", feature = "os-posix", feature = "os-windows"),
-        any(unix, windows)
-    ),
+    all(any(feature = "engine-tokio", feature = "os-host"), any(unix, windows)),
     test
 ))]
 fn micros_of(unit: Unit, count: usize) -> u64 {
