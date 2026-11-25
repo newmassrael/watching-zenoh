@@ -5737,6 +5737,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.core.lock().0.arena.holds(at)
     }
 
+    /// Whether `at` is a byte of the region the build fixes the session's shape in, the head of
+    /// the block its arena is the tail of.
+    #[cfg(all(
+        test,
+        feature = "std",
+        not(feature = "runtime-plan"),
+        any(feature = "queryable", feature = "query", feature = "connectivity")
+    ))]
+    pub(crate) fn region_holds(&self, at: *const u8) -> bool {
+        let start = self.core.lock().0._state.as_ptr().as_ptr() as usize;
+        (start..start + core::mem::size_of::<StateRegion>()).contains(&(at as usize))
+    }
+
     /// Where the planes the session's state owns lie, each where its feature is.
     #[cfg(all(
         test,

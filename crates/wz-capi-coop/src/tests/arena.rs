@@ -3117,9 +3117,11 @@ fn a_groups_face_counts_every_members_aliases_in_the_pool() {
     );
 }
 
-/// The planes the session's state owns lie in the session's own arena, each in the place its plan
-/// laid out for it, reached by its engine and its tasks through handles that count nothing.
-/// Turned red by a plane made on the heap.
+/// The planes the session's state owns lie in the session's own block, reached by its engine and
+/// its tasks through handles that count nothing: each in the place its plan laid out for it in the
+/// arena where the open lays the plan out, and in its field of the region, the head of the block
+/// the arena is the tail of, where the build fixes the session's shape (`StatePlaces`). Turned red
+/// by a plane made on the heap, or by one placed anywhere but where its build puts it.
 #[test]
 #[cfg(any(feature = "queryable", feature = "query", feature = "connectivity"))]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
@@ -3129,7 +3131,10 @@ fn a_sessions_planes_lie_in_its_own_arena() {
     let places = engine.plane_places();
     assert!(!places.is_empty(), "the build has a plane");
     for at in places {
+        #[cfg(feature = "runtime-plan")]
         assert!(engine.arena_holds(at), "the plane lies in the arena");
+        #[cfg(not(feature = "runtime-plan"))]
+        assert!(engine.region_holds(at), "the plane lies in the region");
     }
 }
 
