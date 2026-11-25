@@ -1917,21 +1917,17 @@ fn admit_lent(
     }
 }
 
-/// The reader of a Push on the walks that lend one (`lend_push`).
+/// The reader of a Push: on the walks that lend one (`lend_push`), and on the owned parse
+/// (`decode_one_record`), which a build with an allocator has.
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
     any(
+        feature = "alloc",
         all(
-            feature = "alloc",
-            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-        ),
-        feature = "rx-push"
-    ),
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
+            feature = "rx-push",
+            any(test, feature = "session-unicast", feature = "session-multicast")
+        )
     )
 ))]
 mod push_read;
@@ -2574,9 +2570,16 @@ fn decode_one_record(
             let req = wz_codecs::request::RequestIn::<LentHeap<'_>>::decode(cursor)?;
             out.put(NetworkMessage::Request(Box::new(own_wire!(req, origin))))?;
         }
+        // A Push is read by the one reader every walk reads it with (`push_read`), and its view is
+        // filled into the record at the heap's capacity, which the owned message is projected from.
+        // The reader's verdict is not read here: the owned message is judged where every owned
+        // record is (`NetworkMessage::ext_admission`).
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
-            let push = wz_codecs::push::PushIn::<LentHeap<'_>>::decode(cursor)?;
+            let mut view = wz_codecs::push::PushView::default();
+            push_read::read_push_view(cursor, &mut view)?;
+            let mut push = wz_codecs::push::PushIn::<LentHeap<'_>>::default();
+            view.into_builder(&mut push)?;
             out.put(NetworkMessage::Push(Box::new(own_wire!(push, origin))))?;
         }
         #[cfg(feature = "codec-response-final")]

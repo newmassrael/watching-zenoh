@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The one reader of a Push on the walks that lend a record where its frame lies
-//! (`lend_push`): the record as the codec's view (`wz_codecs::push::PushView`) and the
-//! verdict of the extension admission rule on its chains, read in one pass.
+//! The one reader of a Push: the record as the codec's view (`wz_codecs::push::PushView`) and
+//! the verdict of the extension admission rule on its chains, read in one pass. Every walk that
+//! reads a Push reads it here: the walks that lend a record where its frame lies (`lend_push`),
+//! and the owned parse (`decode_one_record`), which projects the view into its owned message.
 //!
 //! What it reads, and how it refuses what it does not, is the generated `PushView::decode`'s,
 //! error for error, and its verdict is the one the rule gives the view it reads (the Push's own
@@ -332,6 +333,55 @@ mod tests {
         Ok((view, consumed, admission))
     }
 
+    /// What the owned parse makes of `bytes`, whose first record is a Push: the owned Push its one
+    /// record dispatch (`decode_one_record`) builds, and how far it read.
+    #[cfg(feature = "alloc")]
+    fn owned(
+        bytes: &[u8],
+    ) -> Result<(wz_codecs::push::PushOwned<super::super::WireStorage>, usize), CodecError> {
+        let mut cursor = SceCursor::new(bytes);
+        let mut out = alloc::vec::Vec::new();
+        let known =
+            super::super::decode_one_record(&mut cursor, &mut out, super::super::NO_ORIGIN)?;
+        assert!(known, "a Push is a record the build decodes");
+        let consumed = bytes.len() - cursor.remaining();
+        match out.pop() {
+            Some(super::super::NetworkMessage::Push(push)) if out.is_empty() => {
+                Ok((*push, consumed))
+            }
+            other => panic!("one Push is decoded: {other:?}"),
+        }
+    }
+
+    /// What the generated codec decodes `bytes` to at the heap's capacity and projects into the
+    /// owned Push, and how far it read: the reading the owned parse is held to.
+    #[cfg(feature = "alloc")]
+    fn owned_through_the_codec(
+        bytes: &[u8],
+    ) -> Result<(wz_codecs::push::PushOwned<super::super::WireStorage>, usize), CodecError> {
+        let mut cursor = SceCursor::new(bytes);
+        let push = wz_codecs::push::PushIn::<super::super::LentHeap<'_>>::decode(&mut cursor)?;
+        let consumed = bytes.len() - cursor.remaining();
+        Ok((
+            push.try_into_owned_in::<super::super::WireStorage>()?,
+            consumed,
+        ))
+    }
+
+    /// The reader against the codec over `bytes`, and with an allocator the owned parse against
+    /// the codec's owned decode, where the first record is a Push: what each case below is held
+    /// to.
+    fn agree(bytes: &[u8], case: &dyn core::fmt::Debug) {
+        assert_eq!(reading(bytes), through_the_codec(bytes), "{case:?}");
+        #[cfg(feature = "alloc")]
+        if bytes
+            .first()
+            .is_some_and(|header| header & 0x1f == wz_codecs::wire_const::N_MID_PUSH)
+        {
+            assert_eq!(owned(bytes), owned_through_the_codec(bytes), "{case:?}");
+        }
+    }
+
     /// Every shape a Push takes, written byte by byte: a plain Put with and without the QoS
     /// extension, a key in either mapping with and without a suffix, a chain of several entries,
     /// a Put with a timestamp and an encoding, a Put's own chain, a shared-memory Put (the marker
@@ -376,8 +426,9 @@ mod tests {
     }
 
     /// Over every shape, the reader reads what the codec reads and judges it as the rule judges
-    /// the codec's view: the same view, the same end, the same verdict; and with another record
-    /// behind it, as a frame holds them, the same.
+    /// the codec's view: the same view, the same end, the same verdict; the owned parse decodes it
+    /// as the codec's owned decode does; and with another record behind it, as a frame holds them,
+    /// the same.
     #[test]
     fn every_shape_reads_as_the_codec_reads_it() {
         let behind = [0x9du8, 3, 0x21, 0x1a, 0x01, 1, b'n'];
@@ -385,13 +436,13 @@ mod tests {
         for shape in shapes() {
             let read = reading(&shape);
             assert!(read.is_ok(), "{shape:02x?}: {read:?}");
-            assert_eq!(read, through_the_codec(&shape), "{shape:02x?}");
+            agree(&shape, &shape);
             assert_eq!(read.as_ref().map(|r| r.1), Ok(shape.len()), "{shape:02x?}");
             if read.is_ok_and(|r| r.2.refusal().is_some()) {
                 refused += 1;
             }
             let frame = [&shape[..], &behind[..]].concat();
-            assert_eq!(reading(&frame), through_the_codec(&frame), "{frame:02x?}");
+            agree(&frame, &frame);
         }
         assert!(
             refused >= 3,
@@ -400,28 +451,20 @@ mod tests {
     }
 
     /// Cut anywhere, a record is refused with the codec's error, and with any one byte changed to
-    /// any value, the reader answers what the codec and the rule answer: the same reading, or the
-    /// same error.
+    /// any value, the reader answers what the codec and the rule answer, and the owned parse what
+    /// the codec's owned decode answers: the same reading, or the same error.
     #[test]
     fn a_cut_or_damaged_record_reads_as_the_codec_reads_it() {
         let mut compared = 0usize;
         for shape in shapes() {
             for length in 0..shape.len() {
-                assert_eq!(
-                    reading(&shape[..length]),
-                    through_the_codec(&shape[..length]),
-                    "{shape:02x?} cut at {length}"
-                );
+                agree(&shape[..length], &(&shape, "cut at", length));
             }
             for position in 0..shape.len() {
                 for value in 0..=255u8 {
                     let mut bytes = shape.clone();
                     bytes[position] = value;
-                    assert_eq!(
-                        reading(&bytes),
-                        through_the_codec(&bytes),
-                        "{shape:02x?}: byte {position} = {value:#04x}"
-                    );
+                    agree(&bytes, &(&shape, "byte", position, value));
                     compared += 1;
                 }
             }
@@ -429,9 +472,9 @@ mod tests {
         assert!(compared > 10_000, "{compared}");
     }
 
-    /// The edges of what the key holds, each read as the codec reads it: an id of the widest value
-    /// and one past it, an id padded to nine bytes, a suffix of the longest length and one past it,
-    /// and a suffix that is not UTF-8.
+    /// The edges of what the key holds, each read as the codec reads it, by the reader and by the
+    /// owned parse: an id of the widest value and one past it, an id padded to nine bytes, a suffix
+    /// of the longest length and one past it, and a suffix that is not UTF-8.
     #[test]
     fn the_key_s_edges_read_as_the_codec_reads_them() {
         let id = |vle: &[u8]| [&[0x1du8][..], vle, &[0x01, 0][..]].concat();
@@ -454,6 +497,7 @@ mod tests {
             cases.iter().map(|case| reading(case.as_slice())).collect();
         for (case, answer) in cases.iter().zip(&answers) {
             assert_eq!(*answer, through_the_codec(case));
+            agree(case, &case.len());
         }
         assert!(answers[0].is_ok() && answers[2].is_ok() && answers[3].is_ok());
         assert_eq!(
