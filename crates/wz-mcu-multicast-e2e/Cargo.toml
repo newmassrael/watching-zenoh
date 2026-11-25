@@ -5,15 +5,15 @@
 #
 # A `#![no_std]` library that owns ONE thing: `run_multicast_e2e<C>` — the
 # full MCU multicast feature profile exercised end to end over a real lwIP
-# loopback: a peer JOIN admitted into the §3.2 peer table (transport-
-# multicast), an oversize application `z_put` split into a `T_MID_FRAGMENT`
-# chain by the shared `multicast_tx_emit` SSOT (transport-fragmentation TX),
-# multicast to the group, and reassembled by the R311mf Fragment RX arm back
-# into one `Push` (codec-push + reassembly RX). The multicast machinery is
-# the shared `wz-session-core` SSOT driven by `wz_session_lwip::
-# run_multicast_session`; this crate is only the e2e TOPOLOGY (the
-# pre-admit-our-source loopback trick + the oversize payload) plus the
-# verdict.
+# loopback: a second member's JOIN admitted into the §3.2 peer table
+# (transport-multicast), an oversize application `z_put` split into a
+# `T_MID_FRAGMENT` chain by the shared `multicast_tx_emit` SSOT
+# (transport-fragmentation TX) and read by that member, and the member's own
+# chain reassembled by the R311mf Fragment RX arm back into one `Push`
+# (codec-push + reassembly RX). The multicast machinery is the shared
+# `wz-session-core` SSOT driven by `wz_session_lwip::run_multicast_session`;
+# this crate is only the e2e TOPOLOGY (the member on a socket of its own, since
+# one host holds one socket on a port, + the oversize payload) plus the verdict.
 #
 # # Why a library (not folded into the deploy bin)
 #
