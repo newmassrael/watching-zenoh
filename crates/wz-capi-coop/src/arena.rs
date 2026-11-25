@@ -474,10 +474,10 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The round's records, the callbacks they owe, its keys and, where the open places it in the
-/// arena (`runtime-plan`), the round itself: the round keeps no area, since every record is read
-/// where it lies.
-const LANE_ROWS: usize = 3 + cfg!(feature = "runtime-plan") as usize;
+/// The round's records where the arena lends them, the callbacks they owe, its keys and, where the
+/// open places it in the arena (`runtime-plan`), the round itself: the round keeps no area, since
+/// every record is read where it lies, and a round of one thread keeps its records in itself.
+const LANE_ROWS: usize = (RECORD_BYTES != 0) as usize + 2 + cfg!(feature = "runtime-plan") as usize;
 /// The places the session lends its Router and, where its links run as tasks, its registry in for
 /// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
 const STEP_LEND_ROWS: usize = cfg!(feature = "runtime-plan") as usize
@@ -1768,12 +1768,15 @@ impl ArenaPlan {
             let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
             self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
         }
-        // The round's tables (`crate::round::RoundRows::lent`).
-        self.put(
-            ArenaPart::DeliveryRecords,
-            self.session.round.records,
-            RECORD_BYTES,
-        );
+        // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
+        // lends them, as a round of one thread keeps them in itself and is lent no byte of them.
+        if RECORD_BYTES != 0 {
+            self.put(
+                ArenaPart::DeliveryRecords,
+                self.session.round.records,
+                RECORD_BYTES,
+            );
+        }
         self.put(
             ArenaPart::DeliveryCallbacks,
             self.session.round.callbacks,

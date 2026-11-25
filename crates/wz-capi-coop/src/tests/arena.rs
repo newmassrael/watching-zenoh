@@ -706,7 +706,9 @@ fn the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool() {
 /// The round's tables are as many rows as the session's `DELIVERY_LANE_EVENTS` and
 /// `DELIVERY_LANE_CALLBACKS` state and its longest key, two of it for a round of threads and one for
 /// a round of one thread, each lowered with its limit, and are laid out right after the lane's area,
-/// the order the open lends them in. Turned red by a round of one thread lent two keys.
+/// the order the open lends them in. A round of one thread keeps its records in itself and is laid
+/// out no row of them. Turned red by a round of one thread lent two keys, or a row of records laid
+/// out where the arena lends none.
 #[test]
 fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
     let built =
@@ -719,10 +721,13 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
             longest_key: caps::MAX_KEYEXPR_BYTES,
         }
     );
-    assert_eq!(
-        row(&built, "delivery records").count,
-        caps::DELIVERY_LANE_EVENTS
-    );
+    let records = |plan: &ArenaPlan| {
+        plan.rows()
+            .find(|row| row.part() == "delivery records")
+            .map(|row| row.count)
+    };
+    let lent = |count: usize| (crate::round::RECORD_BYTES != 0).then_some(count);
+    assert_eq!(records(&built), lent(caps::DELIVERY_LANE_EVENTS));
     assert_eq!(
         row(&built, "delivery callbacks").count,
         caps::DELIVERY_LANE_CALLBACKS
@@ -732,7 +737,7 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
         l.select_max_keyexpr_bytes(Quota::at_most(32))
     });
     let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
-    assert_eq!(row(&plan, "delivery records").count, 4);
+    assert_eq!(records(&plan), lent(4));
     assert_eq!(row(&plan, "delivery keys").count, 1);
     let keys = if <CoopForm as ThreadForm>::OTHER_THREADS {
         2
@@ -759,17 +764,25 @@ fn the_plan_lays_out_no_delivery_lane() {
     let parts: Vec<&str> = built.rows().map(|row| row.part()).collect();
     assert!(!parts.contains(&"delivery lane"));
     assert!(!parts.contains(&"delivery lane flag"));
-    let records = parts
+    // A round of one thread keeps its records in itself, and is laid out no row of them; a round
+    // the region holds is laid out no place either.
+    let tables: Vec<&str> = [
+        "delivery records",
+        "delivery callbacks",
+        "delivery keys",
+        "delivery round",
+    ]
+    .into_iter()
+    .filter(|part| crate::round::RECORD_BYTES != 0 || *part != "delivery records")
+    .filter(|part| cfg!(feature = "runtime-plan") || *part != "delivery round")
+    .collect();
+    let first = parts
         .iter()
-        .position(|part| *part == "delivery records")
+        .position(|part| *part == tables[0])
         .expect("CONTROL: the round's tables are laid out");
-    assert_eq!(
-        parts[records..records + 3],
-        ["delivery records", "delivery callbacks", "delivery keys"]
-    );
+    assert_eq!(parts[first..first + tables.len()], tables[..]);
     #[cfg(feature = "runtime-plan")]
     {
-        assert_eq!(parts.get(records + 3), Some(&"delivery round"));
         let round = row(&built, "delivery round");
         assert_eq!(
             (round.count, round.entry_bytes),
@@ -805,11 +818,13 @@ fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
         "the region holds the Router's place"
     );
     #[cfg(feature = "runtime-plan")]
-    for (part, bytes) in [
+    let lends: &[(&str, usize)] = &[
         #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         ("registry lend", crate::engine::REGISTRY_LEND_BYTES),
         ("router lend", crate::engine::ROUTER_LEND_BYTES),
-    ] {
+    ];
+    #[cfg(feature = "runtime-plan")]
+    for &(part, bytes) in lends {
         let laid = row(&built, part);
         assert_eq!((laid.count, laid.entry_bytes), (1, bytes), "{part}");
     }
