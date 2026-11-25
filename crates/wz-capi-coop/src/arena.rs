@@ -163,7 +163,9 @@ use crate::engine::ROOM_PLACE_BYTES;
 #[cfg(feature = "runtime-plan")]
 use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
 use crate::open_source::EndpointList;
-use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
+#[cfg(feature = "runtime-plan")]
+use crate::round::{CoopForm, CALLBACK_BYTES};
+use crate::round::{RoundRowCounts, RECORD_BYTES};
 use crate::CoopConfig;
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReply;
@@ -474,10 +476,12 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The round's records where the arena lends them, the callbacks they owe, its keys and, where the
-/// open places it in the arena (`runtime-plan`), the round itself: the round keeps no area, since
-/// every record is read where it lies, and a round of one thread keeps its records in itself.
-const LANE_ROWS: usize = (RECORD_BYTES != 0) as usize + 2 + cfg!(feature = "runtime-plan") as usize;
+/// The round's records where the arena lends them, the callbacks they owe, its keys and the round
+/// itself, where the open places them in the arena (`runtime-plan`); a region holds them otherwise:
+/// the round keeps no area, since every record is read where it lies, and a round of one thread
+/// keeps its records in itself.
+const LANE_ROWS: usize =
+    ((RECORD_BYTES != 0) as usize + 3) * cfg!(feature = "runtime-plan") as usize;
 /// The places the session lends its Router and, where its links run as tasks, its registry in for
 /// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
 const STEP_LEND_ROWS: usize = cfg!(feature = "runtime-plan") as usize
@@ -1770,6 +1774,9 @@ impl ArenaPlan {
         }
         // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
         // lends them, as a round of one thread keeps them in itself and is lent no byte of them.
+        // Where the build fixes the session's shape the tables and the round lie in the session's
+        // region instead (`StatePlaces::round`).
+        #[cfg(feature = "runtime-plan")]
         if RECORD_BYTES != 0 {
             self.put(
                 ArenaPart::DeliveryRecords,
@@ -1777,11 +1784,13 @@ impl ArenaPlan {
                 RECORD_BYTES,
             );
         }
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::DeliveryCallbacks,
             self.session.round.callbacks,
             CALLBACK_BYTES,
         );
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::DeliveryKeys,
             1,

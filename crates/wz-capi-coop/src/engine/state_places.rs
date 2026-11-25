@@ -3,9 +3,9 @@
 
 //! The values a session whose shape the build fixes owns in its state and its tasks reach by
 //! handles that count nothing, laid out as fields of the session's region
-//! (`crate::region::StateRegion`) instead of placed in its arena: the round of deliveries, the
-//! planes of its gets, its queryables and the watchers of its faces, and the cells its registry
-//! and its Router are lent in for a step. Each lies in a `MaybeUninit` field, which the region's drop does not drop: the
+//! (`crate::region::StateRegion`) instead of placed in its arena: the round of deliveries and the
+//! rows of its tables, the planes of its gets, its queryables and the watchers of its faces, and
+//! the cells its registry and its Router are lent in for a step. Each lies in a `MaybeUninit` field, which the region's drop does not drop: the
 //! [`Placed`] owner written there does, wherever the session holds it, so each value is let go in
 //! the order the session lets its owner go, as one the arena held was.
 
@@ -14,6 +14,7 @@ use core::ptr::{addr_of_mut, NonNull};
 
 use wz_session_core::bounded::ZeroEmpty;
 use wz_session_core::placed::Placed;
+use wz_session_core::round::RoundRowPlaces;
 use wz_session_core::step_lend::LendCell;
 
 #[cfg(feature = "connectivity")]
@@ -25,7 +26,7 @@ use super::QueryPlane;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use super::Registry;
 use super::{SessionReassembly, StepPlaces};
-use crate::round::{CoopCalls, Round, RoundRows};
+use crate::round::{CoopCalls, Round, RoundRowCounts, RoundRows};
 
 /// The places of a session's region its state's own values are written in: see the module
 /// documentation.
@@ -36,6 +37,9 @@ pub(crate) struct StatePlaces {
     /// Where the reassembly Router is lent to the links' receives.
     router_lend: MaybeUninit<LendCell<SessionReassembly>>,
     round: MaybeUninit<Round>,
+    /// The rows of the round's tables, which the round reads where they lie: the build's bound of
+    /// each, as the round's form keeps them.
+    round_rows: RoundRowPlaces<CoopCalls>,
     #[cfg(feature = "query")]
     gets: MaybeUninit<GetPlane>,
     #[cfg(feature = "queryable")]
@@ -44,7 +48,8 @@ pub(crate) struct StatePlaces {
     faces: MaybeUninit<FacePlane>,
 }
 
-// SAFETY: every field is a `MaybeUninit`, which holds no value at any bytes, so none at zero.
+// SAFETY: every field is a `MaybeUninit`, which holds no value at any bytes, or the round's rows,
+// which are `ZeroEmpty`.
 unsafe impl ZeroEmpty for StatePlaces {}
 
 /// Where the value of the field at `field` is to lie.
@@ -83,13 +88,23 @@ impl StatePlaces {
         }
     }
 
-    /// The session's round over `rows`, written in its field of the places at `at`.
+    /// The session's round over tables of `counts`, written in its field of the places at `at`,
+    /// its tables over the rows of the field beside it.
     ///
     /// # Safety
-    /// As [`Self::steps`], for the round's field.
-    pub(super) unsafe fn round(at: NonNull<Self>, rows: RoundRows<CoopCalls>) -> Placed<Round> {
+    /// As [`Self::steps`], for the round's field and its rows' field.
+    pub(super) unsafe fn round(at: NonNull<Self>, counts: RoundRowCounts) -> Placed<Round> {
+        let at = at.as_ptr();
+        // SAFETY: the caller's contract; the rows' field holds no value and is reached by the
+        // round's tables alone, which the round's owner drops before the region goes.
+        let rows = unsafe {
+            RoundRows::placed_in(
+                NonNull::new_unchecked(addr_of_mut!((*at).round_rows)),
+                counts,
+            )
+        };
         // SAFETY: the caller's contract; the field is aligned for a round and the owner's alone.
-        unsafe { Round::placed_at(value_at(addr_of_mut!((*at.as_ptr()).round)), rows) }
+        unsafe { Round::placed_at(value_at(addr_of_mut!((*at).round)), rows) }
     }
 
     /// The gets' `plane`, written in its field of the places at `at`.

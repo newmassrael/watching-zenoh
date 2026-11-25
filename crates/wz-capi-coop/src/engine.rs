@@ -58,7 +58,9 @@ use crate::form::{LockForm, StateGuard, StateLock};
 use crate::round::LendingLink;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
-use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundRows};
+#[cfg(feature = "runtime-plan")]
+use crate::round::RoundRows;
+use crate::round::{CoopForm, Latch, Round, RoundCounts};
 use crate::RowPolicy;
 use wz_capi_port::reach::{ReachEngine, RowClaim};
 use wz_runtime_coop::kept::Shared;
@@ -886,6 +888,7 @@ fn lend_session(
         policy,
         SessionChains::over(&transport.reassembly, LENT_CHAINS),
     );
+    #[cfg(feature = "runtime-plan")]
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
     // The rows the gets that consolidate hold their replies in, lent beside the round's.
@@ -916,9 +919,9 @@ fn lend_session(
     #[cfg(feature = "runtime-plan")]
     let mut samples =
         Round::placed_over(arena.arena_mut(), round_rows).map_err(ArenaRefused::Lend)?;
-    // SAFETY: as above, for the round's field.
+    // SAFETY: as above, for the round's field and the field of its tables' rows.
     #[cfg(not(feature = "runtime-plan"))]
-    let mut samples = unsafe { StatePlaces::round(region_places, round_rows) };
+    let mut samples = unsafe { StatePlaces::round(region_places, plan.round()) };
     // No handle of the round is taken yet: it reads the keys a peer's aliases keep in the
     // session's key arena where they lie.
     let round = samples.get_mut();

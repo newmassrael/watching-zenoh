@@ -24,7 +24,6 @@ use wz_session_core::limits::{SessionLimits, CAPACITY_LIMITS, SESSION_LIMITS};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
-use wz_session_core::row_callback::ThreadForm;
 use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
 
 use super::entity_tables::lowered;
@@ -34,7 +33,7 @@ use super::{
 use crate::arena::{
     AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
 };
-use crate::round::{CoopForm, RoundRowCounts};
+use crate::round::RoundRowCounts;
 use crate::{CoopConfig, OpenError, OpenKeyIds};
 
 /// A memory with none to give, whatever it is asked.
@@ -730,42 +729,56 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
             longest_key: caps::MAX_KEYEXPR_BYTES,
         }
     );
-    let records = |plan: &ArenaPlan| {
-        plan.rows()
-            .find(|row| row.part() == "delivery records")
-            .map(|row| row.count)
-    };
-    let lent = |count: usize| (crate::round::RECORD_BYTES != 0).then_some(count);
-    assert_eq!(records(&built), lent(caps::DELIVERY_LANE_EVENTS));
-    assert_eq!(
-        row(&built, "delivery callbacks").count,
-        caps::DELIVERY_LANE_CALLBACKS
-    );
     let lowered = lowered(|l| {
         l.select_delivery_lane_events(Quota::at_most(4))?;
         l.select_max_keyexpr_bytes(Quota::at_most(32))
     });
     let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
-    assert_eq!(records(&plan), lent(4));
-    assert_eq!(row(&plan, "delivery keys").count, 1);
-    let keys = if <CoopForm as ThreadForm>::OTHER_THREADS {
-        2
-    } else {
-        1
-    };
-    assert_eq!(row(&plan, "delivery keys").entry_bytes, 32 * keys);
-    assert!(
-        plan.reserved_bytes() < built.reserved_bytes(),
-        "the lowered limits lower the arena"
-    );
+    assert_eq!(plan.round().records, 4);
+    assert_eq!(plan.round().longest_key, 32);
+    // A build of the region's form keeps the round's tables in its region over these counts
+    // (`StatePlaces::round`): its arena lays out no row of them.
+    #[cfg(not(feature = "runtime-plan"))]
+    assert!(plan
+        .rows()
+        .chain(built.rows())
+        .all(|laid| !laid.part().starts_with("delivery")));
+    #[cfg(feature = "runtime-plan")]
+    {
+        let records = |plan: &ArenaPlan| {
+            plan.rows()
+                .find(|row| row.part() == "delivery records")
+                .map(|row| row.count)
+        };
+        let lent = |count: usize| (crate::round::RECORD_BYTES != 0).then_some(count);
+        assert_eq!(records(&built), lent(caps::DELIVERY_LANE_EVENTS));
+        assert_eq!(
+            row(&built, "delivery callbacks").count,
+            caps::DELIVERY_LANE_CALLBACKS
+        );
+        assert_eq!(records(&plan), lent(4));
+        assert_eq!(row(&plan, "delivery keys").count, 1);
+        let keys =
+            if <crate::round::CoopForm as wz_session_core::row_callback::ThreadForm>::OTHER_THREADS
+            {
+                2
+            } else {
+                1
+            };
+        assert_eq!(row(&plan, "delivery keys").entry_bytes, 32 * keys);
+        assert!(
+            plan.reserved_bytes() < built.reserved_bytes(),
+            "the lowered limits lower the arena"
+        );
+    }
 }
 
 /// The plan lays out no delivery area: every record is read where it lies, so the plan has no lane
 /// and no flag of one, and the round's tables are laid out next to each other, the round itself
-/// after them, one of it where the open places the round in the arena, none where the build fixes
-/// the session's shape and the round lies in its region (`StatePlaces`). Turned red by a plan that
-/// reserves the area again, that lays out no place for the round the open places in the arena
-/// (`lend_session`), or one for the round the region holds.
+/// after them, one of it where the open places the round in the arena; none of them where the build
+/// fixes the session's shape and the round and its tables lie in its region (`StatePlaces`).
+/// Turned red by a plan that reserves the area again, that lays out no place for the round the open
+/// places in the arena (`lend_session`), or a row of the round the region holds.
 #[test]
 fn the_plan_lays_out_no_delivery_lane() {
     let built =
@@ -775,31 +788,32 @@ fn the_plan_lays_out_no_delivery_lane() {
     assert!(!parts.contains(&"delivery lane flag"));
     // A round of one thread keeps its records in itself, and is laid out no row of them; a round
     // the region holds is laid out no place either.
-    let tables: Vec<&str> = [
-        "delivery records",
-        "delivery callbacks",
-        "delivery keys",
-        "delivery round",
-    ]
-    .into_iter()
-    .filter(|part| crate::round::RECORD_BYTES != 0 || *part != "delivery records")
-    .filter(|part| cfg!(feature = "runtime-plan") || *part != "delivery round")
-    .collect();
-    let first = parts
-        .iter()
-        .position(|part| *part == tables[0])
-        .expect("CONTROL: the round's tables are laid out");
-    assert_eq!(parts[first..first + tables.len()], tables[..]);
+    // A build of the region's form keeps the round and its tables in its region
+    // (`StatePlaces::round`), and its arena lays out none of them.
+    #[cfg(not(feature = "runtime-plan"))]
+    assert!(parts.iter().all(|part| !part.starts_with("delivery")));
     #[cfg(feature = "runtime-plan")]
     {
+        let tables: Vec<&str> = [
+            "delivery records",
+            "delivery callbacks",
+            "delivery keys",
+            "delivery round",
+        ]
+        .into_iter()
+        .filter(|part| crate::round::RECORD_BYTES != 0 || *part != "delivery records")
+        .collect();
+        let first = parts
+            .iter()
+            .position(|part| *part == tables[0])
+            .expect("CONTROL: the round's tables are laid out");
+        assert_eq!(parts[first..first + tables.len()], tables[..]);
         let round = row(&built, "delivery round");
         assert_eq!(
             (round.count, round.entry_bytes),
             (1, core::mem::size_of::<crate::round::Round>())
         );
     }
-    #[cfg(not(feature = "runtime-plan"))]
-    assert!(!parts.contains(&"delivery round"));
 }
 
 /// The plan lays out one place for each step lend the open places in the arena
