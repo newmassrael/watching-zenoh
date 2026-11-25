@@ -237,6 +237,18 @@ DISCARD_UNWIND_LINK = f"-Wl,-T,{DISCARD_UNWIND_SCRIPT}"
 # The C compiler's like of `-C force-unwind-tables=no`: code with no unwind tables, the
 # asynchronous ones GCC writes by default on x86_64 included.
 NO_UNWIND_CFLAGS = ("-fno-asynchronous-unwind-tables", "-fno-unwind-tables")
+# The line tables the size ledger reads its areas from (`size_ledger_gate.py`): a case and its
+# zenoh-pico reference built again with them, so each byte of code names the source it came from,
+# inlined code included. No loaded section holds them, and the ledger refuses a twin whose
+# executable sections differ from the library measured here, so every figure of this gate is still
+# read from the build without them. rustc keeps line tables only, and keeps them at the link (a
+# profile without debug information has cargo strip it by default). The C compiler writes GCC's
+# level 1 (clang's line tables only), without its command line in the producer string, where the
+# prefix maps would put the host's paths. The twin has a target directory of its own, so it does
+# not overwrite the library this gate measured and neither build undoes the other.
+LINE_TABLES_RUSTFLAGS = ["-C", "debuginfo=line-tables-only", "-C", "strip=none"]
+LINE_TABLES_CFLAGS = ("-g1", "-gno-record-gcc-switches")
+LINE_TABLES_TARGET = TARGET / "line-tables"
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
@@ -2143,20 +2155,24 @@ def inherits_from(profile: str, base: str, profiles: Mapping[str, Mapping[str, s
 
 
 def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
-               cfg: set[str] | None = None) -> CaseBuild:
+               cfg: set[str] | None = None, *, line_tables: bool = False) -> CaseBuild:
     """The build of `case` in `env` (the gate's, `build_env`). A case that names configuration
     files is built for the host's own target, `triple` (this host's when not given), whose
     `rustc --print cfg` lines are `cfg` (rustc's when not given), so their flags reach the
-    library's crates and not the build scripts."""
+    library's crates and not the build scripts. With `line_tables`, the same build with its line
+    tables, after every other flag, in their own target directory (`LINE_TABLES_TARGET`)."""
+    target = LINE_TABLES_TARGET if line_tables else TARGET
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
-           "--target-dir", str(TARGET)]
-    lib_dir = TARGET / case.profile
+           "--target-dir", str(target)]
+    lib_dir = target / case.profile
     flags = list(GATE_RUSTFLAGS)
     if case.cargo_configs:
         triple = triple or host_triple()
         flags += case_config_flags(case, triple, target_cfg(triple) if cfg is None else cfg)
         cmd += ["--target", triple]
-        lib_dir = TARGET / triple / case.profile
+        lib_dir = target / triple / case.profile
+    if line_tables:
+        flags += LINE_TABLES_RUSTFLAGS
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
@@ -2702,6 +2718,19 @@ def cmd_selftest() -> int:
            in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
            and discards_unwind_tables(bare_build.link_args)
            and PACKED_RELOCS_LINK in bare_build.link_args)
+    lines_build = case_build(by_case["pico-client-coop-nostd"], {}, "x86_64-unknown-linux-gnu",
+                             linux_gnu, line_tables=True)
+    lines_flags = lines_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
+    bare_flags = bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
+    expect("a case with line tables is its own build with their flags last, in its own directory",
+           lines_flags == bare_flags + LINE_TABLES_RUSTFLAGS
+           and lines_build.cmd[lines_build.cmd.index("--target-dir") + 1] == str(LINE_TABLES_TARGET)
+           and [a for a in lines_build.cmd if a != str(LINE_TABLES_TARGET)]
+           == [a for a in bare_build.cmd if a != str(TARGET)]
+           and lines_build.lib
+           == LINE_TABLES_TARGET / "x86_64-unknown-linux-gnu" / "capi-nostd" / "libwz_capi_pico.so"
+           and lines_build.link_args == bare_build.link_args
+           and LINE_TABLES_TARGET != TARGET)
     expect("the GNU ld line of the C compiler's linker version is read, and none is None",
            gnu_ld_line("collect2 version 13\nGNU ld (GNU Binutils for Ubuntu) 2.38\nCopyright\n")
            == "GNU ld (GNU Binutils for Ubuntu) 2.38"

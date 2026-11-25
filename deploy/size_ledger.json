@@ -1,8 +1,9 @@
 {
-  "about": "The size ledger of the pico C ABI's release library (docs/c-abi-architecture.md principle P9; the gate is scripts/lib/size_ledger_gate.py, Layer C1cs). The function bytes of one case of scripts/lib/capability_cost_gate.py (`case`) and of zenoh-pico built as the same build, each body counted once however many names its address carries, divided into the AREAS of the architecture by the RULES below, and each area's ratio held by its row in `rows`. A row follows the rule of a row of deploy/pico_host_ceiling.json (scripts/lib/pico_host_ceiling.py, the one implementation): locked at WIN, or a ratchet, `ratio_at_most`, the ratio of the reading it was set from rounded up to four places, under the open-debt item the area is registered under; `wz_text` and `pico_text` of a reading are the area's function bytes. A ratchet only moves down: a reading over it by more than the tolerance fails, a reading under it by more prints the tighter row to commit. A row whose ratio_at_most is null is unfilled and fails with the row this run reads; --measure prints every row. RULES, per side: `names` are regular expressions over a symbol's name (its compiler clone suffix removed), the first match in this file's order placing it; `owners` are prefixes of the path of what wrote the symbol (for wz the crate::module its v0 mangling names, for an impl item the module that wrote the impl; for zenoh-pico the source file that defines it), the longest match at a segment boundary placing it. A name rule comes first, and a symbol with several owners is placed only when they agree. Bytes no rule places are unclassified, and either side's over `unclassified_bytes_at_most` fail the gate: what a change brings is given an area in the commit that brings it.",
-  "schema": 1,
+  "about": "The size ledger of the pico C ABI's release library (docs/c-abi-architecture.md principle P9; the gate is scripts/lib/size_ledger_gate.py, Layer C1cs). The function bytes of one case of scripts/lib/capability_cost_gate.py (`case`) and of zenoh-pico built as the same build, each body counted once however many names its address carries, each byte of it given to the source file the line table of the build's twin with line tables names (for inlined code, the inlined function's file), divided into the AREAS of the architecture by the RULES below, and each area's ratio held by its row in `rows`. A row follows the rule of a row of deploy/pico_host_ceiling.json (scripts/lib/pico_host_ceiling.py, the one implementation): locked at WIN, or a ratchet, `ratio_at_most`, the ratio of the reading it was set from rounded up to four places, under the open-debt item the area is registered under; `wz_text` and `pico_text` of a reading are the area's function bytes. A ratchet only moves down: a reading over it by more than the tolerance fails, a reading under it by more prints the tighter row to commit. A row whose ratio_at_most is null is unfilled and fails with the row this run reads; --measure prints every row. RULES, per side: `owners` are prefixes of the owner of a byte's source file (for wz the crate::module the file is, by its path in its crate or, for code a crate includes, by the module its functions are named in; for zenoh-pico the file's path in the export, and `toolchain/...` for the C toolchain's headers), the longest match at a segment boundary placing it; `names` are regular expressions over a symbol's name (its compiler clone suffix removed), the first match in this file's order giving the area of the bytes of the body's own file. Bytes no rule places are unclassified, and either side's over `unclassified_bytes_at_most` fail the gate: what a change brings is given an area in the commit that brings it. Bytes of no source line (line 0, or no row) are unattributed, in no area, and either side's over `unattributed_bytes_at_most` fail; null is unfilled and fails with what the run reads.",
+  "schema": 2,
   "case": "pico-client-coop-nostd",
   "unclassified_bytes_at_most": 1024,
+  "unattributed_bytes_at_most": null,
   "areas": [
     {"id": "sessions", "title": "sessions, routing, entities (declare, subscribe, query, reply, interest)"},
     {"id": "doors", "title": "C ABI doors (z_*, zp_*, ze_*)"},
@@ -74,6 +75,8 @@
         "wz_codecs": "codec",
         "sce_portable_bytes": "language",
         "core": "language",
+        "core_arch": "language",
+        "compiler_builtins": "language",
         "alloc": "language",
         "hashbrown": "language",
         "foldhash": "language",
@@ -112,7 +115,8 @@
         "src/system": "driver",
         "include/zenoh-pico/system": "driver",
         "src/link": "driver",
-        "include/zenoh-pico/link": "driver"
+        "include/zenoh-pico/link": "driver",
+        "toolchain": "language"
       }
     }
   }

@@ -67,14 +67,19 @@ class ElfError(Exception):
 
 
 class Section:
-    __slots__ = ("name", "kind", "offset", "size", "link")
+    __slots__ = ("name", "kind", "offset", "size", "link", "flags", "addr")
 
-    def __init__(self, name: str, kind: int, offset: int, size: int, link: int) -> None:
+    def __init__(self, name: str, kind: int, offset: int, size: int, link: int, flags: int = 0,
+                 addr: int = 0) -> None:
         self.name = name
         self.kind = kind
         self.offset = offset
         self.size = size
         self.link = link
+        # sh_flags and sh_addr: whether the section is code (SHF_EXECINSTR) or compressed
+        # (SHF_COMPRESSED), and where it is loaded.
+        self.flags = flags
+        self.addr = addr
 
 
 class Note:
@@ -126,16 +131,17 @@ def sections(data: bytes) -> list[Section]:
         entry = _span(data, shoff + i * shentsize, need, f"section header {i}")
         fields = struct.unpack_from(shdr, entry, 0)
         # name, type, flags, addr, offset, size, link
-        raw.append((fields[0], fields[1], fields[4], fields[5], fields[6]))
+        raw.append((fields[0], fields[1], fields[4], fields[5], fields[6], fields[2], fields[3]))
     if shstrndx >= len(raw):
         raise ElfError("the section name table index is outside the section headers")
     names = _span(data, raw[shstrndx][2], raw[shstrndx][3], "the section name table")
     out = []
-    for name_off, kind, offset, size, link in raw:
+    for name_off, kind, offset, size, link, flags, addr in raw:
         stop = names.find(b"\x00", name_off)
         if name_off >= len(names) or stop < 0:
             raise ElfError("a section name is outside the name table")
-        out.append(Section(names[name_off:stop].decode("utf-8", "replace"), kind, offset, size, link))
+        out.append(Section(names[name_off:stop].decode("utf-8", "replace"), kind, offset, size, link,
+                           flags, addr))
     return out
 
 
