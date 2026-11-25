@@ -2181,7 +2181,9 @@ impl SubscriberRow {
             return;
         }
         let hidden;
-        let sample = if self.expose {
+        // A sample that carries no timestamp has none to hide: it is handed as it lies, with no
+        // copy made of it for each call.
+        let sample = if self.expose || sample.timestamp.is_none() {
             sample
         } else {
             hidden = sample.without_timestamp();
@@ -2856,11 +2858,11 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         let (plane, generation) = (&self.plane, self.generation);
         let dispatched = self.registry.with(|registry| {
             #[cfg(feature = "queryable")]
-            for (rid, qos) in registry.after_pushes(face, actions) {
+            registry.after_pushes(face, actions, |rid, qos| {
                 if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
                     actions.send_response_final(rid, qos);
                 }
-            }
+            });
             #[cfg(not(feature = "queryable"))]
             registry.after_pushes(face, actions);
         });

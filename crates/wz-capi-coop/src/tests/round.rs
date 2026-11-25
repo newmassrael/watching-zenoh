@@ -320,6 +320,48 @@ fn a_row_that_sees_no_timestamp_is_handed_every_other_part() {
     );
 }
 
+/// A subscriber that does not see timestamps is handed a sample carrying none as it lies, with no
+/// copy made of it, and one carrying a timestamp as a copy without it. Turned red by a row that
+/// copies every sample it hides timestamps from, or hands on a timestamp it was declared not to see.
+#[test]
+fn a_row_that_sees_no_timestamp_hands_a_sample_without_one_as_it_lies() {
+    use wz_session_core::sink::SampleRef;
+
+    /// Notes where the sample handed lay and whether it carried a timestamp.
+    unsafe fn note(context: *mut core::ffi::c_void, sample: &SampleRef<'_>) {
+        // SAFETY: the context is the test's cell, which stands while the row does.
+        let noted = unsafe { &*context.cast::<Cell<(usize, bool)>>() };
+        noted.set((
+            core::ptr::from_ref(sample) as usize,
+            sample.timestamp.is_some(),
+        ));
+    }
+    let noted = Cell::new((0usize, false));
+    // SAFETY: `note` reads its context alone, on this thread, while `noted` stands; nothing drops
+    // the context.
+    let sink =
+        unsafe { SubscriberSink::raw(note, core::ptr::from_ref(&noted).cast_mut().cast(), None) };
+    let row = Row::exposing(sink, false);
+    let zid = [7u8; 16];
+    let bare = SampleRef::new("demo/round", b"p", SampleKind::Put, Reliability::BestEffort);
+    let mut stamped = SampleRef::new("demo/round", b"p", SampleKind::Put, Reliability::BestEffort);
+    stamped.timestamp = Some((1, &zid[..]));
+    let call = row.call();
+    call.hand(&bare);
+    assert_eq!(
+        noted.get(),
+        (core::ptr::from_ref(&bare) as usize, false),
+        "a sample with no timestamp is handed as it lies"
+    );
+    call.hand(&stamped);
+    let (at, shown) = noted.get();
+    assert!(
+        at != core::ptr::from_ref(&stamped) as usize && !shown,
+        "CONTROL: a timestamp is hidden in a copy"
+    );
+    assert!(!call.end(), "the row is not undeclared");
+}
+
 /// The samples of a datagram a link lends are read where they lie: one record for a sample
 /// however many subscribers it reaches, the link held back from the next datagram until they are
 /// handed out, and each handed to its callbacks in the order it came.
