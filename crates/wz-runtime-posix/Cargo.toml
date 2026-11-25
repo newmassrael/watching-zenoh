@@ -105,6 +105,10 @@ serial = ["alloc", "wz-runtime-coop/serial"]
 # `PosixFifo`, opened and locked as zenoh's unixpipe link opens its own, on Linux and Android).
 # The heap profile's, as the engine's unixpipe links are.
 unixpipe = ["alloc", "wz-runtime-coop/unixpipe"]
+# The host's raw packet sockets as the devices of the cooperative engine's `reth/` groups
+# (`raweth`: `PosixRawEth`, an `AF_PACKET` socket bound to the endpoint's interface, as zenoh-pico
+# opens its raweth socket, on Linux). The heap profile's, as the engine's groups are.
+raweth = ["alloc", "wz-runtime-coop/raweth"]
 
 [lints]
 workspace = true

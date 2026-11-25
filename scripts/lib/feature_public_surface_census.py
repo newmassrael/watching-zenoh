@@ -1127,8 +1127,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`serial` gates the host's ttys as serial lines (`serial`), which the cooperative engine's "
         "serial links open and this crate's own tests run; `unixpipe` gates the host's named FIFOs "
         "(`unixpipe`), which the cooperative engine's unixpipe links open and this crate's own "
-        "tests run",
-        frozenset({"host-multicast", "serial", "session-slot", "unixpipe"}),
+        "tests run; `raweth` gates the host's raw packet sockets (`raweth`), which the "
+        "cooperative engine's `reth/` groups open and this crate's own tests run",
+        frozenset({"host-multicast", "raweth", "serial", "session-slot", "unixpipe"}),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -1574,8 +1575,11 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     "wz-runtime-zephyr": frozenset({"session-slot"}),
     # The host profile: `session-slot` gates one crate-root `pub mod slot`, and `host-multicast`
     # three crate-root modules, the simple shape the axis names, so the row is excused only while
-    # the axis could take it for free.
-    "wz-runtime-posix": frozenset({"host-multicast", "serial", "session-slot", "unixpipe"}),
+    # the axis could take it for free. `raweth` gates one crate-root `pub mod raweth` behind
+    # `all(raweth, not(session-slot))`, the compound `wz-runtime-coop`'s `app-link` site has.
+    "wz-runtime-posix": frozenset(
+        {"host-multicast", "raweth", "serial", "session-slot", "unixpipe"}
+    ),
     # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind
     # `all(feature = .., lwip_real_build)`, a compound the derivation reads.
