@@ -123,6 +123,14 @@ enum Command {
     /// Ask a query of request id `.0` on the key.
     #[cfg(feature = "queryable")]
     Query(wz_session_core::wire_id::RequestId, &'static str),
+    /// In one batch window, so that one frame carries all three: push on the key `.0`, ask a
+    /// query of request id `.1` on the key `.2`, and push on `.0` again.
+    #[cfg(feature = "queryable")]
+    QueryBetweenPushes(
+        &'static str,
+        wz_session_core::wire_id::RequestId,
+        &'static str,
+    ),
     /// Ask a query of request id `.0` naming its key by id `.1` in the sender's space and the
     /// rest `.2`, which no declaration precedes: an id of the key ids both ends share.
     #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
@@ -162,6 +170,10 @@ enum Command {
     /// sequence number `.2`.
     #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
     PushSequenced(&'static str, &'static [u8], u32),
+    /// Ask the session, as Interest `.0`, for its subscribers on the key, those it holds now and
+    /// those it declares later.
+    #[cfg(feature = "interest-answer")]
+    AskSubscribers(u64, &'static str),
     /// Hold the cache of that advanced publisher: a queryable on its `@adv` key that answers as
     /// the publisher's own cache does, out of the samples with the sequence numbers `.0`, each
     /// carrying its number as its payload. The selectors it is asked are recorded.
@@ -176,6 +188,12 @@ struct Seen {
     /// The id of each subscriber the router was declared, in the order the declarations arrived.
     subscribers: Vec<u64>,
     interests: usize,
+    /// The Interest each subscriber declaration that answers one names, in the order they arrived.
+    #[cfg(feature = "interest-answer")]
+    subscriber_answers: Vec<u64>,
+    /// The Interest each declaration Final names, in the order they arrived.
+    #[cfg(feature = "interest-answer")]
+    interest_finals: Vec<u64>,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
     samples: Vec<(String, Vec<u8>)>,
@@ -473,6 +491,19 @@ fn run_router(
                             {
                                 seen.subscribers.push(subscriber.id);
                             }
+                            #[cfg(feature = "interest-answer")]
+                            if let Some(interest) = declare.interest_id {
+                                use wz_codecs::declare::DeclareOwnedVariant as Body;
+                                match &declare.body {
+                                    Body::CodecZenohDeclSubscriber(_) => {
+                                        seen.subscriber_answers.push(interest);
+                                    }
+                                    Body::CodecZenohDeclFinal(_) => {
+                                        seen.interest_finals.push(interest);
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                         NetworkMessage::Interest(_interest) => {
                             seen.interests += 1;
@@ -534,6 +565,18 @@ fn run_router(
                         &declare.body
                     {
                         seen.subscribers.push(subscriber.id);
+                    }
+                    #[cfg(feature = "interest-answer")]
+                    if let Some(interest) = declare.interest_id {
+                        match &declare.body {
+                            wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(_) => {
+                                seen.subscriber_answers.push(interest);
+                            }
+                            wz_codecs::lent::DeclareVariant::CodecZenohDeclFinal(_) => {
+                                seen.interest_finals.push(interest);
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 if let Some(_interest) = record.interest() {
@@ -607,6 +650,10 @@ fn run_router(
             }
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
+            }
+            #[cfg(feature = "interest-answer")]
+            Ok(Command::AskSubscribers(id, key)) => {
+                let _ = actions.send_interest_subscribers(id, true, true, 0, Some(key));
             }
             #[cfg(feature = "liveliness-get")]
             Ok(Command::MuteInterests) => {
@@ -725,6 +772,14 @@ fn run_router(
             #[cfg(feature = "queryable")]
             Ok(Command::Query(rid, key)) => {
                 let _ = actions.send_request_query(rid, 0, Some(key));
+            }
+            #[cfg(feature = "queryable")]
+            Ok(Command::QueryBetweenPushes(pushed, rid, asked)) => {
+                let _ = actions.batch_start();
+                let _ = actions.send_push_literal(pushed, b"before", true);
+                let _ = actions.send_request_query(rid, 0, Some(asked));
+                let _ = actions.send_push_literal(pushed, b"after", true);
+                let _ = actions.batch_stop();
             }
             #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
             Ok(Command::QueryById(rid, id, rest)) => {
@@ -1050,6 +1105,55 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
                 .iter()
                 .any(|(k, v)| k == "demo/b" && v == b"world")
         })
+    });
+}
+
+/// A subscriber the program declares after a peer asked for the session's subscribers, current and
+/// future, is told to that peer in answer to its Interest by the declaration itself: the session is
+/// not stepped after it, so no record, keep-alive or lease check of the link's can stage the
+/// answer. The CONTROL is the declaration itself, which reaches the peer unstepped too, so what
+/// the session sends outside a step is seen. Turned red by an answer staged only by the next event
+/// of the link's session.
+#[cfg(feature = "interest-answer")]
+#[test]
+fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration() {
+    const INTEREST: u64 = 41;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    router.send(Command::AskSubscribers(INTEREST, "demo/**"));
+    until(&engine, "the session to answer the Interest", || {
+        router.seen(|s| s.interest_finals.contains(&INTEREST))
+    });
+    assert!(
+        !router.seen(|s| s.subscriber_answers.contains(&INTEREST)),
+        "CONTROL: no subscriber answered the Interest before one is declared"
+    );
+    let declared_before = router.seen(|s| s.subscribers.len());
+    engine
+        .declare_subscriber_on_wire(
+            "demo/a",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
+        )
+        .expect("the session declares the subscriber");
+    // Waited for with the session unstepped.
+    let unstepped = |what: &str, done: &dyn Fn(&Seen) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !router.seen(done) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what} with the session unstepped"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    unstepped("CONTROL: the declaration", &|s| {
+        s.subscribers.len() > declared_before
+    });
+    unstepped("the answer to the Interest", &|s| {
+        s.subscriber_answers.contains(&INTEREST)
     });
 }
 

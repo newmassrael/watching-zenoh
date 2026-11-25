@@ -850,10 +850,9 @@ impl<W: LinkWaits> GroupFace<W> {
         self.generation == generation && !self.has_ended()
     }
 
-    /// The sink a member's query is answered through: the group's stage (`queryable`). An answer
-    /// made outside the group's step is written after it by the answering thread
-    /// (`Self::write_staged`).
-    #[cfg(feature = "queryable")]
+    /// The sink a member's query is answered through, and what a declaration of the application's
+    /// owes the members' Interests: the group's stage. What is put on it outside the group's step
+    /// is written after it by the thread that put it (`Self::write_staged`).
     pub(super) fn replies(&self) -> &GroupReplies {
         &self.replies
     }

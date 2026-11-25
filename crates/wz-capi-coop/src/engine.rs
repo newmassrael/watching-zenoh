@@ -2783,6 +2783,12 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             return;
         }
         // What the Pushes before this record put off is done before it, as it was after each.
+        #[cfg(all(test, feature = "std"))]
+        if self.after_pushes {
+            let _ = self
+                .registry
+                .with(|registry| registry.count_drain_within_frame());
+        }
         self.end_records();
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&self.lane);
@@ -2830,6 +2836,12 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             return;
         }
         // What the Pushes before this record put off is done before it, as it was after each.
+        #[cfg(all(test, feature = "std"))]
+        if self.after_pushes {
+            let _ = self
+                .registry
+                .with(|registry| registry.count_drain_within_frame());
+        }
         self.end_records();
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&self.lane);
@@ -2846,7 +2858,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         debug_assert!(dispatched.is_some(), "{UNLENT}");
     }
 
-    /// The drains a run of Pushes put off ([`Registry::after_pushes`]), once for the run: at the
+    /// The drains a run of Pushes put off ([`Registry::settle`]), once for the run: at the
     /// end of the frame, or before the first record of it that is not a Push.
     fn end_records(&mut self) {
         if !core::mem::take(&mut self.after_pushes) {
@@ -2854,18 +2866,9 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         }
         let face = self.face;
         let actions = &*self.actions;
-        #[cfg(feature = "queryable")]
-        let (plane, generation) = (&self.plane, self.generation);
-        let dispatched = self.registry.with(|registry| {
-            #[cfg(feature = "queryable")]
-            registry.after_pushes(face, actions, |rid, qos| {
-                if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
-                    actions.send_response_final(rid, qos);
-                }
-            });
-            #[cfg(not(feature = "queryable"))]
-            registry.after_pushes(face, actions);
-        });
+        let dispatched = self
+            .registry
+            .with(|registry| registry.settle(face, actions));
         debug_assert!(dispatched.is_some(), "{UNLENT}");
     }
 
@@ -3841,6 +3844,37 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
                 false
             }
+        }
+    }
+
+    /// Send each face's peer what the application's declaration or undeclaration of a subscriber
+    /// owes its Interests ([`Registry::settle`]) now: the reconcile that stages it otherwise runs
+    /// at the next event of the link's session, a record or a keep-alive, up to a keep-alive
+    /// interval later, and not at all while the program does not step the session.
+    #[cfg(feature = "interest-answer")]
+    fn settle_faces(&mut self) {
+        for at in 0..self.transport.links.places() {
+            let Some(face) = self.transport.links.face(at) else {
+                continue;
+            };
+            if let Link::Up(wire) = &face.link {
+                self.session
+                    .registry
+                    .settle(HeldFace::new(at, face.id), &*wire.actions);
+            }
+        }
+        // A group's stage is written by the thread that put on it outside the group's own step.
+        #[cfg(feature = "group")]
+        for group in self
+            .transport
+            .groups
+            .iter()
+            .filter(|group| !group.has_ended())
+        {
+            self.session
+                .registry
+                .settle(HeldFace::new(group.at(), group.id()), group.replies());
+            group.write_staged();
         }
     }
 
@@ -5234,6 +5268,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn push_dispatches(&self) -> (usize, usize, usize) {
         self.core.lock().0.session.registry.push_dispatches()
+    }
+
+    /// How often the session's links drained a run of Pushes before a later record of its own
+    /// frame: what tells a test that a Push and the record after it came in one frame.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn drains_within_frames(&self) -> usize {
+        self.core.lock().0.session.registry.drains_within_frames()
     }
 
     /// Whether the peer of every established link has been told every declaration the session
@@ -7472,6 +7513,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 });
             }
         }
+        // What it owes the Interests the peers asked goes now, after the declaration itself.
+        #[cfg(feature = "interest-answer")]
+        core.settle_faces();
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
@@ -7567,6 +7611,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             core.retract_keyexpr(named_place, undeclared.named);
+            // An aggregate answer it alone stood for is retracted now, as it was declared.
+            #[cfg(feature = "interest-answer")]
+            core.settle_faces();
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             self.read_matching(core);

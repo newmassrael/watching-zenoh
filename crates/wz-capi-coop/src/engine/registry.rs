@@ -252,7 +252,12 @@ pub(super) struct HeldFace {
 impl HeldFace {
     /// The key of face `id` whose set lies at `at`: the place the face keeps in every table of
     /// the session while it is held.
-    #[cfg(any(feature = "listen", feature = "group", test))]
+    #[cfg(any(
+        feature = "listen",
+        feature = "group",
+        feature = "interest-answer",
+        test
+    ))]
     pub(super) const fn new(at: usize, id: FaceId) -> Self {
         Self { at, id }
     }
@@ -495,6 +500,11 @@ pub(super) struct RegistryOf<H: Holders> {
     /// cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
+    /// How often a run of Pushes was drained before a later record of its own frame
+    /// ([`Self::count_drain_within_frame`]): what tells a test that a Push and the record after
+    /// it came in one frame.
+    #[cfg(all(test, feature = "std"))]
+    drains_within_frames: usize,
 }
 
 /// The faces as the session's state reaches them (`SessionState`): a
@@ -623,6 +633,8 @@ impl<H: Holders> RegistryOf<H> {
             set_reads: core::cell::Cell::new(0),
             #[cfg(all(test, feature = "std"))]
             pushes: (0, 0, 0),
+            #[cfg(all(test, feature = "std"))]
+            drains_within_frames: 0,
         })
     }
 
@@ -656,6 +668,18 @@ impl<H: Holders> RegistryOf<H> {
     #[cfg(all(test, feature = "std"))]
     pub(super) fn push_dispatches(&self) -> (usize, usize, usize) {
         self.pushes
+    }
+
+    /// One more run of Pushes drained before a later record of its own frame.
+    #[cfg(all(test, feature = "std"))]
+    pub(super) fn count_drain_within_frame(&mut self) {
+        self.drains_within_frames += 1;
+    }
+
+    /// How often a run of Pushes was drained before a later record of its own frame.
+    #[cfg(all(test, feature = "std"))]
+    pub(super) fn drains_within_frames(&self) -> usize {
+        self.drains_within_frames
     }
 
     /// One more lent Push handed to the subscribers' plane alone, the face lookups since
@@ -1089,7 +1113,7 @@ impl<H: Holders> RegistryOf<H> {
     /// subscribers' plane alone, which is the one plane that reads a Push: the fan over every
     /// plane ([`Self::dispatch_event`]) is spared, and so are the watches' staging, which a Push
     /// stages nothing into. What follows the dispatch of a record is put off to the end of the run
-    /// of Pushes it is one of ([`Self::after_pushes`]): a Push stages nothing for it to drain, so
+    /// of Pushes it is one of ([`Self::settle`]): a Push stages nothing for it to drain, so
     /// it is done once for the run and not once for each. A face the session no longer holds hears
     /// nothing.
     pub(super) fn dispatch_push(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
@@ -1110,30 +1134,26 @@ impl<H: Holders> RegistryOf<H> {
         self.counted_push(written);
     }
 
-    /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
-    /// under one lookup of the face: the subscribers' tables reconciled with what the application
-    /// registered since, what anything staged drained through `actions`
-    /// ([`Self::flush_pending_replies`]), and each `Final` owed handed to `owe` where the face's
-    /// table holds it, the table left empty after: a run of Pushes almost never owes one, so no
-    /// table of them is made and moved out for each run, as [`Self::take_pending_final_rids`]
-    /// makes one. A face the session no longer holds owes nothing.
+    /// What face `id`'s peer is owed outside the dispatch of a record that drains it, under one
+    /// lookup of the face: the subscribers' tables reconciled with what the application registered
+    /// since, what anything staged drained through `actions` ([`Self::flush_pending_replies`]).
+    /// Settled once after a run of lent Pushes ([`Self::dispatch_push`]), and after the
+    /// application declares or undeclares a subscriber, which no record of the peer's need follow.
+    /// A face the session no longer holds owes nothing.
     #[cfg(feature = "queryable")]
-    pub(super) fn after_pushes<S>(
-        &mut self,
-        face: HeldFace,
-        actions: &S,
-        mut owe: impl FnMut(wz_session_core::wire_id::RequestId, wz_session_core::sample::QosLevel),
-    ) where
+    pub(super) fn settle<S>(&mut self, face: HeldFace, actions: &S)
+    where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             #[cfg(feature = "interest-answer")]
             reconcile_face(app, face);
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
-            for &(rid, qos) in face.peer.finals.iter() {
-                owe(rid, qos);
-            }
-            face.peer.finals.clear();
+            // No `Final` is owed here: only a Request's dispatch owes one
+            // (`wz_session_core::query::QueryPeer::dispatch_request_in_place` and
+            // `QueryPeer::dispatch_messages_with`), and the dispatch of a record that is not a Push
+            // takes every one it owed before the next record is read (`FaceDispatch::event`).
+            debug_assert!(face.peer.finals.is_empty(), "a run of Pushes owes no Final");
         }
     }
 
@@ -1152,10 +1172,11 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
-    /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
-    /// drained under one lookup of the face, as [`Self::dispatch`] drains after every other record.
+    /// What face `id`'s peer is owed outside the dispatch of a record, drained under one lookup of
+    /// the face, as [`Self::dispatch`] drains after every other record: after a run of lent Pushes
+    /// ([`Self::dispatch_push`]), and after the application declares or undeclares a subscriber.
     #[cfg(not(feature = "queryable"))]
-    pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S)
+    pub(super) fn settle<S>(&mut self, face: HeldFace, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
