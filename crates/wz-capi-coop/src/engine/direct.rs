@@ -1081,11 +1081,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> Result<(), OpenError> {
         let (mut input, mut now_us) = (input, now_us);
         loop {
-            let Some(face) = core.transport.links.face_mut(slot.at) else {
+            let Some(record) = core.transport.links.face_mut(slot.at) else {
                 return Ok(());
             };
-            let was = face.life.phase();
-            let effects = face.life.input(input, now_us);
+            let was = record.life.phase();
+            let effects = record.life.input(input, now_us);
             // A close is told to the life by the slot alone, which lets go of what it holds
             // itself (`DirectSlot::let_go`): no input told here asks for that.
             debug_assert!(!effects.let_go(), "a close told to the life past the slot");
