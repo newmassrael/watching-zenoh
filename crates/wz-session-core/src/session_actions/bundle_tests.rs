@@ -1441,6 +1441,29 @@ mod facts_lock {
         assert_ne!(actions.negotiated_tx_limits(), settled);
     }
 
+    /// A link no handshake runs over takes a data send once it is opened without one, with the
+    /// limits the session's own advertisement sets, and is not established. Turned red by a door
+    /// that leaves the gate shut (the send refused), settles no limits (`(0, 0)`), or stamps the
+    /// establishment.
+    #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
+    #[test]
+    fn a_link_opened_without_a_handshake_sends_with_its_own_limits_unestablished() {
+        let (actions, _link) = bundle();
+        actions.open_without_handshake();
+        let limits = actions.negotiated_tx_limits();
+        assert_eq!(
+            limits,
+            (
+                actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
+                actions.negotiated_sn_mask()
+            ),
+            "settled from the session's own advertisement"
+        );
+        assert_ne!(limits.0, 0, "a frame has room");
+        assert_eq!(actions.send_push_literal("a/b", b"x", true), Ok(()));
+        assert!(!actions.is_established(), "no handshake ran");
+    }
+
     /// An awaited OpenAck is admitted, ends the wait and takes the peer's lease and bound in one
     /// hold. Turned red by an admission that asks whether one is awaited, or writes the bound, in
     /// a hold of its own.
