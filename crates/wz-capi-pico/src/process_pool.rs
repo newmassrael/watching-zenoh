@@ -1259,10 +1259,7 @@ impl Reserved {
     fn at_open(&mut self, reserve: &Plan, asked: &Held) -> bool {
         if !self.whole {
             for (stage, held) in Stage::ALL.iter().zip(self.stages.iter_mut()) {
-                // A stage of no object in this build holds no pool.
-                if held.is_none()
-                    && matches!(lay_stage(held, reserve, *stage), Err(Unlaid::NoMemory))
-                {
+                if !lay_missing(held, reserve, *stage) {
                     return false;
                 }
             }
@@ -1344,6 +1341,14 @@ fn lay_stage<'a>(
         }
     }
     held.as_mut().ok_or(Unlaid::NoMemory)
+}
+
+/// Reserve the pools `plan` makes for `stage` in `held` where it holds none yet ([`lay_stage`]):
+/// `false` only when the heap has not the memory, as a stage of no object in this build holds no
+/// pool. Not inlined: the first open asks it of each stage, and each asking is then a call.
+#[inline(never)]
+fn lay_missing(held: &mut Option<Pools>, plan: &Plan, stage: Stage) -> bool {
+    held.is_some() || !matches!(lay_stage(held, plan, stage), Err(Unlaid::NoMemory))
 }
 
 // SAFETY: the memory of the pools is reached only through the lock this is held behind, by one
@@ -3472,6 +3477,36 @@ mod tests {
             Err(Unlaid::NoMemory)
         );
         assert!(held.is_none());
+    }
+
+    /// The first open lays a stage that holds no pools yet, leaves alone one that holds them, and
+    /// fails only for want of memory: a stage of no slot is no failure. Turned red by an open
+    /// refused over a stage of no object, or one that lays a held stage again.
+    #[test]
+    fn the_first_open_lays_only_the_stages_it_finds_missing() {
+        let configs_only = Plan::laid(&Counts {
+            configs: 1,
+            ..Counts::NONE
+        });
+        let mut held = None;
+        assert!(lay_missing(&mut held, &configs_only, Stage::Open));
+        assert!(held.is_none(), "a stage of no slot holds no pools");
+        assert!(lay_missing(&mut held, &configs_only, Stage::Config));
+        let laid = held.as_ref().map(|pools| pools.base);
+        assert!(laid.is_some());
+        let too_many = Plan::laid(&Counts {
+            samples: usize::MAX / 2,
+            ..Counts::NONE
+        });
+        assert!(lay_missing(&mut held, &too_many, Stage::Open));
+        assert_eq!(
+            held.as_ref().map(|pools| pools.base),
+            laid,
+            "a held stage stays"
+        );
+        let mut missing = None;
+        assert!(!lay_missing(&mut missing, &too_many, Stage::Open));
+        assert!(missing.is_none());
     }
 
     /// A place is given back to the pool of the stage it lies in, whichever stage that is, and a
