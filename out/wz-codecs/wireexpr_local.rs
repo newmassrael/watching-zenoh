@@ -4,7 +4,7 @@
 // Runtime: none
 // Do not edit — regenerate from the source SCXML file.
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceReader, SceSink};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
 // RFC §synth-5-B: `VecSink` and the heap-backed `encode_to_vec` facade
 // are gated on the `alloc` feature (see
 // `backends/rust/forge-runtime/src/codec.rs`). MCU / `no_std` consumers see
@@ -94,10 +94,10 @@ impl<S: WireexprLocalStorage> WireexprLocalIn<S> {
         Self::default()
     }
 
-    /// Decode the next frame from `cursor`. On success the cursor advances
-    /// past the consumed bytes; on a refusal it does not move, so a caller that
-    /// receives `NeedMoreBytes` reads the frame again from the same place once
-    /// more bytes have arrived (RFC §synth-5-B L494-519, docs/adr/0128).
+    /// Decode the next frame from `cursor`. On success the cursor
+    /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
+    /// is left untouched so the caller can resume after appending more
+    /// bytes (RFC §synth-5-B L494-519).
     pub fn decode<'f>(cursor: &mut SceCursor<'f>, n: u8) -> Result<Self, CodecError> where S: WireexprLocalFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out, n)?;
@@ -121,63 +121,56 @@ impl<S: WireexprLocalStorage> WireexprLocalIn<S> {
     /// `_out` holds the fields decoded so far and is not to be read; each of
     /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, n: u8) -> Result<(), CodecError> where S: WireexprLocalFrom<'f> {
-        cursor.read_frame(|cursor| Self::read_into(cursor, _out, n))
-    }
-
-    /// Read the frame through `cursor`, the frame's reader, into `_out`: every
-    /// read total, each refusal recorded in the reader and the first of them
-    /// the frame's verdict, which the reader says once the frame is read
-    /// (docs/adr/0128). A codec that embeds or dispatches to this one reads it
-    /// through its own reader, so one frame has one verdict.
-    pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, n: u8) where S: WireexprLocalFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
         // declaration; consumption is a per-codec design choice.
         let _ = n;
-        // Streaming decode (SSOT selection: `needs_streaming`).
+        // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
         // handles every codec where it is not — present-if-gated fields
         // (runtime presence), VLE / repeat / TLV-chain / embed fields
         // (runtime width), string fields (UTF-8 decode), and a fixed field
         // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the reader and
-        // consumes exactly what it read. Per-field `is_repeat` /
+        // length). Each field reads its own bytes from the cursor and
+        // advances past exactly what it consumed. Per-field `is_repeat` /
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let id = cursor.read_vle_u16();
+        let id = cursor.read_vle_u16()?;
         let suffix_len = if (n & 0x01u8) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
         };
-        let suffix = if let Some(_len) = suffix_len {
+        let suffix = if (n & 0x01u8) != 0 {
+            let _len = suffix_len.unwrap();
             if _len > 65535 {
-                cursor.fail(CodecError::LengthOutOfRange);
+                return Err(CodecError::LengthOutOfRange);
             }
             let _n = _len as usize;
-            let raw = cursor.take_slice(_n);
-            Some(cursor.settle(core::str::from_utf8(raw).map_err(|_| CodecError::InvalidUtf8)))
+            let raw = cursor.peek_slice(_n)?;
+            let _v = core::str::from_utf8(raw)
+                .map_err(|_| CodecError::InvalidUtf8)?;
+            cursor.advance(_n)?;
+            Some(_v)
         } else {
             None
         };
-        let suffix = cursor.settle(suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose());
-        let suffix = cursor.hold(suffix.map(|_v| _v.store::<S, WireexprLocalSuffixField>()).transpose());
+        let suffix = suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
+        let suffix = ::sce_forge_runtime::codec::note_held(suffix.map(|_v| _v.store::<S, WireexprLocalSuffixField>()).transpose(), &mut _over)?;
         _out.id = id;
         _out.suffix_len = suffix_len;
         _out.suffix = suffix;
-
-    }
-
-    /// [`Self::read_into`] of a value of its own: a list's entry, which the
-    /// list then holds.
-    pub fn read<'f>(cursor: &mut SceReader<'f>, n: u8) -> Self where S: WireexprLocalFrom<'f> {
-        let mut _out = Self::default();
-        Self::read_into(cursor, &mut _out, n);
-        _out
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
+        Ok(())
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -359,9 +352,8 @@ pub struct WireexprLocalWalk;
 impl ::sce_forge_runtime::codec::ListWalk<1> for WireexprLocalWalk {
     type Entry<'b> = WireexprLocalView<'b>;
 
-    #[inline(always)]
-    fn read<'b>(_r: &mut SceReader<'b>, _a: &[u8; 1]) -> Self::Entry<'b> {
-        WireexprLocalView::read(_r, _a[0])
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 1]) -> Result<Self::Entry<'b>, CodecError> {
+        WireexprLocalView::decode(_c, _a[0])
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {  }

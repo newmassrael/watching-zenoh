@@ -39,7 +39,7 @@
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
 // `Duration`/`Engine`, leaving the imports unused.
-// Method parameters such as `_engine: &mut ::sce_rust_runtime::EngineState<Self>` and per-state
+// Method parameters such as `_engine: &mut Engine<Self>` and per-state
 // fields (`pending_event_invokeid`, `script_engine_initialized`, ...) are
 // emitted on every fixture for the StatePolicy trait shape but read only
 // by fixtures that actually exercise the corresponding W3C feature.
@@ -183,23 +183,14 @@ pub type ScoutingConfiguration = ::sce_rust_runtime::helpers::hierarchy::Bounded
 /// row walk reads them. Any other document carries the general walk, which
 /// computes them, and no rows.
 ///
-/// `selection` is what enables each written transition (docs/adr/0127): each
-/// state's range of written transitions (`first_written`, one entry past the
-/// last state), and for each transition the list of events that enable it
-/// (`triggers`, a position in `trigger_events`, each list its length first),
-/// as the numbers of `ScoutingEvent`. The runtime's one selection
-/// reads them for every machine and asks this machine only whether a guard
-/// holds (`guard_holds`).
-///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const SCOUTING_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, EntryRow, EntryStep, EventId, HistoryId, HistoryRow, SelectionRows,
-        StateId, StateKind, StateRow, Target, TransitionId, TransitionRow, TriggerEvent,
-        TriggerRow,
+        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
+        Target, TransitionId, TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -233,16 +224,11 @@ pub const SCOUTING_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
         default_state: ::sce_rust_runtime::StateId(ScoutingState::Idle as u16),
         null_event: ::sce_rust_runtime::EventId(5),
         error_events: &[],
-        walk: &::sce_rust_runtime::NO_WALK,
-        entry_rows: &[],
-        entry_paths: &[],
+        walk: &::sce_rust_runtime::ROW_WALK,
+        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(4), EntryRow::at(2), EntryRow::at(4), EntryRow::at(4)],
+        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
         history: None,
         parallel: None,
-        selection: Some(SelectionRows {
-            first_written: &[TransitionId(0), TransitionId(1), TransitionId(3), TransitionId(6)],
-            triggers: &[TriggerRow::at(0), TriggerRow::at(2), TriggerRow::at(4), TriggerRow::at(6), TriggerRow::at(6), TriggerRow::at(8), TriggerRow::NONE],
-            trigger_events: &[TriggerEvent::count(1), TriggerEvent::new(EventId(4)), TriggerEvent::count(1), TriggerEvent::new(EventId(3)), TriggerEvent::count(1), TriggerEvent::new(EventId(1)), TriggerEvent::count(1), TriggerEvent::new(EventId(0)), TriggerEvent::count(1), TriggerEvent::new(EventId(2))],
-        }),
     }
 };
 
@@ -453,111 +439,6 @@ impl<A: ScoutingActions + 'static> ScoutingPolicy<A> {
 
 
 // ======================================================================
-// The document's own step function (docs/adr/0129)
-// ======================================================================
-
-/// This document printed as its own step function: what Appendix D does for
-/// each step of this document, written out when it was built. The engine runs
-/// these arms in place of its shared procedures, and calls the hooks of this
-/// policy from them as it would from those.
-impl<A: ScoutingActions + 'static> ::sce_rust_runtime::StepFunction for ScoutingPolicy<A> {
-    fn enter_initial_configuration<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-    ) -> ::sce_rust_runtime::Entered {
-        machine.enter(ScoutingState::ID_Idle, false);
-        ::sce_rust_runtime::Entered { states: 1, current: Some(ScoutingState::ID_Idle), ended_in: None }
-    }
-
-    fn select_transition<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-        event: ::sce_rust_runtime::EventId,
-    ) -> Option<::sce_rust_runtime::TransitionId> {
-        match atomic {
-            ScoutingState::ID_Idle => {
-                machine.enabled(ScoutingState::ID_Idle, event)
-            }
-            ScoutingState::ID_Sending => {
-                machine.enabled(ScoutingState::ID_Sending, event)
-            }
-            ScoutingState::ID_AwaitingHello => {
-                machine.enabled(ScoutingState::ID_AwaitingHello, event)
-            }
-            _ => None,
-        }
-    }
-
-    fn microstep<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-        transition: ::sce_rust_runtime::TransitionId,
-    ) -> ::sce_rust_runtime::Entered {
-        match (transition, atomic) {
-            (::sce_rust_runtime::TransitionId(0), ScoutingState::ID_Idle) => {
-                machine.exit(ScoutingState::ID_Idle);
-                machine.content(::sce_rust_runtime::TransitionId(0));
-                machine.enter(ScoutingState::ID_Sending, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(ScoutingState::ID_Sending), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(1), ScoutingState::ID_Sending) => {
-                machine.exit(ScoutingState::ID_Sending);
-                machine.enter(ScoutingState::ID_AwaitingHello, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(ScoutingState::ID_AwaitingHello), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(2), ScoutingState::ID_Sending) => {
-                machine.exit(ScoutingState::ID_Sending);
-                machine.content(::sce_rust_runtime::TransitionId(2));
-                machine.enter(ScoutingState::ID_Idle, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(ScoutingState::ID_Idle), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(3), ScoutingState::ID_AwaitingHello) => {
-                machine.exit(ScoutingState::ID_AwaitingHello);
-                machine.content(::sce_rust_runtime::TransitionId(3));
-                machine.enter(ScoutingState::ID_Idle, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(ScoutingState::ID_Idle), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(4), ScoutingState::ID_AwaitingHello) => {
-                machine.exit(ScoutingState::ID_AwaitingHello);
-                machine.content(::sce_rust_runtime::TransitionId(4));
-                machine.enter(ScoutingState::ID_AwaitingHello, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(ScoutingState::ID_AwaitingHello), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(5), ScoutingState::ID_AwaitingHello) => {
-                machine.exit(ScoutingState::ID_AwaitingHello);
-                machine.content(::sce_rust_runtime::TransitionId(5));
-                machine.enter(ScoutingState::ID_Idle, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(ScoutingState::ID_Idle), ended_in: None }
-            }
-            // No other pair is selected: a transition is selected only from
-            // an atomic state below the state it is written in.
-            _ => ::sce_rust_runtime::Entered {
-                states: 0,
-                current: None,
-                ended_in: None,
-            },
-        }
-    }
-
-    fn exit_configuration<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-    ) {
-        match atomic {
-            ScoutingState::ID_Idle => {
-                machine.exit(ScoutingState::ID_Idle);
-            }
-            ScoutingState::ID_Sending => {
-                machine.exit(ScoutingState::ID_Sending);
-            }
-            ScoutingState::ID_AwaitingHello => {
-                machine.exit(ScoutingState::ID_AwaitingHello);
-            }
-            _ => {}
-        }
-    }
-}
-
-// ======================================================================
 // StatePolicy trait implementation
 // ======================================================================
 
@@ -659,12 +540,6 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
         ::sce_rust_runtime::EventId(event as u16)
     }
 
-    // docs/adr/0129: this document is printed as its own step function, the
-    // `StepFunction` above, which the engine runs in place of the shared
-    // interpreter.
-    const STEP_FUNCTION: Option<::sce_rust_runtime::StepFunctionForm<Self>> =
-        Some(::sce_rust_runtime::StepFunctionForm::of());
-
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
@@ -679,9 +554,9 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    // docs/adr/0129: this document's microsteps are its step function's, which
-    // takes one transition a microstep and builds no set of states, so the
-    // workspace holds that one transition alone.
+    // docs/adr/0125: this document's microsteps are walked from the entry rows
+    // of its tables, which builds no set of states and walks no stack, so the
+    // workspace holds the enabled set alone.
     type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(3) }, { ::sce_rust_runtime::record_words(3, 0) }, 0>;
     type Configuration = ScoutingConfiguration;
@@ -784,7 +659,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: scouting.scxml:103 :: _machine"]
 // SCE-MAP: scouting.scxml:103 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::EngineState<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
     }
 
     // §scxml-3.10.2: a <history>'s default transition content, run after its
@@ -800,7 +675,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
         &mut self,
         state: ::sce_rust_runtime::StateId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::EngineState<Self>,
+        engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
@@ -812,27 +687,70 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
 
 
 
-    // §scxml-3.13: whether the guard of `transition`, a written transition the
-    // event being selected for enables, holds. Which transitions an event
-    // enables is a row of the tables (`selection`), which the runtime's one
-    // selection reads for every machine and asks this only for a transition
-    // the event enables, in the order its state's transitions are written,
-    // until one holds (docs/adr/0127). The transition is its number in the
-    // tables, and every other transition has no guard.
+
+    // Appendix D selectTransitions, the half only this document can answer:
+    // the first of `state`'s own transitions, in document order, that `event`
+    // enables, as its row of the tables, which holds its targets and its
+    // type. The engine walks the atomic states and their ancestors and keeps
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
     #[doc = "SCE-MAP: scouting.scxml:103 :: _machine"]
 // SCE-MAP: scouting.scxml:103 :: _machine
-    fn guard_holds(
+    fn first_enabled_transition(
         &mut self,
-        transition: ::sce_rust_runtime::TransitionId,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::EngineState<Self>,
-    ) -> bool {
-        match transition.0 {
-            // AwaitingHello, transition 0
-            3 => matches!(sce_event_data, ScoutingEventData::HelloReceived(ev) if ev.exit_on_first != 0),
-            // AwaitingHello, transition 1
-            4 => matches!(sce_event_data, ScoutingEventData::HelloReceived(ev) if ev.exit_on_first == 0),
-            _ => true,
+        engine: &mut sce_rust_runtime::Engine<Self>,
+    ) -> Option<::sce_rust_runtime::TransitionId> {
+        match state {
+            ScoutingState::ID_AwaitingHello => {
+                if event == ScoutingEvent::ID_HelloReceived {
+                    if matches!(sce_event_data, ScoutingEventData::HelloReceived(ev) if ev.exit_on_first != 0) {
+                        // AwaitingHello, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(3));
+                    }
+                }
+                if event == ScoutingEvent::ID_HelloReceived {
+                    if matches!(sce_event_data, ScoutingEventData::HelloReceived(ev) if ev.exit_on_first == 0) {
+                        // AwaitingHello, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(4));
+                    }
+                }
+                if event == ScoutingEvent::ID_ScoutTimerElapsed {
+                    {
+                        // AwaitingHello, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(5));
+                    }
+                }
+                None
+            }
+            ScoutingState::ID_Idle => {
+                if event == ScoutingEvent::ID_SessionOpenRequested {
+                    {
+                        // Idle, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(0));
+                    }
+                }
+                None
+            }
+            ScoutingState::ID_Sending => {
+                if event == ScoutingEvent::ID_ScoutTxDone {
+                    {
+                        // Sending, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(1));
+                    }
+                }
+                if event == ScoutingEvent::ID_LinkTxFailed {
+                    {
+                        // Sending, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(2));
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -845,7 +763,7 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::EngineState<Self>,
+        engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         match transition.0 {
             // AwaitingHello, transition 0

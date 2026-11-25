@@ -39,7 +39,7 @@
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
 // `Duration`/`Engine`, leaving the imports unused.
-// Method parameters such as `_engine: &mut ::sce_rust_runtime::EngineState<Self>` and per-state
+// Method parameters such as `_engine: &mut Engine<Self>` and per-state
 // fields (`pending_event_invokeid`, `script_engine_initialized`, ...) are
 // emitted on every fixture for the StatePolicy trait shape but read only
 // by fixtures that actually exercise the corresponding W3C feature.
@@ -259,23 +259,14 @@ pub type SessionFsmUnicastConfiguration = ::sce_rust_runtime::helpers::hierarchy
 /// row walk reads them. Any other document carries the general walk, which
 /// computes them, and no rows.
 ///
-/// `selection` is what enables each written transition (docs/adr/0127): each
-/// state's range of written transitions (`first_written`, one entry past the
-/// last state), and for each transition the list of events that enable it
-/// (`triggers`, a position in `trigger_events`, each list its length first),
-/// as the numbers of `SessionFsmUnicastEvent`. The runtime's one selection
-/// reads them for every machine and asks this machine only whether a guard
-/// holds (`guard_holds`).
-///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, EntryRow, EntryStep, EventId, HistoryId, HistoryRow, SelectionRows,
-        StateId, StateKind, StateRow, Target, TransitionId, TransitionRow, TriggerEvent,
-        TriggerRow,
+        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
+        Target, TransitionId, TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -401,35 +392,32 @@ pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables<'static
         #[cfg(not(feature = "session-unicast-accept"))] null_event: ::sce_rust_runtime::EventId(15),
         #[cfg(feature = "session-unicast-accept")] null_event: ::sce_rust_runtime::EventId(19),
         error_events: &[],
-        walk: &::sce_rust_runtime::NO_WALK,
-        entry_rows: &[],
-        entry_paths: &[],
+        walk: &::sce_rust_runtime::ROW_WALK,
+        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(5), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(9),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(12), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(11),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(14), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(5),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(16), #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(7),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(18), #[cfg(feature = "session-unicast-accept")] EntryRow::at(14), #[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(feature = "session-unicast-accept")] EntryRow::at(8), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), #[cfg(feature = "session-unicast-accept")] EntryRow::at(10), EntryRow::NONE, #[cfg(feature = "session-unicast-accept")] EntryRow::NONE, #[cfg(not(feature = "session-unicast-accept"))] EntryRow::at(13),
+#[cfg(feature = "session-unicast-accept")] EntryRow::at(20),],
+        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(2), #[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(5), true), #[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(6), false), #[cfg(feature = "session-unicast-accept")] EntryStep::count(2), EntryStep::new(StateId(2), true), EntryStep::new(StateId(3), false), EntryStep::count(1), #[cfg(not(feature = "session-unicast-accept"))] EntryStep::new(StateId(6), false),
+#[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(10), false), EntryStep::count(1), #[cfg(not(feature = "session-unicast-accept"))] EntryStep::new(StateId(7), false),
+#[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(11), false), EntryStep::count(1), EntryStep::new(StateId(4), false), EntryStep::count(1), #[cfg(not(feature = "session-unicast-accept"))] EntryStep::new(StateId(5), false),
+#[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(9), false), EntryStep::count(1), #[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(7), false), #[cfg(feature = "session-unicast-accept")] EntryStep::count(1), #[cfg(feature = "session-unicast-accept")] EntryStep::new(StateId(8), false), #[cfg(feature = "session-unicast-accept")] EntryStep::count(1), EntryStep::new(StateId(0), false),],
         history: None,
         parallel: None,
-        selection: Some(SelectionRows {
-            first_written: &[TransitionId(0), #[cfg(not(feature = "session-unicast-accept"))] TransitionId(1),
-#[cfg(feature = "session-unicast-accept")] TransitionId(2), #[cfg(not(feature = "session-unicast-accept"))] TransitionId(4),
-#[cfg(feature = "session-unicast-accept")] TransitionId(5), #[cfg(not(feature = "session-unicast-accept"))] TransitionId(8),
-#[cfg(feature = "session-unicast-accept")] TransitionId(9), #[cfg(not(feature = "session-unicast-accept"))] TransitionId(10),
-#[cfg(feature = "session-unicast-accept")] TransitionId(11), #[cfg(not(feature = "session-unicast-accept"))] TransitionId(12),
-#[cfg(feature = "session-unicast-accept")] TransitionId(13), TransitionId(18), #[cfg(not(feature = "session-unicast-accept"))] TransitionId(20),
-#[cfg(feature = "session-unicast-accept")] TransitionId(19), TransitionId(20), #[cfg(feature = "session-unicast-accept")] TransitionId(21), #[cfg(feature = "session-unicast-accept")] TransitionId(27), #[cfg(feature = "session-unicast-accept")] TransitionId(29), #[cfg(feature = "session-unicast-accept")] TransitionId(29),],
-            triggers: &[TriggerRow::at(0), TriggerRow::at(2), TriggerRow::at(4), TriggerRow::at(6), TriggerRow::at(8), TriggerRow::at(10), TriggerRow::at(12), #[cfg(not(feature = "session-unicast-accept"))] TriggerRow::at(6), TriggerRow::at(14), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(8), TriggerRow::at(16), TriggerRow::at(18), TriggerRow::at(20), TriggerRow::at(22), TriggerRow::at(24), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(10), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(12), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(14), TriggerRow::at(8), TriggerRow::at(26), #[cfg(not(feature = "session-unicast-accept"))] TriggerRow::at(12), #[cfg(not(feature = "session-unicast-accept"))] TriggerRow::at(6), TriggerRow::at(28), #[cfg(not(feature = "session-unicast-accept"))] TriggerRow::at(6),
-#[cfg(feature = "session-unicast-accept")] TriggerRow::at(30), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(32), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(34), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(10), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(36), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(14), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(8), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(38), #[cfg(feature = "session-unicast-accept")] TriggerRow::at(8), TriggerRow::NONE, TriggerRow::NONE, #[cfg(feature = "session-unicast-accept")] TriggerRow::NONE,],
-            trigger_events: &[TriggerEvent::count(1), #[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(15)), #[cfg(feature = "session-unicast-accept")] TriggerEvent::count(1), #[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(4)), #[cfg(feature = "session-unicast-accept")] TriggerEvent::count(1), TriggerEvent::new(EventId(11)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(8)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(10)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(7)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(9)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(6)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(3)), TriggerEvent::count(1), TriggerEvent::new(EventId(2)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(1)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(16)), TriggerEvent::count(1), #[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(5)), #[cfg(feature = "session-unicast-accept")] TriggerEvent::count(1), #[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(6)), #[cfg(feature = "session-unicast-accept")] TriggerEvent::count(1), TriggerEvent::new(EventId(12)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(3)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(13)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(4)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(0)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(9)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(7)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(10)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(14)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(13)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(19)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(5)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(17)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(14)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(8)), TriggerEvent::count(1), #[cfg(not(feature = "session-unicast-accept"))] TriggerEvent::new(EventId(0)),
-#[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(18)), #[cfg(feature = "session-unicast-accept")] TriggerEvent::count(1), #[cfg(feature = "session-unicast-accept")] TriggerEvent::new(EventId(1)),],
-        }),
     }
 };
 
@@ -618,482 +606,6 @@ impl<A: SessionFsmUnicastActions + 'static> SessionFsmUnicastPolicy<A> {
 
 
 // ======================================================================
-// The document's own step function (docs/adr/0129)
-// ======================================================================
-
-/// This document printed as its own step function: what Appendix D does for
-/// each step of this document, written out when it was built. The engine runs
-/// these arms in place of its shared procedures, and calls the hooks of this
-/// policy from them as it would from those.
-impl<A: SessionFsmUnicastActions + 'static> ::sce_rust_runtime::StepFunction for SessionFsmUnicastPolicy<A> {
-    fn enter_initial_configuration<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-    ) -> ::sce_rust_runtime::Entered {
-        machine.enter(SessionFsmUnicastState::ID_Init, false);
-        ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Init), ended_in: None }
-    }
-
-    fn select_transition<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-        event: ::sce_rust_runtime::EventId,
-    ) -> Option<::sce_rust_runtime::TransitionId> {
-        match atomic {
-            SessionFsmUnicastState::ID_Init => {
-                machine.enabled(SessionFsmUnicastState::ID_Init, event)
-            },
-            SessionFsmUnicastState::ID_LinkOpening => {
-                machine.enabled(SessionFsmUnicastState::ID_LinkOpening, event)
-            },
-            SessionFsmUnicastState::ID_SentInitSyn => {
-                if let Some(transition) = machine.enabled(SessionFsmUnicastState::ID_SentInitSyn, event) {
-                    return Some(transition);
-                }
-                machine.enabled(SessionFsmUnicastState::ID_Opening, event)
-            },
-            SessionFsmUnicastState::ID_GotInitAck => {
-                if let Some(transition) = machine.enabled(SessionFsmUnicastState::ID_GotInitAck, event) {
-                    return Some(transition);
-                }
-                machine.enabled(SessionFsmUnicastState::ID_Opening, event)
-            },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_AwaitingInitSyn => {
-                if let Some(transition) = machine.enabled(SessionFsmUnicastState::ID_AwaitingInitSyn, event) {
-                    return Some(transition);
-                }
-                machine.enabled(SessionFsmUnicastState::ID_Accepting, event)
-            },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentInitAck => {
-                if let Some(transition) = machine.enabled(SessionFsmUnicastState::ID_SentInitAck, event) {
-                    return Some(transition);
-                }
-                machine.enabled(SessionFsmUnicastState::ID_Accepting, event)
-            },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentOpenAck => {
-                if let Some(transition) = machine.enabled(SessionFsmUnicastState::ID_SentOpenAck, event) {
-                    return Some(transition);
-                }
-                machine.enabled(SessionFsmUnicastState::ID_Accepting, event)
-            },
-            SessionFsmUnicastState::ID_Established => {
-                machine.enabled(SessionFsmUnicastState::ID_Established, event)
-            },
-            SessionFsmUnicastState::ID_Closing => {
-                machine.enabled(SessionFsmUnicastState::ID_Closing, event)
-            },
-            _ => None,
-        }
-    }
-
-    fn microstep<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-        transition: ::sce_rust_runtime::TransitionId,
-    ) -> ::sce_rust_runtime::Entered {
-        match (transition, atomic) {
-            (::sce_rust_runtime::TransitionId(0), SessionFsmUnicastState::ID_Init) => {
-                machine.exit(SessionFsmUnicastState::ID_Init);
-                machine.enter(SessionFsmUnicastState::ID_LinkOpening, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_LinkOpening), ended_in: None }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(1), SessionFsmUnicastState::ID_LinkOpening) => {
-                machine.exit(SessionFsmUnicastState::ID_LinkOpening);
-                machine.enter(SessionFsmUnicastState::ID_Opening, true);
-                machine.enter(SessionFsmUnicastState::ID_SentInitSyn, false);
-                ::sce_rust_runtime::Entered { states: 2, current: Some(SessionFsmUnicastState::ID_SentInitSyn), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(1), SessionFsmUnicastState::ID_Init) => {
-                machine.exit(SessionFsmUnicastState::ID_Init);
-                machine.enter(SessionFsmUnicastState::ID_Accepting, true);
-                machine.enter(SessionFsmUnicastState::ID_AwaitingInitSyn, false);
-                ::sce_rust_runtime::Entered { states: 2, current: Some(SessionFsmUnicastState::ID_AwaitingInitSyn), ended_in: None }
-            },
-            (::sce_rust_runtime::TransitionId(2), SessionFsmUnicastState::ID_LinkOpening) => {
-                machine.exit(SessionFsmUnicastState::ID_LinkOpening);
-                #[cfg(not(feature = "session-unicast-accept"))] machine.content(::sce_rust_runtime::TransitionId(2));
-                #[cfg(not(feature = "session-unicast-accept"))] machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                #[cfg(feature = "session-unicast-accept")] machine.enter(SessionFsmUnicastState::ID_Opening, true);
-                #[cfg(feature = "session-unicast-accept")] machine.enter(SessionFsmUnicastState::ID_SentInitSyn, false);
-                ::sce_rust_runtime::Entered { #[cfg(not(feature = "session-unicast-accept"))] states: 1, #[cfg(feature = "session-unicast-accept")] states: 2, #[cfg(not(feature = "session-unicast-accept"))] current: Some(SessionFsmUnicastState::ID_Closing),
-#[cfg(feature = "session-unicast-accept")] current: Some(SessionFsmUnicastState::ID_SentInitSyn), ended_in: None, }
-            },
-            (::sce_rust_runtime::TransitionId(3), SessionFsmUnicastState::ID_LinkOpening) => {
-                machine.exit(SessionFsmUnicastState::ID_LinkOpening);
-                #[cfg(feature = "session-unicast-accept")] machine.content(::sce_rust_runtime::TransitionId(3));
-                #[cfg(not(feature = "session-unicast-accept"))] machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                #[cfg(feature = "session-unicast-accept")] machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, #[cfg(not(feature = "session-unicast-accept"))] current: Some(SessionFsmUnicastState::ID_Closed),
-#[cfg(feature = "session-unicast-accept")] current: Some(SessionFsmUnicastState::ID_Closing), #[cfg(not(feature = "session-unicast-accept"))] ended_in: Some(SessionFsmUnicastState::ID_Closed), #[cfg(feature = "session-unicast-accept")] ended_in: None, }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(4), SessionFsmUnicastState::ID_SentInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.content(::sce_rust_runtime::TransitionId(4));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(4), SessionFsmUnicastState::ID_GotInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.content(::sce_rust_runtime::TransitionId(4));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(4), SessionFsmUnicastState::ID_LinkOpening) => {
-                machine.exit(SessionFsmUnicastState::ID_LinkOpening);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            (::sce_rust_runtime::TransitionId(5), SessionFsmUnicastState::ID_SentInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.content(::sce_rust_runtime::TransitionId(5));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            (::sce_rust_runtime::TransitionId(5), SessionFsmUnicastState::ID_GotInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.content(::sce_rust_runtime::TransitionId(5));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            (::sce_rust_runtime::TransitionId(6), SessionFsmUnicastState::ID_SentInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                #[cfg(feature = "session-unicast-accept")] machine.content(::sce_rust_runtime::TransitionId(6));
-                #[cfg(not(feature = "session-unicast-accept"))] machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                #[cfg(feature = "session-unicast-accept")] machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, #[cfg(not(feature = "session-unicast-accept"))] current: Some(SessionFsmUnicastState::ID_Closed),
-#[cfg(feature = "session-unicast-accept")] current: Some(SessionFsmUnicastState::ID_Closing), #[cfg(not(feature = "session-unicast-accept"))] ended_in: Some(SessionFsmUnicastState::ID_Closed), #[cfg(feature = "session-unicast-accept")] ended_in: None, }
-            },
-            (::sce_rust_runtime::TransitionId(6), SessionFsmUnicastState::ID_GotInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                #[cfg(feature = "session-unicast-accept")] machine.content(::sce_rust_runtime::TransitionId(6));
-                #[cfg(not(feature = "session-unicast-accept"))] machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                #[cfg(feature = "session-unicast-accept")] machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, #[cfg(not(feature = "session-unicast-accept"))] current: Some(SessionFsmUnicastState::ID_Closed),
-#[cfg(feature = "session-unicast-accept")] current: Some(SessionFsmUnicastState::ID_Closing), #[cfg(not(feature = "session-unicast-accept"))] ended_in: Some(SessionFsmUnicastState::ID_Closed), #[cfg(feature = "session-unicast-accept")] ended_in: None, }
-            },
-            (::sce_rust_runtime::TransitionId(7), SessionFsmUnicastState::ID_SentInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            (::sce_rust_runtime::TransitionId(7), SessionFsmUnicastState::ID_GotInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            (::sce_rust_runtime::TransitionId(8), SessionFsmUnicastState::ID_SentInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitSyn);
-                #[cfg(feature = "session-unicast-accept")] machine.exit(SessionFsmUnicastState::ID_Opening);
-                #[cfg(not(feature = "session-unicast-accept"))] machine.enter(SessionFsmUnicastState::ID_GotInitAck, false);
-                #[cfg(feature = "session-unicast-accept")] machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, #[cfg(not(feature = "session-unicast-accept"))] current: Some(SessionFsmUnicastState::ID_GotInitAck),
-#[cfg(feature = "session-unicast-accept")] current: Some(SessionFsmUnicastState::ID_Closed), #[cfg(not(feature = "session-unicast-accept"))] ended_in: None, #[cfg(feature = "session-unicast-accept")] ended_in: Some(SessionFsmUnicastState::ID_Closed), }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(8), SessionFsmUnicastState::ID_GotInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            (::sce_rust_runtime::TransitionId(9), SessionFsmUnicastState::ID_SentInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitSyn);
-                #[cfg(not(feature = "session-unicast-accept"))] machine.exit(SessionFsmUnicastState::ID_Opening);
-                #[cfg(not(feature = "session-unicast-accept"))] machine.content(::sce_rust_runtime::TransitionId(9));
-                #[cfg(not(feature = "session-unicast-accept"))] machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                #[cfg(feature = "session-unicast-accept")] machine.enter(SessionFsmUnicastState::ID_GotInitAck, false);
-                ::sce_rust_runtime::Entered { states: 1, #[cfg(not(feature = "session-unicast-accept"))] current: Some(SessionFsmUnicastState::ID_Closing),
-#[cfg(feature = "session-unicast-accept")] current: Some(SessionFsmUnicastState::ID_GotInitAck), ended_in: None, }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(10), SessionFsmUnicastState::ID_GotInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.enter(SessionFsmUnicastState::ID_Established, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Established), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(10), SessionFsmUnicastState::ID_SentInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.content(::sce_rust_runtime::TransitionId(10));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            (::sce_rust_runtime::TransitionId(11), SessionFsmUnicastState::ID_GotInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                #[cfg(not(feature = "session-unicast-accept"))] machine.content(::sce_rust_runtime::TransitionId(11));
-                #[cfg(not(feature = "session-unicast-accept"))] machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                #[cfg(feature = "session-unicast-accept")] machine.enter(SessionFsmUnicastState::ID_Established, false);
-                ::sce_rust_runtime::Entered { states: 1, #[cfg(not(feature = "session-unicast-accept"))] current: Some(SessionFsmUnicastState::ID_Closing),
-#[cfg(feature = "session-unicast-accept")] current: Some(SessionFsmUnicastState::ID_Established), ended_in: None, }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(12), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.content(::sce_rust_runtime::TransitionId(12));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(13), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.content(::sce_rust_runtime::TransitionId(13));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(14), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.content(::sce_rust_runtime::TransitionId(14));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(12), SessionFsmUnicastState::ID_GotInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-                machine.content(::sce_rust_runtime::TransitionId(12));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(13), SessionFsmUnicastState::ID_AwaitingInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_AwaitingInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(13), SessionFsmUnicastState::ID_SentInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(13), SessionFsmUnicastState::ID_SentOpenAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentOpenAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(14), SessionFsmUnicastState::ID_AwaitingInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_AwaitingInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.content(::sce_rust_runtime::TransitionId(14));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(14), SessionFsmUnicastState::ID_SentInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.content(::sce_rust_runtime::TransitionId(14));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(14), SessionFsmUnicastState::ID_SentOpenAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentOpenAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.content(::sce_rust_runtime::TransitionId(14));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(15), SessionFsmUnicastState::ID_AwaitingInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_AwaitingInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.content(::sce_rust_runtime::TransitionId(15));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(15), SessionFsmUnicastState::ID_SentInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.content(::sce_rust_runtime::TransitionId(15));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(15), SessionFsmUnicastState::ID_SentOpenAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentOpenAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.content(::sce_rust_runtime::TransitionId(15));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(16), SessionFsmUnicastState::ID_AwaitingInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_AwaitingInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(16), SessionFsmUnicastState::ID_SentInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(16), SessionFsmUnicastState::ID_SentOpenAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentOpenAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(17), SessionFsmUnicastState::ID_AwaitingInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_AwaitingInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(17), SessionFsmUnicastState::ID_SentInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(17), SessionFsmUnicastState::ID_SentOpenAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentOpenAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(18), SessionFsmUnicastState::ID_AwaitingInitSyn) => {
-                machine.exit(SessionFsmUnicastState::ID_AwaitingInitSyn);
-                machine.enter(SessionFsmUnicastState::ID_SentInitAck, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_SentInitAck), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(19), SessionFsmUnicastState::ID_SentInitAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitAck);
-                machine.enter(SessionFsmUnicastState::ID_SentOpenAck, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_SentOpenAck), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(20), SessionFsmUnicastState::ID_SentOpenAck) => {
-                machine.exit(SessionFsmUnicastState::ID_SentOpenAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-                machine.enter(SessionFsmUnicastState::ID_Established, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Established), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(21), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.content(::sce_rust_runtime::TransitionId(21));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(22), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.content(::sce_rust_runtime::TransitionId(22));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(23), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.content(::sce_rust_runtime::TransitionId(23));
-                machine.enter(SessionFsmUnicastState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closing), ended_in: None }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(15), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(24), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(16), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(25), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(17), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(26), SessionFsmUnicastState::ID_Established) => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(18), SessionFsmUnicastState::ID_Closing) => {
-                machine.exit(SessionFsmUnicastState::ID_Closing);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(27), SessionFsmUnicastState::ID_Closing) => {
-                machine.exit(SessionFsmUnicastState::ID_Closing);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(not(feature = "session-unicast-accept"))] (::sce_rust_runtime::TransitionId(19), SessionFsmUnicastState::ID_Closing) => {
-                machine.exit(SessionFsmUnicastState::ID_Closing);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            #[cfg(feature = "session-unicast-accept")] (::sce_rust_runtime::TransitionId(28), SessionFsmUnicastState::ID_Closing) => {
-                machine.exit(SessionFsmUnicastState::ID_Closing);
-                machine.enter(SessionFsmUnicastState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(SessionFsmUnicastState::ID_Closed), ended_in: Some(SessionFsmUnicastState::ID_Closed) }
-            },
-            // No other pair is selected: a transition is selected only from
-            // an atomic state below the state it is written in.
-            _ => ::sce_rust_runtime::Entered {
-                states: 0,
-                current: None,
-                ended_in: None,
-            },
-        }
-    }
-
-    fn exit_configuration<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-    ) {
-        match atomic {
-            SessionFsmUnicastState::ID_Init => {
-                machine.exit(SessionFsmUnicastState::ID_Init);
-            },
-            SessionFsmUnicastState::ID_LinkOpening => {
-                machine.exit(SessionFsmUnicastState::ID_LinkOpening);
-            },
-            SessionFsmUnicastState::ID_SentInitSyn => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-            },
-            SessionFsmUnicastState::ID_GotInitAck => {
-                machine.exit(SessionFsmUnicastState::ID_GotInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Opening);
-            },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_AwaitingInitSyn => {
-                machine.exit(SessionFsmUnicastState::ID_AwaitingInitSyn);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-            },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentInitAck => {
-                machine.exit(SessionFsmUnicastState::ID_SentInitAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-            },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentOpenAck => {
-                machine.exit(SessionFsmUnicastState::ID_SentOpenAck);
-                machine.exit(SessionFsmUnicastState::ID_Accepting);
-            },
-            SessionFsmUnicastState::ID_Established => {
-                machine.exit(SessionFsmUnicastState::ID_Established);
-            },
-            SessionFsmUnicastState::ID_Closing => {
-                machine.exit(SessionFsmUnicastState::ID_Closing);
-            },
-            SessionFsmUnicastState::ID_Closed => {
-                machine.exit(SessionFsmUnicastState::ID_Closed);
-            },
-            _ => {},
-        }
-    }
-}
-
-// ======================================================================
 // StatePolicy trait implementation
 // ======================================================================
 
@@ -1218,12 +730,6 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         ::sce_rust_runtime::EventId(event as u16)
     }
 
-    // docs/adr/0129: this document is printed as its own step function, the
-    // `StepFunction` above, which the engine runs in place of the shared
-    // interpreter.
-    const STEP_FUNCTION: Option<::sce_rust_runtime::StepFunctionForm<Self>> =
-        Some(::sce_rust_runtime::StepFunctionForm::of());
-
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
@@ -1238,9 +744,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    // docs/adr/0129: this document's microsteps are its step function's, which
-    // takes one transition a microstep and builds no set of states, so the
-    // workspace holds that one transition alone.
+    // docs/adr/0125: this document's microsteps are walked from the entry rows
+    // of its tables, which builds no set of states and walks no stack, so the
+    // workspace holds the enabled set alone.
     type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     #[cfg(not(feature = "session-unicast-accept"))] type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(8) }, { ::sce_rust_runtime::record_words(8, 0) }, 0>;
     #[cfg(feature = "session-unicast-accept")] type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(12) }, { ::sce_rust_runtime::record_words(12, 0) }, 0>;
@@ -1382,7 +888,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: session_fsm_unicast.scxml:118 :: _machine"]
 // SCE-MAP: session_fsm_unicast.scxml:118 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::EngineState<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             SessionFsmUnicastState::ID_Closed => {
                 // SCE-MAP: session_fsm_unicast.scxml:257 :: Closed :: _state_body
@@ -1493,7 +999,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         &mut self,
         state: ::sce_rust_runtime::StateId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::EngineState<Self>,
+        engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
@@ -1521,6 +1027,254 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
 
 
+
+    // Appendix D selectTransitions, the half only this document can answer:
+    // the first of `state`'s own transitions, in document order, that `event`
+    // enables, as its row of the tables, which holds its targets and its
+    // type. The engine walks the atomic states and their ancestors and keeps
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
+    #[doc = "SCE-MAP: session_fsm_unicast.scxml:118 :: _machine"]
+// SCE-MAP: session_fsm_unicast.scxml:118 :: _machine
+    fn first_enabled_transition(
+        &mut self,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
+        sce_event_data: Self::EventData<'_>,
+        engine: &mut sce_rust_runtime::Engine<Self>,
+    ) -> Option<::sce_rust_runtime::TransitionId> {
+        match state {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_Accepting => {
+                if event == SessionFsmUnicastEvent::ID_AcceptingInactivityTimeout {
+                    {
+                        // Accepting, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(13));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_FramingError {
+                    {
+                        // Accepting, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(14));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_EstablishmentExtRejected {
+                    {
+                        // Accepting, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(15));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_PeerClose {
+                    {
+                        // Accepting, transition 3
+                        return Some(::sce_rust_runtime::TransitionId(16));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
+                    {
+                        // Accepting, transition 4
+                        return Some(::sce_rust_runtime::TransitionId(17));
+                    }
+                }
+                None
+            },
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_AwaitingInitSyn => {
+                if event == SessionFsmUnicastEvent::ID_InitSynReceived {
+                    {
+                        // AwaitingInitSyn, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(18));
+                    }
+                }
+                None
+            },
+            SessionFsmUnicastState::ID_Closing => {
+                if event == SessionFsmUnicastEvent::ID_ClosingTimeout {
+                    {
+                        // Closing, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(18));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(27));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
+                    {
+                        // Closing, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(19));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(28));
+                    }
+                }
+                None
+            },
+            SessionFsmUnicastState::ID_Established => {
+                if event == SessionFsmUnicastEvent::ID_SessionClose {
+                    {
+                        // Established, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(12));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(21));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_LeaseExpired {
+                    {
+                        // Established, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(13));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(22));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_FramingError {
+                    {
+                        // Established, transition 2
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(14));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(23));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_TxCongestionExhaust {
+                    {
+                        // Established, transition 3
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(15));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(24));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_PeerClose {
+                    {
+                        // Established, transition 4
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(16));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(25));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
+                    {
+                        // Established, transition 5
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(17));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(26));
+                    }
+                }
+                None
+            },
+            SessionFsmUnicastState::ID_GotInitAck => {
+                if event == SessionFsmUnicastEvent::ID_OpenAckReceived {
+                    {
+                        // GotInitAck, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(10));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(11));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_OpenAckTimeout {
+                    {
+                        // GotInitAck, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(11));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(12));
+                    }
+                }
+                None
+            },
+            SessionFsmUnicastState::ID_Init => {
+                if event == SessionFsmUnicastEvent::ID_OutboundStart {
+                    {
+                        // Init, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(0));
+                    }
+                }
+                #[cfg(feature = "session-unicast-accept")] if event == SessionFsmUnicastEvent::ID_InboundStart {
+                    {
+                        // Init, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(1));
+                    }
+                }
+                None
+            },
+            SessionFsmUnicastState::ID_LinkOpening => {
+                if event == SessionFsmUnicastEvent::ID_LinkOpened {
+                    {
+                        // LinkOpening, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(1));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(2));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_LinkOpenTimeout {
+                    {
+                        // LinkOpening, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(2));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(3));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
+                    {
+                        // LinkOpening, transition 2
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(3));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(4));
+                    }
+                }
+                None
+            },
+            SessionFsmUnicastState::ID_Opening => {
+                if event == SessionFsmUnicastEvent::ID_FramingError {
+                    {
+                        // Opening, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(4));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(5));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_EstablishmentExtRejected {
+                    {
+                        // Opening, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(5));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(6));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_PeerClose {
+                    {
+                        // Opening, transition 2
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(6));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(7));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
+                    {
+                        // Opening, transition 3
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(7));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(8));
+                    }
+                }
+                None
+            },
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentInitAck => {
+                if event == SessionFsmUnicastEvent::ID_OpenSynReceived {
+                    {
+                        // SentInitAck, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(19));
+                    }
+                }
+                None
+            },
+            SessionFsmUnicastState::ID_SentInitSyn => {
+                if event == SessionFsmUnicastEvent::ID_InitAckReceived {
+                    {
+                        // SentInitSyn, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(8));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(9));
+                    }
+                }
+                if event == SessionFsmUnicastEvent::ID_InitAckTimeout {
+                    {
+                        // SentInitSyn, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(9));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(10));
+                    }
+                }
+                None
+            },
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentOpenAck => {
+                if event == SessionFsmUnicastEvent::ID_Null {
+                    {
+                        // SentOpenAck, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(20));
+                    }
+                }
+                None
+            },
+            _ => None,
+        }
+    }
+
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
@@ -1530,7 +1284,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::EngineState<Self>,
+        engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         match transition.0 {
             // Established, transition 0

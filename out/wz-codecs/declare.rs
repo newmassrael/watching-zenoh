@@ -4,7 +4,7 @@
 // Runtime: none
 // Do not edit — regenerate from the source SCXML file.
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceReader, SceSink};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
 // RFC §synth-5-B: `VecSink` and the heap-backed `encode_to_vec` facade
 // are gated on the `alloc` feature (see
 // `backends/rust/forge-runtime/src/codec.rs`). MCU / `no_std` consumers see
@@ -204,10 +204,10 @@ impl<S: DeclareStorage> DeclareIn<S> {
         Self::default()
     }
 
-    /// Decode the next frame from `cursor`. On success the cursor advances
-    /// past the consumed bytes; on a refusal it does not move, so a caller that
-    /// receives `NeedMoreBytes` reads the frame again from the same place once
-    /// more bytes have arrived (RFC §synth-5-B L494-519, docs/adr/0128).
+    /// Decode the next frame from `cursor`. On success the cursor
+    /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
+    /// is left untouched so the caller can resume after appending more
+    /// bytes (RFC §synth-5-B L494-519).
     pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: DeclareFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
@@ -231,15 +231,9 @@ impl<S: DeclareStorage> DeclareIn<S> {
     /// `_out` holds the fields decoded so far and is not to be read; each of
     /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: DeclareFrom<'f> {
-        cursor.read_frame(|cursor| Self::read_into(cursor, _out))
-    }
-
-    /// Read the frame through `cursor`, the frame's reader, into `_out`: every
-    /// read total, each refusal recorded in the reader and the first of them
-    /// the frame's verdict, which the reader says once the frame is read
-    /// (docs/adr/0128). A codec that embeds or dispatches to this one reads it
-    /// through its own reader, so one frame has one verdict.
-    pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: DeclareFrom<'f> {
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
         // RFC §synth-5-B peek-byte / streaming-prefix:
         // streaming prefix decode (variable-length fields supported via
         // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
@@ -248,145 +242,118 @@ impl<S: DeclareStorage> DeclareIn<S> {
         // byte as its own header byte (Zenoh response/request body MID
         // dispatch shape per network.c:347-364 + 220-235).
         let header = {
-            let raw = cursor.take_array::<1>();
-            raw[0]
+            let raw = cursor.peek_array::<1>()?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            _v
         };
         let interest_id = if (header & 0x20u8) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
         };
         if (header & 0x80u8) != 0 {
-            cursor.hold_with(|cursor| _out.extensions.get_or_insert_with(Default::default).refill(|_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill(|_vec| {
                 let mut _full = false;
                 let mut _more = false;
                 loop {
-                    if cursor.failed() { break; }
-                    let _entry = ExtEntryOwned::<S>::read(cursor);
+                    let mut _entry = ExtEntryOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(ExtEntryOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
                     _more = _entry.z();
                     ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
                     if !_more { break; }
                 }
                 if _more && cursor.remaining() == 0 {
-                    cursor.fail(CodecError::NeedMoreBytes);
+                    return Err(CodecError::NeedMoreBytes);
                 }
                 if _full {
                     return Err(CodecError::CapacityExceeded);
                 }
                 Ok(())
-            }));
+            }), &mut _over)?;
         } else {
             _out.extensions = None;
         }
-        let _peek = cursor.peek_u8();
-        // Dispatch on the tag field; each arm reads its body codec from the
-        // reader where `_out.body` holds it, so no arm body is returned up
-        // through the variant wrapper (docs/adr/0049). An arm is installed,
-        // holding its body's default, only where `_out.body` holds another
-        // arm: a destination that holds the arm already, as one a caller
-        // reads frame after frame into does, is read into as it is, every
-        // field of the body written by its read (docs/adr/0128). The default
-        // arm (when declared) carries the runtime tag value so encode can
-        // round-trip it back onto the wire.
+        let _peek = cursor.peek_u8()?;
+        // Dispatch on the tag field; each arm decodes its body codec
+        // from the cursor. The default arm (when declared) carries the
+        // runtime tag value so encode can round-trip it back onto the
+        // wire.
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
         match _peek & 0x1F {
             0u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohDeclKexpr(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohDeclKexpr(DeclKexprOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohDeclKexpr(DeclKexprOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclKexpr(_b) = &mut _out.body {
-                    DeclKexprOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(DeclKexprOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             1u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohUndeclKexpr(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohUndeclKexpr(UndeclKexprOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohUndeclKexpr(UndeclKexprOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohUndeclKexpr(_b) = &mut _out.body {
-                    UndeclKexprOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(UndeclKexprOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             2u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohDeclSubscriber(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohDeclSubscriber(DeclSubscriberOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohDeclSubscriber(DeclSubscriberOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclSubscriber(_b) = &mut _out.body {
-                    DeclSubscriberOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(DeclSubscriberOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             3u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohUndeclSubscriber(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohUndeclSubscriber(UndeclSubscriberOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohUndeclSubscriber(UndeclSubscriberOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohUndeclSubscriber(_b) = &mut _out.body {
-                    UndeclSubscriberOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(UndeclSubscriberOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             4u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohDeclQueryable(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohDeclQueryable(DeclQueryableOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohDeclQueryable(DeclQueryableOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclQueryable(_b) = &mut _out.body {
-                    DeclQueryableOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(DeclQueryableOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             5u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohUndeclQueryable(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohUndeclQueryable(UndeclQueryableOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohUndeclQueryable(UndeclQueryableOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohUndeclQueryable(_b) = &mut _out.body {
-                    UndeclQueryableOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(UndeclQueryableOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             6u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohDeclToken(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohDeclToken(DeclTokenOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohDeclToken(DeclTokenOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclToken(_b) = &mut _out.body {
-                    DeclTokenOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(DeclTokenOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             7u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohUndeclToken(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohUndeclToken(UndeclTokenOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohUndeclToken(UndeclTokenOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohUndeclToken(_b) = &mut _out.body {
-                    UndeclTokenOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(UndeclTokenOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             26u8 => {
-                if !matches!(_out.body, DeclareVariantIn::CodecZenohDeclFinal(_)) {
-                    _out.body = DeclareVariantIn::CodecZenohDeclFinal(DeclFinalOwned::<S>::default());
-                }
+                _out.body = DeclareVariantIn::CodecZenohDeclFinal(DeclFinalOwned::<S>::default());
                 if let DeclareVariantIn::CodecZenohDeclFinal(_b) = &mut _out.body {
-                    DeclFinalOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(DeclFinalOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
             other => {
-                if let DeclareVariantIn::Default { tag, .. } = &mut _out.body {
-                    *tag = DeclareUnknownTag(other);
-                } else {
-                    _out.body = DeclareVariantIn::Default {
-                        tag: DeclareUnknownTag(other),
-                        body: DeclFinalOwned::<S>::default(),
-                    };
-                }
+                _out.body = DeclareVariantIn::Default {
+                    tag: DeclareUnknownTag(other),
+                    body: DeclFinalOwned::<S>::default(),
+                };
                 if let DeclareVariantIn::Default { body: _b, .. } = &mut _out.body {
-                    DeclFinalOwned::<S>::read_into(cursor, _b);
+                    ::sce_forge_runtime::codec::note_capacity(DeclFinalOwned::<S>::decode_into(cursor, _b), &mut _over)?;
                 }
             }
         }
         _out.header = header;
         _out.interest_id = interest_id;
-
-    }
-
-    /// [`Self::read_into`] of a value of its own: a list's entry, which the
-    /// list then holds.
-    pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: DeclareFrom<'f> {
-        let mut _out = Self::default();
-        Self::read_into(cursor, &mut _out);
-        _out
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
+        Ok(())
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -752,9 +719,8 @@ pub struct DeclareWalk;
 impl ::sce_forge_runtime::codec::ListWalk<0> for DeclareWalk {
     type Entry<'b> = DeclareView<'b>;
 
-    #[inline(always)]
-    fn read<'b>(_r: &mut SceReader<'b>, _a: &[u8; 0]) -> Self::Entry<'b> {
-        DeclareView::read(_r)
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        DeclareView::decode(_c)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
@@ -828,26 +794,17 @@ impl<'a> DeclareView<'a> {
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
     /// errors of [`DeclareIn::decode`], held as a view. On success the
-    /// cursor advances past the consumed bytes; on a refusal it does not move.
+    /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
     }
 
-    /// [`Self::decode`] into a destination the caller owns. On `Err`, `_out`
-    /// holds what the reads made of the frame and is not to be read.
+    /// [`Self::decode`] into a destination the caller owns, so a view that
+    /// embeds or dispatches to this one is filled where it will live. On
+    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
     pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
-        cursor.read_frame(|cursor| *_out = Self::read(cursor))
-    }
-
-    /// Read the frame through `cursor`, the frame's reader, as a view built
-    /// once from what its reads return (docs/adr/0128): a view is a value of a
-    /// few words, so no field of it is written first with a default and then
-    /// with what the frame says, and no arm's body is installed before it is
-    /// read. Every read is total, each refusal is recorded in the reader and the
-    /// first of them is the frame's verdict.
-    pub fn read(cursor: &mut SceReader<'a>) -> Self {
         // RFC §synth-5-B peek-byte / streaming-prefix:
         // streaming prefix decode (variable-length fields supported via
         // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
@@ -856,68 +813,110 @@ impl<'a> DeclareView<'a> {
         // byte as its own header byte (Zenoh response/request body MID
         // dispatch shape per network.c:347-364 + 220-235).
         let header = {
-            let raw = cursor.take_array::<1>();
-            raw[0]
+            let raw = cursor.peek_array::<1>()?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            _v
         };
         let interest_id = if (header & 0x20u8) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
         };
-        #[allow(clippy::needless_late_init)]
-        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
-            let _rest = cursor.rest();
+            let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _more = false;
             loop {
-                if cursor.failed() { break; }
-                let _entry = ExtEntryView::read(cursor);
+                let _entry = ExtEntryView::decode(cursor)?;
                 _more = _entry.z();
-                _count += u32::from(!cursor.failed());
+                _count += 1;
                 if !_more { break; }
             }
             if _more && cursor.remaining() == 0 {
-                cursor.fail(CodecError::NeedMoreBytes);
+                return Err(CodecError::NeedMoreBytes);
             }
-            extensions = cursor.settle(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements).map(Some));
+            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
         } else {
-            extensions = None;
+            _out.extensions = None;
         }
-        let _peek = cursor.peek_u8();
-        // Dispatch on the tag field; each arm reads its body's view as a value
-        // from the reader and is made of it once, so no arm is installed
-        // holding a default body before its body is read (docs/adr/0128). The
-        // default arm (when declared) carries the runtime tag value so encode
-        // can round-trip it back onto the wire.
-        let body = match _peek & 0x1F {
-            0u8 => DeclareViewVariant::CodecZenohDeclKexpr(DeclKexprView::read(cursor)),
-            1u8 => DeclareViewVariant::CodecZenohUndeclKexpr(UndeclKexprView::read(cursor)),
-            2u8 => DeclareViewVariant::CodecZenohDeclSubscriber(DeclSubscriberView::read(cursor)),
-            3u8 => DeclareViewVariant::CodecZenohUndeclSubscriber(UndeclSubscriberView::read(cursor)),
-            4u8 => DeclareViewVariant::CodecZenohDeclQueryable(DeclQueryableView::read(cursor)),
-            5u8 => DeclareViewVariant::CodecZenohUndeclQueryable(UndeclQueryableView::read(cursor)),
-            6u8 => DeclareViewVariant::CodecZenohDeclToken(DeclTokenView::read(cursor)),
-            7u8 => DeclareViewVariant::CodecZenohUndeclToken(UndeclTokenView::read(cursor)),
-            26u8 => DeclareViewVariant::CodecZenohDeclFinal(DeclFinalView::read(cursor)),
-            other => DeclareViewVariant::Default {
-                tag: DeclareUnknownTag(other),
-                body: DeclFinalView::read(cursor),
-            },
-        };
-        Self {
-            header,
-            interest_id,
-            extensions,
-            body,
+        let _peek = cursor.peek_u8()?;
+        // Dispatch on the tag field; each arm decodes its body codec
+        // from the cursor. The default arm (when declared) carries the
+        // runtime tag value so encode can round-trip it back onto the
+        // wire.
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
+        match _peek & 0x1F {
+            0u8 => {
+                _out.body = DeclareViewVariant::CodecZenohDeclKexpr(DeclKexprView::default());
+                if let DeclareViewVariant::CodecZenohDeclKexpr(_b) = &mut _out.body {
+                    DeclKexprView::decode_into(cursor, _b)?;
+                }
+            }
+            1u8 => {
+                _out.body = DeclareViewVariant::CodecZenohUndeclKexpr(UndeclKexprView::default());
+                if let DeclareViewVariant::CodecZenohUndeclKexpr(_b) = &mut _out.body {
+                    UndeclKexprView::decode_into(cursor, _b)?;
+                }
+            }
+            2u8 => {
+                _out.body = DeclareViewVariant::CodecZenohDeclSubscriber(DeclSubscriberView::default());
+                if let DeclareViewVariant::CodecZenohDeclSubscriber(_b) = &mut _out.body {
+                    DeclSubscriberView::decode_into(cursor, _b)?;
+                }
+            }
+            3u8 => {
+                _out.body = DeclareViewVariant::CodecZenohUndeclSubscriber(UndeclSubscriberView::default());
+                if let DeclareViewVariant::CodecZenohUndeclSubscriber(_b) = &mut _out.body {
+                    UndeclSubscriberView::decode_into(cursor, _b)?;
+                }
+            }
+            4u8 => {
+                _out.body = DeclareViewVariant::CodecZenohDeclQueryable(DeclQueryableView::default());
+                if let DeclareViewVariant::CodecZenohDeclQueryable(_b) = &mut _out.body {
+                    DeclQueryableView::decode_into(cursor, _b)?;
+                }
+            }
+            5u8 => {
+                _out.body = DeclareViewVariant::CodecZenohUndeclQueryable(UndeclQueryableView::default());
+                if let DeclareViewVariant::CodecZenohUndeclQueryable(_b) = &mut _out.body {
+                    UndeclQueryableView::decode_into(cursor, _b)?;
+                }
+            }
+            6u8 => {
+                _out.body = DeclareViewVariant::CodecZenohDeclToken(DeclTokenView::default());
+                if let DeclareViewVariant::CodecZenohDeclToken(_b) = &mut _out.body {
+                    DeclTokenView::decode_into(cursor, _b)?;
+                }
+            }
+            7u8 => {
+                _out.body = DeclareViewVariant::CodecZenohUndeclToken(UndeclTokenView::default());
+                if let DeclareViewVariant::CodecZenohUndeclToken(_b) = &mut _out.body {
+                    UndeclTokenView::decode_into(cursor, _b)?;
+                }
+            }
+            26u8 => {
+                _out.body = DeclareViewVariant::CodecZenohDeclFinal(DeclFinalView::default());
+                if let DeclareViewVariant::CodecZenohDeclFinal(_b) = &mut _out.body {
+                    DeclFinalView::decode_into(cursor, _b)?;
+                }
+            }
+            other => {
+                _out.body = DeclareViewVariant::Default {
+                    tag: DeclareUnknownTag(other),
+                    body: DeclFinalView::default(),
+                };
+                if let DeclareViewVariant::Default { body: _b, .. } = &mut _out.body {
+                    DeclFinalView::decode_into(cursor, _b)?;
+                }
+            }
         }
-
-    }
-
-    /// [`Self::read`] into a destination the caller owns.
-    pub fn read_into(cursor: &mut SceReader<'a>, _out: &mut Self) {
-        *_out = Self::read(cursor);
+        _out.header = header;
+        _out.interest_id = interest_id;
+        Ok(())
     }
 
     /// Fill `_out`, the builder form [`DeclareIn`] a sender fills and

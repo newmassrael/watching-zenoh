@@ -33,9 +33,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use sce_rust_runtime::helpers::hierarchy::BoundedVec;
 use sce_rust_runtime::{
-    state_scratch, state_words, CurrentEventData, DocumentTables, Engine, EngineState, EventId,
-    Hal, HistoryId, NoHistory, RunStore, StateId, StateKind, StatePolicy, StateRow, Target,
-    TransitionId, TransitionRow, Workspace, GENERAL_WALK,
+    state_scratch, state_words, CurrentEventData, DocumentTables, Engine, EventId, Hal, HistoryId,
+    NoHistory, RunStore, StateId, StateKind, StatePolicy, StateRow, Target, TransitionId,
+    TransitionRow, Workspace, GENERAL_WALK,
 };
 use wz_runtime_tokio_test_support::{
     test_hal_advance_ticks, test_hal_now_ticks, test_hal_set_ticks, TestHal,
@@ -156,9 +156,6 @@ impl StatePolicy for TimerProbePolicy {
         entry_paths: &[],
         history: None,
         parallel: None,
-        // Tables written by hand carry no selection rows: the policy answers the
-        // selection itself, in `first_enabled_transition` below.
-        selection: None,
     };
     const STATES: &'static [St] = &[St::S0];
     const HISTORIES: &'static [NoHistory] = &[];
@@ -231,7 +228,7 @@ impl StatePolicy for TimerProbePolicy {
         _state: StateId,
         _event: EventId,
         _event_data: Self::EventData<'_>,
-        _eng: &mut EngineState<Self>,
+        _eng: &mut Engine<Self>,
     ) -> Option<TransitionId> {
         None
     }
@@ -239,7 +236,7 @@ impl StatePolicy for TimerProbePolicy {
         &mut self,
         _t: TransitionId,
         _event_data: Self::EventData<'_>,
-        _eng: &mut EngineState<Self>,
+        _eng: &mut Engine<Self>,
     ) {
     }
     // The fixture is a single flat state with no entry or exit actions at all.
@@ -247,7 +244,7 @@ impl StatePolicy for TimerProbePolicy {
         &mut self,
         _s: StateId,
         _event_data: Self::EventData<'_>,
-        _eng: &mut EngineState<Self>,
+        _eng: &mut Engine<Self>,
         _is_default_entry: bool,
     ) {
     }
@@ -255,7 +252,7 @@ impl StatePolicy for TimerProbePolicy {
         &mut self,
         _s: StateId,
         _event_data: Self::EventData<'_>,
-        _eng: &mut EngineState<Self>,
+        _eng: &mut Engine<Self>,
     ) {
     }
 }

@@ -9,10 +9,9 @@
 //!
 //! Three emit kinds:
 //! - [`Codegen::emit_statechart`] — `sce:kind="statechart"` →
-//!   `$OUT_DIR/{stem}_sm.rs`, in the [`MachineForm`] the caller names; strips
-//!   the file-head `#![...]` inner attributes / `//!` inner doc comments
-//!   (illegal mid-module; the consuming `pub mod` restores the lint allows as
-//!   outer attributes).
+//!   `$OUT_DIR/{stem}_sm.rs`; strips the file-head `#![...]` inner
+//!   attributes / `//!` inner doc comments (illegal mid-module; the
+//!   consuming `pub mod` restores the lint allows as outer attributes).
 //! - [`Codegen::emit_buffer_pool`] — `sce:kind="buffer-pool"` →
 //!   `$OUT_DIR/{stem}.rs` (note: NOT `_sm.rs`); strips the inner
 //!   attributes AND the trailing `#[cfg(test)] mod generated_tests`
@@ -487,33 +486,6 @@ fn git_hash_object(dir: &Path, input: &[u8]) -> Option<String> {
     (!digest.is_empty()).then_some(digest)
 }
 
-/// The form a statechart's Rust machine is printed in (SCE ADR 0129). Both
-/// forms have the same policy, hooks and names, so the code that binds a
-/// machine is the same for either; what differs is how the engine takes a step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MachineForm {
-    /// For the shared interpreter, which walks the document's tables and calls
-    /// the policy's hooks through `dyn`. Serves every document.
-    Interpreted,
-    /// As the document's own step function: the exits, entries and selection
-    /// of each step written out as arms the engine runs with every hook a
-    /// direct call. Serves only a document of the static class (no
-    /// `<parallel>`, `<history>`, `<invoke>` or transition of more than one
-    /// target); the generator refuses any other rather than print it in the
-    /// other form.
-    StepFunction,
-}
-
-impl MachineForm {
-    /// The arguments that ask `sce-codegen generate` for this form.
-    fn flags(self) -> &'static [&'static str] {
-        match self {
-            Self::Interpreted => &[],
-            Self::StepFunction => &["--step-function"],
-        }
-    }
-}
-
 /// A located `sce-codegen` binary + its SCE workspace root, ready to
 /// drive one or more emits into `$OUT_DIR`.
 pub struct Codegen {
@@ -539,17 +511,11 @@ impl Codegen {
     }
 
     /// Codegen one `sce:kind="statechart"` document into
-    /// `$OUT_DIR/{stem}_sm.rs` in `form`, stripping inner attributes / inner
-    /// doc comments. `resource_dir` is the directory holding `{stem}.scxml`
+    /// `$OUT_DIR/{stem}_sm.rs`, stripping inner attributes / inner doc
+    /// comments. `resource_dir` is the directory holding `{stem}.scxml`
     /// (plus any `<sce:import>` siblings sce-codegen resolves relatively).
-    pub fn emit_statechart(
-        &self,
-        stem: &str,
-        resource_dir: &Path,
-        out_dir: &Path,
-        form: MachineForm,
-    ) {
-        self.generate(stem, resource_dir, out_dir, form.flags());
+    pub fn emit_statechart(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
+        self.run_generate(stem, resource_dir, out_dir);
         let emit_path = out_dir.join(format!("{stem}_sm.rs"));
         let original = read(&emit_path);
         let stripped = strip_inner_attrs(original.lines());
@@ -623,22 +589,16 @@ impl Codegen {
     /// templates use only `core::` types under this flag, so one emit
     /// serves both the std (AP) and heapless (MCU) runtimes.
     fn run_generate(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
-        self.generate(stem, resource_dir, out_dir, &[]);
-    }
-
-    /// [`run_generate`](Self::run_generate) with `flags` before the document.
-    fn generate(&self, stem: &str, resource_dir: &Path, out_dir: &Path, flags: &[&str]) {
         let scxml_path = resource_dir.join(format!("{stem}.scxml"));
-        let mut args = vec![
+        let args = [
             OsStr::new("generate"),
             OsStr::new("--language"),
             OsStr::new("rust"),
             OsStr::new("--no-std"),
             OsStr::new("--output-dir"),
             out_dir.as_os_str(),
+            scxml_path.as_os_str(),
         ];
-        args.extend(flags.iter().copied().map(OsStr::new));
-        args.push(scxml_path.as_os_str());
         if let Err(refusal) = self.codegen.run(args) {
             panic!("sce-codegen generate for {stem}: {refusal}");
         }
@@ -696,18 +656,4 @@ fn read(path: &Path) -> String {
 
 fn write(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MachineForm;
-
-    /// The interpreted form asks for nothing, so its emit is the generator's default; the step
-    /// function asks for itself. Turned red by a flag the generator does not know, or by an
-    /// interpreted emit that passes one.
-    #[test]
-    fn a_machine_form_asks_the_generator_for_itself_alone() {
-        assert!(MachineForm::Interpreted.flags().is_empty());
-        assert_eq!(MachineForm::StepFunction.flags(), ["--step-function"]);
-    }
 }

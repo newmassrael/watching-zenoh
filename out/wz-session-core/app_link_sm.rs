@@ -39,7 +39,7 @@
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
 // `Duration`/`Engine`, leaving the imports unused.
-// Method parameters such as `_engine: &mut ::sce_rust_runtime::EngineState<Self>` and per-state
+// Method parameters such as `_engine: &mut Engine<Self>` and per-state
 // fields (`pending_event_invokeid`, `script_engine_initialized`, ...) are
 // emitted on every fixture for the StatePolicy trait shape but read only
 // by fixtures that actually exercise the corresponding W3C feature.
@@ -195,23 +195,14 @@ pub type AppLinkConfiguration = ::sce_rust_runtime::helpers::hierarchy::BoundedV
 /// row walk reads them. Any other document carries the general walk, which
 /// computes them, and no rows.
 ///
-/// `selection` is what enables each written transition (docs/adr/0127): each
-/// state's range of written transitions (`first_written`, one entry past the
-/// last state), and for each transition the list of events that enable it
-/// (`triggers`, a position in `trigger_events`, each list its length first),
-/// as the numbers of `AppLinkEvent`. The runtime's one selection
-/// reads them for every machine and asks this machine only whether a guard
-/// holds (`guard_holds`).
-///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const APP_LINK_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, EntryRow, EntryStep, EventId, HistoryId, HistoryRow, SelectionRows,
-        StateId, StateKind, StateRow, Target, TransitionId, TransitionRow, TriggerEvent,
-        TriggerRow,
+        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
+        Target, TransitionId, TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -265,16 +256,11 @@ pub const APP_LINK_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
         default_state: ::sce_rust_runtime::StateId(AppLinkState::Opening as u16),
         null_event: ::sce_rust_runtime::EventId(9),
         error_events: &[],
-        walk: &::sce_rust_runtime::NO_WALK,
-        entry_rows: &[],
-        entry_paths: &[],
+        walk: &::sce_rust_runtime::ROW_WALK,
+        entry_rows: &[EntryRow::at(0), EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(6), EntryRow::at(2), EntryRow::at(2), EntryRow::at(2), EntryRow::at(4), EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(2), EntryRow::at(2), EntryRow::at(8)],
+        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(4), false), EntryStep::count(1), EntryStep::new(StateId(3), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
         history: None,
         parallel: None,
-        selection: Some(SelectionRows {
-            first_written: &[TransitionId(0), TransitionId(4), TransitionId(9), TransitionId(12), TransitionId(14), TransitionId(14)],
-            triggers: &[TriggerRow::at(0), TriggerRow::at(2), TriggerRow::at(4), TriggerRow::at(6), TriggerRow::at(8), TriggerRow::at(10), TriggerRow::at(12), TriggerRow::at(4), TriggerRow::at(6), TriggerRow::at(14), TriggerRow::at(4), TriggerRow::at(6), TriggerRow::at(16), TriggerRow::at(4), TriggerRow::NONE],
-            trigger_events: &[TriggerEvent::count(1), TriggerEvent::new(EventId(3)), TriggerEvent::count(1), TriggerEvent::new(EventId(1)), TriggerEvent::count(1), TriggerEvent::new(EventId(2)), TriggerEvent::count(1), TriggerEvent::new(EventId(8)), TriggerEvent::count(1), TriggerEvent::new(EventId(5)), TriggerEvent::count(1), TriggerEvent::new(EventId(6)), TriggerEvent::count(1), TriggerEvent::new(EventId(7)), TriggerEvent::count(1), TriggerEvent::new(EventId(4)), TriggerEvent::count(1), TriggerEvent::new(EventId(0))],
-        }),
     }
 };
 
@@ -438,155 +424,6 @@ impl<A: AppLinkActions + 'static> AppLinkPolicy<A> {
 
 
 // ======================================================================
-// The document's own step function (docs/adr/0129)
-// ======================================================================
-
-/// This document printed as its own step function: what Appendix D does for
-/// each step of this document, written out when it was built. The engine runs
-/// these arms in place of its shared procedures, and calls the hooks of this
-/// policy from them as it would from those.
-impl<A: AppLinkActions + 'static> ::sce_rust_runtime::StepFunction for AppLinkPolicy<A> {
-    fn enter_initial_configuration<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-    ) -> ::sce_rust_runtime::Entered {
-        machine.enter(AppLinkState::ID_Opening, false);
-        ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Opening), ended_in: None }
-    }
-
-    fn select_transition<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-        event: ::sce_rust_runtime::EventId,
-    ) -> Option<::sce_rust_runtime::TransitionId> {
-        match atomic {
-            AppLinkState::ID_Opening => {
-                machine.enabled(AppLinkState::ID_Opening, event)
-            }
-            AppLinkState::ID_Open => {
-                machine.enabled(AppLinkState::ID_Open, event)
-            }
-            AppLinkState::ID_Blocked => {
-                machine.enabled(AppLinkState::ID_Blocked, event)
-            }
-            AppLinkState::ID_Closing => {
-                machine.enabled(AppLinkState::ID_Closing, event)
-            }
-            _ => None,
-        }
-    }
-
-    fn microstep<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-        transition: ::sce_rust_runtime::TransitionId,
-    ) -> ::sce_rust_runtime::Entered {
-        match (transition, atomic) {
-            (::sce_rust_runtime::TransitionId(0), AppLinkState::ID_Opening) => {
-                machine.exit(AppLinkState::ID_Opening);
-                machine.enter(AppLinkState::ID_Open, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Open), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(1), AppLinkState::ID_Opening) => {
-                machine.exit(AppLinkState::ID_Opening);
-                machine.enter(AppLinkState::ID_Open, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Open), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(2), AppLinkState::ID_Opening) => {
-                machine.exit(AppLinkState::ID_Opening);
-                machine.enter(AppLinkState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closed), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(3), AppLinkState::ID_Opening) => {
-                machine.exit(AppLinkState::ID_Opening);
-                machine.enter(AppLinkState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closing), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(4), AppLinkState::ID_Open) => {
-                machine.exit(AppLinkState::ID_Open);
-                machine.enter(AppLinkState::ID_Blocked, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Blocked), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(5), AppLinkState::ID_Open) => {
-                machine.exit(AppLinkState::ID_Open);
-                machine.enter(AppLinkState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closed), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(6), AppLinkState::ID_Open) => {
-                machine.exit(AppLinkState::ID_Open);
-                machine.enter(AppLinkState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closed), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(7), AppLinkState::ID_Open) => {
-                machine.exit(AppLinkState::ID_Open);
-                machine.enter(AppLinkState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closed), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(8), AppLinkState::ID_Open) => {
-                machine.exit(AppLinkState::ID_Open);
-                machine.enter(AppLinkState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closing), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(9), AppLinkState::ID_Blocked) => {
-                machine.exit(AppLinkState::ID_Blocked);
-                machine.enter(AppLinkState::ID_Open, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Open), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(10), AppLinkState::ID_Blocked) => {
-                machine.exit(AppLinkState::ID_Blocked);
-                machine.enter(AppLinkState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closed), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(11), AppLinkState::ID_Blocked) => {
-                machine.exit(AppLinkState::ID_Blocked);
-                machine.enter(AppLinkState::ID_Closing, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closing), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(12), AppLinkState::ID_Closing) => {
-                machine.exit(AppLinkState::ID_Closing);
-                machine.enter(AppLinkState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closed), ended_in: None }
-            }
-            (::sce_rust_runtime::TransitionId(13), AppLinkState::ID_Closing) => {
-                machine.exit(AppLinkState::ID_Closing);
-                machine.enter(AppLinkState::ID_Closed, false);
-                ::sce_rust_runtime::Entered { states: 1, current: Some(AppLinkState::ID_Closed), ended_in: None }
-            }
-            // No other pair is selected: a transition is selected only from
-            // an atomic state below the state it is written in.
-            _ => ::sce_rust_runtime::Entered {
-                states: 0,
-                current: None,
-                ended_in: None,
-            },
-        }
-    }
-
-    fn exit_configuration<M: ::sce_rust_runtime::Steps>(
-        machine: &mut M,
-        atomic: ::sce_rust_runtime::StateId,
-    ) {
-        match atomic {
-            AppLinkState::ID_Opening => {
-                machine.exit(AppLinkState::ID_Opening);
-            }
-            AppLinkState::ID_Open => {
-                machine.exit(AppLinkState::ID_Open);
-            }
-            AppLinkState::ID_Blocked => {
-                machine.exit(AppLinkState::ID_Blocked);
-            }
-            AppLinkState::ID_Closing => {
-                machine.exit(AppLinkState::ID_Closing);
-            }
-            AppLinkState::ID_Closed => {
-                machine.exit(AppLinkState::ID_Closed);
-            }
-            _ => {}
-        }
-    }
-}
-
-// ======================================================================
 // StatePolicy trait implementation
 // ======================================================================
 
@@ -694,12 +531,6 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
         ::sce_rust_runtime::EventId(event as u16)
     }
 
-    // docs/adr/0129: this document is printed as its own step function, the
-    // `StepFunction` above, which the engine runs in place of the shared
-    // interpreter.
-    const STEP_FUNCTION: Option<::sce_rust_runtime::StepFunctionForm<Self>> =
-        Some(::sce_rust_runtime::StepFunctionForm::of());
-
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
@@ -714,9 +545,9 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    // docs/adr/0129: this document's microsteps are its step function's, which
-    // takes one transition a microstep and builds no set of states, so the
-    // workspace holds that one transition alone.
+    // docs/adr/0125: this document's microsteps are walked from the entry rows
+    // of its tables, which builds no set of states and walks no stack, so the
+    // workspace holds the enabled set alone.
     type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(5) }, { ::sce_rust_runtime::record_words(5, 0) }, 0>;
     type Configuration = AppLinkConfiguration;
@@ -823,7 +654,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: app_link.scxml:55 :: _machine"]
 // SCE-MAP: app_link.scxml:55 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::EngineState<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             AppLinkState::ID_Closed => {
                 // SCE-MAP: app_link.scxml:98 :: Closed :: _state_body
@@ -872,7 +703,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
         &mut self,
         state: ::sce_rust_runtime::StateId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::EngineState<Self>,
+        engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
@@ -884,6 +715,124 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
 
 
 
+
+    // Appendix D selectTransitions, the half only this document can answer:
+    // the first of `state`'s own transitions, in document order, that `event`
+    // enables, as its row of the tables, which holds its targets and its
+    // type. The engine walks the atomic states and their ancestors and keeps
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
+    #[doc = "SCE-MAP: app_link.scxml:55 :: _machine"]
+// SCE-MAP: app_link.scxml:55 :: _machine
+    fn first_enabled_transition(
+        &mut self,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
+        sce_event_data: Self::EventData<'_>,
+        engine: &mut sce_rust_runtime::Engine<Self>,
+    ) -> Option<::sce_rust_runtime::TransitionId> {
+        match state {
+            AppLinkState::ID_Blocked => {
+                if event == AppLinkEvent::ID_LinkWritable {
+                    {
+                        // Blocked, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(9));
+                    }
+                }
+                if event == AppLinkEvent::ID_LinkClosed {
+                    {
+                        // Blocked, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(10));
+                    }
+                }
+                if event == AppLinkEvent::ID_SessionClose {
+                    {
+                        // Blocked, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(11));
+                    }
+                }
+                None
+            }
+            AppLinkState::ID_Closing => {
+                if event == AppLinkEvent::ID_CloseDone {
+                    {
+                        // Closing, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(12));
+                    }
+                }
+                if event == AppLinkEvent::ID_LinkClosed {
+                    {
+                        // Closing, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(13));
+                    }
+                }
+                None
+            }
+            AppLinkState::ID_Open => {
+                if event == AppLinkEvent::ID_SendBlocked {
+                    {
+                        // Open, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(4));
+                    }
+                }
+                if event == AppLinkEvent::ID_SendClosed {
+                    {
+                        // Open, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(5));
+                    }
+                }
+                if event == AppLinkEvent::ID_SendFailed {
+                    {
+                        // Open, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(6));
+                    }
+                }
+                if event == AppLinkEvent::ID_LinkClosed {
+                    {
+                        // Open, transition 3
+                        return Some(::sce_rust_runtime::TransitionId(7));
+                    }
+                }
+                if event == AppLinkEvent::ID_SessionClose {
+                    {
+                        // Open, transition 4
+                        return Some(::sce_rust_runtime::TransitionId(8));
+                    }
+                }
+                None
+            }
+            AppLinkState::ID_Opening => {
+                if event == AppLinkEvent::ID_LinkConnected {
+                    {
+                        // Opening, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(0));
+                    }
+                }
+                if event == AppLinkEvent::ID_LinkAccepted {
+                    {
+                        // Opening, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(1));
+                    }
+                }
+                if event == AppLinkEvent::ID_LinkClosed {
+                    {
+                        // Opening, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(2));
+                    }
+                }
+                if event == AppLinkEvent::ID_SessionClose {
+                    {
+                        // Opening, transition 3
+                        return Some(::sce_rust_runtime::TransitionId(3));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
@@ -893,7 +842,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::EngineState<Self>,
+        engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // W3C SCXML 3.13: no transition in this document has content.
         let _ = (transition, engine);

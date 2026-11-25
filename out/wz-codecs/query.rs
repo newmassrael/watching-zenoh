@@ -4,7 +4,7 @@
 // Runtime: none
 // Do not edit — regenerate from the source SCXML file.
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceReader, SceSink};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
 // RFC §synth-5-B: `VecSink` and the heap-backed `encode_to_vec` facade
 // are gated on the `alloc` feature (see
 // `backends/rust/forge-runtime/src/codec.rs`). MCU / `no_std` consumers see
@@ -113,10 +113,10 @@ impl<S: QueryStorage> QueryIn<S> {
         Self::default()
     }
 
-    /// Decode the next frame from `cursor`. On success the cursor advances
-    /// past the consumed bytes; on a refusal it does not move, so a caller that
-    /// receives `NeedMoreBytes` reads the frame again from the same place once
-    /// more bytes have arrived (RFC §synth-5-B L494-519, docs/adr/0128).
+    /// Decode the next frame from `cursor`. On success the cursor
+    /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
+    /// is left untouched so the caller can resume after appending more
+    /// bytes (RFC §synth-5-B L494-519).
     pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: QueryFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
@@ -140,72 +140,72 @@ impl<S: QueryStorage> QueryIn<S> {
     /// `_out` holds the fields decoded so far and is not to be read; each of
     /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: QueryFrom<'f> {
-        cursor.read_frame(|cursor| Self::read_into(cursor, _out))
-    }
-
-    /// Read the frame through `cursor`, the frame's reader, into `_out`: every
-    /// read total, each refusal recorded in the reader and the first of them
-    /// the frame's verdict, which the reader says once the frame is read
-    /// (docs/adr/0128). A codec that embeds or dispatches to this one reads it
-    /// through its own reader, so one frame has one verdict.
-    pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: QueryFrom<'f> {
-        // Streaming decode (SSOT selection: `needs_streaming`).
+        // A field past what the profile holds is read on and not held; the
+        // frame says so once it is read whole (docs/adr/0077 §7).
+        let mut _over = false;
+        // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
         // handles every codec where it is not — present-if-gated fields
         // (runtime presence), VLE / repeat / TLV-chain / embed fields
         // (runtime width), string fields (UTF-8 decode), and a fixed field
         // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the reader and
-        // consumes exactly what it read. Per-field `is_repeat` /
+        // length). Each field reads its own bytes from the cursor and
+        // advances past exactly what it consumed. Per-field `is_repeat` /
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let header = {
-            let raw = cursor.take_array::<1>();
-            raw[0]
+            let raw = cursor.peek_array::<1>()?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
         };
         let parameters_len = if (header & 0x40u8) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
         };
-        let parameters = if let Some(_len) = parameters_len {
-            let _n = cursor.settle(usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes));
-            Some(cursor.take_slice(_n))
+        let parameters = if (header & 0x40u8) != 0 {
+            let _len = parameters_len.unwrap();
+            let _n = usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes)?;
+            let raw = cursor.peek_slice(_n)?;
+            let _v = raw;
+            cursor.advance(_n)?;
+            Some(_v)
         } else {
             None
         };
-        let parameters = cursor.settle(parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose());
-        let parameters = cursor.hold(parameters.map(|_v| _v.store::<S, QueryParametersField>()).transpose());
+        let parameters = parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
+        let parameters = ::sce_forge_runtime::codec::note_held(parameters.map(|_v| _v.store::<S, QueryParametersField>()).transpose(), &mut _over)?;
         if (header & 0x80u8) != 0 {
-            cursor.hold_with(|cursor| _out.extensions.get_or_insert_with(Default::default).refill_from((), |_vec| {
+            ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill_from((), |_vec| {
                 let mut _full = false;
                 let mut _prev_extensions_after_shm: u8 = 0;
                 let mut _more = false;
                 loop {
-                    if cursor.failed() { break; }
-                    let _entry = QueryExtEntryOwned::<S>::read(cursor, _prev_extensions_after_shm);
+                    let mut _entry = QueryExtEntryOwned::<S>::default();
+                    ::sce_forge_runtime::codec::note_capacity(QueryExtEntryOwned::<S>::decode_into(cursor, &mut _entry, _prev_extensions_after_shm), &mut _full)?;
                     _more = _entry.z();
                     _prev_extensions_after_shm = u8::from((u64::from(_entry.header) & 127u64) == 4u64);
                     ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
                     if !_more { break; }
                 }
                 if _more && cursor.remaining() == 0 {
-                    cursor.fail(CodecError::NeedMoreBytes);
+                    return Err(CodecError::NeedMoreBytes);
                 }
                 if _full {
                     return Err(CodecError::CapacityExceeded);
                 }
                 Ok(())
-            }));
+            }), &mut _over)?;
         } else {
             _out.extensions = None;
         }
@@ -213,15 +213,10 @@ impl<S: QueryStorage> QueryIn<S> {
         _out.consolidation = consolidation;
         _out.parameters_len = parameters_len;
         _out.parameters = parameters;
-
-    }
-
-    /// [`Self::read_into`] of a value of its own: a list's entry, which the
-    /// list then holds.
-    pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: QueryFrom<'f> {
-        let mut _out = Self::default();
-        Self::read_into(cursor, &mut _out);
-        _out
+        if _over {
+            return Err(CodecError::CapacityExceeded);
+        }
+        Ok(())
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -528,9 +523,8 @@ pub struct QueryWalk;
 impl ::sce_forge_runtime::codec::ListWalk<0> for QueryWalk {
     type Entry<'b> = QueryView<'b>;
 
-    #[inline(always)]
-    fn read<'b>(_r: &mut SceReader<'b>, _a: &[u8; 0]) -> Self::Entry<'b> {
-        QueryView::read(_r)
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        QueryView::decode(_c)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
@@ -551,9 +545,8 @@ pub struct QueryExtensionsWalk;
 impl ::sce_forge_runtime::codec::ListWalk<1> for QueryExtensionsWalk {
     type Entry<'b> = QueryExtEntryView<'b>;
 
-    #[inline(always)]
-    fn read<'b>(_r: &mut SceReader<'b>, _a: &[u8; 1]) -> Self::Entry<'b> {
-        QueryExtEntryView::read(_r, _a[0])
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 1]) -> Result<Self::Entry<'b>, CodecError> {
+        QueryExtEntryView::decode(_c, _a[0])
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) { _s[0] = u8::from((u64::from(_e.header) & 127u64) == 4u64); }
@@ -591,96 +584,82 @@ impl<'a> QueryView<'a> {
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
     /// errors of [`QueryIn::decode`], held as a view. On success the
-    /// cursor advances past the consumed bytes; on a refusal it does not move.
+    /// cursor advances past the consumed bytes.
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
         Ok(_out)
     }
 
-    /// [`Self::decode`] into a destination the caller owns. On `Err`, `_out`
-    /// holds what the reads made of the frame and is not to be read.
+    /// [`Self::decode`] into a destination the caller owns, so a view that
+    /// embeds or dispatches to this one is filled where it will live. On
+    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
     pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
-        cursor.read_frame(|cursor| *_out = Self::read(cursor))
-    }
-
-    /// Read the frame through `cursor`, the frame's reader, as a view built
-    /// once from what its reads return (docs/adr/0128): a view is a value of a
-    /// few words, so no field of it is written first with a default and then
-    /// with what the frame says, and no arm's body is installed before it is
-    /// read. Every read is total, each refusal is recorded in the reader and the
-    /// first of them is the frame's verdict.
-    pub fn read(cursor: &mut SceReader<'a>) -> Self {
-        // Streaming decode (SSOT selection: `needs_streaming`).
+        // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
         // handles every codec where it is not — present-if-gated fields
         // (runtime presence), VLE / repeat / TLV-chain / embed fields
         // (runtime width), string fields (UTF-8 decode), and a fixed field
         // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the reader and
-        // consumes exactly what it read. Per-field `is_repeat` /
+        // length). Each field reads its own bytes from the cursor and
+        // advances past exactly what it consumed. Per-field `is_repeat` /
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let header = {
-            let raw = cursor.take_array::<1>();
-            raw[0]
+            let raw = cursor.peek_array::<1>()?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            _v
         };
         let consolidation = if (header & 0x20u8) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
         };
         let parameters_len = if (header & 0x40u8) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
         };
-        let parameters = if let Some(_len) = parameters_len {
-            let _n = cursor.settle(usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes));
-            Some(cursor.take_slice(_n))
+        let parameters = if (header & 0x40u8) != 0 {
+            let _len = parameters_len.unwrap();
+            let _n = usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes)?;
+            let raw = cursor.peek_slice(_n)?;
+            let _v = raw;
+            cursor.advance(_n)?;
+            Some(_v)
         } else {
             None
         };
-        let parameters = cursor.settle(parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose());
-        #[allow(clippy::needless_late_init)]
-        let extensions: Option<::sce_forge_runtime::codec::Lawful<Bounded<ListView<'a, QueryExtensionsWalk, 1>, { usize::MAX }, 1>, QueryExtensionsLaw>>;
+        let parameters = parameters.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
         if (header & 0x80u8) != 0 {
-            let _rest = cursor.rest();
+            let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
             let mut _prev_extensions_after_shm: u8 = 0;
             let mut _more = false;
             loop {
-                if cursor.failed() { break; }
-                let _entry = QueryExtEntryView::read(cursor, _prev_extensions_after_shm);
+                let _entry = QueryExtEntryView::decode(cursor, _prev_extensions_after_shm)?;
                 _more = _entry.z();
                 _prev_extensions_after_shm = u8::from((u64::from(_entry.header) & 127u64) == 4u64);
-                _count += u32::from(!cursor.failed());
+                _count += 1;
                 if !_more { break; }
             }
             if _more && cursor.remaining() == 0 {
-                cursor.fail(CodecError::NeedMoreBytes);
+                return Err(CodecError::NeedMoreBytes);
             }
-            extensions = cursor.settle(Bounded::new(ListView::new(_rest, _count, [0])).ok_or(CodecError::TooManyElements).and_then(|_l| ::sce_forge_runtime::codec::Lawful::new((), _l).ok_or(CodecError::PresentIfMismatch)).map(Some));
+            _out.extensions = Some(::sce_forge_runtime::codec::Lawful::new((), Bounded::new(ListView::new(_rest, _count, [0])).ok_or(CodecError::TooManyElements)?).ok_or(CodecError::PresentIfMismatch)?);
         } else {
-            extensions = None;
+            _out.extensions = None;
         }
-        Self {
-            header,
-            consolidation,
-            parameters_len,
-            parameters,
-            extensions,
-        }
-
-    }
-
-    /// [`Self::read`] into a destination the caller owns.
-    pub fn read_into(cursor: &mut SceReader<'a>, _out: &mut Self) {
-        *_out = Self::read(cursor);
+        _out.header = header;
+        _out.consolidation = consolidation;
+        _out.parameters_len = parameters_len;
+        _out.parameters = parameters;
+        Ok(())
     }
 
     /// Fill `_out`, the builder form [`QueryIn`] a sender fills and

@@ -1412,11 +1412,6 @@ mod tests {
                 self.bytes.extend_from_slice(bytes);
                 Ok(())
             }
-            fn write_u8(&mut self, b: u8) -> Result<(), CodecError> {
-                self.calls += 1;
-                self.bytes.push(b);
-                Ok(())
-            }
             fn position(&self) -> usize {
                 self.bytes.len()
             }

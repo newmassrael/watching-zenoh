@@ -421,8 +421,6 @@ fn regen_codec_deployment(
 ///                      session_rx_pool_mcu_multicast,
 ///                      session_tx_pool_mcu, eth_rx_pool_mcu (buffer-pools)
 fn regen_statecharts_and_pools(root: &Path) {
-    use wz_codegen_build::MachineForm::{Interpreted, StepFunction};
-
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
     let codegen = wz_codegen_build::Codegen::from_manifest(&root.join("crates/wz-session-core"));
@@ -433,42 +431,34 @@ fn regen_statecharts_and_pools(root: &Path) {
 
     // wz-session-core statecharts. reassembly_slot lives under sources/network;
     // the session FSMs under sources/session (mirrors build.rs resource_dirs).
-    //
-    // Each machine is printed as its own step function (SCE ADR 0129) where its document allows
-    // it: an image links a handful of these machines, which is too few for the shared interpreter
-    // to cost less than it shares, and a step function calls every hook directly where the
-    // interpreter calls through `dyn`, on the reassembly slot's per-fragment path among others.
-    // An image whose machines are all step functions links no shared interpreter at all. The
-    // multicast session has a `<parallel>`, which no step function serves, so it stays
-    // interpreted and an image that holds it links the interpreter for it alone.
     let sc_out = root.join("out/wz-session-core");
     mkdir(&sc_out);
-    codegen.emit_statechart("reassembly_slot", &network, &sc_out, StepFunction);
-    for (stem, form) in [
-        ("scouting", StepFunction),
-        ("session_fsm_unicast", StepFunction),
-        ("session_fsm_multicast", Interpreted),
-        ("multicast_peer", StepFunction),
+    codegen.emit_statechart("reassembly_slot", &network, &sc_out);
+    for stem in [
+        "scouting",
+        "session_fsm_unicast",
+        "session_fsm_multicast",
+        "multicast_peer",
         // Decision D5 of docs/session-lifecycle-intent.md — the per-peer
         // connection machine the lifecycle verbs drive.
-        ("peer_connection", StepFunction),
+        "peer_connection",
         // The observation plane's time — how far the node's clock may be trusted.
-        ("clock_quality", StepFunction),
+        "clock_quality",
         // The observation plane's supervision — a deadline the application feeds.
-        ("supervision", StepFunction),
+        "supervision",
         // Reception supervision per stream — when a receiver judges its periodic streams.
-        ("stream_activation", StepFunction),
+        "stream_activation",
         // The lifecycle of one link over a transport the program supplies.
-        ("app_link", StepFunction),
+        "app_link",
         // The replay cache: a subscriber's round of asking the publishers, and whether a
         // publisher is answering one (and so holding its message's sends).
-        ("replay_round", StepFunction),
-        ("replay_serving", StepFunction),
+        "replay_round",
+        "replay_serving",
         // The life of the one link of a session that holds one face: dialled, up, lost and
         // dialled again, or given up.
-        ("unicast_link", StepFunction),
+        "unicast_link",
     ] {
-        codegen.emit_statechart(stem, &session, &sc_out, form);
+        codegen.emit_statechart(stem, &session, &sc_out);
     }
 
     // wz-session-core algorithms: pure functions of their arguments, written as
