@@ -843,17 +843,35 @@ impl<T> Drop for Placed<T> {
     }
 }
 
-/// Give back a place whose value is gone: to its pool when it lies in one, else to the heap.
+/// Give back a place whose value is gone: to its pool when it lies in one, else to the heap. The
+/// typed face of [`give_back_laid`], which every type shares.
 ///
 /// # Safety
 /// `place` was taken for a `T` (by a [`Slot`] or a `Box`), holds no live value, and is given
 /// back once.
 unsafe fn give_back<T>(place: NonNull<MaybeUninit<T>>) {
+    // SAFETY: the caller's; a `Box` of a `T` was allocated with the layout of a `T`.
+    unsafe { give_back_laid(place.cast::<u8>(), core::alloc::Layout::new::<T>()) }
+}
+
+/// Give back the place at `place`, laid out by `layout`: to its pool when it lies in one, else
+/// to the heap it was allocated from with `layout`. One body for every type of object, out of the
+/// line of each release, where each type held a copy of its own.
+///
+/// # Safety
+/// `place` holds no live value, is given back once, and lies in a pool or was allocated from the
+/// global heap with `layout`.
+#[inline(never)]
+unsafe fn give_back_laid(place: NonNull<u8>, layout: core::alloc::Layout) {
     #[cfg(wz_process_pools)]
-    if crate::process_pool::give_back(place.cast::<u8>()) {
+    if crate::process_pool::give_back(place) {
         return;
     }
-    drop(Box::from_raw(place.as_ptr()));
+    // A `Box` of nothing allocated nothing, so there is nothing to give back.
+    if layout.size() != 0 {
+        // SAFETY: the caller's: the heap allocated `place` with `layout`.
+        unsafe { alloc::alloc::dealloc(place.as_ptr(), layout) };
+    }
 }
 
 #[cfg(test)]
@@ -934,6 +952,25 @@ mod tests {
         // SAFETY: a live `Box::into_raw` handle, released once.
         unsafe { release(object) };
         assert_eq!(drops.get(), 1);
+    }
+
+    /// The shared give-back hands a heap place back with the layout its `Box` was allocated by,
+    /// whatever the type: one over-aligned, and one of no bytes, which allocated nothing and so is
+    /// given nothing back. Turned red (the test process aborts in the heap) by a give-back that
+    /// frees the dangling place of a type of no bytes.
+    #[test]
+    fn a_heap_object_of_any_layout_goes_back_through_the_one_body() {
+        #[repr(align(64))]
+        struct Wide(u8);
+        struct Nothing;
+        let wide = Box::into_raw(Box::new(Wide(7)));
+        let nothing = Box::into_raw(Box::new(Nothing));
+        // SAFETY: two live `Box::into_raw` handles, each released once.
+        unsafe {
+            assert_eq!((*wide).0, 7);
+            release(wide);
+            release(nothing);
+        }
     }
 
     /// An object that does not fit the place its kind is laid out with, by size or by alignment, is
