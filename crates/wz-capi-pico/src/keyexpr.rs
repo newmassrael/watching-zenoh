@@ -219,7 +219,8 @@ impl WireDeclaration {
             None => self.hold.unheld(),
         };
         Ok(Self {
-            session: self.session,
+            // A copy where the session is held by a handle that is `Copy`, a count where by an `Arc`.
+            session: Clone::clone(&self.session),
             hold: ManuallyDrop::new(hold),
             prefix_len: self.prefix_len,
         })
