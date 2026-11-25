@@ -1762,7 +1762,44 @@ fn the_node_lends_a_subscriptions_key_as_its_own_literal_until_it_is_retracted()
     // SAFETY: the node keeps the text until the subscription is retracted, which it is not yet.
     let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
     assert_eq!(text, b"wz/port/lent/**");
-    assert_eq!(view.row, None, "the node declares no key");
+    assert_eq!(view.own, None, "the node declares no key");
     engine.undeclare_subscriber(id);
     assert_eq!(engine.subscriber_keyexpr(id), None);
+}
+
+/// The node lends a queryable's key back as the text it keeps for it, naming no declaration as it
+/// declares none, until the queryable is retracted.
+///
+/// # Control
+///
+/// Lending the program's own buffer in place of the node's copy reds the address assertion (that
+/// buffer is let go of before the key is asked for); a view left after the retraction reds the
+/// last.
+#[test]
+fn the_node_lends_a_queryables_key_as_its_own_literal_until_it_is_retracted() {
+    let (router, _peer) = pair();
+    let engine = router.as_engine();
+    let asked = String::from("wz/port/lent/qbl/**");
+    let id = engine
+        .declare_queryable_on_wire(
+            &asked,
+            WireKey::literal(),
+            false,
+            Locality::Any,
+            None,
+            QueryableSink::shared(|_, _, _| {}),
+        )
+        .expect("a node with ids left declares");
+    let asked_at = asked.as_ptr();
+    drop(asked);
+    let view = engine
+        .queryable_keyexpr(id)
+        .expect("a declared queryable lends its key");
+    assert_ne!(view.start, asked_at, "the node keeps a copy of its own");
+    // SAFETY: the node keeps the text until the queryable is retracted, which it is not yet.
+    let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
+    assert_eq!(text, b"wz/port/lent/qbl/**");
+    assert_eq!(view.own, None, "the node declares no key");
+    engine.undeclare_queryable(id);
+    assert_eq!(engine.queryable_keyexpr(id), None);
 }

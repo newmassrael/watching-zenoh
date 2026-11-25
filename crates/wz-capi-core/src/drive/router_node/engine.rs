@@ -105,6 +105,14 @@ struct Subscribed {
     key: Box<str>,
 }
 
+/// A queryable of the program's: the id the node's data plane holds it under, and the key it was
+/// declared on, which the program is lent back ([`SessionEngine::queryable_keyexpr`]). The key is
+/// a buffer of its own, so it stays where it is when the map moves the entry.
+struct Hosted {
+    host: u64,
+    key: Box<str>,
+}
+
 /// What the node keeps to be an engine: the clock, the ids, the subscriptions and the periodic
 /// jobs it holds for the program.
 pub(super) struct EngineState {
@@ -122,11 +130,12 @@ pub(super) struct EngineState {
     /// ([`SessionEngine::filtered_keyexpr`]). Each key is a buffer of its own, so it stays where it
     /// is when the map moves the entry.
     filters: Mutex<HashMap<FilterId, Box<str>>>,
-    /// The program's queryables, each by the id the node's data plane holds it under. That id is
+    /// The program's queryables, each with the id the node's data plane holds it under. That id is
     /// the data plane's key for its own face's declaration, which no peer reads; the program is
     /// given an entity id, as every other declaration of its session.
-    queryables: Mutex<HashMap<QblId, u64>>,
-    /// The program's liveliness tokens, as `queryables` holds its queryables.
+    queryables: Mutex<HashMap<QblId, Hosted>>,
+    /// The program's liveliness tokens, each by the id the node's data plane holds it under, as
+    /// `queryables` names its queryables.
     tokens: Mutex<HashMap<TokenId, u64>>,
     jobs: Mutex<HashMap<u64, PeriodicJob>>,
     /// What each connectivity listener whose history is being replayed was told of the node's
@@ -616,20 +625,37 @@ impl SessionEngine for RouterState {
             .queryables
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, host);
+            .insert(
+                id,
+                Hosted {
+                    host,
+                    key: keyexpr.into(),
+                },
+            );
         Ok(id)
     }
 
     fn undeclare_queryable(&self, id: QblId) {
-        let host = self
+        let hosted = self
             .engine
             .queryables
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
-        if let Some(host) = host {
-            self.forwarder.unhost_queryable(host);
+        if let Some(hosted) = hosted {
+            self.forwarder.unhost_queryable(hosted.host);
         }
+    }
+
+    // A node names every key whole and declares none, so the key is lent as a literal, the text
+    // the node keeps for the queryable.
+    fn queryable_keyexpr(&self, id: QblId) -> Option<wz_capi_port::KeyView> {
+        self.engine
+            .queryables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|hosted| wz_capi_port::KeyView::literal(&hosted.key))
     }
 
     // A reply holds the keep's value while it runs, so a release from another thread meanwhile

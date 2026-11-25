@@ -578,6 +578,11 @@ impl SessionEngine for SharedSession {
         SharedSession::undeclare_queryable(self, id);
     }
 
+    #[cfg(feature = "queryable")]
+    fn queryable_keyexpr(&self, id: wz_capi_port::QblId) -> Option<wz_capi_port::KeyView> {
+        SharedSession::queryable_keyexpr(self, id)
+    }
+
     // A reply holds the keep's value while it runs, so a release from another thread meanwhile
     // sends the Final once the reply has gone out. The runtime's hold answers under the key it
     // keeps itself, so the caller's is not read.

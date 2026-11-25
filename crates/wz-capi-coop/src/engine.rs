@@ -8988,6 +8988,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.deliver();
     }
 
+    // The text is the row's own, which does not move while the row stands.
+    #[cfg(feature = "queryable")]
+    fn queryable_keyexpr(&self, id: QblId) -> Option<KeyView> {
+        let core = self.live()?;
+        let tables = tables(&core.0.session.registry);
+        let (_, row) = tables.queryables().iter().find(|(_, row)| row.id() == id)?;
+        let key = row.key();
+        Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())))
+    }
+
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_token_on_wire(
         &self,

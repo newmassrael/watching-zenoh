@@ -147,6 +147,9 @@ pub(crate) trait LentRecord {
 const SUBSCRIBER_TAG: usize = 1;
 /// The kind of a publisher's or a querier's key, filter and all.
 const FILTERED_TAG: usize = 2;
+/// The kind of a queryable's state.
+#[cfg(feature = "queryable")]
+const QUERYABLE_TAG: usize = 3;
 
 impl LentRecord for SubscriberState {
     const TAG: usize = SUBSCRIBER_TAG;
@@ -154,6 +157,11 @@ impl LentRecord for SubscriberState {
 
 impl LentRecord for FilteredKey {
     const TAG: usize = FILTERED_TAG;
+}
+
+#[cfg(feature = "queryable")]
+impl LentRecord for crate::query::QueryableState {
+    const TAG: usize = QUERYABLE_TAG;
 }
 
 /// The bits slot 3 of a key lent from the session's record of an entity carries
@@ -167,6 +175,12 @@ const _: () = assert!(
         && core::mem::align_of::<FilteredKey>() > RECORD_TAGS
         && SUBSCRIBER_TAG & !RECORD_TAGS == 0
         && FILTERED_TAG & !RECORD_TAGS == 0
+);
+
+#[cfg(feature = "queryable")]
+const _: () = assert!(
+    core::mem::align_of::<crate::query::QueryableState>() > RECORD_TAGS
+        && QUERYABLE_TAG & !RECORD_TAGS == 0
 );
 
 /// What slot 3 of `ke` names.
@@ -188,6 +202,9 @@ unsafe fn lent_of<'a>(ke: *const z_loaned_keyexpr_t) -> LentKey<'a> {
         SUBSCRIBER_TAG => unsafe { &*at.cast::<SubscriberState>() }.record_key(),
         // SAFETY: as above.
         FILTERED_TAG => unsafe { &*at.cast::<FilteredKey>() }.record_key(),
+        // SAFETY: as above.
+        #[cfg(feature = "queryable")]
+        QUERYABLE_TAG => unsafe { &*at.cast::<crate::query::QueryableState>() }.record_key(),
         // No loan carries another tag.
         _ => return LentKey::View,
     };
@@ -595,18 +612,6 @@ impl DeclaredKeyexpr {
     /// The literal key.
     pub(crate) fn literal(&self) -> &str {
         self.literal.as_str()
-    }
-
-    /// A borrow of this key in the loaned layout, carrying the declaration so a
-    /// caller that publishes on it aliases as pico's `z_publisher_keyexpr` loan
-    /// does. Valid while `self` stays at its address.
-    pub(crate) fn loaned(&self) -> z_loaned_keyexpr_t {
-        z_loaned_keyexpr_t {
-            _start: self.literal().as_ptr(),
-            _len: self.literal().len(),
-            _handle: self.row_address(),
-            _state: self as *const Self as *mut c_void,
-        }
     }
 
     /// The address of the row of the declaration that covers a prefix of the key, where the
@@ -2908,9 +2913,6 @@ mod key_text_tests {
         );
         drop(key);
         assert_eq!(shared.literal(), "demo/own/key");
-        let loaned = shared.loaned();
-        assert_eq!(loaned._start, shared.literal().as_ptr());
-        assert_eq!(loaned._len, shared.literal().len());
     }
 }
 

@@ -648,6 +648,10 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// library names one. Refused as [`Self::declare_subscriber_on_wire`] is, and with
     /// [`Refusal::NotBuilt`] by an engine with no queryable in this build, which is the provided
     /// answer.
+    ///
+    /// The record of the queryable keeps `keyexpr` and holds the declarations `wire` and
+    /// `retraction` name until the queryable is retracted: the entity keeps no copy of its key and
+    /// lends it from the record ([`Self::queryable_keyexpr`]).
     fn declare_queryable_on_wire(
         &self,
         keyexpr: &str,
@@ -665,6 +669,16 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// nothing.
     fn undeclare_queryable(&self, id: QblId) {
         let _ = id;
+    }
+
+    /// The key queryable `id` was declared on, as the engine's record of the queryable keeps it:
+    /// its text, and the declaration the record holds that the key is lent with, when it holds
+    /// one ([`Self::declare_queryable_on_wire`]). Valid until the queryable is retracted, the
+    /// record holding both until then; `None` for an id that names no queryable, and from an
+    /// engine with no queryable in this build, which is the provided answer.
+    fn queryable_keyexpr(&self, id: QblId) -> Option<KeyView> {
+        let _ = id;
+        None
     }
 
     /// Answer the kept query `id` ([`crate::QueryHolder::keep_query`]) now, with what `answer`
@@ -709,6 +723,9 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// when the declaring ABI's reference library names one. Refused as
     /// [`Self::declare_subscriber_on_wire`] is, and with [`Refusal::NotBuilt`] by an engine with
     /// no liveliness in this build, which is the provided answer.
+    ///
+    /// The record of the token holds the declarations `wire` and `retraction` name until the
+    /// token is retracted, so the entity keeps none of its own.
     fn declare_liveliness_token_on_wire(
         &self,
         keyexpr: &str,

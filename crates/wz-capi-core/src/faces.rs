@@ -1490,6 +1490,28 @@ fn declarations_named(wire: &WireKey, retraction: Option<RetractionKey>) -> [Key
     ]
 }
 
+/// `key`, the text an entry of the registry keeps, lent with the declaration the entry holds that
+/// the key begins with: that of the entity's own key, or else the one its key is named by, as
+/// `declarations_named` puts the own one second when it is another.
+fn lent_entry_key(
+    tables: &SessionTables<CoreRows, Heap>,
+    key: &str,
+    held: [Option<KeyexprHandle>; 2],
+) -> wz_capi_port::KeyView {
+    let lent = held[1]
+        .or(held[0])
+        .and_then(|handle| Some((handle, tables.keyexprs().get(handle)?)));
+    match lent {
+        // SAFETY: the growable table keeps its rows in chunks that are only ever added
+        // (`Chunked`), so a row stays where it was put while it stands; and the entry holds the
+        // declaration until the entity is retracted.
+        Some((handle, row)) => unsafe {
+            wz_capi_port::KeyView::holding(key, handle, row.key(), row.id(), row.head().count())
+        },
+        None => wz_capi_port::KeyView::literal(key),
+    }
+}
+
 /// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face
 /// exactly as the others are, which is what makes a token declared before any
 /// peer connected visible to that peer when it arrives. Upstream's
@@ -5319,20 +5341,16 @@ impl SharedSession {
                     .find(|entry| entry.id == id)
                     .map(|entry| (&entry.keyexpr, entry.held))
             })?;
-        // The declaration of the subscription's own key, or else the one its key is named by: the
-        // entry holds both (`declarations_named`), the own one second when it is another.
-        let lent = held[1]
-            .or(held[0])
-            .and_then(|handle| Some((handle, guard.tables.keyexprs().get(handle)?)));
-        Some(match lent {
-            // SAFETY: the growable table keeps its rows in chunks that are only ever added
-            // (`Chunked`), so a row stays where it was put while it stands; and the entry holds
-            // the declaration until the subscription is retracted.
-            Some((handle, row)) => unsafe {
-                wz_capi_port::KeyView::holding(key, handle, row.key(), row.id(), row.head().count())
-            },
-            None => wz_capi_port::KeyView::literal(key),
-        })
+        Some(lent_entry_key(&guard.tables, key, held))
+    }
+
+    /// The key queryable `id` was declared on, as its SSOT entry keeps it, with the declaration
+    /// the entry holds that the key begins with. The text is the entry's heap buffer, which stays
+    /// where it is when the entries move and goes with the entry.
+    pub fn queryable_keyexpr(&self, id: QblId) -> Option<wz_capi_port::KeyView> {
+        let guard = self.lock();
+        let entry = guard.qbls.iter().find(|entry| entry.id == id)?;
+        Some(lent_entry_key(&guard.tables, &entry.keyexpr, entry.held))
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
@@ -8033,6 +8051,55 @@ mod matching_aggregate_tests {
         );
         shared.undeclare_write_filter(filter);
         assert_eq!(shared.filtered_keyexpr(filter), None, "gone with its entry");
+        assert_eq!(holds(&shared), Some(1), "the entry gave its hold back");
+        hold.release(&shared);
+    }
+
+    /// A queryable's entry keeps its key and holds the declaration the key is named by, which the
+    /// queryable's key is lent with, from its declaration until it is retracted, when the hold goes
+    /// back. Turned red by an entry that takes no hold, lends another text or no declaration, or
+    /// lends its key past the retraction.
+    #[test]
+    fn a_queryable_lends_its_key_with_the_declaration_it_holds() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let key = "wz/qbl/lent";
+        let hold = shared
+            .acquire_keyexpr(key.to_owned())
+            .expect("a session with room declares");
+        let row = hold.row().expect("a hold names its row");
+        let holds = |shared: &SharedSession| {
+            shared
+                .lock()
+                .tables
+                .keyexprs()
+                .get(row)
+                .map(|row| row.holds())
+        };
+        let id = shared
+            .declare_queryable_on_wire(
+                key.to_owned(),
+                WireKey::aliased_tail(hold.mapping_id(), 0).at_row(Some(row)),
+                false,
+                Locality::Any,
+                None,
+                wz_capi_port::QueryableSink::shared(|_, _, _| {}),
+            )
+            .expect("a session with ids left declares");
+        assert_eq!(holds(&shared), Some(2), "the program's and the entry's");
+        let lent = shared
+            .queryable_keyexpr(id)
+            .expect("the entry keeps the key");
+        // SAFETY: the entry keeps the text where it lent it until the queryable is retracted below.
+        let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
+        assert_eq!(text, key.as_bytes());
+        let own = lent.own.expect("lent with the declaration the entry holds");
+        assert_eq!(
+            (own.row, own.mapping, own.prefix_len),
+            (row, hold.mapping_id(), key.len())
+        );
+        shared.undeclare_queryable(id);
+        assert_eq!(shared.queryable_keyexpr(id), None, "gone with its entry");
         assert_eq!(holds(&shared), Some(1), "the entry gave its hold back");
         hold.release(&shared);
     }

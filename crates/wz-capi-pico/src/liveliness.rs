@@ -113,12 +113,12 @@ impl z_owned_liveliness_token_t {
 /// retraction lives in `Drop` rather than in the export so that both the
 /// explicit `z_liveliness_undeclare_token` and the implicit `z_drop` take the
 /// identical path — the two must not be able to diverge.
+///
+/// The session's record of the token holds the whole-key declaration pico makes for it until the
+/// token is retracted, so its retraction follows the token's; the door keeps no copy of the key.
 pub(crate) struct TokenState {
     shared: EngineHold,
     id: TokenId,
-    /// R2959 — the token's key with the whole-key declaration pico makes for
-    /// it; dropped after the token, so its retraction follows the token's.
-    _key: DeclaredKeyexpr,
 }
 
 impl TokenState {
@@ -147,10 +147,11 @@ impl TokenState {
                 Some(key.retraction_key(crate::session::EngineHold::as_ref(&session.engine))),
             )
             .map_err(|refused| refusal_code(refused, Door::Token))?;
+        // The session's record holds the declaration from here on: the door's hold goes.
+        drop(key);
         Ok(Self {
             shared: session.engine.clone(),
             id,
-            _key: key,
         })
     }
 }
