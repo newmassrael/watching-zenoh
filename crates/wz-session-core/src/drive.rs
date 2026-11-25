@@ -3916,16 +3916,23 @@ pub(crate) fn lease_deadlines<R: SessionRuntime, T: TimeSource>(
     })
 }
 
-/// R311kx — absolute next keepalive TX deadline (ms):
-/// `max(established_at, last_outbound_at) + keepalive_interval_ms`, or `None`
-/// pre-Established. The TX-side wake twin of [`lease_wake_deadline`]: the
-/// lease deadline watches the PEER's silence, this one watches OURS —
+/// R311kx — absolute next keepalive TX deadline (ms): the end of the link's
+/// keepalive tick, `max(established_at, keepalive_tick_at) + keepalive_interval_ms`,
+/// or `None` pre-Established. The TX-side wake twin of [`lease_wake_deadline`]:
+/// the lease deadline watches the PEER's silence, this one watches OURS —
 /// zenoh-pico's keep-alive task wakes every
 /// `_lease / Z_TRANSPORT_LEASE_EXPIRE_FACTOR` and emits when nothing was
 /// transmitted in the window (unicast/lease.c:191), and zenoh's link writer
 /// sends one when its tracker of `lease / keep_alive` runs out. The interval
 /// is the session's own ([`SessionLinkActions::keepalive_interval_ms`]),
 /// because the two divide different leases by different numbers.
+///
+/// A frame does not move the deadline: it marks the tick as one the line
+/// spoke in, and the tick's end reads the mark. So a line that spoke just
+/// after a tick began is silent for at most two intervals, which is inside
+/// the lease for every division the session offers. A driver with a queue
+/// reports its last write, which moves the deadline, as its writer is what
+/// speaks.
 ///
 /// The interval is never 0, so a degenerate 0 ms lease does not hot-spin the
 /// emitter; the lease comparator expires such a session on its first check
@@ -3960,6 +3967,9 @@ pub(crate) struct KeepaliveDeadlines {
     link: Option<u64>,
     /// The companion's: `None` on a link without one.
     companion: Option<u64>,
+    /// The start of the link's tick these deadlines were read in, which the judge that ends it
+    /// finds unchanged: a second judge of the same tick finds it ended.
+    tick: Option<u64>,
 }
 
 #[cfg(feature = "transport-keepalive")]
@@ -3988,14 +3998,14 @@ pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
     }
     let crate::session_actions::LinkStamps {
         established_at: established,
-        last_outbound_at: outbound,
+        keepalive_tick_at: tick,
         ..
     } = actions.link.stamps();
     let now = actions.clock.now_monotonic_ms();
     // A driver with a queue between hand-over and write reports when its writer last finished
-    // a write, and that is when the line spoke (the stamp above then holds only the control
-    // frames, which are the keepalives themselves). Folded in as a stamp on the session's
-    // clock: the driver answers an elapsed time, so the two clocks need no common epoch.
+    // a write, and that is when the line spoke (its data frames never mark the tick,
+    // `emit_on_link`). Folded in as a stamp on the session's clock: the driver answers an
+    // elapsed time, so the two clocks need no common epoch.
     let driver = actions.link.link_driver();
     let written = if driver.reports_wire_writes() {
         driver
@@ -4005,10 +4015,9 @@ pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
         None
     };
     let interval = actions.keepalive_interval_ms();
-    let link =
-        max_stamp(max_stamp(established, outbound), written).map(|b| b.saturating_add(interval));
-    // The companion's line is its own last write and nothing the session stamps: its frames
-    // never stamp the link's (`emit_on_link`), and the link's never stand in for it.
+    let link = max_stamp(max_stamp(established, tick), written).map(|b| b.saturating_add(interval));
+    // The companion's line is its own last write and nothing the session marks: its frames
+    // never mark the link's tick (`emit_on_link`), and the link's never stand in for it.
     let class = crate::reliability::Reliability::BestEffort;
     let companion = if driver.carries_apart(class) {
         let written = driver
@@ -4018,15 +4027,18 @@ pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
     } else {
         None
     };
-    Some(KeepaliveDeadlines { link, companion })
+    Some(KeepaliveDeadlines {
+        link,
+        companion,
+        tick,
+    })
 }
 
 /// R311kx — run one keepalive TX deadline check: when the link's keepalive
-/// worker is running, the transport is live, and the line has been idle for
-/// the session's keepalive interval (no wire emit since the
-/// [`keepalive_wake_deadline`] baseline), emit one KeepAlive through
-/// [`SessionLinkActions::send_keep_alive`] — which re-stamps
-/// `last_outbound_at`, opening the next idle window. The TX-emitter
+/// worker is running, the transport is live, and the link's keepalive tick
+/// has run out ([`keepalive_wake_deadline`]), end the tick and emit one
+/// KeepAlive through [`SessionLinkActions::send_keep_alive`] if the line did
+/// not speak in it; the next tick starts at `now_ms`. The TX-emitter
 /// closure of the R311kv asymmetry: without it a wz node publishing
 /// nothing fell silent for its whole advertised lease and the peer
 /// expired it (zenoh-pico's keep-alive task is the reference,
@@ -4066,17 +4078,35 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
         return K::Inactive;
     }
     let due = |deadline: Option<u64>| deadline.is_some_and(|at| now_ms >= at);
-    let link_due = due(deadlines.link);
-    let companion_due = due(deadlines.companion);
-    if link_due {
-        actions.send_keep_alive();
+    let mut emitted = false;
+    // The tick ends once: under the stamps' lock, and only if it is still the tick the
+    // deadlines were read in, so the tokio pacer beside the loop cannot answer it twice.
+    let tick_ended = due(deadlines.link)
+        && actions.link.with_stamps(|stamps| {
+            let ours = stamps.keepalive_tick_at == deadlines.tick;
+            if ours {
+                stamps.keepalive_tick_at = Some(now_ms);
+            }
+            ours
+        });
+    if tick_ended {
+        let spoke = &actions.link.spoke;
+        // zenoh-pico's order (`src/transport/unicast/lease.c`): a keepalive only for a tick
+        // the line was silent in, and the flag cleared after it, so the keepalive's own mark
+        // does not count as speech in the next tick.
+        if !spoke.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            actions.send_keep_alive();
+            spoke.store(false, core::sync::atomic::Ordering::Relaxed);
+            emitted = true;
+        }
     }
     // Each line by its own clock: the companion's keepalive goes when its own
     // deadline passes, whether or not the link's did.
-    if companion_due {
+    if due(deadlines.companion) {
         actions.send_keep_alive_apart(crate::reliability::Reliability::BestEffort);
+        emitted = true;
     }
-    if link_due || companion_due {
+    if emitted {
         K::Emitted
     } else {
         K::WithinInterval

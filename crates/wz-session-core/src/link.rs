@@ -1105,8 +1105,8 @@ pub trait BoxedLinkDriver {
     /// holds.
     ///
     /// The keepalive emitter asks the line whether it has been idle for a lease interval. The
-    /// stamp the session keeps itself is the time a frame was HANDED to the link, and that is
-    /// the time it was written only while the link's queue is empty: a link whose writer is
+    /// mark the session sets itself is made when a frame is HANDED to the link, and that is
+    /// when it was written only while the link's queue is empty: a link whose writer is
     /// behind holds frames that have not left, and counting them as line activity silences the
     /// keepalive exactly when the peer is hearing nothing. zenoh-pico sets its `_transmitted`
     /// flag where the bytes are written (`src/transport/common/tx.c`), and zenoh resets its
@@ -1116,7 +1116,7 @@ pub trait BoxedLinkDriver {
     /// the driver's clock and the session's never have to agree on an epoch.
     ///
     /// A driver that WRAPS another must forward both methods, or the session behind it keeps
-    /// the hand-over stamp that overstates the line's activity.
+    /// marking the hand-over, which overstates the line's activity.
     fn ms_since_wire_write(&self) -> Option<u64> {
         None
     }
