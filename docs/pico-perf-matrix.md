@@ -217,14 +217,23 @@ mode builds everything it runs: the reference (cached by the cost gate's key und
 | `PICO_CMP_PERF_TRANSPORTS` | `tcp,udp,multicast,program` | the transports |
 | `PICO_CMP_PERF_BATCHING` | `off,on` | batching off, on, or both |
 | `PICO_CMP_PERF_WORKLOADS` | `rtt,thr` | the workloads |
-| `PICO_CMP_CLIENT_CPUS` | `4-7` | the CPUs ping and pub are pinned to |
-| `PICO_CMP_SERVER_CPUS` | `8-11` | the CPUs pong and sub are pinned to |
+| `PICO_CMP_CLIENT_CPUS` | from the topology | the CPUs ping and pub are pinned to |
+| `PICO_CMP_SERVER_CPUS` | from the topology | the CPUs pong and sub are pinned to |
 | `PICO_CMP_PINGS` | `20000` | the round trips counted per rtt cell |
 | `PICO_CMP_STDLIB` | the release's form | arm W's standard library, `std` or `nostd` (section 1) |
 | `WZ_PERF_EXTERNAL_*` | unset | arm X and its table (section 1, section 5) |
 
-The pinning defaults to the parity matrix's (`docs/upstream-parity.md` section 5b). On the host a
-run is made on, name CPUs that are idle and that do not share a physical core across the two sides.
+A side whose variable is unset is chosen from the host's topology before anything is built
+(`perf_matrix.py pin-sides`): two whole physical cores a side, every thread of a core on one side, the
+core of CPU 0 left to the system, cores of more threads first (a hybrid CPU's performance cores); one
+core a side on a host with too few for two, and a host with too few for one is refused with the reason.
+The run prints the CPUs it chose (`pico-compare: pinning ...`) and the report carries them. To place
+the run by hand, name CPUs that are idle and that do not share a physical core across the two sides.
+
+The three measurements are declared in `bx.toml` as runs that hold their machine alone (bx RFC
+0072): `bx --command pico-perf`, `bx --command pico-perf-tcp` (`PICO_CMP_PERF_TRANSPORTS=tcp`) and
+`bx --command pico-subprofile`, with `--host <alias>` to choose the machine. bx waits until every
+other run there has ended and admits none after it until it ends.
 
 **Picking idle CPUs on a shared host such as pc2.** Other jobs run there, and a cell whose pinned CPUs
 were busy is run again and finally lost ("the pinned CPUs were used by something else in 6 runs").

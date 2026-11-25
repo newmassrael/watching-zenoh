@@ -85,13 +85,15 @@
 # loopback.
 #
 # Run it on a build host through `bx --host <host> -- bash scripts/pico-compare.sh ...`: the libraries are
-# built in that tree, and what the script prints is read from bx's log. A hybrid-CPU host needs the
-# pinning stated, because the default layout is the one measured on a 22-thread hybrid host (a physical
-# core is a pair of threads; each process gets one pair, never one thread: a process pinned to a single
-# CPU measured a 2 ms scheduler tick in BOTH libraries).
+# built in that tree, and what the script prints is read from bx's log. The pinning is chosen from the
+# host's topology unless it is stated (pin_sides below): two whole physical cores a side, every thread of a
+# core on one side, the core of CPU 0 left to the system, and one core a side on a host with too few; a host
+# with fewer than that is refused before anything is built. A process is never pinned to one thread of an SMT
+# core: a process pinned to a single CPU measured a 2 ms scheduler tick in BOTH libraries.
 #
-# Environment: PICO_CMP_PING_CPUS / PICO_CMP_PONG_CPUS / PICO_CMP_PUB_CPUS / PICO_CMP_SUB_CPUS (defaults
-# 6,7 / 8,9 / 6,7 / 10,11), PICO_CMP_WZ_ENV (extra `VAR=value` words put in front of every wz process,
+# Environment: PICO_CMP_PING_CPUS / PICO_CMP_PONG_CPUS (`rtt`) and PICO_CMP_PUB_CPUS / PICO_CMP_SUB_CPUS
+# (`thr`, `nodrop`, `nodrop-c`, `profile`, `tids`, `subprofile`), each unset one from the topology,
+# PICO_CMP_WZ_ENV (extra `VAR=value` words put in front of every wz process,
 # for example WZ_CAPI_RX_BUSY_POLL_US=10), PICO_CMP_NO_BUILD=1 (use the libraries already built), PICO_CMP_ENGINE
 # (`tokio` or `coop`: the engine the wz library is built on, to compare the two; unset, the one the package for a
 # host ships on, which its profile configs/profiles/host-peer-ext.conf chooses). `rtt`, `thr`, `nodrop`, `profile`,
@@ -99,10 +101,10 @@
 # builds each original's preset and `nodrop-c` the zenoh-c family, which have one engine each. PICO_CMP_STDLIB
 # (`std` or `nostd`, `perf` only): the standard library the wz library is built with, to compare the two;
 # unset, the one form the release ships (perf_matrix.py bench-stdlib).
-# `parity` pins the client side of a pair (z_ping, z_pub_thr, z_put, z_get) to PICO_CMP_CLIENT_CPUS and the
-# server side to PICO_CMP_SERVER_CPUS (defaults 4-7 and 8-11: two physical cores a side on the 22-thread
-# hybrid bench host, because zenoh-c and zenoh run several threads a process and one SMT pair would bind
-# them where it binds pico's one); PICO_CMP_PINGS (default 20000), PICO_CMP_WARMUP_S (3) and
+# `parity` and `perf` pin the client side of a pair (z_ping, z_pub_thr, z_put, z_get) to PICO_CMP_CLIENT_CPUS
+# and the server side to PICO_CMP_SERVER_CPUS (unset, from the topology: two whole cores a side where the host
+# has them, because zenoh-c and zenoh run several threads a process and one SMT pair would bind them where it
+# binds pico's one); PICO_CMP_PINGS (default 20000), PICO_CMP_WARMUP_S (3) and
 # PICO_CMP_WINDOW_S (10) set the round trips and the throughput window.
 #
 # What it does NOT show: anything about an MCU, and the cost in CPU of a lower round trip: read the
@@ -113,11 +115,41 @@ set -u
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root" || exit 2
 
-ping_cpus="${PICO_CMP_PING_CPUS:-6,7}"
-pong_cpus="${PICO_CMP_PONG_CPUS:-8,9}"
-pub_cpus="${PICO_CMP_PUB_CPUS:-6,7}"
-sub_cpus="${PICO_CMP_SUB_CPUS:-10,11}"
 wz_env="${PICO_CMP_WZ_ENV:-}"
+
+# THE CPUS EACH SIDE OF A PAIR RUNS ON. A variable that names them is used as given; an unset one takes its side
+# from this host's topology (perf_matrix.py pin-sides), so a host of another shape than the one the fixed layout
+# was measured on is pinned to CPUs it has instead of every cell failing in taskset. A host with too few cores is
+# refused here, before anything is built or run, and the CPUs chosen are printed and carried into each record.
+client_cpus=""
+server_cpus=""
+pin_sides() {
+    local client_var="$1" server_var="$2" words how
+    words="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" pin-sides "$client_var=${!client_var:-}" \
+        "$server_var=${!server_var:-}")" \
+        || { echo "pico-compare: NOT-MEASURED, no pinning on this host (perf_matrix.py pin-sides said why above)"; exit 2; }
+    read -r client_cpus server_cpus how <<<"$words"
+    echo "pico-compare: pinning $client_var=$client_cpus $server_var=$server_cpus ($how)"
+}
+ping_cpus=""
+pong_cpus=""
+pub_cpus=""
+sub_cpus=""
+case "${1:-}" in
+    rtt)
+        pin_sides PICO_CMP_PING_CPUS PICO_CMP_PONG_CPUS
+        ping_cpus="$client_cpus"
+        pong_cpus="$server_cpus"
+        ;;
+    thr | nodrop | nodrop-c | profile | tids | subprofile)
+        pin_sides PICO_CMP_PUB_CPUS PICO_CMP_SUB_CPUS
+        pub_cpus="$client_cpus"
+        sub_cpus="$server_cpus"
+        ;;
+    parity | perf)
+        pin_sides PICO_CMP_CLIENT_CPUS PICO_CMP_SERVER_CPUS
+        ;;
+esac
 
 # Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
 # shellcheck source=scripts/lib/artifact-root.sh
@@ -871,7 +903,7 @@ parity() {
     run="$out/parity-runs/$tag"
     python3 -I "$root/scripts/host-bench/parity.py" --family "$family" --bin-dir "$dir/bin" --run "$run" \
         --boots "$boots" --sizes "$sizes" --image "$PARITY_IMAGE" --reference "$PARITY_REFERENCE" \
-        --client-cpus "${PICO_CMP_CLIENT_CPUS:-4-7}" --server-cpus "${PICO_CMP_SERVER_CPUS:-8-11}" \
+        --client-cpus "$client_cpus" --server-cpus "$server_cpus" \
         --pings "${PICO_CMP_PINGS:-20000}" --warmup-s "${PICO_CMP_WARMUP_S:-3}" --window-s "${PICO_CMP_WINDOW_S:-10}" \
         --heap-shim "$dir/bin/heap_peak.so" --rss-wrapper "$dir/bin/fork_rss" \
         --size-binary "P=$PARITY_SIZE_P" --size-binary "W=$PARITY_SIZE_W"
@@ -888,7 +920,7 @@ parity() {
         echo "cc=$(cc --version | head -1)"
         echo "rustc=$(cd crates && rustc -V)"
         echo "boots=$boots of each image, alternating; sizes=$sizes"
-        echo "client_cpus=${PICO_CMP_CLIENT_CPUS:-4-7} server_cpus=${PICO_CMP_SERVER_CPUS:-8-11}"
+        echo "client_cpus=$client_cpus server_cpus=$server_cpus"
         echo "reference=$PARITY_REFERENCE image=$PARITY_IMAGE"
         echo "$PARITY_NOTES"
         echo "parity_exit=$rc"
@@ -1038,7 +1070,7 @@ perf_probe_build() {
 
 # perf_matrix [reps] [sizes]: build the arms (unless PICO_CMP_NO_BUILD=1), run the matrix and judge the run. The
 # cells can be narrowed with PICO_CMP_PERF_TRANSPORTS, PICO_CMP_PERF_BATCHING and PICO_CMP_PERF_WORKLOADS (comma
-# lists of perf_matrix.py's words); the pinning is parity's, PICO_CMP_CLIENT_CPUS and PICO_CMP_SERVER_CPUS. The
+# lists of perf_matrix.py's words); the pinning is parity's (pin_sides above). The
 # exit is the gate's (docs/pico-perf-matrix.md section 5): 0 every row held, 1 a row failed, 2 an input refused,
 # 3 nothing failed but a row, or arm X when the environment names it, was not measured; a run that did not
 # finish exits as before, 2 when it measured nothing.
@@ -1074,7 +1106,7 @@ perf_matrix() {
     python3 -I "$root/scripts/host-bench/perf_matrix.py" run --bin-dir "$dir/bin" --run "$run" --reps "$reps" \
         --sizes "$sizes" --transports "${PICO_CMP_PERF_TRANSPORTS:-tcp,udp,multicast,program}" \
         --batching "${PICO_CMP_PERF_BATCHING:-off,on}" --workloads "${PICO_CMP_PERF_WORKLOADS:-rtt,thr}" \
-        --client-cpus "${PICO_CMP_CLIENT_CPUS:-4-7}" --server-cpus "${PICO_CMP_SERVER_CPUS:-8-11}" \
+        --client-cpus "$client_cpus" --server-cpus "$server_cpus" \
         --pings "${PICO_CMP_PINGS:-20000}" --reference-record "$dir/reference.json" ${external_args[@]+"${external_args[@]}"}
     rc=$?
     if [ -f "$run/report.txt" ]; then

@@ -70,6 +70,12 @@ committed rows.
         at least PER_SIDE (default 4) CPUs of whole cores, the least busy first, printed as the words
         `pico-compare.sh perf` reads; on a shared host a moment's idle CPUs are a guess the run's own
         validity check then grades
+    perf_matrix.py pin-sides CLIENT_VAR=[CPUS] SERVER_VAR=[CPUS]
+        the CPUs of the two sides of a pair, printed as `<client> <server> <how>` on one line: a side whose
+        CPUS are given is used as given, a side whose CPUS are empty is chosen from this host's topology
+        (topology_pinning: two whole physical cores a side, one when the host has too few, the core of CPU 0
+        left to the system); exit 2 with the reason when a given CPU cannot be run on or the host has too few
+        cores. `pico-compare.sh` calls it before a mode that pins builds or runs anything
     perf_matrix.py --selftest
         the readers, the figures and the pinning on synthetic input
 
@@ -502,6 +508,87 @@ def cmd_idle_cpus(seconds: float, per_side: int) -> int:
     client, server = pinning
     print(f"PICO_CMP_CLIENT_CPUS={','.join(map(str, client))} PICO_CMP_SERVER_CPUS={','.join(map(str, server))}",
           flush=True)
+    return 0
+
+
+#: The CPU whose physical core a pinning from the topology leaves to the system: interrupts, timers and the
+#: kernel's housekeeping threads land there, and a side pinned beside them would measure them.
+SYSTEM_CPU = 0
+#: Whole physical cores a side is given from the topology, then what it falls back to on a host with too few:
+#: one core is still a pair of threads on an SMT host, and a process held to a single thread measured a 2 ms
+#: scheduler tick in both libraries.
+SIDE_CORES = (2, 1)
+
+
+def topology_pinning(core_of: dict[int, tuple[int, int]], allowed: set[int],
+                     given: list[tuple[str, str]]) -> tuple[list[list[int]], str]:
+    """The CPUs of each side of a pair (client, then server), in the order of `given`: a (variable, CPU list)
+    per side, the list empty for a side the host's topology chooses.
+
+    A given side is used as it is, once each of its CPUs is one this process may run on. A side not given is
+    SIDE_CORES[0] whole physical cores, or SIDE_CORES[1] a side when too few are left: every CPU of a core on
+    one side, so the sides share no core, cores of more threads first (a hybrid CPU's performance cores),
+    then the lowest CPU. Left out: the core of SYSTEM_CPU, every core a given side touches, and a core one of
+    whose CPUs this process may not run on. Returns the sides and how they were chosen; Refused with the
+    sentence that says why when a given CPU cannot be run on or the host has too few cores."""
+    sides: list[list[int] | None] = []
+    for name, spec in given:
+        if not spec:
+            sides.append(None)
+            continue
+        try:
+            cpus = sorted(set(cpu_list(spec)))
+        except ValueError:
+            cpus = []
+        if not cpus:
+            raise Refused(f"{name}={spec} is not a CPU list (6,7 or 4-7)")
+        outside = [cpu for cpu in cpus if cpu not in allowed]
+        if outside:
+            raise Refused(f"{name}={spec} names CPU {','.join(map(str, outside))}, which this process "
+                          f"may not run on (it may run on {','.join(map(str, sorted(allowed)))})")
+        sides.append(cpus)
+    missing = [name for (name, _), side in zip(given, sides) if side is None]
+    if not missing:
+        return [side for side in sides if side is not None], "given"
+    taken = {cpu for side in sides if side is not None for cpu in side}
+    cores: dict[tuple[int, int], list[int]] = {}
+    for cpu, core in core_of.items():
+        cores.setdefault(core, []).append(cpu)
+    reserved = core_of.get(SYSTEM_CPU)
+    free = sorted((sorted(cpus) for core, cpus in cores.items()
+                   if core != reserved and all(c in allowed and c not in taken for c in cpus)),
+                  key=lambda cpus: (-len(cpus), cpus[0]))
+    for per_side in SIDE_CORES:
+        if len(free) < per_side * len(missing):
+            continue
+        for i, side in enumerate(sides):
+            if side is None:
+                chosen = free[:per_side]
+                del free[:per_side]
+                sides[i] = sorted(cpu for cpus in chosen for cpu in cpus)
+        how = (f"{' and '.join(missing)} from the topology, {per_side} whole core{'s' if per_side > 1 else ''} "
+               f"a side, the core of CPU {SYSTEM_CPU} left to the system")
+        return [side for side in sides if side is not None], how
+    beside = " or a given side" if taken else ""
+    raise Refused(f"this host has {len(free)} whole core{'' if len(free) == 1 else 's'} this process may run on "
+                  f"outside the core of CPU {SYSTEM_CPU}{beside}, and {' and '.join(missing)} need one core "
+                  f"a side at least; name the CPUs of each side to run here")
+
+
+def cmd_pin_sides(words: list[str]) -> int:
+    given = []
+    for word in words:
+        name, eq, spec = word.partition("=")
+        if not eq or not name:
+            print(__doc__, file=sys.stderr)
+            return 64
+        given.append((name, spec))
+    try:
+        sides, how = topology_pinning(cpu_cores(), set(os.sched_getaffinity(0)), given)
+    except Refused as why:
+        print(f"perf-matrix: {why}", file=sys.stderr)
+        return 2
+    print(" ".join(",".join(map(str, side)) for side in sides), how, flush=True)
     return 0
 
 
@@ -1888,6 +1975,38 @@ def cmd_selftest() -> int:
            suggest_pinning(busy, core_of, 3) == ([1, 2, 5, 6], [0, 3, 4, 7]))
     expect("a host with too few cores for both sides is refused", suggest_pinning(busy, core_of, 5) is None)
 
+    def pinned(topology: dict[int, tuple[int, int]], allowed: set[int], client: str = "", server: str = ""):
+        try:
+            return topology_pinning(topology, allowed, [("C", client), ("S", server)])
+        except Refused as why:
+            return str(why)
+
+    # A hybrid host: six cores of two threads (core i holds CPUs 2i and 2i + 1), then ten of one thread.
+    hybrid = {cpu: (0, cpu // 2) for cpu in range(12)}
+    hybrid.update({cpu: (0, cpu - 6) for cpu in range(12, 22)})
+    sides, how = pinned(hybrid, set(hybrid))
+    expect("on a hybrid host each side is two two-thread cores, past the core of CPU 0",
+           sides == [[2, 3, 4, 5], [6, 7, 8, 9]] and "2 whole cores a side" in how)
+    # Four cores of two threads, core i holding CPUs i and i + 4: three are left past the core of CPU 0.
+    eight = {cpu: (0, cpu % 4) for cpu in range(8)}
+    sides, how = pinned(eight, set(eight))
+    expect("an eight-thread host falls back to one whole core a side",
+           sides == [[1, 5], [2, 6]] and "1 whole core a side" in how)
+    two = {0: (0, 0), 1: (0, 1), 2: (0, 0), 3: (0, 1)}
+    expect("a host with one core past the core of CPU 0 is refused, and says so",
+           pinned(two, set(two)).startswith("this host has 1 whole core"))
+    expect("a core one of whose CPUs this process may not run on is not a candidate",
+           pinned(eight, {0, 1, 2, 3, 4, 5, 6})[0] == [[1, 5], [2, 6]]
+           and pinned(eight, {0, 1, 2, 3, 4, 5}).startswith("this host has 1 whole core"))
+    sides, how = pinned(eight, set(eight), client="3,7")
+    expect("a given side is kept and the other side avoids its core",
+           sides == [[3, 7], [1, 2, 5, 6]] and how.startswith("S from the topology, 2 whole cores"))
+    expect("two given sides are used as given", pinned(eight, set(eight), "1", "2") == ([[1], [2]], "given"))
+    expect("a given CPU this process may not run on is refused by its variable",
+           pinned(eight, set(eight), client="6,7,8").startswith("C=6,7,8 names CPU 8"))
+    expect("a given side that is not a CPU list is refused",
+           pinned(eight, set(eight), server="x").startswith("S=x is not"))
+
     stalled_pub = {"sent": "9", "failed": "0", "start_ns": "1000000000", "batch_cycles": "5",
                    "lost_match_ns": "3500000000", "matched_at_end": "0", "peers_at_end": "0"}
     sub_end = {"total": "40", "last_growth_ns": "3400000000", "peers": "0"}
@@ -2343,6 +2462,8 @@ def main(argv: list[str]) -> int:
             return cmd_reference(pathlib.Path(asked.out), asked.engine, asked.stdlib)
         return cmd_wz_arm(pathlib.Path(asked.out), asked.arm, asked.engine, asked.stdlib,
                           [f for f in asked.features.split(",") if f])
+    if len(argv) == 4 and argv[1] == "pin-sides":
+        return cmd_pin_sides(argv[2:])
     if 2 <= len(argv) <= 4 and argv[1] == "idle-cpus":
         try:
             seconds = float(argv[2]) if len(argv) > 2 else 5.0
