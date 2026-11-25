@@ -88,12 +88,12 @@ a Request still wakes it at once.
 
 ```text
 cargo test -p wz-runtime-coop --features app-link,host-lock --lib app_link::
-cargo test -p wz-capi-pico --no-default-features --features engine-coop,app-transport,peer,query,queryable,multi-thread --test it files::app_transport_doors::
+cargo test -p wz-capi-pico --no-default-features --features os-host,app-transport,peer,query,queryable,multi-thread --test it files::app_transport_doors::
 cargo test -p wz-capi-pico --features app-transport --test it files::app_transport_doors::
 ```
 
 And Layer S's gets count on the cooperative engine
-(`cargo test -p wz-capi-pico --no-default-features --features engine-coop,app-transport,peer,query,queryable,multi-thread --test allocation_faults -- --ignored gets_between_open_sessions_are_counted_for_their_allocations`):
+(`cargo test -p wz-capi-pico --no-default-features --features os-host,app-transport,peer,query,queryable,multi-thread --test allocation_faults -- --ignored gets_between_open_sessions_are_counted_for_their_allocations`):
 expected to end in seconds, far inside `RUN_BOUND`. Its count of allocations may move with it, and
 `tests/no_heap_after_open.rs` (Layer C1nh) reads the same sessions: a read that waits with the
 session free allocates nothing for its wait, so its `idle` family is expected to stay at 0.

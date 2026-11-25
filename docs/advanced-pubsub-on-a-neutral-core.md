@@ -9,7 +9,7 @@ that note. Everything stated as a number here was counted on the tree of that da
 The advanced publisher and subscriber (zenoh-ext, pico's `ze_advanced_*`; atom 5.25) exist once, in
 `wz-runtime-tokio`, and both C ABIs reach them through `wz-capi-core`. The cooperative engine
 (`wz-capi-coop`) has none of it, and a pico build on it must not link the tokio engine (the size
-gate refuses `wz_capi_core::` and `wz_runtime_tokio::` symbols in an `engine-coop` build). So the
+gate refuses `wz_capi_core::` and `wz_runtime_tokio::` symbols in an `os-host` build). So the
 plane is either written a second time for the cooperative engine, or its mechanism leaves the
 tokio crate and both engines host it. Writing it twice is the choice that lets two readings of
 zenoh-ext drift, which is what the scouting and replay steps removed elsewhere.

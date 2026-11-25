@@ -9,7 +9,7 @@ tokio engine onto the same tables, and the saving expected. The tables themselve
 
 ## 1. What is measured
 
-The release form (`os-posix`, no `std`, `capi-nostd`), text 363,212 B against zenoh-pico's
+The release form (`os-host`, no `std`, `capi-nostd`), text 363,212 B against zenoh-pico's
 329,664 B for the same build, function bytes with aliases of one address counted once:
 
 | part of `wz-capi-coop` | bytes |
