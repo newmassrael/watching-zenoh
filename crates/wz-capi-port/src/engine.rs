@@ -828,7 +828,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
 /// engine places in its session's own memory, reached through a row of the process's table
 /// ([`crate::reach::ReachEngine`]). What keeps an engine generic over this keeps either, so an
 /// engine that takes no memory of the heap is not made to take it for its holders.
-pub trait EngineHolder: Clone + Send + Sync + Deref<Target: SessionEngine> {
+pub trait EngineHolder: Clone + Send + Sync + 'static + Deref<Target: SessionEngine> {
     /// What reaches the engine without keeping it standing.
     type Handle: Clone + Send + Sync;
 

@@ -28,6 +28,7 @@
 //! stepped like everything else: a step moves the handshake on and returns, so a program that
 //! steps its session, or its read task, is what brings the link back.
 
+#[cfg(feature = "time-base")]
 use alloc::sync::Arc;
 use core::any::Any;
 use core::num::NonZeroU32;
@@ -1934,7 +1935,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// the tasks, which hold every lease, and before the arena it lies in. Held for its owner's
     /// drop alone.
     #[cfg(feature = "listen")]
-    admission: Placed<Admission<C>>,
+    _admission: Placed<Admission<C>>,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -3547,7 +3548,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 match self.dial(at, id, start, walks, OpenError::NoEndpoint)? {
                     Dialled::Pending | Dialled::Opened => return Ok(()),
                     Dialled::Exhausted(last) if walks => {
-                        return self.redial_later(at, last, redial_ms)
+                        return self.redial_later(at, last, redial_ms);
                     }
                     Dialled::Exhausted(last) => (life.after_failure(next), last),
                 }
@@ -4562,7 +4563,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             places: lent.places,
             _steps: lent.steps,
             #[cfg(feature = "listen")]
-            admission,
+            _admission: admission,
             arena: lent.arena,
         };
         let apart = LentApart {
@@ -5142,7 +5143,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     continue;
                 }
                 Behind::WaitForSession => {
-                    return self.live().map_or(ToPublish::Closed, ToPublish::Live)
+                    return self.live().map_or(ToPublish::Closed, ToPublish::Live);
                 }
                 #[cfg(any(feature = "listen", feature = "group"))]
                 Behind::Dropped { on, told } => ToPublish::DroppedOn {
@@ -5437,7 +5438,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 &mut onward,
             );
             // The queries the callback keeps are held through the session, as the face's holder.
-            let holder = CoopHolder {
+            let holder = CoopHolder::<L, C> {
                 engine: EngineHandle::reaching(self.reach),
             };
             call.ask(query, &mut responder, &holder);
