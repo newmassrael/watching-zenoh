@@ -2030,6 +2030,39 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
+    /// What a member sends is counted with the session's transports (`transport-stats`): the
+    /// datagram's bytes once, its two transport messages (the member's beacon and its frame) and
+    /// each record of the frame once, whatever the walks its delivery took.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn what_a_member_sends_is_counted_in_the_sessions_transport_stats() {
+        use wz_session_core::stats::{DirectionReport, StatMedium};
+
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let heard = subscribe(&session, "demo/counted/**");
+        assert_eq!(
+            session.transport_stats().rx,
+            DirectionReport::default(),
+            "CONTROL: no member has sent anything"
+        );
+        let keys = ["demo/counted/a", "demo/counted/b", "demo/counted/c"];
+        let mut datagram = beacon(7);
+        datagram.extend_from_slice(&frame_of_puts(0, &keys));
+        hand_in(&network, 1, 7, &datagram);
+        eventually("the three samples", || heard.lock().unwrap().len() >= 3);
+        eventually("the three records counted", || {
+            session.transport_stats().rx.n_msgs_total() >= 3
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let rx = session.transport_stats().rx;
+        assert_eq!(rx.bytes, datagram.len(), "the datagram's bytes, once");
+        assert_eq!(rx.t_msgs, 2, "the beacon and the frame");
+        assert_eq!(rx.n_msgs_on(StatMedium::Net), 3, "each put once");
+        SessionDrive::close(&*session);
+    }
+
     /// Below the engine: the group's receive over a datagram its transport keeps. A host with room
     /// for no other stops the walk before the next message, and with room for one record stops it
     /// before the next record; each walk goes on from where the last stopped, the frame admitted

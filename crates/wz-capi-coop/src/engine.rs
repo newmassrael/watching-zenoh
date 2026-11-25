@@ -4868,7 +4868,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// What the session's transports counted (`transport-stats`), in the report a tokio session
-    /// gives (`OpenedSession::stats`): the counters of each link that is up, summed, and in
+    /// gives (`OpenedSession::stats`): the counters of each link that is up and what each group
+    /// joined received, summed, and in
     /// `tx.n_dropped`, where a link's session charges the messages it dropped for congestion,
     /// the droppable publishes this engine dropped before they reached a link (one each,
     /// whatever the number of links). A link's counters leave with it, as a tokio session's
@@ -4882,9 +4883,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
             // A group charges what its queue dropped, for want of room or past the reply limit,
             // where the tokio engine's group charges it, the transport's dropped messages; it
-            // leaves with the group's join.
+            // leaves with the group's join, as what the group received does.
             #[cfg(feature = "group")]
             for group in &core.0.transport.groups {
+                report.absorb(&group.stats_report());
                 report.tx.n_dropped = report
                     .tx
                     .n_dropped

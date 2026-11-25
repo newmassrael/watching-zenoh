@@ -764,7 +764,8 @@ transport-link-ws|"
     # And with `transport-stats`: what a group's queue drops for congestion is the transport's
     # `tx.n_dropped`, as the tokio engine's group counts it (`tests::group::congested::`), and a
     # member's datagram is still read where it lies and its records lent, each counted once against
-    # the member (`tests::group::in_place::`), with the module's other tests, a get and its answer
+    # the member and in the session's `transport_stats` (`tests::group::in_place::`), with the
+    # module's other tests, a get and its answer
     # among them. The second row adds the members' keyexprs read member by member.
     "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|tests::group::"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable,transport-stats|tests::group::"
@@ -1555,6 +1556,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
     # `codec-push` the items; the row above is the slot profile, where none of this is built.
     "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
+    # And with `transport-stats`: what the pump receives is counted into the counters its holder
+    # attached, a datagram's bytes and each transport and network message read out of it.
+    "wz-session-mcu|hook|codec-push,transport-multicast,transport-stats|group_drive::"
     # A node that declares liveliness tokens (`declare-token`): its tokens are declared after its
     # documents, mirrors and subscriptions, and more of them than the node declares stop it; without
     # the feature a token is refused by name. `slot_node` is built with `client-slot`.

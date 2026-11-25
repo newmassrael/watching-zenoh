@@ -1067,6 +1067,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "session-slot",
                 "test-support",
                 "transport-multicast",
+                # The counters a group session counts what it receives into
+                # (`MulticastPump::attach_stats`, `MulticastSessionSeed::with_stats`): methods of
+                # the group drive's types, selected by the cooperative C engine's
+                # `transport-stats`, which no MCU image selects.
+                "transport-stats",
             }
         ),
     ),
@@ -1562,6 +1567,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "session-slot",
             "test-support",
             "transport-multicast",
+            "transport-stats",
         }
     ),
     "wz-runtime-core": frozenset({"alloc"}),

@@ -36,7 +36,8 @@
 //! the node's stats registry reads the same counts from another task.
 //!
 //! `()` records nothing: it is what a loop without a registry passes, and what
-//! the MCU loop always passes, since `transport-stats` is never on an MCU lane.
+//! an MCU image's group loop passes, since `transport-stats` is never on an MCU
+//! lane; the cooperative C engine's group counts into a session's counters.
 //!
 //! (`multicast_rx`, `multicast_tx` and `stats_registry::MulticastMetrics` are
 //! code spans rather than links: the first two are `session-multicast`-gated
@@ -204,6 +205,101 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
     }
 }
 
+/// Records into the recorder it refers to: what a host passes for a recorder it shares with its
+/// owner, an `Option<&R>` read off the `Option<Rc<R>>` it holds.
+impl<R: MulticastStatsRecorder + ?Sized> MulticastStatsRecorder for &R {
+    fn datagram_sent(&self, bytes: usize, transport_messages: u64) {
+        (**self).datagram_sent(bytes, transport_messages);
+    }
+
+    fn datagram_received(&self, bytes: usize) {
+        (**self).datagram_received(bytes);
+    }
+
+    fn transport_message_received(&self) {
+        (**self).transport_message_received();
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        )
+    ))]
+    fn network_message_sent(&self, tally: &crate::multicast_tx::MulticastTxTally) {
+        (**self).network_message_sent(tally);
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        )
+    ))]
+    fn network_message_dropped(&self, tally: &crate::multicast_tx::MulticastTxTally) {
+        (**self).network_message_dropped(tally);
+    }
+
+    #[cfg(feature = "alloc")]
+    fn network_message_received(&self, zid: &[u8], msg: &NetworkMessage) {
+        (**self).network_message_received(zid, msg);
+    }
+
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+    fn network_record_received(
+        &self,
+        zid: &[u8],
+        priority: crate::qos::Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        (**self).network_record_received(zid, priority, class);
+    }
+
+    fn peer_arrived(&self, arrived: &MulticastPeerArrived) {
+        (**self).peer_arrived(arrived);
+    }
+
+    fn peer_lost(&self, lost: &MulticastPeerLost) {
+        (**self).peer_lost(lost);
+    }
+}
+
+/// A session's counters as a group's receive reports into them, in their inbound half: the bytes of
+/// each datagram, each transport message decoded out of it, and each network message a member
+/// sent, classified as the tokio engine's group recorder classifies one, with no alias table. A
+/// session's counters hold no partition per member, so who sent a message, and who came and
+/// went, is not kept. What the group sends is not reported here: the group's writer is not this
+/// seam's caller.
+#[cfg(feature = "transport-stats")]
+impl MulticastStatsRecorder for crate::stats::TransportStats {
+    fn datagram_received(&self, bytes: usize) {
+        self.inc_rx(bytes);
+    }
+
+    fn transport_message_received(&self) {
+        self.inc_rx_transport_message();
+    }
+
+    fn network_message_received(&self, _zid: &[u8], msg: &NetworkMessage) {
+        self.inc_rx_network(&crate::network_message::stats_class(msg, |_| None));
+    }
+
+    fn network_record_received(
+        &self,
+        _zid: &[u8],
+        _priority: crate::qos::Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        self.inc_rx_network(class);
+    }
+}
+
 /// `resource-snapshot` — a recorder that spaces the transport messages a group receives
 /// (the resource snapshot's message spacing) and passes every report on to the recorder it wraps.
 ///
@@ -365,5 +461,50 @@ mod tap_tests {
         tap.transport_message_received();
         tap.transport_message_received();
         assert_eq!(inner.messages.get(), 2);
+    }
+}
+
+#[cfg(all(test, feature = "transport-stats"))]
+mod session_counter_tests {
+    use super::MulticastStatsRecorder;
+    use crate::qos::Priority;
+    use crate::stats::{
+        DirectionReport, MessageLabel, NetworkStatsClass, StatMedium, StatMessage, StatSpace,
+        TransportStats,
+    };
+
+    /// A group's receive counts into a session's counters, in their inbound half, through the
+    /// option a host that may hold none passes: the datagram's bytes, each transport message and
+    /// each network message, classified. With none held, nothing is counted.
+    #[test]
+    fn a_groups_receive_counts_into_the_inbound_half_of_a_sessions_counters() {
+        let counters = TransportStats::default();
+        let held = Some(&counters);
+        let put = NetworkStatsClass::net(MessageLabel::Put, StatMessage::Put, StatSpace::User, 3);
+        held.datagram_received(40);
+        held.transport_message_received();
+        held.transport_message_received();
+        held.network_record_received(&[1, 2, 3, 4], Priority::DEFAULT, &put);
+        let report = counters.report();
+        assert_eq!((report.rx.bytes, report.rx.t_msgs), (40, 2));
+        assert_eq!(report.rx.n_msgs_on(StatMedium::Net), 1);
+        assert_eq!(
+            report
+                .rx
+                .payload_of(StatMessage::Put, StatSpace::User)
+                .pl_bytes,
+            3
+        );
+        assert_eq!(report.tx, DirectionReport::default(), "nothing was sent");
+
+        let none: Option<&TransportStats> = None;
+        none.datagram_received(40);
+        none.transport_message_received();
+        none.network_record_received(&[1, 2, 3, 4], Priority::DEFAULT, &put);
+        assert_eq!(
+            counters.report(),
+            report,
+            "a host that holds no counters counts nothing"
+        );
     }
 }
