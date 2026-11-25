@@ -7694,6 +7694,25 @@
       "carry_forward_bullets": [
         "Open, measured on the shipped no_std preset against zenoh-pico (opprofile, Ir per operation): get as querier 1.80, get as queryable 1.40, declare subscriber 1.11, declare queryable 1.12, receive 2.07 per message; heap 21 times and RSS 1.18 times. Put (0.91), declare publisher (0.85) and open (0.90) win. The heap loss is the session arena (290 KB) and the process pools (78 KB); the counts the open states (DDS resource limits, owner ruling of 2026-11-25) land with the next integration. The size debt is sessions 2.57, transport 2.36, doors 2.22, driver 1.83. The SCE pin move waits for the generator to keep decoder arms out of line."
       ]
+    },
+    "Round 4648": {
+      "decision_summary": "An integration of the pico C ABI release toward the win budget of docs/c-abi-architecture.md section 9: the send-side writes (S-WRITE), the get deadline index (Q-DEADLINE), the first ABI door rows (T-ABI D2 and D4) and the feature-leg repairs.\n\nSend side: a Frame header is written in one write and a stream batch is sealed in place by its framing, so a put moves no bytes after its header. WebSocket framing is total arithmetic.\n\nGets: a session's gets keep their earliest deadline in an index whose root a read's wait reads, so a wait no longer walks every get table.\n\nABI doors: the owned families run over one TypeFacts each, an object's place goes back through one body and each owned export is a jump with its facts; the well-known encodings are read from one table.\n\nFeature legs: pico's gossip is stated as a gap of the feature legs gate, and the raweth joiner runs over the host's groups in a leg of its own.",
+      "changes_bullets": [
+        "crates/wz-frame-encode, wz-runtime-coop stream links, wz-ws-link: the Frame header and batch seal of the send side.",
+        "crates/wz-session-core, wz-capi-coop: the index of the gets' earliest deadline and the wait that reads its root.",
+        "crates/wz-capi-pico: abi.rs TypeFacts, object_slot.rs, encoding.rs.",
+        "scripts/lib/nondefault_feature_legs_gate.py, scripts/lib/nondefault-tests-gate.sh: gossip as a stated gap, the raweth joiner leg."
+      ],
+      "verification_bullets": [
+        "Run through bx from the integration worktree on 3868111f6: each changed crate checked alone, the changed crates' tests and clippy with -D warnings, the coop, pico, threads and direct combinations, Layer C1nh, wz_config.py --check and --selftest, the size ledger --measure, --dump and --check; every step exit 0 (ck 38 steps, three test shards 34, 34 and 32 steps, none failed). The lane builds before it: qd-2 (the deadline index; wz-capi-coop 265 tests, 0 filtered), tabi-5 (doors 42,091 bytes, 169 under the base). Locally: mnemosyne-cli validate-workspace (T1 orphan new +0), upstream_citation_anchor_gate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open, measured on the shipped no_std preset against zenoh-pico: get as querier 1.80 and as queryable 1.40 Ir per operation, declare subscriber 1.11, declare queryable 1.12, receive 2.07 per message, heap 21 times, RSS 1.18 times; size sessions 2.58, transport 2.36, doors 2.21, driver 1.83. Next landing: the rest of the ABI door rows (panic aborts at the C boundary in every build, closure and hand-written families on facts), the session counts the first open states, the direct form's faces, and the snapshot's message count on the cooperative engine."
+      ]
     }
   },
   "inventory_entries": {
