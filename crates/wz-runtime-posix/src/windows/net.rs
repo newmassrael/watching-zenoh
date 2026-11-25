@@ -312,8 +312,11 @@ impl DatagramSocket for WindowsUdpSocket {
 
     const RESOLVES: bool = true;
 
-    fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
-        super::resolve(host, port, found)
+    fn resolve(
+        name: &wz_runtime_coop::locator_text::NamedHost<'_>,
+        found: &mut [SocketAddr],
+    ) -> usize {
+        super::resolve(name, found)
     }
 
     fn bind(at: SocketAddr) -> Result<Self, WindowsNetError> {

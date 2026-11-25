@@ -711,8 +711,12 @@ where
     // wait on each of them.
     const RESOLVES: bool = U::RESOLVES;
 
-    fn resolve(&self, host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
-        U::resolve(host, port, found)
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [SocketAddr],
+    ) -> usize {
+        U::resolve(name, found)
     }
 
     // The waits of the platform whose sockets these are: its streams, the secure channels over

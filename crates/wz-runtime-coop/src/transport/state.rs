@@ -48,7 +48,7 @@ use crate::executor::SpawnRefusal;
 use crate::faces::Accepted;
 use crate::faces::{
     Begun, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord,
-    IdleWait, LinkEnd, LinkSupervisor, NextAddresses, TaskEnd, Wire,
+    IdleWait, LinkEnd, LinkSupervisor, TaskEnd, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
@@ -440,9 +440,10 @@ impl<T: TransportFaces> TransportState<T> {
 
     /// Begin a dial of the host `name` at the first of the addresses the network resolves it to
     /// that the network begins, keeping the rest for the dial to pass to when that one is refused,
-    /// at once or later ([`NextAddresses`]). A network without a resolver refuses the name before
-    /// any is asked ([`DialRefused::NoResolver`]); a name that resolves to no address the network
-    /// begins is refused as a link the other end did not take, which a dial retries.
+    /// at once or later ([`crate::faces::NextAddresses`]). A network without a resolver refuses
+    /// the name before any is asked ([`DialRefused::NoResolver`]); a name that resolves to no
+    /// address the network begins is refused as a link the other end did not take, which a dial
+    /// retries.
     ///
     /// The resolver is asked here and nowhere else, as a dial begins: it may block for as long as
     /// the network's name service takes, which no step of a link's way waits on.
@@ -451,9 +452,7 @@ impl<T: TransportFaces> TransportState<T> {
         if !<T::Links as SessionLinks<CountOf<T>>>::RESOLVES {
             return Err(Refusal::Locator(DialRefused::NoResolver));
         }
-        let mut then = NextAddresses::of_host(name, &|host, port, found| {
-            self.links.resolve(host, port, found)
-        });
+        let mut then = self.links.addresses_of(name);
         match self.links.begin_next(&mut then) {
             Some(pending) => Ok(Begun { pending, then }),
             None => Err(Refusal::Link(LinkOpenError::Refused)),

@@ -202,14 +202,15 @@ pub trait DatagramSocket: Sized {
     /// resolver is refused where the endpoint is read, and an image over one carries no resolver.
     const RESOLVES: bool = false;
 
-    /// The addresses `host` stands for on the platform's network, each at `port`, written to the
-    /// front of `found` in the order the platform's resolver answers them, each once: how many.
-    /// `0` when the resolver answers none or fails, and on a platform without one
-    /// ([`Self::RESOLVES`]). `host` is a name as `crate::locator_text::read_dial_target` reads
-    /// one, at most `crate::locator_text::HOST_NAME_MAX` bytes. It blocks for as long as the
-    /// resolver takes, so a link's dial asks it as it begins and nothing on a link's way does.
-    fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
-        let _ = (host, port, found);
+    /// The addresses the host `name` stands for on the platform's network, each at its port,
+    /// written to the front of `found` in the order the platform's resolver answers them: how
+    /// many. `0` when the resolver answers none or fails, and on a platform without one
+    /// ([`Self::RESOLVES`]). The name is one `crate::locator_text::read_dial_target` read, so a
+    /// resolver is handed it whole, with no byte a C string would end at. It blocks for as long
+    /// as the resolver takes, so a link's dial asks it as it begins and nothing on a link's way
+    /// does.
+    fn resolve(name: &crate::locator_text::NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
+        let _ = (name, found);
         0
     }
 }
@@ -306,8 +307,8 @@ impl<U: DatagramSocket> DatagramSocket for NoDatagramOf<U> {
     // The platform resolves a name for the stack's other links, as its waits wait on them.
     const RESOLVES: bool = U::RESOLVES;
 
-    fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
-        U::resolve(host, port, found)
+    fn resolve(name: &crate::locator_text::NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
+        U::resolve(name, found)
     }
 
     fn local(&self) -> SocketAddr {

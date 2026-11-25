@@ -1072,12 +1072,16 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     /// refused before any link is begun (`crate::locator_text::DialRefused::NoResolver`).
     const RESOLVES: bool = false;
 
-    /// The addresses `host` stands for on the stack's network, each at `port`, written to the
-    /// front of `found` in the order its resolver answers them: how many, `0` for none
+    /// The addresses the host `name` stands for on the stack's network, each at its port, written
+    /// to the front of `found` in the order its resolver answers them: how many, `0` for none
     /// (`crate::udp_link::DatagramSocket::resolve`). Blocks for as long as the resolver takes,
     /// so it is asked as a dial begins and never on a link's way. The default answers none.
-    fn resolve(&self, host: &str, port: u16, found: &mut [core::net::SocketAddr]) -> usize {
-        let _ = (host, port, found);
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        let _ = (name, found);
         0
     }
 

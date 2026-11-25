@@ -239,8 +239,12 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     // resolver answers none.
     const RESOLVES: bool = A::RESOLVES || B::RESOLVES;
 
-    fn resolve(&self, host: &str, port: u16, found: &mut [core::net::SocketAddr]) -> usize {
-        on_side!(EitherLinks, self, links => links.resolve(host, port, found))
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        on_side!(EitherLinks, self, links => links.resolve(name, found))
     }
 
     type Waits = EitherWaits<A::Waits, B::Waits>;

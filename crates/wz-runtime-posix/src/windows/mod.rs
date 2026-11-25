@@ -496,14 +496,16 @@ pub(crate) fn name_of(
 }
 
 /// The addresses Winsock's resolver (`getaddrinfo`, of `ws2_32`, whose sockets the process already
-/// opens) answers for `host`, each at `port`, written to the front of `found` in its order, each
-/// once: how many, `0` when it answers none, fails, or Winsock does not start. Asked as the POSIX
+/// opens) answers for the host `name`, each at its port, written to the front of `found` in its
+/// order: how many, `0` when it answers none, fails, or Winsock does not start. Asked as the POSIX
 /// half asks it, of every family and the stream kind alone, as zenoh-pico asks it on Windows
-/// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @ `getaddrinfo(`).
-pub(crate) fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
-    let Some(name) = crate::resolve::terminated(host) else {
-        return 0;
-    };
+/// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @ `getaddrinfo(`), and walked as
+/// that open walks the answer, in its order.
+pub(crate) fn resolve(
+    name: &wz_runtime_coop::locator_text::NamedHost<'_>,
+    found: &mut [SocketAddr],
+) -> usize {
+    let text = crate::resolve::terminated(name);
     if startup().is_err() {
         return 0;
     }
@@ -513,24 +515,22 @@ pub(crate) fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize 
         ..Default::default()
     };
     let mut answers: *mut ws::ADDRINFOA = core::ptr::null_mut();
-    // SAFETY: `name` ends in a 0 byte, `hints` is live for the call, and the call writes
+    // SAFETY: `text` ends in a 0 byte, `hints` is live for the call, and the call writes
     // `answers`, which is freed below once read.
     let failed =
-        unsafe { ws::getaddrinfo(name.as_ptr(), core::ptr::null(), &hints, &mut answers) } != 0;
+        unsafe { ws::getaddrinfo(text.as_ptr(), core::ptr::null(), &hints, &mut answers) } != 0;
     if failed {
         return 0;
     }
-    let mut count = 0;
+    let mut count: usize = 0;
     let mut next = answers.cast_const();
     // SAFETY: each answer of the list is the resolver's, live until the list is freed.
-    while let Some(answer) = unsafe { next.as_ref() } {
+    while let (Some(answer), Some(place)) = (unsafe { next.as_ref() }, found.get_mut(count)) {
         next = answer.ai_next.cast_const();
-        let Some(at) = answered_address(answer, port) else {
-            continue;
-        };
-        match crate::resolve::keep(found, count, at) {
-            Some(kept) => count = kept,
-            None => break,
+        if let Some(at) = answered_address(answer, name.port()) {
+            *place = at;
+            // `count` names a place of `found`, so the sum does not wrap.
+            count = count.wrapping_add(1);
         }
     }
     // SAFETY: `answers` is the list the call made, freed once, and nothing read of it is held.

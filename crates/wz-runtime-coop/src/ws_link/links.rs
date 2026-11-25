@@ -470,8 +470,12 @@ where
     // A name is resolved by the network the stack's IP links are opened on.
     const RESOLVES: bool = S::RESOLVES;
 
-    fn resolve(&self, host: &str, port: u16, found: &mut [core::net::SocketAddr]) -> usize {
-        self.links.resolve(host, port, found)
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        self.links.resolve(name, found)
     }
 
     type Waits = S::Waits;

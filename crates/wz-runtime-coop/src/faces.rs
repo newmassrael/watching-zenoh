@@ -440,16 +440,11 @@ impl NextAddresses {
         link: None,
     };
 
-    /// The addresses `resolve` answers for the host `name`, each to be dialled with its link;
-    /// those past the room are not kept. One body for every network, which is handed its
-    /// resolver: what is generic in a named dial is the network's call alone.
-    #[inline(never)]
-    pub fn of_host(
-        name: &NamedHost<'_>,
-        resolve: &dyn Fn(&str, u16, &mut [core::net::SocketAddr]) -> usize,
-    ) -> Self {
+    /// The addresses `links`' network resolves the host `name` to, each to be dialled with its
+    /// link; those past the room are not kept (`SessionLinks::resolve`).
+    pub fn of_host<N: CountKind, L: SessionLinks<N>>(name: &NamedHost<'_>, links: &L) -> Self {
         let mut then = Self::NONE;
-        let count = resolve(name.host(), name.port(), &mut then.addresses);
+        let count = links.resolve(name, &mut then.addresses);
         then.count = u8::try_from(count.min(RESOLVED_ADDRESSES)).unwrap_or(0);
         then.link = Some(name.link());
         then
@@ -461,7 +456,9 @@ impl NextAddresses {
     }
 
     /// Begin a dial of the next address on `links`, each one the network refuses at once passed
-    /// over: `None` once none is left.
+    /// over: `None` once none is left. Out of line: the dial of a host's first address and the
+    /// pass to the next of a refused one share this one walk.
+    #[inline(never)]
     fn begin_next<N: CountKind, L: SessionLinks<N>>(&mut self, links: &L) -> Option<L::Dial> {
         let link = self.link?;
         while self.next < self.count {
@@ -539,25 +536,26 @@ impl<D> Dial<D> {
     }
 
     /// [`Self::answer`], where a refusal passes the dial to the next address of its host on
-    /// `links` while one is left: the dial is then under way again, and `None` is answered until
-    /// that one answers. The refusal of the last address tried is the dial's. A link made is
-    /// answered as it comes.
+    /// `links` while one is left: the dial is then under way again, `None` is answered, and the
+    /// next address is asked at the next step, as a dial just begun is. The refusal of the last
+    /// address tried is the dial's. A link made is answered as it comes.
     pub fn answer_on<N: CountKind, L>(&mut self, links: &L) -> DialAnswer<L::Pump, N>
     where
         L: SessionLinks<N, Dial = D>,
         D: PendingDial<L::Pump, N>,
     {
-        loop {
-            let refused = match self.pending.poll() {
-                Some(Err(refused)) => refused,
-                answered => return answered,
-            };
+        let answer = self.pending.poll();
+        if !matches!(answer, Some(Err(_))) {
+            return answer;
+        }
+        match self.then.begin_next(links) {
             // The refused dial has handed out all it held, so it is let go of as the next is put
             // in its place.
-            match self.then.begin_next(links) {
-                Some(next) => self.pending = next,
-                None => return Some(Err(refused)),
+            Some(next) => {
+                self.pending = next;
+                None
             }
+            None => answer,
         }
     }
 }
@@ -1248,10 +1246,10 @@ impl<
         self.links.begin_initiator(to)
     }
 
-    /// The addresses the network resolves `host` to, each at `port`, written to the front of
-    /// `found`: how many (`SessionLinks::resolve`).
-    pub fn resolve(&self, host: &str, port: u16, found: &mut [core::net::SocketAddr]) -> usize {
-        self.links.resolve(host, port, found)
+    /// The addresses these links' network resolves the host `name` to
+    /// ([`NextAddresses::of_host`]).
+    pub fn addresses_of(&self, name: &NamedHost<'_>) -> NextAddresses {
+        NextAddresses::of_host::<N, L>(name, &self.links)
     }
 
     /// Listen on `at`, whose links are stated for the endpoint in row `endpoint` of the session's
@@ -2155,22 +2153,24 @@ mod tests {
                 dialled: core::cell::RefCell::new(alloc::vec::Vec::new()),
             }
         }
-
-        /// The addresses of the host as its resolver answers them, at `port`.
-        fn resolve(&self, port: u16, found: &mut [core::net::SocketAddr]) -> usize {
-            let mut count = 0;
-            for (place, (at, _)) in found.iter_mut().zip(&self.says) {
-                *place = core::net::SocketAddr::new(at.ip(), port);
-                count += 1;
-            }
-            count
-        }
     }
 
     impl SessionLinks for Hosts {
         type Pump = Rc<Quiet>;
         type Dial = Answer;
         type Waits = crate::session_drive::NoWaits;
+
+        const RESOLVES: bool = true;
+
+        /// The addresses of the host as its resolver answers them, at the name's port.
+        fn resolve(&self, name: &NamedHost<'_>, found: &mut [core::net::SocketAddr]) -> usize {
+            let mut count = 0;
+            for (place, (at, _)) in found.iter_mut().zip(&self.says) {
+                *place = core::net::SocketAddr::new(at.ip(), name.port());
+                count += 1;
+            }
+            count
+        }
 
         fn waits(&self) -> Self::Waits {
             crate::session_drive::NoWaits
@@ -2207,9 +2207,8 @@ mod tests {
         else {
             panic!("a host name");
         };
-        let mut then =
-            NextAddresses::of_host(&name, &|_host, port, found| hosts.resolve(port, found));
-        let pending = then.begin_next(hosts)?;
+        let mut then = NextAddresses::of_host::<OneTask, Hosts>(&name, hosts);
+        let pending = then.begin_next::<OneTask, Hosts>(hosts)?;
         Some(Dial::begun(
             DialEndpoint::Listed(0),
             Begun { pending, then },
@@ -2246,19 +2245,29 @@ mod tests {
         assert_eq!(*hosts.dialled.borrow(), vec![v6, v4], "each address once");
     }
 
-    /// A dial of a host every address of which is refused answers one refusal, once, after it
-    /// dialled each address in turn; a host no address of which begins is no dial. Turned red by
-    /// a refusal for each address, or one answered before the last address was tried.
+    /// A dial of a host every address of which is refused answers one refusal, once, at the step
+    /// that asks the last address it dialled, each address dialled in turn; a host no address of
+    /// which begins is no dial. Turned red by a refusal for each address, or one answered before
+    /// the last address was tried.
     #[test]
     fn a_dial_whose_every_address_is_refused_answers_one_refusal() {
         let (v6, v4) = loopbacks();
         let hosts = Hosts::new(&[(v6, Says::Refused), (v4, Says::Refused)]);
         let mut dial = named_dial(&hosts).expect("the first address is begun");
+        assert!(
+            dial.answer_on::<OneTask, Hosts>(&hosts).is_none(),
+            "the first refusal passes the dial to the second address"
+        );
+        assert_eq!(*hosts.dialled.borrow(), vec![v6, v4]);
         assert!(matches!(
             dial.answer_on::<OneTask, Hosts>(&hosts),
             Some(Err(LinkOpenError::Refused))
         ));
-        assert_eq!(*hosts.dialled.borrow(), vec![v6, v4]);
+        assert_eq!(
+            *hosts.dialled.borrow(),
+            vec![v6, v4],
+            "no address dialled twice"
+        );
         assert!(
             dial.answer_on::<OneTask, Hosts>(&hosts).is_none(),
             "answered once"
