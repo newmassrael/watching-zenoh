@@ -28,7 +28,6 @@
 //! row, to be dropped where no lock is held.
 
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 // The split `round` uses: the host profile has the native atomics, the `no_std` profile gets the
@@ -453,7 +452,7 @@ struct LegEnd<C: GetCalls> {
     timed_out: Option<RequestId>,
     /// The entry's count of the leg's row, which the end holds from the entry's drop on.
     row: LegId,
-    plane: Arc<GetPlane<C>>,
+    plane: PlacedRef<GetPlane<C>>,
 }
 
 impl<C: GetCalls> Drop for LegEnd<C> {
@@ -490,12 +489,13 @@ impl<C: GetCalls> LegSink<C> {
     /// # Safety
     /// The sink is handed its replies by the holder of the session's lock alone, as
     /// [`Round::offer_reply`] asks of its caller: the engine registers it in the session's tables
-    /// of pending gets, which it reaches under that lock. The round's owner outlives the sink, as
+    /// of pending gets, which it reaches under that lock. The owners of the round and of the plane
+    /// outlive the sink, whose drop writes its end into the plane, as
     /// [`crate::placed::Placed::share`] asks of every handle.
     pub unsafe fn new(
         leg: u64,
         row: LegId,
-        plane: &Arc<GetPlane<C>>,
+        plane: PlacedRef<GetPlane<C>>,
         round: PlacedRef<Round<C>>,
     ) -> Self {
         Self {
@@ -505,7 +505,7 @@ impl<C: GetCalls> LegSink<C> {
                 leg,
                 timed_out: None,
                 row,
-                plane: Arc::clone(plane),
+                plane,
             },
         }
     }
@@ -542,17 +542,18 @@ impl<C: GetCalls> ReplySink for LegSink<C> {
 /// face gone) lets them go.
 pub struct LegHold<C: GetCalls> {
     leg: u64,
-    plane: Arc<GetPlane<C>>,
+    plane: PlacedRef<GetPlane<C>>,
     /// Whether the get's end made what it holds due.
     due: bool,
 }
 
 impl<C: GetCalls> LegHold<C> {
-    /// The hold of leg `leg` in `plane`'s rows.
-    pub fn new(leg: u64, plane: &Arc<GetPlane<C>>) -> Self {
+    /// The hold of leg `leg` in `plane`'s rows, whose owner outlives the hold, whose drop lets go
+    /// of what it still holds there ([`crate::placed::Placed::share`]).
+    pub fn new(leg: u64, plane: PlacedRef<GetPlane<C>>) -> Self {
         Self {
             leg,
-            plane: Arc::clone(plane),
+            plane,
             due: false,
         }
     }

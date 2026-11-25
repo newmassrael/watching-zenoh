@@ -76,6 +76,15 @@ unsafe impl<T: Sync> Send for PlacedRef<T> {}
 // SAFETY: as `Send`.
 unsafe impl<T: Sync> Sync for PlacedRef<T> {}
 
+impl<T> PlacedRef<T> {
+    /// A handle of a value that stands for the rest of the program, which no owner drops.
+    pub fn of_static(value: &'static T) -> Self {
+        Self {
+            at: NonNull::from(value),
+        }
+    }
+}
+
 impl<T> Clone for PlacedRef<T> {
     fn clone(&self) -> Self {
         *self
@@ -177,5 +186,15 @@ mod tests {
         assert_eq!(drops.get(), 1, "dropped once, by its owner");
         let refused = arena.place([0_u8; 64]);
         assert!(matches!(refused, Err(LendRefused::Exhausted { .. })));
+    }
+
+    /// A handle of a value that stands for the rest of the program reads it where it lies.
+    /// Turned red by a handle that reads a copy.
+    #[test]
+    fn a_handle_of_a_static_value_reads_it_where_it_lies() {
+        static VALUE: u32 = 7;
+        let handle = PlacedRef::of_static(&VALUE);
+        assert_eq!(*handle, 7);
+        assert!(core::ptr::eq(&*handle, &VALUE));
     }
 }

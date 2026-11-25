@@ -671,13 +671,14 @@ struct SessionLent {
     transport: TransportTables,
     router: SessionReassembly,
     keys: KeySpace,
-    #[cfg(feature = "queryable")]
-    plane: Arc<QueryPlane>,
     registry: Registry,
+    /// After the registry, whose dispatch reaches it by a handle that counts nothing.
+    #[cfg(feature = "queryable")]
+    plane: Placed<QueryPlane>,
     /// What the session's gets share with their sinks and the round: the ends of their legs, the
     /// replies the gets that consolidate hold, and the legs' callbacks.
     #[cfg(feature = "query")]
-    gets: Arc<GetPlane>,
+    gets: Placed<GetPlane>,
     /// The session's own note of each leg pending, a row for each get its tables hold.
     #[cfg(feature = "query")]
     pending_gets: Rows<PendingGet, { usize::MAX }>,
@@ -822,14 +823,17 @@ fn lend_session(
     #[cfg(feature = "query")]
     let held_replies = HeldReplies::lent(arena.arena_mut(), plan.session().held_replies())
         .map_err(ArenaRefused::Lend)?;
-    // What the gets share: made here, so the round is told whose legs' callbacks its replies'
+    // What the gets share: placed here, so the round is told whose legs' callbacks its replies'
     // records hold counts of before it is shared.
     #[cfg(feature = "query")]
-    let gets = Arc::new(GetPlane::new(
-        EndedLegs::over(legs),
-        held_replies,
-        LegRows::over(leg_rows),
-    ));
+    let gets = arena
+        .arena_mut()
+        .place(GetPlane::new(
+            EndedLegs::over(legs),
+            held_replies,
+            LegRows::over(leg_rows),
+        ))
+        .map_err(ArenaRefused::Lend)?;
     // The round lies in the arena beside its tables, owned by the session's state and reached by
     // handles that count nothing.
     let mut samples =
@@ -839,21 +843,33 @@ fn lend_session(
     let round = samples.get_mut();
     round.reads_keys_in(keys);
     #[cfg(feature = "query")]
-    round.calls_legs_of(gets.clone());
+    {
+        let legs: NonNull<dyn LegHolders<crate::round::CoopCalls>> = NonNull::from(&*gets);
+        // SAFETY: the round reaches the legs until the engine's drop lets it go
+        // (`Round::let_go`), before the plane's owner, the session's state, is dropped; until
+        // then the plane is held where it was placed, by this value and then by the state.
+        unsafe { round.calls_legs_of(legs) };
+    }
     let steps = StepPlaces::placed_in(arena.arena_mut()).map_err(ArenaRefused::Lend)?;
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
-    let plane = Arc::new(QueryPlane::over(query::FinalHolds::over(
-        held_finals,
-        refused_finals,
-    )));
+    let plane = arena
+        .arena_mut()
+        .place(QueryPlane::over(query::FinalHolds::over(
+            held_finals,
+            refused_finals,
+        )))
+        .map_err(ArenaRefused::Lend)?;
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
     // owner changes the round no more.
     let lane = unsafe { samples.share() };
+    // SAFETY: the delivery is held by the registry, dropped before the plane wherever both are
+    // held: here, where the registry is made after it, and in `SessionLent` and the session's
+    // state, which hold the plane in a field after the registry's.
     #[cfg(feature = "queryable")]
-    let delivery = RoundDelivery::new(lane, plane.clone());
+    let delivery = RoundDelivery::new(lane, unsafe { plane.share() });
     #[cfg(not(feature = "queryable"))]
     let delivery = RoundDelivery::new(lane);
     // The application's tables, lent from the rows the plan counts for them: the session's
@@ -1059,13 +1075,13 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     matching_owed: AtomicBool,
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
-    plane: Arc<QueryPlane>,
+    plane: PlacedRef<QueryPlane>,
     /// What the session's gets queued for their callbacks (`get`).
     #[cfg(feature = "query")]
-    gets: Arc<GetPlane>,
+    gets: PlacedRef<GetPlane>,
     /// What the session's watchers of its faces are owed, and who they are (`connectivity`).
     #[cfg(feature = "connectivity")]
-    faces: Arc<FacePlane>,
+    faces: PlacedRef<FacePlane>,
     /// The program's watches of what the peers declare and what is owed to them, shared with the
     /// registry whose observers stage it (`decl_watch`).
     #[cfg(any(
@@ -1895,13 +1911,13 @@ impl SessionParts for CoopSession {
     type Storage = Lent;
     /// Where a face coming up or going down is reported (`connectivity`).
     #[cfg(feature = "connectivity")]
-    type Watchers = Arc<FacePlane>;
+    type Watchers = Placed<FacePlane>;
     #[cfg(not(feature = "connectivity"))]
     type Watchers = ();
     /// The tables hold each plane's write filters to its own bound: nothing is kept apart.
     type Entities = ();
     #[cfg(feature = "queryable")]
-    type Queryables = Arc<QueryPlane>;
+    type Queryables = Placed<QueryPlane>;
     #[cfg(not(feature = "queryable"))]
     type Queryables = ();
     /// The legs of the session's gets still pending on its links, in rows the session's arena lent.
@@ -1910,7 +1926,7 @@ impl SessionParts for CoopSession {
     #[cfg(not(feature = "query"))]
     type PendingGets = ();
     #[cfg(feature = "query")]
-    type Gets = Arc<GetPlane>;
+    type Gets = Placed<GetPlane>;
     #[cfg(not(feature = "query"))]
     type Gets = ();
     /// Asked by every link's gate before it reads a record (`crate::round::RoundGate`): owned
@@ -2197,7 +2213,7 @@ impl SubscriberCall {
 pub(crate) struct RoundDelivery {
     round: PlacedRef<Round>,
     #[cfg(feature = "queryable")]
-    plane: Arc<QueryPlane>,
+    plane: PlacedRef<QueryPlane>,
 }
 
 impl RoundDelivery {
@@ -2209,7 +2225,7 @@ impl RoundDelivery {
 
     /// Deliveries into `round`, and queries into `plane`, which only the engine reaches.
     #[cfg(feature = "queryable")]
-    fn new(round: PlacedRef<Round>, plane: Arc<QueryPlane>) -> Self {
+    fn new(round: PlacedRef<Round>, plane: PlacedRef<QueryPlane>) -> Self {
         Self { round, plane }
     }
 }
@@ -2651,7 +2667,7 @@ pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     face: HeldFace,
     actions: LinkHandle<C>,
     #[cfg(feature = "queryable")]
-    plane: Arc<QueryPlane>,
+    plane: PlacedRef<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
     #[cfg(feature = "queryable")]
     generation: u64,
@@ -2789,11 +2805,41 @@ pub(crate) struct OpenHolds<'h> {
     pub(crate) runtime: usize,
     /// The place the session's engine lies in.
     pub(crate) engine: usize,
+    /// The places of the planes the session's state owns.
+    pub(crate) planes: SessionPlanes,
+}
+
+/// The bytes of the place of each plane a session's state owns, which its tasks and its engine
+/// reach by handles that count nothing, each where its feature is ([`ArenaPlan::holding_planes`]).
+#[derive(Clone, Copy)]
+pub(crate) struct SessionPlanes {
+    /// The queryables' plane (`QueryPlane`).
+    #[cfg(feature = "queryable")]
+    pub(crate) queries: usize,
+    /// The gets' plane (`GetPlane`).
+    #[cfg(feature = "query")]
+    pub(crate) gets: usize,
+    /// The plane of the watchers of the faces (`FacePlane`).
+    #[cfg(feature = "connectivity")]
+    pub(crate) faces: usize,
+}
+
+impl SessionPlanes {
+    /// This build's planes.
+    pub(crate) const OF_BUILD: Self = Self {
+        #[cfg(feature = "queryable")]
+        queries: core::mem::size_of::<QueryPlane>(),
+        #[cfg(feature = "query")]
+        gets: core::mem::size_of::<GetPlane>(),
+        #[cfg(feature = "connectivity")]
+        faces: core::mem::size_of::<FacePlane>(),
+    };
 }
 
 /// Lay out on `plan`, the rows an open's limits size ([`ArenaPlan::count`]), the cells
 /// `holds.cells` sizes for each link, the faces' rooms, the ABI's places and then the span the
-/// session's runtime is placed in and the place its engine lies in, after every other row: the one plan an open reserves by. Laid
+/// session's runtime is placed in, the place its engine lies in and the places of its planes,
+/// after every other row: the one plan an open reserves by. Laid
 /// out where the plan lies, which `lend_session` reads in its own frame: a plan handed back by
 /// value would be moved again, twice, by the open that reads it.
 pub(crate) fn lay_out_open(
@@ -2804,7 +2850,8 @@ pub(crate) fn lay_out_open(
     plan.holding_rooms(holds.rooms)?;
     plan.holding(holds.held)?;
     plan.holding_runtime(holds.runtime)?;
-    plan.holding_engine(holds.engine)
+    plan.holding_engine(holds.engine)?;
+    plan.holding_planes(holds.planes)
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
@@ -3030,8 +3077,10 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
             // The registry holds the face before its link is made (`Registry::add_face`).
             face: self.session.registry.held(face),
             actions: actions.clone(),
+            // SAFETY: as the round's handle below: the dispatch is held by the link's session,
+            // dropped before the session's state, which owns the plane.
             #[cfg(feature = "queryable")]
-            plane: self.session.plane.clone(),
+            plane: unsafe { self.session.plane.share() },
             #[cfg(feature = "queryable")]
             generation,
             // SAFETY: the dispatch is held by the link's session, which the session's transport
@@ -3672,10 +3721,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "queryable")]
         let generation = self.session.plane.next_generation();
         #[cfg(feature = "queryable")]
+        // SAFETY: the dispatch is held by the group's task, which the engine's links' end stops
+        // and runs to its end (`Core::end_links`) before the session's state, which owns the
+        // plane, is dropped.
         let dispatch = group::dispatch(
             self.registry_lend.clone(),
             face,
-            self.session.plane.clone(),
+            unsafe { self.session.plane.share() },
             generation,
         );
         #[cfg(not(feature = "queryable"))]
@@ -3712,8 +3764,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }),
                 #[cfg(feature = "queryable")]
                 generation,
+                // SAFETY: the group's task reads the watchers while it runs, which ends when the
+                // engine's links' end stops the group and runs it out (`Core::end_links`), before
+                // the session's state, which owns them, is dropped.
                 #[cfg(feature = "connectivity")]
-                watchers: Arc::clone(&self.session.watchers),
+                watchers: unsafe { self.session.watchers.share() },
             },
             dispatch,
             self.rooms.waits().clone(),
@@ -4248,6 +4303,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             held: &held,
             runtime: runtime_bytes,
             engine: Shared::<Self>::layout().size(),
+            planes: SessionPlanes::OF_BUILD,
         };
         let mut lent =
             lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
@@ -4293,8 +4349,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             moves.watch(wake.waker.clone());
             Some(wake)
         });
+        // No watcher yet: the queue's rows are reserved now, so a program that watches after the
+        // open is told its faces with nothing allocated. The plane lies in the row the plan laid
+        // out for it (`ArenaPlan::holding_planes`).
         #[cfg(feature = "connectivity")]
-        let face_rows = face_event_rows(config.max_faces, config.groups.len());
+        let watchers = lent
+            .arena
+            .arena_mut()
+            .place(FacePlane::with_room(face_event_rows(
+                config.max_faces,
+                config.groups.len(),
+            )))
+            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         // The faces' links keep the places the registry lends their tables at: one table of them.
         let places = lent.registry.places();
         // A place for each face the registry lent a set for, each face with its dial, and the waits
@@ -4353,10 +4419,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             },
             session: SessionState {
                 registry: lent.registry,
-                // No watcher yet: the queue's rows are reserved now, so a program that watches
-                // after the open is told its faces with nothing allocated.
                 #[cfg(feature = "connectivity")]
-                watchers: Arc::new(FacePlane::with_room(face_rows)),
+                watchers,
                 #[cfg(not(feature = "connectivity"))]
                 watchers: (),
                 entities: (),
@@ -4433,12 +4497,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // no more.
         let samples = unsafe { core.session.lane.share() };
         let wire = core.transport.wire_zid;
+        // SAFETY: the engine holds the handles beside the `Core` that owns the planes and reads
+        // them last in its own drop, before its fields, `core` among them, are dropped.
         #[cfg(feature = "queryable")]
-        let plane = core.session.plane.clone();
+        let plane = unsafe { core.session.plane.share() };
+        // SAFETY: as the plane's.
         #[cfg(feature = "query")]
-        let gets = core.session.gets.clone();
+        let gets = unsafe { core.session.gets.share() };
+        // SAFETY: as the plane's.
         #[cfg(feature = "connectivity")]
-        let faces = core.session.watchers.clone();
+        let faces = unsafe { core.session.watchers.share() };
         #[cfg(any(
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
@@ -4568,6 +4636,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn arena_holds(&self, at: *const u8) -> bool {
         self.core.lock().0.arena.holds(at)
+    }
+
+    /// Where the planes the session's state owns lie, each where its feature is.
+    #[cfg(all(
+        test,
+        feature = "std",
+        any(feature = "queryable", feature = "query", feature = "connectivity")
+    ))]
+    pub(crate) fn plane_places(&self) -> alloc::vec::Vec<*const u8> {
+        let mut places = alloc::vec::Vec::new();
+        #[cfg(feature = "queryable")]
+        places.push(core::ptr::from_ref::<QueryPlane>(&self.plane).cast::<u8>());
+        #[cfg(feature = "query")]
+        places.push(core::ptr::from_ref::<GetPlane>(&self.gets).cast::<u8>());
+        #[cfg(feature = "connectivity")]
+        places.push(core::ptr::from_ref::<FacePlane>(&self.faces).cast::<u8>());
+        places
     }
 
     /// How many cells of the session's table of links' halves hold a link's halves now: `None`
@@ -6037,12 +6122,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         // SAFETY: the sink goes into a table of pending gets, which the session
         // reaches under its lock alone, and is handed its replies there; the table is the
-        // registry's, dropped before the round's owner, the session state's last field.
-        let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, self.samples) };
+        // registry's, dropped before the owners of the round and of the plane, the session
+        // state's fields after the registry's.
+        let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.samples) };
         let sink = ConsolidatingSink::with_hold(
             ask.opts.resolved_consolidation(),
             leg_sink,
-            get::LegHold::new(leg_id, &self.gets),
+            get::LegHold::new(leg_id, self.gets),
         );
         let accept = ReplyAcceptance::for_query(ask.keyexpr, ask.opts.effective_accept_replies());
         let registered = registry.gets_mut(face).map(|gets| {
@@ -7868,8 +7954,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             // SAFETY: the sink goes into a table of pending gets, which the session
             // reaches under its lock alone, and is handed its replies there; the table is the
-            // registry's, dropped before the round's owner, the session state's last field.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, self.samples) };
+            // registry's, dropped before the owners of the round and of the plane, the session
+            // state's fields after the registry's.
+            let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.samples) };
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.
             let registered = core

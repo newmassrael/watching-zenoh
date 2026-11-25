@@ -242,6 +242,7 @@ fn held_plan(
             held,
             runtime,
             engine: wz_runtime_coop::kept::Shared::<Engine>::layout().size(),
+            planes: crate::engine::SessionPlanes::OF_BUILD,
         },
     )?;
     Ok(plan)
@@ -2922,6 +2923,22 @@ fn a_groups_face_counts_every_members_aliases_in_the_pool() {
         GROUP_FACE_ALIASES,
         caps::MAX_GROUP_MEMBERS * caps::MAX_MEMBER_KEYEXPRS
     );
+}
+
+/// The planes the session's state owns lie in the session's own arena, each in the place its plan
+/// laid out for it, reached by its engine and its tasks through handles that count nothing.
+/// Turned red by a plane made on the heap.
+#[test]
+#[cfg(any(feature = "queryable", feature = "query", feature = "connectivity"))]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn a_sessions_planes_lie_in_its_own_arena() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let places = engine.plane_places();
+    assert!(!places.is_empty(), "the build has a plane");
+    for at in places {
+        assert!(engine.arena_holds(at), "the plane lies in the arena");
+    }
 }
 
 /// A session's engine lies in the session's own arena, and is reached through its row while the

@@ -1469,7 +1469,9 @@ mod tests {
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
             round,
-            alloc::sync::Arc::new(super::super::query::leaked_plane(1)),
+            wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
+                alloc::boxed::Box::new(super::super::query::leaked_plane(1)),
+            )),
         );
         let registry = RegistryOf::<H>::new(
             &SessionLimits::defaults(),

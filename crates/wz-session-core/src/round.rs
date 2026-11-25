@@ -39,7 +39,6 @@
 //! ([`RoundCounts`]): apart when its congestion control holds its sender, which a record the gate
 //! let through never does (a debug build stops there).
 
-use alloc::sync::Arc;
 use core::cell::{OnceCell, UnsafeCell};
 use core::convert::Infallible;
 use core::ptr::{self, addr_of_mut, NonNull};
@@ -1067,8 +1066,9 @@ pub trait LegHolders<C: RoundCalls>: Send + Sync {
     fn release(&self, leg: C::Leg) -> Option<C::ReplyCallback>;
 }
 
-/// The holders of the legs' callbacks, once the session told the round of them.
-type Legs<C> = Option<Arc<dyn LegHolders<C>>>;
+/// The holders of the legs' callbacks, once the session told the round of them, which outlive
+/// every use the round makes of them ([`Round::calls_legs_of`]).
+type Legs<C> = Option<NonNull<dyn LegHolders<C>>>;
 
 /// The datagram of a group a record of the round reads, its first byte and its length.
 type GroupRead = Option<(*const u8, usize)>;
@@ -1132,7 +1132,9 @@ impl<C: RoundCalls> Released<C> {
 
     /// The holders of the legs' callbacks, once the session told the round of them.
     fn legs(&self) -> Option<&dyn LegHolders<C>> {
-        <C::Replies as Presence>::get::<Legs<C>>(&self.legs).and_then(Option::as_deref)
+        let legs = <C::Replies as Presence>::get::<Legs<C>>(&self.legs).and_then(|legs| *legs)?;
+        // SAFETY: the holders outlive every use the round makes of them (`Round::calls_legs_of`).
+        Some(unsafe { legs.as_ref() })
     }
 
     /// Say that a row waits: set after the row's latch said its last call ended, so a session that
@@ -1363,7 +1365,12 @@ impl<C: RoundCalls> Round<C> {
 
     /// Hold the replies offered from here on for the callbacks `legs` holds, by a count of each
     /// leg's row. Told once, before the round is shared.
-    pub fn calls_legs_of(&mut self, legs: Arc<dyn LegHolders<C>>) {
+    ///
+    /// # Safety
+    /// `legs` stands for as long as the round reaches it: until the round's calls are ended
+    /// ([`Self::let_go`]) or the round is dropped, whichever is first, and it is reached from any
+    /// thread a delivery runs on.
+    pub unsafe fn calls_legs_of(&mut self, legs: NonNull<dyn LegHolders<C>>) {
         if let Some(held) = <C::Replies as Presence>::get_mut::<Legs<C>>(&mut self.released.legs) {
             *held = Some(legs);
         }

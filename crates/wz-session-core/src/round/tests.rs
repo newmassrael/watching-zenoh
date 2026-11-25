@@ -6,6 +6,7 @@ use crate::bounded::ARENA_ALIGN;
 use crate::plane_lock::StdLocks;
 use crate::session_tables::{Absent, Present};
 use crate::wire_id::RequestId;
+use alloc::sync::Arc;
 use core::ptr::NonNull;
 use std::format;
 use std::string::String;
@@ -624,8 +625,12 @@ fn a_sample_with_no_room_or_no_place_is_refused_and_its_call_ended() {
 #[test]
 fn a_reply_is_held_where_replies_are_kept_and_refused_where_they_are_not() {
     let log = Arc::new(Log::default());
+    // Declared before the rounds, so dropped after them.
+    let (kept_leg, lean_leg) = (OneLeg(log.clone()), OneLeg(log.clone()));
     let mut kept = round::<Kept>();
-    kept.get_mut().calls_legs_of(Arc::new(OneLeg(log.clone())));
+    let legs: NonNull<dyn LegHolders<Kept>> = NonNull::from(&kept_leg);
+    // SAFETY: the leg outlives the round.
+    unsafe { kept.get_mut().calls_legs_of(legs) };
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     unsafe {
         kept.offer_reply(4, &Reply("r/1"));
@@ -640,8 +645,10 @@ fn a_reply_is_held_where_replies_are_kept_and_refused_where_they_are_not() {
     );
 
     let mut lean = round::<Lean>();
-    lean.get_mut().calls_legs_of(Arc::new(OneLeg(log.clone())));
-    // SAFETY: as above.
+    let legs: NonNull<dyn LegHolders<Lean>> = NonNull::from(&lean_leg);
+    // SAFETY: the leg outlives the round.
+    unsafe { lean.get_mut().calls_legs_of(legs) };
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     unsafe {
         lean.offer_reply(4, &Reply("r/2"));
         lean.seal();

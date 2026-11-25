@@ -297,6 +297,9 @@ pub enum ArenaPart {
     ArenaKeep,
     RuntimeState,
     EngineState,
+    QueryPlaneState,
+    GetPlaneState,
+    FacePlaneState,
 }
 
 impl ArenaPart {
@@ -437,6 +440,9 @@ impl ArenaPart {
             Self::ArenaKeep => ("arena keep", ""),
             Self::RuntimeState => ("runtime state", "MAX_TASKS + MAX_TIMERS"),
             Self::EngineState => ("engine state", ""),
+            Self::QueryPlaneState => ("query plane", ""),
+            Self::GetPlaneState => ("get plane", ""),
+            Self::FacePlaneState => ("face plane", ""),
         }
     }
 }
@@ -535,7 +541,8 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + CACHE_RING_ROWS
     + FINAL_ROWS
     + RUNTIME_ROWS
-    + ENGINE_STATE_ROWS;
+    + ENGINE_STATE_ROWS
+    + PLANE_ROWS;
 
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
@@ -547,6 +554,11 @@ const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
 const RUNTIME_ROWS: usize = 2;
 /// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
 const ENGINE_STATE_ROWS: usize = 1;
+/// The planes the session's queryables, gets and watchers of its faces share, each where its
+/// feature is ([`ArenaPlan::holding_planes`]).
+const PLANE_ROWS: usize = cfg!(feature = "queryable") as usize
+    + cfg!(feature = "query") as usize
+    + cfg!(feature = "connectivity") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -2283,6 +2295,24 @@ impl ArenaPlan {
     /// refused one is no plan to open by.
     pub fn holding_engine(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
         self.put(ArenaPart::EngineState, 1, bytes);
+        self.settled()
+    }
+
+    /// Lay out the place of each plane the session's state owns and its tasks and its engine
+    /// reach by handles that count nothing (`crate::engine::SessionPlanes`): the queryables',
+    /// the gets' and the watchers' of the faces, each where its feature is. Laid out once, at the
+    /// open. The plan is laid out where it lies; a refused one is no plan to open by.
+    pub(crate) fn holding_planes(
+        &mut self,
+        planes: crate::engine::SessionPlanes,
+    ) -> Result<(), ArenaRefused> {
+        #[cfg(feature = "queryable")]
+        self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
+        #[cfg(feature = "query")]
+        self.put(ArenaPart::GetPlaneState, 1, planes.gets);
+        #[cfg(feature = "connectivity")]
+        self.put(ArenaPart::FacePlaneState, 1, planes.faces);
+        let _ = planes;
         self.settled()
     }
 
