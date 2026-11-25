@@ -932,16 +932,43 @@ fn lend_session(
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
     // owner changes the round no more.
-    #[cfg(wz_round)]
+    #[cfg(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group",
+        feature = "liveliness",
+        feature = "queryable",
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
     let lane = unsafe { samples.share() };
     // SAFETY: the delivery is held by the registry, dropped before the plane wherever both are
     // held: here, where the registry is made after it, and in `SessionLent` and the session's
     // state, which hold the plane in a field after the registry's.
     #[cfg(feature = "queryable")]
     let delivery = RoundDelivery::new(lane, unsafe { plane.share() });
-    #[cfg(all(wz_round, not(feature = "queryable")))]
+    #[cfg(all(
+        any(
+            feature = "threads",
+            feature = "listen",
+            feature = "group",
+            feature = "liveliness",
+            feature = "queryable",
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        not(feature = "queryable")
+    ))]
     let delivery = RoundDelivery::new(lane);
-    #[cfg(not(wz_round))]
+    #[cfg(not(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group",
+        feature = "liveliness",
+        feature = "queryable",
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
     let delivery = RoundDelivery::new();
     // The application's tables, lent from the rows the plan counts for them: the session's
     // one table set among them, which holds its subscribers and its queryables.
@@ -2436,10 +2463,20 @@ impl SubscriberCall {
 /// lock held; a query, the queryables' plane, which holds a call begun on a queryable's row until
 /// the query is handed to its callback. The registry holds it and hands it to each dispatch, so no
 /// row keeps a reference to either.
-/// A build that puts nothing in the round (`wz_round`) hands it no record: its delivery holds
-/// nothing, and the planes that are told through it tell none of their own.
+/// The round is held only where a plane tells it through the delivery: a subscriber's sample where
+/// the read runs beside the program's calls, a token, a query, a declaration watch's event. A build
+/// of none of them (one that puts nothing in the round, or one whose round is told only by the
+/// engine itself) holds nothing.
 pub(crate) struct RoundDelivery {
-    #[cfg(wz_round)]
+    #[cfg(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group",
+        feature = "liveliness",
+        feature = "queryable",
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
     round: PlacedRef<Round>,
     #[cfg(feature = "queryable")]
     plane: PlacedRef<QueryPlane>,
@@ -2447,13 +2484,33 @@ pub(crate) struct RoundDelivery {
 
 impl RoundDelivery {
     /// Deliveries into `round`.
-    #[cfg(all(wz_round, not(feature = "queryable")))]
+    #[cfg(all(
+        any(
+            feature = "threads",
+            feature = "listen",
+            feature = "group",
+            feature = "liveliness",
+            feature = "queryable",
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        not(feature = "queryable")
+    ))]
     fn new(round: PlacedRef<Round>) -> Self {
         Self { round }
     }
 
-    /// Deliveries into no round: what the records of a build that puts nothing in it go through.
-    #[cfg(not(wz_round))]
+    /// Deliveries told to no round: what the records of a build whose planes tell it none go
+    /// through.
+    #[cfg(not(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group",
+        feature = "liveliness",
+        feature = "queryable",
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
     fn new() -> Self {
         Self {}
     }
