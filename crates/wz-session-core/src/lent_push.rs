@@ -611,18 +611,8 @@ impl SceSink for Head {
             .map_err(|_| CodecError::BufferOverflow)
     }
 
-    // The trait's own byte writer hands a one-byte slice to `write_bytes`, which copies it with a
-    // call to the platform's `memcpy`.
     fn write_u8(&mut self, b: u8) -> Result<(), CodecError> {
         self.0.push(b).map_err(|_| CodecError::BufferOverflow)
-    }
-
-    // The trait's own VLE writer takes the head a byte at a time; the codec crate's encoder writes
-    // the same bytes on the stack, which the head takes in one copy, or refuses whole.
-    fn write_vle_u64(&mut self, v: u64) -> Result<(), CodecError> {
-        let mut bytes = [0u8; wz_codecs::vle::VLE_LEN];
-        let n = wz_codecs::vle::encode_zint(&mut bytes, v);
-        self.write_bytes(bytes.get(..n).unwrap_or(&bytes))
     }
 
     fn position(&self) -> usize {
@@ -1410,6 +1400,11 @@ mod tests {
             fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
                 self.calls += 1;
                 self.bytes.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn write_u8(&mut self, b: u8) -> Result<(), CodecError> {
+                self.calls += 1;
+                self.bytes.push(b);
                 Ok(())
             }
             fn position(&self) -> usize {
