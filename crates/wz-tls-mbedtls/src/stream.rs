@@ -28,7 +28,7 @@ use core::fmt::Write as _;
 use core::net::{IpAddr, SocketAddr};
 
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
 
 use crate::channel::{Identity, Io, Role, Session, Step, TlsError, Transport, Trust, Want, Zid};
@@ -136,14 +136,9 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
     where
         Self: 'static;
 
-    const PROTO: LinkProto = LinkProto::Tls;
-
-    fn local(&self) -> SocketAddr {
-        self.lower.socket.local()
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.lower.socket.peer()
+    // The channel's ends are the connection's, under its own protocol.
+    fn ends(&self) -> StreamEnds<'_> {
+        self.lower.socket.ends().speaking(LinkProto::Tls)
     }
 
     // The channel's write takes every byte: its records leave through the stream under it, which

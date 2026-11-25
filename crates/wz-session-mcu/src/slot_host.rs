@@ -43,6 +43,8 @@ use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::policy::SnResolution;
+use wz_session_core::policy_binding::OutsideDomain;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_slot::{ClaimRefused, SessionSlots, SlotClaim};
 
@@ -58,6 +60,11 @@ pub enum OpenRefused {
     PumpCell,
     /// The task table refused the task that would run the session.
     Task(SpawnRefusal),
+    /// The width of sequence numbers the session's parameters offer is one the build's
+    /// `sn-resolution` domain leaves out ([`wz_session_core::sn::sn_resolution_admitted`]): the
+    /// node's parameters are refused, not a table, so no table counts it. The session built in
+    /// the slot is dropped with the slot before its pump is claimed, having sent nothing.
+    SnResolution(OutsideDomain<SnResolution>),
 }
 
 /// Why a dial did not open a session.
@@ -232,6 +239,10 @@ where
         let runtime = self.local.runtime();
         let driver = claim.driver_handle();
         let (actions, entropy) = new_session_in_slot(claim, params, CoopTime::new(runtime));
+        // The parameters are made in the slot, so their width is read from the session built
+        // there: the one test every engine's open makes of a width it is handed.
+        wz_session_core::sn::sn_resolution_admitted(actions.offered_sn_resolution())
+            .map_err(OpenRefused::SnResolution)?;
         let pump_link = self.stack.pump(driver, lane);
         let Ok(pump) = self.pumps.claim(
             runtime.with_driver(),

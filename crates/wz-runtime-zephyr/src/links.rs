@@ -34,6 +34,13 @@ use crate::stream::ZephyrTcpDial;
 /// [`ZephyrLinks`] is the datagram-only form the heap images that predate it were written against.
 pub type ZephyrIpLinks = wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial>;
 
+/// [`ZephyrIpLinks`] in a build that links no datagram link: `tcp/` as there, every `udp/` dial
+/// and listener refused as unsupported, and no link over a [`ZephyrUdpSocket`] made.
+pub type ZephyrStreamLinks = wz_runtime_coop::ip_stack::IpLinks<
+    wz_runtime_coop::udp_link::NoDatagramOf<ZephyrUdpSocket>,
+    ZephyrTcpDial,
+>;
+
 /// The links of a node whose network stack is Zephyr's own.
 pub struct ZephyrLinks {
     local: IpAddr,
@@ -115,15 +122,18 @@ impl SessionLinks for ZephyrLinks {
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // These links are Zephyr's datagram sockets alone, so a `tcp/` dial is not this stack's;
         // `ZephyrIpLinks` carries both.
-        if to.proto != LinkProto::Udp {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        if ip.proto != LinkProto::Udp {
             return Err(LinkOpenError::Unsupported);
         }
         // Port 0 has the stack choose a free one, one per initiator session.
-        let socket = ZephyrUdpSocket::bind(dial_bind(self.local, to.at))
+        let socket = ZephyrUdpSocket::bind(dial_bind(self.local, ip.at))
             .map_err(bind_refused::<ZephyrUdpSocket>)?;
         let driver = CellRc::boxed(ZephyrUdpDriver::initiator_with_buffers(
             socket,
-            to.at,
+            ip.at,
             self.rx_capacity,
             HeapTx::for_link(self.tx_slots, self.tx_capacity, self.rx_capacity),
         ));

@@ -35,7 +35,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use crate::app_layer::SessionEvents;
 use crate::connect_manager::{ConnectManager, DialFailed, Dialer, Ended};
 use crate::dial::{dial_failed, parse_locator_for};
-use crate::slot_host::{DialRefused, OpenedSession, SessionHost};
+use crate::slot_host::{DialRefused, OpenRefused, OpenedSession, SessionHost};
 
 /// What the node needs from the image to make a session: the entropy source the session's
 /// cookies are drawn from, its handshake parameters, and the application layer it reports to. One
@@ -320,6 +320,11 @@ where
             // the link is the stack's to say.
             .map_err(|refused| match refused {
                 DialRefused::Link(link) => dial_failed(link),
+                // A width the build's domain leaves out is the node's to change, not the
+                // endpoint's: refused, and not dialled again.
+                DialRefused::Open(OpenRefused::SnResolution(_)) => {
+                    DialFailed::Refused(crate::connect_manager::DialRefused::SnResolution)
+                }
                 DialRefused::Open(_) => DialFailed::Exhausted,
             })?;
         Ok(SlotSession::new(opened))

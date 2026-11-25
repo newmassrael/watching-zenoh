@@ -263,7 +263,7 @@ impl SessionFactory<Clock, LwipUdpDriver> for Factory {
         SessionInitParams {
             whatami: WhatAmI::Peer,
             zid: zid_bytes(&self.zid),
-            seq_num_res: 2,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size: BATCH_SIZE,
             lease_ms: 10_000,

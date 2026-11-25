@@ -923,7 +923,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     let mut initiator_params = fixture_session_init_params();
     initiator_params.zid = [0x5A; 4].into();
     initiator_params.whatami = WhatAmI::Client;
-    initiator_params.seq_num_res = 0;
+    initiator_params.seq_num_res = wz_session_core::policy::SnResolution::Bits8;
     initiator_params.req_id_res = 1;
     initiator_params.batch_size = 2048;
     let initiator = new_session_actions(initiator_out, initiator_params, TokioTime::new());
@@ -953,7 +953,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     let recording = Arc::new(RecordingOutboundDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 2;
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits32;
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
@@ -1387,7 +1387,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     // three fields to the peer's stricter values.
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 3;
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits64;
     params.req_id_res = 3;
     params.batch_size = 65535;
     let actions = new_session_actions(driver, params, TokioTime::new());
@@ -1395,7 +1395,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     // No peer InitSyn parsed yet → init_ack_params returns own
     // params verbatim (the slot is `None`).
     let p = actions.init_ack_params();
-    assert_eq!(p.seq_num_res, 3);
+    assert_eq!(p.seq_num_res, wz_session_core::policy::SnResolution::Bits64);
     assert_eq!(p.req_id_res, 3);
     assert_eq!(p.batch_size, 65535);
 
@@ -1406,7 +1406,11 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
         batch_size: 2048,
     }));
     let p = actions.init_ack_params();
-    assert_eq!(p.seq_num_res, 2, "seq_num_res capped to peer");
+    assert_eq!(
+        p.seq_num_res,
+        wz_session_core::policy::SnResolution::Bits32,
+        "seq_num_res capped to peer"
+    );
     assert_eq!(p.req_id_res, 1, "req_id_res capped to peer");
     assert_eq!(p.batch_size, 2048, "batch_size capped to peer");
 }
@@ -1420,7 +1424,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
 fn the_send_limits_are_the_capabilities_of_each_establishment() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 3;
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits64;
     params.req_id_res = 3;
     params.batch_size = 65535;
     let actions = new_session_actions(driver, params, TokioTime::new());
@@ -1471,7 +1475,7 @@ fn r121d_init_ack_params_keeps_own_when_own_lower() {
     // never accidentally promotes a value upward.
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 1;
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits16;
     params.req_id_res = 1;
     params.batch_size = 512;
     let actions = new_session_actions(driver, params, TokioTime::new());
@@ -1482,7 +1486,11 @@ fn r121d_init_ack_params_keeps_own_when_own_lower() {
         batch_size: 65535,
     }));
     let p = actions.init_ack_params();
-    assert_eq!(p.seq_num_res, 1, "own seq_num_res preserved (1 < 3)");
+    assert_eq!(
+        p.seq_num_res,
+        wz_session_core::policy::SnResolution::Bits16,
+        "own seq_num_res preserved (1 < 3)"
+    );
     assert_eq!(p.req_id_res, 1, "own req_id_res preserved (1 < 3)");
     assert_eq!(p.batch_size, 512, "own batch_size preserved (512 < 65535)");
 }

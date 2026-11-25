@@ -102,10 +102,7 @@ pub(crate) fn monotonic_ns() -> u64 {
         QueryPerformanceCounter(&mut ticks);
         QueryPerformanceFrequency(&mut per_second);
     }
-    if per_second <= 0 || ticks < 0 {
-        return 0;
-    }
-    (u128::from(ticks as u64) * 1_000_000_000 / u128::from(per_second as u64)) as u64
+    crate::counter::ticks_to_ns(ticks, per_second)
 }
 
 /// A thread of the system, by its handle.

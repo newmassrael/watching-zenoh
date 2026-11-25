@@ -34,7 +34,7 @@ use wz_runtime_coop::group_transport::GroupInterface;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const IPV6_JOIN: c_int = libc::IPV6_ADD_MEMBERSHIP;
 /// See the Linux form of this constant.
-#[cfg(target_os = "nto")]
+#[cfg(any(target_os = "nto", target_os = "macos"))]
 const IPV6_JOIN: c_int = libc::IPV6_JOIN_GROUP;
 
 // The heap profile's readiness seam is compiled where the runtime declares it, whatever this crate's
@@ -318,6 +318,55 @@ pub(crate) fn errno() -> c_int {
     unsafe { *libc::__get_errno_ptr() }
 }
 
+/// The calling thread's `errno`.
+#[cfg(target_os = "macos")]
+pub(crate) fn errno() -> c_int {
+    // SAFETY: `__error` is what Darwin's `errno` macro reads: the address of the calling thread's
+    // `errno`, valid for the thread's life.
+    unsafe { *libc::__error() }
+}
+
+/// A socket of `family` and `kind` (`SOCK_DGRAM`, `SOCK_STREAM`) as every socket of this crate is
+/// made: closed when the process starts another program, and on macOS one whose write to a stream
+/// the peer has closed is the write's error and not a SIGPIPE. The descriptor, or the `errno` of
+/// the refusal. Where the kernel takes `SOCK_CLOEXEC` with the kind it is one call; macOS has no
+/// such flag, so its socket is made and then set, and closed again when a setting is refused.
+pub(crate) fn open_socket(family: c_int, kind: c_int) -> Result<c_int, c_int> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: plain system call with value arguments.
+        let fd = unsafe { libc::socket(family, kind | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(errno());
+        }
+        Ok(fd)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: plain system call with value arguments.
+        let fd = unsafe { libc::socket(family, kind, 0) };
+        if fd < 0 {
+            return Err(errno());
+        }
+        match set_close_on_exec(fd).and_then(|()| set_no_sigpipe(fd)) {
+            Ok(()) => Ok(fd),
+            Err(refused) => {
+                // SAFETY: `fd` is this call's own descriptor, closed exactly once.
+                unsafe { libc::close(fd) };
+                Err(refused)
+            }
+        }
+    }
+}
+
+/// Make a write to `fd` after its peer closed the stream fail with `EPIPE` rather than raise
+/// SIGPIPE (`SO_NOSIGPIPE`): Darwin's form of the `MSG_NOSIGNAL` the other hosts pass to each send,
+/// which a library loaded into a C program, whose SIGPIPE ends the process, must not leave to it.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_no_sigpipe(fd: c_int) -> Result<(), c_int> {
+    set_flag(fd, libc::SOL_SOCKET, libc::SO_NOSIGPIPE)
+}
+
 /// Bound every blocking read of `fd` by `ms` milliseconds (`SO_RCVTIMEO`): the `errno` when the
 /// kernel refuses.
 fn set_receive_timeout_ms(fd: c_int, ms: c_int) -> Result<(), c_int> {
@@ -487,8 +536,8 @@ impl RawAddr {
         let len = match at {
             SocketAddr::V4(v4) => {
                 let sin = libc::sockaddr_in {
-                    // Neutrino's socket address, as the BSDs', carries its own length.
-                    #[cfg(target_os = "nto")]
+                    // Neutrino's and macOS's socket address, as the BSDs', carries its own length.
+                    #[cfg(any(target_os = "nto", target_os = "macos"))]
                     sin_len: size_of::<libc::sockaddr_in>() as u8,
                     sin_family: libc::AF_INET as libc::sa_family_t,
                     sin_port: v4.port().to_be(),
@@ -506,9 +555,9 @@ impl RawAddr {
             }
             SocketAddr::V6(v6) => {
                 // SAFETY: an all-zero `sockaddr_in6` is a valid value of it; the fields are set
-                // below, and what is not set (Neutrino's length aside) is zero as the kernel wants.
+                // below, and what is not set (the BSD length aside) is zero as the kernel wants.
                 let mut sin6: libc::sockaddr_in6 = unsafe { core::mem::zeroed() };
-                #[cfg(target_os = "nto")]
+                #[cfg(any(target_os = "nto", target_os = "macos"))]
                 {
                     sin6.sin6_len = size_of::<libc::sockaddr_in6>() as u8;
                 }
@@ -636,11 +685,7 @@ impl PosixUdpSocket {
     /// A socket bound to `at`; `shared` sets `SO_REUSEADDR` and `SO_REUSEPORT` first, which is
     /// what lets a group's receiver bind the port another member on this host already holds.
     fn open(at: SocketAddr, shared: bool) -> Result<Self, PosixNetError> {
-        // SAFETY: plain system call with value arguments.
-        let fd = unsafe { libc::socket(family_of(&at), libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
-        if fd < 0 {
-            return Err(PosixNetError::Socket(errno()));
-        }
+        let fd = open_socket(family_of(&at), libc::SOCK_DGRAM).map_err(PosixNetError::Socket)?;
         // Owned from here, so an early return closes it.
         let mut this = Self { fd, local: at };
         if let Err(e) = set_receive_timeout_ms(fd, SERVICE_WAIT_MS) {
@@ -712,7 +757,7 @@ impl PosixUdpSocket {
                 // SAFETY: an all-zero `ipv6_mreq` is a valid value of it; both fields are set below.
                 let mut request: libc::ipv6_mreq = unsafe { core::mem::zeroed() };
                 request.ipv6mr_multiaddr.s6_addr = group.octets();
-                // `c_uint` on Linux and Neutrino, `c_int` on Android: an index fits either.
+                // `c_uint` on Linux, Neutrino and macOS, `c_int` on Android: an index fits either.
                 request.ipv6mr_interface = index as _;
                 set_option(self.fd, libc::IPPROTO_IPV6, IPV6_JOIN, &request)
                     .map_err(PosixNetError::Membership)
@@ -1192,6 +1237,28 @@ mod tests {
         assert_eq!(
             set_flag(-1, libc::SOL_SOCKET, libc::SO_BROADCAST),
             Err(libc::EBADF)
+        );
+    }
+
+    /// Every socket this crate opens is closed when the process starts another program, made so by
+    /// the open itself (with the kind where the kernel takes `SOCK_CLOEXEC`, by a call of its own
+    /// on macOS), so no descriptor of a node leaks into a program it starts; a family the kernel
+    /// has no socket of is the refusal, with its errno. Turned red by an open that drops
+    /// `SOCK_CLOEXEC`, or on macOS the `fcntl` after the `socket`.
+    #[test]
+    fn a_socket_this_crate_opens_is_closed_on_exec() {
+        for kind in [libc::SOCK_DGRAM, libc::SOCK_STREAM] {
+            let fd = open_socket(libc::AF_INET, kind).expect("a socket");
+            // SAFETY: plain system call on the descriptor just opened.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            // SAFETY: the descriptor this test opened, closed exactly once.
+            unsafe { libc::close(fd) };
+            assert_ne!(flags & libc::FD_CLOEXEC, 0, "a socket of kind {kind}");
+        }
+        assert_eq!(
+            open_socket(-1, libc::SOCK_DGRAM),
+            Err(libc::EAFNOSUPPORT),
+            "no family numbered -1"
         );
     }
 

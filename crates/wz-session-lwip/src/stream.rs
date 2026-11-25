@@ -34,8 +34,8 @@ use core::ops::Deref;
 use wz_link_lwip::tcp::TcpSocketPool;
 use wz_link_lwip::tcp::{LwipTcpListener, LwipTcpSocket, TcpError, TcpState};
 use wz_link_lwip::{ipv4_addr_from_octets, ipv4_octets, route_source, LwipLink};
-use wz_runtime_coop::session_drive::LinkOpenError;
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
+use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 
 /// How long a dial waits for the handshake before it gives the link up.
 pub const DIAL_TIMEOUT_MS: u32 = 5_000;
@@ -83,17 +83,18 @@ where
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
+    // This end is the address the stack routes to the peer from, on the port it picked.
+    fn ends(&self) -> StreamEnds<'_> {
         let addr = route_source(ipv4_addr_from_octets(self.peer.ip().octets()))
             .map_or([0; 4], ipv4_octets);
-        SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::from(addr),
-            self.socket.borrow().local_port(),
-        ))
-    }
-
-    fn peer(&self) -> SocketAddr {
-        SocketAddr::V4(self.peer)
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::from(addr),
+                self.socket.borrow().local_port(),
+            )),
+            peer: SocketAddr::V4(self.peer),
+        }
     }
 
     // The write waits for the send buffer, up to its bound, and returns once it took every byte.
@@ -377,6 +378,11 @@ mod tests {
 
     const RX: usize = 4096;
 
+    /// This end's address and the peer's, of a stream over IP.
+    fn ip_ends<S: StreamSocket>(stream: &S) -> (SocketAddr, SocketAddr) {
+        stream.ends().ip().expect("a stream over IP")
+    }
+
     /// An echo server on `port` (raw API, the same stack): whatever arrives is written back, and
     /// `bye` ends the connection from the server's side.
     fn server(port: u16) {
@@ -462,12 +468,19 @@ mod tests {
         server(47_301);
         let to = SocketAddr::from(([127, 0, 0, 1], 47_301));
         let stream = dial(&link).dial(to).expect("dial");
-        assert_eq!(stream.peer(), to);
-        assert_ne!(stream.local().port(), 0, "the stack picked a local port");
-        assert_eq!(
-            <LwipTcpStream<&LwipLink, RX> as StreamSocket>::PROTO,
-            LinkProto::Tcp
+        assert_eq!(ip_ends(&stream).1, to);
+        assert_ne!(
+            ip_ends(&stream).0.port(),
+            0,
+            "the stack picked a local port"
         );
+        assert!(matches!(
+            stream.ends(),
+            StreamEnds::Ip {
+                proto: LinkProto::Tcp,
+                ..
+            }
+        ));
 
         assert_eq!(stream.try_read(&mut [0; 8]), Ok(None), "nothing yet");
         assert_eq!(stream.write(b"hello"), Ok(5));
@@ -561,7 +574,7 @@ mod tests {
             asks + 1,
             "one poll for each ask, the one that found it made included"
         );
-        assert_eq!(stream.peer(), to);
+        assert_eq!(ip_ends(&stream).1, to);
 
         assert_eq!(stream.write(b"hi"), Ok(2));
         stream.wait_readable(2_000);
@@ -665,7 +678,7 @@ mod tests {
         let dialled = dial(link)
             .dial(SocketAddr::from(([127, 0, 0, 1], 47_501)))
             .expect("dial");
-        let dialled_port = dialled.local().port();
+        let dialled_port = ip_ends(&dialled).0.port();
         let mut accepted = None;
         for _ in 0..4_000 {
             if let Some(stream) = listen.accept().expect("the listener is sound") {
@@ -675,7 +688,7 @@ mod tests {
         }
         let accepted = accepted.expect("the connection that arrived");
         assert_eq!(
-            accepted.peer(),
+            ip_ends(&accepted).1,
             SocketAddr::from(([127, 0, 0, 1], dialled_port))
         );
 

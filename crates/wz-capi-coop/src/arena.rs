@@ -961,19 +961,31 @@ impl EntityRows {
         }
     }
 
-    /// The rows of the write filters' one table: a publisher's and a querier's each.
-    pub const fn filters(&self) -> Option<usize> {
-        self.of_kind(EntityKind::Publisher)
-            .checked_add(self.of_kind(EntityKind::Querier))
+    /// The write filters the matching listeners declared on a key judge through, one each: none
+    /// in a build that keeps no such listener (`key-matching-listener`).
+    pub const fn key_listeners(&self) -> usize {
+        if cfg!(feature = "key-matching-listener") {
+            self.of_kind(EntityKind::MatchingListener)
+        } else {
+            0
+        }
     }
 
-    /// The rows of the Interests the session holds open: a write filter or a matching listener
-    /// opens at most one, and one that finds its key already asked opens none.
-    pub const fn interests(&self) -> Option<usize> {
-        match self.filters() {
-            Some(filters) => filters.checked_add(self.of_kind(EntityKind::MatchingListener)),
+    /// The rows of the write filters' one table: a publisher's and a querier's each, and a key
+    /// listener's.
+    pub const fn filters(&self) -> Option<usize> {
+        match self
+            .of_kind(EntityKind::Publisher)
+            .checked_add(self.of_kind(EntityKind::Querier))
+        {
+            Some(entities) => entities.checked_add(self.key_listeners()),
             None => None,
         }
+    }
+
+    /// The rows of the Interests the session holds open: a write filter opens at most one.
+    pub const fn interests(&self) -> Option<usize> {
+        self.filters()
     }
 }
 
@@ -1805,7 +1817,7 @@ impl ArenaPlan {
                 NO_PEER_ROWS
             }
         };
-        let pools = match pool_rows(limits, faces, member_alias_groups(&shape)) {
+        let pools = match pool_rows(limits, faces, member_alias_groups(shape.groups)) {
             Ok(pools) => pools,
             Err(refused) => {
                 self.refuse(refused);
@@ -1988,6 +2000,7 @@ impl ArenaPlan {
             publishers: rows.of_kind(EntityKind::Publisher),
             queriers: rows.of_kind(EntityKind::Querier),
             matching_listeners: rows.of_kind(EntityKind::MatchingListener),
+            key_listeners: rows.key_listeners(),
             pending_gets: 0,
             held_replies: 0,
         }
@@ -2481,12 +2494,12 @@ const ALIAS_LIMITS: PoolLimit = PoolLimit {
 pub(crate) const GROUP_FACE_ALIASES: usize =
     caps::MAX_GROUP_MEMBERS.saturating_mul(caps::MAX_MEMBER_KEYEXPRS);
 
-/// The groups of a session of `shape` whose faces hold `GROUP_FACE_ALIASES`: each one a task
-/// cell holds, as `PlanShape::faces` counts them, in a build whose members' keyexprs are their
-/// own, and none in another.
-const fn member_alias_groups(shape: &PlanShape) -> usize {
+/// The groups of a session that joins `groups` whose faces hold `GROUP_FACE_ALIASES`: each one a
+/// task cell holds, as [`PlanShape::faces`] counts them, in a build whose members' keyexprs are their own,
+/// and none in another.
+const fn member_alias_groups(groups: usize) -> usize {
     if cfg!(feature = "multicast-declarations") {
-        least(shape.groups, caps::MAX_TASKS)
+        least(groups, caps::MAX_TASKS)
     } else {
         0
     }

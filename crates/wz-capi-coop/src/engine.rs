@@ -52,7 +52,7 @@ use crate::arena::{
     EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables, PlanFrom,
     SessionArena, SessionRows, TransportTables,
 };
-use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
+use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
@@ -61,7 +61,7 @@ use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
-use wz_session_core::row_callback::{CallLatch, RowCallback};
+use wz_session_core::row_callback::{RowCallback, ThreadForm};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
@@ -77,12 +77,14 @@ use wz_session_core::slot_observer::ObserverRows;
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
 #[cfg(feature = "listen")]
 use crate::admission_gate::AdmissionGate;
-use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
+use wz_capi_port::os::{self, Mutex, MutexGuard};
+#[cfg(feature = "threads")]
+use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
-    KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused,
-    SessionClosed, SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId,
-    SubscriberSink, WireHolds, WireKey,
+    KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender,
+    ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SessionKeys,
+    StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
@@ -154,6 +156,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleRef, SampleView};
+use wz_session_core::sn::sn_resolution_admitted;
 use wz_session_core::timestamp_visibility::exposed_by;
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -472,6 +475,16 @@ pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
     SessionPolicy::defaults()
 }
 
+/// Whether a session may run the widths of sequence numbers `config` states, its own and each
+/// group's: each is held to the build's `sn-resolution` domain
+/// (`wz_session_core::sn::sn_resolution_admitted`), the first one refused is the open's refusal.
+fn admit_sn_widths<E>(config: &CoopConfig<E>) -> Result<(), OpenError> {
+    sn_resolution_admitted(config.sn_resolution).map_err(OpenError::SnResolution)?;
+    config.groups.iter().try_for_each(|group| {
+        sn_resolution_admitted(group.profile.seq_num_res).map_err(OpenError::SnResolution)
+    })
+}
+
 /// The session limits a session `CoopEngine::open` opens from `config` holds its tables to: the
 /// snapshot the ABI resolved and states in the config ([`CoopConfig::limits`]), as it is, read
 /// where the config holds it: only a value that owns limits of its own (a link's parameters, a
@@ -521,6 +534,10 @@ pub enum OpenError {
     /// at most the build's `MAX_TASKS`, and every one was taken, or none fits the task. Nothing of
     /// the link or the group stays.
     NoTask(SpawnRefusal),
+    /// A width of sequence numbers the config states, the session's or a group's, is one the
+    /// build's `sn-resolution` domain leaves out: the build holds no word for its ring. Nothing
+    /// was reserved, bound, joined or dialled.
+    SnResolution(OutsideDomain<SnResolution>),
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -913,7 +930,7 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
     listen: impl IntoIterator<Item = T>,
     entropy: &mut dyn EntropySource,
 ) -> Result<SessionZid, OpenError> {
-    use wz_runtime_coop::session_drive::LinkProto;
+    use wz_runtime_coop::session_drive::{LinkProto, Locator};
     use wz_session_core::zid_derivation::{ListenerFacts, ListenerTransport, RANDOM_BYTES};
     let mut random = [0u8; RANDOM_BYTES];
     entropy
@@ -925,7 +942,10 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
     // address or a port, and linking it put some thirty kilobytes into every cooperative build.
     let mut facts = ListenerFacts::new();
     for endpoint in listen {
-        let Ok(at) = parse_listen_locator(endpoint.as_ref()) else {
+        let Some(at) = parse_listen_locator(endpoint.as_ref())
+            .ok()
+            .and_then(Locator::as_ip)
+        else {
             continue;
         };
         let transport = match at.proto {
@@ -979,7 +999,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// work out under the session's lock, since that wait would be none. Written by the step, under
     /// the lock; a stale `true` costs one step that finds nothing, after which the read waits.
     input_held: AtomicBool,
-    /// Where a read waits for another read to hand back the session's buffer of waits.
+    /// Where a read waits for another read to hand back the session's buffer of waits. Only a
+    /// build with a read task beside the program's calls has two reads at once.
+    #[cfg(feature = "threads")]
     hand_back: HandBack,
     /// How many handed legs of each priority are held at most: as many as the session's queue
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
@@ -1025,9 +1047,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// entity ids are spent.
     #[cfg(any(feature = "query", feature = "ticker"))]
     next_local: AtomicU64,
+    #[cfg(feature = "threads")]
     reader: Mutex<Option<ReadTask>>,
     /// The run of read tasks, one past each stop: a read task steps the session while the run is
     /// the one it was started in, so a stop needs no word made for it (`ReaderBody`).
+    #[cfg(feature = "threads")]
     reader_run: core::sync::atomic::AtomicUsize,
     /// The threads handing deliveries out for this engine now, and the callbacks each runs
     /// ([`Deliveries`]): a callback that steps its session again from one of them queues what it
@@ -1089,6 +1113,7 @@ impl Takes {
 /// ([`IdleWait::Behind`]) waits for the buffer to be handed back: woken then, it steps and its
 /// next wait is on the links, so a read task behind a program's read does not sleep out its bound
 /// while what arrives after that read waits for it.
+#[cfg(feature = "threads")]
 struct HandBack {
     /// The reads waiting here now: a hand-back with none takes no lock.
     behind: core::sync::atomic::AtomicUsize,
@@ -1098,6 +1123,7 @@ struct HandBack {
     back: os::Condvar,
 }
 
+#[cfg(feature = "threads")]
 impl HandBack {
     fn new() -> Self {
         Self {
@@ -1655,6 +1681,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
+#[cfg(feature = "threads")]
 struct ReadTask {
     thread: JoinHandle,
     id: ThreadId,
@@ -1663,11 +1690,13 @@ struct ReadTask {
 /// What the read task's thread runs, handed to whatever makes the thread: a hold of the engine,
 /// stepped until the engine's run of read tasks is no longer this one's (`reader_run`). A value
 /// of a type that can be named, so the start boxes nothing and makes no word for the stop.
+#[cfg(feature = "threads")]
 pub(crate) struct ReaderBody<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: Arc<CoopEngine<L, C>>,
     run: usize,
 }
 
+#[cfg(feature = "threads")]
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> {
     /// Step the session until the task is told to stop or the session ends.
     pub(crate) fn run(self) {
@@ -1904,46 +1933,30 @@ fn sleep_ms(ms: u32) {
 /// is its callback's life (P11): a call is begun on the row's latch with the session held and made
 /// after it, and an undeclared row is let go of by whoever sees its last call end.
 pub(crate) struct SubscriberRow {
-    /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
-    /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
-    /// of the session held.
-    holds: WireHolds,
+    /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
+    /// lock of the session held: the declarations the key and the retraction name are the tables'
+    /// row's to hold.
+    _anchor: KeyAnchor,
     /// The program's callback, called where the row lies: the tables lend their rows from the
     /// session's arena and never move one.
     sink: SubscriberSink,
     /// Whether the callback is shown each sample's timestamp (`entity-timestamp-opt-in`).
     expose: bool,
     /// How many calls of the callback run, and whether the subscriber was undeclared.
-    latch: CallLatch,
-}
-
-/// A row of the session's own declarations whose key holds the session's declarations: taken out
-/// of the tables, it is let go of with no lock of the session held, and what its key held comes
-/// back from it, to give back to the session (`CoopEngine::give_back`). The holds are bare ids
-/// of the session's count, which a dropped row would never give back, so every place a row leaves
-/// the tables goes through this.
-pub(crate) trait RowHolds {
-    /// Let go of the row, its callback with it: what its key held.
-    fn into_holds(self) -> WireHolds;
-}
-
-impl RowHolds for SubscriberRow {
-    fn into_holds(self) -> WireHolds {
-        self.holds
-    }
+    latch: Latch,
 }
 
 impl SubscriberRow {
-    /// A subscriber keeping `holds`, handing what it hears to `sink`, the timestamp shown when
+    /// A subscriber keeping `anchor`, handing what it hears to `sink`, the timestamp shown when
     /// `expose`.
     // Out of line: measured smaller apart from the declaration that builds the row.
     #[inline(never)]
-    pub(crate) fn new(holds: WireHolds, sink: SubscriberSink, expose: bool) -> Self {
+    pub(crate) fn new(anchor: KeyAnchor, sink: SubscriberSink, expose: bool) -> Self {
         Self {
-            holds,
+            _anchor: anchor,
             sink,
             expose,
-            latch: CallLatch::new(),
+            latch: Latch::new(),
         }
     }
 
@@ -1960,7 +1973,7 @@ impl SubscriberRow {
             hidden = sample.without_timestamp();
             &hidden
         };
-        self.sink.call(sample);
+        self.sink.call_ref(sample);
     }
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:
@@ -2002,7 +2015,7 @@ const _: () = assert!(
 // A delivery ends a call with no lock of the session held; a target whose latch is ended only with
 // the tables held has no atomic read-modify-write of a word, and so no `Arc` this engine is built on.
 const _: () = assert!(
-    !CallLatch::ENDS_HELD,
+    !Latch::ENDS_HELD,
     "a call of a subscriber's callback ends with no lock held"
 );
 
@@ -2962,7 +2975,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let params = SessionInitParams {
             whatami: self.config.whatami,
             zid: self.transport.wire_zid,
-            seq_num_res: self.config.sn_resolution.wire_code(),
+            seq_num_res: self.config.sn_resolution,
             req_id_res: 2,
             batch_size: self.config.batch_size,
             lease_ms: self.config.lease_ms,
@@ -3455,7 +3468,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .set_unanswerable_final(id, self.policy.query_unanswerable_final());
             // Each member's keyexprs are its own, and the face holds them all.
             #[cfg(feature = "multicast-declarations")]
-            self.session.registry.borrow_mut().hold_member_aliases(held);
+            self.session.registry.hold_member_aliases(held);
             // An id of the key ids every node shares is read on the group as on a link.
             #[cfg(feature = "shared-key-ids")]
             if let Some(ids) = &self.session.key_ids {
@@ -4063,6 +4076,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             plan: from,
         } = storage;
         let (config, write_endpoints) = source.into_parts();
+        admit_sn_widths(&config)?;
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
@@ -4263,6 +4277,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(any(feature = "listen", feature = "group"))]
                 owed: AtomicBool::new(false),
                 input_held: AtomicBool::new(false),
+                #[cfg(feature = "threads")]
                 hand_back: HandBack::new(),
                 #[cfg(any(feature = "listen", feature = "group"))]
                 handed_limits,
@@ -4285,7 +4300,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 closed: AtomicBool::new(false),
                 #[cfg(any(feature = "query", feature = "ticker"))]
                 next_local: AtomicU64::new(1),
+                #[cfg(feature = "threads")]
                 reader: Mutex::new(None),
+                #[cfg(feature = "threads")]
                 reader_run: core::sync::atomic::AtomicUsize::new(0),
                 deliveries: Deliveries::new(),
                 arena_bytes,
@@ -4741,14 +4758,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Run `held` while holding the session as a read step holds it: what a test of a publish that
     /// finds the session held by what is not a publish runs beside one.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "threads"))]
     pub(crate) fn holding_as_a_step(&self, held: impl FnOnce()) {
         let _core = self.live();
         held();
     }
 
     /// Run `held` while holding the session as a read working out its wait holds it.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "threads"))]
     pub(crate) fn holding_as_a_read_wait(&self, held: impl FnOnce()) {
         let _core = self.live();
         let _waiting = SendingOn::enter(&self.sending_on, WAITING);
@@ -4823,21 +4840,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// delivers nothing itself: the delivery this thread is already making goes on to hand out
     /// what the inner step queued, in order. Delivering from the inner call would run a callback
     /// inside itself, waiting on its own lock.
-    fn deliver(&self) {
-        self.deliveries.within(|entered| {
-            if entered {
-                self.hand_out_entered();
-            }
-        });
+    /// Whether this call handed anything out: none inside the delivery it is already making.
+    fn deliver(&self) -> bool {
+        self.deliveries
+            .within(|entered| entered && self.hand_out_entered())
     }
 
-    /// Everything [`Self::deliver`] hands out, inside the delivery it entered.
-    fn hand_out_entered(&self) {
+    /// Everything [`Self::deliver`] hands out, inside the delivery it entered: whether its passes
+    /// handed anything out.
+    fn hand_out_entered(&self) -> bool {
         // A callback can queue more for this delivery than the pass that ran it has already passed
         // over (a queryable's answer to the session's own get lies in the next round): the passes
         // go on until one hands nothing, so a get its own queryables answer inside the call ends
         // there.
-        while self.hand_out() {}
+        let mut handed = false;
+        while self.hand_out() {
+            handed = true;
+        }
         // The subscribers undeclared while a call of theirs ran, whose last call has ended now.
         self.let_go_of_released();
         // What the declaration watches are owed and the round had no room for when it came (the
@@ -4889,6 +4908,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
         }
+        handed
     }
 
     /// Hand the callback of the leg that `ended` what its entry held to its end, with no lock held:
@@ -5569,23 +5589,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// Give back to the session what a key held of its declarations (`RowHolds`), with no lock
-    /// of the session held: a release may retract a declaration, which takes the lock.
-    // Out of line: every undeclaration, refused declaration and close gives holds back, and each
-    // would otherwise carry the releases and the drop of what the key kept.
-    #[inline(never)]
-    fn give_back(&self, holds: WireHolds) {
-        holds.release(self);
-    }
-
-    /// Let go of `wire`, a key no row came to hold, giving back what it held
-    /// ([`Self::give_back`]), with no lock of the session held.
-    // Out of line: each refusal of a declaration lets its key go, and one body serves them.
-    #[inline(never)]
-    fn let_go_of_key(&self, wire: WireKey) {
-        self.give_back(wire.into_holds());
-    }
-
     /// Let go of each row whose last call ended after it was undeclared, when a call said one may
     /// wait ([`Round::take_marked`]): a walk of each table whose calls the round ends takes them out
     /// one at a time under the session's lock (`SessionTables::release_drained_subscriber` and its
@@ -5618,10 +5621,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Walk one table with `take`, which takes out the next row at or after its cursor whose last
     /// call ended: each row is taken under the session's lock, its drop counted as under way from
     /// there, and dropped after the lock.
-    fn let_go_of_drained<R: RowHolds>(
-        &self,
-        mut take: impl FnMut(&mut CoopTables, &mut usize) -> Option<R>,
-    ) {
+    fn let_go_of_drained<R>(&self, mut take: impl FnMut(&mut CoopTables, &mut usize) -> Option<R>) {
         let mut cursor = 0;
         loop {
             let taken = {
@@ -5632,7 +5632,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let Some((row, releasing)) = taken else {
                 break;
             };
-            self.give_back(row.into_holds());
+            drop(row);
             // Only now is the row's drop over, which a waiting undeclaration reads.
             drop(releasing);
         }
@@ -5675,6 +5675,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// out of its table is under way. At once on a thread that delivers now (see
     /// [`Self::wait_for_release`]).
     fn wait_until_let_go(&self, held: impl Fn(&CoopTables) -> bool, settled: impl Fn() -> bool) {
+        // Every call runs on this thread: one that runs now is below on this stack and lets the
+        // row go as the delivery it is inside of ends (the delivery here is then none), and with
+        // none running the delivery here ends every call the round owes and lets the rows go.
+        if !<CoopForm as ThreadForm>::OTHER_THREADS {
+            self.deliver();
+            return;
+        }
         if self.deliveries.delivers_here() {
             return;
         }
@@ -5713,7 +5720,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
-                Some((_, Some(row))) => self.give_back(row.into_holds()),
+                Some((_, Some(row))) => drop(row),
                 Some((handle, None)) => self.wait_for_release(handle),
                 None => {}
             }
@@ -5744,7 +5751,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
-                Some((_, Some(row))) => self.give_back(row.into_holds()),
+                Some((_, Some(row))) => drop(row),
                 Some((handle, None)) => self.wait_for_queryable_release(handle),
                 None => {}
             }
@@ -5762,7 +5769,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
-                Some((_, Some(row))) => self.give_back(row.into_holds()),
+                Some((_, Some(row))) => drop(row),
                 Some((handle, None)) => self.wait_for_liveliness_release(handle),
                 None => {}
             }
@@ -6053,6 +6060,33 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Some(now_us)
     }
 
+    /// One take of the session for a step after `wait`: its links, what publishes handed to it,
+    /// and whether a periodic job is due by the clock reading the step made. What publishes handed
+    /// to the session while it was held leaves on this step too, so a program that only reads its
+    /// session sends it; let go of once the session is. Whether the session is still open, and
+    /// the time a job is due.
+    fn step_after(&self, wait: IdleWait) -> (bool, Option<u64>) {
+        let Some(mut core) = self.live() else {
+            return (false, None);
+        };
+        #[cfg(feature = "threads")]
+        let handed = matches!(wait, IdleWait::Input { .. });
+        core.0.transport.links.waited(wait);
+        #[cfg(feature = "threads")]
+        if handed {
+            self.hand_back.handed_back();
+        }
+        let stepped = self.step(&mut core.0);
+        self.input_held.store(
+            stepped.is_some() && core.0.transport.holds_input(),
+            Ordering::Relaxed,
+        );
+        let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
+        #[cfg(any(feature = "listen", feature = "group"))]
+        self.send_handed_now(&mut core.0);
+        (stepped.is_some(), jobs_due_ms)
+    }
+
     /// The id of something the session holds and never names to a peer (`next_local`).
     #[cfg(any(feature = "query", feature = "ticker"))]
     fn next_local_id(&self) -> u64 {
@@ -6096,7 +6130,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 return Err(why);
             }
         };
-        // A new Interest is asked of each link from its row; one held already was asked.
+        // A listener on a key asks its own Interest of each link from its row; one on a filter
+        // asks nothing.
         if let Some(opened) = watching.interest {
             core.announce(DeclaredRow::of(opened.handle));
         }
@@ -6296,6 +6331,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// is answered (`NoThread`), and the task is left not running, so a later start tries again:
     /// zenoh-pico's start answers its task creation's error the same way, and a panic here would
     /// leave the C caller nothing to read on a build that aborts on one.
+    #[cfg(feature = "threads")]
     pub(crate) fn start_reader(
         &self,
         spawn: impl FnOnce(ReaderBody<L, C>) -> Option<(JoinHandle, ThreadId)>,
@@ -6319,6 +6355,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Stop the read task, from a thread that is not it.
+    #[cfg(feature = "threads")]
     fn stop_reader(&self) -> Result<(), CalledFromReadTask> {
         let task = {
             let mut reader = lock(&self.reader);
@@ -6345,34 +6382,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::
     for CoopEngine<L, C>
 {
     #[inline(never)]
-    fn release_keyexpr(&self, mapping_id: ExprId) {
+    fn release_keyexpr(&self, row: KeyexprHandle) {
         #[cfg(test)]
         self.takes.holds.fetch_sub(1, Ordering::Relaxed);
         let Some(mut core) = self.live() else {
             return;
         };
         let core = &mut core.0;
-        let Some(handle) = tables(&core.session.registry).keyexpr_by_id(mapping_id) else {
-            return;
-        };
-        let place = core.prefix_retraction(Some(handle));
-        let retracted = tables_mut(&mut core.session.registry).undeclare_keyexpr(handle);
+        // A row that went names nothing, whichever declaration took its slot or its id since.
+        let place = core.prefix_retraction(Some(row));
+        let retracted = tables_mut(&mut core.session.registry).undeclare_keyexpr(row);
         // The row went before the links are told: a send never finds the table borrowed.
         core.retract_keyexpr(place, retracted);
     }
 
     #[inline(never)]
-    fn retain_keyexpr(&self, mapping_id: ExprId) {
-        #[cfg(test)]
-        self.takes.holds.fetch_add(1, Ordering::Relaxed);
-        let Some(mut core) = self.live() else {
-            return;
-        };
+    fn retain_keyexpr(&self, row: KeyexprHandle) -> bool {
         // One more hold of the row in the session's one table set; nothing goes on the wire.
-        let tables = tables_mut(&mut core.0.session.registry);
-        if let Some(handle) = tables.keyexpr_by_id(mapping_id) {
-            tables.retain_keyexpr(handle);
+        let taken = match self.live() {
+            Some(mut core) => tables_mut(&mut core.0.session.registry).retain_keyexpr(row),
+            None => false,
+        };
+        #[cfg(test)]
+        if taken {
+            self.takes.holds.fetch_add(1, Ordering::Relaxed);
         }
+        taken
     }
 }
 
@@ -6667,7 +6702,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -6678,21 +6713,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(
-            wire.mapping_id,
-            retraction.map_or(Retraction::ById, Retraction::Named),
-        );
-        // The tables' row holds the declaration the key is named by, so the key's own hold of it
-        // is given back once the row stands, and the entity holds it once; the row keeps what
-        // else the key held.
-        let mut holds = wire.into_holds();
-        let named = holds.take_named();
+        let form = core
+            .session
+            .key_form(
+                wire.mapping_id,
+                retraction.map_or(Retraction::ById, Retraction::Named),
+            )
+            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
+        // The tables' row holds the declarations the key and the retraction name, once each, in
+        // the session's one count; the row keeps what else the key kept.
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let row = SubscriberRow::new(holds, sink, exposed_by(&core.policy));
+        let row = SubscriberRow::new(wire.into_anchor(), sink, exposed_by(&core.policy));
         let declared = tables_mut(&mut core.session.registry).declare_subscriber(
             keyexpr,
             allowed_origin,
@@ -6703,13 +6738,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Ok(declared) => declared,
             Err(refused) => {
                 // The program's callback goes with the refusal, let go of with no lock held, and
-                // what the key held goes back.
+                // what the key kept with it.
                 drop(guard);
                 let why = Declined::from(refused.why);
-                if let Some(named) = named {
-                    named.release(self);
-                }
-                self.give_back(refused.callback.into_holds());
+                drop(refused.callback);
                 return Err(why);
             }
         };
@@ -6741,9 +6773,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "local-subscriber")]
         self.read_matching(core);
         drop(guard);
-        if let Some(named) = named {
-            named.release(self);
-        }
         #[cfg(feature = "local-subscriber")]
         self.deliver();
         Ok(id)
@@ -6784,13 +6813,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "liveliness")]
         if let Some(undeclared) = live {
             match undeclared {
-                (_, Some(row)) => self.give_back(row.into_holds()),
+                (_, Some(row)) => drop(row),
                 (handle, None) => self.wait_for_liveliness_release(handle),
             }
             return;
         }
-        // The row is taken out of the tables under the lock and let go of after it: its key may hold
-        // a declaration whose release reaches the session (`WireKey`). One a call of which runs is
+        // The row is taken out of the tables under the lock and let go of after it: what its key
+        // kept may reach the session as it goes (`KeyAnchor`). One a call of which runs is
         // let go of once that call ends (`Self::wait_for_release`).
         let undeclared = self.live().and_then(|mut core| {
             let core = &mut core.0;
@@ -6807,7 +6836,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                         (
                             rank,
                             handle,
-                            row.key().prefix(),
+                            row.key().holds(),
                             // Read against the key, held past the row.
                             tables
                                 .retraction_of(row.key())
@@ -6816,12 +6845,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     });
                 found
             };
-            let (rank, handle, prefix, retraction) = found?;
+            let (rank, handle, (prefix, named), retraction) = found?;
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the subscriber's, ranked by the walk that found it, then the declaration's,
             // which comes before every subscriber.
             let place = core.place(DeclaredTable::Subscribers, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
+            let named_place = core.prefix_retraction(named);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
             let undeclared = tables_mut(&mut core.session.registry).undeclare_subscriber(handle)?;
@@ -6832,6 +6862,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 SubscriberRow::retract(id, names, actions);
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
+            core.retract_keyexpr(named_place, undeclared.named);
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             self.read_matching(core);
@@ -6840,7 +6871,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
         // which runs is let go of by the call that ends last.
         match undeclared {
-            Some((_, Some(row))) => self.give_back(row.into_holds()),
+            Some((_, Some(row))) => drop(row),
             Some((handle, None)) => self.wait_for_release(handle),
             None => {}
         }
@@ -6849,7 +6880,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     #[inline(never)]
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<ExprId, Declined> {
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<KeyHold, Declined> {
         let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
         // A key the session declared already is held once more; any other takes a row and an id.
@@ -6877,7 +6908,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if !declared.new {
             #[cfg(test)]
             self.takes.holds.fetch_add(1, Ordering::Relaxed);
-            return Ok(id);
+            return Ok(KeyHold::taken(id, declared.handle));
         }
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn. A link
@@ -6899,7 +6930,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         #[cfg(test)]
         self.takes.holds.fetch_add(1, Ordering::Relaxed);
-        Ok(id)
+        Ok(KeyHold::taken(id, declared.handle))
     }
 
     fn key_arena(&self) -> Option<&dyn SessionKeys> {
@@ -6926,15 +6957,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // locally.
         count_local: bool,
     ) -> Result<MatchId, Declined> {
-        // A plane the build does not hold is refused first, with nothing taken. Every refusal
-        // lets `sink` go as it returns, before the caller hears of it.
+        // A build that keeps no filter rows for a listener on a key, or does not hold the plane,
+        // refuses it first, with nothing taken. Every refusal lets `sink` go as it returns, before
+        // the caller hears of it.
+        if !cfg!(feature = "key-matching-listener") {
+            return Err(Declined::NotBuilt);
+        }
         if !counts(plane) {
             return Err(Declined::NotBuilt);
         }
         let mut guard = self.live().ok_or(Declined::Closed)?;
-        // The listener is a row of the session's tables holding an Interest of its own: a full
-        // table, a key the session cannot hold or an Interest it cannot hold or number refuses it
-        // before anything is asked, as a listener that could ask no peer would never hear one.
+        // The listener is a row of the session's tables on a write filter of its own, which holds
+        // an Interest: a full table, a key the session cannot hold or an Interest it cannot hold or
+        // number refuses it before anything is asked, as a listener that could ask no peer would
+        // never hear one.
         let declared = tables_mut(&mut guard.0.session.registry).declare_matching_listener_on(
             plane_of(plane),
             keyexpr,
@@ -6952,10 +6988,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Result<MatchId, Declined> {
         let handle = row_of(filter).ok_or(Declined::Closed)?;
         let mut guard = self.live().ok_or(Declined::Closed)?;
-        // The filter's row holds the plane and the count of the session's own it was declared
-        // with, as `declare_matching_listener` would make them, so the listener is that one's.
+        // The listener is a callback of the filter's row, which it reads and goes with, and asks
+        // nothing of its own, as zenoh-pico's is a callback of its entity's filter.
         let declared = tables_mut(&mut guard.0.session.registry)
-            .declare_matching_listener_of(handle, MatchingCall { sink: Some(sink) });
+            .declare_matching_listener(handle, MatchingCall { sink: Some(sink) })
+            .map(|handle| Watching {
+                handle,
+                interest: None,
+            });
         self.matching_declared(guard, declared)
     }
 
@@ -6965,7 +7005,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let handle = row_of(id)?;
             let place = {
                 let tables = tables(&core.session.registry);
-                let interest = tables.matching_listeners().get(handle)?.interest();
+                let row = tables.matching_listeners().get(handle)?;
+                // A listener declared on a key ends the Interest of the filter it owns; one declared
+                // on an entity's filter ends none.
+                let owned = row.owns_filter().then_some(row.filter());
+                let interest =
+                    owned.and_then(|filter| tables.write_filters().get(filter)?.interest());
                 interest_rank(tables, interest)
             };
             let unwatched =
@@ -7013,26 +7058,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             )
             .map_err(Declined::from)?;
         let id = row_id(watching.handle);
-        // The id this filter spent of its own, when it spent one: its Interest's, when it is the
-        // first to hold it, or the one taken for a filter that sends none.
-        let spent = if ask.is_some() {
-            if let Some(opened) = watching.interest {
+        // The id this filter spent of its own: its Interest's, or the one taken for a filter that
+        // sends none.
+        let spent = match watching.interest {
+            Some(opened) => {
                 core.announce(DeclaredRow::of(opened.handle));
+                u64::from(opened.id)
             }
-            watching.interest.map(|opened| u64::from(opened.id))
-        } else {
-            // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
-            // `_z_add_interest` takes it before it decides: a filter that finds none left is
-            // refused, its row given back.
-            let Some(taken) = core.session.take_entity_id() else {
-                let _ = unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
-                return Err(Declined::NoEntityId);
-            };
-            Some(u64::from(taken))
+            None => {
+                // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
+                // `_z_add_interest` takes it before it decides: a filter that finds none left is
+                // refused, its row given back.
+                let Some(taken) = core.session.take_entity_id() else {
+                    let _ = unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
+                    return Err(Declined::NoEntityId);
+                };
+                u64::from(taken)
+            }
         };
         // Each group a write filter asks (`asks_for_filters`) is asked for its members'
-        // declarations by an id of the filter's own, as the tokio engine's group is: the one the
-        // filter spent, or a fresh one when its Interest was held already.
+        // declarations by the id the filter spent, as the tokio engine's group is.
         #[cfg(feature = "group")]
         if core
             .transport
@@ -7040,12 +7085,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .iter()
             .any(|group| group.declarations().asks_for_filters())
         {
-            if let Some(interest_id) =
-                spent.or_else(|| core.session.take_entity_id().map(u64::from))
-            {
-                for group in &core.transport.groups {
-                    group.ask_filter(id, interest_id, plane, keyexpr, wire);
-                }
+            for group in &core.transport.groups {
+                group.ask_filter(id, spent, plane, keyexpr, wire);
             }
         }
         #[cfg(not(feature = "group"))]
@@ -7177,7 +7218,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         sink: QueryableSink,
     ) -> Result<QblId, Declined> {
         let Some(mut guard) = self.live() else {
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -7188,19 +7229,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(
-            wire.mapping_id,
-            retraction.map_or(Retraction::ById, Retraction::Named),
-        );
-        // The tables' row holds the declaration the key is named by, so the key's own hold of it
-        // is given back once the row stands, and the entity holds it once; the row keeps what
-        // else the key held.
-        let mut holds = wire.into_holds();
-        let named = holds.take_named();
-        let row = QueryableRow::new(holds, sink);
+        let form = core
+            .session
+            .key_form(
+                wire.mapping_id,
+                retraction.map_or(Retraction::ById, Retraction::Named),
+            )
+            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
+        // The tables' row holds the declarations the key and the retraction name, once each, in
+        // the session's one count; the row keeps what else the key kept.
+        let row = QueryableRow::new(wire.into_anchor(), sink);
         let declared = tables_mut(&mut core.session.registry).declare_queryable(
             keyexpr,
             allowed_origin,
@@ -7212,13 +7253,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Ok(declared) => declared,
             Err(refused) => {
                 // The row goes with the refusal, let go of with no lock held, and what its key
-                // held goes back.
+                // kept with it.
                 drop(guard);
                 let why = Declined::from(refused.why);
-                if let Some(named) = named {
-                    named.release(self);
-                }
-                self.give_back(refused.callback.into_holds());
+                drop(refused.callback);
                 return Err(why);
             }
         };
@@ -7252,9 +7290,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "local-queryable")]
         self.read_matching(core);
         drop(guard);
-        if let Some(named) = named {
-            named.release(self);
-        }
         #[cfg(feature = "local-queryable")]
         self.deliver();
         Ok(id)
@@ -7670,8 +7705,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
     #[cfg(feature = "queryable")]
     fn undeclare_queryable(&self, id: QblId) {
-        // The row is taken out of the tables under the lock and let go of after it: its key may hold
-        // a declaration whose release reaches the session (`WireKey`). One a call of which is owed,
+        // The row is taken out of the tables under the lock and let go of after it: what its key
+        // kept may reach the session as it goes (`KeyAnchor`). One a call of which is owed,
         // a query queued for it or handed to its callback now, is let go of once that call ends
         // (`Self::wait_for_queryable_release`), and a query queued before is answered by nothing.
         let undeclared = self.live().and_then(|mut core| {
@@ -7689,7 +7724,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                         (
                             rank,
                             handle,
-                            row.key().prefix(),
+                            row.key().holds(),
                             // Read against the key, held past the row.
                             tables
                                 .retraction_of(row.key())
@@ -7698,12 +7733,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     });
                 found
             };
-            let (rank, handle, prefix, retraction) = found?;
+            let (rank, handle, (prefix, named), retraction) = found?;
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the queryable's, ranked by the walk that found it, then the declaration's,
             // which comes before every queryable.
             let place = core.place(DeclaredTable::Queryables, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
+            let named_place = core.prefix_retraction(named);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
             let undeclared = tables_mut(&mut core.session.registry).undeclare_queryable(handle)?;
@@ -7714,6 +7750,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 QueryableRow::retract(id, names, actions);
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
+            core.retract_keyexpr(named_place, undeclared.named);
             // One that counted it may now match no more.
             #[cfg(feature = "local-queryable")]
             self.read_matching(core);
@@ -7722,7 +7759,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
         // which is owed is let go of by the call that ends last.
         match undeclared {
-            Some((_, Some(row))) => self.give_back(row.into_holds()),
+            Some((_, Some(row))) => drop(row),
             Some((handle, None)) => self.wait_for_queryable_release(handle),
             None => {}
         }
@@ -7751,7 +7788,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             } else {
                 Retraction::ById
             };
-            let form = core.session.key_form(wire.mapping_id, named);
+            let form = core
+                .session
+                .key_form(wire.mapping_id, named)
+                .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
             let declared = tables_mut(&mut core.session.registry).declare_token(keyexpr, form)?;
             core.announce(DeclaredRow::of(declared.handle));
             // A token takes no traffic of its own, so every group that is told tokens is told it.
@@ -7763,8 +7803,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Ok(declared.id)
         });
         // The row holds the declaration its key is named by, so the key the ABI named it by is
-        // not kept: what it held goes back, declared or refused, with no lock held.
-        self.let_go_of_key(wire);
+        // not kept: what it kept goes, declared or refused, with no lock held.
+        drop(wire);
         declared
     }
 
@@ -7822,7 +7862,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -7830,33 +7870,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // next, which its Interest carries: a full table, a key the session cannot hold or no id
         // left refuses it before anything is asked, and the sink goes with the refusal. The row
         // holds the key expression declaration its Interest names the key by for as long as it
-        // stands, so the key's own hold of it is given back once the row stands.
+        // stands.
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            self.let_go_of_key(wire);
+            drop(wire);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(wire.mapping_id, Retraction::ById);
-        let mut holds = wire.into_holds();
-        let mut named = holds.take_named();
+        let form = core
+            .session
+            .key_form(wire.mapping_id, Retraction::ById)
+            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
         let declared = tables_mut(&mut core.session.registry).declare_liveliness_subscriber(
             keyexpr,
             history,
             form,
-            LivelinessRow::new(holds, sink),
+            LivelinessRow::new(wire.into_anchor(), sink),
         );
         let declared = match declared {
             Ok(declared) => declared,
             Err(refused) => {
                 // The program's callback goes with the refusal, let go of with no lock held, and
-                // what the key held goes back.
+                // what the key kept with it.
                 drop(guard);
                 let why = Declined::from(refused.why);
-                if let Some(named) = named {
-                    named.release(self);
-                }
-                self.give_back(refused.callback.into_holds());
+                drop(refused.callback);
                 return Err(why);
             }
         };
@@ -7871,9 +7909,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // a peer's answer repeats is not handed again: the first declaration of an id wins.
         if history {
             drop(guard);
-            if let Some(named) = named.take() {
-                named.release(self);
-            }
             self.hand_history(declared.handle);
             guard = match self.live() {
                 Some(guard) => guard,
@@ -7903,9 +7938,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
         }
         drop(guard);
-        if let Some(named) = named {
-            named.release(self);
-        }
         self.deliver();
         Ok(id)
     }
@@ -7997,6 +8029,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // The read task stops first, so the close is the last thing the session does. A close
         // from the read task itself stops nothing and leaves the thread to see the session
         // closed.
+        #[cfg(feature = "threads")]
         let _ = self.stop_reader();
         let mut guard = self.core.lock();
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -8079,18 +8112,38 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         self.closed.load(Ordering::Acquire)
     }
 
+    #[cfg(feature = "threads")]
     fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
         self.start_reader(|body| os::spawn(move || body.run()))
     }
 
+    // A build of one thread starts none: its rows count their calls for that thread alone
+    // (`CoopForm`), and a read task would end them on another.
+    #[cfg(not(feature = "threads"))]
+    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+        Err(ReadTaskStartRefused::NoThread)
+    }
+
+    #[cfg(feature = "threads")]
     fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
         self.stop_reader()
     }
 
+    #[cfg(not(feature = "threads"))]
+    fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+        Ok(())
+    }
+
+    #[cfg(feature = "threads")]
     fn read_task_is_running(&self) -> bool {
         lock(&self.reader)
             .as_ref()
             .is_some_and(|task| !task.thread.is_finished())
+    }
+
+    #[cfg(not(feature = "threads"))]
+    fn read_task_is_running(&self) -> bool {
+        false
     }
 
     fn read(&self, _single: bool) -> Result<(), SessionClosed> {
@@ -8099,7 +8152,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // step left held makes it none, which it is then without the session taken to say so:
         // under a stream of batches each read takes the session once, for its step.
         // A read behind another's wait counts itself in under the session's lock, which the
-        // hand-back it waits for is made under too.
+        // hand-back it waits for is made under too. Without a read task the program's reads are
+        // one at a time, so none is ever behind another.
+        #[cfg(feature = "threads")]
         let mut seen = None;
         let mut wait = if self.input_held.swap(false, Ordering::Relaxed) {
             IdleWait::None
@@ -8110,6 +8165,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             self.live().map_or(IdleWait::None, |mut core| {
                 let _waiting = SendingOn::enter(&self.sending_on, WAITING);
                 let wait = core.0.idle_wait();
+                #[cfg(feature = "threads")]
                 if matches!(wait, IdleWait::Behind(_)) {
                     seen = Some(self.hand_back.enter());
                 }
@@ -8118,36 +8174,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         #[cfg(test)]
         self.takes.wait(&wait);
+        #[cfg(feature = "threads")]
         match (&wait, seen) {
             (IdleWait::Behind(ms), Some(seen)) => self.hand_back.wait(seen, *ms),
             _ => wait.wait(self.rooms.waits(), sleep_ms),
         }
+        #[cfg(not(feature = "threads"))]
+        wait.wait(self.rooms.waits(), sleep_ms);
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
-        // One take of the session for the step: its links, what publishes handed to it, and
-        // whether a periodic job is due by the clock reading the step made.
-        // What publishes handed to the session while it was held leaves on this step too, so a
-        // program that only reads its session sends it; let go of once the session is.
-        let (stepped, jobs_due_ms) = match self.live() {
-            Some(mut core) => {
-                let handed = matches!(wait, IdleWait::Input { .. });
-                core.0.transport.links.waited(wait);
-                if handed {
-                    self.hand_back.handed_back();
-                }
-                let stepped = self.step(&mut core.0);
-                self.input_held.store(
-                    stepped.is_some() && core.0.transport.holds_input(),
-                    Ordering::Relaxed,
-                );
-                let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
-                #[cfg(any(feature = "listen", feature = "group"))]
-                self.send_handed_now(&mut core.0);
-                (stepped.is_some(), jobs_due_ms)
-            }
-            None => (false, None),
-        };
-        self.deliver();
+        let (mut stepped, jobs_due_ms) = self.step_after(wait);
+        let mut handed = self.deliver();
+        // One thread: the round took one record of what the links hold (`Round::has_room`), so
+        // the step goes on in this read, each record read once the callbacks of the one before
+        // returned, until the links hold nothing more or a step hands nothing out.
+        while !<CoopForm as ThreadForm>::OTHER_THREADS
+            && handed
+            && stepped
+            && self.input_held.load(Ordering::Relaxed)
+        {
+            stepped = self.step_after(IdleWait::None).0;
+            handed = self.deliver();
+        }
         if let Some(started_ms) = jobs_due_ms {
             self.run_due_tickers(started_ms);
         }
@@ -8582,7 +8630,7 @@ mod member_key_tests {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", feature = "threads"))]
 mod hand_back_tests {
     use super::{lock, HandBack};
     use std::sync::Arc;

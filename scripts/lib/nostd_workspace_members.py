@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 """R2940 (no register item) — the workspace members that force
-`sce-rust-runtime/no_std`, derived.
+`sce-rust-runtime/no_std`, or the cooperative C library's lent-only receive,
+derived.
 
 `sce-rust-runtime`'s `no_std` and `http-send` are mutually exclusive (a
 `compile_error!` in the runtime), and `wz-runtime-tokio` pulls `http-send`.
@@ -18,6 +19,13 @@ nobody added it to either list, and C1 stopped compiling at all (hosted run
 instead: a member is in it when its OWN build -- `cargo tree -p <member>`, its
 default features and its dev-dependencies, which is what the workspace lanes
 unify -- enables `sce-rust-runtime feature "no_std"`.
+
+The cooperative engine's C library is the second kind (docs/c-abi-engine-and-
+memory.md, P1): `wz-capi-pico`'s default build names `engine-coop`, which
+switches `wz-session-core/rx-lent-only` on, and `wz-runtime-tokio` refuses to
+be built in a graph that has it (a const assertion in its `lib.rs`). A member
+whose own build enables `wz-session-core feature "rx-lent-only"` is excluded by
+the same per-member rule, and tested on its own lane (Layer C1pc).
 
 The first cut read the whole workspace's inverted tree and took every member
 under the no_std node. That answered 18 where the lanes need 4: a member that
@@ -42,17 +50,27 @@ from pathlib import Path
 CRATES = Path(__file__).resolve().parents[2] / "crates"
 TARGET = "sce-rust-runtime"
 FEATURE_NODE = f'{TARGET} feature "no_std"'
+# The second exclusive feature: the cooperative C library's lent-only receive, which the tokio
+# engine's runtime refuses to share a graph with.
+LENT_TARGET = "wz-session-core"
+LENT_NODE = f'{LENT_TARGET} feature "rx-lent-only"'
+# Each (package the tree is inverted at, the feature node that excludes a member).
+EXCLUSIVE = ((TARGET, FEATURE_NODE), (LENT_TARGET, LENT_NODE))
 # `cargo tree --prefix depth`: the depth, then the node text.
 LINE = re.compile(r"^(\d+)(.*)$")
 
 
-def enables_no_std(tree: str) -> bool:
-    """Whether one member's inverted tree has the no_std feature node."""
+def enables_node(tree: str, node: str) -> bool:
+    """Whether one member's inverted tree has the feature node `node`."""
     for raw in tree.splitlines():
         m = LINE.match(raw)
-        if m and m.group(2).strip() == FEATURE_NODE:
+        if m and m.group(2).strip() == node:
             return True
     return False
+
+def excluded(member: str) -> bool:
+    """Whether `member`'s own build switches on a feature the workspace graph cannot hold."""
+    return any(enables_node(member_tree(member, target), node) for target, node in EXCLUSIVE)
 
 
 def workspace_members() -> list:
@@ -66,12 +84,12 @@ def workspace_members() -> list:
     return sorted(pkg["name"] for pkg in json.loads(out)["packages"])
 
 
-def member_tree(member: str) -> str:
-    """`member`'s own build, inverted at the runtime; empty when it does not
-    depend on the runtime at all (cargo then prints a warning and nothing)."""
+def member_tree(member: str, target: str = TARGET) -> str:
+    """`member`'s own build, inverted at `target`; empty when it does not
+    depend on it at all (cargo then prints a warning and nothing)."""
     done = subprocess.run(
         [
-            "cargo", "tree", "-p", member, "-e", "features", "-i", TARGET,
+            "cargo", "tree", "-p", member, "-e", "features", "-i", target,
             "--prefix", "depth",
         ],
         cwd=CRATES,
@@ -106,16 +124,43 @@ def selftest() -> int:
         "0sce-rust-runtime v0.1.0 (/x/runtime)",
         '1wz-session-core feature "no_std"',
     ])
+    lent = "\n".join([
+        "0wz-session-core v0.1.0 (/x/wz-session-core)",
+        '1wz-session-core feature "rx-lent-only"',
+        '2wz-capi-pico feature "engine-coop"',
+        '3wz-capi-pico feature "default"',
+        "4wz-capi-pico v0.1.0 (/x/wz-capi-pico)",
+    ])
+    owned = "\n".join([
+        "0wz-session-core v0.1.0 (/x/wz-session-core)",
+        '1wz-session-core feature "default"',
+        "2wz-runtime-tokio v0.1.0 (/x/wz-runtime-tokio)",
+    ])
+    # The lent-only feature of another crate (`wz-capi-coop`'s `tx-lend-only` style) is not the
+    # session core's receive selector.
+    other_lent = "\n".join([
+        "0wz-session-core v0.1.0 (/x/wz-session-core)",
+        '1wz-capi-coop feature "rx-lent-only"',
+    ])
     cases = [
-        (forcing, True, "a member whose build switches the runtime's no_std on"),
-        (std_only, False, "a member whose build is std"),
-        (other_no_std, False, "another crate's no_std feature"),
-        ("", False, "a member that does not depend on the runtime"),
+        (forcing, FEATURE_NODE, True, "a member whose build switches the runtime's no_std on"),
+        (std_only, FEATURE_NODE, False, "a member whose build is std"),
+        (other_no_std, FEATURE_NODE, False, "another crate's no_std feature"),
+        ("", FEATURE_NODE, False, "a member that does not depend on the runtime"),
+        (lent, LENT_NODE, True, "a member whose default build names the cooperative engine"),
+        (owned, LENT_NODE, False, "a member whose session core keeps the owned receive"),
+        (other_lent, LENT_NODE, False, "another crate's feature of the same name"),
+        ("", LENT_NODE, False, "a member that does not depend on the session core"),
+        (lent, FEATURE_NODE, False, "the lent-only receive is not the runtime's no_std"),
     ]
-    for tree, want, what in cases:
-        if enables_no_std(tree) != want:
+    for tree, node, want, what in cases:
+        if enables_node(tree, node) != want:
             print(f"selftest FAIL: {what}: answered {not want}", file=sys.stderr)
             return 1
+    if [target for target, _ in EXCLUSIVE] != [TARGET, LENT_TARGET]:
+        print("selftest FAIL: the excluded features are the runtime's no_std and the session "
+              "core's lent-only receive", file=sys.stderr)
+        return 1
     print(f"nostd-workspace-members: selftest OK ({len(cases)} cases)")
     return 0
 
@@ -128,14 +173,15 @@ def main() -> int:
         return 2
     try:
         members = workspace_members()
-        found = [m for m in members if enables_no_std(member_tree(m))]
+        found = [m for m in members if excluded(m)]
     except (subprocess.CalledProcessError, FileNotFoundError, KeyError, ValueError) as e:
         print(f"nostd-workspace-members: cargo could not answer: {e}", file=sys.stderr)
         return 2
     for name in found:
         print(name)
     print(
-        f"nostd-workspace-members: {len(found)} member(s) force {TARGET}/no_std: "
+        f"nostd-workspace-members: {len(found)} member(s) force {TARGET}/no_std or "
+        f"{LENT_TARGET}/rx-lent-only: "
         + (" ".join(found) or "none"),
         file=sys.stderr,
     )

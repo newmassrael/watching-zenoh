@@ -2260,6 +2260,43 @@ mod tests {
         assert!(refusals.is_empty(), "{refusals}");
     }
 
+    /// A document that states `sn-resolution` = `bits-64` is refused where the build leaves
+    /// that width out of its domain, as the release profile does and as zenoh refuses a
+    /// resolution above 32 bits in its configuration
+    /// (`commons/zenoh-config/src/lib.rs` @ `fn sequence_number_resolution_validator(b: &Bits) -> bool {`),
+    /// and taken where the domain holds it.
+    #[test]
+    fn a_64_bit_width_is_refused_where_the_domain_leaves_it_out() {
+        let stated = [Statement::new("sn-resolution", "bits-64")];
+        match resolve(SessionPolicy::defaults(), &[document(&stated)]) {
+            Ok(resolved) => {
+                assert!(
+                    crate::sn::SN_RESOLUTION_HAS_64,
+                    "bits-64 was taken outside the domain"
+                );
+                assert_eq!(
+                    resolved.policy.sn_resolution(),
+                    crate::policy::SnResolution::Bits64
+                );
+            }
+            Err(refusals) => {
+                assert!(!crate::sn::SN_RESOLUTION_HAS_64, "{refusals}");
+                let refusal = only(&refusals);
+                assert!(
+                    matches!(
+                        refusal.reason,
+                        Reason::OutsideDomain {
+                            policy: "sn-resolution",
+                            value: "bits-64",
+                            ..
+                        }
+                    ),
+                    "{refusal:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_policy_only_the_build_decides_is_refused() {
         let table = table_with(PolicyEntry::of::<BuildOnly>());

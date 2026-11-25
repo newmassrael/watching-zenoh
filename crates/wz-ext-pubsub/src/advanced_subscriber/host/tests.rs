@@ -137,10 +137,12 @@ impl Script {
 }
 
 impl wz_capi_port::KeyHolds for Script {
-    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+    fn release_keyexpr(&self, _row: wz_session_core::session_tables::KeyexprHandle) {}
 
     // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
-    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+    fn retain_keyexpr(&self, _row: wz_session_core::session_tables::KeyexprHandle) -> bool {
+        false
+    }
 }
 
 impl wz_capi_port::Tickers for Script {
@@ -243,7 +245,7 @@ impl SessionEngine for Script {
             });
         self.event(format!("retract {}", known.unwrap_or_default()));
     }
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         Err(Refusal::NotBuilt)
     }
     fn declare_matching_listener(

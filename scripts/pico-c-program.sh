@@ -156,9 +156,12 @@ if [ ! -f "$src" ]; then
     exit 2
 fi
 
-# The cooperative engine is the build without the default features (which name the tokio
-# engine), with `engine-coop` in front of the program's capabilities; the header renderer adds
-# `engine-coop` itself when it is told the engine.
+# The crate's default build is the cooperative engine (docs/c-abi-engine-and-memory.md, P1). The
+# tokio engine is that build's list with `engine-coop` replaced by the tokio option's features
+# (`wz_config.py --bench-cargo-args tokio`), without the default features, and the program's
+# capabilities; its header is the default build's, as the capabilities are. The cooperative engine
+# here is `engine-coop` in front of the program's capabilities alone, and the header renderer is
+# told that engine.
 build_features="$features"
 engine_args=()
 header_engine=()
@@ -166,6 +169,20 @@ if [ "$engine" = coop ]; then
     build_features="engine-coop${features:+,$features}"
     engine_args=(--no-default-features)
     header_engine=(--engine coop)
+else
+    if [ "$os" = Windows ]; then
+        list_py="$(command -v python || command -v python3 || true)"
+    else
+        list_py="$(command -v python3 || command -v python || true)"
+    fi
+    if [ -z "$list_py" ] || ! tokio_words="$("$list_py" scripts/lib/wz_config.py \
+            --bench-cargo-args tokio "$features")"; then
+        say "pico-program-probe on ${os}: the tokio engine's feature list did not resolve NOT-MEASURED"
+        exit 1
+    fi
+    tokio_words="${tokio_words#--no-default-features --features }"
+    build_features="${tokio_words//wz-capi-pico\//}"
+    engine_args=(--no-default-features)
 fi
 if [ "$form" = nostd ]; then
     host_triple="$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')"

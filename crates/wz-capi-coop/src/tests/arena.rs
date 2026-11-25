@@ -472,7 +472,7 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
             lease_ms: 10_000,
             join_interval_ms: 2_500,
             max_sessions: None,
-            seq_num_res: 0x02,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
@@ -590,7 +590,7 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
             lease_ms: 10_000,
             join_interval_ms: 2_500,
             max_sessions: None,
-            seq_num_res: 0x02,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 0x02,
             batch_size,
             is_qos: false,
@@ -1840,14 +1840,16 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     }
     assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
     let entities = plan.entities();
-    assert_eq!(
-        entities.filters(),
-        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS"))
-    );
-    assert_eq!(
-        entities.interests(),
-        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + preset("MAX_MATCHING_LISTENERS"))
-    );
+    // A matching listener declared on a key judges through a filter of its own, in a build that
+    // keeps such listeners.
+    let key_listeners = if cfg!(feature = "key-matching-listener") {
+        preset("MAX_MATCHING_LISTENERS")
+    } else {
+        0
+    };
+    let filters = preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + key_listeners;
+    assert_eq!(entities.filters(), Some(filters));
+    assert_eq!(entities.interests(), Some(filters), "one Interest a filter");
     assert_eq!(
         plan.gets().rows.queries,
         if cfg!(feature = "query") {
@@ -2505,7 +2507,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
             lease_ms: 10_000,
             join_interval_ms: 2_500,
             max_sessions: None,
-            seq_num_res: 0x02,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
@@ -2624,24 +2626,6 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
     let reserved = RECORDED.reserved.load(Ordering::SeqCst);
     assert!(reserved > 0, "the arena was reserved before the refusal");
     assert_eq!(RECORDED.released.load(Ordering::SeqCst), reserved);
-}
-
-/// A group whose members' keyexprs are each their own counts every member's aliases at its face's
-/// place in the session's pool, and each other face one peer's.
-#[cfg(feature = "multicast-declarations")]
-#[test]
-fn a_groups_face_counts_every_members_aliases_in_the_pool() {
-    use crate::arena::{faces_aliases, GROUP_FACE_ALIASES};
-    assert_eq!(faces_aliases(3, 0, 16), 48, "CONTROL: no group's face");
-    assert_eq!(
-        faces_aliases(3, 1, 16),
-        2 * 16 + GROUP_FACE_ALIASES,
-        "two faces of one peer and one group's"
-    );
-    assert_eq!(
-        GROUP_FACE_ALIASES,
-        caps::MAX_GROUP_MEMBERS * caps::MAX_MEMBER_KEYEXPRS
-    );
 }
 
 /// A plan laid out when the build is compiled is the plan an open lays out at run time, row by
@@ -2849,4 +2833,22 @@ fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
         }))
     );
     assert!(!probe.reached(), "a refused open dials nothing");
+}
+
+/// A group whose members' keyexprs are each their own counts every member's aliases at its face's
+/// place in the session's pool, and each other face one peer's.
+#[cfg(feature = "multicast-declarations")]
+#[test]
+fn a_groups_face_counts_every_members_aliases_in_the_pool() {
+    use crate::arena::{faces_aliases, GROUP_FACE_ALIASES};
+    assert_eq!(faces_aliases(3, 0, 16), 48, "CONTROL: no group's face");
+    assert_eq!(
+        faces_aliases(3, 1, 16),
+        2 * 16 + GROUP_FACE_ALIASES,
+        "two faces of one peer and one group's"
+    );
+    assert_eq!(
+        GROUP_FACE_ALIASES,
+        caps::MAX_GROUP_MEMBERS * caps::MAX_MEMBER_KEYEXPRS
+    );
 }

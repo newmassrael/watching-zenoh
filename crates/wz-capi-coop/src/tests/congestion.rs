@@ -307,7 +307,8 @@ fn the_sessions_counters_are_its_links_counters() {
 
 /// The engine over a link whose peer took the connection, brought the session up and then read
 /// nothing more: what the session sends fills the stream, and a blocking publish waits on it.
-#[cfg(feature = "listen")]
+// Its publisher and peers are stepped by their read tasks.
+#[cfg(all(feature = "listen", feature = "threads"))]
 mod stalled_link {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
