@@ -198,6 +198,9 @@ use {
 mod deliveries;
 use deliveries::Deliveries;
 
+#[cfg(not(feature = "threads"))]
+mod one_thread_lock;
+
 mod registry;
 pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(any(feature = "listen", feature = "group"))]
@@ -1202,18 +1205,32 @@ impl HandBack {
 /// The session state no other thread may touch while one does; see the module doc.
 struct Confined<T>(T);
 
+/// The lock the session's state lies behind: the host's or the kernel's where other threads may
+/// call in, and a flag in a build of one thread, whose calls come from one thread at a time
+/// (`one_thread_lock`).
+#[cfg(feature = "threads")]
+type StateLock<T> = Mutex<T>;
+#[cfg(feature = "threads")]
+type StateGuard<'a, T> = MutexGuard<'a, T>;
+#[cfg(not(feature = "threads"))]
+type StateLock<T> = one_thread_lock::OneThreadLock<T>;
+#[cfg(not(feature = "threads"))]
+type StateGuard<'a, T> = one_thread_lock::OneThreadGuard<'a, T>;
+
 /// The session's state behind its one lock. Every hold of it goes through here, and tells the
 /// session's key arena that the lock is held for as long as it is
 /// ([`KeySpace::guard_by_owner_lock`]): the arena's counts are touched only under this lock, so a
 /// key let go of after the lock (a row taken out of a table and dropped outside it) fails a debug
 /// build at once instead of racing a reader that holds the lock.
-struct CoreLock<L: SessionLinks + 'static, C: ClockSource + 'static>(Mutex<Confined<Core<L, C>>>);
+struct CoreLock<L: SessionLinks + 'static, C: ClockSource + 'static>(
+    StateLock<Confined<Core<L, C>>>,
+);
 
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     /// `core` behind the lock, its key arena guarded by it from now on.
     fn new(core: Core<L, C>) -> Self {
         core.session.keys.guard_by_owner_lock();
-        Self(Mutex::new(Confined(core)))
+        Self(StateLock::new(Confined(core)))
     }
 
     fn lock(&self) -> CoreGuard<'_, L, C> {
@@ -1240,7 +1257,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
 
 /// A hold of [`CoreLock`]: the key arena is marked held from its taking to its drop.
 struct CoreGuard<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
-    guard: MutexGuard<'a, Confined<Core<L, C>>>,
+    guard: StateGuard<'a, Confined<Core<L, C>>>,
     // The thread's mark of the hold, which a debug build reads: a second take of this lock on
     // this thread, or a C ABI's place given back under it, fails there instead of waiting.
     _held: wz_capi_port::sync::SessionHeld,
@@ -1248,7 +1265,7 @@ struct CoreGuard<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 
 impl<'a, L: SessionLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
     fn taken(
-        guard: MutexGuard<'a, Confined<Core<L, C>>>,
+        guard: StateGuard<'a, Confined<Core<L, C>>>,
         held: wz_capi_port::sync::SessionHeld,
     ) -> Self {
         guard.0.session.keys.owner_lock_taken();
@@ -1571,8 +1588,8 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
     },
 }
 
-// SAFETY: a `Confined` is reached only through the `Mutex` that holds it in `CoopEngine`, so one
-// thread at a time uses it. Its `Rc` handles and `RefCell` cells are all owned by the `Core`
+// SAFETY: a `Confined` is reached only through the lock that holds it in `CoopEngine`
+// (`StateLock`), so one thread at a time uses it. Its `Rc` handles and `RefCell` cells are all owned by the `Core`
 // inside it: no clone of any of them is ever handed out of the lock (deliveries leave as bytes
 // of the delivery lane and `bool`s, see `CoopEngine::samples`), so every handle of each `Rc`
 // moves with the `Core` when another thread takes the lock, and none is used by two threads at
