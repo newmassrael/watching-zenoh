@@ -611,6 +611,20 @@ impl SceSink for Head {
             .map_err(|_| CodecError::BufferOverflow)
     }
 
+    // The trait's own byte writer hands a one-byte slice to `write_bytes`, which copies it with a
+    // call to the platform's `memcpy`.
+    fn write_u8(&mut self, b: u8) -> Result<(), CodecError> {
+        self.0.push(b).map_err(|_| CodecError::BufferOverflow)
+    }
+
+    // The trait's own VLE writer takes the head a byte at a time; the codec crate's encoder writes
+    // the same bytes on the stack, which the head takes in one copy, or refuses whole.
+    fn write_vle_u64(&mut self, v: u64) -> Result<(), CodecError> {
+        let mut bytes = [0u8; wz_codecs::vle::VLE_LEN];
+        let n = wz_codecs::vle::encode_zint(&mut bytes, v);
+        self.write_bytes(bytes.get(..n).unwrap_or(&bytes))
+    }
+
     fn position(&self) -> usize {
         self.0.len()
     }
@@ -647,6 +661,35 @@ mod tests {
         head.write_bytes(&[0u8; 24]).expect("the head's room");
         assert_eq!(head.write_u8(1), Err(CodecError::BufferOverflow));
         assert_eq!(head.position(), 24);
+    }
+
+    /// The head writes a VLE in the bytes of the codec's own writer at both ends of every width,
+    /// and a VLE past its room is refused whole. Turned red by an encoding that differs from the
+    /// trait's writer in a byte, and by a writer that fills the head a byte at a time before it
+    /// refuses.
+    #[test]
+    fn a_head_writes_a_vle_as_the_codec_does_and_refuses_one_whole() {
+        let mut edges = alloc::vec![0u64, 1, u64::MAX];
+        for bits in (7..64).step_by(7) {
+            edges.push((1u64 << bits) - 1);
+            edges.push(1u64 << bits);
+        }
+        for value in edges {
+            let mut want = alloc::vec::Vec::new();
+            sce_forge_runtime::codec::VecSink::new(&mut want)
+                .write_vle_u64(value)
+                .expect("a Vec grows");
+            let mut head = Head::default();
+            head.write_vle_u64(value).expect("the head's room");
+            assert_eq!(&head.0[..], &want[..], "the VLE of {value:#x}");
+        }
+        let mut head = Head::default();
+        head.write_bytes(&[0u8; 20]).expect("the head's room");
+        assert_eq!(
+            head.write_vle_u64(u64::MAX),
+            Err(CodecError::BufferOverflow)
+        );
+        assert_eq!(head.position(), 20, "nothing of the refused VLE is kept");
     }
 
     /// The direct writer and the codec's encoder write the same bytes: for a literal key and
