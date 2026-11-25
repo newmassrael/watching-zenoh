@@ -2265,7 +2265,7 @@ async fn a_replayed_open_ack_after_established_is_not_admitted() {
             "frame {sn} is delivered; got {outcome:?}"
         );
     }
-    let rx_before = actions.fact_rx_sn(|slot| slot.clone());
+    let rx_before = actions.rx_sn();
 
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_openack_wire(1)))]);
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -2283,7 +2283,7 @@ async fn a_replayed_open_ack_after_established_is_not_admitted() {
         "the already-delivered frame 1 is a duplicate and stays one; got {outcome:?}"
     );
     assert_eq!(
-        actions.fact_rx_sn(|slot| slot.clone()),
+        actions.rx_sn(),
         rx_before,
         "the replay did not move the RX baseline"
     );

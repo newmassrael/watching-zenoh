@@ -21,8 +21,11 @@
 //! reaches the application registries. Pure no_std + no_alloc;
 //! unconditional (like [`crate::reliability`]).
 
+use core::sync::atomic::Ordering;
+
 use crate::policy::SnResolution;
 use crate::policy_binding::{OutsideDomain, PolicyValue};
+use crate::runtime_cell::WordCell;
 
 /// Whether the build's `sn-resolution` domain holds `bits-64`, the one width whose ring does
 /// not fit 32 bits. A build that leaves it out never advertises it (it advertises at most
@@ -402,25 +405,31 @@ impl RxSn {
         } else {
             &mut self.best_effort
         };
-        match *slot {
-            Some(last) if !precedes(mask, last, sn) => RxAdmit::Stale,
-            Some(last) => {
-                // `precedes` bounds the distance to 1..=half the ring.
-                let distance = sn.wrapping_sub(last) & mask;
-                *slot = Some(sn);
-                if distance > 1 {
-                    RxAdmit::Gap {
-                        missing: saturating_u32(distance.saturating_sub(1)),
-                    }
-                } else {
-                    RxAdmit::Accept
+        let (verdict, held) = judge_rx(mask, *slot, sn);
+        *slot = held;
+        verdict
+    }
+}
+
+/// The gate's verdict on `sn` against a channel whose last admitted SN is `last`, and what the
+/// channel holds after it: `sn` once admitted, `last` when stale. The one rule of [`RxSn`] and
+/// of [`RxConduitWords`].
+fn judge_rx(mask: Sn, last: Option<Sn>, sn: Sn) -> (RxAdmit, Option<Sn>) {
+    match last {
+        Some(last) if !precedes(mask, last, sn) => (RxAdmit::Stale, Some(last)),
+        Some(last) => {
+            // `precedes` bounds the distance to 1..=half the ring.
+            let distance = sn.wrapping_sub(last) & mask;
+            let verdict = if distance > 1 {
+                RxAdmit::Gap {
+                    missing: saturating_u32(distance.saturating_sub(1)),
                 }
-            }
-            None => {
-                *slot = Some(sn);
+            } else {
                 RxAdmit::Accept
-            }
+            };
+            (verdict, Some(sn))
         }
+        None => (RxAdmit::Accept, Some(sn)),
     }
 }
 
@@ -550,6 +559,176 @@ impl RxConduits {
         sn: Sn,
     ) -> RxAdmit {
         self.select_mut(priority).admit_judged(mask, reliable, sn)
+    }
+}
+
+/// The word of a channel that has admitted nothing yet ([`RxSn`]'s `None`). No sequence number
+/// is kept as it: each is kept below the top bit of its word ([`rx_word`]).
+const RX_NONE: u64 = u64::MAX;
+
+/// The word a channel holding `sn` keeps. The top bit is dropped: every ring the build runs lies
+/// below it ([`SN_RES_WIDEST`]) and every judgement masks its distance first, so a number a peer
+/// sent past the ring is judged as it would be whole.
+fn rx_word(sn: Option<Sn>) -> u64 {
+    sn.map_or(RX_NONE, |sn| to_wire(sn) & (u64::MAX >> 1))
+}
+
+/// The sequence number a channel's word holds.
+fn word_rx(word: u64) -> Option<Sn> {
+    (word != RX_NONE).then(|| from_wire(word))
+}
+
+/// One conduit of [`RxConduitWords`]: its two channels, a word each.
+struct RxSnWords<W: WordCell> {
+    reliable: W,
+    best_effort: W,
+}
+
+impl<W: WordCell> RxSnWords<W> {
+    fn new() -> Self {
+        Self {
+            reliable: W::new(RX_NONE),
+            best_effort: W::new(RX_NONE),
+        }
+    }
+
+    /// Both channels holding `held`.
+    fn hold(&self, held: Option<Sn>) {
+        for channel in [&self.reliable, &self.best_effort] {
+            channel.store(rx_word(held), Ordering::Release);
+        }
+    }
+
+    fn row(&self) -> RxSn {
+        RxSn {
+            reliable: word_rx(self.reliable.load(Ordering::Acquire)),
+            best_effort: word_rx(self.best_effort.load(Ordering::Acquire)),
+        }
+    }
+
+    /// [`RxSn::admit_judged`] on the channel's word: the baseline moves by a compare-and-swap of
+    /// the word judged, so of two judges of one channel at once one moves it and the other judges
+    /// again against what it moved. A stale frame writes nothing.
+    fn admit_judged(&self, mask: Sn, reliable: bool, sn: Sn) -> RxAdmit {
+        let channel = if reliable {
+            &self.reliable
+        } else {
+            &self.best_effort
+        };
+        let mut word = channel.load(Ordering::Acquire);
+        loop {
+            let (verdict, held) = judge_rx(mask, word_rx(word), sn);
+            if verdict == RxAdmit::Stale {
+                return verdict;
+            }
+            match channel.compare_exchange(word, rx_word(held), Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return verdict,
+                Err(now) => word = now,
+            }
+        }
+    }
+}
+
+/// The unicast inbound SN gates of [`RxConduits`] and the ring they judge on, each a word of the
+/// runtime's (`SessionRuntime::Word`: an atomic where threads hold the session, a cell where one
+/// task does) and none under a lock: every inbound `Frame` and `Fragment` is judged here, with a
+/// load and a compare-and-swap of its channel's word. The receives of an aggregated session's
+/// links judge one set of gates; the compare-and-swap orders two that judge one channel at once.
+///
+/// The ring is the one the peer's capabilities give, and the writer of those capabilities keeps it
+/// in step with them, so a frame reads no row of the session's facts for it. A seed and a clear
+/// write every channel, and neither runs while a frame of the same transport is judged: the seed
+/// is the admitted Open's, before any data frame, and the clear a reopen's, once the transport
+/// is gone.
+pub struct RxConduitWords<W: WordCell> {
+    ring: W,
+    #[cfg(feature = "transport-qos")]
+    conduits: [RxSnWords<W>; crate::qos::Priority::NUM],
+    #[cfg(not(feature = "transport-qos"))]
+    conduit: RxSnWords<W>,
+}
+
+impl<W: WordCell> RxConduitWords<W> {
+    /// Gates that have admitted nothing yet, on the ring of `mask`.
+    pub fn new(mask: Sn) -> Self {
+        Self {
+            ring: W::new(to_wire(mask)),
+            #[cfg(feature = "transport-qos")]
+            conduits: core::array::from_fn(|_| RxSnWords::new()),
+            #[cfg(not(feature = "transport-qos"))]
+            conduit: RxSnWords::new(),
+        }
+    }
+
+    /// The ring the gates judge on.
+    #[inline]
+    pub fn ring(&self) -> Sn {
+        from_wire(self.ring.load(Ordering::Acquire))
+    }
+
+    /// Judge on the ring of `mask` from now on: the peer's capabilities were written.
+    #[inline]
+    pub fn set_ring(&self, mask: Sn) {
+        self.ring.store(to_wire(mask), Ordering::Release);
+    }
+
+    /// The `(priority)` conduit, as [`RxConduits::select_mut`] picks it.
+    #[inline]
+    fn select(&self, _priority: crate::qos::Priority) -> &RxSnWords<W> {
+        #[cfg(feature = "transport-qos")]
+        {
+            _priority.of(&self.conduits)
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        {
+            &self.conduit
+        }
+    }
+
+    /// Every conduit's channels holding `held`.
+    fn hold(&self, held: Option<Sn>) {
+        #[cfg(feature = "transport-qos")]
+        for conduit in &self.conduits {
+            conduit.hold(held);
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        self.conduit.hold(held);
+    }
+
+    /// Seed every conduit one before `initial_sn` on the gates' ring, as [`RxConduits::seed`].
+    pub fn seed(&self, initial_sn: Sn) {
+        self.hold(Some(decrement(self.ring(), initial_sn)));
+    }
+
+    /// Every channel back to having admitted nothing; the ring stays.
+    pub fn clear(&self) {
+        self.hold(None);
+    }
+
+    /// [`RxConduits::admit_judged`] on the gates' ring, under no lock.
+    #[inline]
+    pub fn admit_judged(&self, priority: crate::qos::Priority, reliable: bool, sn: Sn) -> RxAdmit {
+        self.select(priority)
+            .admit_judged(self.ring(), reliable, sn)
+    }
+
+    /// The gates as a row, each channel read once: a copy, for a reader of all of them.
+    pub fn row(&self) -> RxConduits {
+        #[cfg(feature = "transport-qos")]
+        {
+            let mut row = RxConduits::default();
+            for (to, from) in row.conduits.iter_mut().zip(&self.conduits) {
+                *to = from.row();
+            }
+            row
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        {
+            RxConduits {
+                conduit: self.conduit.row(),
+            }
+        }
     }
 }
 
@@ -1083,6 +1262,145 @@ mod tests {
             rx.admit_judged(Priority::DEFAULT, mask, false, 1),
             RxAdmit::Accept,
             "the best-effort channel was not moved by the reliable gap"
+        );
+    }
+
+    /// The gates kept in words judge as the gates kept in a row: the same verdict for every frame
+    /// of a walk that takes a first frame, steps, repeats, skips, steps back and jumps past half
+    /// the ring on either channel, and then crosses the ring's seam from a seed, and the same
+    /// baselines after each. A clear empties every channel and leaves the ring. Turned red by a
+    /// word that keeps another baseline than the row, a stale frame that moves one, or a seed off
+    /// the gates' ring.
+    #[test]
+    fn the_gates_in_words_judge_as_the_gates_in_a_row() {
+        use crate::qos::Priority;
+        let mask = mask_from_res(0x00);
+        let words = RxConduitWords::<core::cell::Cell<u64>>::new(mask);
+        let mut row = RxConduits::default();
+        assert_eq!(words.row(), row, "nothing admitted yet");
+        assert_eq!(words.ring(), mask);
+        let walk: [(bool, Sn); 9] = [
+            (true, 3),
+            (false, 100),
+            (true, 4),
+            (true, 4),
+            (true, 9),
+            (true, 8),
+            (false, 101),
+            (true, 9 + 64),
+            (true, 10),
+        ];
+        for (reliable, sn) in walk {
+            assert_eq!(
+                words.admit_judged(Priority::DEFAULT, reliable, sn),
+                row.admit_judged(Priority::DEFAULT, mask, reliable, sn),
+                "reliable {reliable}, sn {sn}"
+            );
+            assert_eq!(words.row(), row, "baselines after {reliable}, {sn}");
+        }
+        words.seed(120);
+        row.seed(mask, 120);
+        assert_eq!(words.row(), row, "a seed puts every channel one before it");
+        for sn in [120, 127, 0, 1] {
+            assert_eq!(
+                words.admit_judged(Priority::DEFAULT, true, sn),
+                row.admit_judged(Priority::DEFAULT, mask, true, sn),
+                "sn {sn}"
+            );
+            assert_eq!(words.row(), row, "baselines after {sn}");
+        }
+        words.clear();
+        assert_eq!(words.row(), RxConduits::default(), "every channel emptied");
+        assert_eq!(words.ring(), mask, "and the ring left");
+    }
+
+    /// The gates judge on the ring they were last set to. Turned red by gates that keep the ring
+    /// they were made on.
+    #[test]
+    fn the_gates_judge_on_the_ring_they_were_set_to() {
+        use crate::qos::Priority;
+        let words = RxConduitWords::<core::cell::Cell<u64>>::new(mask_from_res(0x02));
+        assert_eq!(
+            words.admit_judged(Priority::DEFAULT, true, 0),
+            RxAdmit::Accept
+        );
+        words.set_ring(mask_from_res(0x00));
+        assert_eq!(words.ring(), mask_from_res(0x00));
+        assert_eq!(
+            words.admit_judged(Priority::DEFAULT, true, 64),
+            RxAdmit::Stale,
+            "past half the seven-bit ring"
+        );
+        words.set_ring(mask_from_res(0x02));
+        assert_eq!(
+            words.admit_judged(Priority::DEFAULT, true, 64),
+            RxAdmit::Gap { missing: 63 },
+            "within half the 28-bit ring"
+        );
+    }
+
+    /// A number a peer sent past every ring is judged in a word as it is judged whole, though the
+    /// word keeps it without the top bit: taken as a first baseline, its repeat is stale. Turned
+    /// red by a word that keeps such a number as a channel that has admitted nothing, which would
+    /// take the repeat as a first frame.
+    #[test]
+    fn a_number_past_every_ring_is_judged_in_a_word_as_it_is_whole() {
+        use crate::qos::Priority;
+        let mask = mask_from_res(SN_RES_WIDEST);
+        let words = RxConduitWords::<core::cell::Cell<u64>>::new(mask);
+        let mut row = RxConduits::default();
+        for sn in [Sn::MAX, Sn::MAX, 0, Sn::MAX, 5] {
+            assert_eq!(
+                words.admit_judged(Priority::DEFAULT, true, sn),
+                row.admit_judged(Priority::DEFAULT, mask, true, sn),
+                "sn {sn}"
+            );
+        }
+        assert_eq!(words.row(), row, "the same baseline after the walk");
+    }
+
+    /// Two judges of one channel at once, each walking the same sequence numbers in order, admit
+    /// each number once between them: the one that moves the baseline first takes it, and the
+    /// other judges again against what it moved and finds it stale. Turned red by an admission
+    /// that writes over a baseline moved since it was read.
+    #[cfg(target_has_atomic = "64")]
+    #[test]
+    fn two_judges_of_one_channel_admit_each_number_once() {
+        use crate::qos::Priority;
+        use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        const LAST: Sn = 2_000;
+        let words = RxConduitWords::<AtomicU64>::new(mask_from_res(0x02));
+        let admitted = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    for sn in 1..=LAST {
+                        match words.admit_judged(Priority::DEFAULT, true, sn) {
+                            RxAdmit::Stale => {}
+                            RxAdmit::Accept => {
+                                admitted.fetch_add(1, Ordering::Relaxed);
+                            }
+                            RxAdmit::Gap { missing } => {
+                                panic!("{missing} missing before {sn}: a judge skipped one")
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            admitted.load(Ordering::Relaxed),
+            usize::try_from(LAST).expect("a small count"),
+            "each number once"
+        );
+        assert_eq!(
+            words.admit_judged(Priority::DEFAULT, true, LAST),
+            RxAdmit::Stale,
+            "the baseline is the last number"
+        );
+        assert_eq!(
+            words.admit_judged(Priority::DEFAULT, true, LAST + 1),
+            RxAdmit::Accept
         );
     }
 

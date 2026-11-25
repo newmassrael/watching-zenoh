@@ -2101,6 +2101,19 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// keepalive deadlines read it at every step of the link, and a lock of the row there was a
     /// hold for each. Reached through [`Self::fact_peer_open_lease_ms`].
     peer_open_lease_ms: R::Word,
+    /// R311ke — the inbound Frame/Fragment SN gates ([`crate::sn::RxConduitWords`]): the
+    /// zenoh-pico `_z_transport_peer_unicast_t._sn_rx_reliable` / `_sn_rx_best_effort` pair of
+    /// each conduit, and the ring they judge on, which the writer of the peer's capabilities keeps
+    /// in step with them (`SessionLinkActions::write_peer_init_caps`). Seeded by the admitted
+    /// OpenSyn/OpenAck's `initial_sn` (one before, so the first frame at exactly `initial_sn`
+    /// passes — peer.c:212-214); consulted by `SessionLinkActions::admit_rx_frame_sn` before a
+    /// Frame payload or Fragment reaches the application layer. Handshake-scoped: cleared by
+    /// `reset_for_reopen` and seeded again by the reopen's handshake.
+    ///
+    /// Words of the runtime's, as the peer's lease is, and not a fact of the row: every inbound
+    /// frame is judged here, and a hold of the row for each was a lock taken per message. Read
+    /// whole through [`Self::rx_sn()`].
+    rx_sn: crate::sn::RxConduitWords<R::Word>,
     /// Every fact the session keeps under a lock, under ONE lock: [`SessionFacts`]. Reached
     /// through a door (`Self::fact_*`, [`Self::with_facts`]), never named by a caller.
     facts: R::Mutex<SessionFacts>,
@@ -2841,17 +2854,6 @@ pub struct SessionFacts {
     /// marker instead of the bytes.
     #[cfg(feature = "transport-shm")]
     pub is_shm: bool,
-    /// R311ke — per-channel inbound Frame/Fragment SN gate state
-    /// ([`crate::sn::RxSn`]), the zenoh-pico
-    /// `_z_transport_peer_unicast_t._sn_rx_reliable` /
-    /// `_sn_rx_best_effort` pair. Seeded by `SessionLinkActions::handle_inbound`
-    /// from the peer's OpenSyn/OpenAck `initial_sn` (one before, so the
-    /// first frame at exactly `initial_sn` passes — peer.c:212-214);
-    /// consulted by the drive dispatcher's
-    /// `SessionLinkActions::admit_rx_frame_sn` before a Frame payload or Fragment
-    /// reaches the application layer. Handshake-scoped: reset by
-    /// `reset_for_reopen` and re-seeded by the reopen handshake.
-    pub rx_sn: crate::sn::RxConduits,
     /// The key expressions this node declared, by the id it gave each (zenoh-pico's
     /// `_z_session_t._local_resources`): what a later aliased publish, a loopback delivery and
     /// a received `M=0` alias resolve against. Either this link keeps them, recorded as
@@ -2982,7 +2984,6 @@ fact_doors! {
     #[cfg(feature = "transport-shm")]
     fact_is_shm => is_shm: bool,
     fact_inbound_peer_init_caps => handshake.inbound_peer_init_caps: Option<PeerInitCaps>,
-    fact_rx_sn => rx_sn: crate::sn::RxConduits,
     #[cfg(feature = "routing-namespace")]
     fact_namespace_egress => namespace_egress: Option<OwnedNonWildKeyExpr>,
     #[cfg(feature = "routing-namespace")]
@@ -3600,6 +3601,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionCore<R, T> {
     #[inline]
     pub fn fact_peer_open_lease_ms<U>(&self, f: impl FnOnce(&mut Option<u64>) -> U) -> U {
         StampWords::<R::Word>::lend(&self.peer_open_lease_ms, f)
+    }
+
+    /// The inbound SN gates as a row ([`crate::sn::RxConduits`]), each channel read once: a copy.
+    pub fn rx_sn(&self) -> crate::sn::RxConduits {
+        self.rx_sn.row()
     }
 }
 
@@ -5614,6 +5620,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // value via its reliable-channel window tracking
         // (zenoh-pico unicast/transport.c:182-194).
         let initial_frame_sn = params.initial_sn;
+        // Read before `params` moves into the core: the ring the inbound gates judge on before
+        // the peer's capabilities are known.
+        let own_sn_mask = Self::sn_mask_of(&params, None);
         // Read before `params` moves into the core: the queries a link remembers the key form of.
         #[cfg(feature = "shared-key-ids")]
         let noted_requests = params.limits.link_noted_requests();
@@ -5637,6 +5646,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 iteration_work: R::IterationWork::default(),
                 params: params,
                 peer_open_lease_ms: <R::Word as crate::runtime_cell::WordCell>::new(NO_STAMP),
+                rx_sn: crate::sn::RxConduitWords::new(own_sn_mask),
                 // Every fact under the session's one lock (`SessionFacts`).
                 facts: R::new_mutex(SessionFacts {
                     handshake: HandshakeFacts {
@@ -5695,7 +5705,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     is_compression: false,
                     #[cfg(feature = "transport-shm")]
                     is_shm: false,
-                    rx_sn: crate::sn::RxConduits::default(),
                     #[cfg(feature = "alloc")]
                     own_keyexprs: crate::declared_keyexprs::LinkKeyexprs::new(),
                     #[cfg(feature = "shared-key-ids")]
@@ -8600,8 +8609,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The SN ring mask [`Self::negotiated_sn_mask`] answers, for the peer's capabilities
     /// `peer` as read by the caller.
     pub(crate) fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> crate::sn::Sn {
+        Self::sn_mask_of(&self.params, peer)
+    }
+
+    /// [`Self::sn_mask_for`] over the parameters `params`, for a session not built yet.
+    fn sn_mask_of(params: &SessionInitParams, peer: Option<PeerInitCaps>) -> crate::sn::Sn {
         crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
-            self.params.seq_num_res.wire_code(),
+            params.seq_num_res.wire_code(),
             peer,
         ))
     }
@@ -8801,13 +8815,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// limits are settled from them when the link is established ([`TxLimits`]), so a write
     /// after establishment reaches the sends at the next establishment.
     pub fn set_peer_init_caps(&self, caps: Option<PeerInitCaps>) {
-        self.fact_inbound_peer_init_caps(|slot| Self::write_peer_init_caps(slot, caps));
+        self.fact_inbound_peer_init_caps(|slot| self.write_peer_init_caps(slot, caps));
     }
 
     /// [`Self::set_peer_init_caps`] for a step that holds the facts' lock already, writing
-    /// the capabilities beside other facts of the same handshake message.
-    fn write_peer_init_caps(slot: &mut Option<PeerInitCaps>, caps: Option<PeerInitCaps>) {
+    /// the capabilities beside other facts of the same handshake message. Every write of them is
+    /// made here: the inbound SN gates judge on the ring they give, set here with them, so a
+    /// frame judged reads no row of the facts for it.
+    fn write_peer_init_caps(&self, slot: &mut Option<PeerInitCaps>, caps: Option<PeerInitCaps>) {
         *slot = caps;
+        self.rx_sn.set_ring(self.sn_mask_for(caps));
     }
 
     /// R311qh — the remote peer's zid as learned at handshake (from the inbound
@@ -9783,7 +9800,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             f.handshake.inbound_peer_zid = zid;
             f.handshake.remote_peer_zid = zid;
             f.handshake.peer_whatami = whatami;
-            Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, caps);
+            self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, caps);
         });
     }
 
@@ -12031,15 +12048,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R311ke — seed the RX SN gate baselines from the peer's announced
     /// `initial_sn` (peer.c:212-214: both channels one before, so the first
-    /// frame at `initial_sn` passes), on the ring the negotiated caps in `facts` give.
+    /// frame at `initial_sn` passes), on the ring the negotiated caps give, which
+    /// their writer set on the gates with them.
     ///
     /// R2782 — called by the two admissions, [`Self::admit_open_syn`] and
     /// [`Self::admit_open_ack`], inside the hold in which they write the rest of what
     /// an admitted Open takes, and by nothing at parse time.
     #[cfg(feature = "codec-open-body")]
-    fn seed_rx_sn_in(&self, facts: &mut SessionFacts, initial_sn: u64) {
-        let mask = self.sn_mask_for(facts.handshake.inbound_peer_init_caps);
-        facts.rx_sn.seed(mask, crate::sn::from_wire(initial_sn));
+    fn seed_rx_sn(&self, initial_sn: u64) {
+        self.rx_sn.seed(crate::sn::from_wire(initial_sn));
     }
 
     /// R2782 — everything an ADMITTED OpenSyn does to the acceptor, in one
@@ -12069,7 +12086,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             f.cookie_nonce = None;
             // R311ke — the peer's announced initial_sn seeds the RX gate on the
             // ring the restored caps give (peer.c:212-214).
-            self.seed_rx_sn_in(f, initial_sn);
+            self.seed_rx_sn(initial_sn);
             // R311kv — the peer's advertised lease (ms, R311ku boundary
             // projection) for the deadline comparator's min(); pico adopts it at
             // OpenSyn arrival (unicast/transport.c:269), which on its accept path
@@ -12210,7 +12227,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             f.handshake.awaiting_open_ack = false;
             // R311ke — pico captures `_initial_sn_rx` from either Open body
             // (transport.c:196/270).
-            self.seed_rx_sn_in(f, initial_sn);
+            self.seed_rx_sn(initial_sn);
             // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
             // unicast/transport.c:193).
             self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
@@ -12356,7 +12373,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             cookie,
                         );
                     }
-                    Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
+                    self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
                 });
             }
             // A peer's InitSyn and OpenSyn are recorded only by a build with the accepting
@@ -12393,7 +12410,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // alongside its zid; see the InitAck arm above for why both
                     // directions capture it (the gossip-policy "F1" prerequisite).
                     f.handshake.peer_whatami = Some(init.whatami);
-                    Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
+                    self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
                 });
             }
             #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
@@ -12962,15 +12979,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         sn: u64,
     ) -> crate::sn::RxAdmit {
-        // The ring the peer's capabilities give and the conduit's baseline are facts of one row,
-        // read and moved in one hold of it.
         // R311y215 — the SN gate is per-(priority, reliable) conduit; a non-QoS
-        // session passes `Priority::DEFAULT` and gates on the single conduit.
-        self.with_facts(|f| {
-            let mask = self.sn_mask_for(f.handshake.inbound_peer_init_caps);
-            f.rx_sn
-                .admit_judged(priority, mask, reliable, crate::sn::from_wire(sn))
-        })
+        // session passes `Priority::DEFAULT` and gates on the single conduit. The conduit's
+        // baseline and the ring the peer's capabilities give are words of the gates', so a frame
+        // is judged under no lock.
+        self.rx_sn
+            .admit_judged(priority, reliable, crate::sn::from_wire(sn))
     }
 
     /// Record that the peer's `DeclareFinal` of the initial interest arrived,
@@ -19922,7 +19936,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // that clear is `return_to_offer` below: the region joined the
                 // cookie's group, whose one writer puts back the offer, and the offer
                 // holds no peer's region. A second write here would be a second writer.
-                Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, None);
+                self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, None);
                 // R2566 — the authenticated principal is HANDSHAKE-scoped and must
                 // not survive into the re-dial window. The `auth` dispatch itself
                 // persists here (its methods keep their configured credentials), so
@@ -19934,8 +19948,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     f.peer_auth_id = None;
                 }
                 // R311ke — the RX SN gate is handshake-scoped: the reopen
-                // handshake's OpenSyn/OpenAck re-seeds both channels.
-                f.rx_sn = crate::sn::RxConduits::default();
+                // handshake's OpenSyn/OpenAck re-seeds both channels. Its words are cleared here,
+                // beside the capabilities whose ring they judge on.
+                self.rx_sn.clear();
                 // §5.21 routing-namespace — the per-session INGRESS correlation is
                 // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
                 // declaration tables + a RESTARTED id space, so a stale blocked-id
