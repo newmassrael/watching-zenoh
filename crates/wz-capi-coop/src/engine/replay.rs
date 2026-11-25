@@ -647,6 +647,9 @@ pub(super) enum Retract<'a> {
 
 impl Retract<'_> {
     /// Tell it over `actions`.
+    // Out of line: a retraction and an announce undone each tell one, and each kind's message is
+    // built in this one body.
+    #[inline(never)]
     fn tell<C: ClockSource + 'static>(self, actions: &LinkActions<C>) {
         match self {
             Self::Keyexpr(id) => actions.send_undeclare_kexpr(id),
