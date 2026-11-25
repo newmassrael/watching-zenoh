@@ -38,11 +38,11 @@
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz_capi_port::lodge::{Kept, Lodging, Strong, WeakRef};
-use wz_capi_port::os::Mutex;
+use wz_capi_port::os::{mutex_in, Mutex};
 use wz_ext_pubsub::advanced_subscriber::{DeclarationForms, EntityForm};
 use wz_session_core::WhatAmI;
 
@@ -181,20 +181,35 @@ impl PicoSubscriberForms {
     /// place `place` counts stands while it is kept, which every anchor is; with no `place`, the
     /// caller keeps the rooms past the forms and every anchor they answer with. Anchors are
     /// lodged only while the place's owner holds it.
-    pub(crate) unsafe fn new(
+    ///
+    /// The forms are made in `at`, where they stay: their locks are made there
+    /// ([`mutex_in`]). `at` is valid for writes of a `Self`, aligned for it and holds none, and
+    /// the forms are not moved from it until they are dropped there.
+    pub(crate) unsafe fn write_in(
+        at: NonNull<Self>,
         session: &PicoSession,
         base: DeclaredKeyexpr,
         rooms: NonNull<AnchorRooms>,
         place: Option<CountIn>,
-    ) -> Self {
-        Self {
-            shared: crate::session::EngineHold::downgrade(&session.engine),
-            mode: session.mode,
-            base,
-            answered: Mutex::new([None, None, None, None]),
-            rooms,
-            place,
-            retained: Mutex::new([None, None, None, None]),
+    ) {
+        let at = at.as_ptr();
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // it is inside the place, the locks made there.
+        unsafe {
+            addr_of_mut!((*at).shared)
+                .write(crate::session::EngineHold::downgrade(&session.engine));
+            addr_of_mut!((*at).mode).write(session.mode);
+            addr_of_mut!((*at).base).write(base);
+            mutex_in(
+                NonNull::new_unchecked(addr_of_mut!((*at).answered)),
+                |answered| answered.write([None, None, None, None]),
+            );
+            addr_of_mut!((*at).rooms).write(rooms);
+            addr_of_mut!((*at).place).write(place);
+            mutex_in(
+                NonNull::new_unchecked(addr_of_mut!((*at).retained)),
+                |retained| retained.write([None, None, None, None]),
+            );
         }
     }
 
@@ -331,7 +346,13 @@ mod tests {
     /// The forms of an advanced subscriber on `key`, over a registry with no
     /// face: what they declare is read back from the registry's key table, which
     /// needs no peer.
-    fn forms_on(key: &str) -> (Arc<SharedSession>, Box<AnchorRooms>, PicoSubscriberForms) {
+    fn forms_on(
+        key: &str,
+    ) -> (
+        Arc<SharedSession>,
+        Box<AnchorRooms>,
+        Box<PicoSubscriberForms>,
+    ) {
         let shared = Arc::new(
             SharedSession::new(
                 TokioTime::new(),
@@ -347,15 +368,20 @@ mod tests {
             time: crate::last_timestamp::SessionTime::new(),
         };
         let rooms = Box::new(AnchorRooms::new());
+        let base = DeclaredKeyexpr::literal_only(key).expect("the test's heap");
+        let mut place = Box::<PicoSubscriberForms>::new_uninit();
         // SAFETY: the rooms are vacant, and each test keeps them past the forms and every anchor
-        // they answer with (it binds them before both).
+        // they answer with (it binds them before both); the box's place is valid for the forms,
+        // holds none and is not moved by the box, and they are whole once `write_in` returns.
         let forms = unsafe {
-            PicoSubscriberForms::new(
+            PicoSubscriberForms::write_in(
+                NonNull::from(&mut *place).cast::<PicoSubscriberForms>(),
                 &session,
-                DeclaredKeyexpr::literal_only(key).expect("the test's heap"),
+                base,
                 NonNull::from(&*rooms),
                 None,
-            )
+            );
+            place.assume_init()
         };
         (shared, rooms, forms)
     }

@@ -454,7 +454,11 @@ pub unsafe extern "C" fn z_declare_querier(
         let write = |at: *mut crate::object_slot::Answering<QuerierState>| {
             // SAFETY: the slot hands a place valid for writes of the querier's `Answering`,
             // holding none; `write_state` writes the whole querier.
-            unsafe { crate::object_slot::Answering::write_at(at, write_state) }
+            unsafe {
+                crate::object_slot::Answering::write_at(at, write_state, |kept: NonNull<()>| {
+                    kept.as_ptr().write(());
+                })
+            }
         };
         // SAFETY: `write` leaves a whole `Answering<QuerierState>` in the place it is handed.
         let state = unsafe { slot.fill_in_place(write) };

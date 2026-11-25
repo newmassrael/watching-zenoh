@@ -46,10 +46,11 @@
 
 use alloc::sync::Arc;
 use core::ffi::c_void;
+use core::ptr::{addr_of_mut, NonNull};
 use core::time::Duration;
 
 use wz_capi_port::lodge::{Lodging, Strong};
-use wz_capi_port::os::{Condvar, Mutex};
+use wz_capi_port::os::{condvar_in, mutex_in, Condvar, Mutex};
 use wz_ext_pubsub::advanced_cache::{CacheConfig, RepliesConfig};
 use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherOn, AdvancedPublisherOptions, AdvancedPutOptions,
@@ -965,14 +966,26 @@ struct MissRoom {
 }
 
 impl MissRooms {
-    fn new() -> Self {
-        Self {
-            book: Mutex::new(MissBook {
-                next_id: 1,
-                rooms: [MissRoom::default(); wz_session_core::caps::MAX_SAMPLE_MISS_LISTENERS],
-            }),
-            vacated: Condvar::new(),
-            closures: core::array::from_fn(|_| core::cell::UnsafeCell::new(None)),
+    /// Rooms all free, made in `place`, where they stay: the book's lock and the condition
+    /// variable are made there ([`mutex_in`]).
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self`, aligned for it and holds none; the rooms are not
+    /// moved from it until they are dropped there.
+    unsafe fn write_in(place: NonNull<Self>) {
+        let at = place.as_ptr();
+        // SAFETY: the caller's: each field is made once through a pointer to it, not null as it
+        // is inside the place.
+        unsafe {
+            mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).book)), |book| {
+                book.write(MissBook {
+                    next_id: 1,
+                    rooms: [MissRoom::default(); wz_session_core::caps::MAX_SAMPLE_MISS_LISTENERS],
+                })
+            });
+            condvar_in(NonNull::new_unchecked(addr_of_mut!((*at).vacated)));
+            addr_of_mut!((*at).closures)
+                .write(core::array::from_fn(|_| core::cell::UnsafeCell::new(None)));
         }
     }
 
@@ -1182,8 +1195,14 @@ impl AdvSubKept {
 /// # Safety
 /// `state` was filled for an `AdvSubPlace`, its owner holds it, and no set is lodged in it yet.
 unsafe fn lodge_miss_set(state: *mut AdvSubState) -> MissSlot {
+    let make = |place: NonNull<MissRooms>| {
+        // SAFETY: the place is the subscriber's, valid for one set, holding none, never moved
+        // while the set is counted.
+        unsafe { MissRooms::write_in(place) }
+    };
     // SAFETY: the caller's; the keep is written before the set is lodged, and the set lies in the
-    // place, which stands until `let_go_miss_place` lets go of the keep, once, and takes no lock.
+    // place, which stands until `let_go_miss_place` lets go of the keep, once, and takes no lock;
+    // `make` makes the whole set there.
     unsafe {
         let kept = crate::object_slot::kept_at::<AdvSubState, AdvSubKept>(state);
         (*kept)
@@ -1191,9 +1210,9 @@ unsafe fn lodge_miss_set(state: *mut AdvSubState) -> MissSlot {
             .write(crate::object_slot::keep_entity::<AdvSubState, AdvSubKept>(
                 state,
             ));
-        Strong::lodge(
+        Strong::lodge_in(
             core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*kept).miss)),
-            MissRooms::new(),
+            make,
             let_go_miss_place,
             kept.cast::<c_void>(),
         )
@@ -1231,15 +1250,16 @@ unsafe fn lodge_forms(
         let keep = crate::object_slot::keep_entity::<AdvSubState, AdvSubKept>(state);
         let place = keep.count();
         (*kept).forms_keep.write(keep);
-        let forms = PicoSubscriberForms::new(
-            session,
-            base,
-            core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*kept).anchors)),
-            Some(place),
-        );
-        Strong::lodge(
+        let rooms = core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*kept).anchors));
+        // Inside this block, so the call below is under its SAFETY: the place handed is the
+        // subscriber's, valid for the forms, holding none, never moved while they are counted;
+        // the rooms are vacant and stand as `write_in` asks.
+        let make = |at: NonNull<PicoSubscriberForms>| {
+            PicoSubscriberForms::write_in(at, session, base, rooms, Some(place));
+        };
+        Strong::lodge_in(
             core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*kept).forms)),
-            forms,
+            make,
             let_go_forms_place,
             kept.cast::<c_void>(),
         )
@@ -2437,7 +2457,12 @@ mod tests {
             |_| {},
         )
         .expect("a plain subscriber declares on a session with no face");
-        let set: MissSlot = Strong::boxed(MissRooms::new());
+        let make = |place: NonNull<MissRooms>| {
+            // SAFETY: the place is the box's, valid for one set, holding none, never moved.
+            unsafe { MissRooms::write_in(place) }
+        };
+        // SAFETY: `make` makes the whole set in the place it is handed.
+        let set: MissSlot = unsafe { Strong::boxed_in(make) };
         let slot = crate::object_slot::Slot::<AdvSubPlace>::take_entity(
             &engine,
             crate::object_slot::Kind::AdvancedSubscriber,
@@ -2862,7 +2887,13 @@ mod tests {
     #[test]
     fn a_listener_retracted_inside_a_call_goes_after_it() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let rooms = MissRooms::new();
+        let mut place = Box::<MissRooms>::new_uninit();
+        // SAFETY: the box's place is valid for one set and holds none; the box does not move it,
+        // and the set is whole once `write_in` returns.
+        let rooms = unsafe {
+            MissRooms::write_in(NonNull::from(&mut *place).cast::<MissRooms>());
+            place.assume_init()
+        };
         let (first_dropped, second_dropped) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let adopted = |dropped: &AtomicUsize| {
             let moved = counted_miss_closure(dropped);

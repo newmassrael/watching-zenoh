@@ -93,6 +93,22 @@ impl NoRoom {
 /// as zenoh-pico answers its failed `malloc` and never ends the program. Laid out as
 /// `Box::new(value)` lays it out, so the box is dropped and freed as any other is.
 pub(crate) fn try_box<T>(value: T) -> Result<Box<T>, NoRoom> {
+    let write = |at: NonNull<T>| {
+        // SAFETY: the place `try_box_in` hands is valid for writes of a `T` and holds none.
+        unsafe { at.as_ptr().write(value) }
+    };
+    // SAFETY: `write` leaves `value` in the place it is handed.
+    unsafe { try_box_in(write) }
+}
+
+/// The value `make` writes in a box of its own, where it stays, or [`NoRoom`] when the heap
+/// refuses the box, with `make` not called: what a value holding a lock is made in, its locks
+/// made there ([`wz_capi_port::os::mutex_in`]). Laid out as [`try_box`] lays a box out.
+///
+/// # Safety
+/// `make` leaves a valid `T` in the place it is handed, which is valid for writes of one, aligned
+/// for it and holds none.
+pub(crate) unsafe fn try_box_in<T>(make: impl FnOnce(NonNull<T>)) -> Result<Box<T>, NoRoom> {
     let layout = core::alloc::Layout::new::<T>();
     let at = if layout.size() == 0 {
         NonNull::<T>::dangling()
@@ -100,12 +116,11 @@ pub(crate) fn try_box<T>(value: T) -> Result<Box<T>, NoRoom> {
         // SAFETY: the layout has bytes.
         NonNull::new(unsafe { alloc::alloc::alloc(layout) }.cast::<T>()).ok_or(NoRoom)?
     };
+    make(at);
     // SAFETY: `at` is a block of `T`'s layout from the global allocator (or the aligned place of
-    // a value of no bytes), this call's alone; it is written whole before the box owns it.
-    unsafe {
-        at.as_ptr().write(value);
-        Ok(Box::from_raw(at.as_ptr()))
-    }
+    // a value of no bytes), this call's alone, which `make` wrote whole (the caller's contract)
+    // before the box owns it.
+    Ok(unsafe { Box::from_raw(at.as_ptr()) })
 }
 
 /// A copy of `bytes` of its own, or [`NoRoom`] when the heap refuses it: laid out as

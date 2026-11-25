@@ -92,8 +92,9 @@
 
 use alloc::sync::Arc;
 use core::ffi::{c_int, c_void};
+use core::ptr::{addr_of_mut, NonNull};
 
-use wz_capi_port::os::{Mutex, MutexGuard};
+use wz_capi_port::os::{mutex_in, Mutex, MutexGuard};
 
 use wz_capi_port::told::{ToldKey, ToldPlane};
 use wz_capi_port::SessionEngine;
@@ -694,14 +695,27 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl<E: Arrival + Send> Delivery<E> {
-    fn new(closure: CClosure<Callback<E>>, replaying: bool) -> Self {
-        Self {
-            gate: Mutex::new(Some(closure)),
-            phase: Mutex::new(if replaying {
-                Phase::Replaying(Pending::new())
-            } else {
-                Phase::Live
-            }),
+    /// A delivery to `closure`, holding what arrives while `replaying`, made in `place`, where it
+    /// stays: its locks are made there ([`mutex_in`]).
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self`, aligned for it and holds none; the delivery is not
+    /// moved from it until it is dropped there.
+    unsafe fn write_in(place: NonNull<Self>, closure: CClosure<Callback<E>>, replaying: bool) {
+        let at = place.as_ptr();
+        // SAFETY: the caller's: each lock is made once through a pointer to it, not null as it is
+        // inside the place.
+        unsafe {
+            mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).gate)), |gate| {
+                gate.write(Some(closure))
+            });
+            mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).phase)), |phase| {
+                phase.write(if replaying {
+                    Phase::Replaying(Pending::new())
+                } else {
+                    Phase::Live
+                })
+            });
         }
     }
 
@@ -1176,12 +1190,27 @@ pub(crate) struct Connectivity {
 }
 
 impl Connectivity {
+    /// A session's hub with no listener and nothing told, its locks made in its `Arc`.
     pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            transports: Mutex::new(Table::new()),
-            links: Mutex::new(Table::new()),
-            told: Mutex::new(Told::new()),
-        })
+        let make = |place: NonNull<Self>| {
+            let at = place.as_ptr();
+            // SAFETY: the place is its `Arc`'s, valid for one hub, holding none, never moved;
+            // each lock is made once through a pointer to it, not null as it is inside the place.
+            unsafe {
+                mutex_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).transports)),
+                    |table| table.write(Table::new()),
+                );
+                mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).links)), |table| {
+                    table.write(Table::new())
+                });
+                mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).told)), |told| {
+                    told.write(Told::new())
+                });
+            }
+        };
+        // SAFETY: `make` makes the whole hub in the place it is handed.
+        unsafe { wz_capi_port::os::arc_with_lock_in(make) }
     }
 
     /// The transport listener of the first row from `at` on, held for a call (`next_in`).
@@ -1339,15 +1368,26 @@ impl Connectivity {
         else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
-        let object = place
-            .fill(Answering::keeping(
-                TransportListenerState {
-                    hub: Arc::clone(self),
-                    id: 0,
-                },
-                Delivery::new(closure, history),
-            ))
-            .cast::<TransportListenerState>();
+        let state = TransportListenerState {
+            hub: Arc::clone(self),
+            id: 0,
+        };
+        let write_state = |at: NonNull<TransportListenerState>| {
+            // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
+            unsafe { at.as_ptr().write(state) }
+        };
+        let write_kept = |at: NonNull<TransportKept>| {
+            // SAFETY: the place is the listener's, valid for its delivery, holding none, never
+            // moved while the listener's place stands.
+            unsafe { Delivery::write_in(at, closure, history) }
+        };
+        let write = |at: *mut TransportPlace| {
+            // SAFETY: the slot hands a place valid for writes of a `TransportPlace`, holding none;
+            // the two writers write its state and its delivery whole.
+            unsafe { Answering::write_at(at, write_state, write_kept) }
+        };
+        // SAFETY: `write` leaves a whole `TransportPlace` in the place it is handed.
+        let object = unsafe { place.fill_in_place(write) }.cast::<TransportListenerState>();
         // SAFETY: the place was filled just above and its owner holds it; the closure is counted
         // in it before anything can call it or let it go.
         unsafe {
@@ -1402,18 +1442,34 @@ impl Connectivity {
         let Some(place) = Slot::<LinkPlace>::take_entity(engine, Kind::LinkEventsListener) else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
-        let object = place
-            .fill(Answering::keeping(
-                LinkListenerState {
-                    hub: Arc::clone(self),
-                    id: 0,
-                },
-                LinkListener {
-                    delivery: Delivery::new(closure, history),
-                    filter,
-                },
-            ))
-            .cast::<LinkListenerState>();
+        let state = LinkListenerState {
+            hub: Arc::clone(self),
+            id: 0,
+        };
+        let write_state = |at: NonNull<LinkListenerState>| {
+            // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
+            unsafe { at.as_ptr().write(state) }
+        };
+        let write_kept = |at: NonNull<LinkListener>| {
+            let listener = at.as_ptr();
+            // SAFETY: the place is the listener's, valid for its delivery and filter, holding
+            // none, never moved while the listener's place stands; each field is written once
+            // through a pointer to it, not null as it is inside the place.
+            unsafe {
+                Delivery::write_in(
+                    NonNull::new_unchecked(addr_of_mut!((*listener).delivery)),
+                    closure,
+                    history,
+                );
+                addr_of_mut!((*listener).filter).write(filter);
+            }
+        };
+        let write = |at: *mut LinkPlace| {
+            // SAFETY: as in `declare_transport`, of a `LinkPlace`.
+            unsafe { Answering::write_at(at, write_state, write_kept) }
+        };
+        // SAFETY: `write` leaves a whole `LinkPlace` in the place it is handed.
+        let object = unsafe { place.fill_in_place(write) }.cast::<LinkListenerState>();
         // SAFETY: as in `declare_transport`.
         unsafe {
             count_closure::<LinkListenerState, LinkListener, _>(
@@ -2608,6 +2664,18 @@ pub(crate) mod tests {
         CClosure::uncounted(ctx(log), Some(on_transport), Some(released))
     }
 
+    /// A replaying delivery to `log`'s transport closure, made in its `Arc` with its locks made
+    /// there, as a listener's is made in its place.
+    fn replaying_delivery(log: &'static Log) -> Arc<Delivery<z_loaned_transport_event_t>> {
+        let closure = transport_closure(log);
+        let make = |place: NonNull<Delivery<z_loaned_transport_event_t>>| {
+            // SAFETY: the place is the `Arc`'s, valid for one delivery, holding none, never moved.
+            unsafe { Delivery::write_in(place, closure, true) }
+        };
+        // SAFETY: `make` makes the whole delivery in the place it is handed.
+        unsafe { wz_capi_port::os::arc_with_lock_in(make) }
+    }
+
     fn link_closure(log: &'static Log) -> CClosure<Callback<z_loaned_link_event_t>> {
         CClosure::uncounted(ctx(log), Some(on_link), Some(released))
     }
@@ -3003,7 +3071,7 @@ pub(crate) mod tests {
     #[test]
     fn an_arrival_during_the_history_replay_is_queued_behind_it() {
         let log = log();
-        let delivery = Arc::new(Delivery::new(transport_closure(log), true));
+        let delivery = replaying_delivery(log);
         log.reenter.set((Arc::clone(&delivery), 9)).ok();
 
         // The replay: two peers connected now.
@@ -3045,7 +3113,7 @@ pub(crate) mod tests {
     #[test]
     fn a_transport_that_came_and_went_inside_the_replay_is_not_told() {
         let log = log();
-        let delivery = Delivery::new(transport_closure(log), true);
+        let delivery = replaying_delivery(log);
         delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, 4), key_of(4));
         delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, 3), key_of(3));
         delivery.deliver(event_of(Z_SAMPLE_KIND_DELETE, 3), key_of(3));
@@ -3065,7 +3133,7 @@ pub(crate) mod tests {
     #[test]
     fn a_reconnect_inside_the_replay_is_told_as_both_in_order() {
         let log = log();
-        let delivery = Delivery::new(transport_closure(log), true);
+        let delivery = replaying_delivery(log);
         delivery.deliver(event_of(Z_SAMPLE_KIND_DELETE, 5), key_of(5));
         delivery.deliver(event_of(Z_SAMPLE_KIND_DELETE, 5), key_of(5));
         delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, 5), key_of(5));
@@ -3085,7 +3153,7 @@ pub(crate) mod tests {
     #[test]
     fn a_queue_past_its_rows_converges_once_what_it_held_was_told() {
         let log = log();
-        let delivery = Delivery::new(transport_closure(log), true);
+        let delivery = replaying_delivery(log);
         let firsts: Vec<u8> = (0..REPLAY_ROWS)
             .map(|at| u8::try_from(at).expect("a few rows").saturating_add(10))
             .collect();
@@ -3123,7 +3191,7 @@ pub(crate) mod tests {
     #[test]
     fn holding_a_replays_arrivals_allocates_nothing() {
         let log = log();
-        let delivery = Delivery::new(transport_closure(log), true);
+        let delivery = replaying_delivery(log);
         let held = allocations(|| {
             for at in 0..=REPLAY_ROWS {
                 let first = u8::try_from(at).unwrap_or(u8::MAX);
