@@ -3448,14 +3448,15 @@ mod tests {
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
-    /// An advanced subscriber's background publisher detection holds a liveliness subscriber's
-    /// place of the session past its declaration, and its closure is let go of by the time the
-    /// session's close returns; one asked for once the session is closed is refused with its
-    /// closure dropped. Turned red by a detection whose closure takes memory of its own, which
-    /// holds no liveliness subscriber's place and which the close does not wait for.
+    /// An advanced subscriber's background publisher detection takes a liveliness subscriber's
+    /// place of the session for its declaration and gives it back at once, its row holding the
+    /// closure, which is let go of by the time the session's close returns; one asked for once the
+    /// session is closed is refused with its closure dropped. Turned red by a detection whose place
+    /// is kept past its declaration (no handle will give it back), or whose closure the close does
+    /// not let go of.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
     #[test]
-    fn a_background_publisher_detection_lies_in_a_place_of_its_session() {
+    fn a_background_publisher_detections_closure_lies_in_its_row_until_the_close() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
             engine_held, listening_on_loopback, session_handle, z_close, z_session_drop,
@@ -3519,8 +3520,8 @@ mod tests {
         assert_eq!(code, Z_OK);
         assert_eq!(
             free(&engine, Kind::LivelinessSubscriber),
-            detections - 1,
-            "the background detection holds a liveliness subscriber's place"
+            detections,
+            "the background detection's place goes back at once: no handle gives it back"
         );
         assert_eq!(detect_drops.load(Ordering::SeqCst), 0);
         drop(engine);
