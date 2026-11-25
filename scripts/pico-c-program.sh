@@ -50,16 +50,19 @@
 # the shape of a program whose sessions cannot share a thread, as two single-threaded sessions
 # that dial each other cannot. The program passes when every process exits 0.
 #
-# WZ_PICO_SANITIZER, when set, is `thread`, `address` or `undefined`, on Linux, for the library with
-# `std` (scripts/verify.sh, Layers Vtsan and Vasan). `undefined` is the C compiler's
-# UndefinedBehaviorSanitizer over the program alone, every report fatal (`-fno-sanitize-recover`), and
-# the library built as it is without a sanitizer: Rust has no such sanitizer, and its own undefined
-# behaviour is the interpreter's lane (Layer Vmiri). With `thread` or `address` the library and the
-# program are built under that sanitizer.
+# WZ_PICO_SANITIZER, when set, is `thread`, `address` or `undefined`, on Linux, for either form of
+# the library (scripts/verify.sh, Layers Vtsan and Vasan, run it on the cooperative engine).
+# `undefined` is the C compiler's UndefinedBehaviorSanitizer over the program alone, every report
+# fatal (`-fno-sanitize-recover`), and the library built as it is without a sanitizer: Rust has no
+# such sanitizer, and its own undefined behaviour is the interpreter's lane (Layer Vmiri). With
+# `thread` or `address` the library and the program are built under that sanitizer.
 # The library is built by the nightly crates/wz-fuzz/rust-toolchain.toml pins, with `-Zsanitizer` and
-# its standard library rebuilt under it (`-Zbuild-std`, for the host's own target, so it lives in a
-# target directory of its own). The program is compiled with the C compiler's `-fsanitize` and linked
-# against the sanitizer runtime that nightly ships, linked whole and its symbols exported: the
+# its standard library rebuilt under it (`-Zbuild-std`, for the host's own target), since rustc
+# refuses to link crates built with another sanitizer. The library without `std` keeps its own
+# profile and configuration (the dev profile unwinds, and a library without `std` cannot), so the
+# standard library is rebuilt with the abort runtime that profile asks for, in a target directory
+# of its own, which keeps the build without a sanitizer from being replaced by it. The program is
+# compiled with the C compiler's `-fsanitize` and linked against the sanitizer runtime that nightly ships, linked whole and its symbols exported: the
 # library's instrumentation calls into the runtime of the compiler that instrumented it, which a
 # system compiler's own runtime can be older than.
 #
@@ -120,14 +123,14 @@ sanitizer="${WZ_PICO_SANITIZER:-}"
 case "$sanitizer" in
     "") ;;
     undefined)
-        if [ "$os" != Linux ] || [ "$form" != std ]; then
-            echo "pico-c-program: WZ_PICO_SANITIZER is read on Linux, for the library with \`std\`" >&2
+        if [ "$os" != Linux ]; then
+            echo "pico-c-program: WZ_PICO_SANITIZER is read on Linux" >&2
             exit 2
         fi
         ;;
     thread | address)
-        if [ "$os" != Linux ] || [ "$form" != std ]; then
-            echo "pico-c-program: WZ_PICO_SANITIZER is read on Linux, for the library with \`std\`" >&2
+        if [ "$os" != Linux ]; then
+            echo "pico-c-program: WZ_PICO_SANITIZER is read on Linux" >&2
             exit 2
         fi
         RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"$/\1/p' crates/wz-fuzz/rust-toolchain.toml)"
@@ -200,8 +203,14 @@ if [ "$sanitizer" = thread ] || [ "$sanitizer" = address ]; then
         say "pico-program-probe on ${os}: rustc named no host target NOT-MEASURED"
         exit 1
     fi
-    engine_args+=(-Zbuild-std --target "$host_triple")
-    lib_dir="$WZ_ARTIFACTS/crates/target/$host_triple/debug"
+    if [ "$form" = nostd ]; then
+        sanitized_dir="$WZ_ARTIFACTS/crates/target/sanitizer-$sanitizer"
+        engine_args+=(-Zbuild-std=std,panic_abort --target-dir "$sanitized_dir")
+        lib_dir="$sanitized_dir/$host_triple/capi-nostd"
+    else
+        engine_args+=(-Zbuild-std --target "$host_triple")
+        lib_dir="$WZ_ARTIFACTS/crates/target/$host_triple/debug"
+    fi
 fi
 feature_args=()
 if [ -n "$build_features" ]; then
