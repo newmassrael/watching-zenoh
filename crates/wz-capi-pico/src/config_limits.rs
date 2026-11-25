@@ -92,12 +92,11 @@ pub(crate) fn state_over(text: Option<&str>, stated: &mut Stated) -> Result<(), 
     // `char`'s pulls in the string searcher. No value states nothing, as an empty one does.
     // Walked by hand rather than through a splitting iterator, whose end states each reached the
     // trim apart.
-    let mut rest = Some(text.unwrap_or_default().as_bytes());
-    while let Some(text) = rest {
-        let (item, after) = match split_at_first(text, b',') {
-            Some((item, after)) => (item, Some(after)),
-            None => (text, None),
-        };
+    // The text after the last comma is its last item, and an empty rest holds none: an item
+    // that is empty states nothing, so a text that ends in a comma loses nothing by the stop.
+    let mut rest = text.unwrap_or_default().as_bytes();
+    while !rest.is_empty() {
+        let (item, after) = split_at_first(rest, b',').unwrap_or((rest, Default::default()));
         rest = after;
         let item = trimmed(item);
         if item.is_empty() {
