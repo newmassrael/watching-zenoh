@@ -435,6 +435,56 @@ pub fn canonize_parts_uninit<'o>(
     Ok(unsafe { core::slice::from_raw_parts(out.as_ptr().cast::<u8>(), len) })
 }
 
+/// How a key made of parts takes a text that is not in canon form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartsForm {
+    /// The canonical form is the key.
+    Canonized,
+    /// Only a text that is its own canonical form is a key: concatenation, which rewrites nothing.
+    AsGiven,
+}
+
+/// Why [`canonize_parts_as`] made no key of its parts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartsRefusal {
+    /// The canonizer refused the text for this cause, under either form.
+    Canon(KeyexprCanonError),
+    /// Under [`PartsForm::AsGiven`], a text with a canonical form that is not that form.
+    NotAsGiven,
+    /// A form that is not UTF-8, which only parts that are not UTF-8 make.
+    NotText,
+}
+
+/// The key the text `parts` make, read in order as one text, written into `out` as
+/// [`canonize_parts_uninit`] writes it and taken as `form` says, as text. The one body every
+/// builder of a key from parts (a concatenation, a join, a canonizing constructor) holds its
+/// text to, so each keeps only what it stores; nothing is copied or allocated.
+pub fn canonize_parts_as<'o>(
+    parts: &[&[u8]],
+    out: &'o mut [MaybeUninit<u8>],
+    dialect: KeyexprDialect,
+    form: PartsForm,
+) -> Result<&'o str, PartsRefusal> {
+    let canon = canonize_parts_uninit(parts, out, dialect).map_err(PartsRefusal::Canon)?;
+    if form == PartsForm::AsGiven && !spelled_by(parts, canon) {
+        return Err(PartsRefusal::NotAsGiven);
+    }
+    core::str::from_utf8(canon).map_err(|_| PartsRefusal::NotText)
+}
+
+/// Whether `form` is the text `parts` make, read part by part where each lies, so the text is
+/// not copied to be compared.
+fn spelled_by(parts: &[&[u8]], form: &[u8]) -> bool {
+    let mut rest = form;
+    for part in parts {
+        match rest.strip_prefix(*part) {
+            Some(after) => rest = after,
+            None => return false,
+        }
+    }
+    rest.is_empty()
+}
+
 /// `src` written over the start of `dst`, as many bytes as both hold, and how many that is.
 fn write_bytes(dst: &mut [MaybeUninit<u8>], src: &[u8]) -> usize {
     let n = src.len().min(dst.len());
@@ -1582,6 +1632,73 @@ mod tests {
         assert_eq!(
             canonize_parts_uninit(&refused, &mut room, KeyexprDialect::Pico),
             Err(KeyexprCanonError::ContainsSharpOrQmark)
+        );
+    }
+
+    /// A key made of parts is its form under `Canonized`, and under `AsGiven` only when the
+    /// parts already spell the form; a refusal of the canonizer is named under both, and a form
+    /// that is not text is refused. Turned red by `spelled_by` reading one part too few, or
+    /// the `AsGiven` check run under `Canonized`.
+    #[test]
+    fn a_key_of_parts_is_taken_as_its_form_says() {
+        let mut room = [MaybeUninit::<u8>::uninit(); 32];
+        let rewritten: [&[u8]; 2] = [b"a/x$*", b"$*/b"];
+        assert_eq!(
+            canonize_parts_as(
+                &rewritten,
+                &mut room,
+                KeyexprDialect::Pico,
+                PartsForm::Canonized
+            ),
+            Ok("a/x$*/b")
+        );
+        assert_eq!(
+            canonize_parts_as(
+                &rewritten,
+                &mut room,
+                KeyexprDialect::Pico,
+                PartsForm::AsGiven
+            ),
+            Err(PartsRefusal::NotAsGiven)
+        );
+        let canon: [&[u8]; 3] = [b"a/b", b"/", b"c"];
+        for form in [PartsForm::Canonized, PartsForm::AsGiven] {
+            assert_eq!(
+                canonize_parts_as(&canon, &mut room, KeyexprDialect::Pico, form),
+                Ok("a/b/c")
+            );
+        }
+        let short: [&[u8]; 2] = [b"a/b", b"c"];
+        assert_eq!(
+            canonize_parts_as(&short, &mut room, KeyexprDialect::Pico, PartsForm::AsGiven),
+            Ok("a/bc")
+        );
+        let refused: [&[u8]; 2] = [b"a", b"//b"];
+        for form in [PartsForm::Canonized, PartsForm::AsGiven] {
+            assert_eq!(
+                canonize_parts_as(&refused, &mut room, KeyexprDialect::Pico, form),
+                Err(PartsRefusal::Canon(KeyexprCanonError::EmptyChunk))
+            );
+        }
+        let mut tight = [MaybeUninit::<u8>::uninit(); 3];
+        assert_eq!(
+            canonize_parts_as(
+                &canon,
+                &mut tight,
+                KeyexprDialect::Pico,
+                PartsForm::Canonized
+            ),
+            Err(PartsRefusal::Canon(KeyexprCanonError::ExceedsCapacity))
+        );
+        let bytes: [&[u8]; 1] = [b"a/\xff"];
+        assert_eq!(
+            canonize_parts_as(
+                &bytes,
+                &mut room,
+                KeyexprDialect::Pico,
+                PartsForm::Canonized
+            ),
+            Err(PartsRefusal::NotText)
         );
     }
 

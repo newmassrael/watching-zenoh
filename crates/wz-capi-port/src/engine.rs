@@ -419,7 +419,12 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal>;
 
-    /// Retract subscriber `id`. Retracting one already retracted does nothing.
+    /// Retract subscriber `id`, a liveliness subscriber's too. Returns once the callback the
+    /// declaration was given has been let go of, its drop run, as zenoh-pico's undeclare waits for
+    /// the callbacks in flight (`_z_sync_group_wait`), unless it is made from inside a subscriber
+    /// callback on this thread, which returns at once and leaves the callback to the call that ends
+    /// last. The engine keeps this, so every ABI over it means the same. Retracting one already
+    /// retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
 
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
@@ -831,8 +836,8 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
 
 /// What holds a session's engine for as long as it is held, and reaches it without holding it
 /// ([`Self::Handle`]): a count of an engine of the heap (`Arc`, reached by a `Weak`), or of one an
-/// engine places in its session's own memory, reached through a row of the process's table
-/// ([`crate::reach::ReachEngine`]). What keeps an engine generic over this keeps either, so an
+/// engine places in its session's own memory, reached through a row of a table of the process its
+/// own crate keeps. What keeps an engine generic over this keeps either, so an
 /// engine that takes no memory of the heap is not made to take it for its holders.
 pub trait EngineHolder: Clone + Send + Sync + 'static + Deref<Target: SessionEngine> {
     /// What reaches the engine without keeping it standing.

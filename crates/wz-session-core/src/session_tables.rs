@@ -1612,6 +1612,9 @@ impl<P: Storage> Declaring<'_, P> {
 
     /// The id and the key of an entity declared on `text` as `form` asks, into a table with
     /// room for its row (`room`): the first refusal met when there is none, with nothing kept.
+    // Out of line: one body admits every kind of entity, so each kind a build links adds only the
+    // insert of its own row (`Self::declare`), not another copy of the key's admission.
+    #[inline(never)]
     fn keyed(
         &mut self,
         room: bool,

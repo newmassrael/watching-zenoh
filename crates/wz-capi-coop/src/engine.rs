@@ -55,7 +55,6 @@ use crate::arena::{
 };
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundGate, RoundRows};
 use crate::RowPolicy;
-use wz_capi_port::reach::{ReachEngine, RowClaim};
 use wz_runtime_coop::kept::Shared;
 use wz_session_core::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
@@ -203,6 +202,9 @@ use deliveries::Deliveries;
 
 mod hold;
 pub use hold::{EngineHandle, EngineHold};
+mod reach;
+use reach::ReachEngine;
+pub use reach::RowClaim;
 
 mod ledger;
 use ledger::{Ledger, Seen};
@@ -308,7 +310,7 @@ pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
 use {
     crate::round::LegHolders,
     get::{EndedLegs, GetKind, GetPlane, LegRows},
-    wz_capi_port::cancellation::{CancellableFan, Canceller, FanCanceller, FanKey},
+    wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey},
     wz_capi_port::ReplyCallback,
     wz_session_core::query_options::QueryOptionsOf,
     wz_session_core::registry_error::RegisterError,
@@ -556,7 +558,7 @@ pub enum OpenError {
     /// was reserved, bound, joined or dialled.
     SnResolution(OutsideDomain<SnResolution>),
     /// Every row of the process's table of engines (the build's `ENGINE_ROWS`, one for each
-    /// session open at once, [`wz_capi_port::reach`]) holds the engine of a session open now.
+    /// session open at once, [`RowClaim`]) holds the engine of a session open now.
     /// Nothing was reserved, bound, joined or dialled.
     NoEngineRow,
 }
@@ -1128,7 +1130,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     pub(crate) takes: Takes,
     /// The row of the process's table the engine is reached through without being held
     /// ([`EngineHandle`]), taken out at the session's close.
-    reach: ReachEngine,
+    reach: ReachEngine<Self>,
 }
 
 /// What a step of the session came to ([`CoopEngine::step`]).
@@ -4657,7 +4659,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         key_ids.admit(&policy)?;
         // The row the engine is reached through, taken before anything is reserved: a process
         // whose rows are all held opens no more, and reserves nothing for it.
-        let row = ReachEngine::claim().ok_or(OpenError::NoEngineRow)?;
+        let row = RowClaim::take().ok_or(OpenError::NoEngineRow)?;
         // The runtime's tables are placed in the arena, so its plan holds their span.
         let tables = RuntimeTables::of::<C>(&config);
         let runtime_bytes = tables
@@ -4927,10 +4929,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
         let make = |this: NonNull<Self>| {
-            let reachable: NonNull<dyn wz_capi_port::reach::Reachable> = this;
-            // SAFETY: the engine is taken out of its row at its close and first in its drop,
-            // before its place is given back.
-            let reach = unsafe { row.fill(reachable) };
+            // SAFETY: `this` is where the `Shared` the open places lays the engine, which is
+            // taken out of its row at its close and first in its drop, before its place is given
+            // back.
+            let reach = unsafe { row.fill(this) };
             // The round hands the queries it holds to their queryables through the engine,
             // which sends what they answer.
             #[cfg(feature = "queryable")]
@@ -6376,7 +6378,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(fan) = fan else {
             return Ok(None);
         };
-        if fan.attach(Canceller::Engine(self.reach)) {
+        if fan.attach(self.reach.canceller()) {
             Ok(Some(fan.key()))
         } else {
             Err(FanCancelled)

@@ -177,6 +177,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/liveliness.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/one_thread_lock.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/query.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/reach.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/held.rs` | S7 | |
@@ -364,7 +365,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/os.rs` | S7 | |
 | `crates/wz-capi-port/src/peers.rs` | S7 | |
 | `crates/wz-capi-port/src/query.rs` | S7 | |
-| `crates/wz-capi-port/src/reach.rs` | S7 | |
 | `crates/wz-capi-port/src/refusal.rs` | S7 | |
 | `crates/wz-capi-port/src/runtime_limits.rs` | S7 | |
 | `crates/wz-capi-port/src/scout_ask.rs` | S7 | |

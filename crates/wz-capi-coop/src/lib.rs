@@ -152,7 +152,7 @@ mod tests;
 pub use engine::ClockMoves;
 pub use engine::{
     ClockMovesWord, ComposedLinks, CoopConfig, CoopDrive, CoopEngine, EndpointRefusal,
-    EngineHandle, EngineHold, KeyWireFormRefused, OpenError, OpenKeyIds, Refusal,
+    EngineHandle, EngineHold, KeyWireFormRefused, OpenError, OpenKeyIds, Refusal, RowClaim,
 };
 /// Why the session's runtime had no task for a link or a group ([`OpenError::NoTask`]).
 pub use wz_runtime_coop::executor::SpawnRefusal;

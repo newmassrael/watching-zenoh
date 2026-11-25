@@ -16,7 +16,9 @@ use crate::prelude::*;
 
 use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, SessionKeys, WireKey};
 use wz_session_core::declare_form::RetractionKey;
-use wz_session_core::keyexpr_canon::KeyexprCanonError;
+use wz_session_core::keyexpr_canon::{
+    canonize_parts_as, KeyexprCanonError, KeyexprDialect, PartsForm, PartsRefusal,
+};
 use wz_session_core::WhatAmI;
 
 use crate::abi::{
@@ -1209,7 +1211,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
             keyexpr,
             core::ptr::null(),
             &[text.as_bytes()],
-            Form::Canonized,
+            PartsForm::Canonized,
         ) {
             Ok(written) => {
                 *len = written;
@@ -1359,7 +1361,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
             key,
             left,
             &[head.as_bytes(), tail.as_bytes()],
-            Form::AsGiven,
+            PartsForm::AsGiven,
         )
         .err()
         .unwrap_or(Z_OK)
@@ -1383,15 +1385,18 @@ unsafe fn extended_from(
 }
 
 /// The body `z_keyexpr_concat`, `z_keyexpr_join` and the owned canonizing constructor share, out
-/// of line so no export holds a copy of it: the text `parts` make, read in order where each lies,
-/// canonized into a buffer of the bound and stored in `key` keeping `left`'s declaration
-/// ([`extended_from`]), a literal for a null `left`. The bound every key of this build is held to
-/// is held to the form and not to the text, as pico keeps only the form: a long text whose form is
-/// short is a key, and a form past the bound is refused as a key past pico's heap is
-/// (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`, [`fits`]). A text no canonizing makes a key of, and under
-/// [`Form::AsGiven`] a text that is not its own form, is answered as `form` says. The form's
-/// length on success; `key` is left as it was on a refusal. The join takes no allocation and no
-/// copy of its text.
+/// of line so no export holds a copy of it: the key the text `parts` make, taken as `form` says
+/// by [`canonize_parts_as`] into a buffer of the bound, stored in `key` keeping `left`'s
+/// declaration ([`extended_from`]), a literal for a null `left`. The bound is held to the form
+/// and not to the text, as pico keeps only the form: a form past the bound is refused as a key past
+/// pico's heap is (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`, [`fits`]). A text no canonizing makes a key of
+/// is answered with pico's canonize status for the cause under [`PartsForm::Canonized`], as its
+/// join and its canonizing constructor answer (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `_Z_CLEAN_RETURN_IF_ERR(_z_keyexpr_canonize((char *)key->_keyexpr._slice.start, &key->_keyexpr._slice.len),`),
+/// and every refusal under [`PartsForm::AsGiven`] with pico's `_Z_ERR_INVALID` (`Z_EINVAL`), the
+/// one refusal its concatenation has (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `_Z_ERROR_RETURN(_Z_ERR_INVALID);`). The form's length on success; `key` is left as it was on
+/// a refusal.
 ///
 /// # Safety
 /// `key` must be valid and writable; `left` must be null or a live loaned keyexpr.
@@ -1400,66 +1405,26 @@ unsafe fn store_canonized(
     key: *mut z_owned_keyexpr_t,
     left: *const z_loaned_keyexpr_t,
     parts: &[&[u8]],
-    form_of: Form,
+    form: PartsForm,
 ) -> Result<usize, ZResult> {
     // Left unfilled: the walk writes the form from the room's first byte and reads no further than
     // it wrote, and a room of the bound filled first is a write of the whole bound at every call.
     let mut room =
         [core::mem::MaybeUninit::<u8>::uninit(); wz_session_core::caps::MAX_KEYEXPR_BYTES];
-    let form = match wz_session_core::keyexpr_canon::canonize_parts_uninit(
-        parts,
-        &mut room,
-        wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
-    ) {
-        Ok(form) => form,
-        Err(KeyexprCanonError::ExceedsCapacity) => {
-            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
-        }
-        Err(err) => {
-            return Err(match form_of {
-                Form::Canonized => pico_canon_status(&err),
-                Form::AsGiven => Z_EINVAL,
-            })
-        }
-    };
-    if matches!(form_of, Form::AsGiven) && !spelled_by(parts, form) {
-        return Err(Z_EINVAL);
-    }
-    // The parts are whole `str` values, and the form of UTF-8 is UTF-8.
-    let Some(canon) = crate::abi::text_of(form) else {
-        return Err(Z_ERR_INVALID);
-    };
+    let canon = canonize_parts_as(parts, &mut room, KeyexprDialect::Pico, form).map_err(
+        |refusal| match (refusal, form) {
+            (PartsRefusal::Canon(KeyexprCanonError::ExceedsCapacity), _) => {
+                crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
+            }
+            (PartsRefusal::Canon(err), PartsForm::Canonized) => pico_canon_status(&err),
+            (PartsRefusal::NotText, _) => Z_ERR_INVALID,
+            _ => Z_EINVAL,
+        },
+    )?;
     match store_owned_keyexpr(key, extended_from(left, canon)?) {
-        Z_OK => Ok(form.len()),
+        Z_OK => Ok(canon.len()),
         code => Err(code),
     }
-}
-
-/// How a door that makes a key of the text `parts` make takes a text not in canon form.
-#[derive(Clone, Copy)]
-enum Form {
-    /// Canonized, and a text no canonizing makes a key of answered with pico's canonize status for
-    /// the cause ([`pico_canon_status`]), as its join and its canonizing constructor answer
-    /// (`vendor/zenoh-pico/src/session/keyexpr.c` @
-    /// `_Z_CLEAN_RETURN_IF_ERR(_z_keyexpr_canonize((char *)key->_keyexpr._slice.start, &key->_keyexpr._slice.len),`).
-    Canonized,
-    /// Taken only as it is: a text not in canon form, whatever the cause, is refused with pico's
-    /// `_Z_ERR_INVALID` (`Z_EINVAL`), the one refusal its concatenation has
-    /// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `_Z_ERROR_RETURN(_Z_ERR_INVALID);`).
-    AsGiven,
-}
-
-/// Whether `form` is the text `parts` make, read part by part where each lies, so the text is
-/// not copied to be compared.
-fn spelled_by(parts: &[&[u8]], form: &[u8]) -> bool {
-    let mut rest = form;
-    for part in parts {
-        match rest.strip_prefix(*part) {
-            Some(after) => rest = after,
-            None => return false,
-        }
-    }
-    rest.is_empty()
 }
 
 /// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
@@ -1485,7 +1450,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
             key,
             left,
             &[l.as_bytes(), b"/".as_slice(), r.as_bytes()],
-            Form::Canonized,
+            PartsForm::Canonized,
         )
         .err()
         .unwrap_or(Z_OK)

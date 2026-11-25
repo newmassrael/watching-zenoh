@@ -64,7 +64,6 @@ use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 
 use crate::os::{Condvar, Mutex, MutexGuard};
-use crate::reach::ReachEngine;
 use crate::sync::Lock;
 
 /// The token's state, under one lock so "cancel has started", "the fans are off the list" and
@@ -234,31 +233,59 @@ pub trait FanCanceller: Send + Sync {
     }
 }
 
+/// What names a session's engine in the table of engines its own crate keeps, which keeps nothing
+/// of the engine standing: a row and the generation the row was at when the engine was put in it.
+/// The port only hands it back to that crate ([`Canceller::Engine`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineAt {
+    /// The row of the table.
+    pub row: usize,
+    /// The generation of the row the engine was put in at.
+    pub generation: u32,
+}
+
+/// What a fan tells the engine that ends its legs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FanEnd {
+    /// The fan was cancelled: end its legs ([`FanCanceller::cancel_fan`]).
+    Cancel(FanKey),
+    /// The fan was dropped uncancelled ([`FanCanceller::fan_over`]).
+    Over(FanKey),
+}
+
+impl FanEnd {
+    /// Tell `canceller` this end.
+    pub fn tell<C: FanCanceller + ?Sized>(self, canceller: &C) {
+        match self {
+            Self::Cancel(key) => canceller.cancel_fan(key),
+            Self::Over(key) => canceller.fan_over(key),
+        }
+    }
+}
+
 /// The engine end a fan is attached to: one that stands for the whole process, or a session's
-/// engine reached through its row ([`ReachEngine`]), which keeps nothing of the engine standing
+/// engine named in its crate's table ([`EngineAt`]), which keeps nothing of the engine standing
 /// and reaches nothing once its session closed.
 #[derive(Clone, Copy)]
 pub enum Canceller {
     /// A canceller of the process's, which every engine of a kind shares.
     Static(&'static dyn FanCanceller),
-    /// The engine in the row the reach names, ended through [`crate::reach::Reachable::canceller`].
-    Engine(ReachEngine),
+    /// The engine `at` names, told a fan's end by `ends`, its crate's: under a count of the
+    /// engine taken for the call while its session is open, and not at all once it closed.
+    Engine {
+        /// The engine, in its crate's table.
+        at: EngineAt,
+        /// What reaches the engine `at` names and tells it the end.
+        ends: fn(EngineAt, FanEnd),
+    },
 }
 
 impl Canceller {
-    /// Run `with` on the canceller while it can be reached: at once for a static one, under a
-    /// count of the engine taken for the call for an engine's, and not at all for an engine whose
-    /// session closed.
-    fn reached(self, with: impl FnOnce(&dyn FanCanceller)) {
+    /// Tell the canceller `end`: at once for a static one, through its crate for an engine's.
+    fn tell(self, end: FanEnd) {
         match self {
-            Self::Static(canceller) => with(canceller),
-            Self::Engine(reach) => {
-                if let Some(engine) = reach.reach() {
-                    if let Some(canceller) = engine.canceller() {
-                        with(canceller);
-                    }
-                }
-            }
+            Self::Static(canceller) => end.tell(canceller),
+            Self::Engine { at, ends } => ends(at, end),
         }
     }
 }
@@ -273,7 +300,7 @@ struct Cancelling {
 impl Cancelling {
     fn run(self) {
         if let (Some(key), Some(canceller)) = (self.key, self.canceller) {
-            canceller.reached(|canceller| canceller.cancel_fan(key));
+            canceller.tell(FanEnd::Cancel(key));
         }
     }
 }
@@ -451,7 +478,7 @@ impl Drop for CancellableFan {
             .state
             .with(|state| (state.canceller.take(), state.key_at(at)));
         if let Some(canceller) = canceller {
-            canceller.reached(|canceller| canceller.fan_over(key));
+            canceller.tell(FanEnd::Over(key));
         }
         let Some(token) = self.token.get_mut().take() else {
             return;
@@ -636,6 +663,35 @@ mod tests {
             engine.taken(),
             vec![(key, "cancel")],
             "a cancelled fan is not over again at its drop"
+        );
+    }
+    /// What the engine-end canceller was told, with the engine it named.
+    static TOLD: Mutex<Vec<(EngineAt, FanEnd)>> = Mutex::new(Vec::new());
+
+    fn told(at: EngineAt, end: FanEnd) {
+        TOLD.lock().unwrap().push((at, end));
+    }
+
+    /// A fan attached to an engine named in its crate's table hands that crate the name and the
+    /// end: a cancel as a cancel of the fan's key, a drop uncancelled as the fan being over.
+    /// Turned red by an engine end told of the wrong engine, or the two ends swapped.
+    #[test]
+    fn an_engine_named_in_its_crates_table_is_told_the_fans_end_through_its_crate() {
+        let at = EngineAt {
+            row: 3,
+            generation: 8,
+        };
+        let cancelled = CancellableFan::new();
+        assert!(cancelled.attach(Canceller::Engine { at, ends: told }));
+        let key = cancelled.key();
+        cancelled.cancel();
+        let dropped = CancellableFan::new();
+        assert!(dropped.attach(Canceller::Engine { at, ends: told }));
+        let over = dropped.key();
+        drop(dropped);
+        assert_eq!(
+            *TOLD.lock().unwrap(),
+            vec![(at, FanEnd::Cancel(key)), (at, FanEnd::Over(over))]
         );
     }
 }

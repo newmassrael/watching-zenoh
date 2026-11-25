@@ -352,7 +352,8 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal> {
-        self.declared_on_wire(wire, |wire| {
+        let (sink, release) = crate::faces::face_sink(sink);
+        let id = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -360,9 +361,11 @@ impl SessionEngine for SharedSession {
                 allowed_origin,
                 LinkRestriction::Any,
                 retraction,
-                crate::faces::face_sink(sink),
+                sink,
             )
-        })
+        })?;
+        self.keep_sink_release(id, release);
+        Ok(id)
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
@@ -634,16 +637,19 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        self.declared_on_wire(wire, |wire| {
+        let (sink, release) = crate::faces::face_liveliness_sink(sink);
+        let id = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
                 wire,
                 options,
                 LinkRestriction::Any,
-                crate::faces::face_liveliness_sink(sink),
+                sink,
             )
-        })
+        })?;
+        self.keep_sink_release(id, release);
+        Ok(id)
     }
 
     #[cfg(feature = "query")]
@@ -735,7 +741,8 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal> {
-        self.declared_on_wire(wire, |wire| {
+        let (sink, release) = crate::faces::face_sink(sink);
+        let id = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -743,9 +750,11 @@ impl SessionEngine for SharedSession {
                 allowed_origin,
                 links,
                 retraction,
-                crate::faces::face_sink(sink),
+                sink,
             )
-        })
+        })?;
+        self.keep_sink_release(id, release);
+        Ok(id)
     }
 
     #[cfg(feature = "queryable")]
@@ -807,16 +816,19 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        self.declared_on_wire(wire, |wire| {
+        let (sink, release) = crate::faces::face_liveliness_sink(sink);
+        let id = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
                 wire,
                 options,
                 links,
-                crate::faces::face_liveliness_sink(sink),
+                sink,
             )
-        })
+        })?;
+        self.keep_sink_release(id, release);
+        Ok(id)
     }
 
     #[cfg(feature = "liveliness-get")]
