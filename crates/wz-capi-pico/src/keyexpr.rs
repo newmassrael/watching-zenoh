@@ -9,7 +9,7 @@
 //! must keep alive while the keyexpr is used (the pico contract). `z_put` /
 //! `z_declare_*` read the borrowed UTF-8 back via `keyexpr_str`.
 
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use core::ffi::{c_char, c_void, CStr};
 use core::mem::ManuallyDrop;
 
@@ -166,7 +166,7 @@ pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine)
 pub(crate) struct WireDeclaration {
     /// The session the declaration was made on. Let go of only by the drop, so a holder's drop
     /// glue is the one call to it.
-    session: ManuallyDrop<Weak<Engine>>,
+    session: ManuallyDrop<crate::session::EngineHandle>,
     /// Taken only by the drop.
     hold: ManuallyDrop<KeyHold>,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.

@@ -68,7 +68,7 @@ use crate::prelude::*;
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{z_loaned_session_t, Engine};
+use crate::session::{z_loaned_session_t, EngineHandle};
 
 // The enum-typed option fields (`z_congestion_control_t`, `z_priority_t`) are in
 // `crate::qos`. Both are documented "Deprecated: ignored, taken from query" on the
@@ -353,7 +353,7 @@ impl QueryText<[u8]> {
 /// session holds none of the session's memory. The query's key and parameters are the copy's own
 /// ([`QueryMarshal::kept_texts`]).
 struct Deferred {
-    engine: alloc::sync::Weak<Engine>,
+    engine: EngineHandle,
     id: wz_capi_port::HeldQueryId,
 }
 
@@ -447,7 +447,7 @@ pub(crate) struct QueryMarshal {
     /// The session a query is kept on, lent with [`Self::holder`] for the callback's call by the
     /// queryable's place, which keeps it weakly ([`QueryableKept`]), as an escape keeps it
     /// ([`Deferred`]).
-    session: Option<NonNull<alloc::sync::Weak<Engine>>>,
+    session: Option<NonNull<EngineHandle>>,
     /// R2953 — whether the session asked this query of itself: the half of
     /// the query's route the rid alone does not name.
     is_local: bool,
@@ -549,13 +549,13 @@ impl QueryMarshal {
     ///
     /// # Safety
     /// The marshal is dropped before the borrow of `session` ends.
-    unsafe fn with_session(mut self, session: &alloc::sync::Weak<Engine>) -> Self {
+    unsafe fn with_session(mut self, session: &EngineHandle) -> Self {
         self.session = Some(NonNull::from(session));
         self
     }
 
     /// The session the face's queries are kept on, while the dispatch lends it.
-    fn session(&self) -> Option<&alloc::sync::Weak<Engine>> {
+    fn session(&self) -> Option<&EngineHandle> {
         // SAFETY: `Self::with_session`'s contract: the pointer is live for as long as this marshal.
         self.session.map(|session| unsafe { &*session.as_ptr() })
     }
@@ -838,7 +838,7 @@ fn hand_query(
     view: &dyn QueryView,
     out: &mut dyn ReplyOut,
     holder: &dyn QueryHolder,
-    session: &alloc::sync::Weak<Engine>,
+    session: &EngineHandle,
 ) {
     let call = match closure.call {
         Some(f) => f,
@@ -1356,7 +1356,7 @@ pub(crate) struct QueryableKept {
     _session: Option<crate::ffi::HeldIn>,
     /// The session the queryable is declared on, which a query its callback keeps holds while the
     /// program does: weakly here, so the row the session keeps this in holds no count of it.
-    engine: alloc::sync::Weak<Engine>,
+    engine: EngineHandle,
 }
 
 /// A queryable's place: its state, which its owner lets go of, and what its row keeps past it; the
@@ -2564,13 +2564,13 @@ mod tests {
     /// A session that is gone, as a copy made by a test holds it: a reply on the copy is refused as
     /// on a closed session, and its drop releases nothing.
     #[cfg(feature = "engine-tokio")]
-    fn no_session() -> alloc::sync::Weak<Engine> {
+    fn no_session() -> EngineHandle {
         alloc::sync::Weak::<wz_capi_core::faces::SharedSession>::new()
     }
 
     /// As the tokio engine's: the cooperative engine's session is a type of its own.
     #[cfg(not(feature = "engine-tokio"))]
-    fn no_session() -> alloc::sync::Weak<Engine> {
+    fn no_session() -> EngineHandle {
         alloc::sync::Weak::new()
     }
 
@@ -2772,7 +2772,7 @@ mod tests {
     fn clone_in_callback(
         view: &FakeQuery,
         holder: &dyn QueryHolder,
-        session: Option<&alloc::sync::Weak<Engine>>,
+        session: Option<&EngineHandle>,
     ) -> (ZResult, z_owned_query_t) {
         // SAFETY: the marshal is dropped before `view`, `holder` and `session`.
         let mut marshal = unsafe { QueryMarshal::new(view).with_holder(holder) };

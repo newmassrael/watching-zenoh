@@ -914,6 +914,11 @@ pub(crate) type Engine = wz_capi_coop::CoopEngine<PicoLinks, SessionClockOf>;
 /// `Deref`. The one name every module holds the engine by, whichever engine the build runs.
 pub(crate) type EngineHold = alloc::sync::Arc<Engine>;
 
+/// A reach of the session's engine that keeps nothing of it standing: what a holder that must not
+/// keep the session open holds (a key expression the program keeps, a query kept past its
+/// callback), and `upgrade`s to an [`EngineHold`] for the length of a use, while it can.
+pub(crate) type EngineHandle = alloc::sync::Weak<Engine>;
+
 /// The engine behind a session handle as the session holds it, for the length of one call: a door
 /// that only passes it on, or keeps it in an object that clones it, takes no count of its own, and
 /// so has none to let go of on each of its ways out.

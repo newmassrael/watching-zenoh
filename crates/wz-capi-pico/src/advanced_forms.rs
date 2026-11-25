@@ -35,7 +35,7 @@
 //! declaration stands for as long as some face still holds an entity on it and
 //! is retracted with the last — which is when pico lets go of a key it counted.
 
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
@@ -49,7 +49,7 @@ use wz_session_core::WhatAmI;
 
 use crate::ffi::{CountIn, KeptIn};
 use crate::keyexpr::DeclaredKeyexpr;
-use crate::session::Engine;
+use crate::session::EngineHandle;
 use crate::write_filter::PicoSession;
 
 /// How many entities an advanced subscriber declares ([`Entity`]).
@@ -150,7 +150,7 @@ unsafe fn vacate(context: *mut c_void) {
 pub(crate) struct PicoSubscriberForms {
     /// Weak, because the registry holds these forms (they are in the entry it
     /// replays) and a strong reference back is a session that can never end.
-    shared: Weak<Engine>,
+    shared: EngineHandle,
     mode: WhatAmI,
     /// The caller's key: declared when the caller's is, a literal otherwise.
     base: DeclaredKeyexpr,
