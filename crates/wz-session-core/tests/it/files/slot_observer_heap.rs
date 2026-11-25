@@ -442,7 +442,7 @@ fn lent_peers(each: usize) -> PeerTables<Lent> {
         .lend_keys(1024, SessionLimits::defaults().max_keyexpr_bytes_held())
         .expect("the arena is laid out for the key arena");
     let mut pools =
-        PeerPools::lent(&mut arena, pool_rows).expect("the arena is laid out for the pools");
+        PeerPools::lent(&mut arena, keys, pool_rows).expect("the arena is laid out for the pools");
     PeerTables::<Lent>::lent(
         &mut arena,
         keys,

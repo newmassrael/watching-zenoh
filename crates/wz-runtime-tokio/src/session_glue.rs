@@ -4293,12 +4293,16 @@ mod negotiated_mtu_tests {
         actions.handle_inbound(&wire).expect("parse InitAck");
         actions.enter_established();
         assert_eq!(
-            actions.negotiated_tx_limits_for(Reliability::Reliable).0,
-            BATCH - length
+            actions
+                .negotiated_tx_limits_for(Reliability::Reliable)
+                .map(|(budget, _)| budget),
+            Some(BATCH - length)
         );
         assert_eq!(
-            actions.negotiated_tx_limits_for(Reliability::BestEffort).0,
-            COMPANION
+            actions
+                .negotiated_tx_limits_for(Reliability::BestEffort)
+                .map(|(budget, _)| budget),
+            Some(COMPANION)
         );
         assert_eq!(actions.batch_envelope_bytes_for(Reliability::BestEffort), 0);
         assert_eq!(actions.batch_envelope_bytes(), length);
@@ -4339,9 +4343,11 @@ mod negotiated_mtu_tests {
             crate::test_fixtures::recording_actions_length_prefixed(fixture_session_init_params());
         plain.handle_inbound(&wire).expect("parse InitAck");
         plain.enter_established();
+        let reliable = plain.negotiated_tx_limits_for(Reliability::Reliable);
+        assert!(reliable.is_some(), "established, the limits are settled");
         assert_eq!(
             plain.negotiated_tx_limits_for(Reliability::BestEffort),
-            plain.negotiated_tx_limits_for(Reliability::Reliable),
+            reliable,
             "a link without a companion sizes both classes the same"
         );
     }
@@ -6478,6 +6484,120 @@ mod link_congestion_tests {
         assert!(!actions.take_congestion_close(), "and taken once");
     }
 
+    /// A deferral the test turns on and off, counting the sends it was told were deferred.
+    struct TestDeferral {
+        defers: Arc<std::sync::atomic::AtomicBool>,
+        deferred: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl wz_session_core::send_deferral::SendDeferral for TestDeferral {
+        fn defers(&self) -> bool {
+            self.defers.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn deferred(&self) {
+            self.deferred
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Install a [`TestDeferral`] on `actions`, deferring from now on, and hand back its two
+    /// handles: whether it defers, and how many sends it was told were deferred.
+    fn deferring(
+        actions: &super::SessionLinkActions,
+    ) -> (
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let defers = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let deferred = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        actions.install_send_deferral(Box::new(TestDeferral {
+            defers: Arc::clone(&defers),
+            deferred: Arc::clone(&deferred),
+        }));
+        (defers, deferred)
+    }
+
+    /// Whether `frame` carries the text `key`.
+    fn names(frame: &[u8], key: &str) -> bool {
+        frame
+            .windows(key.len())
+            .any(|bytes| bytes == key.as_bytes())
+    }
+
+    /// A declaration made while its thread defers asks the link for no room, so the thread
+    /// waits for none however full the link is; it is written by the flush the thread owes once
+    /// it defers no more, which waits for room as the declaration would have.
+    #[test]
+    fn a_send_its_thread_defers_waits_for_no_room_and_leaves_at_the_flush() {
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        let (defers, deferred) = deferring(&actions);
+        let (asked, framed) = (link.asked().len(), link.frames().len());
+        link.set_room(LinkRoom::Congested);
+        actions
+            .send_declare_keyexpr(1, "home/k")
+            .expect("a deferred declaration is accepted");
+        assert_eq!(
+            link.asked().len(),
+            asked,
+            "the link was asked for no room: the thread waited for none"
+        );
+        assert_eq!(link.frames().len(), framed, "nothing reached the link");
+        assert_eq!(
+            deferred.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the owner is told the thread owes a flush"
+        );
+
+        defers.store(false, std::sync::atomic::Ordering::SeqCst);
+        link.set_room(LinkRoom::Free);
+        actions.flush_deferred_sends();
+        assert_eq!(
+            link.frames().len(),
+            framed + 1,
+            "the flush wrote the declaration"
+        );
+        assert_eq!(
+            link.last_asked(),
+            Some(RoomWait::Block {
+                wait_us: wz_session_core::session_actions::WAIT_BEFORE_CLOSE_US
+            }),
+            "and waited for room as a declaration does"
+        );
+        assert!(!actions.take_congestion_close(), "nothing was closed");
+    }
+
+    /// A send of a thread that does not defer leaves after what is queued: a put made after a
+    /// declaration was deferred goes out behind it, so a put on a key can never pass the
+    /// declaration that names it. The flush owed for the declaration then finds nothing left.
+    #[test]
+    fn a_send_made_after_a_deferred_one_leaves_after_it() {
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        let (defers, _) = deferring(&actions);
+        let framed = link.frames().len();
+        actions
+            .send_declare_keyexpr(1, "home/k")
+            .expect("a deferred declaration is accepted");
+        defers.store(false, std::sync::atomic::Ordering::SeqCst);
+        actions
+            .send_push_literal_qos("home/c", b"C", true, Priority::DEFAULT)
+            .expect("a put of a thread that does not defer");
+        let frames = link.frames();
+        let sent = frames.get(framed..).unwrap_or_default();
+        assert_eq!(sent.len(), 2, "the declaration and the put, one frame each");
+        assert!(
+            names(&sent[0], "home/k") && names(&sent[1], "home/c"),
+            "the deferred declaration leaves first, the put after it"
+        );
+        actions.flush_deferred_sends();
+        assert_eq!(
+            link.frames().len(),
+            framed + 2,
+            "the owed flush finds nothing left"
+        );
+    }
+
     /// A link whose blocking asks for room park the asking sender until the test lets it go (or
     /// [`PARKED_AT_MOST`] passes), so that sender holds its conduit meanwhile, as a sender waiting
     /// for a full lane does; a droppable ask is answered that the lane stayed congested for the
@@ -7267,11 +7387,10 @@ mod reconnect_tx_tests {
             3,
             "a rejected declare caches nothing"
         );
-        // Simulate the re-handshake reaching Established (the supervisor
-        // replays only after `drive_open_loop`; `record_established_at`
-        // re-opens the gate) — direct-stamp idiom shared with
-        // `reset_for_reopen_clears_handshake_scoped_state_only`.
-        actions.link.transport_available.open();
+        // The re-handshake reaches Established (the supervisor replays only after
+        // `drive_open_loop`): through the one door that settles the send limits and opens the
+        // gate, as a session does.
+        actions.enter_established();
         let replayed = actions
             .replay_declarations()
             .expect("replay over validated cache entries cannot reject");
@@ -7326,7 +7445,7 @@ mod reconnect_tx_tests {
     /// is held, and the declarations are in the cache and owed to the new peer.
     fn reopened(actions: &super::SessionLinkActions) {
         actions.reset_for_reopen();
-        actions.link.transport_available.open();
+        actions.enter_established();
     }
 
     /// With the policy off nothing is paced, and a paced replay that sends everything in one turn
@@ -7777,7 +7896,8 @@ mod reconnect_tx_tests {
             "the send is refused and the turn says so"
         );
         assert!(actions.paced_replay_running(), "the replay is still owed");
-        actions.link.transport_available.open();
+        // The link is established again.
+        actions.enter_established();
         let turn = actions.replay_turn(10).expect("the rest");
         assert_eq!(
             (turn.emitted, turn.finished),
@@ -7885,10 +8005,9 @@ mod reconnect_tx_tests {
             "the declaration cache IS the replay source — must survive"
         );
         // SN re-seed: the next emitted frame repeats the initial SN. The
-        // probe send happens post-re-handshake in production, so re-open
-        // the F2 transport gate first (Established re-entry does this via
-        // `record_established_at`).
-        actions.link.transport_available.open();
+        // probe send happens post-re-handshake in production, so the link is
+        // established again first, through the door a session takes.
+        actions.enter_established();
         let pre_reset_first_frame = driver.frame_bytes(0);
         actions
             .send_push_literal("home/x", b"p", true)
@@ -7981,7 +8100,7 @@ mod reconnect_tx_tests {
         // Register the bundle's own link into the aggregation set and mark it
         // live -> a surviving aggregate member (`live_link_count() == 1`).
         actions.register_first_link(actions.link.clone());
-        actions.link.transport_available.open();
+        actions.enter_established();
         assert_eq!(actions.live_link_count(), 1);
 
         // Advance the shared outbound SN mid-stream: 42, 43, 44 -> counter 45.

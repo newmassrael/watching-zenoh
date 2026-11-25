@@ -61,6 +61,29 @@
 //! `u8` keeps this module unconditional (no codec feature, no storage-profile
 //! generic) so every consumer reaches one copy of the rule, including builds
 //! whose codec set cannot construct an `ExtEntryOwned` at all.
+//!
+//! ## A declared extension whose body its reader refuses
+//!
+//! One refusal is not in the header. zenoh 1.10.2 reads each extension a network
+//! message or a zenoh body declares with that extension's own typed reader, as the
+//! chain walk meets it, and propagates what the reader refuses with `?`: a Push
+//! whose timestamp names the zid zero, a Request whose target is `3`, a Put whose
+//! source info is cut short is refused whole, exactly as one that does not decode
+//! (`commons/zenoh-codec/src/network/push.rs` @
+//! `let (t, ext): (ext::TimestampType, bool) = eodec.read(&mut *reader)?;`). The
+//! refusal is of EVERY entry the reader meets, not the one a reader of the chain
+//! then keeps: an earlier entry the last one supersedes is read, and refused, all
+//! the same. wz's chain decode reads an entry by its encoding alone (a ZInt, a
+//! length and bytes), so such an entry decodes; the readers of the chain used to
+//! read it as absent, which acted on a message upstream never delivers.
+//!
+//! [`judge_ext_entries`] judges the entries of a network or zenoh-body chain,
+//! headers and bodies, in chain order, and answers
+//! [`ExtAdmission::MalformedExt`] for a body the declared extension's reader
+//! refuses. The participant seams that judge a chain by its headers judge those
+//! chains by their entries instead, so the held, the lent and the walked forms of
+//! a message refuse the same bodies. A transport chain keeps the header rule: its
+//! bodies are the handshake's to read.
 
 use crate::ext_header::{ext_eid, EXT_ENC_MASK, EXT_FLAG_M};
 use wz_codecs::wire_const;
@@ -84,6 +107,11 @@ pub enum ExtAdmission {
     /// has no body shape. A participant MUST refuse the whole message, whatever
     /// the entry's `M` bit says; `eid` is the entry's identity.
     ReservedEncoding { eid: u8 },
+    /// The chain carries an extension the message declares whose body the
+    /// declared extension's own reader refuses ([`judge_ext_entries`]). A
+    /// participant MUST refuse the whole message, as upstream's decoder does; `eid`
+    /// is the entry's identity.
+    MalformedExt { eid: u8 },
     /// This build has no extension space for that message id, so it has
     /// nothing to judge the chain against. The analyzer's reach limit, not a
     /// verdict about the wire.
@@ -98,7 +126,9 @@ impl ExtAdmission {
     pub const fn is_refusal(self) -> bool {
         matches!(
             self,
-            Self::UnknownMandatory { .. } | Self::ReservedEncoding { .. }
+            Self::UnknownMandatory { .. }
+                | Self::ReservedEncoding { .. }
+                | Self::MalformedExt { .. }
         )
     }
 
@@ -109,6 +139,7 @@ impl ExtAdmission {
         match self {
             Self::UnknownMandatory { eid } => Some(InboundParseError::UnknownMandatoryExt { eid }),
             Self::ReservedEncoding { eid } => Some(InboundParseError::ReservedExtEncoding { eid }),
+            Self::MalformedExt { eid } => Some(InboundParseError::MalformedExt { eid }),
             Self::Admissible | Self::Unjudged => None,
         }
     }
@@ -379,15 +410,262 @@ pub fn judge_ext_chain(carrier: ExtCarrier, headers: impl IntoIterator<Item = u8
         return ExtAdmission::Unjudged;
     };
     for header in headers {
-        let eid = ext_eid(header);
-        if (eid & EXT_ENC_MASK) == EXT_ENC_MASK {
-            return ExtAdmission::ReservedEncoding { eid };
-        }
-        if (eid & EXT_FLAG_M) != 0 && !reads_mandatory(carrier, declared, eid) {
-            return ExtAdmission::UnknownMandatory { eid };
+        if let Some(refusal) = judge_header(carrier, declared, header) {
+            return refusal;
         }
     }
     ExtAdmission::Admissible
+}
+
+/// The verdict on one entry's header, `None` for one a participant may read on past: the rule
+/// [`judge_ext_chain`] applies to each header and [`judge_ext_entries`] to each entry.
+fn judge_header(carrier: ExtCarrier, declared: &[u8], header: u8) -> Option<ExtAdmission> {
+    let eid = ext_eid(header);
+    if (eid & EXT_ENC_MASK) == EXT_ENC_MASK {
+        return Some(ExtAdmission::ReservedEncoding { eid });
+    }
+    if (eid & EXT_FLAG_M) != 0 && !reads_mandatory(carrier, declared, eid) {
+        return Some(ExtAdmission::UnknownMandatory { eid });
+    }
+    None
+}
+
+/// Judge the ENTRIES of a decoded network or zenoh-body chain for the message named by
+/// `carrier`: each entry's header by the rule [`judge_ext_chain`] applies, and then the body of
+/// an extension the message declares by what that extension's reader refuses
+/// ([`ExtAdmission::MalformedExt`]), in chain order, the first offender reported. Upstream reads
+/// the chain one entry at a time, the unknown ones by their header and the declared ones by their
+/// typed reader, and stops at the first it refuses, so whichever offence comes first is the one
+/// its decoder fails on.
+///
+/// `entries` is the chain held (a slice's references) or walked where its frame lies (entries by
+/// value). An entry whose body this build holds as something other than plain bytes (a Query's
+/// value after a shared-memory marker, a list of slices) is judged by its header alone: the chain
+/// decode read its structure, and its reader is the shared-memory one.
+pub fn judge_ext_entries<E: crate::ext_view::ExtEntryView>(
+    carrier: ExtCarrier,
+    entries: impl IntoIterator<Item = E>,
+) -> ExtAdmission {
+    let Some(declared) = declared_identities(carrier) else {
+        return ExtAdmission::Unjudged;
+    };
+    for entry in entries {
+        if let Some(refusal) = judge_header(carrier, declared, entry.header()) {
+            return refusal;
+        }
+        let eid = entry.eid();
+        if body_rule(carrier, eid).is_some_and(|rule| !body_reads(rule, &entry)) {
+            return ExtAdmission::MalformedExt { eid };
+        }
+    }
+    ExtAdmission::Admissible
+}
+
+/// How upstream's reader of a declared extension reads its body, for the extensions whose reader
+/// can refuse one. Every other declared extension is read by a reader that cannot: a QoS, a node
+/// id, a budget, a timeout and a queryable's info take any ZInt (`ext.into()`, `as u32`), an
+/// attachment any bytes (`reader.read_zbuf(h.len)`), and a marker has no body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyRule {
+    /// A `TimestampType` (`commons/zenoh-codec/src/network/mod.rs` @
+    /// `let timestamp: uhlc::Timestamp = self.codec.read(&mut *reader)?;`): a ZInt time, a ZInt
+    /// length of at most sixteen and that many bytes of an id that is not zero
+    /// (`commons/zenoh-codec/src/core/timestamp.rs` @
+    /// `let id = uhlc::ID::try_from(&id[..size]).map_err(|_| DidntRead)?;`).
+    Timestamp,
+    /// A `TsStackType` (`commons/zenoh-codec/src/network/timestamp_stack.rs` @
+    /// `let ts_stack: TimestampStack = self.codec.read(&mut *reader)?;`): flags that are not zero,
+    /// a count of at most `MAX_STACK_SIZE` (255) and that many interceptions, each a flags byte
+    /// and a length-prefixed run of bytes.
+    TsStack,
+    /// A Request's `QueryTarget` (`commons/zenoh-codec/src/network/request.rs` @
+    /// `_ => return Err(DidntRead),`): `0`, `1` or `2`.
+    QueryTarget,
+    /// An `EntityGlobalIdType`, a Response's responder (`commons/zenoh-codec/src/network/mod.rs`
+    /// @ `RCodec<(ext::EntityGlobalIdType<{ ID }>, bool), &mut R>`): a flags byte whose high
+    /// nibble is the zid's length less one, a zid that is not zero
+    /// (`commons/zenoh-codec/src/core/zenohid.rs` @
+    /// `ZenohIdProto::try_from(&id[..self.length]).map_err(|_| DidntRead)`), and a ZInt entity id
+    /// of at most 32 bits.
+    EntityGlobalId,
+    /// An undeclaration's `WireExprType` (`commons/zenoh-codec/src/network/declare.rs` @
+    /// `String::from_utf8(buff).map_err(|_| DidntRead)?`): a flags byte, a ZInt scope of at most
+    /// 16 bits (`ExprLen`), and, when the flags say a suffix follows, the rest of the body as
+    /// UTF-8.
+    WireExpr,
+    /// A `SourceInfoType` (`commons/zenoh-codec/src/zenoh/mod.rs` @
+    /// `RCodec<(ext::SourceInfoType<{ ID }>, bool), &mut R>`): the entity id of
+    /// [`Self::EntityGlobalId`] and a ZInt sequence number of at most 32 bits.
+    SourceInfo,
+    /// A Query's value read as bytes (`commons/zenoh-codec/src/zenoh/mod.rs` @
+    /// `let Some(len) = header.len.checked_sub(start - end) else {`): an `Encoding` that fits the
+    /// body, a ZInt id of at most 32 bits and, when its low bit says so, a schema of at most 255
+    /// bytes (`commons/zenoh-codec/src/core/encoding.rs` @
+    /// `let zodec = Zenoh080Bounded::<u8>::new();`).
+    QueryValue,
+}
+
+/// The reader that reads the extension `eid` on the message `carrier` names, when that reader
+/// can refuse a body ([`BodyRule`]). Every pair is a row of the naming table
+/// ([`declared_identities`]); the test `every_body_rule_is_of_a_declared_extension` holds them
+/// to it.
+fn body_rule(carrier: ExtCarrier, eid: u8) -> Option<BodyRule> {
+    use crate::ext_header::{body_eid, ext_identity, network_eid, EXT_ENC_Z64, EXT_ENC_ZBUF};
+    use DeclarationKind as K;
+    use NetworkEnvelope as N;
+    use ZenohBody as Z;
+    // `pub type Timestamp = zextzbuf!(0x2, false);` on every network message.
+    const TIMESTAMP: u8 = ext_identity(0x2, false, EXT_ENC_ZBUF);
+    // `pub type TsStack = zextzbuf!(0x7, false);` on a Push, a Request and a Response.
+    const TS_STACK: u8 = ext_identity(0x7, false, EXT_ENC_ZBUF);
+    // `pub type Target = zextz64!(0x4, true);` on a Request.
+    const TARGET: u8 = ext_identity(0x4, true, EXT_ENC_Z64);
+    // `pub type WireExprExt = zextzbuf!(0x0f, true);` on the three undeclarations that carry it.
+    const WIRE_EXPR: u8 = ext_identity(0x0f, true, EXT_ENC_ZBUF);
+    let rule = match (carrier, eid) {
+        (ExtCarrier::Network(_), TIMESTAMP) => BodyRule::Timestamp,
+        (ExtCarrier::Network(N::Push | N::Request | N::Response), TS_STACK) => BodyRule::TsStack,
+        (ExtCarrier::Network(N::Request), TARGET) => BodyRule::QueryTarget,
+        (ExtCarrier::Network(N::Response), network_eid::RESPONDER) => BodyRule::EntityGlobalId,
+        (
+            ExtCarrier::Declaration(K::UndeclSubscriber | K::UndeclQueryable | K::UndeclToken),
+            WIRE_EXPR,
+        ) => BodyRule::WireExpr,
+        (ExtCarrier::Zenoh(Z::Put | Z::Del | Z::Query | Z::Err), body_eid::SOURCE_INFO) => {
+            BodyRule::SourceInfo
+        }
+        (ExtCarrier::Zenoh(Z::Query), body_eid::QUERY_VALUE) => BodyRule::QueryValue,
+        _ => return None,
+    };
+    Some(rule)
+}
+
+/// Whether the reader `rule` names reads `entry`'s body. A body this build holds as something
+/// other than the encoding the rule reads (no ZInt for a ZInt rule, no plain bytes for a ZBuf
+/// one) is not this reader's to judge, and reads.
+///
+/// Upstream's readers of a timestamp, a responder, a source info and a timestamp stack read their
+/// fields from the message's reader after the extension's length, not from the bytes the length
+/// covers; wz reads the fields from those bytes, so fields that run past the length are refused
+/// here where upstream would read on into what follows them, and bytes the fields leave over are
+/// read past here where upstream would read them as the next extension. Both are a sender that
+/// wrote a length its fields do not have.
+fn body_reads<E: crate::ext_view::ExtEntryView>(rule: BodyRule, entry: &E) -> bool {
+    if rule == BodyRule::QueryTarget {
+        return entry.zint().is_none_or(|target| target <= 2);
+    }
+    let Some(body) = entry.plain_zbuf() else {
+        return true;
+    };
+    let mut cursor = sce_forge_runtime::codec::SceCursor::new(body);
+    let read = match rule {
+        BodyRule::Timestamp => read_timestamp(&mut cursor),
+        BodyRule::TsStack => read_ts_stack(&mut cursor),
+        BodyRule::EntityGlobalId => read_entity_global_id(&mut cursor),
+        BodyRule::WireExpr => read_wire_expr(&mut cursor),
+        BodyRule::SourceInfo => {
+            read_entity_global_id(&mut cursor).and_then(|()| read_u32(&mut cursor))
+        }
+        BodyRule::QueryValue => read_encoding(&mut cursor),
+        BodyRule::QueryTarget => Some(()),
+    };
+    read.is_some()
+}
+
+/// One byte.
+fn read_u8(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<u8> {
+    let byte = cursor.peek_u8().ok()?;
+    cursor.advance(1).ok()?;
+    Some(byte)
+}
+
+/// `len` bytes.
+fn read_bytes<'a>(
+    cursor: &mut sce_forge_runtime::codec::SceCursor<'a>,
+    len: usize,
+) -> Option<&'a [u8]> {
+    let bytes = cursor.peek_slice(len).ok()?;
+    cursor.advance(len).ok()?;
+    Some(bytes)
+}
+
+/// A ZInt length, as upstream reads a `usize`.
+fn read_len(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<usize> {
+    usize::try_from(cursor.read_vle_u64().ok()?).ok()
+}
+
+/// A ZInt of at most 32 bits, as upstream reads a `u32`.
+fn read_u32(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
+    cursor.read_vle_u32().ok().map(|_| ())
+}
+
+/// `len` bytes of a zid: one to sixteen of them, not all zero, as upstream's `ZenohIdProto` and
+/// `uhlc::ID` take them (`crate::session_zid::SessionZid::new` holds the same rule).
+fn read_zid(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>, len: usize) -> Option<()> {
+    crate::session_zid::SessionZid::new(read_bytes(cursor, len)?)
+        .ok()
+        .map(|_| ())
+}
+
+/// [`BodyRule::Timestamp`].
+fn read_timestamp(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
+    cursor.read_vle_u64().ok()?;
+    let size = read_len(cursor)?;
+    if size > crate::session_zid::ZID_MAX {
+        return None;
+    }
+    read_zid(cursor, size)
+}
+
+/// [`BodyRule::TsStack`].
+fn read_ts_stack(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
+    /// `commons/zenoh-protocol/src/network/timestamp_stack.rs` @
+    /// `pub const MAX_STACK_SIZE: usize = 255;`.
+    const MAX_STACK_SIZE: usize = 255;
+    if read_u8(cursor)? == 0 {
+        return None;
+    }
+    let count = read_len(cursor)?;
+    if count > MAX_STACK_SIZE {
+        return None;
+    }
+    for _ in 0..count {
+        read_u8(cursor)?;
+        let len = read_len(cursor)?;
+        read_bytes(cursor, len)?;
+    }
+    Some(())
+}
+
+/// [`BodyRule::EntityGlobalId`].
+fn read_entity_global_id(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
+    let flags = read_u8(cursor)?;
+    read_zid(cursor, usize::from(flags >> 4).saturating_add(1))?;
+    read_u32(cursor)
+}
+
+/// [`BodyRule::WireExpr`].
+fn read_wire_expr(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
+    let flags = read_u8(cursor)?;
+    cursor.read_vle_u16().ok()?;
+    if flags & 0x01 != 0 {
+        let rest = cursor.remaining();
+        core::str::from_utf8(read_bytes(cursor, rest)?).ok()?;
+    }
+    Some(())
+}
+
+/// [`BodyRule::QueryValue`]: the encoding; the payload is the rest of the body.
+fn read_encoding(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
+    let id = cursor.read_vle_u32().ok()?;
+    if id & 0x01 != 0 {
+        let len = read_len(cursor)?;
+        if len > usize::from(u8::MAX) {
+            return None;
+        }
+        read_bytes(cursor, len)?;
+    }
+    Some(())
 }
 
 #[cfg(test)]
@@ -566,6 +844,11 @@ mod tests {
             ExtAdmission::ReservedEncoding { eid: 0x6F }.refusal(),
             Some(E::ReservedExtEncoding { eid: 0x6F })
         );
+        assert_eq!(
+            ExtAdmission::MalformedExt { eid: 0x41 }.refusal(),
+            Some(E::MalformedExt { eid: 0x41 })
+        );
+        assert!(ExtAdmission::MalformedExt { eid: 0x41 }.is_refusal());
         assert_eq!(ExtAdmission::Admissible.refusal(), None);
         assert_eq!(ExtAdmission::Unjudged.refusal(), None);
         assert!(!ExtAdmission::Admissible.is_refusal());
@@ -654,6 +937,319 @@ mod tests {
                     want,
                     "{carrier:?}: {eid:#04x}"
                 );
+            }
+        }
+    }
+
+    /// An entry as a reader of a chain sees it, made of its header and the body this build holds:
+    /// the rule asks nothing else, so the tests need no storage profile to build one.
+    struct Entry {
+        header: u8,
+        zint: Option<u64>,
+        zbuf: Option<&'static [u8]>,
+    }
+
+    impl crate::ext_view::ExtEntryView for Entry {
+        fn header(&self) -> u8 {
+            self.header
+        }
+
+        fn ext_id(&self) -> u8 {
+            self.header & 0x0F
+        }
+
+        fn enc(&self) -> u8 {
+            (self.header >> 5) & 0x03
+        }
+
+        fn plain_zbuf(&self) -> Option<&[u8]> {
+            self.zbuf
+        }
+
+        fn zint(&self) -> Option<u64> {
+            self.zint
+        }
+    }
+
+    fn zbuf(header: u8, body: &'static [u8]) -> Entry {
+        Entry {
+            header,
+            zint: None,
+            zbuf: Some(body),
+        }
+    }
+
+    fn zint(header: u8, value: u64) -> Entry {
+        Entry {
+            header,
+            zint: Some(value),
+            zbuf: None,
+        }
+    }
+
+    fn unit(header: u8) -> Entry {
+        Entry {
+            header,
+            zint: None,
+            zbuf: None,
+        }
+    }
+
+    /// The carriers a network message or a zenoh body names, each with a chain of its own.
+    fn network_carriers() -> [ExtCarrier; 21] {
+        use DeclarationKind as K;
+        use NetworkEnvelope as N;
+        use ZenohBody as Z;
+        [
+            ExtCarrier::Network(N::Push),
+            ExtCarrier::Network(N::Request),
+            ExtCarrier::Network(N::Response),
+            ExtCarrier::Network(N::ResponseFinal),
+            ExtCarrier::Network(N::Interest),
+            ExtCarrier::Network(N::Declare),
+            ExtCarrier::Network(N::Oam),
+            ExtCarrier::Declaration(K::KeyExpr),
+            ExtCarrier::Declaration(K::UndeclKeyExpr),
+            ExtCarrier::Declaration(K::Subscriber),
+            ExtCarrier::Declaration(K::UndeclSubscriber),
+            ExtCarrier::Declaration(K::Queryable),
+            ExtCarrier::Declaration(K::UndeclQueryable),
+            ExtCarrier::Declaration(K::Token),
+            ExtCarrier::Declaration(K::UndeclToken),
+            ExtCarrier::Declaration(K::Final),
+            ExtCarrier::Zenoh(Z::Put),
+            ExtCarrier::Zenoh(Z::Del),
+            ExtCarrier::Zenoh(Z::Query),
+            ExtCarrier::Zenoh(Z::Reply),
+            ExtCarrier::Zenoh(Z::Err),
+        ]
+    }
+
+    /// A body is judged only for an extension its message declares: upstream reads any other
+    /// one as unknown, by its header, and never asks its body. Each rule is also the one its row
+    /// names, so a rule moved to the wrong identity fails here and not on the wire.
+    #[test]
+    fn every_body_rule_is_of_a_declared_extension() {
+        use DeclarationKind as K;
+        use NetworkEnvelope as N;
+        use ZenohBody as Z;
+        for carrier in network_carriers() {
+            let declared = declared_identities(carrier).expect("a named carrier");
+            for eid in 0u8..0x80 {
+                if body_rule(carrier, eid).is_some() {
+                    assert!(declared.contains(&eid), "{carrier:?}: {eid:#04x}");
+                }
+            }
+        }
+        let rows = [
+            (ExtCarrier::Network(N::Push), 0x42, BodyRule::Timestamp),
+            (ExtCarrier::Network(N::Oam), 0x42, BodyRule::Timestamp),
+            (
+                ExtCarrier::Network(N::ResponseFinal),
+                0x42,
+                BodyRule::Timestamp,
+            ),
+            (ExtCarrier::Network(N::Push), 0x47, BodyRule::TsStack),
+            (ExtCarrier::Network(N::Response), 0x47, BodyRule::TsStack),
+            (ExtCarrier::Network(N::Request), 0x34, BodyRule::QueryTarget),
+            (
+                ExtCarrier::Network(N::Response),
+                0x43,
+                BodyRule::EntityGlobalId,
+            ),
+            (
+                ExtCarrier::Declaration(K::UndeclToken),
+                0x5F,
+                BodyRule::WireExpr,
+            ),
+            (ExtCarrier::Zenoh(Z::Del), 0x41, BodyRule::SourceInfo),
+            (ExtCarrier::Zenoh(Z::Err), 0x41, BodyRule::SourceInfo),
+            (ExtCarrier::Zenoh(Z::Query), 0x43, BodyRule::QueryValue),
+        ];
+        for (carrier, eid, rule) in rows {
+            assert_eq!(
+                body_rule(carrier, eid),
+                Some(rule),
+                "{carrier:?}: {eid:#04x}"
+            );
+        }
+        // The same identity on another message is another extension: a Put's attachment is a
+        // run of any bytes, and an Interest carries no timestamp stack.
+        assert_eq!(body_rule(ExtCarrier::Zenoh(Z::Put), 0x43), None);
+        assert_eq!(body_rule(ExtCarrier::Network(N::Interest), 0x47), None);
+    }
+
+    /// Each reader that can refuse a body refuses the bodies upstream's refuses, and reads the
+    /// ones it reads. Every malformed body is a structurally whole entry, which the chain decode
+    /// reads: only its reader can tell.
+    #[test]
+    fn each_declared_reader_refuses_the_bodies_upstreams_refuses() {
+        use DeclarationKind as K;
+        use NetworkEnvelope as N;
+        use ZenohBody as Z;
+        let push = ExtCarrier::Network(N::Push);
+        let cases: [(ExtCarrier, Entry, bool); 20] = [
+            // A timestamp: a time, a length, an id of that length that is not zero.
+            (push, zbuf(0x42, &[0x05, 0x01, 0x01]), true),
+            (push, zbuf(0x42, &[0x05, 0x01, 0x00]), false),
+            (push, zbuf(0x42, &[0x05, 0x00]), false),
+            (push, zbuf(0x42, &[0x05, 0x02, 0x01]), false),
+            (
+                push,
+                zbuf(
+                    0x42,
+                    &[
+                        0x05, 0x11, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                    ],
+                ),
+                false,
+            ),
+            // A timestamp stack: flags that are not zero, then its interceptions.
+            (push, zbuf(0x47, &[0x01, 0x01, 0x02, 0x01, 0xAA]), true),
+            (push, zbuf(0x47, &[0x00, 0x00]), false),
+            (push, zbuf(0x47, &[0x01, 0x01, 0x02, 0x02, 0xAA]), false),
+            // A Request's target: 0, 1 or 2.
+            (ExtCarrier::Network(N::Request), zint(0x34, 2), true),
+            (ExtCarrier::Network(N::Request), zint(0x34, 3), false),
+            // A responder: a zid that is not zero and a 32-bit entity id.
+            (
+                ExtCarrier::Network(N::Response),
+                zbuf(0x43, &[0x00, 0x01, 0x07]),
+                true,
+            ),
+            (
+                ExtCarrier::Network(N::Response),
+                zbuf(0x43, &[0x00, 0x00, 0x07]),
+                false,
+            ),
+            (
+                ExtCarrier::Network(N::Response),
+                zbuf(0x43, &[0x00, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10]),
+                false,
+            ),
+            // An undeclaration's key: a 16-bit scope and a suffix that is UTF-8.
+            (
+                ExtCarrier::Declaration(K::UndeclSubscriber),
+                zbuf(0x5F, &[0x01, 0x00, b'a']),
+                true,
+            ),
+            (
+                ExtCarrier::Declaration(K::UndeclSubscriber),
+                zbuf(0x5F, &[0x01, 0x00, 0xFF]),
+                false,
+            ),
+            (
+                ExtCarrier::Declaration(K::UndeclQueryable),
+                zbuf(0x5F, &[0x00, 0x80, 0x80, 0x04]),
+                false,
+            ),
+            // A source info: a zid, an entity id and a sequence number.
+            (
+                ExtCarrier::Zenoh(Z::Put),
+                zbuf(0x41, &[0x00, 0x01, 0x02, 0x03]),
+                true,
+            ),
+            (
+                ExtCarrier::Zenoh(Z::Put),
+                zbuf(0x41, &[0x00, 0x01, 0x02]),
+                false,
+            ),
+            // A Query's value: an encoding whose schema fits the body, then the payload.
+            (ExtCarrier::Zenoh(Z::Query), zbuf(0x43, &[0x00, b'p']), true),
+            (
+                ExtCarrier::Zenoh(Z::Query),
+                zbuf(0x43, &[0x01, 0x05, b'a']),
+                false,
+            ),
+        ];
+        for (carrier, entry, reads) in cases {
+            let eid = ext_eid(entry.header);
+            let want = if reads {
+                ExtAdmission::Admissible
+            } else {
+                ExtAdmission::MalformedExt { eid }
+            };
+            assert_eq!(
+                judge_ext_entries(carrier, [entry]),
+                want,
+                "{carrier:?}: {eid:#04x}"
+            );
+        }
+    }
+
+    /// Upstream reads every entry of a chain with its reader, the ones a later entry supersedes
+    /// included, so a malformed entry the reader of the chain would not keep still refuses the
+    /// message; and the first offence in chain order, of the header or of the body, is the one
+    /// reported, as upstream's decoder stops at it.
+    #[test]
+    fn every_entry_is_judged_and_the_first_offence_is_reported() {
+        use ZenohBody as Z;
+        let del = ExtCarrier::Zenoh(Z::Del);
+        let good: &'static [u8] = &[0x00, 0x01, 0x02, 0x03];
+        let bad: &'static [u8] = &[0x00, 0x01, 0x02];
+        assert_eq!(
+            judge_ext_entries(del, [zbuf(0xC1, bad), zbuf(0x41, good)]),
+            ExtAdmission::MalformedExt { eid: 0x41 },
+            "a superseded entry is read all the same"
+        );
+        assert_eq!(
+            judge_ext_entries(del, [zbuf(0xC1, good), zbuf(0x41, bad)]),
+            ExtAdmission::MalformedExt { eid: 0x41 },
+            "the last one is read"
+        );
+        assert_eq!(
+            judge_ext_entries(del, [zbuf(0xC1, good), zbuf(0x41, good)]),
+            ExtAdmission::Admissible
+        );
+        assert_eq!(
+            judge_ext_entries(del, [unit(0x94), zbuf(0x41, bad)]),
+            ExtAdmission::UnknownMandatory { eid: 0x14 }
+        );
+        assert_eq!(
+            judge_ext_entries(del, [zbuf(0xC1, bad), unit(0x14)]),
+            ExtAdmission::MalformedExt { eid: 0x41 }
+        );
+    }
+
+    /// A body is asked of the extension it belongs to and of nothing that looks like it: an
+    /// attachment of any bytes, an identity the message does not declare, and an entry whose body
+    /// this build holds as something other than the bytes the rule reads.
+    #[test]
+    fn a_body_is_judged_only_by_its_own_extensions_reader() {
+        use NetworkEnvelope as N;
+        use ZenohBody as Z;
+        // A Del's attachment (`0x42`) is any bytes.
+        assert_eq!(
+            judge_ext_entries(ExtCarrier::Zenoh(Z::Del), [zbuf(0x42, &[0xFF])]),
+            ExtAdmission::Admissible
+        );
+        // A Push's `0x22` is not its timestamp: unknown, not mandatory, skipped by its header.
+        assert_eq!(
+            judge_ext_entries(ExtCarrier::Network(N::Push), [zint(0x22, 0)]),
+            ExtAdmission::Admissible
+        );
+        // A Query's value after a shared-memory marker is a list of slices, not bytes.
+        assert_eq!(
+            judge_ext_entries(ExtCarrier::Zenoh(Z::Query), [unit(0x84), unit(0x43)]),
+            ExtAdmission::Admissible
+        );
+        // A carrier this build cannot name is still unjudged.
+        assert_eq!(
+            judge_ext_entries(ExtCarrier::Transport(0x1F), [zbuf(0x42, &[])]),
+            ExtAdmission::Unjudged
+        );
+    }
+
+    /// The header rule is the one [`judge_ext_chain`] applies: the entries of a chain are judged
+    /// by it before their bodies are read.
+    #[test]
+    fn the_entries_of_a_chain_are_judged_by_the_header_rule_first() {
+        use NetworkEnvelope as N;
+        for header in 0u8..=0xFF {
+            let carrier = ExtCarrier::Network(N::Push);
+            let by_header = judge_ext_chain(carrier, [header]);
+            if by_header.is_refusal() {
+                assert_eq!(judge_ext_entries(carrier, [unit(header)]), by_header);
             }
         }
     }

@@ -108,12 +108,17 @@ pub fn peer_patch(extensions: &[ExtEntryOwned]) -> PatchLevel {
 /// [`peer_patch`] over the entries a chain yields, held or read where its message lies
 /// (`crate::inbound::ExtChainRead`), so a handshake read in place is answered without its chain
 /// being made owned.
+///
+/// A chain that carries the patch level twice announces its last entry's level, as upstream's
+/// decoder reads it: its arm for the extension assigns each entry it meets
+/// (`commons/zenoh-codec/src/transport/init.rs` @ `ext_patch = p;`).
 pub fn peer_patch_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> PatchLevel {
     extensions
         .into_iter()
-        .find_map(|ext| patch_of_entry(&ext))
+        .filter_map(|ext| patch_of_entry(&ext))
+        .last()
         .unwrap_or(NO_PATCH)
 }
 

@@ -419,14 +419,13 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
     carrier: crate::ext_admit::ExtCarrier,
     extensions: Option<&[E]>,
 ) -> crate::ext_admit::ExtAdmission {
-    judge_headers(
-        carrier,
-        extensions.map(|chain| chain.iter().map(|e| e.header())),
-    )
+    judge_entries(carrier, extensions.map(|chain| chain.iter()))
 }
 
-/// [`judge_chain`] over the header bytes a chain yields, held or walked where its frame lies: the
-/// verdict reads the headers and nothing else of an entry.
+/// [`judge_chain`] over the entries a chain yields, held or walked where its frame lies: each
+/// entry's header and the body of each extension the message declares
+/// ([`crate::ext_admit::judge_ext_entries`]), so the held, the lent and the walked forms of a
+/// message refuse the same chains.
 // [`judge_chain`]'s union, which it serves and which holds the Put verdict's
 // (`judge_put_chain`) and the Response read where its frame lies
 // (`response_view_admission`), and the Request read where its frame lies
@@ -458,12 +457,16 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
         )
     )
 ))]
-fn judge_headers(
+fn judge_entries<I>(
     carrier: crate::ext_admit::ExtCarrier,
-    headers: Option<impl Iterator<Item = u8>>,
-) -> crate::ext_admit::ExtAdmission {
-    headers.map_or(crate::ext_admit::ExtAdmission::Admissible, |headers| {
-        crate::ext_admit::judge_ext_chain(carrier, headers)
+    entries: Option<I>,
+) -> crate::ext_admit::ExtAdmission
+where
+    I: IntoIterator,
+    I::Item: crate::ext_view::ExtEntryView,
+{
+    entries.map_or(crate::ext_admit::ExtAdmission::Admissible, |entries| {
+        crate::ext_admit::judge_ext_entries(carrier, entries)
     })
 }
 
@@ -514,7 +517,11 @@ impl NetworkMessage {
     /// means the message, or the body
     /// it carries, has an extension with the M bit set that the message does not
     /// define, and upstream refuses the whole message for it
-    /// (`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory() {`).
+    /// (`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory() {`);
+    /// [`ExtAdmission::MalformedExt`](crate::ext_admit::ExtAdmission::MalformedExt)
+    /// means one of them carries an extension the message declares whose body that
+    /// extension's reader refuses, which upstream's decoder refuses the whole message
+    /// for as well ([`crate::ext_admit::judge_ext_entries`]).
     ///
     /// The network and zenoh-body counterpart of
     /// [`crate::inbound::InboundFrame::ext_admission`], and for the same reason a
@@ -746,8 +753,8 @@ fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
 
 /// The verdict on the chain of a Put body, its shared-memory marker included at the
 /// place it stands: a Put holds the marker as a place among its entries and not as
-/// one of them, so the chain is judged by the headers it writes
-/// ([`crate::put_payload::chain_headers`]). The Push, the Reply and the Request
+/// one of them, so the chain is judged by the entries it writes, the marker among them
+/// ([`crate::put_payload::chain_entries`]). The Push, the Reply and the Request
 /// that carry a Put all judge it here.
 // The union of its callers: the owned message's Push, Response and (with `request-put-del`)
 // Request. A Put read where its frame lies is judged by `judge_put_view`.
@@ -763,7 +770,7 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
     put: &wz_codecs::msg_put::MsgPutOwned<S>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
-    judge_headers(C::Zenoh(Z::Put), crate::put_payload::chain_headers(put))
+    judge_entries(C::Zenoh(Z::Put), crate::put_payload::chain_entries(put))
 }
 
 /// The verdict on the chain of a Put read as its view, its shared-memory marker included at the
@@ -788,19 +795,20 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
 ))]
 fn judge_put_view(put: &wz_codecs::msg_put::MsgPutView<'_>) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
-    // A Put holds its shared-memory marker as a place among its entries, so the walk writes the
-    // marker's header at that place, as `judge_put_chain` reads a held Put.
-    judge_headers(
+    // A Put holds its shared-memory marker as a place among its entries, so the walk yields the
+    // marker at that place, as `judge_put_chain` reads a held Put.
+    judge_entries(
         C::Zenoh(Z::Put),
         crate::put_payload::view_chain(put).map(|(rest, place)| {
+            use crate::put_payload::ChainEntry;
             let entries = sce_forge_runtime::codec::Entries::entries(rest);
             let at = place.unwrap_or(usize::MAX);
             entries
                 .clone()
                 .take(at)
-                .map(|e| e.header)
-                .chain(place.map(|_| crate::put_payload::marker_header()))
-                .chain(entries.skip(at).map(|e| e.header))
+                .map(ChainEntry::Entry)
+                .chain(place.map(|_| ChainEntry::Marker))
+                .chain(entries.skip(at).map(ChainEntry::Entry))
         }),
     )
 }
@@ -900,29 +908,21 @@ fn request_view_admission(
     // The rule of [`judge_request_chains`] -- the envelope's chain, then the body's -- over chains
     // that are walked where the frame lies and not held, so no entry is decoded into a slot.
     then_judge(
-        judge_headers(
+        judge_entries(
             C::Network(N::Request),
-            request
-                .extensions
-                .as_ref()
-                .map(|chain| walked(Some(chain)).map(|e| e.header)),
+            request.extensions.as_ref().map(|chain| walked(Some(chain))),
         ),
         || match &request.body {
             #[cfg(feature = "request-put-del")]
             B::CodecZenohMsgPut(put) => judge_put_view(put),
             #[cfg(feature = "request-put-del")]
-            B::CodecZenohMsgDel(del) => judge_headers(
+            B::CodecZenohMsgDel(del) => judge_entries(
                 C::Zenoh(Z::Del),
-                del.extensions
-                    .as_ref()
-                    .map(|chain| walked(Some(chain)).map(|e| e.header)),
+                del.extensions.as_ref().map(|chain| walked(Some(chain))),
             ),
-            B::CodecZenohQuery(query) | B::Default { body: query, .. } => judge_headers(
+            B::CodecZenohQuery(query) | B::Default { body: query, .. } => judge_entries(
                 C::Zenoh(Z::Query),
-                query
-                    .extensions
-                    .as_ref()
-                    .map(|chain| walked(Some(chain)).map(|e| e.header)),
+                query.extensions.as_ref().map(|chain| walked(Some(chain))),
             ),
             // As in `ext_admission`: a Put or Del body this build does not name is not judged.
             #[cfg(not(feature = "request-put-del"))]
@@ -960,55 +960,461 @@ fn response_view_admission(
     // its data's, or an Err's -- over chains that are walked where the frame lies and not held,
     // so no entry is decoded into a slot.
     then_judge(
-        judge_headers(
+        judge_entries(
             C::Network(N::Response),
             response
                 .extensions
                 .as_ref()
-                .map(|chain| walked(Some(chain)).map(|e| e.header)),
+                .map(|chain| walked(Some(chain))),
         ),
         || match &response.body {
             B::CodecZenohReply(reply) | B::Default { body: reply, .. } => then_judge(
-                judge_headers(
+                judge_entries(
                     C::Zenoh(Z::Reply),
-                    reply
-                        .extensions
-                        .as_ref()
-                        .map(|chain| walked(Some(chain)).map(|e| e.header)),
+                    reply.extensions.as_ref().map(|chain| walked(Some(chain))),
                 ),
                 || match &reply.body {
                     // A Put holds its shared-memory marker as a place among its entries, so the
-                    // walk writes the marker's header at that place, as `judge_put_chain` reads a
-                    // held Put.
-                    R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => judge_headers(
+                    // walk yields the marker at that place, as `judge_put_chain` reads a held
+                    // Put.
+                    R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => judge_entries(
                         C::Zenoh(Z::Put),
                         crate::put_payload::view_chain(put).map(|(rest, place)| {
+                            use crate::put_payload::ChainEntry;
                             let entries = sce_forge_runtime::codec::Entries::entries(rest);
                             let at = place.unwrap_or(usize::MAX);
                             entries
                                 .clone()
                                 .take(at)
-                                .map(|e| e.header)
-                                .chain(place.map(|_| crate::put_payload::marker_header()))
-                                .chain(entries.skip(at).map(|e| e.header))
+                                .map(ChainEntry::Entry)
+                                .chain(place.map(|_| ChainEntry::Marker))
+                                .chain(entries.skip(at).map(ChainEntry::Entry))
                         }),
                     ),
-                    R::CodecZenohMsgDel(del) => judge_headers(
+                    R::CodecZenohMsgDel(del) => judge_entries(
                         C::Zenoh(Z::Del),
-                        del.extensions
-                            .as_ref()
-                            .map(|chain| walked(Some(chain)).map(|e| e.header)),
+                        del.extensions.as_ref().map(|chain| walked(Some(chain))),
                     ),
                 },
             ),
-            B::CodecZenohErr(err) => judge_headers(
+            B::CodecZenohErr(err) => judge_entries(
                 C::Zenoh(Z::Err),
-                err.extensions
-                    .as_ref()
-                    .map(|chain| walked(Some(chain)).map(|e| e.header)),
+                err.extensions.as_ref().map(|chain| walked(Some(chain))),
             ),
         },
     )
+}
+
+/// What upstream sends on of `message` when it routes it: the message its decoder made, in which
+/// each extension the message (or a body it carries) declares is held once, with the value of the
+/// last entry the chain carried of it. `None` when no chain of `message` repeats a declared
+/// extension, which is nearly every message, and the message is sent on as it came.
+///
+/// Upstream's decoders assign each entry an extension's arm meets to the one field that extension
+/// has, so a repeated extension is held as its last entry
+/// ([`crate::ext_view::last_by_eid`]), and its encoders write each field once
+/// (`commons/zenoh-codec/src/network/push.rs` @ `if let Some(ts) = ext_tstamp.as_ref() {`): a
+/// router that forwards a chain carrying an extension twice sends the extension once. wz holds the
+/// chain as it came, and its egress writes what it holds, so the router makes this message of the
+/// one it received before it routes it and every way a routed message leaves (a mesh face, a
+/// client's carrier, a group) sends what upstream sends of the extensions it declares. An extension
+/// the message does not declare is left as it came: a zenoh body keeps each such entry
+/// (`commons/zenoh-codec/src/zenoh/put.rs` @ `ext_unknown.push(u);`), so a repeated one is a
+/// repetition upstream forwards too. The network envelope and the declarations skip such an entry
+/// instead (`commons/zenoh-codec/src/network/push.rs` @
+/// `has_ext = extension::skip(reader, "Push", ext)?;`) and upstream forwards none of it; this
+/// function does not take that up, since it is a question of which undeclared extensions a node
+/// carries and not of which entry of a declared one it reads.
+///
+/// A Query's value is one extension upstream reads from two entries, the shared-memory marker and
+/// the value after it (`commons/zenoh-codec/src/zenoh/query.rs` @
+/// `ext::QueryBodyType::SID | ext::QueryBodyType::VID => {`): the last value is kept with the
+/// marker before it, when it has one, and every other value and marker is dropped.
+#[cfg(feature = "alloc")]
+pub fn without_superseded_exts(message: &NetworkMessage) -> Option<NetworkMessage> {
+    // Which of these a build uses depends on the codecs it selects.
+    #[allow(unused_imports)]
+    use crate::ext_admit::{
+        DeclarationKind as K, ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z,
+    };
+    use crate::held_list::HeldList;
+    match message {
+        #[cfg(feature = "codec-request")]
+        NetworkMessage::Request(request) => {
+            request_without_superseded_exts(request).map(|r| NetworkMessage::Request(Box::new(r)))
+        }
+        #[cfg(feature = "codec-push")]
+        NetworkMessage::Push(push) => {
+            push_without_superseded_exts(push).map(|p| NetworkMessage::Push(Box::new(p)))
+        }
+        #[cfg(feature = "codec-response")]
+        NetworkMessage::Response(response) => {
+            use wz_codecs::reply::ReplyOwnedVariant as R;
+            use wz_codecs::response::ResponseOwnedVariant as B;
+            let body = match &response.body {
+                B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
+                    supersedes(C::Zenoh(Z::Reply), reply.extensions.entries())
+                        || match &reply.body {
+                            R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
+                                put_supersedes(put)
+                            }
+                            R::CodecZenohMsgDel(del) => {
+                                supersedes(C::Zenoh(Z::Del), del.extensions.entries())
+                            }
+                        }
+                }
+                B::CodecZenohErr(err) => supersedes(C::Zenoh(Z::Err), err.extensions.entries()),
+            };
+            if !body && !supersedes(C::Network(N::Response), response.extensions.entries()) {
+                return None;
+            }
+            let mut response = response.clone();
+            drop_superseded(C::Network(N::Response), &mut response.extensions).ok()?;
+            match &mut response.body {
+                B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
+                    drop_superseded(C::Zenoh(Z::Reply), &mut reply.extensions).ok()?;
+                    match &mut reply.body {
+                        R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
+                            drop_superseded_put(put).ok()?
+                        }
+                        R::CodecZenohMsgDel(del) => {
+                            drop_superseded(C::Zenoh(Z::Del), &mut del.extensions).ok()?
+                        }
+                    }
+                }
+                B::CodecZenohErr(err) => {
+                    drop_superseded(C::Zenoh(Z::Err), &mut err.extensions).ok()?
+                }
+            }
+            Some(NetworkMessage::Response(response))
+        }
+        #[cfg(feature = "codec-response-final")]
+        NetworkMessage::ResponseFinal(done) => {
+            if !supersedes(C::Network(N::ResponseFinal), done.extensions.entries()) {
+                return None;
+            }
+            let mut done = done.clone();
+            drop_superseded(C::Network(N::ResponseFinal), &mut done.extensions).ok()?;
+            Some(NetworkMessage::ResponseFinal(done))
+        }
+        NetworkMessage::Oam(oam) => {
+            if !supersedes(C::Network(N::Oam), oam.extensions.entries()) {
+                return None;
+            }
+            let mut oam = oam.clone();
+            drop_superseded(C::Network(N::Oam), &mut oam.extensions).ok()?;
+            Some(NetworkMessage::Oam(oam))
+        }
+        NetworkMessage::Interest(interest) => {
+            if !supersedes(C::Network(N::Interest), interest.extensions.entries()) {
+                return None;
+            }
+            let mut interest = interest.clone();
+            drop_superseded(C::Network(N::Interest), &mut interest.extensions).ok()?;
+            Some(NetworkMessage::Interest(interest))
+        }
+        #[cfg(feature = "codec-declare")]
+        NetworkMessage::Declare(declare) => {
+            use wz_codecs::declare::DeclareOwnedVariant as B;
+            let body = match &declare.body {
+                B::CodecZenohDeclKexpr(d) => {
+                    supersedes(C::Declaration(K::KeyExpr), d.extensions.entries())
+                }
+                B::CodecZenohUndeclKexpr(d) => {
+                    supersedes(C::Declaration(K::UndeclKeyExpr), d.extensions.entries())
+                }
+                B::CodecZenohDeclSubscriber(d) => {
+                    supersedes(C::Declaration(K::Subscriber), d.extensions.entries())
+                }
+                B::CodecZenohUndeclSubscriber(d) => {
+                    supersedes(C::Declaration(K::UndeclSubscriber), d.extensions.entries())
+                }
+                B::CodecZenohDeclQueryable(d) => {
+                    supersedes(C::Declaration(K::Queryable), d.extensions.entries())
+                }
+                B::CodecZenohUndeclQueryable(d) => {
+                    supersedes(C::Declaration(K::UndeclQueryable), d.extensions.entries())
+                }
+                B::CodecZenohDeclToken(d) => {
+                    supersedes(C::Declaration(K::Token), d.extensions.entries())
+                }
+                B::CodecZenohUndeclToken(d) => {
+                    supersedes(C::Declaration(K::UndeclToken), d.extensions.entries())
+                }
+                B::CodecZenohDeclFinal(d) | B::Default { body: d, .. } => {
+                    supersedes(C::Declaration(K::Final), d.extensions.entries())
+                }
+            };
+            if !body && !supersedes(C::Network(N::Declare), declare.extensions.entries()) {
+                return None;
+            }
+            let mut declare = declare.clone();
+            drop_superseded(C::Network(N::Declare), &mut declare.extensions).ok()?;
+            match &mut declare.body {
+                B::CodecZenohDeclKexpr(d) => {
+                    drop_superseded(C::Declaration(K::KeyExpr), &mut d.extensions).ok()?
+                }
+                B::CodecZenohUndeclKexpr(d) => {
+                    drop_superseded(C::Declaration(K::UndeclKeyExpr), &mut d.extensions).ok()?
+                }
+                B::CodecZenohDeclSubscriber(d) => {
+                    drop_superseded(C::Declaration(K::Subscriber), &mut d.extensions).ok()?
+                }
+                B::CodecZenohUndeclSubscriber(d) => {
+                    drop_superseded(C::Declaration(K::UndeclSubscriber), &mut d.extensions).ok()?
+                }
+                B::CodecZenohDeclQueryable(d) => {
+                    drop_superseded(C::Declaration(K::Queryable), &mut d.extensions).ok()?
+                }
+                B::CodecZenohUndeclQueryable(d) => {
+                    drop_superseded(C::Declaration(K::UndeclQueryable), &mut d.extensions).ok()?
+                }
+                B::CodecZenohDeclToken(d) => {
+                    drop_superseded(C::Declaration(K::Token), &mut d.extensions).ok()?
+                }
+                B::CodecZenohUndeclToken(d) => {
+                    drop_superseded(C::Declaration(K::UndeclToken), &mut d.extensions).ok()?
+                }
+                B::CodecZenohDeclFinal(d) | B::Default { body: d, .. } => {
+                    drop_superseded(C::Declaration(K::Final), &mut d.extensions).ok()?
+                }
+            }
+            Some(NetworkMessage::Declare(declare))
+        }
+        NetworkMessage::Unknown { .. } => None,
+    }
+}
+
+/// [`without_superseded_exts`] for a Request: the message a router routes of the one it received,
+/// or `None` when no chain of it repeats a declared extension. Its own function for the router's
+/// multicast ingress, which is handed a Request and not a [`NetworkMessage`].
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
+pub fn request_without_superseded_exts(
+    request: &RequestOwned<WireStorage>,
+) -> Option<RequestOwned<WireStorage>> {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
+    use crate::held_list::HeldList;
+    use wz_codecs::request::RequestOwnedVariant as B;
+    let body = match &request.body {
+        #[cfg(feature = "request-put-del")]
+        B::CodecZenohMsgPut(put) => put_supersedes(put),
+        #[cfg(feature = "request-put-del")]
+        B::CodecZenohMsgDel(del) => supersedes(C::Zenoh(Z::Del), del.extensions.entries()),
+        B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
+            supersedes(C::Zenoh(Z::Query), query.extensions.entries())
+        }
+        #[cfg(not(feature = "request-put-del"))]
+        #[allow(unreachable_patterns)]
+        _ => false,
+    };
+    if !body && !supersedes(C::Network(N::Request), request.extensions.entries()) {
+        return None;
+    }
+    let mut request = request.clone();
+    drop_superseded(C::Network(N::Request), &mut request.extensions).ok()?;
+    match &mut request.body {
+        #[cfg(feature = "request-put-del")]
+        B::CodecZenohMsgPut(put) => drop_superseded_put(put).ok()?,
+        #[cfg(feature = "request-put-del")]
+        B::CodecZenohMsgDel(del) => drop_superseded(C::Zenoh(Z::Del), &mut del.extensions).ok()?,
+        B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
+            drop_superseded_query(query).ok()?
+        }
+        #[cfg(not(feature = "request-put-del"))]
+        #[allow(unreachable_patterns)]
+        _ => {}
+    }
+    Some(request)
+}
+
+/// [`without_superseded_exts`] for a Push, for the router's multicast ingress as
+/// [`request_without_superseded_exts`] is for a Request.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn push_without_superseded_exts(
+    push: &PushOwned<WireStorage>,
+) -> Option<PushOwned<WireStorage>> {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
+    use crate::held_list::HeldList;
+    use wz_codecs::push::PushOwnedVariant as B;
+    let body = match &push.body {
+        B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => put_supersedes(put),
+        B::CodecZenohMsgDel(del) => supersedes(C::Zenoh(Z::Del), del.extensions.entries()),
+    };
+    if !body && !supersedes(C::Network(N::Push), push.extensions.entries()) {
+        return None;
+    }
+    let mut push = push.clone();
+    drop_superseded(C::Network(N::Push), &mut push.extensions).ok()?;
+    match &mut push.body {
+        B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => drop_superseded_put(put).ok()?,
+        B::CodecZenohMsgDel(del) => drop_superseded(C::Zenoh(Z::Del), &mut del.extensions).ok()?,
+    }
+    Some(push)
+}
+
+/// Whether `chain` carries an extension the message `carrier` names declares more than once.
+#[cfg(feature = "alloc")]
+fn supersedes<E: crate::ext_view::ExtEntryView>(
+    carrier: crate::ext_admit::ExtCarrier,
+    chain: Option<&[E]>,
+) -> bool {
+    let (Some(chain), Some(declared)) = (chain, crate::ext_admit::declared_identities(carrier))
+    else {
+        return false;
+    };
+    (0..chain.len()).any(|at| superseded_at(chain, at, declared))
+}
+
+/// Whether the entry at `at` of `chain` is of an identity among `declared` that a later entry
+/// carries again, so upstream's decoder holds the later one in its place.
+#[cfg(feature = "alloc")]
+fn superseded_at<E: crate::ext_view::ExtEntryView>(
+    chain: &[E],
+    at: usize,
+    declared: &[u8],
+) -> bool {
+    chain.get(at).is_some_and(|entry| {
+        let eid = entry.eid();
+        declared.contains(&eid)
+            && chain
+                .iter()
+                .skip(at.saturating_add(1))
+                .any(|later| later.eid() == eid)
+    })
+}
+
+/// Drop from `list` each entry a later one supersedes ([`superseded_at`]), keeping the order of
+/// the rest.
+#[cfg(feature = "alloc")]
+fn retain_last<E: crate::ext_view::ExtEntryView>(list: &mut Vec<E>, declared: &[u8]) {
+    let entries: &[E] = list;
+    let superseded: Vec<bool> = (0..entries.len())
+        .map(|at| superseded_at(entries, at, declared))
+        .collect();
+    let mut superseded = superseded.into_iter();
+    list.retain(|_| !superseded.next().unwrap_or(false));
+}
+
+/// [`retain_last`] on the chain a message holds of the generic entry, its chain flags set again
+/// for the entries that are left. The chain cannot be left empty or past its bound, since only
+/// entries a later one repeats are dropped.
+#[cfg(feature = "alloc")]
+fn drop_superseded<S: wz_codecs::ext_entry::ExtEntryStorage, const MAX: usize, const MIN: usize>(
+    carrier: crate::ext_admit::ExtCarrier,
+    chain: &mut Option<
+        sce_forge_runtime::codec::Bounded<Vec<wz_codecs::ext_entry::ExtEntryOwned<S>>, MAX, MIN>,
+    >,
+) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    let Some(declared) = crate::ext_admit::declared_identities(carrier) else {
+        return Ok(());
+    };
+    crate::held_list::edit_chain(chain, |list| {
+        if let Some(list) = list {
+            retain_last(list, declared);
+            crate::ext_nodeid::apply_chain_z_bits(list);
+        }
+    })
+}
+
+/// Whether a Put's chain repeats an extension the Put declares. The shared-memory marker is a
+/// place of the chain and cannot be repeated.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        all(feature = "codec-request", feature = "request-put-del")
+    )
+))]
+fn put_supersedes<S: wz_codecs::msg_put::MsgPutStorage>(
+    put: &wz_codecs::msg_put::MsgPutOwned<S>,
+) -> bool {
+    use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
+    supersedes(C::Zenoh(Z::Put), Some(crate::put_payload::chain(put)))
+}
+
+/// [`drop_superseded`] for a Put's chain, the shared-memory marker kept at its place.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        all(feature = "codec-request", feature = "request-put-del")
+    )
+))]
+fn drop_superseded_put<S: wz_codecs::msg_put::MsgPutStorage>(
+    put: &mut wz_codecs::msg_put::MsgPutOwned<S>,
+) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
+    use crate::put_payload::ChainEntry;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    let Some(declared) = crate::ext_admit::declared_identities(C::Zenoh(Z::Put)) else {
+        return Ok(());
+    };
+    // The whole chain, the marker an entry at its place, as `set_chain` takes it back.
+    let mut entries: Vec<ExtEntryOwned<S>> = crate::put_payload::chain_entries(put)
+        .map(|walk| {
+            walk.map(|entry| match entry {
+                ChainEntry::Marker => ExtEntryOwned {
+                    header: crate::put_payload::marker_header(),
+                    body: ExtEntryOwnedVariant::CodecZenohExtUnit(
+                        wz_codecs::ext_unit::ExtUnit::default(),
+                    ),
+                },
+                ChainEntry::Entry(entry) => entry.clone(),
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    retain_last(&mut entries, declared);
+    crate::ext_nodeid::apply_chain_z_bits(&mut entries);
+    crate::put_payload::set_chain(put, entries)
+}
+
+/// [`drop_superseded`] for a Query's chain, whose value is the marker and the entry after it.
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
+fn drop_superseded_query(
+    query: &mut crate::wire::parts::QueryOwned,
+) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
+    use crate::ext_header::body_eid::{QUERY_SHM, QUERY_VALUE};
+    use crate::ext_header::EXT_FLAG_Z;
+    use crate::ext_view::ExtEntryView;
+    let Some(declared) = crate::ext_admit::declared_identities(C::Zenoh(Z::Query)) else {
+        return Ok(());
+    };
+    let Some(lawful) = query.extensions.take() else {
+        return Ok(());
+    };
+    let mut chain = lawful.into_parts().1.into_inner();
+    let value = crate::ext_view::last_index_by_eid(&chain, QUERY_VALUE);
+    let marker = value
+        .and_then(|at| at.checked_sub(1))
+        .filter(|at| chain.get(*at).is_some_and(|entry| entry.eid() == QUERY_SHM));
+    let others: Vec<u8> = declared
+        .iter()
+        .copied()
+        .filter(|eid| *eid != QUERY_VALUE && *eid != QUERY_SHM)
+        .collect();
+    let superseded: Vec<bool> = (0..chain.len())
+        .map(|at| match chain.get(at).map(ExtEntryView::eid) {
+            Some(QUERY_VALUE) => Some(at) != value,
+            Some(QUERY_SHM) => Some(at) != marker,
+            _ => superseded_at(&chain, at, &others),
+        })
+        .collect();
+    let mut superseded = superseded.into_iter();
+    chain.retain(|_| !superseded.next().unwrap_or(false));
+    let last = chain.len().saturating_sub(1);
+    for (at, entry) in chain.iter_mut().enumerate() {
+        entry.header = if at == last {
+            entry.header & !EXT_FLAG_Z
+        } else {
+            entry.header | EXT_FLAG_Z
+        };
+    }
+    query.extensions = Some(crate::held_list::lawful(crate::held_list::held(chain)?)?);
+    Ok(())
 }
 
 /// R74 — decode a `Frame.payload` byte slice into the in-order batch
@@ -1616,7 +2022,11 @@ pub(crate) fn is_transport_mid(mid: u8) -> bool {
 /// stops it after that record, and is the walk's answer. What a receive path
 /// needs when handing a record over can itself fail (the owned extension chain
 /// of the `Frame` it came in, made only when an owned record needs it).
-#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+// Its test readers are the record walk's, which are the heap profile's (`record_walk_tests`).
+#[cfg(all(
+    feature = "codec-frame",
+    any(all(test, feature = "alloc"), feature = "session-unicast")
+))]
 pub(crate) fn try_for_each_record<'f>(
     payload: &'f [u8],
     record: &mut RecordBuf,
@@ -3552,8 +3962,9 @@ fn stats_class_marked<E: crate::ext_view::ExtEntryView>(
     class
 }
 
-/// The value length of the first ZBUF extension of identity `eid` in
-/// `extensions`, or `0`. The extension is told by its identity
+/// The value length of the ZBUF extension of identity `eid` in `extensions`,
+/// the last entry of it as every reader picks one
+/// ([`crate::ext_view::last_by_eid`]), or `0`. The extension is told by its identity
 /// ([`crate::ext_header::body_eid`]), as upstream tells it, so an extension of
 /// the same id that is mandatory is another extension and is not sized.
 #[cfg(all(
@@ -3565,7 +3976,7 @@ fn stats_class_marked<E: crate::ext_view::ExtEntryView>(
     )
 ))]
 fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, eid: u8) -> usize {
-    crate::ext_view::find_by_eid(extensions.unwrap_or_default(), eid)
+    crate::ext_view::last_by_eid(extensions.unwrap_or_default(), eid)
         .and_then(|ext| ext.plain_zbuf())
         .map_or(0, <[u8]>::len)
 }
@@ -4030,9 +4441,7 @@ fn zbuf_ext_len_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
     eid: u8,
 ) -> usize {
-    extensions
-        .into_iter()
-        .find(|ext| ext.eid() == eid)
+    crate::ext_view::last_by_eid_in(extensions, eid)
         .and_then(|ext| ext.plain_zbuf().map(<[u8]>::len))
         .unwrap_or(0)
 }
@@ -4513,24 +4922,22 @@ fn query_view_class(
     use wz_codecs::query_ext_entry::QueryExtEntryViewVariant;
     use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
     let entries = || crate::ext_view::walked(query.extensions.as_deref());
-    let value = entries()
-        .find(|ext| {
-            crate::ext_view::ExtEntryView::eid(ext) == crate::ext_header::body_eid::QUERY_VALUE
-        })
-        .map_or(0, |ext| match &ext.body {
-            QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(zbuf) => match &zbuf.after_shm {
-                QueryValueZbufAfterShm::NotAfterShm { value } => {
-                    crate::encoding::split_value_body(value.into_inner())
-                        .map_or(0, |(_, payload)| payload.len())
-                }
-                QueryValueZbufAfterShm::AfterShm { slices, .. } => slices
-                    .inner()
-                    .iter()
-                    .map(|slice| crate::put_payload::slice_len(&slice))
-                    .sum(),
-            },
-            _ => 0,
-        });
+    let value =
+        crate::ext_view::last_by_eid_in(entries(), crate::ext_header::body_eid::QUERY_VALUE)
+            .map_or(0, |ext| match &ext.body {
+                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(zbuf) => match &zbuf.after_shm {
+                    QueryValueZbufAfterShm::NotAfterShm { value } => {
+                        crate::encoding::split_value_body(value.into_inner())
+                            .map_or(0, |(_, payload)| payload.len())
+                    }
+                    QueryValueZbufAfterShm::AfterShm { slices, .. } => slices
+                        .inner()
+                        .iter()
+                        .map(|slice| crate::put_payload::slice_len(&slice))
+                        .sum(),
+                },
+                _ => 0,
+            });
     stats_class_marked_in(
         MessageLabel::Query,
         StatMessage::Query,
@@ -6379,6 +6786,26 @@ mod attachment_identity_tests {
             );
         }
     }
+
+    /// A Query that carries its attachment twice is sized by the last, the one upstream's decoder
+    /// keeps (`commons/zenoh-codec/src/zenoh/query.rs` @ `ext_attachment = Some(a);`) and whose
+    /// length its statistics count, held and walked alike.
+    #[test]
+    fn a_repeated_attachment_is_sized_by_its_last_entry() {
+        let entry = |bytes: &[u8]| {
+            crate::attachment::encode_attachment_ext::<crate::wire::WireStorage>(
+                crate::attachment::ATTACHMENT_EXT_ID_QUERY,
+                bytes,
+            )
+            .unwrap()
+        };
+        let chain = [entry(&[0xAB; 3]), entry(&[0xCD; 5])];
+        assert_eq!(
+            zbuf_ext_len(Some(&chain[..]), body_eid::QUERY_ATTACHMENT),
+            5
+        );
+        assert_eq!(zbuf_ext_len_in(chain.iter(), body_eid::QUERY_ATTACHMENT), 5);
+    }
 }
 
 // The mandatory-extension rule for the network messages and the zenoh bodies:
@@ -6413,15 +6840,35 @@ mod mandatory_extension_rule_tests {
         (0u8..0x80).filter(|h| (h >> 5) & 3 != 3)
     }
 
-    /// One generic entry with `header` and the body its encoding needs.
-    fn entry<S: ExtEntryStorage>(header: u8) -> ExtEntryOwned<S> {
+    /// One generic entry with `header` and the body its encoding needs. These tests judge the
+    /// mandatory-extension rule, so the body of an identity some message declares is one every
+    /// reader of that identity reads (the readers' well-formed cases in `ext_admit`): the
+    /// verdict then turns on the header alone. Every other identity carries the empty body.
+    fn entry<S: ExtEntryStorage>(header: u8) -> ExtEntryOwned<S>
+    where
+        <S as sce_forge_runtime::codec::HoldsBytes<wz_codecs::ext_zbuf::ExtZbufValueField>>::Bytes:
+            wz_codecs::SceByteBuf,
+    {
+        let zbuf: &[u8] = match header {
+            // A timestamp: a time, an id length of 1, an id that is not zero.
+            0x42 => &[0x05, 0x01, 0x01],
+            // A responder (zid length, zid, entity id) and a Query's value (an encoding
+            // with no schema, then the payload): these bytes are both.
+            0x43 => &[0x00, 0x01, 0x07],
+            // A source info: a zid, an entity id and a sequence number.
+            0x41 => &[0x00, 0x01, 0x02, 0x03],
+            // A timestamp stack: flags that are not zero, then one interception.
+            0x47 => &[0x01, 0x01, 0x02, 0x01, 0xAA],
+            // An undeclaration's key: a scope and a UTF-8 suffix.
+            0x5F => &[0x01, 0x00, b'a'],
+            _ => &[],
+        };
         let body = match (header >> 5) & 3 {
             0 => ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
             1 => ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: 0 }),
-            // The default value is the empty body.
             _ => ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                value_len: 0,
-                value: Default::default(),
+                value_len: zbuf.len() as u64,
+                value: crate::codec_owned::owned_bytes(zbuf).expect("a short body fits"),
             }),
         };
         ExtEntryOwned { header, body }
@@ -6757,6 +7204,917 @@ mod alias_space_tests {
         assert_eq!(
             stats_space_of_key(0, Some("demo/x"), &unknown),
             StatSpace::User
+        );
+    }
+}
+
+// A chain that carries one extension twice is read as upstream reads it, on every network
+// message and every body it carries whose extension wz reads. Each of upstream's decoders assigns
+// the entry an extension's arm meets, so a later entry replaces an earlier one: the chain reads as
+// the chain of its last entry alone, and no decoder refuses the repetition or keeps the first
+// (`crate::ext_view::last_by_eid`, which cites each decoder). Every test reads the chain held, as
+// the heap receive path holds it, and walked where its frame lies, as the in-place and the slot
+// receive paths read it, and holds each reading to the reading of the last entry alone and away
+// from that of the first.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "storage-profile",
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-declare"
+))]
+mod repeated_extension_tests {
+    use super::{parse_frame_payload, NetworkMessage};
+    use crate::ext_header::body_eid::{DEL_ATTACHMENT, QUERY_ATTACHMENT, QUERY_VALUE, SOURCE_INFO};
+    use crate::ext_header::network_eid::{QOS, RESPONDER};
+    use crate::ext_nodeid::{read_z64_of, NODEID_EXT_HEADER as NODE_ID};
+    use crate::ext_view::walked;
+    use crate::held_list::HeldList;
+    use crate::wire::WireStorage;
+    use alloc::vec::Vec;
+    use sce_forge_runtime::codec::{Bounded, SceCursor};
+    use wz_codecs::ext_entry::{
+        ExtEntryFrom, ExtEntryOwned, ExtEntryOwnedVariant, ExtEntryStorage,
+    };
+    use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
+    use wz_codecs::ext_zint::ExtZint;
+    use wz_codecs_test_support::TestWire as _;
+
+    /// A z64 entry of `header` holding `value`.
+    fn z64<S: ExtEntryStorage>(header: u8, value: u64) -> ExtEntryOwned<S> {
+        ExtEntryOwned {
+            header,
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
+        }
+    }
+
+    /// A ZBuf entry of `header` holding `bytes`.
+    fn zbuf<S: for<'x> ExtEntryFrom<'x>>(header: u8, bytes: &[u8]) -> ExtEntryOwned<S> {
+        let value = Bounded::new(bytes)
+            .expect("a test value is within the protocol's bound")
+            .store::<S, ExtZbufValueField>()
+            .expect("the heap holds a test value");
+        ExtEntryOwned {
+            header,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: bytes.len() as u64,
+                value,
+            }),
+        }
+    }
+
+    /// A chain of `entries`, in order, as a message holds it; the encoder sets each entry's
+    /// chain flag.
+    fn chain<E>(entries: Vec<E>) -> Bounded<Vec<E>, { usize::MAX }, 1> {
+        crate::held_list::held(entries).expect("a chain of a few entries is within its bound")
+    }
+
+    /// The body of a source-info extension naming the two-byte zid `[0xA0, n]`, entity `n` and
+    /// sequence number `n`.
+    fn source_info(n: u8) -> Vec<u8> {
+        crate::source_info_ext::encode_source_info_ext_body(&[0xA0, n], u32::from(n), u32::from(n))
+            .expect("a two-byte zid is a zid")
+    }
+
+    /// `both` is the reading of the chain that carries the extension twice, `last` and `first`
+    /// the readings of each of its entries alone.
+    #[track_caller]
+    fn assert_reads_last<T: PartialEq + core::fmt::Debug>(what: &str, both: T, last: T, first: T) {
+        assert_ne!(last, first, "{what}: the two entries must read apart");
+        assert_eq!(
+            both, last,
+            "{what}: a repeated extension is read by its last entry"
+        );
+    }
+
+    /// The Push (`commons/zenoh-codec/src/network/push.rs` @ `ext_qos = q;` and
+    /// `ext_nodeid = nid;`) and the Del it carries (`commons/zenoh-codec/src/zenoh/del.rs` @
+    /// `ext_sinfo = Some(s);` and `ext_attachment = Some(a);`).
+    #[test]
+    fn a_push_and_its_del_read_a_repeated_extension_by_its_last_entry() {
+        let (sinfo_first, sinfo_last) = (source_info(1), source_info(2));
+        let mut push = crate::push_build::build_push_del_literal("k").expect("a literal del");
+        push.extensions = Some(chain(alloc::vec![
+            z64(QOS, 5),
+            z64(NODE_ID, 7),
+            z64(QOS, 2),
+            z64(NODE_ID, 9),
+        ]));
+        crate::ext_nodeid::sync_header_z(&mut push.header, true);
+        match &mut push.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgDel(del) => {
+                del.extensions = Some(chain(alloc::vec![
+                    zbuf(SOURCE_INFO, &sinfo_first),
+                    zbuf(DEL_ATTACHMENT, b"first"),
+                    zbuf(SOURCE_INFO, &sinfo_last),
+                    zbuf(DEL_ATTACHMENT, b"last"),
+                ]));
+                crate::ext_nodeid::sync_header_z(&mut del.header, true);
+            }
+            _ => panic!("a literal del carries a Del"),
+        }
+        let wire = push.wire();
+        let messages = parse_frame_payload(&wire).expect("the Push decodes");
+        let [NetworkMessage::Push(held)] = messages.as_slice() else {
+            panic!("the wire is one Push");
+        };
+        let view = wz_codecs::push::PushView::decode(&mut SceCursor::new(&wire))
+            .expect("the Push decodes where it lies");
+
+        let envelope = HeldList::entries(&held.extensions).expect("the Push holds its chain");
+        let (qos_last, qos_first) = (z64::<WireStorage>(QOS, 2), z64::<WireStorage>(QOS, 5));
+        let alone_qos = |e: &ExtEntryOwned<WireStorage>| crate::sample::extract_qos_in([e]);
+        for both in [
+            crate::sample::extract_qos_in(envelope),
+            crate::sample::extract_qos_in(walked(view.extensions.as_ref())),
+        ] {
+            assert_reads_last(
+                "push qos",
+                both,
+                alone_qos(&qos_last),
+                alone_qos(&qos_first),
+            );
+        }
+        for both in [
+            read_z64_of(envelope, NODE_ID),
+            read_z64_of(walked(view.extensions.as_ref()), NODE_ID),
+        ] {
+            assert_reads_last("push node id", both, Some(9), Some(7));
+        }
+        assert_eq!(
+            crate::ext_nodeid::read_source(held.extensions.as_deref()),
+            9
+        );
+
+        let held_del = match &held.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgDel(del) => {
+                HeldList::entries(&del.extensions).expect("the Del holds its chain")
+            }
+            _ => panic!("the Push carries a Del"),
+        };
+        let walked_del = || {
+            walked(match &view.body {
+                wz_codecs::push::PushViewVariant::CodecZenohMsgDel(del) => del.extensions.as_ref(),
+                _ => panic!("the Push carries a Del"),
+            })
+        };
+        let sinfo = |bytes: &[u8]| {
+            crate::sample::extract_source_info(&[zbuf::<WireStorage>(SOURCE_INFO, bytes)])
+        };
+        for both in [
+            crate::sample::extract_source_info(held_del),
+            crate::sample::extract_source_info_in(walked_del()),
+        ] {
+            assert_reads_last(
+                "del source info",
+                both,
+                sinfo(&sinfo_last),
+                sinfo(&sinfo_first),
+            );
+        }
+        #[cfg(feature = "attachment-bytes")]
+        {
+            use crate::attachment::ATTACHMENT_EXT_ID_DEL as DEL;
+            use crate::attachment::{decode_attachment_ext, decode_attachment_ext_in};
+            for both in [
+                decode_attachment_ext(held_del, DEL),
+                decode_attachment_ext_in(walked_del(), DEL),
+            ] {
+                assert_reads_last(
+                    "del attachment",
+                    both,
+                    Some(&b"last"[..]),
+                    Some(&b"first"[..]),
+                );
+            }
+        }
+    }
+
+    /// The Put a Push carries (`commons/zenoh-codec/src/zenoh/put.rs` @ `*ext_sinfo = Some(s);`
+    /// and `*ext_attachment = Some(a);`), whose chain the payload's layout holds.
+    #[test]
+    fn a_put_reads_a_repeated_extension_by_its_last_entry() {
+        let (sinfo_first, sinfo_last) = (source_info(1), source_info(2));
+        let mut push = crate::push_build::build_push_literal("k", b"v").expect("a literal put");
+        match &mut push.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                crate::put_payload::set_chain(
+                    put,
+                    [
+                        zbuf(SOURCE_INFO, &sinfo_first),
+                        zbuf(crate::ext_header::body_eid::PUT_ATTACHMENT, b"first"),
+                        zbuf(SOURCE_INFO, &sinfo_last),
+                        zbuf(crate::ext_header::body_eid::PUT_ATTACHMENT, b"last"),
+                    ],
+                )
+                .expect("an inline Put holds a chain of four entries");
+            }
+            _ => panic!("a literal put carries a Put"),
+        }
+        let wire = push.wire();
+        let messages = parse_frame_payload(&wire).expect("the Push decodes");
+        let [NetworkMessage::Push(held)] = messages.as_slice() else {
+            panic!("the wire is one Push");
+        };
+        let view = wz_codecs::push::PushView::decode(&mut SceCursor::new(&wire))
+            .expect("the Push decodes where it lies");
+        let held_put = match &held.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => crate::put_payload::chain(put),
+            _ => panic!("the Push carries a Put"),
+        };
+        let walked_put = || {
+            let wz_codecs::push::PushViewVariant::CodecZenohMsgPut(put) = &view.body else {
+                panic!("the Push carries a Put");
+            };
+            crate::put_payload::view_chain(put)
+                .map(|(rest, _)| sce_forge_runtime::codec::Entries::entries(rest))
+                .into_iter()
+                .flatten()
+        };
+        let sinfo = |bytes: &[u8]| {
+            crate::sample::extract_source_info(&[zbuf::<WireStorage>(SOURCE_INFO, bytes)])
+        };
+        for both in [
+            crate::sample::extract_source_info(held_put),
+            crate::sample::extract_source_info_in(walked_put()),
+        ] {
+            assert_reads_last(
+                "put source info",
+                both,
+                sinfo(&sinfo_last),
+                sinfo(&sinfo_first),
+            );
+        }
+        #[cfg(feature = "attachment-bytes")]
+        {
+            use crate::attachment::ATTACHMENT_EXT_ID_PUSH as PUT;
+            use crate::attachment::{decode_attachment_ext, decode_attachment_ext_in};
+            for both in [
+                decode_attachment_ext(held_put, PUT),
+                decode_attachment_ext_in(walked_put(), PUT),
+            ] {
+                assert_reads_last(
+                    "put attachment",
+                    both,
+                    Some(&b"last"[..]),
+                    Some(&b"first"[..]),
+                );
+            }
+        }
+    }
+
+    /// The Request (`commons/zenoh-codec/src/network/request.rs` @ `ext_qos = q;`,
+    /// `ext_nodeid = nid;`, `ext_target = rt;` and `ext_timeout = Some(`) and the Query it carries
+    /// (`commons/zenoh-codec/src/zenoh/query.rs` @ `ext_sinfo = Some(s);`, `ext_body = Some(s);`
+    /// and `ext_attachment = Some(a);`).
+    #[test]
+    fn a_request_and_its_query_read_a_repeated_extension_by_its_last_entry() {
+        use crate::query_mode::TARGET_EXT_HEADER as TARGET;
+        use crate::request_routing_context::TIMEOUT_EXT_HEADER as TIMEOUT;
+        let (sinfo_first, sinfo_last) = (source_info(1), source_info(2));
+        // A value is its encoding (0: none, no schema) and its payload.
+        let (value_first, value_last) = ([0x00, b'a'], [0x00, b'b', b'b']);
+        let mut request = crate::request_build::build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .expect("a query request");
+        request.extensions = Some(chain(alloc::vec![
+            z64(QOS, 5),
+            z64(TARGET, 1),
+            z64(TIMEOUT, 100),
+            z64(NODE_ID, 7),
+            z64(QOS, 2),
+            z64(TARGET, 2),
+            z64(TIMEOUT, 200),
+            z64(NODE_ID, 9),
+        ]));
+        crate::ext_nodeid::sync_header_z(&mut request.header, true);
+        let entry = |header: u8, bytes: &[u8]| {
+            crate::ext_view::query_ext_from_generic(zbuf::<WireStorage>(header, bytes))
+        };
+        match &mut request.body {
+            crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                query.extensions = Some(
+                    crate::held_list::lawful(chain(alloc::vec![
+                        entry(SOURCE_INFO, &sinfo_first),
+                        entry(QUERY_VALUE, &value_first),
+                        entry(QUERY_ATTACHMENT, b"first"),
+                        entry(SOURCE_INFO, &sinfo_last),
+                        entry(QUERY_VALUE, &value_last),
+                        entry(QUERY_ATTACHMENT, b"last"),
+                    ]))
+                    .expect("a chain with no shared-memory marker follows its law"),
+                );
+                crate::ext_nodeid::sync_header_z(&mut query.header, true);
+            }
+            _ => panic!("a query request carries a Query"),
+        }
+        let wire = request.wire();
+        let messages = parse_frame_payload(&wire).expect("the Request decodes");
+        let [NetworkMessage::Request(held)] = messages.as_slice() else {
+            panic!("the wire is one Request");
+        };
+        let view = wz_codecs::request::RequestView::decode(&mut SceCursor::new(&wire))
+            .expect("the Request decodes where it lies");
+
+        let envelope = HeldList::entries(&held.extensions).expect("the Request holds its chain");
+        let alone = |header: u8, value: u64| [z64::<WireStorage>(header, value)];
+        for both in [
+            crate::declare_ext_qos::read_qos_of(envelope),
+            crate::declare_ext_qos::read_qos_of(walked(view.extensions.as_ref())),
+        ] {
+            assert_reads_last(
+                "request qos",
+                both,
+                crate::declare_ext_qos::read_qos_of(alone(QOS, 2)),
+                crate::declare_ext_qos::read_qos_of(alone(QOS, 5)),
+            );
+        }
+        for both in [
+            crate::request_routing_context::read_target_of(envelope),
+            crate::request_routing_context::read_target_of(walked(view.extensions.as_ref())),
+        ] {
+            assert_reads_last(
+                "request target",
+                both,
+                crate::request_routing_context::read_target_of(alone(TARGET, 2)),
+                crate::request_routing_context::read_target_of(alone(TARGET, 1)),
+            );
+        }
+        assert_eq!(
+            crate::request_routing_context::read_request_target(held),
+            crate::request_routing_context::read_target_of(alone(TARGET, 2))
+        );
+        // The in-place receive path reads the target and the QoS in one walk.
+        assert_eq!(
+            crate::ext_nodeid::read_two_z64_of(walked(view.extensions.as_ref()), TARGET, QOS),
+            (Some(2), Some(2))
+        );
+        for both in [
+            read_z64_of(envelope, TIMEOUT),
+            read_z64_of(walked(view.extensions.as_ref()), TIMEOUT),
+        ] {
+            assert_reads_last("request timeout", both, Some(200), Some(100));
+        }
+        assert_eq!(
+            crate::request_routing_context::read_request_timeout_ms(held),
+            Some(200)
+        );
+        for both in [
+            read_z64_of(envelope, NODE_ID),
+            read_z64_of(walked(view.extensions.as_ref()), NODE_ID),
+        ] {
+            assert_reads_last("request node id", both, Some(9), Some(7));
+        }
+
+        let held_query = match &held.body {
+            crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                HeldList::entries(&query.extensions).expect("the Query holds its chain")
+            }
+            _ => panic!("the Request carries a Query"),
+        };
+        let walked_query = || {
+            walked(match &view.body {
+                wz_codecs::request::RequestViewVariant::CodecZenohQuery(query) => {
+                    query.extensions.as_deref()
+                }
+                _ => panic!("the Request carries a Query"),
+            })
+        };
+        let sinfo = |bytes: &[u8]| crate::sample::extract_source_info(&[entry(SOURCE_INFO, bytes)]);
+        for both in [
+            crate::sample::extract_source_info(held_query),
+            crate::sample::extract_source_info_in(walked_query()),
+        ] {
+            assert_reads_last(
+                "query source info",
+                both,
+                sinfo(&sinfo_last),
+                sinfo(&sinfo_first),
+            );
+        }
+        assert_reads_last(
+            "query value length",
+            crate::ext_view::query_value_payload_len(held_query),
+            2,
+            1,
+        );
+        #[cfg(feature = "query-value")]
+        {
+            use crate::query_value_ext::{decode_query_value_ext, decode_query_value_ext_in};
+            for both in [
+                decode_query_value_ext(held_query).map(|(_, payload)| payload),
+                decode_query_value_ext_in(walked_query()).map(|(_, payload)| payload),
+            ] {
+                assert_reads_last("query value", both, Some(&b"bb"[..]), Some(&b"a"[..]));
+            }
+        }
+        #[cfg(feature = "attachment-bytes")]
+        {
+            use crate::attachment::ATTACHMENT_EXT_ID_QUERY as QUERY;
+            use crate::attachment::{decode_attachment_ext, decode_attachment_ext_in};
+            for both in [
+                decode_attachment_ext(held_query, QUERY),
+                decode_attachment_ext_in(walked_query(), QUERY),
+            ] {
+                assert_reads_last(
+                    "query attachment",
+                    both,
+                    Some(&b"last"[..]),
+                    Some(&b"first"[..]),
+                );
+            }
+        }
+    }
+
+    /// The Response (`commons/zenoh-codec/src/network/response.rs` @ `ext_qos = q;` and
+    /// `ext_respid = Some(t);`) and the Err it carries (`commons/zenoh-codec/src/zenoh/err.rs` @
+    /// `ext_sinfo = Some(s);`).
+    #[test]
+    fn a_response_and_its_err_read_a_repeated_extension_by_its_last_entry() {
+        let (sinfo_first, sinfo_last) = (source_info(1), source_info(2));
+        // The responder: the zid's length less one in the high nibble, the zid, the entity id.
+        let (responder_first, responder_last) = ([0x10, 0xCA, 0xFE, 0x03], [0x00, 0xAB, 0x07]);
+        let mut response = crate::response_build::build_response_err(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+            b"e",
+        )
+        .expect("an err response");
+        response.extensions = Some(chain(alloc::vec![
+            zbuf(RESPONDER, &responder_first),
+            z64(QOS, 5),
+            zbuf(RESPONDER, &responder_last),
+            z64(QOS, 2),
+        ]));
+        crate::ext_nodeid::sync_header_z(&mut response.header, true);
+        match &mut response.body {
+            crate::wire::ResponseOwnedVariant::CodecZenohErr(err) => {
+                err.extensions = Some(chain(alloc::vec![
+                    zbuf(SOURCE_INFO, &sinfo_first),
+                    zbuf(SOURCE_INFO, &sinfo_last),
+                ]));
+                crate::ext_nodeid::sync_header_z(&mut err.header, true);
+            }
+            _ => panic!("an err response carries an Err"),
+        }
+        let wire = response.wire();
+        let messages = parse_frame_payload(&wire).expect("the Response decodes");
+        let [NetworkMessage::Response(held)] = messages.as_slice() else {
+            panic!("the wire is one Response");
+        };
+        let view = wz_codecs::response::ResponseView::decode(&mut SceCursor::new(&wire))
+            .expect("the Response decodes where it lies");
+
+        let envelope = HeldList::entries(&held.extensions).expect("the Response holds its chain");
+        for both in [
+            crate::reply::response_responder(envelope),
+            crate::reply::response_responder(walked(view.extensions.as_ref())),
+        ] {
+            assert_reads_last(
+                "response responder",
+                both,
+                Some((&[0xAB][..], 7)),
+                Some((&[0xCA, 0xFE][..], 3)),
+            );
+        }
+        let (qos_last, qos_first) = (z64::<WireStorage>(QOS, 2), z64::<WireStorage>(QOS, 5));
+        let alone_qos = |e: &ExtEntryOwned<WireStorage>| crate::sample::extract_qos_in([e]);
+        for both in [
+            crate::sample::extract_qos_in(envelope),
+            crate::sample::extract_qos_in(walked(view.extensions.as_ref())),
+        ] {
+            assert_reads_last(
+                "response qos",
+                both,
+                alone_qos(&qos_last),
+                alone_qos(&qos_first),
+            );
+        }
+
+        let held_err = match &held.body {
+            crate::wire::ResponseOwnedVariant::CodecZenohErr(err) => {
+                HeldList::entries(&err.extensions).expect("the Err holds its chain")
+            }
+            _ => panic!("the Response carries an Err"),
+        };
+        let walked_err = walked(match &view.body {
+            wz_codecs::response::ResponseViewVariant::CodecZenohErr(err) => err.extensions.as_ref(),
+            _ => panic!("the Response carries an Err"),
+        });
+        let sinfo = |bytes: &[u8]| {
+            crate::sample::extract_source_info(&[zbuf::<WireStorage>(SOURCE_INFO, bytes)])
+        };
+        for both in [
+            crate::sample::extract_source_info(held_err),
+            crate::sample::extract_source_info_in(walked_err),
+        ] {
+            assert_reads_last(
+                "err source info",
+                both,
+                sinfo(&sinfo_last),
+                sinfo(&sinfo_first),
+            );
+        }
+    }
+
+    /// The Declare (`commons/zenoh-codec/src/network/declare.rs` @ `ext_qos = q;` and
+    /// `ext_nodeid = nid;`), the undeclaration's wire expression (the same file @
+    /// `ext_wire_expr = we;`) and a queryable's info (the same file @ `ext_info = i;`).
+    #[test]
+    fn a_declare_and_its_bodies_read_a_repeated_extension_by_its_last_entry() {
+        let mut undeclare = crate::declare_build::build_undeclare_subscriber(1);
+        undeclare.extensions = Some(chain(alloc::vec![
+            z64(QOS, 5),
+            z64(NODE_ID, 7),
+            z64(QOS, 2),
+            z64(NODE_ID, 9),
+        ]));
+        crate::ext_nodeid::sync_header_z(&mut undeclare.header, true);
+        match &mut undeclare.body {
+            wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(d) => {
+                d.extensions = Some(chain(alloc::vec![
+                    crate::declare_ext_keyexpr::build_ext_keyexpr("first")
+                        .expect("a literal keyexpr"),
+                    crate::declare_ext_keyexpr::build_ext_keyexpr("last")
+                        .expect("a literal keyexpr"),
+                ]));
+                crate::ext_nodeid::sync_header_z(&mut d.header, true);
+            }
+            _ => panic!("an undeclaration carries its body"),
+        }
+        let wire = undeclare.wire();
+        let messages = parse_frame_payload(&wire).expect("the Declare decodes");
+        let [NetworkMessage::Declare(held)] = messages.as_slice() else {
+            panic!("the wire is one Declare");
+        };
+        let view = wz_codecs::declare::DeclareView::decode(&mut SceCursor::new(&wire))
+            .expect("the Declare decodes where it lies");
+
+        let envelope = HeldList::entries(&held.extensions).expect("the Declare holds its chain");
+        let alone_qos =
+            |value: u64| crate::declare_ext_qos::read_qos_of(&[z64::<WireStorage>(QOS, value)]);
+        for both in [
+            crate::declare_ext_qos::read_qos_of(envelope),
+            crate::declare_ext_qos::read_qos_of(walked(view.extensions.as_ref())),
+        ] {
+            assert_reads_last("declare qos", both, alone_qos(2), alone_qos(5));
+        }
+        for both in [
+            read_z64_of(envelope, NODE_ID),
+            read_z64_of(walked(view.extensions.as_ref()), NODE_ID),
+        ] {
+            assert_reads_last("declare node id", both, Some(9), Some(7));
+        }
+        let wire_expr = match &held.body {
+            wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(d) => {
+                crate::declare_ext_keyexpr::read_ext_keyexpr(d.extensions.as_deref())
+            }
+            _ => panic!("the Declare carries the undeclaration"),
+        };
+        assert_reads_last(
+            "undeclaration wire expression",
+            wire_expr,
+            Some("last"),
+            Some("first"),
+        );
+
+        let mut queryable = crate::declare_build::build_declare_queryable(1, 0, Some("k"))
+            .expect("a literal queryable");
+        let info = crate::queryable_info::QUERYABLE_INFO_EXT_HEADER;
+        let (info_first, info_last) = (0x01, 0x0300);
+        match &mut queryable.body {
+            wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                d.extensions = Some(chain(alloc::vec![
+                    z64(info, info_first),
+                    z64(info, info_last),
+                ]));
+                crate::ext_nodeid::sync_header_z(&mut d.header, true);
+            }
+            _ => panic!("a queryable declaration carries its body"),
+        }
+        let wire = queryable.wire();
+        let messages = parse_frame_payload(&wire).expect("the Declare decodes");
+        let [NetworkMessage::Declare(held)] = messages.as_slice() else {
+            panic!("the wire is one Declare");
+        };
+        let read = match &held.body {
+            wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                crate::queryable_info::read_queryable_info_in(HeldList::entries(&d.extensions))
+            }
+            _ => panic!("the Declare carries the queryable"),
+        };
+        let alone = |value: u64| {
+            crate::queryable_info::read_queryable_info_in(Some(
+                &[z64::<WireStorage>(info, value)][..],
+            ))
+        };
+        assert_reads_last("queryable info", read, alone(info_last), alone(info_first));
+    }
+
+    /// The Interest (`commons/zenoh-codec/src/network/interest.rs` @ `ext_qos = q;` and
+    /// `ext_nodeid = nid;`).
+    #[test]
+    fn an_interest_reads_a_repeated_extension_by_its_last_entry() {
+        let mut interest = crate::interest_build::build_interest_final(1);
+        interest.extensions = Some(chain(alloc::vec![
+            z64(QOS, 5),
+            z64(NODE_ID, 7),
+            z64(QOS, 2),
+            z64(NODE_ID, 9),
+        ]));
+        crate::ext_nodeid::sync_header_z(&mut interest.header, true);
+        let wire = interest.wire();
+        let messages = parse_frame_payload(&wire).expect("the Interest decodes");
+        let [NetworkMessage::Interest(held)] = messages.as_slice() else {
+            panic!("the wire is one Interest");
+        };
+        let view = wz_codecs::interest::InterestView::decode(&mut SceCursor::new(&wire))
+            .expect("the Interest decodes where it lies");
+        let envelope = HeldList::entries(&held.extensions).expect("the Interest holds its chain");
+        let alone_qos =
+            |value: u64| crate::declare_ext_qos::read_qos_of(&[z64::<WireStorage>(QOS, value)]);
+        for both in [
+            crate::declare_ext_qos::read_qos_of(envelope),
+            crate::declare_ext_qos::read_qos_of(walked(view.extensions.as_ref())),
+        ] {
+            assert_reads_last("interest qos", both, alone_qos(2), alone_qos(5));
+        }
+        for both in [
+            read_z64_of(envelope, NODE_ID),
+            read_z64_of(walked(view.extensions.as_ref()), NODE_ID),
+        ] {
+            assert_reads_last("interest node id", both, Some(9), Some(7));
+        }
+    }
+
+    /// A message's readings a participant may act on: the batch decode held and judged as a batch,
+    /// and the record walk that lends each record where its frame lies and the one that owns it.
+    fn refusals(wire: &[u8]) -> [Result<(), crate::parse_error::InboundParseError>; 3] {
+        use super::{for_each_record, new_record_buf, RecordForm};
+        let held = parse_frame_payload(wire)
+            .expect("the record decodes")
+            .iter()
+            .find_map(|message| message.ext_admission().refusal())
+            .map_or(Ok(()), Err);
+        let walk = |form| {
+            let mut record = new_record_buf();
+            let mut handed = 0usize;
+            let result = for_each_record(wire, &mut record, form, |_| handed += 1);
+            assert!(
+                result.is_ok() || handed == 0,
+                "a refused record is not handed over"
+            );
+            result
+        };
+        [held, walk(RecordForm::Lent), walk(RecordForm::Owned)]
+    }
+
+    /// A declared extension whose LAST entry its reader refuses refuses the whole message on every
+    /// reading, where it was read as absent: upstream reads each entry with the extension's reader
+    /// and propagates what that reader refuses (`commons/zenoh-codec/src/network/push.rs` @
+    /// `let (t, ext): (ext::TimestampType, bool) = eodec.read(&mut *reader)?;`,
+    /// `commons/zenoh-codec/src/network/request.rs` @ `_ => return Err(DidntRead),`,
+    /// `commons/zenoh-codec/src/zenoh/mod.rs` @ `let sn: u32 = self.codec.read(&mut *reader)?;`).
+    /// The same message with that entry well formed is admitted on every reading.
+    #[test]
+    fn a_malformed_last_entry_refuses_the_message_on_every_reading() {
+        use crate::ext_header::ext_eid;
+        use crate::parse_error::InboundParseError::MalformedExt;
+        use crate::query_mode::TARGET_EXT_HEADER as TARGET;
+        // `pub type Timestamp = zextzbuf!(0x2, false);`
+        const TIMESTAMP: u8 = 0x42;
+        // A timestamp is a time, the length of an id and the id; an id of zero is no id.
+        let (stamp_good, stamp_zero) = ([0x05, 0x01, 0x01], [0x05, 0x01, 0x00]);
+        let push = |last: &[u8]| {
+            let mut push = crate::push_build::build_push_del_literal("k").expect("a literal del");
+            push.extensions = Some(chain(alloc::vec![
+                zbuf(TIMESTAMP, &stamp_good),
+                zbuf(TIMESTAMP, last),
+            ]));
+            crate::ext_nodeid::sync_header_z(&mut push.header, true);
+            push.wire()
+        };
+        // A Request's target is 0, 1 or 2.
+        let request = |last: u64| {
+            let mut request = crate::request_build::build_request_query(
+                1,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+            )
+            .expect("a query request");
+            request.extensions = Some(chain(alloc::vec![z64(TARGET, 1), z64(TARGET, last)]));
+            crate::ext_nodeid::sync_header_z(&mut request.header, true);
+            request.wire()
+        };
+        // A source info is a zid, an entity id and a sequence number; one cut short has none.
+        let sinfo_good = source_info(2);
+        let sinfo_cut = &sinfo_good[..sinfo_good.len() - 1];
+        let response = |last: &[u8]| {
+            let mut response = crate::response_build::build_response_err(
+                1,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"e",
+            )
+            .expect("an err response");
+            match &mut response.body {
+                crate::wire::ResponseOwnedVariant::CodecZenohErr(err) => {
+                    err.extensions = Some(chain(alloc::vec![
+                        zbuf(SOURCE_INFO, &source_info(1)),
+                        zbuf(SOURCE_INFO, last),
+                    ]));
+                    crate::ext_nodeid::sync_header_z(&mut err.header, true);
+                }
+                _ => panic!("an err response carries an Err"),
+            }
+            response.wire()
+        };
+        let cases = [
+            (
+                "push timestamp",
+                push(&stamp_good),
+                push(&stamp_zero),
+                TIMESTAMP,
+            ),
+            ("request target", request(2), request(3), ext_eid(TARGET)),
+            (
+                "err source info",
+                response(&sinfo_good),
+                response(sinfo_cut),
+                SOURCE_INFO,
+            ),
+        ];
+        for (what, good, bad, eid) in cases {
+            assert_eq!(
+                refusals(&good),
+                [Ok(()); 3],
+                "{what}: the well-formed control"
+            );
+            assert_eq!(refusals(&bad), [Err(MalformedExt { eid }); 3], "{what}");
+        }
+    }
+
+    /// The shape of a chain as its readers see it: each entry's identity and body, in order, the
+    /// chain flag aside.
+    fn shape<E: crate::ext_view::ExtEntryView>(
+        entries: &[E],
+    ) -> Vec<(u8, Option<Vec<u8>>, Option<u64>)> {
+        entries
+            .iter()
+            .map(|e| (e.eid(), e.plain_zbuf().map(<[u8]>::to_vec), e.zint()))
+            .collect()
+    }
+
+    /// What a router routes of a message whose chains repeat a declared extension is the message
+    /// upstream's decoder makes of it (`super::without_superseded_exts`): each declared extension
+    /// once, as its last entry, the order of the rest kept. An extension a body does not declare
+    /// is kept as often as it came, as upstream's body decoder keeps each
+    /// (`commons/zenoh-codec/src/zenoh/del.rs` @ `ext_unknown.push(u);`), and a Query's value
+    /// is its last. A message that repeats nothing is routed as it came.
+    #[test]
+    fn a_routed_message_holds_a_repeated_declared_extension_once_as_its_last_entry() {
+        use super::without_superseded_exts;
+        use crate::ext_header::body_eid::PUT_ATTACHMENT;
+        // A ZBuf of id 0xA, which no Del declares.
+        const UNKNOWN: u8 = 0x4A;
+        let decoded = |wire: Vec<u8>| {
+            let mut messages = parse_frame_payload(&wire).expect("the record decodes");
+            assert_eq!(messages.len(), 1);
+            messages.remove(0)
+        };
+        let (sinfo_first, sinfo_last) = (source_info(1), source_info(2));
+
+        let mut push = crate::push_build::build_push_del_literal("k").expect("a literal del");
+        push.extensions = Some(chain(alloc::vec![
+            z64(QOS, 5),
+            z64(NODE_ID, 7),
+            z64(QOS, 2)
+        ]));
+        crate::ext_nodeid::sync_header_z(&mut push.header, true);
+        match &mut push.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgDel(del) => {
+                del.extensions = Some(chain(alloc::vec![
+                    zbuf(SOURCE_INFO, &sinfo_first),
+                    zbuf(UNKNOWN, b"u1"),
+                    zbuf(DEL_ATTACHMENT, b"first"),
+                    zbuf(SOURCE_INFO, &sinfo_last),
+                    zbuf(UNKNOWN, b"u2"),
+                    zbuf(DEL_ATTACHMENT, b"last"),
+                ]));
+                crate::ext_nodeid::sync_header_z(&mut del.header, true);
+            }
+            _ => panic!("a literal del carries a Del"),
+        }
+        let Some(NetworkMessage::Push(routed)) = without_superseded_exts(&decoded(push.wire()))
+        else {
+            panic!("a Push that repeats an extension is routed as another Push");
+        };
+        let envelope: [ExtEntryOwned<WireStorage>; 2] = [z64(NODE_ID, 7), z64(QOS, 2)];
+        assert_eq!(
+            shape(routed.extensions.entries().expect("a chain")),
+            shape(&envelope)
+        );
+        let body: [ExtEntryOwned<WireStorage>; 4] = [
+            zbuf(UNKNOWN, b"u1"),
+            zbuf(SOURCE_INFO, &sinfo_last),
+            zbuf(UNKNOWN, b"u2"),
+            zbuf(DEL_ATTACHMENT, b"last"),
+        ];
+        match &routed.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgDel(del) => {
+                assert_eq!(
+                    shape(del.extensions.entries().expect("a chain")),
+                    shape(&body)
+                )
+            }
+            _ => panic!("the routed Push carries the Del"),
+        }
+        let again = decoded(routed.wire());
+        assert!(
+            without_superseded_exts(&again).is_none(),
+            "the routed Push encodes, decodes and repeats nothing"
+        );
+
+        let mut put = crate::push_build::build_push_literal("k", b"v").expect("a literal put");
+        match &mut put.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgPut(p) => crate::put_payload::set_chain(
+                p,
+                [
+                    zbuf(PUT_ATTACHMENT, b"first"),
+                    zbuf(PUT_ATTACHMENT, b"last"),
+                ],
+            )
+            .expect("two entries are within the bound"),
+            _ => panic!("a literal put carries a Put"),
+        }
+        let Some(NetworkMessage::Push(routed)) = without_superseded_exts(&decoded(put.wire()))
+        else {
+            panic!("a Put that repeats its attachment is routed as another Push");
+        };
+        let attachment: [ExtEntryOwned<WireStorage>; 1] = [zbuf(PUT_ATTACHMENT, b"last")];
+        match &routed.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgPut(p) => {
+                assert_eq!(shape(crate::put_payload::chain(p)), shape(&attachment))
+            }
+            _ => panic!("the routed Push carries the Put"),
+        }
+
+        let entry = |header: u8, bytes: &[u8]| {
+            crate::ext_view::query_ext_from_generic(zbuf::<WireStorage>(header, bytes))
+        };
+        let mut request = crate::request_build::build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .expect("a query request");
+        request.extensions = Some(chain(alloc::vec![z64(QOS, 5), z64(QOS, 2)]));
+        crate::ext_nodeid::sync_header_z(&mut request.header, true);
+        match &mut request.body {
+            crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                query.extensions = Some(
+                    crate::held_list::lawful(chain(alloc::vec![
+                        entry(SOURCE_INFO, &sinfo_first),
+                        entry(QUERY_VALUE, &[0x00, b'a']),
+                        entry(QUERY_ATTACHMENT, b"a"),
+                        entry(QUERY_VALUE, &[0x00, b'b']),
+                    ]))
+                    .expect("a chain with no shared-memory marker follows its law"),
+                );
+                crate::ext_nodeid::sync_header_z(&mut query.header, true);
+            }
+            _ => panic!("a query request carries a Query"),
+        }
+        let Some(NetworkMessage::Request(routed)) =
+            without_superseded_exts(&decoded(request.wire()))
+        else {
+            panic!("a Request that repeats an extension is routed as another Request");
+        };
+        let qos: [ExtEntryOwned<WireStorage>; 1] = [z64(QOS, 2)];
+        assert_eq!(
+            shape(routed.extensions.entries().expect("a chain")),
+            shape(&qos)
+        );
+        let query = [
+            entry(SOURCE_INFO, &sinfo_first),
+            entry(QUERY_ATTACHMENT, b"a"),
+            entry(QUERY_VALUE, &[0x00, b'b']),
+        ];
+        match &routed.body {
+            crate::wire::RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(
+                    shape(q.extensions.entries().expect("a chain")),
+                    shape(&query)
+                )
+            }
+            _ => panic!("the routed Request carries the Query"),
+        }
+
+        let plain = crate::push_build::build_push_literal("k", b"v").expect("a literal put");
+        assert!(
+            without_superseded_exts(&decoded(plain.wire())).is_none(),
+            "a message that repeats nothing is routed as it came"
         );
     }
 }

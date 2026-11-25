@@ -4556,7 +4556,7 @@ pub struct McastSocketConfig<'a> {
     /// joined socket binds its family's wildcard or it cannot receive the group at
     /// all, which is the split upstream makes between the `ucast_sock` it binds
     /// here and the `mcast_sock` it does not.
-    pub bind: Option<SocketAddr>,
+    pub bind: Option<std::net::SocketAddr>,
     /// R2791 — `#dscp=<value>` (zenoh `DSCP`): written to `IP_TOS` /
     /// `IPV6_TCLASS` on whichever socket SENDS, keyed to the group's family as
     /// upstream keys it.

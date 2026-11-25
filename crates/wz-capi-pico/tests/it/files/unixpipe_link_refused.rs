@@ -2,12 +2,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #![cfg(all(
     feature = "peer",
-    not(feature = "transport-link-unixpipe"),
+    not(all(
+        feature = "transport-link-unixpipe",
+        any(target_os = "linux", target_os = "android")
+    )),
     not(feature = "engine-tokio")
 ))]
 
-//! A `unixpipe/` endpoint in a cooperative library built without `transport-link-unixpipe`: no
-//! link of the build opens one, so a session that listens on one, or dials one, is refused before
+//! A `unixpipe/` endpoint in a cooperative library built without `transport-link-unixpipe`, or
+//! with it on a host that has no named FIFO (Windows), where the feature is inert: no link of the
+//! build opens one, so a session that listens on one, or dials one, is refused before
 //! anything is opened with `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN`, what zenoh-pico answers for a
 //! scheme its build has no link for (`vendor/zenoh-pico/src/link/link.c` @
 //! `ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`); pico has no unixpipe link in any build. The
@@ -41,7 +45,8 @@ fn open_code(key: u8, endpoint: &CStr) -> i8 {
 }
 
 /// Neither role opens over a `unixpipe/` endpoint, each refused as a scheme the build has no link
-/// for. Turned red by a scheme judged built without its link, or by a refusal left to the engine.
+/// for. Turned red by a scheme judged built without its link (the feature named on a host with no
+/// named FIFO included), or by a refusal left to the engine.
 #[test]
 fn a_unixpipe_endpoint_opens_no_session_without_the_feature() {
     for (key, role) in [

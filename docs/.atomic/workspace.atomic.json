@@ -7557,6 +7557,104 @@
       "carry_forward_bullets": [
         "i686 size claims: id_map lent table 332 vs 328 and peer_tables own spans (also on x86_64 in the Vasan kit-pico set), reassembly_rx kept buffer let go (0 vs 2); keep the claims, fix the heads or the alignment. C1m legs whose counts moved (adminspace-write 57, lifecycle verbs 38, adminspace-core 27, read+write 69, rx fragment in place 9, coop static runtime 20, ip stack links 13, posix tcp seam 24) to be pinned with their causes. C1cs capic-default and lean text over budget and log:: in pico-client-coop-nostd: symbol diff first. Layer F codec-response-final floor 7712 < 8000. E7s stall at 1101 of 2048 sessions. The next hosted run's reds."
       ]
+    },
+    "Round 4640": {
+      "decision_summary": "The second integration of the CI red repayment, on main 20ee0c0a1, each red fixed at the structure that made it possible rather than at its symptom.\n\nLiveness: the registry no longer sends while it holds its lock. A declaration (subscriber, queryable, token, keyexpr, interest, undeclare, final, the face_up replay, gossip, and the multicast group sends) is recorded under the lock into an ordered per-face deferral and leaves after the guard drops (send_deferral in wz-session-core, wz-capi-core and the tokio multicast pipeline), as upstream's dispatcher sends after drop(ctrl_lock). A congested link can no longer stop every other face's receive and timeout sweep. The deferral's order lock is held across waits, as the conduit's is.\n\nNo-heap tables: a lent table's head holds no pointer. It names its rows by index (first, len) in the span its owner holds once per session, and each kind carries exactly the counters its inline twin has, so a lent table and a face's lent tables take no more than their inline twins on every ABI wz builds for, i386 System V included; the size claims are restored as originally stated. PeerSlot and lent_space are the row layer's; peer-row-pools takes storage-profile.\n\nRouter admission: the link table follows the node's declared limits and is unbounded where they are open (1101 was MAX_FACES + MAX_ACCEPT_PENDING + 1 read as a hidden bound), and a link refused for want of a row closes as INVALID rather than MAX_LINKS, which a peer read as held and redialled forever.\n\nBounds derived from the build: the handshake chain bound is the staging type's own slot count (a compile-time assertion ties them; patch and remote bound share id 0x7), and the encoders' tests derive their inputs from it. A coop read's wait buffer is emptied by its owner when handed back. A ring maximum is answered in u64 at upstream's widths. The response-final footprint floor is re-pinned after a per-symbol bisection (10760 -> 7584 B: the lent Final writer, the consolidating get's tables, an inline boundary) with response_final_len as its witness. Tests that measured a thread race (the admin GET beside a declaration flood) or a router's lifetime wrongly now measure the property they state. The Windows pico-api size rows are filled from the hosted reading.",
+      "changes_bullets": [
+        "wz-session-core: send_deferral (new), session_actions deferral, row_pool/id_map/peer_tables pointer-free heads and their registry callers, link_admission rows as a Quota and has_row, driver_loop LinkNoRoom, handshake_encode/ext_chain STAGED_CHAIN_MAX, transport_compose sn_ring_max, tests.",
+        "wz-capi-core: faces send deferral under the registry (unicast and groups). wz-runtime-tokio: multicast pipeline deferral, lib.rs SocketAddr path, link registry tests. wz-runtime-coop: faces wait buffer, reassembly_rx and table tests. wz-capi-coop: engine rows quota. wz-zenoh: the admin GET test asks its local plane.",
+        "scripts/measure-codec-footprint.sh (floor and witness), deploy/pico_host_ceiling.json (Windows pico-api rows), docs/c-abi-no-heap-pools.md."
+      ],
+      "verification_bullets": [
+        "Through bx from the integration worktree ci-int. Passed: Layers E7s (6/6, 2048 sessions) and F shard 2/4; on x86_64 and on i686 (pc2) the lent-table and face size tests; wz-session-core lib (1618), wz-capi-core send_deferral (2), wz-runtime-tokio link_congestion_tests and multicast_pipeline tests (with transport-multicast), wz-runtime-coop lib under alloc,listen / alloc,session-unicast and in the workspace-unified set, the tx_lend_only_encode and handshake_encode legs at fixed storage, lend-only heap and the slot set, zenoh router_session tests (10), link_admission (21), wz-runtime-tokio --no-default-features --features transport-multicast check; clippy -D warnings of wz-session-core (default and peer-row-pools set), wz-runtime-tokio, wz-capi-core, wz-capi-coop, wz-runtime-coop. The workspace-unified lib run and the i686 linked-crates leg leave four session_actions bundle_tests red, which the int-fix lane repays (7fa627553, ad702c4b9). mnemosyne-cli validate-workspace: no new T1 orphan."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "bundle_tests (4) and lent_frame_refusal (3) in session-core under the lend-only and unified sets, with the int-fix lane; Vmiri: SCE runtime with_policy hands f an &mut to the policy field and &mut self over it at once (engine.rs:1780), for an SCE session; Platform reds of 45556149010 (surface matrix finding, interop on Windows and macOS, macOS multicast route); the C1p32 lane's placement (it declines on a host without gcc-multilib instead of being placed on one); receive-side RECEIVED_EXT_KINDS counts 0x7 twice; heap-profile open allocates one Rc<SetOwner>; the next hosted run's reds."
+      ]
+    },
+    "Round 4641": {
+      "decision_summary": "The Platform workflow's four red jobs on 20ee0c0a1 (the leg and interop jobs on Windows and macOS) had one cause: 13e4aec98 dropped the `unix` condition from wz-capi-pico's refusal of coop unixpipe, so a build naming transport-link-unixpipe on Windows was refused at compile time, and platform_surface_matrix.py graded that as the feature switched on where it is unserved. Upstream compiles no unixpipe link off Unix (zenoh-link-unixpipe lib.rs @ `#[cfg(unix)] mod unix;`). The coop unixpipe link is now built where a FIFO opener exists (Linux and Android) and inert elsewhere: a unixpipe/ endpoint there is refused as an unknown locator scheme, and the refusal test covers that build. The --promoted listing keeps its stdout for the list and grades on stderr, so a failing grade names its finding in the job log rather than in the listed file.",
+      "changes_bullets": [
+        "crates/wz-capi-pico: Cargo.toml, lib.rs, coop_host.rs, session.rs, endpoint.rs, tests/it/files/unixpipe_link_refused.rs. scripts/lib/platform_surface_matrix.py."
+      ],
+      "verification_bullets": [
+        "Through bx on ci-int: platform_surface_matrix.py --check (rc 0, no finding) and --selftest (OK); wz-capi-pico with transport-link-unixpipe: unixpipe_link_roundtrip and a_scheme_without_a_link_in_this_build_is_unknown (1 each), without it a_unixpipe_endpoint_opens_no_session_without_the_feature (1); clippy -D warnings of wz-capi-pico --all-targets with transport-link-unixpipe. The Windows build of that set is the next hosted Platform run's to judge."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The next hosted Platform run on Windows and macOS; the carries of the previous round."
+      ]
+    },
+    "Round 4642": {
+      "decision_summary": "Six session-core send tests had been red since 7fa627553 made the data-send gate start closed and open only at establishment: their rigs built a link's action bundle and sent on it without establishing it, so every send answered TransportUnavailable before it reached what the test judged (a key past its bound, a reply gate, a staged reply's writer, a lent frame's slot refusal and SN give-back, the batch budget asked). The rigs now send from an established bundle (established_bundle, through the same enter_established a session runs), and the test of the gate itself still starts from an unestablished one. They were never compiled in the feature sets that ran (codec-push, the lend-only heap set), which is why the change that closed the gate did not see them.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/session_actions/bundle_tests.rs: established_bundle(); reply_egress_gate, staged_replies, the plain put past its key bound and the three lent_frame_refusal tests send from it."
+      ],
+      "verification_bullets": [
+        "Through bx: session_actions::bundle_tests in the lend-only heap set (F1 with session-unicast-accept), in codec-push,codec-response,reply-egress-gate, and in the workspace-unified lib set of wz-capi-core, wz-runtime-tokio, wz-runtime-coop, wz-session-core, wz-capi-coop (3312 passed); clippy -D warnings of wz-session-core in the default, lend-only heap and reply-gate sets. One test stays red: data_leaves_only_an_established_link_with_the_limits_it_was_established_with asserts (0, 0) before establishment where the API answers (0, 127) (an unsettled ring code 0 reads as the 8-bit ring); how an unsettled limit is stated is the owning lane's to decide."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "data_leaves_only_an_established_link...: state an unsettled send limit as a type (Option) rather than a ring code 0; Vmiri: SCE engine with_policy overlapping &mut, taken by scxml-core-engine-52 (split Engine into policy and state); the int-fix branch's table_tests merge conflict (Counted defined twice); the hosted runs on 0cdadfbe8."
+      ]
+    },
+    "Round 4643": {
+      "decision_summary": "Three structural repairs of the session core, each closing a state that could be read two ways.\n\nAn unsettled send limit is a type now: negotiated_tx_limits answers None until establishment settles the limits (and again from a reopen until the next establishment), where it answered (0, 127) and read ring code 0, the 8-bit ring, as \"not settled\". The settled flag shares the limits' atomic word, so one load reads a coherent answer; the send path takes its limits from the same read that judges the gate and answers TransportUnavailable for None. The data-send gate opens only where limits settle: SendGate::open is crate-private, so enter_established and open_without_handshake are the only doors, and the test rigs that opened the gate by hand (reconnect replays, multilink joins, the shm segment) now establish their links.\n\nA received extension that repeats is read by its last entry, as upstream 1.10.2's establishment decoders do (zenoh-codec transport/init.rs @ `ext_patch = p;`, open.rs @ `ext_remote_bound = Some(q);`), where wz read the first. The slot profile keeps one place per extension identity (patch level and remote bound are one identity, 0x27), its bound is derived from the identity table and tied to it by a compile-time assertion as the send-side bound is, and ExtChainOverflow is gone, as the assertion makes it unreachable and upstream refuses no such chain.\n\nTests are compiled with the items they exercise: the fragment, join and record-walk tests, the kind-name vector and the Vec JOIN encoder's tests take alloc, and the JOIN fixture writes into an array so the slot multicast build without the heap runs it.",
+      "changes_bullets": [
+        "crates/wz-session-core: session_actions.rs (TxLimits settled flag, Option limits, unsettle at reopen, dispatch), send_gate.rs (open crate-private), ext_chain.rs (identity table, derived bound, last-entry keeping), inbound.rs, extpatch.rs, extbound.rs, extregion.rs, ext_view.rs (last_by_eid), extauth.rs, extmultilink.rs, extshm.rs, multicast_join.rs, parse_error.rs, transport_message_parity.rs, frame_encode.rs, network_message.rs, sn.rs, tests/join_into_alloc.rs, session_actions/bundle_tests.rs. crates/wz-runtime-tokio: session/mod.rs, session_glue.rs, multilink.rs, shm_auth_segment.rs, tests/it session_fsm_accepting_path.rs and compression_e2e.rs."
+      ],
+      "verification_bullets": [
+        "Through bx on the integration worktree: the workspace-unified lib set of wz-capi-core, wz-runtime-tokio, wz-runtime-coop, wz-session-core, wz-capi-coop (session-core 3314, 0 failed, data_leaves_only_an_established_link green); wz-session-core lib default (1619), all-features (3925), the slot set with alloc (1941), the slot multicast set without alloc (1207), the lend-only heap set with every target; wz-runtime-tokio it (317) with compression and fragmentation; wz-capture lib (1429); clippy -D warnings of wz-session-core in all four sets, of wz-runtime-tokio and wz-capi-coop; zenoh and wz-capi-pico all targets check. mnemosyne-cli validate-workspace: no new T1 orphan."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "The network-layer extension reader ext_view::find_by_eid still takes the first entry of a repeated identity where upstream's network decoders keep the last; the SCE with_policy fix (SCE ADR 0131, queued as SCE item 435) and the pin move after it, with the two hand-written StatePolicy impls; the hosted runs on main."
+      ]
+    },
+    "Round 4644": {
+      "decision_summary": "Every network-layer extension that repeats in one message is read by its last entry, as upstream 1.10.2's decoders do: each assigns per entry (`commons/zenoh-codec/src/network/push.rs` @ `ext_nodeid = nid;`, `commons/zenoh-codec/src/network/request.rs` @ `ext_target = rt;`, `commons/zenoh-codec/src/network/response.rs` @ `ext_respid = Some(t);`, `commons/zenoh-codec/src/network/declare.rs` @ `ext_wire_expr = we;`, `commons/zenoh-codec/src/zenoh/put.rs` @ `*ext_attachment = Some(a);`, `commons/zenoh-codec/src/zenoh/query.rs` @ `ext_body = Some(s);`), so the last wins and none refuses a repeat. wz read the first, through ext_view::find_by_eid and a dozen hand-written loops (QoS, node id, timestamp, declare wire expr, query value, frame QoS). The rule now lives once in ext_view (last_by_eid, last_index_by_eid, last_by_eid_in, last_of_each_in), the first-entry readers are gone, and the heap, lent and slot readers all take it; a chain editor edits the entry the reader reads.\n\nThe ext-identity gate was red on main since the staged-chain refactor (5ef299290) and the identity readers of the previous round: three reads of this side's own staged chain were unclassified and four classified functions no longer read an id. The reads are classified as outbound and the stale rows removed.",
+      "changes_bullets": [
+        "crates/wz-session-core: ext_view.rs, sample.rs, reply.rs, reply/in_place.rs, attachment.rs, query.rs, query/in_place.rs, query_value_ext.rs, request_build.rs, network_message.rs (repeated_extension_tests), pubsub/in_place.rs, ts_stack.rs, ext_nodeid.rs, declare_ext_keyexpr.rs, inbound.rs, passive.rs, multicast_join.rs. crates/wz-capture/src/agg.rs. scripts/lib/ext_identity_gate.py."
+      ],
+      "verification_bullets": [
+        "Through bx: wz-session-core lib all-features (3933) including the repeated-extension tests (one per message family, heap and walked reads), default (1619) and the slot set (1942); the workspace-unified lib set (session-core 3321, 0 failed); wz-runtime-tokio it (317); wz-capture lib (1429); clippy -D warnings of wz-session-core all-features and slot set, wz-capture, wz-runtime-tokio; zenoh and wz-capi-pico all targets check; upstream_citation_anchor_gate --check; ext_identity_gate --check and --selftest."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "On the same seam: the passive observer's ShmHandshake::extension and the auth method chain still pick a repeated id's first entry; a malformed last entry is read as absent where upstream refuses the message; a router forwards a chain with a duplicate where upstream re-encodes one entry. The SCE with_policy fix (SCE b9140288) waits for the pin chain the int-fix lane carries."
+      ]
+    },
+    "Round 4645": {
+      "decision_summary": "Two residuals of the network-extension seam closed to upstream 1.10.2's behaviour.\n\nA declared extension whose body its reader cannot read refuses the message, as upstream's decoders do: each declared extension is read with its typed reader as the walk meets it and a refusal propagates (`commons/zenoh-codec/src/network/push.rs` @ `let (t, ext): (ext::TimestampType, bool) = eodec.read(&mut *reader)?;`, `commons/zenoh-codec/src/network/request.rs` @ `_ => return Err(DidntRead),`). wz judged headers only and read a bad body as an absent extension. ext_admit now judges each entry's header and then the body of a declared extension (timestamp, timestamp stack, target, responder, undeclaration key, source info, query value), the first offence reported as MalformedExt and refused through the same seams as an unknown mandatory extension, on the held, lent and walked reads alike. Extensions upstream cannot refuse (QoS, node id, budget, timeout, attachment, markers) are not judged.\n\nA router forwards a message whose declared extension repeats with that extension once, its last entry, as upstream decodes one value and writes each field once; the message is cleaned once at ingress, before ACL and routing, and nothing is cloned when no extension repeats. The mandatory-extension tests now give a declared identity a body its readers read, so their verdict turns on the header they judge.",
+      "changes_bullets": [
+        "crates/wz-session-core: ext_admit.rs (body rules, MalformedExt), parse_error.rs, put_payload.rs (chain_entries), network_message.rs (judge_entries, without_superseded_exts, tests). crates/wz-runtime-tokio/src/router_forward.rs (ingress cleaning, test). crates/wz-integration-tests pico_transport_decode_differential.rs (MalformedExt arms)."
+      ],
+      "verification_bullets": [
+        "Through bx: wz-session-core lib all-features (3940) with ext_admit, repeated-extension and mandatory-extension tests (30), slot set (1947); the workspace-unified lib set (session-core 3328); wz-runtime-tokio with routing-router-hat router_forward (360) and it (317); wz-capture lib (1429); wz-integration-tests tests build; clippy -D warnings of wz-session-core (default, all-features, slot) and wz-runtime-tokio (default, routing-router-hat); zenoh and wz-capi-pico all targets; upstream_citation_anchor_gate and ext_identity_gate --check."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Upstream skips undeclared extensions on network envelopes and declarations and so forwards none; wz still forwards them (a policy question of which extensions a wz node carries). Where upstream reads timestamp, responder, source info and tsstack fields from the message reader, wz reads them from the length-bounded body; they differ only for a sender whose length disagrees with its fields. The SCE with_policy fix (SCE b9140288) waits for the pin chain the int-fix lane carries."
+      ]
     }
   },
   "inventory_entries": {

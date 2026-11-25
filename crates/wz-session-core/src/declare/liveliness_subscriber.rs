@@ -98,7 +98,7 @@ use crate::driver_loop::IterationEvent;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
-use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
+use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap, IdRead, KeyText, PeerIds};
 use crate::key_arena::{KeySpace, LentKeys};
 // Both fan paths ask INTERSECTION and never import `keyexpr_matches`: a token
 // keyexpr may itself be a pattern, and reading it as a literal key would hide a
@@ -107,6 +107,8 @@ use crate::keyexpr_match::keyexpr_intersects;
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
+#[cfg(feature = "storage-profile")]
+use crate::row_pool::PeerSlot;
 use crate::sink::RowAccess;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr_into;
@@ -550,13 +552,14 @@ impl PeerTokens<Static> {
 #[cfg(all(feature = "storage-profile", feature = "peer-row-pools"))]
 impl PeerTokens<crate::bounded::Lent> {
     /// Keep the tokens the peer declares from here on in rows of `rows`, the session's: a pool the
-    /// faces share, or a span of this table's own. What the table held elsewhere is forgotten
-    /// first.
+    /// faces share, or a span of this table's own. A table already taking rows of a space of the
+    /// same form keeps them; its owner empties one that holds rows of another first
+    /// ([`Self::forget`]), as those rows go back only through the space they lie in.
     pub fn keep_rows_in(
         &mut self,
         rows: crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>,
     ) {
-        self.table.keep_rows_in(rows);
+        self.table.attach(&rows);
     }
 
     /// The tokens the peer declared, as a table of their own that keeps their rows where they lie
@@ -600,7 +603,7 @@ impl<P: Storage> PeerTokens<P> {
     /// declared token set. Test / diagnostic surface only.
     #[cfg(feature = "storage-profile")]
     pub fn count(&self) -> usize {
-        self.table.count()
+        Self::tokens_ref(&self.table, &self.keys).count()
     }
 
     /// Hold the peer's table to the `MAX_REMOTE_DECLS` the creator of the session's tables
@@ -629,9 +632,12 @@ impl<P: Storage> PeerTokens<P> {
     }
 
     /// Keep the keys of the tokens the peer declares from here on in `keys`: the session's key
-    /// arena, on the lent policy. The tokens already held keep theirs.
+    /// arena, on the lent policy. The tokens already held keep theirs where the table keeps its
+    /// own rows; on the lent policy they are given back first, through the keys their rows are
+    /// reached by, as no other keys reach them.
     #[cfg(feature = "storage-profile")]
     pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        Self::release_tokens(&mut self.table, &self.keys);
         self.keys = keys;
     }
 
@@ -648,7 +654,9 @@ impl<P: Storage> PeerTokens<P> {
     /// the growable backing while no quota is stated, as its room refuses nothing.
     #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
-        self.table.refusals().saturating_add(self.oversize)
+        Self::tokens_ref(&self.table, &self.keys)
+            .refusals()
+            .saturating_add(self.oversize)
     }
 
     /// The peer tokens this session currently knows, as `(decl id, keyexpr)` —
@@ -670,15 +678,77 @@ impl<P: Storage> PeerTokens<P> {
     /// (`zenoh/src/net/routing/hat/client/token.rs` @ `fn sourced_tokens`).
     #[cfg(feature = "storage-profile")]
     pub fn iter(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
-        self.table
-            .entries()
+        Self::tokens_ref(&self.table, &self.keys)
+            .into_entries()
             .map(|(id, keyexpr)| (id, keyexpr.as_ref()))
     }
 
     /// Drop every token the peer declared, in place; the refusal counts are kept.
     #[cfg(feature = "storage-profile")]
     pub fn forget(&mut self) {
-        self.table.reset();
+        Self::tokens_mut(&mut self.table, &self.keys).reset();
+    }
+}
+
+/// The peer's token table lent the space its keys name for it ([`PeerSlot::Tokens`]): the one
+/// place a view of it is made. The table and the keys are borrowed apart, so the other fields stay
+/// usable beside the view.
+#[cfg(feature = "storage-profile")]
+impl<P: Storage> PeerTokens<P> {
+    /// The table lent its space, to bind and unbind.
+    fn tokens_mut<'a>(
+        table: &'a mut DeclaredKeys<P>,
+        keys: &'a P::Keys,
+    ) -> <DeclaredKeys<P> as PeerIds<KeyText<P>, P::Keys>>::Mut<'a>
+    where
+        P: 'a,
+    {
+        // SAFETY: the table is attached only to the space its keys name for the token slot
+        // (`keep_rows_in`), and `keep_keys_in` gives every row back through the old keys before
+        // it changes them, so the keys lend the table the space it was attached to.
+        unsafe {
+            <DeclaredKeys<P> as PeerIds<KeyText<P>, P::Keys>>::lend(table, keys, PeerSlot::Tokens)
+        }
+    }
+
+    /// The table lent its space, to read.
+    fn tokens_ref<'a>(
+        table: &'a DeclaredKeys<P>,
+        keys: &'a P::Keys,
+    ) -> <DeclaredKeys<P> as PeerIds<KeyText<P>, P::Keys>>::Ref<'a>
+    where
+        P: 'a,
+    {
+        // SAFETY: as `tokens_mut`'s.
+        unsafe {
+            <DeclaredKeys<P> as PeerIds<KeyText<P>, P::Keys>>::lend_ref(
+                table,
+                keys,
+                PeerSlot::Tokens,
+            )
+        }
+    }
+
+    /// The rows the table holds lent from its space given back, which a table keeping its own
+    /// rows keeps.
+    fn release_tokens(table: &mut DeclaredKeys<P>, keys: &P::Keys) {
+        // SAFETY: as `tokens_mut`'s.
+        unsafe {
+            <DeclaredKeys<P> as PeerIds<KeyText<P>, P::Keys>>::release(
+                table,
+                keys,
+                PeerSlot::Tokens,
+            );
+        }
+    }
+}
+
+/// The rows of a lent table lie in the session's pool, which the table cannot reach without its
+/// keys: they are given back here, through them, as the table itself gives nothing back.
+#[cfg(feature = "storage-profile")]
+impl<P: Storage> Drop for PeerTokens<P> {
+    fn drop(&mut self) {
+        Self::release_tokens(&mut self.table, &self.keys);
     }
 }
 
@@ -691,7 +761,8 @@ impl<P: Storage> PeerTokens<P> {
     /// The id the token declared by its keyexpr `keyexpr` is held under ([`SOURCED_ID_BASE`]), if
     /// the table holds one.
     fn sourced_id(&self, keyexpr: &str) -> Option<u64> {
-        self.table.entries().find_map(|(id, held)| {
+        let tokens = Self::tokens_ref(&self.table, &self.keys);
+        tokens.into_entries().find_map(|(id, held)| {
             (id >= SOURCED_ID_BASE && held.as_ref() == keyexpr).then_some(id)
         })
     }
@@ -699,8 +770,9 @@ impl<P: Storage> PeerTokens<P> {
     /// The id the next token declared by its keyexpr is held under: past every one held, and
     /// none when the greatest id there is is held.
     fn next_sourced_id(&self) -> Option<u64> {
-        self.table
-            .entries()
+        let tokens = Self::tokens_ref(&self.table, &self.keys);
+        tokens
+            .into_entries()
             .map(|(id, _)| id)
             .filter(|id| *id >= SOURCED_ID_BASE)
             .max()
@@ -1589,8 +1661,7 @@ impl<P: Storage> PeerTokens<P> {
             return;
         };
         // The row now holds the key, which a context that keeps the sample may hold too.
-        let held = self
-            .table
+        let held = Self::tokens_ref(&self.table, &self.keys)
             .find(id)
             .and_then(crate::bounded::KeyBacking::held);
         tell_reached(
@@ -1635,14 +1706,15 @@ impl<P: Storage> PeerTokens<P> {
             // No id left past the ones held: refused and counted as a full table refuses, and
             // not held under an id another token has.
             let Some(next) = self.next_sourced_id() else {
-                self.table.count_refused();
+                Self::tokens_mut(&mut self.table, &self.keys).count_refused();
                 return None;
             };
             next
         } else {
             id
         };
-        if self.table.find(id).is_some() {
+        let mut tokens = Self::tokens_mut(&mut self.table, &self.keys);
+        if tokens.find(id).is_some() {
             return None;
         }
         // S9a — a token the table has no room for, or none under the quota
@@ -1661,13 +1733,12 @@ impl<P: Storage> PeerTokens<P> {
             // has no room for, and announced to no subscriber, as zenoh-pico drops one its heap
             // cannot hold.
             Err(KeyUnkept::NoRoom) => {
-                self.table.count_refused();
+                tokens.count_refused();
                 return None;
             }
         };
         let quota = self.quota;
-        if self
-            .table
+        if tokens
             .bind_within(id, text, |count| quota.admits(count))
             .is_err()
         {
@@ -1748,7 +1819,7 @@ impl<P: Storage> PeerTokens<P> {
         // holds none of.
         #[cfg(not(feature = "alloc"))]
         let _ = (exts, peer_keyexpr_table);
-        (id, self.table.unbind(id))
+        (id, Self::tokens_mut(&mut self.table, &self.keys).unbind(id))
     }
 
     /// The keyexpr a retraction is told under: the text `removed`, the row it unbound, held, or,
@@ -1917,8 +1988,9 @@ impl<P: Storage> PeerTokens<P> {
     /// loss is a live event, so the news is not historical. `false` once none is left.
     #[cfg(feature = "storage-profile")]
     pub fn take_lost(&mut self, news: &mut TokenNews) -> bool {
-        while let Some(id) = self.table.entries().map(|(id, _)| id).min() {
-            let Some(keyexpr) = self.table.unbind(id) else {
+        let mut tokens = Self::tokens_mut(&mut self.table, &self.keys);
+        while let Some(id) = tokens.entries().map(|(id, _)| id).min() {
+            let Some(keyexpr) = tokens.unbind(id) else {
                 break;
             };
             if news.write(LivelinessSampleKind::Delete, keyexpr.as_ref(), id, false) {
@@ -1943,12 +2015,13 @@ impl<P: Storage> PeerTokens<P> {
     {
         #[cfg(feature = "storage-profile")]
         {
+            let mut tokens = Self::tokens_mut(&mut self.table, &self.keys);
             let mut flushed = 0usize;
-            while let Some(id) = self.table.entries().map(|(id, _)| id).min() {
+            while let Some(id) = tokens.entries().map(|(id, _)| id).min() {
                 if !room() {
                     return (flushed, false);
                 }
-                let Some(keyexpr) = self.table.unbind(id) else {
+                let Some(keyexpr) = tokens.unbind(id) else {
                     break;
                 };
                 // A link loss is a LIVE event — the peer's tokens are going
@@ -1980,7 +2053,7 @@ impl<P: Storage> PeerTokens<P> {
     fn held_key(&self, token_id: u64) -> Option<&crate::key_arena::KeyRef> {
         #[cfg(feature = "storage-profile")]
         {
-            self.table
+            Self::tokens_ref(&self.table, &self.keys)
                 .find(token_id)
                 .and_then(crate::bounded::KeyBacking::held)
         }
@@ -2081,7 +2154,7 @@ impl<P: Storage> PeerTokens<P> {
     ) -> Option<(u64, &str)> {
         #[cfg(feature = "storage-profile")]
         {
-            let peer_token_table = &self.table;
+            let peer_token_table = Self::tokens_ref(&self.table, &self.keys);
             if !peer_token_table.is_bound() {
                 return None;
             }
@@ -2095,7 +2168,7 @@ impl<P: Storage> PeerTokens<P> {
             // intersected truncated: the matcher applies the chunk bound itself, the same refusal
             // `tell` gets from it.
             let mut next: Option<(u64, &str)> = None;
-            for (token_id, keyexpr) in peer_token_table.entries() {
+            for (token_id, keyexpr) in peer_token_table.into_entries() {
                 if after.is_some_and(|last| token_id <= last)
                     || next.is_some_and(|(lowest, _)| token_id >= lowest)
                 {

@@ -222,6 +222,10 @@ impl StagedExt {
 pub type ExtChainBuf = Vec<ExtEntryOwned>;
 
 /// See the growable form of this alias.
+///
+/// `repr(C)`: its places are laid out in the order they are declared with nothing between them,
+/// all of one type, so the chain is laid out as an array of `STAGED_CHAIN_MAX` places, which
+/// the assertion after it holds.
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
@@ -237,6 +241,7 @@ pub type ExtChainBuf = Vec<ExtEntryOwned>;
     )
 ))]
 #[derive(Debug, Clone, Default)]
+#[repr(C)]
 pub struct ExtChainBuf {
     #[cfg(all(
         feature = "transport-qos",
@@ -277,6 +282,93 @@ pub struct ExtChainBuf {
     /// The patch level or the remote bound, which share id 0x7.
     patch_or_bound: Option<ExtEntryOwned>,
 }
+
+/// The most entries a handshake chain a session stages holds: one per place of the staged chain,
+/// which is one per extension id the build stages (`StagedExt`). The patch level and the remote
+/// bound share id 0x7 and so one place, which every build with a handshake has (the patch level on
+/// an Init, the bound on an Open), and is counted once; each other place counts where the gate of
+/// its field in the fixed `ExtChainBuf` holds, and by that gate. The growable chain keeps the
+/// same places, an id's entry replacing the one before it (`stage`). A build that stages no
+/// handshake extension holds no chain and writes the one entry of id 0x7 from its parameters, so
+/// one is its bound too.
+///
+/// Counted from the gates rather than read off the type because the heap profile's chain is a
+/// `Vec`; where the fixed chain is compiled, the assertion below it holds the two to one number,
+/// so a place added, removed or gated otherwise in one and not the other fails the build.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+pub const STAGED_CHAIN_MAX: usize = 1
+    + cfg!(all(
+        feature = "transport-qos",
+        feature = "codec-init-body",
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "session-extshm",
+        feature = "codec-init-body",
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "session-extauth",
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "transport-multilink",
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "transport-lowlatency",
+        feature = "codec-init-body",
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "session-extcompression",
+        feature = "codec-init-body",
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize;
+
+// The fixed chain is exactly `STAGED_CHAIN_MAX` places: laid out as it is declared (`repr(C)`),
+// with every field one place, it is the size of an array of that many places and of no other
+// length.
+#[cfg(all(
+    feature = "session-fixed-storage",
+    feature = "session-unicast",
+    any(
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    ),
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
+const _: () = assert!(
+    core::mem::size_of::<ExtChainBuf>()
+        == core::mem::size_of::<[Option<ExtEntryOwned>; STAGED_CHAIN_MAX]>(),
+    "STAGED_CHAIN_MAX is not the number of places of the fixed ExtChainBuf"
+);
 
 #[cfg(all(
     feature = "session-fixed-storage",
@@ -848,17 +940,101 @@ impl ChainHeaders for Vec<ExtEntryOwned> {
     }
 }
 
-/// How many entries of ONE received handshake message a `session-slot` build keeps: those of
-/// the extensions it reads, which are the patch level, the region name and the remote bound, and
-/// one for each extension a feature of the build reads.
+/// The extensions a `session-slot` build reads off a received handshake message, each as the
+/// identity a reader tells it by (`crate::ext_header::ext_eid`, upstream's `iext::eid`) and
+/// whether this build reads it: the patch level, the remote bound and the region name always,
+/// the others where a feature of the build reads them or the passive tracker is built.
+///
+/// A row is an extension, not a place: the patch level (`init::ext::Patch`) and the remote
+/// bound (`open::ext::RemoteBound`) are two extensions of one identity, `zextz64!(0x7, false)`,
+/// and the keeper holds one entry per identity ([`RECEIVED_EXT_KINDS`]).
 #[cfg(feature = "session-slot")]
-pub const RECEIVED_EXT_KINDS: usize = 3
-    + (cfg!(feature = "transport-qos") || PASSIVE_READS_EVERY_OFFER) as usize
-    + (cfg!(feature = "transport-lowlatency") || PASSIVE_READS_EVERY_OFFER) as usize
-    + (cfg!(feature = "session-extcompression") || PASSIVE_READS_EVERY_OFFER) as usize
-    + (cfg!(feature = "transport-shm") || PASSIVE_READS_EVERY_OFFER) as usize
-    + (cfg!(feature = "session-extauth") || PASSIVE_READS_EVERY_OFFER) as usize
-    + (cfg!(feature = "transport-multilink") || PASSIVE_READS_EVERY_OFFER) as usize;
+const RECEIVED_EXTENSIONS: [(u8, bool); 12] = {
+    use crate::ext_header::establishment_ext_id as id;
+    use crate::ext_header::{ext_identity, EXT_ENC_UNIT, EXT_ENC_Z64, EXT_ENC_ZBUF};
+    let qos = cfg!(feature = "transport-qos") || PASSIVE_READS_EVERY_OFFER;
+    let shm = cfg!(feature = "transport-shm") || PASSIVE_READS_EVERY_OFFER;
+    let auth = cfg!(feature = "session-extauth") || PASSIVE_READS_EVERY_OFFER;
+    let multilink = cfg!(feature = "transport-multilink") || PASSIVE_READS_EVERY_OFFER;
+    let lowlatency = cfg!(feature = "transport-lowlatency") || PASSIVE_READS_EVERY_OFFER;
+    let compression = cfg!(feature = "session-extcompression") || PASSIVE_READS_EVERY_OFFER;
+    [
+        // `init::ext::Patch`, `zextz64!(0x7, false)` (`crate::extpatch`).
+        (ext_identity(id::PATCH, false, EXT_ENC_Z64), true),
+        // `open::ext::RemoteBound`, `zextz64!(0x7, false)` (`crate::extbound`).
+        (ext_identity(id::PATCH, false, EXT_ENC_Z64), true),
+        // `init::ext::RegionName`, `zextzbuf!(0x8, false)` (`crate::extregion`).
+        (ext_identity(id::REGION_NAME, false, EXT_ENC_ZBUF), true),
+        // `init::ext::QoS` and `QoSLink`, a unit and a z64 at 0x1 (`crate::extqos_offer`).
+        (ext_identity(id::QOS, false, EXT_ENC_UNIT), qos),
+        (ext_identity(id::QOS, false, EXT_ENC_Z64), qos),
+        // wz's own unit offer at 0x2 (`crate::extshm::peer_offered_shm`), and upstream's `Shm`,
+        // `zextzbuf!(0x2, false)` (`crate::extshm::peer_shm_zbuf_body`).
+        (ext_identity(id::SHM, false, EXT_ENC_UNIT), shm),
+        (ext_identity(id::SHM, false, EXT_ENC_ZBUF), shm),
+        // `Auth`, `zextzbuf!(0x3, false)` (`crate::extauth::decode_auth_ext`).
+        (ext_identity(id::AUTH, false, EXT_ENC_ZBUF), auth),
+        // `MultiLink` / `MultiLinkSyn`, a ZBuf, and `MultiLinkAck`, a unit, at 0x4
+        // (`crate::extmultilink::decode_multilink_ext`).
+        (ext_identity(id::MULTILINK, false, EXT_ENC_ZBUF), multilink),
+        (ext_identity(id::MULTILINK, false, EXT_ENC_UNIT), multilink),
+        // `LowLatency` and `Compression`, units at 0x5 and 0x6.
+        (
+            ext_identity(id::LOWLATENCY, false, EXT_ENC_UNIT),
+            lowlatency,
+        ),
+        (
+            ext_identity(id::COMPRESSION, false, EXT_ENC_UNIT),
+            compression,
+        ),
+    ]
+};
+
+/// How many entries of ONE received handshake message a `session-slot` build keeps: one for
+/// each identity it reads ([`RECEIVED_EXTENSIONS`]), which is fewer than the extensions it
+/// reads where two share an identity (the patch level and the remote bound, both 0x7).
+///
+/// One place per identity is all a message can fill, because a repeated extension is read by
+/// its last entry, as upstream reads it: each arm of zenoh's establishment decoders assigns the
+/// entry it meets, so a later entry of an identity replaces an earlier one
+/// (`commons/zenoh-codec/src/transport/init.rs` @ `ext_patch = p;`, and
+/// `commons/zenoh-codec/src/transport/open.rs` @ `ext_remote_bound = Some(q);`). The keeper drops
+/// the entry a later one of its identity supersedes (`keep_handshake_entry`), so a chain never
+/// holds two of one identity, whatever its length.
+///
+/// Counted from the table rather than from the keeper's filter; where the filter is compiled, the
+/// assertion beside it holds the two to one number, so an identity kept with no place, or a
+/// place no identity fills, fails the build.
+#[cfg(feature = "session-slot")]
+pub const RECEIVED_EXT_KINDS: usize = distinct_read_identities(&RECEIVED_EXTENSIONS);
+
+/// The number of identities `rows` reads, each counted once however many of its rows read it.
+#[cfg(feature = "session-slot")]
+const fn distinct_read_identities(rows: &[(u8, bool)]) -> usize {
+    let mut count: usize = 0;
+    let mut rest = rows;
+    // A row counts when no later row reads its identity, so each identity counts at its last row.
+    while let [(identity, read), later @ ..] = rest {
+        if *read && !reads_identity(later, *identity) {
+            count = count.saturating_add(1);
+        }
+        rest = later;
+    }
+    count
+}
+
+/// Whether a row of `rows` reads `identity`.
+#[cfg(feature = "session-slot")]
+const fn reads_identity(rows: &[(u8, bool)], identity: u8) -> bool {
+    let mut rest = rows;
+    while let [(row, read), later @ ..] = rest {
+        if *read && *row == identity {
+            return true;
+        }
+        rest = later;
+    }
+    false
+}
 
 /// Whether the build carries the passive tracker (`crate::passive`), which folds BOTH sides'
 /// offers of every capability (qos, shm, auth, multilink, lowlatency, compression) whatever the
@@ -873,10 +1049,11 @@ const PASSIVE_READS_EVERY_OFFER: bool = cfg!(all(
     feature = "codec-frame"
 ));
 
-/// Whether this build reads the establishment extension `id` off a message a peer sent: the
-/// extensions of the modules it compiles (`extpatch`, `extregion` and `extbound` always, the
-/// others each behind the feature of its module, and all of them where the passive tracker is
-/// built). An entry of any other id is not kept; it is judged by its header like the rest.
+/// Whether this build reads the establishment extension whose entry has the header `header`
+/// off a message a peer sent: whether its identity is one [`RECEIVED_EXTENSIONS`] reads. An
+/// entry of any other identity is not kept, a known id in an encoding or with a mandatory bit no
+/// reader takes included, as upstream's decoder skips it (`extension::skip`); it is judged by its
+/// header like the rest.
 #[cfg(all(
     feature = "session-slot",
     any(
@@ -886,29 +1063,58 @@ const PASSIVE_READS_EVERY_OFFER: bool = cfg!(all(
         feature = "codec-keep-alive"
     )
 ))]
-pub(crate) const fn reads_received_ext(id: u8) -> bool {
-    use crate::ext_header::establishment_ext_id as known;
-    // `extbound`'s remote bound is the patch level's id (0x7), on the OPEN messages.
-    id == known::PATCH
-        || id == known::REGION_NAME
-        || ((cfg!(feature = "transport-qos") || PASSIVE_READS_EVERY_OFFER) && id == known::QOS)
-        || ((cfg!(feature = "transport-shm") || PASSIVE_READS_EVERY_OFFER) && id == known::SHM)
-        || ((cfg!(feature = "session-extauth") || PASSIVE_READS_EVERY_OFFER) && id == known::AUTH)
-        || ((cfg!(feature = "transport-multilink") || PASSIVE_READS_EVERY_OFFER)
-            && id == known::MULTILINK)
-        || ((cfg!(feature = "transport-lowlatency") || PASSIVE_READS_EVERY_OFFER)
-            && id == known::LOWLATENCY)
-        || ((cfg!(feature = "session-extcompression") || PASSIVE_READS_EVERY_OFFER)
-            && id == known::COMPRESSION)
+pub(crate) const fn reads_received_ext(header: u8) -> bool {
+    reads_identity(&RECEIVED_EXTENSIONS, crate::ext_header::ext_eid(header))
 }
 
+/// How many identities the keeper's filter ([`reads_received_ext`]) keeps, counted over every
+/// identity a header can carry (a header without its chain flag).
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
+))]
+const fn identities_kept() -> usize {
+    let mut count: usize = 0;
+    let mut identity: u8 = 0;
+    while identity < crate::ext_header::EXT_FLAG_Z {
+        if reads_received_ext(identity) {
+            count = count.saturating_add(1);
+        }
+        identity = identity.saturating_add(1);
+    }
+    count
+}
+
+// The received chain has exactly one place per identity the keeper keeps: it holds at most one
+// entry of an identity (a repeated one supersedes the entry before it), so a chain of every
+// identity once fills it and no chain overfills it.
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
+))]
+const _: () = assert!(
+    identities_kept() == RECEIVED_EXT_KINDS,
+    "RECEIVED_EXT_KINDS is not the number of identities reads_received_ext keeps"
+);
+
 /// The extension chain of a received handshake message on `session-slot`: the entries of the
-/// extensions this build reads ([`reads_received_ext`]), for the readers, which look an
-/// extension up by its id, and the header of the first entry the admission rule refuses for the
-/// message, which is all the rule's verdict depends on.
+/// extensions this build reads ([`reads_received_ext`]), the last of each identity, for the
+/// readers, which look an extension up by its identity, and the header of the first entry the
+/// admission rule refuses for the message, which is all the rule's verdict depends on.
 ///
 /// Its size does not depend on the chain's length, which the protocol does not bound: a chain
-/// keeps one entry for each extension a build reads (three in the smallest) and one header.
+/// keeps one entry for each identity a build reads (two in the smallest) and one header. The
+/// entries are in the order of each identity's last entry on the wire.
 #[cfg(feature = "session-slot")]
 #[derive(Debug, Default)]
 pub struct ReceivedExtChain {
@@ -1019,10 +1225,10 @@ fn collect_walk<'a>(
     entries: &mut ExtChainOwned,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     while let Some(entry) = walked.next_entry() {
-        // On `session-slot` only the entries of an extension the build reads are kept, one each:
-        // a peer that repeats one fills the chain and is refused. Every other build keeps them all.
+        // On `session-slot` only the entries of an extension the build reads are kept, the last of
+        // each identity. Every other build keeps them all.
         #[cfg(feature = "session-slot")]
-        let read = reads_received_ext(entry.ext_id());
+        let read = reads_received_ext(entry.header);
         #[cfg(not(feature = "session-slot"))]
         let read = true;
         keep_handshake_entry(mid, &entry, read, entries)?;
@@ -1033,8 +1239,11 @@ fn collect_walk<'a>(
 /// One entry of a received handshake chain into the chain the message holds
 /// (`collect_handshake_ext_chain`), kept when `read` says the build reads its extension. On
 /// `session-slot` every entry is judged by its header for the message `mid` names, kept or not,
-/// and the first refused header is what the chain holds of the rest; every other build keeps the
-/// whole chain, which the rule judges entry by entry later.
+/// and the first refused header is what the chain holds of the rest; a kept entry supersedes the
+/// one of its identity kept before it, which no reader reads, since a repeated extension is read
+/// by its last entry as upstream reads it ([`RECEIVED_EXT_KINDS`]). Every other build keeps the
+/// whole chain, which the rule judges entry by entry later and whose readers take each
+/// identity's last entry.
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -1064,8 +1273,15 @@ fn keep_handshake_entry(
         {
             entries.refused_header = Some(entry.header);
         }
-        if read && entries.entries.push(received_entry(entry)?).is_err() {
-            return Err(crate::parse_error::InboundParseError::ExtChainOverflow);
+        if read {
+            let kept = received_entry(entry)?;
+            let identity = crate::ext_header::ext_eid(entry.header);
+            entries
+                .entries
+                .retain(|held| crate::ext_header::ext_eid(held.header) != identity);
+            // The chain now holds no entry of this identity and has a place for every identity the
+            // build keeps (the assertion beside `RECEIVED_EXT_KINDS`), so a place is free.
+            let _ = entries.entries.push(kept);
         }
     }
     Ok(())
@@ -1191,7 +1407,7 @@ fn read_walk<'a>(
     let mut kept = ExtChainOwned::new();
     while let Some(entry) = walked.next_entry() {
         #[cfg(feature = "session-slot")]
-        keep_handshake_entry(mid, &entry, reads_received_ext(entry.ext_id()), &mut kept)?;
+        keep_handshake_entry(mid, &entry, reads_received_ext(entry.header), &mut kept)?;
         #[cfg(not(feature = "session-slot"))]
         lend_entry(&entry)?;
         if !admission.is_refusal() {

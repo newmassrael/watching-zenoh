@@ -55,9 +55,10 @@ use alloc::string::{String, ToString};
 #[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
-use crate::bounded::{BoundedString, KeyBacking, Static, Storage};
+use crate::bounded::{BoundedString, InlineKeys, KeyBacking, Static, Storage};
 use crate::caps;
-use crate::id_map::{IdMap, PeerAliases};
+use crate::id_map::{IdRead, PairedIds, PeerAliases};
+use crate::row_pool::PeerSlot;
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
 use sce_forge_runtime::codec::Lent;
@@ -445,8 +446,13 @@ enum PeerSpaceRepr<'a, P: Storage> {
     Ours(&'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>),
     /// The alias table of the session's policy; under the lent policy its keys lie in the
     /// session's key arena.
-    Aliases(&'a PeerAliases<P>),
+    Aliases(AliasesRef<'a, P>),
 }
+
+/// The alias table of the session's policy beside its owner's keys, lent them at each read
+/// ([`PairedIds`]): held as the pair and not as the lent table, which keeps the spaces covariant
+/// in `'a`, so a pair is handed on to a resolver whose buffer lives shorter than the tables.
+type AliasesRef<'a, P> = PairedIds<'a, PeerAliases<P>, <P as Storage>::Keys>;
 
 impl<P: Storage> Clone for PeerSpaceRepr<'_, P> {
     fn clone(&self) -> Self {
@@ -468,8 +474,8 @@ impl<'a, P: Storage> PeerSpace<'a, P> {
         Self::of(PeerSpaceRepr::Map(map))
     }
 
-    /// The alias table of the session's policy, as a peer space.
-    pub(crate) fn of_aliases(table: &'a PeerAliases<P>) -> Self {
+    /// The alias table of the session's policy, lent by its owner, as a peer space.
+    fn of_aliases(table: AliasesRef<'a, P>) -> Self {
         Self::of(PeerSpaceRepr::Aliases(table))
     }
 
@@ -610,9 +616,10 @@ impl<'a, P: Storage, O: Storage> MappingSpaces<'a, P, O> {
         }
     }
 
-    /// The pair over the peer's aliases in the table of its storage policy, with `own` as our own
-    /// space: the session's table of its declarations, or a space a host keeps behind a handle.
-    pub(crate) fn of_aliases(peer: &'a PeerAliases<P>, own: Option<OwnSpace<'a, O>>) -> Self {
+    /// The pair over the peer's aliases in the table of its storage policy, beside the keys of the
+    /// owner that holds it ([`PairedIds`]), with `own` as our own space: the session's table of
+    /// its declarations, or a space a host keeps behind a handle.
+    pub(crate) fn of_aliases(peer: AliasesRef<'a, P>, own: Option<OwnSpace<'a, O>>) -> Self {
         Self {
             peer: PeerSpace::of_aliases(peer),
             own,
@@ -663,11 +670,16 @@ impl<'a, P: Storage, O: Storage> MappingSpaces<'a, P, O> {
     }
 }
 
-impl<'a, P: Storage> MappingSpaces<'a, P> {
+impl<'a, P: Storage<Keys = InlineKeys>> MappingSpaces<'a, P> {
     /// The pair a session holds: the peer's aliases in the table of its storage policy
     /// ([`PeerAliases`]) and our own space when one is installed. The caller names the policy
     /// (`MappingSpaces::<P, P>::for_aliases`): a table type does not say which policy keeps it.
+    /// Only for a policy whose keys are [`InlineKeys`], whose table keeps its rows itself: the
+    /// lent policy's table is read only as its owner lends it.
     pub fn for_aliases(peer: &'a PeerAliases<P>, own: Option<&'a dyn OwnMappingSpace>) -> Self {
+        // SAFETY: the one handle of a policy whose keys are `InlineKeys` names no space, so it is
+        // every owner's handle: its tables keep their rows themselves and are lent nothing.
+        let peer = unsafe { PairedIds::new(peer, &InlineKeys, PeerSlot::Aliases) };
         Self::of_aliases(peer, own.map(OwnSpace::of_handle))
     }
 }
@@ -1514,7 +1526,7 @@ mod bounded_space_tests {
     use super::*;
     use crate::bounded::InlineKeys;
     use crate::codec_owned::owned_string;
-    use crate::id_map::{key_text_as, FixedIdMap};
+    use crate::id_map::{key_text_as, FixedIdMap, IdMap};
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 

@@ -26,18 +26,6 @@ pub enum InboundParseError {
     /// The body codec rejected the wire (truncated, VLE overflow,
     /// etc.).
     Codec(CodecError),
-    /// A received handshake chain repeats an extension a `session-slot`
-    /// build reads, past the one entry per extension such a build holds.
-    ///
-    /// The length of a chain is not refused: a chain is read to the entry
-    /// whose `Z` flag is clear, as zenoh's reader
-    /// (`commons/zenoh-codec/src/transport/init.rs` @ `while has_ext {`) and
-    /// zenoh-pico's (`vendor/zenoh-pico/src/protocol/codec/ext.c` @
-    /// `while (has_next && ret == _Z_RES_OK) {`) both read it, and an entry no
-    /// build reads is judged by its header and not kept. A chain that never
-    /// terminates runs into the end of its frame and is refused as a
-    /// truncated wire ([`Self::Codec`]).
-    ExtChainOverflow,
     /// The header selected a body encoding the wire spec RESERVES, so the
     /// message has no shape to read and no length to skip.
     ///
@@ -91,6 +79,22 @@ pub enum InboundParseError {
         /// The entry's identity (its header without the chain flag).
         eid: u8,
     },
+    /// An ext chain carried an extension its message declares whose body that
+    /// extension's own reader refuses: a timestamp whose id is zero, a Request's
+    /// target past `2`, a source info cut short.
+    ///
+    /// zenoh 1.10.2 reads every declared extension with its typed reader as the
+    /// chain walk meets it and refuses the whole message on what the reader refuses
+    /// (`commons/zenoh-codec/src/network/push.rs` @
+    /// `let (t, ext): (ext::TimestampType, bool) = eodec.read(&mut *reader)?;`).
+    /// The chain decode reads such an entry by its encoding alone, so an analyzer
+    /// still sees it; this is the participant's refusal
+    /// (`crate::ext_admit::ExtAdmission::MalformedExt`). Distinct from
+    /// [`Self::Codec`], which is the chain's own structure failing.
+    MalformedExt {
+        /// The entry's identity (its header without the chain flag).
+        eid: u8,
+    },
     /// The message announced a protocol version other than
     /// [`wz_codecs::wire_const::PROTOCOL_VERSION`], so the rest of its body is
     /// laid out by a protocol this reader does not implement.
@@ -123,10 +127,6 @@ impl fmt::Display for InboundParseError {
         match self {
             Self::Empty => write!(f, "inbound frame was empty (no transport header)"),
             Self::Codec(e) => write!(f, "inbound body codec rejected wire: {:?}", e),
-            Self::ExtChainOverflow => write!(
-                f,
-                "inbound handshake ext chain repeats an extension past the one entry held for it"
-            ),
             Self::ReservedEncoding => {
                 write!(f, "inbound header selected a reserved body encoding")
             }
@@ -140,6 +140,9 @@ impl fmt::Display for InboundParseError {
             ),
             Self::ReservedExtEncoding { eid } => {
                 write!(f, "inbound ext {:#04x} has the reserved encoding 0b11", eid)
+            }
+            Self::MalformedExt { eid } => {
+                write!(f, "inbound ext {:#04x} has a body its reader refuses", eid)
             }
             Self::ForeignVersion { version } => write!(
                 f,

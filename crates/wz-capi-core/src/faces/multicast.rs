@@ -486,6 +486,10 @@ impl SharedSession {
             #[cfg(feature = "resource-snapshot")]
             messages,
         } = parts;
+        // Before the registry pushes anything onto the group under its lock (the replay below and
+        // every announcement after): such a push is queued on the group's producer in the order
+        // the registry decides it, and pushed once the lock is let go (`send_deferral`).
+        super::send_deferral::defer_group_under_the_registry(producer);
         let mut guard = self.lock();
         // The replay announces nothing: zenoh tells a group that comes up of no subscriber the
         // session already holds (`zenoh/src/net/routing/gateway.rs` @

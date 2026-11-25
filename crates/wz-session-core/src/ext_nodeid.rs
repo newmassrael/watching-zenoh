@@ -109,8 +109,12 @@ pub fn read_z64_ext<S: ExtEntryStorage>(
 }
 
 /// [`read_z64_ext`] over any chain a reader can ask ([`ExtEntryView`]): the owned
-/// one, or one read where its message lies. The one scan both use: the first
-/// entry of that identity whose body is a `Z64` zint.
+/// one, or one read where its message lies. The one scan both use: the value of
+/// the last entry of that identity, which is what upstream reads of a repeated
+/// `Z64` extension (`commons/zenoh-codec/src/network/request.rs` @
+/// `ext_target = rt;`, the same assignment in every network decoder's arms), and
+/// what every reader of a received chain picks
+/// ([`crate::ext_view::last_by_eid`]).
 ///
 /// [`ExtEntryView`]: crate::ext_view::ExtEntryView
 pub fn read_z64_in<E: crate::ext_view::ExtEntryView>(
@@ -126,10 +130,7 @@ pub fn read_z64_of<E: crate::ext_view::ExtEntryView>(
     exts: impl IntoIterator<Item = E>,
     header: u8,
 ) -> Option<u64> {
-    let want = ext_eid(header);
-    exts.into_iter()
-        .filter(|ext| ext.eid() == want)
-        .find_map(|ext| ext.zint())
+    crate::ext_view::last_by_eid_in(exts, ext_eid(header))?.zint()
 }
 
 /// [`read_z64_of`] for two identities in ONE walk of the chain: what each would answer asked
@@ -140,21 +141,12 @@ pub fn read_two_z64_of<E: crate::ext_view::ExtEntryView>(
     first: u8,
     second: u8,
 ) -> (Option<u64>, Option<u64>) {
-    let (want_first, want_second) = (ext_eid(first), ext_eid(second));
-    let (mut found_first, mut found_second) = (None, None);
-    for ext in exts {
-        let eid = ext.eid();
-        if found_first.is_none() && eid == want_first {
-            found_first = ext.zint();
-        }
-        if found_second.is_none() && eid == want_second {
-            found_second = ext.zint();
-        }
-        if found_first.is_some() && found_second.is_some() {
-            break;
-        }
-    }
-    (found_first, found_second)
+    let [found_first, found_second] =
+        crate::ext_view::last_of_each_in(exts, [ext_eid(first), ext_eid(second)]);
+    (
+        found_first.and_then(|ext| ext.zint()),
+        found_second.and_then(|ext| ext.zint()),
+    )
 }
 
 /// Insert / replace / remove a `Z64`-bodied extension in a chain, by the
@@ -313,8 +305,8 @@ mod tests {
     }
 
     /// Two identities read in one walk answer what each answers read alone, over chains that
-    /// hold neither, one, both in either order, the same identity twice (the first with an
-    /// integer body wins) and an entry that shares only the id.
+    /// hold neither, one, both in either order, the same identity twice (the last wins) and an
+    /// entry that shares only the id.
     #[test]
     fn two_identities_in_one_walk_are_what_two_walks_answer() {
         let (first, second) = (NODEID_EXT_HEADER, 0x01 | EXT_ENC_Z64);

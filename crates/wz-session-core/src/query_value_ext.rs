@@ -96,8 +96,11 @@ pub fn encode_query_value_ext<S: for<'x> ExtEntryFrom<'x>>(
     })
 }
 
-/// Project the first Query VALUE ext (`0x03`) from an ext chain into
-/// `(encoding, payload)`. Decodes the leading `encoding` (zint32 id + optional
+/// Project the Query VALUE ext (`0x03`) from an ext chain into
+/// `(encoding, payload)`: the last entry of it, as upstream's Query decoder
+/// keeps a repeated value (`commons/zenoh-codec/src/zenoh/query.rs` @
+/// `ext_body = Some(s);`) and every reader of a received chain picks one
+/// ([`crate::ext_view::last_by_eid`]). Decodes the leading `encoding` (zint32 id + optional
 /// schema, via the generated codec — the inverse of `to_codec().encode_to_vec`)
 /// and returns the REMAINING bytes as the payload, exactly as pico's
 /// `_z_value_decode` takes `_z_zbuf_len` bytes after the encoding. Returns
@@ -123,7 +126,7 @@ pub fn decode_query_value_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
     // The value is told by its identity (`body_eid::QUERY_VALUE`), as upstream tells
     // it, and not by the id field its look-alikes share.
     let bytes =
-        crate::ext_view::find_by_eid_in(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
+        crate::ext_view::last_by_eid_in(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
             .plain_zbuf_in()?;
     // The remainder after the encoding is the payload (pico takes
     // `_z_zbuf_len(zbf)` after `_z_encoding_decode`); the split is
@@ -148,7 +151,7 @@ pub fn decode_query_value_ext_parts_in<'c, T: crate::ext_view::ExtEntryBytes<'c>
     extensions: impl IntoIterator<Item = T>,
 ) -> Option<crate::encoding::ValueParts<'c>> {
     let bytes =
-        crate::ext_view::find_by_eid_in(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
+        crate::ext_view::last_by_eid_in(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
             .plain_zbuf_in()?;
     crate::encoding::split_value_body_parts(bytes)
 }

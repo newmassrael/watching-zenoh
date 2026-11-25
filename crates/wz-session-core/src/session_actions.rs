@@ -1915,13 +1915,20 @@ impl<W: crate::runtime_cell::WordCell> FrameTxConduits<W> {
 
 /// The frame budget and SN ring this link's sends are held to, one word for each reliability
 /// class, settled when the link is established ([`SessionLinkActions::enter_established`]) and
-/// read by every send without a lock. Nothing reads them before: the data-send gate opens after
-/// they are settled. What they are computed from does not move while the link is established
-/// (the peer's capabilities and the lowlatency and compression outcomes are the handshake's),
-/// and a reconnect establishes the link again, which settles them again.
+/// read by every send without a lock. What they are computed from does not move while the link
+/// is established (the peer's capabilities and the lowlatency and compression outcomes are the
+/// handshake's), and a reconnect establishes the link again, which settles them again.
 ///
-/// A word holds the ring resolution in bits 0-7 and the budget in bits 8-23 (at most 65535: the
-/// batch advertisements are `u16`).
+/// Before the first establishment, and from a reopen ([`SessionLinkActions::reset_for_reopen`],
+/// which clears the capabilities they are computed from) until the next one, the limits are
+/// unsettled and `get` answers `None`. That state is a bit of its own: every ring
+/// resolution and every budget, `0` included, is a value a settled word can hold, so neither
+/// can stand for "not settled".
+///
+/// A word holds the ring resolution in bits 0-7, the budget in bits 8-23 (at most 65535: the
+/// batch advertisements are `u16`) and the settled bit (`SETTLED`) in bit 24. The three are stored and
+/// loaded as one word, so a reader never sees a budget of one establishment with the ring or
+/// the settled bit of another.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
@@ -1953,6 +1960,10 @@ pub struct TxLimits {
     feature = "liveliness-token",
 ))]
 impl TxLimits {
+    /// The bit of a word that says the word was settled.
+    const SETTLED: u32 = 1 << 24;
+
+    /// Limits not settled yet.
     const fn new() -> Self {
         Self {
             reliable: AtomicU32::new(0),
@@ -1970,15 +1981,27 @@ impl TxLimits {
     /// Settle the limits of `class`.
     fn settle(&self, class: Reliability, budget: usize, ring: u8) {
         let budget = u32::from(u16::try_from(budget).unwrap_or(u16::MAX));
-        self.word(class)
-            .store((budget << 8) | u32::from(ring), Ordering::Release);
+        self.word(class).store(
+            Self::SETTLED | (budget << 8) | u32::from(ring),
+            Ordering::Release,
+        );
     }
 
-    /// The settled `(budget, ring resolution)` of `class`.
+    /// Withdraw the limits of both classes: the link they were settled for is being opened
+    /// again, and its next establishment settles them anew.
+    #[cfg(feature = "session-reconnect")]
+    fn unsettle(&self) {
+        for class in [Reliability::Reliable, Reliability::BestEffort] {
+            self.word(class).store(0, Ordering::Release);
+        }
+    }
+
+    /// The settled `(budget, ring resolution)` of `class`, or `None` while it is unsettled.
     #[inline]
-    fn get(&self, class: Reliability) -> (usize, u8) {
+    fn get(&self, class: Reliability) -> Option<(usize, u8)> {
         let word = self.word(class).load(Ordering::Acquire);
-        (((word >> 8) & 0xFFFF) as usize, (word & 0xFF) as u8)
+        ((word & Self::SETTLED) != 0)
+            .then_some((((word >> 8) & 0xFFFF) as usize, (word & 0xFF) as u8))
     }
 }
 
@@ -3630,6 +3653,31 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// profile never builds, and its runtimes have no second thread to hand to.
     #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub block_first_handoff: R::Mutex<Option<BlockFirstHandoff>>,
+    /// The sends this session's owner deferred, and the deferral that decides which
+    /// ([`SessionLinkActions::install_send_deferral`]). A build with no dispatch arm sends no
+    /// network message, so it has nothing to defer.
+    ///
+    /// Every other heap build that sends has it, as it has the block-first hand-off, whichever
+    /// atomics the build takes: the `no_std` feature selects those atomics and nothing else, and
+    /// Cargo turns it on in a host build that also links `wz-runtime-coop` (which forwards it),
+    /// so a deferral gated on its absence would leave such a build sending under its owner's lock.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "tx-lend-only"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    deferred_sends: crate::send_deferral::DeferredSends<R, send_deferral::DeferredSend>,
 }
 
 /// R2952 (open-debt item 835) — one block-first message whose slot the core
@@ -4280,6 +4328,27 @@ where
 /// the session it lives in is shared across the runtime's threads.
 #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
 pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
+
+/// What a session queues of a send its owner defers while it holds a lock of its own
+/// ([`SessionLinkActions::install_send_deferral`], [`crate::send_deferral`]): a copy of the
+/// message's encoded body.
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+mod send_deferral;
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+use crate::send_deferral::SendDeferral;
+
+/// A session is a sender its owner may owe a flush to, beside the other kinds of sender the
+/// owner defers sends on.
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+impl<R: SessionRuntime, T: TimeSource> crate::send_deferral::DeferredSender
+    for SessionLinkActions<R, T>
+where
+    Self: Send + Sync,
+{
+    fn flush_deferred_sends(&self) {
+        SessionLinkActions::flush_deferred_sends(self);
+    }
+}
 
 /// The §5.16 egress verdict a session hands its action bundle for the replies it sends: `true`
 /// admits the `Response`, or the `Declare` that answers a peer's Interest. See
@@ -5303,6 +5372,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
             #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "tx-lend-only"),
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                )
+            ))]
+            deferred_sends: crate::send_deferral::DeferredSends::new(),
         })
     }
 
@@ -5328,6 +5414,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
             #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             core::ptr::addr_of_mut!((*at).block_first_handoff).write(R::new_mutex(None));
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "tx-lend-only"),
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                )
+            ))]
+            core::ptr::addr_of_mut!((*at).deferred_sends)
+                .write(crate::send_deferral::DeferredSends::new());
         }
     }
 
@@ -5729,6 +5833,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             link,
             #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "tx-lend-only"),
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                )
+            ))]
+            deferred_sends: crate::send_deferral::DeferredSends::new(),
         })
     }
 }
@@ -7192,6 +7313,186 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
     }
 
+    /// Give this session its owner's [`SendDeferral`]: from now on, a send the calling thread
+    /// makes while the deferral says it defers is queued and not written, and is written by the
+    /// thread's [`Self::flush_deferred_sends`]; a send of a thread that does not defer leaves
+    /// after whatever is queued ([`crate::send_deferral`]). Installed by an owner that
+    /// sends to this session under a lock of its own, before it sends anything under that lock.
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+    pub fn install_send_deferral(&self, deferral: alloc::boxed::Box<dyn SendDeferral>) {
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        ))]
+        self.deferred_sends.install(deferral);
+        #[cfg(not(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )))]
+        drop(deferral);
+    }
+
+    /// Write what the calling thread's deferral queued on this session, in the order it was
+    /// queued, waiting for room as each send would have: the flush an owner owes once the thread
+    /// holds none of the locks its deferral stands for ([`SendDeferral::deferred`]). Whatever
+    /// another thread queued meanwhile goes out with it, in its turn. Nothing to do when nothing
+    /// is queued.
+    ///
+    /// A thread that still defers may not flush: its flush would wait for room under the lock
+    /// the deferral exists to keep free of that wait, which a debug build refuses.
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+    pub fn flush_deferred_sends(&self) {
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        ))]
+        self.deferred_sends
+            .flush(|deferred| self.send_deferred(deferred));
+    }
+
+    /// [`Self::dispatch_network_message_in`] for a send of the caller's own on a session whose
+    /// owner installed a [`SendDeferral`].
+    ///
+    /// A thread that defers has the message encoded, as a block-first job is, and queued; it is
+    /// answered as a send handed to the link, and the link is asked nothing, so the thread
+    /// waits for no room. A thread that does not defer sends at once when nothing is queued,
+    /// and otherwise sends what is queued first and then its own message, as the one sender of
+    /// the session's ordered sends: a message decided after one still queued leaves after it.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "tx-lend-only"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    #[inline(never)]
+    fn dispatch_deferrable<P>(
+        &self,
+        conduit: Conduit,
+        qos: crate::sample::QosLevel,
+        worst_case_payload: SizeHint,
+        stats_class: crate::stats::NetworkStatsClass,
+        encode_body: &P,
+    ) -> Result<Dispatched, SendWireError>
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+            + ?Sized,
+    {
+        let sends = &self.deferred_sends;
+        if sends.defers_here() {
+            let mut body = Vec::with_capacity(worst_case_payload);
+            {
+                let mut sink = crate::tx_buf::TxSink::new(&mut body);
+                encode_body(&mut sink)?;
+            }
+            sends.defer(send_deferral::DeferredSend {
+                conduit,
+                qos,
+                stats_class,
+                body,
+            });
+            return Ok(Dispatched::Sent);
+        }
+        sends.after_queued(
+            |deferred| self.send_deferred(deferred),
+            || {
+                self.dispatch_network_message_in::<true, P>(
+                    DispatchStage::Fresh,
+                    conduit,
+                    qos,
+                    worst_case_payload,
+                    stats_class,
+                    encode_body,
+                )
+            },
+        )
+    }
+
+    /// Send one queued send as the send its thread deferred would have been sent: it waits for
+    /// room as that send would have.
+    ///
+    /// Its outcome reaches no caller, and none needs it. What a failed send costs the session is
+    /// decided inside the dispatch, by the session, on whichever thread runs it: a blocking send
+    /// that found no room in its deadline settles that here as at the call
+    /// ([`Self::settle_blocking_expiry`]: the close it orders of the drive loop, which takes the
+    /// face down, or under `tx-expiry-keeps-session` the run of such drops that ends in one),
+    /// and a session whose link is gone or whose close is ordered refuses it
+    /// ([`SendWireError::TransportUnavailable`]), as it refuses every send until a link is up
+    /// again. What is left is the message's own (past the reassembly cap, past the fragment
+    /// budget), and the caller it would have reached, a thread that sends under its owner's
+    /// lock, belongs to an owner whose sends there are best effort per sender: a node's registry
+    /// discards a face's refused declaration and keeps the entity for every later face
+    /// (`wz-capi-core`'s `SharedSession::declare_subscriber`). The one error known without
+    /// waiting, the body's own refusal, is still answered to the caller, which encodes the body
+    /// before it is queued.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "tx-lend-only"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn send_deferred(&self, deferred: send_deferral::DeferredSend) {
+        let send_deferral::DeferredSend {
+            conduit,
+            qos,
+            stats_class,
+            body,
+        } = deferred;
+        let _ = self.dispatch_network_message_in::<true, _>(
+            DispatchStage::Fresh,
+            conduit,
+            qos,
+            body.len(),
+            stats_class,
+            as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| {
+                sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
+            }),
+        );
+    }
+
     /// R311kw — the one wire-emit seam: mark the link's line as spoken in its
     /// keepalive tick and forward to the link driver. Every production TX path routes
     /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
@@ -8215,8 +8516,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// envelope the link and the compression wrap put around the frame, and a frame that
     /// filled the whole batch would reach the peer as a batch past what it negotiated.
     ///
-    /// Settled when this link was established ([`TxLimits`]): before that no data send is let
-    /// through, and the answer is `(0, 0)`.
+    /// Settled when this link was established ([`TxLimits`]); `None` before that and from a
+    /// reopen until the link is established again, when the data-send gate refuses every data
+    /// send too. A send reads them behind that gate, and reads `None` as its refusal: the gate
+    /// can close between the two reads.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -8229,7 +8532,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    pub fn negotiated_tx_limits(&self) -> (usize, crate::sn::Sn) {
+    pub fn negotiated_tx_limits(&self) -> Option<(usize, crate::sn::Sn)> {
         self.negotiated_tx_limits_for(Reliability::Reliable)
     }
 
@@ -8250,9 +8553,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    pub fn negotiated_tx_limits_for(&self, class: Reliability) -> (usize, crate::sn::Sn) {
-        let (budget, ring) = self.link.tx_limits.get(class);
-        (budget, crate::sn::mask_from_res(ring))
+    pub fn negotiated_tx_limits_for(&self, class: Reliability) -> Option<(usize, crate::sn::Sn)> {
+        let (budget, ring) = self.link.tx_limits.get(class)?;
+        Some((budget, crate::sn::mask_from_res(ring)))
     }
 
     /// Settle this link's send limits ([`TxLimits`]) from what the handshake negotiated, once
@@ -12374,6 +12677,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
+    /// Whether the node had room for this link when it was opened; `true` for a link the node
+    /// does not guard. A link it had none for is refused for the node being full and not for a
+    /// second link to the node on the other end. See
+    /// [`crate::link_admission::LinkAdmission::has_row`].
+    #[cfg(all(
+        feature = "alloc",
+        target_has_atomic = "ptr",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    ))]
+    pub(crate) fn link_has_row(&self) -> bool {
+        R::with_mutex_mut(&self.link.link_lease, |slot| {
+            slot.as_ref()
+                .is_none_or(crate::link_admission::LinkLease::has_row)
+        })
+    }
+
     /// This link has left its node's admission: its place is free for the next link to the same
     /// node. The node calls it when the link's face goes; the lease's drop does it otherwise.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -12777,6 +13096,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
+        // A send of its caller's own on a session whose owner defers some of its sends: deferred,
+        // or held behind what was, by [`Self::dispatch_deferrable`]. Every other stage continues a
+        // send that passed here already (a block-first job, a send under room its sender
+        // reserved) or is a probe, which waits for nothing.
+        #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+        if !STAGED && self.deferred_sends.engaged() {
+            return self.dispatch_deferrable(
+                conduit,
+                qos,
+                worst_case_payload,
+                _stats_class,
+                encode_body,
+            );
+        }
         // Nothing of a lend-only build reads it: every frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
         let SizeHint = worst_case_payload;
@@ -12880,12 +13213,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // A session a congestion close was ordered of is not available either: the message
         // would wait another `wait_before_close` for a link that has just been found not to
         // take one (zenoh 1.10.2 disables the pipelines when it decides the close).
-        if self.congestion_close_ordered() || !self.session_send_available() {
+        //
+        // The gate's answer is the frame budget and SN ring the message's class is sent with
+        // ([`Self::negotiated_tx_limits_for`]): they are settled before the gate opens, and a
+        // reopen withdraws them behind the closed gate, so limits not settled when they are read
+        // are the same refusal as a gate found closed (the gate closed between the two reads).
+        // Read once, here, before any conduit lock is taken.
+        let wire_reliability = Reliability::from_reliable_bool(reliable);
+        let limits = if self.congestion_close_ordered() || !self.session_send_available() {
+            None
+        } else {
+            self.negotiated_tx_limits_for(wire_reliability)
+        };
+        let Some((mtu, sn_mask)) = limits else {
             // R2825 — no link can take it: upstream's `no-link` drop.
             #[cfg(feature = "transport-stats")]
             self.drop_for_no_link(message_priority, &_stats_class);
             return Err(SendWireError::TransportUnavailable);
-        }
+        };
         // R2825 — the network-message counter, on the link this message's
         // conduit is routed to: the same `(reliability, priority)` choice the
         // frame carrying it will make in `send_wire`, so a message and its
@@ -12895,7 +13240,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `stats.inc_network_message(zenoh_stats::Tx, msg);`):
         // a message its link had no room for is a congestion drop instead,
         // never both.
-        let wire_reliability = Reliability::from_reliable_bool(reliable);
         let count_pushed = || {
             // A message with room ends a run of expiries (`TX_EXPIRY_CLOSE_AFTER`); with no
             // bound there is no run to end.
@@ -12938,7 +13282,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 let want = worst_case_payload;
                 // A lend-only build asks for the whole batch budget, as each of its frames does.
                 #[cfg(feature = "tx-lend-only")]
-                let want = self.negotiated_tx_limits_for(wire_reliability).0;
+                let want = mtu;
                 let write = lent_write(|slot| {
                     let mut sink = crate::tx_buf::TxSink::new(slot);
                     encode_body(&mut sink)
@@ -12999,24 +13343,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // cap is below the 65535 default, so a UDP deployment expecting
         // >64 KB payloads must configure `batch_size <= 65507`.) R311jp —
         // the same budget bounds the batching accumulator (pico shares one
-        // `_wbuf` capacity between both concerns). Resolved before the
-        // batch lock for the same disjoint-mutex discipline as `sn_mask`
-        // below (the accessor takes `inbound_peer_init_caps`). The budget is
+        // `_wbuf` capacity between both concerns). The budget is
         // the batch less its envelope ([`Self::batch_envelope_bytes`]): a
         // streamed link's length and a compressing session's header ride in
         // the same negotiated batch as the frame.
         //
         // R311kb — and the negotiated SN ring every mint below walks
-        // ([`Self::negotiated_sn_mask`]). Resolved here, before the batch
-        // lock, in the same hold of the `inbound_peer_init_caps` mutex
-        // ([`Self::negotiated_tx_limits_for`]): session mutex scopes stay disjoint
-        // by discipline. The budget is the message's class's: a best-effort
+        // ([`Self::negotiated_sn_mask`]). Both are `mtu` and `sn_mask`, the
+        // gate's answer above, settled at establishment
+        // ([`Self::negotiated_tx_limits_for`]) and read before any conduit
+        // lock. The budget is the message's class's: a best-effort
         // message batches and fragments to what the link's best-effort carriage
         // takes, which a datagram companion bounds below its streams.
-        let (mtu, sn_mask) = self.negotiated_tx_limits_for(wire_reliability);
 
-        // This profile's own reassembly budget, resolved HERE for the same
-        // reason as `mtu` and `sn_mask` above: the accessor takes a mutex,
+        // This profile's own reassembly budget, resolved HERE, before the
+        // batch lock: the accessor takes a mutex,
         // and session mutex scopes stay disjoint by discipline. Without
         // `transport-fragmentation` nothing fragments, so no cap applies.
         #[cfg(feature = "transport-fragmentation")]
@@ -15068,17 +15409,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and the frame budget the send cuts by. Any message but a Push is counted one frame, as
     /// only a Push is sent under a reservation. What [`Self::try_reserve_wire_frames`] is asked
     /// for by a sender that reserves a whole chain before it sends.
+    ///
+    /// A Push measured while the link's limits are unsettled
+    /// ([`Self::negotiated_tx_limits_for`] answers `None`) has no budget to be cut by: it is
+    /// refused with [`SendWireError::TransportUnavailable`], the refusal the data-send gate
+    /// gives such a link, which the reservation would give it next.
     #[cfg(feature = "codec-push")]
     #[cfg(feature = "alloc")]
     pub fn wire_frames_of(
         &self,
         msg: &crate::network_message::NetworkMessage,
         reliable: bool,
-    ) -> usize {
+    ) -> Result<usize, SendWireError> {
         #[cfg(feature = "transport-fragmentation")]
         {
             let crate::network_message::NetworkMessage::Push(push) = msg else {
-                return 1;
+                return Ok(1);
             };
             let encode_body = crate::frame_encode::push_body(push);
             #[cfg(feature = "transport-tx-lend")]
@@ -15094,15 +15440,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             };
             // A body the codec cannot write is refused by the send itself; one frame is asked.
             let Ok(body_len) = body_len else {
-                return 1;
+                return Ok(1);
             };
-            let (mtu, _) = self.negotiated_tx_limits_for(Reliability::from_reliable_bool(reliable));
-            crate::frame_encode::chain_frames(body_len, mtu)
+            let (mtu, _) = self
+                .negotiated_tx_limits_for(Reliability::from_reliable_bool(reliable))
+                .ok_or(SendWireError::TransportUnavailable)?;
+            Ok(crate::frame_encode::chain_frames(body_len, mtu))
         }
         #[cfg(not(feature = "transport-fragmentation"))]
         {
             let _ = (msg, reliable);
-            1
+            Ok(1)
         }
     }
 
@@ -19458,6 +19806,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // FSM saw the loss; this also covers a reset without a prior
             // terminal). record_established_at re-opens it.
             self.link.transport_available.close();
+            // The send limits were settled from the capabilities cleared below: withdrawn with
+            // them, behind the closed gate, until the next establishment settles them anew.
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            ))]
+            self.link.tx_limits.unsettle();
             // The next peer has been asked for nothing: the answers owed by the last are not
             // owed to it, and the replay asks again, noting each interest as it does.
             R::with_mutex_mut(&self.declaration_sync, |sync| sync.clear());

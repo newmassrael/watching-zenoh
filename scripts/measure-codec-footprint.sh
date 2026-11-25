@@ -521,7 +521,21 @@ declare -A CODEC_DELTA_FLOOR=(
     [codec-declare]=0          # lane SKIPs on this binary; floor unused until it is measurable
     [codec-request]=55000      # measured 66456
     [codec-response]=60000     # measured 74472
-    [codec-response-final]=8000 # measured 9712
+    # RE-PINNED 8000 -> 6000 (measured 7376 on ci-int, 7712 hosted on df3586fd0), the
+    # deliberate re-pin the block above prescribes. BISECTED on the hosted Layer F
+    # readings of main: 10760 at 1eb3817e7, 7584 at 271f5cd09. The per-symbol diff of
+    # baseline against minus-codec-response-final at 1eb3817e7 and at ci-int (unstripped,
+    # hashes normalised) names the three causes, none of them a re-pull:
+    #   * the Final is written by the lent writer now (673bdf953): response_final_body
+    #     and build_response_final (928 B elided) gave way to send_response_final and
+    #     lent_control::response_final_len (433 B elided) -- less code to remove;
+    #   * a consolidating get holds its replies in the tables (45bacde68): the
+    #     HashMap<String, InboundReply> drop glue (694 B) became HeapHold's (352 B), and
+    #     ReplyRegistry::dispatch_iteration_event's Final arm 1582 -> 613 B;
+    #   * decode_one_record's inline boundary: without the codec the caller absorbs
+    #     more (-6197 -> -8631 B), the "caller absorbs" case of R311y580.
+    # The witness below now judges the claim by name.
+    [codec-response-final]=6000 # measured 7376
     [codec-scout]=-256         # measured -144: wz-codecs level only; negative is inline noise
     [codec-hello]=-256         # measured -144: same
 )
@@ -569,6 +583,9 @@ declare -A CODEC_ELISION_WITNESS=(
     # `#[inline(never)]` boundary, so the claim the catalog makes is now
     # checkable by name here rather than only by a delta that cannot resolve it.
     [codec-keep-alive]="wz_session_core::inbound::decode_keep_alive"
+    # The Final's lent length, behind its own #[inline(never)] frame and the codec's cfg
+    # (lent_control.rs): present with codec-response-final, absent without it.
+    [codec-response-final]="wz_session_core::lent_control::response_final_len"
 )
 
 # The lanes this binary CANNOT express, as a pinned SET. `wz-ap-demo` references

@@ -489,7 +489,7 @@ fn extract_query_attachment_shared(query: &QueryOwned) -> Option<crate::link::Rx
         use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
         // The entry `decode_attachment_ext` reads: the one of the attachment's
         // identity, with a plain ZBuf body.
-        let ext = crate::ext_view::find_by_eid(
+        let ext = crate::ext_view::last_by_eid(
             query.extensions.as_deref()?,
             crate::ext_header::body_eid::QUERY_ATTACHMENT,
         )?;
@@ -524,7 +524,7 @@ fn extract_query_value_shared(
         use crate::wire::parts::QueryExtEntryOwnedVariant;
         use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
         // The entry `decode_query_value_ext` reads: the one of the value's identity.
-        let ext = crate::ext_view::find_by_eid(
+        let ext = crate::ext_view::last_by_eid(
             query.extensions.as_deref()?,
             crate::ext_header::body_eid::QUERY_VALUE,
         )?;
@@ -3556,39 +3556,34 @@ impl QueryPeer {
         query: &QueryOwned,
         band: usize,
     ) -> Result<Option<(crate::sample::EncodingHint, crate::link::RxBytes)>, ()> {
-        use crate::ext_view::ExtEntryView;
         use sce_forge_runtime::codec::SceList;
         use wz_codecs::query_ext_entry::QueryExtEntryOwnedVariant;
-        let Some(exts) = crate::held_list::HeldList::entries(&query.extensions) else {
+        // The value is the last entry of its identity, the one every reader of the chain reads
+        // (`crate::ext_view::last_by_eid`); an earlier value it supersedes is not unswapped.
+        let Some(ext) = crate::held_list::HeldList::entries(&query.extensions).and_then(|exts| {
+            crate::ext_view::last_by_eid(exts, crate::ext_header::body_eid::QUERY_VALUE)
+        }) else {
             return Ok(None);
         };
-        for ext in exts {
-            if ExtEntryView::eid(ext) != crate::ext_header::body_eid::QUERY_VALUE {
-                continue;
-            }
-            let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &ext.body else {
-                continue;
-            };
-            let wz_codecs::query_value_zbuf::QueryValueZbufAfterShm::AfterShm {
-                encoding,
-                slices,
-                ..
-            } = &value.after_shm
-            else {
-                continue;
-            };
-            // The encoding precedes the slices on the wire, in the same codec the
-            // plain shape's leading bytes are read with.
-            let encoding = crate::sample::EncodingHint::from_codec(encoding);
-            return match self
-                .shm
-                .unswap_slices(SceList::as_slice(slices.inner()), band)
-            {
-                Some(bytes) => Ok(Some((encoding, bytes))),
-                None => Err(()),
-            };
+        let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &ext.body else {
+            return Ok(None);
+        };
+        let wz_codecs::query_value_zbuf::QueryValueZbufAfterShm::AfterShm {
+            encoding, slices, ..
+        } = &value.after_shm
+        else {
+            return Ok(None);
+        };
+        // The encoding precedes the slices on the wire, in the same codec the
+        // plain shape's leading bytes are read with.
+        let encoding = crate::sample::EncodingHint::from_codec(encoding);
+        match self
+            .shm
+            .unswap_slices(SceList::as_slice(slices.inner()), band)
+        {
+            Some(bytes) => Ok(Some((encoding, bytes))),
+            None => Err(()),
         }
-        Ok(None)
     }
 
     /// [`fire_query`] for a query this face's peer asks: one longer than the session allows reaches

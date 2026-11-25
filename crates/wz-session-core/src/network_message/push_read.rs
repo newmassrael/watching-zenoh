@@ -142,8 +142,8 @@ impl<'f> EntrySink<'f> for Lending {
 }
 
 /// The admission rule over a chain read one entry at a time: what
-/// [`judge_ext_chain`](crate::ext_admit::judge_ext_chain) answers for the whole chain, its first
-/// offender, without a second walk of the chain to find it.
+/// [`judge_ext_entries`](crate::ext_admit::judge_ext_entries) answers for the whole chain, its
+/// first offender, without a second walk of the chain to find it.
 struct Judge {
     carrier: ExtCarrier,
     verdict: ExtAdmission,
@@ -157,17 +157,27 @@ impl Judge {
         }
     }
 
-    /// The next entry's header.
-    fn header(&mut self, header: u8) {
+    /// The next entry: its header, and the body of an extension the carrier declares.
+    fn entry(&mut self, entry: &ExtEntryView<'_>) {
         if self.verdict == ExtAdmission::Admissible {
-            self.verdict = crate::ext_admit::judge_ext_chain(self.carrier, [header]);
+            self.verdict = crate::ext_admit::judge_ext_entries(self.carrier, [entry]);
+        }
+    }
+
+    /// The shared-memory marker a Put holds as a place: a unit, judged by its header alone.
+    fn marker(&mut self) {
+        if self.verdict == ExtAdmission::Admissible {
+            self.verdict = crate::ext_admit::judge_ext_chain(
+                self.carrier,
+                [MsgPutExtensionsHas0x12Key::named().header],
+            );
         }
     }
 }
 
 /// The extension chain at the cursor, to the entry whose `Z` flag is clear, as the list the
 /// codec's view holds it as: the bytes from its first entry to the end of the frame, and how many
-/// entries it has. Each entry's header is judged in order, and each entry goes to `sink` as it is
+/// entries it has. Each entry is judged in order, and each entry goes to `sink` as it is
 /// decoded. A Put's chain (`shm`) is judged with the shared-memory marker's own header at the
 /// place of its first entry of that kind, as the rule reads a Put that holds the marker as a
 /// place, and says whether it carried one; the Push's own chain is the one with no `shm`.
@@ -184,15 +194,15 @@ fn read_chain<'f, S: EntrySink<'f>>(
         match shm.as_deref_mut() {
             Some(seen) if !*seen && entry.header & 0x7f == SHM_MARKER => {
                 *seen = true;
-                judge.header(MsgPutExtensionsHas0x12Key::named().header);
+                judge.marker();
                 sink.put_marker();
             }
             Some(_) => {
-                judge.header(entry.header);
+                judge.entry(&entry);
                 sink.put_entry(&entry)?;
             }
             None => {
-                judge.header(entry.header);
+                judge.entry(&entry);
                 sink.push_entry(&entry)?;
             }
         }
@@ -265,11 +275,11 @@ fn read_body<'f, S: EntrySink<'f>>(
         }
         PushViewVariant::CodecZenohMsgDel(del) => {
             MsgDelView::decode_into(cursor, del)?;
-            super::judge_headers(
+            super::judge_entries(
                 ExtCarrier::Zenoh(ZenohBody::Del),
                 del.extensions
                     .as_ref()
-                    .map(|chain| crate::ext_view::walked(Some(chain)).map(|e| e.header)),
+                    .map(|chain| crate::ext_view::walked(Some(chain))),
             )
         }
     };
@@ -559,7 +569,7 @@ impl<'f> PutKept<'f> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{judge_headers, judge_put_view, then_judge};
+    use super::super::{judge_entries, judge_put_view, then_judge};
     use super::*;
 
     /// What the reader reads from `bytes`: the view, how far it read and the verdict.
@@ -598,20 +608,20 @@ mod tests {
         let view = PushView::decode(&mut cursor)?;
         let consumed = bytes.len() - cursor.remaining();
         let admission = then_judge(
-            judge_headers(
+            judge_entries(
                 ExtCarrier::Network(NetworkEnvelope::Push),
                 view.extensions
                     .as_ref()
-                    .map(|chain| crate::ext_view::walked(Some(chain)).map(|e| e.header)),
+                    .map(|chain| crate::ext_view::walked(Some(chain))),
             ),
             || match &view.body {
                 PushViewVariant::CodecZenohMsgPut(put)
                 | PushViewVariant::Default { body: put, .. } => judge_put_view(put),
-                PushViewVariant::CodecZenohMsgDel(del) => judge_headers(
+                PushViewVariant::CodecZenohMsgDel(del) => judge_entries(
                     ExtCarrier::Zenoh(ZenohBody::Del),
                     del.extensions
                         .as_ref()
-                        .map(|chain| crate::ext_view::walked(Some(chain)).map(|e| e.header)),
+                        .map(|chain| crate::ext_view::walked(Some(chain))),
                 ),
             },
         );

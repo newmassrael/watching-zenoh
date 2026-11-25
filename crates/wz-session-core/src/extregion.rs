@@ -172,12 +172,17 @@ pub fn peer_region(extensions: &[ExtEntryOwned]) -> Result<Option<RegionName>, R
 
 /// [`peer_region`] over the entries a chain yields, held or read where its message lies
 /// (`crate::inbound::ExtChainRead`): the name is read where its bytes lie.
+///
+/// A chain that carries the region twice announces its last entry's, valid or not, as upstream's
+/// decoder reads it: its arm for the extension assigns each entry it meets
+/// (`commons/zenoh-codec/src/transport/init.rs` @ `ext_northtag = Some(p);`).
 pub fn peer_region_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> Result<Option<RegionName>, RegionNameError> {
     extensions
         .into_iter()
-        .find_map(|ext| region_of_entry(&ext))
+        .filter_map(|ext| region_of_entry(&ext))
+        .last()
         .transpose()
 }
 
@@ -206,7 +211,7 @@ pub fn region_of_value(value: &[u8]) -> Result<RegionName, RegionNameError> {
 
 /// The patch level ([`crate::extpatch::peer_patch_in`]) and the region identity
 /// ([`peer_region_in`]) of one Init, off a single walk of its chain: each answer is the one its
-/// own reader gives, and the walk stops once both extensions are found.
+/// own reader gives, the last entry of each, so the walk reads the chain to its end.
 pub fn peer_patch_and_region_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> (
@@ -216,14 +221,11 @@ pub fn peer_patch_and_region_in<E: crate::ext_view::ExtEntryView>(
     let mut patch = None;
     let mut region = None;
     for ext in extensions {
-        if patch.is_none() {
-            patch = crate::extpatch::patch_of_entry(&ext);
+        if let Some(level) = crate::extpatch::patch_of_entry(&ext) {
+            patch = Some(level);
         }
-        if region.is_none() {
-            region = region_of_entry(&ext);
-        }
-        if patch.is_some() && region.is_some() {
-            break;
+        if let Some(name) = region_of_entry(&ext) {
+            region = Some(name);
         }
     }
     (
@@ -366,9 +368,10 @@ mod tests {
 
     /// A refused region does not end the walk before the patch: the patch reject is judged
     /// first in the handshake, so it must still see the level a later entry announces. Only the
-    /// first region entry is judged, as [`peer_region`] judges it.
+    /// last region entry is judged, as [`peer_region`] judges it and as upstream's decoder keeps
+    /// it (`commons/zenoh-codec/src/transport/init.rs` @ `ext_northtag = Some(p);`).
     #[test]
-    fn one_walk_reads_the_patch_past_a_refused_region_and_judges_the_first_region() {
+    fn one_walk_reads_the_patch_past_a_refused_region_and_judges_the_last_region() {
         let empty = ExtEntryOwned {
             header: REGION_NAME_EXT_HEADER,
             body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
@@ -378,7 +381,18 @@ mod tests {
         };
         let valid = encode_region_name_ext(&RegionName::new("north").expect("a valid name"))
             .expect("encodes");
-        let chain = [empty, valid, crate::extpatch::encode_patch_ext_at(1)];
+        let north = RegionName::new("north").expect("a valid name");
+        let chain = [
+            empty.clone(),
+            valid.clone(),
+            crate::extpatch::encode_patch_ext_at(1),
+        ];
+        assert_eq!(
+            peer_patch_and_region_in(&chain),
+            (1, Ok(Some(north.clone())))
+        );
+        assert_eq!(peer_region(&chain), Ok(Some(north)));
+        let chain = [valid, empty, crate::extpatch::encode_patch_ext_at(1)];
         assert_eq!(
             peer_patch_and_region_in(&chain),
             (1, Err(RegionNameError::Empty))

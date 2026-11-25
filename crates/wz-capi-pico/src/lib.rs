@@ -259,13 +259,18 @@ compile_error!(
      cooperative feature"
 );
 // The cooperative engine's unixpipe links are the host's named FIFOs (`wz-runtime-posix`'s
-// `unixpipe`), which it opens on Linux and Android; another host, and a Zephyr image, which has no
-// named FIFO, are refused by name rather than by the missing opener of `src/coop_host.rs`.
+// `unixpipe`), which it opens on Linux and Android. Another Unix host has named FIFOs no module
+// opens yet, and a Zephyr image has none: both are refused by name rather than by the missing
+// opener of `src/coop_host.rs`. A host with no named FIFO at all (Windows) is not refused: there
+// the feature is inert, as upstream's unixpipe link compiles nothing off Unix
+// (`io/zenoh-links/zenoh-link-unixpipe/src/lib.rs` @ `#[cfg(unix)]`) and the tokio engine's is
+// built on Unix alone, so a `unixpipe/` endpoint is a scheme the build has no link for.
 #[cfg(all(
     feature = "transport-link-unixpipe",
     any(
         all(
             any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+            unix,
             not(any(target_os = "linux", target_os = "android"))
         ),
         all(

@@ -105,12 +105,18 @@ pub fn peer_remote_bound(extensions: &[ExtEntryOwned]) -> Result<Option<Bound>, 
 
 /// [`peer_remote_bound`] over the entries a chain yields, held or read where its message lies
 /// (`crate::inbound::ExtChainRead`).
+///
+/// A chain that carries the bound twice announces its last entry's, valid or not, as upstream's
+/// decoder reads it: its arm for the extension assigns each entry it meets
+/// (`commons/zenoh-codec/src/transport/open.rs` @ `ext_remote_bound = Some(q);`), and the
+/// receive arm judges the one value left.
 pub fn peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> Result<Option<Bound>, InvalidBound> {
     extensions
         .into_iter()
-        .find_map(|ext| bound_of_entry(&ext))
+        .filter_map(|ext| bound_of_entry(&ext))
+        .last()
         .transpose()
 }
 

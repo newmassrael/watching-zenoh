@@ -190,132 +190,356 @@
       }
     },
     "pico-api-windows-x64": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.6207,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1072858,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x86": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.1257,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 993151,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x64-with-app-transport": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.7718,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1134710,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-config-document": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.7536,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1127242,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-config-policy": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.6908,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1101554,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-conformance-digest": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.6211,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1073034,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-device-requires": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.7192,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1113170,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-e2e-receiver": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.8002,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1146326,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-e2e-sender": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.8066,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1148950,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-e2e-sender-demux": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.8018,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1146994,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-e2e-supervision": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.6438,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1082302,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-instance-key": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.8931,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1184366,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-message-catalog": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.9252,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1197494,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-message-payload": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.2337,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1323806,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-remote-declaration-watch": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.6617,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1089650,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-replay-cache": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.0312,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1240910,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x64-with-shared-key-ids": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.678,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1096294,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-api-windows-x86-with-app-transport": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.3057,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1050331,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-config-document": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.2726,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1039831,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-config-policy": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.2054,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1018475,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-conformance-digest": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.1262,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 993299,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-device-requires": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.2162,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1021911,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-e2e-receiver": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.3321,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1058707,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-e2e-sender": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.3356,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1059819,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-e2e-sender-demux": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.3342,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1059379,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-e2e-supervision": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.1525,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1001647,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-instance-key": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.4324,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1090583,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-message-catalog": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.4615,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1099847,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-message-payload": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.8177,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1213011,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-remote-declaration-watch": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.1777,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1009667,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-replay-cache": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.611,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1147335,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     },
     "pico-api-windows-x86-with-shared-key-ids": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.1854,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-25",
+        "wz_text": 1012119,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     }
   }
 }

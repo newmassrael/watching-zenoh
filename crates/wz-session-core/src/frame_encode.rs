@@ -2452,7 +2452,8 @@ mod chain_frames_tests {
     }
 }
 
-#[cfg(all(test, feature = "transport-fragmentation"))]
+// The fragmenting send and the fragment it decodes to are the heap profile's (`alloc`).
+#[cfg(all(test, feature = "transport-fragmentation", feature = "alloc"))]
 mod fragment_tests {
     use super::{
         build_fragment_drop_wire, build_fragment_wire, fragment_body, fragment_count, FragmentChain,

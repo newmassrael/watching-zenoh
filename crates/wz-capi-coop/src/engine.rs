@@ -5316,10 +5316,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // it (`ArenaPlan::lay_admission`); its rows are the heap's, and a heap that refuses them
         // refuses the open.
         #[cfg(feature = "listen")]
-        let admission = Admission::<C>::try_with_order(&wire, policy.link_tie_order(), lent.links)
-            .ok_or(OpenError::Arena(ArenaRefused::NoMemory {
-                bytes: lent.links.saturating_mul(LinkBook::row_bytes()),
-            }))?;
+        let admission = Admission::<C>::try_with_order(
+            &wire,
+            policy.link_tie_order(),
+            wz_session_core::limit_binding::Quota::at_most(lent.links),
+        )
+        .ok_or(OpenError::Arena(ArenaRefused::NoMemory {
+            bytes: lent.links.saturating_mul(LinkBook::row_bytes()),
+        }))?;
         #[cfg(feature = "listen")]
         let admission = lent
             .arena

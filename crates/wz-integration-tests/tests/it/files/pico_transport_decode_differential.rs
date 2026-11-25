@@ -265,6 +265,10 @@ fn wz_verdict(bytes: &[u8]) -> WzVerdict {
         Ok(frame) => match frame.ext_admission() {
             ExtAdmission::UnknownMandatory { .. } => WzVerdict::Inadmissible,
             ExtAdmission::ReservedEncoding { .. } => WzVerdict::ReservedEncoding,
+            // A transport chain is judged by its headers alone, so no transport frame answers
+            // `MalformedExt` (a network chain's body refusal); were one to, it is a refusal of the
+            // whole message, as bytes that do not decode are.
+            ExtAdmission::MalformedExt { .. } => WzVerdict::Refused,
             // `Unjudged` cannot occur on a named frame — every variant
             // `parse_inbound` produces other than `Unknown` has an extension
             // space — and treating it as admissible here would be the exact
@@ -989,6 +993,8 @@ fn wz_scouting_verdict(bytes: &[u8]) -> WzVerdict {
         Ok(frame) => match frame.ext_admission() {
             ExtAdmission::UnknownMandatory { .. } => WzVerdict::Inadmissible,
             ExtAdmission::ReservedEncoding { .. } => WzVerdict::ReservedEncoding,
+            // As in `wz_verdict`: a scouting chain is judged by its headers alone.
+            ExtAdmission::MalformedExt { .. } => WzVerdict::Refused,
             ExtAdmission::Admissible | ExtAdmission::Unjudged => WzVerdict::Named,
         },
         Err(_) => WzVerdict::Refused,

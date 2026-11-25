@@ -853,9 +853,10 @@ pub struct ReadEntries<'f>(ReadChainIter<'f>);
 impl<'f> Iterator for ReadEntries<'f> {
     type Item = wz_codecs::ext_entry::ExtEntryView<'f>;
 
-    // The slot profile keeps only the entries of an extension it reads
+    // The slot profile keeps only the entries of an extension it reads, the last of each identity
     // (`collect_handshake_ext_chain`), and a chain read where it lies is shown as it keeps it, so
-    // the two reads of one message agree.
+    // the two reads of one message agree: an entry is shown where no later entry of its identity
+    // supersedes it, which is the order the keeper holds them in.
     // Only an Init's and an Open's chain is handed to a judgement (`ReadList`), so the filter is
     // the slot profile's where either is compiled; a build without both walks no entry.
     #[cfg(all(
@@ -863,9 +864,17 @@ impl<'f> Iterator for ReadEntries<'f> {
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.as_mut()?.find(|entry| {
-            crate::ext_chain::reads_received_ext(crate::ext_view::ExtEntryView::ext_id(entry))
-        })
+        use crate::ext_view::ExtEntryView as _;
+        let walk = self.0.as_mut()?;
+        loop {
+            let entry = walk.next()?;
+            let identity = entry.eid();
+            if crate::ext_chain::reads_received_ext(entry.header)
+                && !walk.clone().any(|later| later.eid() == identity)
+            {
+                return Some(entry);
+            }
+        }
     }
 
     #[cfg(not(all(
@@ -909,7 +918,9 @@ impl ReadChain<'_> {
 
 /// What the one walk of a handshake chain read where it lies answers for the readers every build
 /// links (`ext_chain::read_handshake_chain`), found while the walk judges the chain: of each
-/// extension the first entry, as the readers of a held chain take the first.
+/// extension the last entry, as the readers of a held chain take the last and as upstream's
+/// decoder does, whose arm for an extension assigns each entry it meets
+/// (`commons/zenoh-codec/src/transport/init.rs` @ `ext_patch = p;`).
 // Built only by the walk of a handshake chain (`ext_chain::read_handshake_chain`), so it is
 // compiled where that walk is.
 #[cfg(all(
@@ -961,20 +972,23 @@ impl<'a> ChainAnswers<'a> {
         _unit: core::marker::PhantomData,
     };
 
-    /// Take what `entry`, the next entry of the walk, answers that no entry before it did.
+    /// Take what `entry`, the next entry of the walk, answers, in place of what an entry before it
+    /// of the same extension answered.
     pub(crate) fn note(&mut self, entry: &wz_codecs::ext_entry::ExtEntryView<'a>) {
         #[cfg(feature = "codec-init-body")]
         {
-            if self.patch.is_none() {
-                self.patch = crate::extpatch::patch_of_entry(entry);
+            if let Some(patch) = crate::extpatch::patch_of_entry(entry) {
+                self.patch = Some(patch);
             }
-            if self.region.is_none() && crate::extregion::is_region_entry(entry) {
-                self.region = crate::ext_view::ExtEntryBytes::plain_zbuf_in(entry);
+            if crate::extregion::is_region_entry(entry) {
+                if let Some(region) = crate::ext_view::ExtEntryBytes::plain_zbuf_in(entry) {
+                    self.region = Some(region);
+                }
             }
         }
         #[cfg(feature = "codec-open-body")]
-        if self.bound.is_none() {
-            self.bound = crate::extbound::bound_of_entry(entry);
+        if let Some(bound) = crate::extbound::bound_of_entry(entry) {
+            self.bound = Some(bound);
         }
         #[cfg(not(any(feature = "codec-init-body", feature = "codec-open-body")))]
         let _ = entry;
@@ -1111,9 +1125,8 @@ fn judge_transport_chain<C: crate::ext_chain::ChainHeaders + ?Sized>(
 /// dropping a non-DEFAULT priority is the [`crate::drive`] admit seam's call.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn ext_qos_priority(extensions: &[ExtEntryOwned]) -> crate::qos::Priority {
-    extensions
-        .iter()
-        .find_map(qos_priority_of_entry)
+    crate::ext_view::last_by_eid(extensions, crate::ext_header::network_eid::TRANSPORT_QOS)
+        .and_then(qos_priority_of_entry)
         .unwrap_or(crate::qos::Priority::DEFAULT)
 }
 
@@ -1488,7 +1501,13 @@ impl InPlaceExtChain {
             {
                 markers = markers.with_header(entry.header);
             }
-            if priority.is_none() {
+            // A later QoS entry supersedes an earlier one, as upstream's Frame and Fragment
+            // decoders assign each they meet (`commons/zenoh-codec/src/transport/frame.rs` @
+            // `ext_qos = q;`): the rule `crate::ext_view::last_by_eid` states, folded into
+            // the one walk this chain is read in.
+            if crate::ext_header::ext_eid(entry.header)
+                == crate::ext_header::network_eid::TRANSPORT_QOS
+            {
                 priority = qos_priority_of_entry(&entry);
             }
         }
@@ -2588,7 +2607,8 @@ fn decode_oam(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> 
 //    workspace as a hard `E0277` on `panic!("{other:?}")`, so the gap was
 //    a compile error for every consumer that wanted to log, assert on, or
 //    view a decode. ──
-#[cfg(all(test, feature = "reassembly"))]
+// It decodes a fragment, which the heap profile reads (`InboundFrame::Fragment`, `alloc`).
+#[cfg(all(test, feature = "reassembly", feature = "alloc"))]
 mod debug_surface_tests {
     use super::*;
     use alloc::format;
@@ -2767,7 +2787,8 @@ mod mandatory_ext_tests {
 //    reads a capture through, and it reported every multicast peer
 //    announcement as `Unknown { mid: 0x07 }` — a successful parse, which is
 //    why nothing downstream noticed. ──
-#[cfg(all(test, feature = "codec-join"))]
+// `InboundFrame::Join` is the heap profile's (`alloc`).
+#[cfg(all(test, feature = "codec-join", feature = "alloc"))]
 mod join_tests {
     use super::*;
 
@@ -2975,7 +2996,7 @@ mod kind_name_tests {
         #[cfg(feature = "codec-keep-alive")]
         cases.push((alloc::vec![wire_const::T_MID_KEEP_ALIVE], "KeepAlive"));
 
-        #[cfg(feature = "codec-frame")]
+        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         cases.push((
             alloc::vec![
                 wire_const::T_MID_FRAME | wire_const::FLAG_T_FRAME_R,
@@ -2985,7 +3006,7 @@ mod kind_name_tests {
             "Frame",
         ));
 
-        #[cfg(feature = "reassembly")]
+        #[cfg(all(feature = "alloc", feature = "reassembly"))]
         cases.push((
             alloc::vec![
                 wire_const::T_MID_FRAGMENT | wire_const::FLAG_T_FRAME_R,
@@ -2995,7 +3016,7 @@ mod kind_name_tests {
             "Fragment",
         ));
 
-        #[cfg(feature = "codec-join")]
+        #[cfg(all(feature = "alloc", feature = "codec-join"))]
         {
             let join = wz_codecs::join::Join {
                 version: 0x09,
@@ -3047,11 +3068,11 @@ mod kind_name_tests {
         want.push("Close");
         #[cfg(feature = "codec-keep-alive")]
         want.push("KeepAlive");
-        #[cfg(feature = "codec-frame")]
+        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         want.push("Frame");
-        #[cfg(feature = "reassembly")]
+        #[cfg(all(feature = "alloc", feature = "reassembly"))]
         want.push("Fragment");
-        #[cfg(feature = "codec-join")]
+        #[cfg(all(feature = "alloc", feature = "codec-join"))]
         want.push("Join");
         want.push("Unknown");
         want
@@ -3220,6 +3241,19 @@ mod frame_qos_identity_tests {
                 "{header:#04x} shares only the id with the transport QoS"
             );
         }
+    }
+
+    /// A Frame that carries its QoS twice is read by the last, as upstream's Frame and Fragment
+    /// decoders read it: their QoS arm assigns each entry it meets
+    /// (`commons/zenoh-codec/src/transport/frame.rs` @ `ext_qos = q;`,
+    /// `commons/zenoh-codec/src/transport/fragment.rs` @ `ext_qos = q;`).
+    #[test]
+    fn a_repeated_transport_qos_is_read_by_its_last_entry() {
+        let chain = [
+            zint(network_eid::TRANSPORT_QOS | EXT_FLAG_Z, 3),
+            zint(network_eid::TRANSPORT_QOS, 5),
+        ];
+        assert_eq!(ext_qos_priority(&chain), crate::qos::Priority::from_wire(5));
     }
 }
 
@@ -3827,9 +3861,10 @@ mod control_read_tests {
 
     /// One walk of a chain read where it lies answers its admission and its readers together: a
     /// chain the rule refuses still answers the patch level and the region name its entries carry,
-    /// and of an extension carried twice the first entry is the answer, the refused value of a
-    /// remote bound included. Turned red by a walk that stops at the refused header, or that lets a
-    /// later entry overwrite an earlier one.
+    /// and of an extension carried twice the last entry is the answer, as upstream's decoder
+    /// assigns each entry it meets (`commons/zenoh-codec/src/transport/open.rs` @
+    /// `ext_remote_bound = Some(q);`), the refused value of a remote bound included. Turned red by
+    /// a walk that stops at the refused header, or that keeps an earlier entry over a later one.
     #[test]
     fn the_walk_of_a_read_answers_the_admission_and_the_readers_together() {
         #[cfg(feature = "codec-init-body")]
@@ -3860,25 +3895,27 @@ mod control_read_tests {
             assert_eq!(message.chain().patch_and_region(), (1, Ok(Some(north))));
         }
         #[cfg(feature = "codec-open-body")]
-        {
+        for (first, last, read) in [
+            (0x02, 0x01, Ok(Some(crate::extbound::Bound::South))),
+            (0x01, 0x02, Err(crate::extbound::InvalidBound(2))),
+        ] {
             let wire = [
                 wire_const::T_MID_OPEN | wire_const::FLAG_T_OPEN_A | wire_const::FLAG_T_Z,
                 0x0A,
                 0x01,
                 0xA7,
-                0x02,
+                first,
                 0x27,
-                0x01,
+                last,
             ];
             let (message, _) = read_control(&wire).expect("an OpenAck with a chain");
             assert_eq!(
                 message.ext_admission(),
                 crate::ext_admit::ExtAdmission::Admissible
             );
-            assert_eq!(
-                message.chain().remote_bound(),
-                Err(crate::extbound::InvalidBound(2))
-            );
+            assert_eq!(message.chain().remote_bound(), read);
+            let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
+            assert_eq!(frame.control_chain().remote_bound(), read);
         }
     }
 

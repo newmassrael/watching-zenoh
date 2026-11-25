@@ -159,13 +159,21 @@ pub trait Storage: 'static {
     /// (a lookup stays constant time however many ids a router's peers declare), and
     /// the static policy keeps `N` rows in an inline array whose lookup is a short
     /// scan, which is what a few dozen rows cost least in RAM and in code.
-    type Ids<V, const N: usize>: crate::id_map::IdMap<V> + Default;
+    ///
+    /// A table is lent the owner's handle to where its rows lie ([`Self::Keys`]) for each operation
+    /// ([`PeerIds::lend`](crate::id_map::PeerIds::lend)): the lent table is what answers
+    /// [`IdMap`](crate::id_map::IdMap).
+    type Ids<V, const N: usize>: crate::id_map::PeerIds<V, Self::Keys> + Default;
 
     /// A table a peer writes that is a sequence, of at most `N` rows: the policy's own sequence
     /// where it keeps its rows itself, and on the lent policy a list whose rows lie in a pool every
     /// face of the session shares ([`PooledRows`](crate::row_pool::PooledRows)), handed to the
     /// table with the session's other pools.
-    type Pooled<T, const N: usize>: crate::row_pool::RowList<T>;
+    ///
+    /// A table is lent the owner's handle to where its rows lie ([`Self::Keys`]) for each operation
+    /// ([`PeerSeq::lend`](crate::row_pool::PeerSeq::lend)): the lent table is what answers
+    /// [`RowList`](crate::row_pool::RowList).
+    type Pooled<T, const N: usize>: crate::row_pool::PeerSeq<T, Self::Keys>;
 
     /// What a table of this policy moves after every change to it, for a reader that
     /// must not take the table's lock to ask "has anything changed since I looked": a

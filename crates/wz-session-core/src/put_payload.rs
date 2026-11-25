@@ -130,6 +130,65 @@ pub fn marker_header() -> u8 {
 pub fn chain_headers<S: MsgPutStorage>(
     put: &MsgPutOwned<S>,
 ) -> Option<impl Iterator<Item = u8> + '_> {
+    Some(chain_entries(put)?.map(|entry| crate::ext_view::ExtEntryView::header(&entry)))
+}
+
+/// An entry of a Put's chain as a reader of the whole chain walks it: one of the entries the Put
+/// holds, or the shared-memory marker at the place it stands, which the Put holds as a place and
+/// not as an entry ([`chain_entries`]).
+#[derive(Debug, Clone, Copy)]
+pub enum ChainEntry<E> {
+    /// The shared-memory marker, a unit with no body.
+    Marker,
+    /// An entry the Put holds.
+    Entry(E),
+}
+
+impl<E: crate::ext_view::ExtEntryView> crate::ext_view::ExtEntryView for ChainEntry<E> {
+    fn header(&self) -> u8 {
+        match self {
+            Self::Marker => marker_header(),
+            Self::Entry(entry) => entry.header(),
+        }
+    }
+
+    fn ext_id(&self) -> u8 {
+        match self {
+            Self::Marker => crate::ext_header::ext_id(marker_header()),
+            Self::Entry(entry) => entry.ext_id(),
+        }
+    }
+
+    fn enc(&self) -> u8 {
+        match self {
+            // A unit.
+            Self::Marker => 0,
+            Self::Entry(entry) => entry.enc(),
+        }
+    }
+
+    fn plain_zbuf(&self) -> Option<&[u8]> {
+        match self {
+            Self::Marker => None,
+            Self::Entry(entry) => entry.plain_zbuf(),
+        }
+    }
+
+    fn zint(&self) -> Option<u64> {
+        match self {
+            Self::Marker => None,
+            Self::Entry(entry) => entry.zint(),
+        }
+    }
+}
+
+/// Every entry of `put`'s chain, in order, with the shared-memory marker at the place it stands,
+/// or `None` for a Put with no chain: what a reader that judges the whole chain walks (the
+/// extension admission rule, [`crate::ext_admit::judge_ext_entries`]), to which the marker is an
+/// extension like any other.
+pub fn chain_entries<S: MsgPutStorage>(
+    put: &MsgPutOwned<S>,
+) -> Option<impl Iterator<Item = ChainEntry<&ExtEntryOwned<S>>> + '_> {
     let (entries, place): (&[ExtEntryOwned<S>], Option<usize>) = match &put.extensions_has_0x12 {
         MsgPutExtensionsHas0x12::Has0x12 { extensions, .. } => (
             SceList::as_slice(extensions.rest()),
@@ -146,9 +205,9 @@ pub fn chain_headers<S: MsgPutStorage>(
     Some(
         before
             .iter()
-            .map(|entry| entry.header)
-            .chain(place.map(|_| marker_header()))
-            .chain(after.iter().map(|entry| entry.header)),
+            .map(ChainEntry::Entry)
+            .chain(place.map(|_| ChainEntry::Marker))
+            .chain(after.iter().map(ChainEntry::Entry)),
     )
 }
 

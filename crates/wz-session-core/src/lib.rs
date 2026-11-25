@@ -2209,6 +2209,13 @@ pub mod session_timeouts;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod session_actions;
 
+// The sends a sender's owner defers while it holds a lock of its own, kept in order: a unicast
+// session's and a multicast group producer's. A plain comment, not an outer doc: the module
+// documents itself with `//!`. The heap profile's, as the block-first hand-off is: a deferred
+// send owns its message.
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+pub mod send_deferral;
+
 /// Fixed-memory step S5 — the per-session slot: storage of fixed size that holds
 /// one session (its link driver, its entropy source and the bundle that drives it)
 /// and frees it when the last handle goes. Only under the `session-slot`

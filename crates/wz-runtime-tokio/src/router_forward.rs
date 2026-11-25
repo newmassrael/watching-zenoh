@@ -15137,6 +15137,14 @@ impl RouterForwarder {
         let mut writes_held = 0usize;
         let mut reading: Option<ReadRun<'_>> = None;
         for message in messages {
+            // What upstream routes is the message its decoder made, which holds an extension a
+            // chain repeats once, as its last entry, and so sends it on once: the received
+            // message is made that one before anything reads it, so every way it leaves (a mesh
+            // face, a client's carrier, a group) sends what upstream sends
+            // (`wz_session_core::network_message::without_superseded_exts`). Nearly every
+            // message repeats nothing and is routed as it came.
+            let decoded = wz_session_core::network_message::without_superseded_exts(message);
+            let message = decoded.as_ref().unwrap_or(message);
             // A topology message, a declaration and an interest write the tables; every other
             // kind reads them.
             let writes = matches!(
@@ -15469,6 +15477,10 @@ impl FaceForwarder for RouterForwarder {
         // The subscribers of the node's own session are handed what the group brought once the
         // tables are let go, as a face's frame does: a callback may declare. Declared before
         // the tables are taken, so that it ends after they are let go.
+        // The Push the group brought is routed as upstream's decoder made it, an extension a
+        // chain repeats held once, as a face's frame is ([`Self::forward_frame`]).
+        let decoded = wz_session_core::network_message::push_without_superseded_exts(push);
+        let push = decoded.as_ref().unwrap_or(push);
         let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables()
             .route_mcast_ingress(priority, reliable, push, from);
@@ -15484,6 +15496,9 @@ impl FaceForwarder for RouterForwarder {
     ) {
         // The queryables of the node's own session are called once the tables are let go, as
         // for a face's frame. Declared before the tables are taken, so that it ends after.
+        // As the Push above: the Request as upstream's decoder made it.
+        let decoded = wz_session_core::network_message::request_without_superseded_exts(request);
+        let request = decoded.as_ref().unwrap_or(request);
         let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables()
             .route_mcast_ingress_request(reliable, request, from, &deliveries);
@@ -25585,6 +25600,63 @@ mod tests {
              client is not a graph node); leaking the non-zero source closes a real \
              pico client's transport"
         );
+    }
+
+    /// A Put whose chain carries its source info twice is forwarded as upstream forwards it:
+    /// upstream's Put decoder holds the extension once, as its last entry
+    /// (`commons/zenoh-codec/src/zenoh/put.rs` @ `*ext_sinfo = Some(s);`), and its encoder writes
+    /// what it holds, so the router sends the source info once, the last, on the mesh relay to a
+    /// router and on the carrier made for a client alike.
+    #[test]
+    fn a_forwarded_put_carries_a_repeated_extension_once_as_its_last_entry() {
+        use wz_session_core::source_info_ext::encode_source_info_ext_entry;
+        use wz_session_core::wire::WireStorage;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_ROUTER); // router source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // router subscriber (mesh relay)
+        let (d, sink_d) = face(zid(0xDD), WIRE_CLIENT); // client subscriber (client carrier)
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &d);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data"));
+        sink_c.reset();
+        sink_d.reset();
+        let mut push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        let source_info = |sn: u32| {
+            encode_source_info_ext_entry::<WireStorage>(&[0xA0, 0x01], 1, sn)
+                .expect("a two-byte zid is a zid")
+        };
+        match &mut push.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => {
+                wz_session_core::put_payload::set_chain(put, [source_info(1), source_info(2)])
+                    .expect("two entries are within the bound")
+            }
+            _ => panic!("a literal put carries a Put"),
+        }
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        for (who, sink) in [("router", &sink_c), ("client", &sink_d)] {
+            assert_eq!(sink.frame_count(), 1, "{who}: the Put was forwarded");
+            let forwarded = forwarded_push(&sink.frame_bytes(0));
+            let PushOwnedVariant::CodecZenohMsgPut(put) = &forwarded.body else {
+                panic!("{who}: the forwarded Push carries a Put");
+            };
+            let chain = wz_session_core::put_payload::chain(put);
+            assert_eq!(
+                chain.len(),
+                1,
+                "{who}: the source info is sent once: {chain:?}"
+            );
+            assert_eq!(
+                wz_session_core::sample::extract_source_info(chain).map(|s| s.sn),
+                Some(2),
+                "{who}: the entry sent is the last one received"
+            );
+        }
     }
 
     /// Decode the first forwarded `Push` in a recorded wire frame (the C3b twin

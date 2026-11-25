@@ -228,6 +228,16 @@ pub enum DriverLoopOutcome {
     /// nor reports it as a failure.
     #[cfg(feature = "alloc")]
     LinkRefused,
+    /// The node refused the link while its handshake was running because it had no room for
+    /// it: every link its admission may hold was held when the link was opened
+    /// ([`crate::link_admission::LinkAdmission::has_row`]). Not [`Self::LinkRefused`], which
+    /// says the node holds the peer by another link: the dispatcher has injected
+    /// `FramingError`, so the session closes with `CloseReason::Invalid`, the reason upstream
+    /// closes a transport past `max_sessions` with
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`), and the open fails as
+    /// a connect to a full node does.
+    #[cfg(feature = "alloc")]
+    LinkNoRoom,
     /// R2539 — the peer's `init::ext::RegionName` (`0x8`) was PRESENT and its
     /// value is not a region name: not UTF-8, empty, or over
     /// [`crate::extregion::MAX_REGION_NAME_LEN`] bytes.

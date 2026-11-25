@@ -475,8 +475,8 @@ mod tests {
             "the 2nd link joins the shared core"
         );
 
-        primary.link.transport_available.open();
-        secondary.link.transport_available.open();
+        primary.enter_established();
+        secondary.enter_established();
 
         assert!(
             primary.set_qos_offer(true),
@@ -802,8 +802,8 @@ mod tests {
             join_link(&primary, &secondary, 2),
             JoinOutcome::Joined(_)
         ));
-        primary.link.transport_available.open();
-        secondary.link.transport_available.open();
+        primary.enter_established();
+        secondary.enter_established();
         assert!(primary.set_qos_offer(true));
         primary.negotiate_qos_against_peer(true);
         primary.set_link_priority_range(Some(LinkPriorityRange::new(

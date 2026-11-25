@@ -89,14 +89,21 @@ mod posix_host {
     }
 
     /// The links `S` with links over the host's named FIFOs beside them, which `unixpipe/`
-    /// locators are dialled and listened on with.
-    #[cfg(feature = "transport-link-unixpipe")]
+    /// locators are dialled and listened on with: on the hosts `wz-runtime-posix` opens them on,
+    /// Linux and Android (another Unix host is refused by name in `lib.rs`).
+    #[cfg(all(
+        feature = "transport-link-unixpipe",
+        any(target_os = "linux", target_os = "android")
+    ))]
     pub(crate) type WithUnixpipe<S> =
         wz_runtime_posix::unixpipe::PosixUnixpipeLinks<S, wz_capi_coop::LinkCount>;
 
     /// `links`, and links over the host's named FIFOs beside them, made and locked as zenoh's
     /// unixpipe link makes and locks its own.
-    #[cfg(feature = "transport-link-unixpipe")]
+    #[cfg(all(
+        feature = "transport-link-unixpipe",
+        any(target_os = "linux", target_os = "android")
+    ))]
     pub(crate) fn with_unixpipe<S>(links: S) -> WithUnixpipe<S> {
         wz_runtime_posix::unixpipe::PosixUnixpipeLinks::<()>::new(
             (),

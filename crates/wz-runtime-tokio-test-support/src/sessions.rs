@@ -617,6 +617,39 @@ pub async fn establish_capability_pair_between(
     resp_offer: bool,
     apply_offer: impl Fn(&Arc<SessionLinkActions>),
 ) -> EstablishedPair {
+    establish_pair(
+        init_zid,
+        resp_zid,
+        init_offer,
+        resp_offer,
+        apply_offer,
+        |recorder| -> Arc<dyn BoxedLinkDriver + Send + Sync> { recorder },
+    )
+    .await
+}
+
+/// [`establish_capability_pair_between`], offering nothing, whose responding session writes to
+/// the link `wrap` makes of the driver that records what it writes: a test that decides what the
+/// link answers the session (its room, say) wraps the recorder, through which the handshake
+/// still reads back every frame.
+pub async fn establish_pair_through(
+    init_zid: u8,
+    resp_zid: u8,
+    wrap: impl FnOnce(Arc<LifecycleRecordingDriver>) -> Arc<dyn BoxedLinkDriver + Send + Sync>,
+) -> EstablishedPair {
+    establish_pair(init_zid, resp_zid, false, false, |_| {}, wrap).await
+}
+
+/// The one handshake drive of [`establish_capability_pair_between`] and
+/// [`establish_pair_through`].
+async fn establish_pair(
+    init_zid: u8,
+    resp_zid: u8,
+    init_offer: bool,
+    resp_offer: bool,
+    apply_offer: impl Fn(&Arc<SessionLinkActions>),
+    wrap_resp: impl FnOnce(Arc<LifecycleRecordingDriver>) -> Arc<dyn BoxedLinkDriver + Send + Sync>,
+) -> EstablishedPair {
     let init_driver = Arc::new(LifecycleRecordingDriver::default());
     let resp_driver = Arc::new(LifecycleRecordingDriver::default());
 
@@ -634,7 +667,7 @@ pub async fn establish_capability_pair_between(
         a
     };
     let resp_actions = {
-        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = resp_driver.clone();
+        let outbound = wrap_resp(resp_driver.clone());
         let a = new_session_actions(
             outbound,
             fixture_params_with_zid(resp_zid),

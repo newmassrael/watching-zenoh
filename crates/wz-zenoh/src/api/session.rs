@@ -16805,11 +16805,18 @@ mod tests {
         }
 
         /// A GET of a client's own admin key, asked again and again while another thread
-        /// declares and undeclares queryables on the same session, ends every time. The answer is
-        /// made inside the dispatch of the session's local plane, and a declaration takes the
-        /// registry lock before it reaches that plane, so an answer that took the registry lock
+        /// declares and undeclares queryables on the same session, is answered every time. The
+        /// answer is made inside the dispatch of the session's local plane, and a declaration takes
+        /// the registry lock before it reaches that plane, so an answer that took the registry lock
         /// would take the two in the reverse order: the published transports
         /// (`TransportsCell`) are what it reads instead.
+        ///
+        /// The GET asks the session's own queryables alone. A leg to the router would go out on
+        /// the link the declarations go out on, after every one staged before it (a declaration is
+        /// a barrier the data staged after it follows), and the router ends that leg only once it
+        /// has taken them all. The other thread stages them as fast as it can, so how long that
+        /// leg takes is how far the router has fallen behind the declarer, which is a race between
+        /// two threads and no part of the order of the two locks this test is about.
         #[test]
         fn a_clients_own_admin_get_ends_while_entities_are_declared_beside_it() {
             use std::sync::atomic::{AtomicBool, Ordering};
@@ -16850,23 +16857,33 @@ mod tests {
             let asker = {
                 let client = Arc::clone(&client);
                 std::thread::spawn(move || {
-                    for _ in 0..200 {
+                    for asked in 0..200 {
                         let replies = client
                             .get(root.as_str())
+                            .allowed_destination(Locality::SessionLocal)
                             .timeout(Duration::from_secs(2))
                             .wait()
                             .expect("asks");
-                        while replies.recv().is_ok() {}
+                        let mut got = 0usize;
+                        while let Ok(reply) = replies.recv() {
+                            got += usize::from(reply.result().is_ok());
+                        }
+                        // An end with no answer is the deadline's, not the queryable's.
+                        if got != 1 {
+                            let _ = done.send(Err((asked, got)));
+                            return;
+                        }
                     }
-                    let _ = done.send(());
+                    let _ = done.send(Ok(()));
                 })
             };
             let ended = finished.recv_timeout(Duration::from_secs(60));
             stop.store(true, Ordering::Relaxed);
-            assert!(
-                ended.is_ok(),
-                "a GET of the client's own admin key did not end beside the declarations"
-            );
+            let answered = ended
+                .expect("a GET of the client's own admin key did not end beside the declarations");
+            if let Err((asked, got)) = answered {
+                panic!("GET {asked} of the client's own admin key had {got} answers, not one");
+            }
             asker.join().expect("the asker ends");
             declarer.join().expect("the declarer ends");
         }

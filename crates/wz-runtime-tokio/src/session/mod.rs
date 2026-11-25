@@ -5589,7 +5589,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 staged: None,
             }));
         };
-        let frames = self.actions().wire_frames_of(&staged.msg, staged.reliable);
+        let frames = self
+            .actions()
+            .wire_frames_of(&staged.msg, staged.reliable)?;
         match self
             .actions()
             .try_reserve_wire_frames(staged.reliable, staged.priority, frames)

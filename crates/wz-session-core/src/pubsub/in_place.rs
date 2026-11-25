@@ -366,7 +366,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // The Push's own chain is walked where it lies, once for each field that reads it.
         // A message the nodes record on is delivered with a stack of its own to add to.
         #[cfg(feature = "pubsub-ts-stack")]
-        if crate::ext_view::find_by_eid_in(
+        if crate::ext_view::last_by_eid_in(
             crate::ext_view::walked(push.extensions.as_ref()),
             crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
         )
@@ -891,7 +891,7 @@ mod tests {
     fn a_peer_alias_resolves_as_the_owned_path_resolves_it() {
         let peer = |r: &mut SubscriberRegistry| {
             let literal = crate::id_map::key_text("demo/a").expect("fits");
-            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases, 5, literal);
+            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases_mut(), 5, literal);
         };
         for suffix in [None, Some("/b")] {
             let built = crate::push_build::build_push_aliased(5, suffix, b"v").expect("build");
@@ -1038,7 +1038,7 @@ mod tests {
         let base = alloc::format!("{long_base}/");
         let peer = |r: &mut SubscriberRegistry| {
             let literal = crate::id_map::key_text(&base).expect("the alias fits the table");
-            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases, 9, literal);
+            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases_mut(), 9, literal);
         };
         let built = crate::push_build::build_push_aliased(9, Some("tail"), b"v").expect("build");
         let wire = wire_of(&built);

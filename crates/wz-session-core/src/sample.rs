@@ -1227,8 +1227,9 @@ impl Sample {
     }
 }
 
-/// Walk an ExtEntry chain and project the first QoS ext into a
-/// [`QosLevel`]. The matching predicate mirrors zenoh-pico's
+/// Walk an ExtEntry chain and project its QoS ext into a [`QosLevel`]: the
+/// last entry of the extension, as every reader of a received chain picks one
+/// ([`crate::ext_view::last_by_eid`]). The matching predicate mirrors zenoh-pico's
 /// `_Z_EXT_FULL_ID(extension->_header)` switch in
 /// `_z_push_decode_ext_cb` (`vendor/zenoh-pico/src/protocol/codec/
 /// network.c` 70-93): the QoS is the extension `zextz64!(0x1, false)`, header
@@ -1256,14 +1257,9 @@ pub fn extract_qos<S: ExtEntryStorage>(extensions: &[ExtEntryOwned<S>]) -> Optio
 pub fn extract_qos_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> Option<QosLevel> {
-    for ext in extensions {
-        if ext.eid() == crate::ext_header::network_eid::QOS {
-            if let Some(value) = ext.zint() {
-                return Some(QosLevel::from_raw(value as u8));
-            }
-        }
-    }
-    None
+    let value =
+        crate::ext_view::last_by_eid_in(extensions, crate::ext_header::network_eid::QOS)?.zint()?;
+    Some(QosLevel::from_raw(value as u8))
 }
 
 // The attachment ext-chain predicate moved to the `crate::attachment`
@@ -1271,8 +1267,9 @@ pub fn extract_qos_in<E: crate::ext_view::ExtEntryView>(
 // Query (`crate::query`) decode paths share one wire predicate. The Push
 // dispatch in `crate::pubsub` calls `decode_attachment_ext(.., PUSH)`.
 
-/// Walk an ExtEntry chain and project the first source-info ext into a
-/// [`SourceInfo`]. The extension is `zextzbuf!(0x1, false)`, header `0x41`
+/// Walk an ExtEntry chain and project its source-info ext into a
+/// [`SourceInfo`]: the last entry of the extension
+/// ([`crate::ext_view::last_by_eid`]). The extension is `zextzbuf!(0x1, false)`, header `0x41`
 /// ([`crate::ext_header::body_eid::SOURCE_INFO`]), told by its IDENTITY as
 /// upstream tells it (`commons/zenoh-codec/src/zenoh/put.rs` @
 /// `ext::SourceInfo::ID => {`); zenoh-pico's
@@ -1306,7 +1303,7 @@ pub fn extract_source_info_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
     extensions: impl IntoIterator<Item = T>,
 ) -> Option<SourceInfo> {
     let ext =
-        crate::ext_view::find_by_eid_in(extensions, crate::ext_header::body_eid::SOURCE_INFO)?;
+        crate::ext_view::last_by_eid_in(extensions, crate::ext_header::body_eid::SOURCE_INFO)?;
     decode_source_info_payload(ext.plain_zbuf_in()?)
 }
 

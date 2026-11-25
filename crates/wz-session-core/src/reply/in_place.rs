@@ -482,7 +482,7 @@ fn lent_reply<'r, 'f, PS: Storage, OS: Storage>(
     // The Response's own chain is walked where it lies, once for each field that reads it.
     // A Response the nodes record on is delivered with a stack of its own to add to.
     #[cfg(feature = "pubsub-ts-stack")]
-    if crate::ext_view::find_by_eid_in(
+    if crate::ext_view::last_by_eid_in(
         walked(response.extensions.as_ref()),
         crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
     )

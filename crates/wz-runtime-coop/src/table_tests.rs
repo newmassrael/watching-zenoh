@@ -895,6 +895,9 @@ unsafe fn span_given_back(_kept: NonNull<Kept>) {
 /// past the memory's own holder keeps it, and the waker's drop gives it back. A span one byte
 /// short of the layout places nothing. Turned red by a placed runtime that allocates, by one that
 /// gives the memory back while a waker still points into it, or by one that never gives it back.
+///
+/// The local set's owner (`local::SetOwner`) is placed in the span with the runtime, so the two
+/// counts hold the placing of both and every spawn, poll and drop after, apart.
 #[test]
 fn a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_holder() {
     static NOW: AtomicU64 = AtomicU64::new(0);
@@ -918,12 +921,17 @@ fn a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_h
     );
     let kept: Rc<RefCell<Option<Waker>>> = Rc::new(RefCell::new(None));
     let stash = Rc::clone(&kept);
-    let ((), allocated) = allocations(|| {
+    let ((runtime, local), placing) = allocations(|| {
         // SAFETY: as above; the span is freed only after its memory's count was given back.
         let place = unsafe { RuntimePlace::new(span, layout.size(), memory) };
-        let (runtime, local) =
-            CoopRuntime::placed(Hand(&NOW), rows, form, place).expect("the span fits");
-        assert_eq!(runtime.timers().capacity(), 1, "the entries are the span's");
+        CoopRuntime::placed(Hand(&NOW), rows, form, place).expect("the span fits")
+    });
+    assert_eq!(
+        placing, 0,
+        "placing the runtime and its local set takes nothing of the heap"
+    );
+    assert_eq!(runtime.timers().capacity(), 1, "the entries are the span's");
+    let ((), allocated) = allocations(|| {
         let handle = local.spawn_local(core::future::poll_fn(move |cx| {
             *stash.borrow_mut() = Some(cx.waker().clone());
             Poll::<()>::Pending
@@ -933,7 +941,10 @@ fn a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_h
         drop(local);
         drop(runtime);
     });
-    assert_eq!(allocated, 0, "nothing of the heap");
+    assert_eq!(
+        allocated, 0,
+        "spawning, polling and letting go take nothing of the heap"
+    );
     // SAFETY: the memory's own holder lets go of its count, once.
     unsafe { Kept::release(memory) };
     assert_eq!(

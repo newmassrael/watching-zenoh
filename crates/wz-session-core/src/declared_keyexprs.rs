@@ -29,9 +29,22 @@ use alloc::string::String;
 
 use crate::bounded::{CapacityFull, KeyBacking, KeyMaker, KeyUnkept, Profile, Storage};
 use crate::caps;
-use crate::id_map::{IdMap, KeyText};
+use crate::id_map::{IdMap, IdRead, KeyText, PeerIds};
+use crate::row_pool::PeerSlot;
 use crate::wire_id::ExprId;
 use crate::wireexpr_resolve::{KeyexprOut, OwnMappingSpace};
+
+/// `$table`, the `ids` of a [`DeclaredKeyexprs`], lent `$keys`, its `keys`, by the
+/// [`PeerIds`] operation `$lend`: the one place the table is lent.
+macro_rules! lent_ids {
+    ($table:expr, $keys:expr, $lend:ident) => {
+        // SAFETY: nothing attaches the table to a space (this type hands it none), so where its
+        // rows would lie in one (the lent policy with `peer-row-pools`) its head names no row and
+        // reads none in whatever space the keys name for any slot; every other policy keeps the
+        // rows in the table itself and lends it nothing.
+        unsafe { PeerIds::$lend($table, $keys, PeerSlot::Aliases) }
+    };
+}
 
 /// The key expressions a session declared, by the id it gave each, in the storage policy `P`.
 pub struct DeclaredKeyexprs<P: Storage = Profile> {
@@ -70,7 +83,8 @@ impl<P: Storage> DeclaredKeyexprs<P> {
     /// `literal` in its place, as a peer that is told an id again takes the later key.
     pub fn record(&mut self, id: ExprId, literal: &str) -> Result<(), KeyexprUnrecorded> {
         let key = self.keys.key(literal).map_err(KeyexprUnrecorded::Key)?;
-        match self.ids.bind(u64::from(id), key) {
+        let mut ids = lent_ids!(&mut self.ids, &self.keys, lend);
+        match ids.bind(u64::from(id), key) {
             Ok(_) => Ok(()),
             Err(CapacityFull(_)) => Err(KeyexprUnrecorded::TableFull),
         }
@@ -78,17 +92,21 @@ impl<P: Storage> DeclaredKeyexprs<P> {
 
     /// Forget the declaration under `id`: whether there was one. Its key is let go of with it.
     pub fn forget(&mut self, id: ExprId) -> bool {
-        self.ids.unbind(u64::from(id)).is_some()
+        lent_ids!(&mut self.ids, &self.keys, lend)
+            .unbind(u64::from(id))
+            .is_some()
     }
 
     /// The key expression the session declared under `id`.
     pub fn literal(&self, id: ExprId) -> Option<&str> {
-        self.ids.find(u64::from(id)).map(|key| key.as_str())
+        lent_ids!(&self.ids, &self.keys, lend_ref)
+            .find(u64::from(id))
+            .map(|key| key.as_str())
     }
 
     /// How many declarations are recorded.
     pub fn len(&self) -> usize {
-        self.ids.count()
+        lent_ids!(&self.ids, &self.keys, lend_ref).count()
     }
 
     /// Whether none is.

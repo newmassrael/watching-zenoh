@@ -114,8 +114,9 @@ pub fn encode_attachment_ext<S: for<'x> ExtEntryFrom<'x>>(
     })
 }
 
-/// Project the first attachment payload from an ext chain for the given
-/// carrier `ext_id`. Matches on the extension's IDENTITY (the header without
+/// Project the attachment payload from an ext chain for the given carrier
+/// `ext_id`: the last entry of the extension, as every reader of a received
+/// chain picks one ([`crate::ext_view::last_by_eid`]). Matches on the extension's IDENTITY (the header without
 /// the chain flag) and a plain ZBuf body; an extension of
 /// the same id that is mandatory is another extension and is not read. Returns
 /// the borrowed body slice; callers needing ownership map with `<[u8]>::to_vec`.
@@ -133,7 +134,7 @@ pub fn decode_attachment_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
     extensions: impl IntoIterator<Item = T>,
     ext_id: u8,
 ) -> Option<&'c [u8]> {
-    crate::ext_view::find_by_eid_in(extensions, attachment_eid(ext_id))?.plain_zbuf_in()
+    crate::ext_view::last_by_eid_in(extensions, attachment_eid(ext_id))?.plain_zbuf_in()
 }
 
 /// The identity of the attachment extension of the carrier whose id is `ext_id`:

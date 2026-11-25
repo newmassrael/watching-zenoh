@@ -326,6 +326,28 @@ fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
     assert_eq!(report.tx.n_dropped, 0, "nothing sent was dropped");
 }
 
+/// [`bundle`] with its link established ([`SessionLinkActions::enter_established`]): the
+/// bundle a data or reply send is made on, since the data-send gate opens only there. A test of
+/// what a send does is made on this one; a test of the gate itself starts from [`bundle`].
+/// Compiled with the sends its tests make: a plain put, a gated reply, a staged reply.
+#[cfg(any(
+    all(feature = "codec-push", not(feature = "tx-lend-only")),
+    all(feature = "reply-egress-gate", feature = "codec-response"),
+    all(
+        feature = "codec-response",
+        not(feature = "transport-stats"),
+        not(feature = "tx-lend-only")
+    )
+))]
+fn established_bundle() -> (
+    Arc<SessionLinkActions<PlainRuntime, StillClock>>,
+    Arc<CountingLink>,
+) {
+    let (actions, link) = bundle();
+    actions.enter_established();
+    (actions, link)
+}
+
 /// The halves a holder writes where it keeps them are the halves the bundle is made of: the link's
 /// half holds the sink handed and the kernel the parameters. A holder that refuses has its refusal
 /// answered and lets go of what it was handed, the sink's handle with it. Turned red by a bundle
@@ -481,7 +503,7 @@ mod reply_egress_gate {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use super::bundle;
+    use super::{bundle, established_bundle};
     use crate::network_message::MessageRef;
     use crate::response_build::build_response_reply;
     use crate::session_actions::ReplyEgressGate;
@@ -534,7 +556,7 @@ mod reply_egress_gate {
     /// is written; with the gate taken away a reply is written without the gate being asked.
     #[test]
     fn a_reply_the_gate_denies_is_not_written_and_one_it_admits_is() {
-        let (actions, link) = bundle();
+        let (actions, link) = established_bundle();
         let gate = Gate::new(false);
         actions.set_egress_reply_gate(Some(gate.installed()));
 
@@ -1118,6 +1140,7 @@ mod lent_frame_refusal {
         let actions =
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
                 .expect("the heap has room");
+        actions.enter_established();
         assert_eq!(
             put(&actions),
             Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
@@ -1161,7 +1184,8 @@ mod lent_frame_refusal {
                 sink,
                 params(),
                 StillClock,
-            );
+            )
+            .expect("the heap has room");
             assert_eq!(put(&actions), Some(Ok(())));
             let mut sent = link.sent.lock().expect("the sends");
             assert_eq!(sent.len(), 1, "one frame");
@@ -1199,8 +1223,11 @@ mod lent_frame_refusal {
         let actions =
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
                 .expect("the heap has room");
+        actions.enter_established();
         assert_eq!(put(&actions), Some(Ok(())));
-        let (budget, _) = actions.negotiated_tx_limits_for(Reliability::Reliable);
+        let (budget, _) = actions
+            .negotiated_tx_limits_for(Reliability::Reliable)
+            .expect("the limits are settled at establishment");
         assert_eq!(
             *link.asked.lock().expect("the asks"),
             [budget],
@@ -1219,6 +1246,7 @@ mod lent_frame_refusal {
         let actions =
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
                 .expect("the heap has room");
+        actions.enter_established();
         assert_eq!(
             put(&actions),
             Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
@@ -1368,7 +1396,7 @@ mod lent_control_order {
 #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
 #[test]
 fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
-    let (actions, link) = bundle();
+    let (actions, link) = established_bundle();
     let long = "k".repeat(usize::from(u16::MAX) + 1);
     let key = crate::named_key::NamedKey::literal(&long).expect("a key");
     let sent = actions.send_plain_put_qos(
@@ -1409,7 +1437,7 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
 mod staged_replies {
     use core::sync::atomic::Ordering;
 
-    use super::bundle;
+    use super::established_bundle;
     use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
     use crate::response_sink::ResponseSink as _;
     use crate::sample::QosLevel;
@@ -1434,7 +1462,7 @@ mod staged_replies {
 
     #[test]
     fn a_staged_reply_the_writer_refuses_is_skipped_and_one_it_takes_is_written() {
-        let (actions, link) = bundle();
+        let (actions, link) = established_bundle();
         actions.send_reply_parts(staged("demo/asked", Some((&[], 1))));
         actions.send_reply_parts(staged("", None));
         assert_eq!(
@@ -1485,7 +1513,8 @@ mod facts_lock {
     }
 
     /// Every fact the closed transport's handshake took is cleared in the reopen's one hold,
-    /// and the reopened link takes no data send until it is established again.
+    /// and the reopened link takes no data send, and holds no send limits, until it is
+    /// established again.
     #[cfg(feature = "session-reconnect")]
     #[test]
     fn a_reopen_clears_every_handshake_fact_and_closes_the_data_send_gate() {
@@ -1500,6 +1529,11 @@ mod facts_lock {
         }));
         actions.enter_established();
         assert!(actions.link.transport_available.is_open(), "established");
+        #[cfg(feature = "codec-push")]
+        assert!(
+            actions.negotiated_tx_limits().is_some(),
+            "the send limits are settled at establishment"
+        );
         actions.reset_for_reopen();
         let (awaiting, zid, whatami, caps) = actions.with_facts(|facts| {
             (
@@ -1516,6 +1550,12 @@ mod facts_lock {
         assert!(
             !actions.link.transport_available.is_open(),
             "the reopened link waits for its establishment"
+        );
+        #[cfg(feature = "codec-push")]
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            None,
+            "the send limits are the closed transport's"
         );
     }
 
@@ -1546,7 +1586,7 @@ mod facts_lock {
         );
         assert_eq!(
             actions.negotiated_tx_limits(),
-            (0, 0),
+            None,
             "no limits are settled yet"
         );
 
@@ -1555,10 +1595,10 @@ mod facts_lock {
         let settled = actions.negotiated_tx_limits();
         assert_eq!(
             settled,
-            (
+            Some((
                 actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
                 actions.negotiated_sn_mask()
-            ),
+            )),
             "settled from the capabilities the handshake wrote"
         );
         assert_eq!(actions.send_push_literal("a/b", b"x", true), Ok(()));
@@ -1571,8 +1611,8 @@ mod facts_lock {
         );
         actions.enter_established();
         assert_eq!(
-            actions.negotiated_tx_limits().0,
-            actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
+            actions.negotiated_tx_limits().map(|(budget, _)| budget),
+            Some(actions.negotiated_batch_mtu() - actions.batch_envelope_bytes()),
             "established again, the limits are the new capabilities'"
         );
         assert_ne!(actions.negotiated_tx_limits(), settled);
@@ -1580,14 +1620,16 @@ mod facts_lock {
 
     /// A link no handshake runs over takes a data send once it is opened without one, with the
     /// limits the session's own advertisement sets, and is not established. Turned red by a door
-    /// that leaves the gate shut (the send refused), settles no limits (`(0, 0)`), or stamps the
+    /// that leaves the gate shut (the send refused), settles no limits (`None`), or stamps the
     /// establishment.
     #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
     #[test]
     fn a_link_opened_without_a_handshake_sends_with_its_own_limits_unestablished() {
         let (actions, _link) = bundle();
         actions.open_without_handshake();
-        let limits = actions.negotiated_tx_limits();
+        let limits = actions
+            .negotiated_tx_limits()
+            .expect("opening without a handshake settles the limits");
         assert_eq!(
             limits,
             (
