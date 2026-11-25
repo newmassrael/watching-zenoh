@@ -2058,6 +2058,28 @@ impl<
         input
     }
 
+    /// The reading of the node a face's link reached that [`Self::read_face`] makes, for an
+    /// owner that reads each face's link itself and tells its life what it read: `input`, read
+    /// off the face at `at`, numbered `id`, in `phase`, `over` once its handshake is over. The
+    /// dial role's face stands by for a node another face holds and dials again once none does; a
+    /// taken face's input is as it came.
+    #[cfg(feature = "listen")]
+    pub fn read_dial_node(
+        &mut self,
+        at: usize,
+        id: FaceId,
+        phase: LinkPhase,
+        input: LinkInput,
+        over: bool,
+    ) -> LinkInput {
+        let role = if at == 0 || !P::TAKES {
+            LinkRole::Dial
+        } else {
+            LinkRole::Taken
+        };
+        self.read_node(at, id, role, phase, input, over)
+    }
+
     /// The node the link of the face at `at`, numbered `id`, reached, when another face holds
     /// that node or brings a link to it up: what the dial role's face stands by for once its
     /// handshake is over. Read before the link's task is ended.
@@ -3907,6 +3929,59 @@ mod tests {
         assert!(faces.drop_face(1).is_some());
         assert_eq!(
             faces.read_face(0, 100, 0, &mut None, &mut None).input,
+            LinkInput::NodeFree
+        );
+    }
+
+    /// An owner that reads each face's link itself has the node of the dial role's face read as
+    /// `read_face` reads it: a handshake over at a node another face holds is held elsewhere, the
+    /// face that stands by is told the node is free once no face holds it, and a taken face's
+    /// input is as it came. CONTROL: with no other face the end is read as it came. Turned red by
+    /// a reading that takes the face at the first place for a taken one, or reads a taken face's
+    /// node as the dial role's.
+    #[cfg(feature = "listen")]
+    #[test]
+    fn an_owner_that_reads_its_links_itself_reads_the_dial_roles_node_as_read_face_does() {
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let node = [7u8, 1];
+        let mut faces = supervisor(
+            Link::Wire(wire(&local, session(false, Some(&node)), false, true)),
+            2,
+        );
+        let handshaking = LinkPhase::Handshaking {
+            row: 0,
+            deadline_us: 0,
+        };
+        assert_eq!(
+            faces.read_dial_node(0, 100, handshaking, LinkInput::Ended, true),
+            LinkInput::Ended,
+            "CONTROL: no other face holds the node"
+        );
+        let other = TestFace {
+            life: idle_life(),
+            id: 1,
+            link: Link::Wire(wire(&local, session(true, Some(&node)), false, false)),
+        };
+        assert!(faces.place_face(1, other).is_ok());
+        assert_eq!(
+            faces.read_dial_node(1, 1, handshaking, LinkInput::Ended, true),
+            LinkInput::Ended,
+            "a taken face's input is as it came"
+        );
+        assert_eq!(
+            faces.read_dial_node(0, 100, handshaking, LinkInput::Ended, true),
+            LinkInput::HeldElsewhere
+        );
+        faces.put_link(0, Link::Idle);
+        assert_eq!(
+            faces.read_dial_node(0, 100, LinkPhase::Held, LinkInput::Tick, false),
+            LinkInput::Tick,
+            "the other face holds the node still"
+        );
+        assert!(faces.drop_face(1).is_some());
+        assert_eq!(
+            faces.read_dial_node(0, 100, LinkPhase::Held, LinkInput::Tick, false),
             LinkInput::NodeFree
         );
     }
