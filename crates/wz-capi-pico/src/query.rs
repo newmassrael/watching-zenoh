@@ -64,7 +64,8 @@ use crate::abi::{
 };
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
-use crate::prelude::*;
+#[cfg(not(wz_process_pools))]
+use crate::prelude::Box;
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
@@ -1402,7 +1403,7 @@ impl z_owned_queryable_t {
 unsafe fn free_queryable(h: *mut c_void) {
     let state = h as *mut QueryableState;
     if let Some(declared) = &(*state).declared {
-        (*state).engine.undeclare_queryable(declared.id);
+        wz_capi_port::SessionEngine::undeclare_queryable(&*(*state).engine, declared.id);
     }
     crate::object_slot::closures_of::<QueryableState, QueryableKept>(state).wait_none();
     crate::object_slot::retire_entity::<QueryableState, QueryableKept>(state);
@@ -1588,7 +1589,7 @@ impl PlainQueryable {
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 impl Drop for PlainQueryable {
     fn drop(&mut self) {
-        self.engine.undeclare_queryable(self.id);
+        wz_capi_port::SessionEngine::undeclare_queryable(&*self.engine, self.id);
     }
 }
 
@@ -2061,7 +2062,10 @@ pub(crate) unsafe fn queryable_identity(
 ) -> Option<([u8; 16], QblId)> {
     handle_ref::<z_loaned_queryable_t, QueryableState>(queryable).and_then(|state| {
         let declared = state.declared.as_ref()?;
-        Some((state.engine.zid(), declared.id))
+        Some((
+            wz_capi_port::SessionEngine::zid(&*state.engine),
+            declared.id,
+        ))
     })
 }
 
@@ -2124,6 +2128,7 @@ pub unsafe extern "C" fn z_query_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     /// A `QueryView` carrying a value payload + an attachment.

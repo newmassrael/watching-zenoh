@@ -3083,7 +3083,7 @@ const _: () = {
 const _: () = assert!(
     core::mem::offset_of!(z_open_options_t, auto_start_admin_space)
         == if cfg!(feature = "multi-thread") {
-            2 * core::mem::size_of::<*mut c_void>()
+            core::mem::size_of::<[*mut c_void; 2]>()
         } else {
             0
         }
