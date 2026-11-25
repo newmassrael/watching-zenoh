@@ -1916,7 +1916,8 @@ fn pico_value(id: &str) -> usize {
 
 /// A session at the pico preset's limits lends each table the preset sizes as many rows as the
 /// preset states, the tables that share a limit's rows as many as their limits add up to, and an
-/// arena that is the sum of its rows' spans and smaller than the build's.
+/// arena that is the sum of its rows' spans and smaller than the build's where the open lends the
+/// rows the preset lowers from it, no larger where a region holds them at the build's bound.
 #[test]
 fn the_pico_presets_arena_lends_the_presets_rows() {
     let presets = pico_preset();
@@ -2021,10 +2022,30 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
             .try_fold(0usize, |sum, row| sum.checked_add(row.span()?)),
         "the arena is the sum of its rows' spans"
     );
+    // The open lends the rows the preset lowers from the arena, so the preset's arena is under the
+    // build's. A build of the region's form holds those rows in its region at the build's bound,
+    // which a session's preset does not lower: each row its arena still lends is no larger than
+    // the build's, and so is the arena.
+    #[cfg(feature = "runtime-plan")]
     assert!(
         Some(reserved) < built.reserved_bytes(),
         "the preset's arena is under the build's"
     );
+    #[cfg(not(feature = "runtime-plan"))]
+    {
+        for laid in plan.rows() {
+            let of_build = built.rows().find(|row| row.name == laid.name);
+            assert!(
+                of_build.is_some_and(|row| laid.span() <= row.span()),
+                "the preset's {} is no larger than the build's",
+                laid.part()
+            );
+        }
+        assert!(
+            Some(reserved) <= built.reserved_bytes(),
+            "the preset's arena is not over the build's"
+        );
+    }
 }
 
 /// A pico preset holds the build's relations between its limits: the staging of a peer's interest
