@@ -6206,7 +6206,7 @@ mod tests {
         };
         let record =
             InPlaceRecord::declare_of_frame(&declare, true, 0, crate::qos::Priority::DEFAULT)
-                .from_sender(3);
+                .sent_by(3);
         let mut registry = SubscriberRegistry::new();
         registry.dispatch_iteration_event(IterationEvent::InPlace(record.past_sender_bound()));
         assert_eq!(
