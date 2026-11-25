@@ -18,6 +18,7 @@ use crate::arena::MAX_FACE_SETS;
 #[cfg(any(feature = "listen", feature = "group", test))]
 use wz_session_core::bounded::BoundedVec;
 
+#[cfg(any(feature = "listen", feature = "group", test))]
 use crate::RowPolicy;
 #[cfg(any(not(any(feature = "listen", feature = "group")), test))]
 use wz_session_core::slot_observer::NoOtherPeers;

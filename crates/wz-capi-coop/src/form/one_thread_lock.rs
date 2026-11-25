@@ -19,8 +19,9 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// A value behind the flag of a build of one thread.
-pub(super) struct OneThreadLock<T> {
+/// A value behind the flag of a build of one thread. Seen by the crate, as the form's lock type
+/// that names it (`LockForm::Lock` of `OneThread`) is.
+pub(crate) struct OneThreadLock<T> {
     held: AtomicBool,
     value: UnsafeCell<T>,
 }
@@ -86,7 +87,7 @@ impl<T> OneThreadLock<T> {
 }
 
 /// A hold of a [`OneThreadLock`], let go as it drops.
-pub(super) struct OneThreadGuard<'a, T> {
+pub(crate) struct OneThreadGuard<'a, T> {
     lock: &'a OneThreadLock<T>,
 }
 
