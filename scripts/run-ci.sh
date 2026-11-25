@@ -3977,6 +3977,14 @@ layer_c0_test_discipline() {
     # fixture workspace.
     _runci_leg host_lock_gate.selftest -- python3 scripts/lib/host_lock_gate.py --selftest
     _runci_leg host_lock_gate --after host_lock_gate.selftest -- python3 scripts/lib/host_lock_gate.py --check
+    # A crate a library without a logger can link calls the `log` facade only through the session
+    # core's diagnostics (`diag_warn!`, `diag_debug!`), which compile to nothing without
+    # `wz-session-core/log`, and names no `log` dependency of its own: a call past them put the
+    # facade back in the cooperative library without `std`, which its size case refuses. The host
+    # crates exempt are listed, each held outside that library's graph. The selftest drives each
+    # rule over a fixture workspace.
+    _runci_leg log_facade_gate.selftest -- python3 scripts/lib/log_facade_gate.py --selftest
+    _runci_leg log_facade_gate --after log_facade_gate.selftest -- python3 scripts/lib/log_facade_gate.py --check
     # The release code of the C ABI library's core crates is total (docs/c-abi-architecture.md P6):
     # each crate denies the totality lints outside a test build, and a module still allowed them
     # is a row of the register in that document's section 7, which only shrinks. The selftest
