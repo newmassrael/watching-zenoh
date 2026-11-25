@@ -2079,6 +2079,28 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// without that feature. C1bz counted one of them.
     pub iteration_work: R::IterationWork,
     pub params: SessionInitParams,
+    /// R311kv — the lease window the peer advertised in its OPEN body
+    /// (milliseconds; `parse_inbound` already projected the wire T-flag
+    /// seconds form back, R311ku). Captured from BOTH OpenSyn (accepting
+    /// side) and OpenAck (initiating side)
+    /// — zenoh-pico adopts `min(advertised, Z_TRANSPORT_LEASE)` at the
+    /// same two arrival points (unicast/transport.c:193/269) and expires
+    /// the session by it (unicast/lease.c:147). wz stores the raw
+    /// advertisement; the deadline comparator applies the local cap
+    /// ([`crate::drive::check_lease_deadline`]: `min(this,
+    /// params.lease_ms)`) — the same store-raw / cap-at-check split as
+    /// the multicast per-peer sweep (R311ks). `None` pre-OPEN: the local
+    /// window governs alone.
+    ///
+    /// R2782 — captured once the Open frame is ADMITTED
+    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack`), no
+    /// longer at parse time: a replayed Open frame after `Established` used
+    /// to rewrite it.
+    ///
+    /// A word of the runtime's, as a link's stamps are, and not a fact of the row: the lease and
+    /// keepalive deadlines read it at every step of the link, and a lock of the row there was a
+    /// hold for each. Reached through [`Self::fact_peer_open_lease_ms`].
+    peer_open_lease_ms: R::Word,
     /// Every fact the session keeps under a lock, under ONE lock: [`SessionFacts`]. Reached
     /// through a door (`Self::fact_*`, [`Self::with_facts`]), never named by a caller.
     facts: R::Mutex<SessionFacts>,
@@ -2464,25 +2486,6 @@ pub struct HandshakeFacts {
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
     pub inbound_cookie: Option<SessionBytes<COOKIE_MAX>>,
-    /// R311kv — the lease window the peer advertised in its OPEN body
-    /// (milliseconds; `parse_inbound` already projected the wire T-flag
-    /// seconds form back, R311ku). Captured from BOTH OpenSyn (accepting
-    /// side) and OpenAck (initiating side)
-    /// — zenoh-pico adopts `min(advertised, Z_TRANSPORT_LEASE)` at the
-    /// same two arrival points (unicast/transport.c:193/269) and expires
-    /// the session by it (unicast/lease.c:147). wz stores the raw
-    /// advertisement; the deadline comparator applies the local cap
-    /// ([`crate::drive::check_lease_deadline`]: `min(this,
-    /// params.lease_ms)`) — the same store-raw / cap-at-check split as
-    /// the multicast per-peer sweep (R311ks). `None` pre-OPEN: the local
-    /// window governs alone.
-    ///
-    /// R2782 — captured once the Open frame is ADMITTED
-    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack`; code spans,
-    /// because a field doc's `Self` is this struct, which has neither), no
-    /// longer at parse time: a replayed Open frame after `Established` used
-    /// to rewrite it.
-    pub peer_open_lease_ms: Option<u64>,
     /// R2782 — whether this initiator has sent its OpenSyn and not yet taken
     /// an OpenAck: the one window in which an OpenAck means anything.
     ///
@@ -2954,7 +2957,6 @@ fact_doors! {
     #[cfg(feature = "action-trace")]
     fact_trace => trace: ActionTrace,
     fact_inbound_cookie => handshake.inbound_cookie: Option<SessionBytes<COOKIE_MAX>>,
-    fact_peer_open_lease_ms => handshake.peer_open_lease_ms: Option<u64>,
     fact_awaiting_open_ack => handshake.awaiting_open_ack: bool,
     fact_inbound_peer_zid => handshake.inbound_peer_zid: Option<SessionZid>,
     fact_remote_peer_zid => handshake.remote_peer_zid: Option<SessionZid>,
@@ -3005,8 +3007,8 @@ pub struct DatagramResume {
     pub record: Option<usize>,
 }
 
-/// A link's time stamps: milliseconds on the session's clock, `None` until first taken. Kept
-/// together under one lock in [`LinkState`].
+/// A link's time stamps: milliseconds on the session's clock, `None` until first taken. The link
+/// keeps each in a word of its own and reads them into this row, which is a copy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LinkStamps {
     /// R311la — monotonic timestamp in milliseconds of the most recent
@@ -3058,7 +3060,7 @@ pub struct LinkStamps {
     /// KeepAlive only if the line did not speak in it, as zenoh-pico's keep-alive task does with
     /// its `_transmitted` flag (`src/transport/unicast/lease.c`), and starts the next tick at
     /// its own time. What a frame sets is the link's `spoke` bit, not this stamp, so a frame
-    /// takes neither the clock nor this lock. Storage form and clock epoch match
+    /// takes neither the clock nor this stamp. Storage form and clock epoch match
     /// `last_inbound_at` (u64 ms).
     pub keepalive_tick_at: Option<u64>,
 }
@@ -3112,10 +3114,11 @@ pub struct LinkState<R: SessionRuntime> {
     /// Per link, as `pending_batch` is.
     #[cfg(feature = "alloc")]
     pub datagram_resume: R::Mutex<Option<DatagramResume>>,
-    /// The link's time stamps ([`LinkStamps`]), under one lock: the lease and keepalive deadlines
-    /// read two of them at once, and a transport replaced for a re-dial clears all three. Reached
-    /// through [`Self::stamps()`], [`Self::with_stamps`] and the `fact_*` doors.
-    stamps: R::Mutex<LinkStamps>,
+    /// The link's time stamps ([`LinkStamps`]), each a word of the runtime's and none under a
+    /// lock: the receive stamps every message, and the lease and keepalive deadlines read them
+    /// at every step of the link. Reached through [`Self::stamps()`], the `fact_*` doors and
+    /// the deadlines' read while their duty is armed.
+    stamps: StampWords<R::Word>,
     /// F2 — is the transport currently accepting data sends? `false` at
     /// construction: data leaves only over an established link, as upstream's
     /// transport exists only once the Open exchange is over
@@ -3464,32 +3467,141 @@ impl LinkPriorityRange {
 #[cfg(feature = "transport-multilink")]
 pub struct PubkeyBound(());
 
+/// A stamp word that holds no stamp. No count of milliseconds on a monotonic clock reaches it; a
+/// stamp written as that count is kept one below it ([`stamp_word`]).
+const NO_STAMP: u64 = u64::MAX;
+
+/// The word that holds `stamp`.
+fn stamp_word(stamp: Option<u64>) -> u64 {
+    stamp.map_or(NO_STAMP, |at| at.min(NO_STAMP - 1))
+}
+
+/// The stamp `word` holds.
+fn word_stamp(word: u64) -> Option<u64> {
+    (word != NO_STAMP).then_some(word)
+}
+
+/// A link's three stamps ([`LinkStamps`]), each a word of the runtime's (`SessionRuntime::Word`:
+/// an atomic where threads hold the link, a cell where one task does), so the receive stamps a
+/// message with one store and the deadlines read them with loads, under no lock.
+///
+/// Each stamp has one writer at a time: the receive for `last_inbound_at`, the machine's
+/// `Established` entry for `established_at`, the keepalive judge for `keepalive_tick_at` (one
+/// compare-and-swap, so two judges of one tick end it once), and a reopen for all three. A reader
+/// that compares two of them reads them while the duty that compares them is armed
+/// (`LinkState::stamps_while`): a reopen lowers both duties before it clears the stamps, so a
+/// reader that saw a stamp cleared sees its duty lowered too and is answered with nothing.
+pub(crate) struct StampWords<W: crate::runtime_cell::WordCell> {
+    established_at: W,
+    last_inbound_at: W,
+    keepalive_tick_at: W,
+}
+
+impl<W: crate::runtime_cell::WordCell> StampWords<W> {
+    fn new() -> Self {
+        Self {
+            established_at: W::new(NO_STAMP),
+            last_inbound_at: W::new(NO_STAMP),
+            keepalive_tick_at: W::new(NO_STAMP),
+        }
+    }
+
+    #[inline]
+    fn read(word: &W) -> Option<u64> {
+        word_stamp(word.load(core::sync::atomic::Ordering::Acquire))
+    }
+
+    #[inline]
+    fn row(&self) -> LinkStamps {
+        LinkStamps {
+            established_at: Self::read(&self.established_at),
+            last_inbound_at: Self::read(&self.last_inbound_at),
+            keepalive_tick_at: Self::read(&self.keepalive_tick_at),
+        }
+    }
+
+    /// The stamp `word` holds, lent to `f`, and written back when `f` changed it.
+    #[inline]
+    fn lend<U>(word: &W, f: impl FnOnce(&mut Option<u64>) -> U) -> U {
+        let before = Self::read(word);
+        let mut stamp = before;
+        let answer = f(&mut stamp);
+        if stamp != before {
+            word.store(stamp_word(stamp), core::sync::atomic::Ordering::Release);
+        }
+        answer
+    }
+
+    /// Clear the three, as a reopen does once it has lowered the duties that read them.
+    #[cfg(feature = "session-reconnect")]
+    fn clear(&self) {
+        for word in [
+            &self.established_at,
+            &self.last_inbound_at,
+            &self.keepalive_tick_at,
+        ] {
+            word.store(NO_STAMP, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// End the keepalive tick that began at `read` by starting the next at `now_ms`: `false`,
+    /// and nothing written, when the tick running is no longer that one.
+    #[cfg(feature = "transport-keepalive")]
+    fn end_tick(&self, read: Option<u64>, now_ms: u64) -> bool {
+        self.keepalive_tick_at
+            .compare_exchange(
+                stamp_word(read),
+                stamp_word(Some(now_ms)),
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
 /// One door per time stamp the link keeps ([`LinkStamps`]): the stamp, lent to `f` for the length
-/// of the call. A caller names the stamp and not the lock that guards it. `f` runs with the lock
-/// held: it must not open another door or take another lock.
+/// of the call and written back when `f` changed it. A caller names the stamp and not the word that
+/// holds it.
 macro_rules! link_stamp_doors {
     ($( $door:ident => $field:ident, )*) => {
         impl<R: SessionRuntime> LinkState<R> {
             $(
-                #[doc = concat!("The link's `", stringify!($field), "`, lent to `f` under its lock.")]
+                #[doc = concat!("The link's `", stringify!($field), "`, lent to `f`.")]
                 #[inline]
                 pub fn $door<U>(&self, f: impl FnOnce(&mut Option<u64>) -> U) -> U {
-                    R::with_mutex_mut(&self.stamps, |stamps| f(&mut stamps.$field))
+                    StampWords::<R::Word>::lend(&self.stamps.$field, f)
                 }
             )*
 
-            /// Every stamp of the link, read in one hold of its lock. Out of line: one copy of the
-            /// read for every reader of them, where each read inlined was a copy of the lock.
-            #[inline(never)]
+            /// Every stamp of the link, each read once.
+            #[inline]
             pub fn stamps(&self) -> LinkStamps {
-                R::with_mutex_mut(&self.stamps, |stamps| *stamps)
+                self.stamps.row()
             }
 
-            /// Every stamp of the link, lent to `f` under its one lock: for a writer of several at
-            /// once, which then takes the lock once.
+            /// Every stamp of the link, for a duty that runs while `armed` is raised: `None` when
+            /// it is lowered before the stamps are read or after. A reopen lowers the duties
+            /// before it clears the stamps, so a row read in part after a clear is never answered.
             #[inline]
-            pub fn with_stamps<U>(&self, f: impl FnOnce(&mut LinkStamps) -> U) -> U {
-                R::with_mutex_mut(&self.stamps, f)
+            pub(crate) fn stamps_while(
+                &self,
+                armed: &core::sync::atomic::AtomicBool,
+            ) -> Option<LinkStamps> {
+                if !armed.load(core::sync::atomic::Ordering::SeqCst) {
+                    return None;
+                }
+                let stamps = self.stamps.row();
+                armed
+                    .load(core::sync::atomic::Ordering::SeqCst)
+                    .then_some(stamps)
+            }
+
+            /// End the keepalive tick a judge read as beginning at `read`, starting the next at
+            /// `now_ms`: `false` when another judge ended it first.
+            #[cfg(feature = "transport-keepalive")]
+            #[inline]
+            pub(crate) fn end_keepalive_tick(&self, read: Option<u64>, now_ms: u64) -> bool {
+                self.stamps.end_tick(read, now_ms)
             }
         }
     };
@@ -3499,6 +3611,15 @@ link_stamp_doors! {
     fact_established_at => established_at,
     fact_last_inbound_at => last_inbound_at,
     fact_keepalive_tick_at => keepalive_tick_at,
+}
+
+impl<R: SessionRuntime, T: TimeSource> SessionCore<R, T> {
+    /// The lease window the peer's admitted Open advertised, lent to `f` and written back when
+    /// `f` changed it: a word of its own, in the form a link's stamps are.
+    #[inline]
+    pub fn fact_peer_open_lease_ms<U>(&self, f: impl FnOnce(&mut Option<u64>) -> U) -> U {
+        StampWords::<R::Word>::lend(&self.peer_open_lease_ms, f)
+    }
 }
 
 impl<R: SessionRuntime> LinkState<R> {
@@ -5451,7 +5572,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
                 #[cfg(feature = "alloc")]
                 datagram_resume: R::new_mutex(None::<DatagramResume>),
-                stamps: R::new_mutex(LinkStamps::default()),
+                stamps: StampWords::new(),
                 transport_available: crate::send_gate::SendGate::new(false),
                 #[cfg(any(
                     feature = "codec-push",
@@ -5536,6 +5657,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // with the value.
                 iteration_work: R::IterationWork::default(),
                 params: params,
+                peer_open_lease_ms: <R::Word as crate::runtime_cell::WordCell>::new(NO_STAMP),
                 // Every fact under the session's one lock (`SessionFacts`).
                 facts: R::new_mutex(SessionFacts {
                     handshake: HandshakeFacts {
@@ -5545,7 +5667,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         inbound_peer_zid: None::<SessionZid>,
                         inbound_opensyn_cookie: None::<SessionBytes<COOKIE_MAX>>,
                         awaiting_open_ack: false,
-                        peer_open_lease_ms: None::<u64>,
                         inbound_peer_init_caps: None::<PeerInitCaps>,
                         // R311y578 — NOT YET NEGOTIATED. The first admitted Init
                         // seeds it from wz's own announced level and caps it at the
@@ -11974,7 +12095,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // projection) for the deadline comparator's min(); pico adopts it at
             // OpenSyn arrival (unicast/transport.c:269), which on its accept path
             // is after the cookie is judged.
-            f.handshake.peer_open_lease_ms = Some(lease);
+            self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
         });
     }
 
@@ -12113,7 +12234,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.seed_rx_sn_in(f, initial_sn);
             // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
             // unicast/transport.c:193).
-            f.handshake.peer_open_lease_ms = Some(lease);
+            self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
             OpenAckAdmission::Taken
         })
     }
@@ -19873,11 +19994,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
             self.release_handshake_answer();
-            // The stamps are the closed transport's, cleared in one hold: the replacement
-            // starts with no establishment, nothing received and no TX history (pico's fresh
-            // transport initializes `_transmitted = 0`, unicast/transport.c:65).
-            self.link
-                .with_stamps(|stamps| *stamps = LinkStamps::default());
             // The liveness duties belong to the transport that was
             // established: the replacement link's Established entry starts
             // its own, and none runs over the re-dial window.
@@ -19888,6 +20004,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.link
                 .lease_armed
                 .store(false, core::sync::atomic::Ordering::SeqCst);
+            // The stamps are the closed transport's: the replacement starts with no
+            // establishment, nothing received and no TX history (pico's fresh transport
+            // initializes `_transmitted = 0`, unicast/transport.c:65). Cleared after the duties
+            // that read them are lowered (`StampWords`).
+            self.link.stamps.clear();
             // The close reason is the closed transport's; the replacement
             // has staged none.
             R::with_mutex_mut(&self.link.close_reason, |reason| *reason = None);

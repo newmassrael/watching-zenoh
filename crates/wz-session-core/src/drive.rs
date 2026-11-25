@@ -3931,7 +3931,7 @@ pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
     lease_deadlines(actions).map(LeaseDeadlines::wake)
 }
 
-/// What a link's lease is judged by, read from the link's stamps in one hold: the lease's own
+/// What a link's lease is judged by, read from the link's stamps once: the lease's own
 /// expiry and, where the build keeps it, the end of the watch of the peer's initial declarations.
 /// The wake ([`lease_wake_deadline`]) and the judgement ([`judge_lease`]) read the same value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3968,10 +3968,7 @@ fn lease_monitored<R: SessionRuntime, T: TimeSource>(actions: &SessionLinkAction
 pub(crate) fn lease_deadlines<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<LeaseDeadlines> {
-    if !lease_monitored(actions) {
-        return None;
-    }
-    let stamps = actions.link.stamps();
+    let stamps = actions.link.stamps_while(&actions.link.lease_armed)?;
     let expiry = max_stamp(stamps.established_at, stamps.last_inbound_at)?
         .saturating_add(actions.adopted_lease_ms());
     Some(LeaseDeadlines {
@@ -4054,18 +4051,11 @@ impl KeepaliveDeadlines {
 pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<KeepaliveDeadlines> {
-    if !actions
-        .link
-        .keepalive_armed
-        .load(core::sync::atomic::Ordering::SeqCst)
-    {
-        return None;
-    }
     let crate::session_actions::LinkStamps {
         established_at: established,
         keepalive_tick_at: tick,
         ..
-    } = actions.link.stamps();
+    } = actions.link.stamps_while(&actions.link.keepalive_armed)?;
     let now = actions.clock.now_monotonic_ms();
     // A driver with a queue between hand-over and write reports when its writer last finished
     // a write, and that is when the line spoke (its data frames never mark the tick,
@@ -4144,16 +4134,9 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
     }
     let due = |deadline: Option<u64>| deadline.is_some_and(|at| now_ms >= at);
     let mut emitted = false;
-    // The tick ends once: under the stamps' lock, and only if it is still the tick the
-    // deadlines were read in, so the tokio pacer beside the loop cannot answer it twice.
-    let tick_ended = due(deadlines.link)
-        && actions.link.with_stamps(|stamps| {
-            let ours = stamps.keepalive_tick_at == deadlines.tick;
-            if ours {
-                stamps.keepalive_tick_at = Some(now_ms);
-            }
-            ours
-        });
+    // The tick ends once: only if it is still the tick the deadlines were read in, in one
+    // compare-and-swap of its stamp, so the tokio pacer beside the loop cannot answer it twice.
+    let tick_ended = due(deadlines.link) && actions.link.end_keepalive_tick(deadlines.tick, now_ms);
     if tick_ended {
         let spoke = &actions.link.spoke;
         // zenoh-pico's order (`src/transport/unicast/lease.c`): a keepalive only for a tick
