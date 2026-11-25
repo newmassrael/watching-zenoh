@@ -5276,13 +5276,9 @@ impl SharedSession {
             .declare_keyexpr_where(&keyexpr, false, |id| self.mapping_id_free(id))
             .ok()?;
         self.announce_keyexpr_locked(&guard, declared.id, &keyexpr, declared.new);
-        let hold = KeyHold::taken(declared.id, declared.handle);
-        Some(match guard.tables.keyexprs().get(declared.handle) {
-            // SAFETY: the growable table keeps its rows in chunks that are only ever added
-            // (`Chunked`), so a row stays where it was put while it stands.
-            Some(row) => unsafe { hold.placed_at(row.head().count()) },
-            None => hold,
-        })
+        // SAFETY: the hold just taken keeps the row standing, and the growable table keeps its rows
+        // in chunks that are only ever added (`Chunked`), so a row stays where it was put.
+        Some(unsafe { KeyHold::taken(declared.id, declared.handle).placed_at(declared.count()) })
     }
 
     /// Let go of one holder of the declaration in row `row` ([`Self::acquire_keyexpr`]),

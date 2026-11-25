@@ -532,6 +532,31 @@ fn a_key_expression_declared_twice_is_held_twice_and_retracted_by_its_last_holde
     assert_eq!(tables.undeclare_keyexpr(first.handle), None);
 }
 
+/// A declaration names the count of the row its hold was taken in, a new row's and one held again
+/// alike, so a holder names its row with no second look at the table. Turned red by a count read
+/// off another row, or a hold not taken on the count named.
+#[test]
+fn a_key_expression_declaration_names_its_rows_count() {
+    let mut tables = Tables::new();
+    let first = tables.declare_keyexpr("demo/").unwrap();
+    let again = tables.declare_keyexpr("demo/").unwrap();
+    let row = tables
+        .keyexprs()
+        .get(first.handle)
+        .expect("the declared row");
+    // SAFETY: the row stands, held by both declarations, and nothing was put in the table since.
+    let (named, held) = unsafe { (first.count(), again.count()) };
+    assert!(
+        core::ptr::eq(named, row.head().count()),
+        "the new row's count"
+    );
+    assert!(
+        core::ptr::eq(held, named),
+        "the row held again names the same count"
+    );
+    assert_eq!(named.holds(), 2, "both holds taken on that count");
+}
+
 /// A hold taken for a copied holder keeps the declaration until that holder lets go too; a handle
 /// that names no row takes none.
 #[test]

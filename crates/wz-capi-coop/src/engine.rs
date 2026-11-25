@@ -8287,19 +8287,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 }
 
-/// The hold of the declaration `id` taken in row `handle` of `tables`, naming where the row lies,
-/// so a copy of it takes its hold, and a holder that is not the last gives its own back, at the
-/// row with no lock of the session.
-fn placed_hold(tables: &CoopTables, id: ExprId, handle: KeyexprHandle) -> KeyHold {
-    let hold = KeyHold::taken(id, handle);
-    match tables.keyexprs().get(handle) {
-        // SAFETY: the session's rows lie in its region, or in the span lent at its open
-        // (`RowPolicy`), neither of which moves while the session's state stands.
-        Some(row) => unsafe { hold.placed_at(row.head().count()) },
-        None => hold,
-    }
-}
-
 /// An entity's key, as its row in `tables` keeps it ([`RowKey`]), lent with the declaration the
 /// row holds that the key is lent with: that of the entity's own key, or else the one the key is
 /// named by. The caller holds the session, and the row `key` was read off stands.
@@ -8914,11 +8901,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         #[cfg(test)]
         self.takes.holds.fetch_add(1, Ordering::Relaxed);
-        Ok(placed_hold(
-            tables(&core.session.registry),
-            id,
-            declared.handle,
-        ))
+        // SAFETY: the hold just taken keeps the row standing, and the session's rows lie in its
+        // region, or in the span lent at its open (`RowPolicy`), neither of which moves while the
+        // session's state stands.
+        Ok(unsafe { KeyHold::taken(id, declared.handle).placed_at(declared.count()) })
     }
 
     fn key_arena(&self) -> Option<&dyn SessionKeys> {

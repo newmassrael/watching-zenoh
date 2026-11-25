@@ -1215,6 +1215,8 @@ impl KeyView {
     /// As [`KeyHold::placed_at`]: `count` is the count of the head of `row`, and stays at its
     /// address while the row stands and the session's tables do; and the engine's record of the
     /// entity holds the declaration until the entity is retracted.
+    // Inlined into an engine's reader of the row, which has read every argument off it.
+    #[inline]
     pub unsafe fn holding(
         key: &str,
         row: wz_session_core::session_tables::KeyexprHandle,

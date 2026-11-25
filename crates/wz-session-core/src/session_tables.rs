@@ -1603,6 +1603,22 @@ pub struct KeyexprDeclared {
     pub id: ExprId,
     /// Whether it is new, and so to be declared on every link.
     pub new: bool,
+    /// The address of the row's count of holders, read where the hold was taken, so a holder
+    /// names its row with no second look at the table ([`Self::count`]).
+    count: usize,
+}
+
+impl KeyexprDeclared {
+    /// The count of holders of the row the hold was taken in, where it lies.
+    ///
+    /// # Safety
+    /// The row stands (a hold of it is not given back) and the tables keep their rows in place
+    /// (a region, a lent span, or the growable policy's chunks), so the count is where it was read.
+    pub unsafe fn count<'a>(&self) -> &'a KeyexprCount {
+        // SAFETY: the caller's: the address is of the count of a row that still stands where it
+        // was when the hold was taken.
+        unsafe { &*(self.count as *const KeyexprCount) }
+    }
 }
 
 /// A declaration refused: why, and the callback it was handed, for the caller to drop.
@@ -2212,14 +2228,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             self.keyexprs
                 .iter()
                 .find(|(_, row)| text(&row.key) == key)
-                .map(|(handle, row)| (handle, row.id(), row.head.count.retain(handle)))
+                .map(|(handle, row)| (handle, row, row.head.count.retain(handle)))
         };
         match found {
-            Some((handle, id, Ok(()))) => {
+            Some((handle, row, Ok(()))) => {
                 return Ok(KeyexprDeclared {
                     handle,
-                    id,
+                    id: row.id(),
                     new: false,
+                    count: core::ptr::from_ref(&row.head.count) as usize,
                 })
             }
             Some((_, _, Err(RowHoldRefused::Full))) => return Err(RegisterError::TableFull),
@@ -2234,20 +2251,23 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         let table = self.address();
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.mint_expr(usable).ok_or(RegisterError::IdsExhausted)?;
-        let handle = self
+        // The first hold is taken on the row where it is put, with no second look at the table.
+        let (handle, row) = self
             .keyexprs
-            .insert(KeyexprRow {
-                key: kept,
-                head: KeyexprHead::new(id, key_len, table),
-            })
+            .insert_with_row(
+                KeyexprRow {
+                    key: kept,
+                    head: KeyexprHead::new(id, key_len, table),
+                },
+                core::convert::identity,
+            )
             .map_err(|_| RegisterError::TableFull)?;
-        if let Some(row) = self.keyexprs.get(handle) {
-            row.head.count.first_hold(handle);
-        }
+        row.head.count.first_hold(handle);
         Ok(KeyexprDeclared {
             handle,
             id,
             new: true,
+            count: core::ptr::from_ref(&row.head.count) as usize,
         })
     }
 
