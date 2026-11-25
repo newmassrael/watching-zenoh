@@ -80,7 +80,7 @@ use crate::session_zid::SessionZid;
 // policy dispatches through).
 use crate::scouting::ScoutingActions as ScoutingActionsTrait;
 use crate::scouting::{
-    ScoutingEvent, ScoutingHelloReceivedPayload, ScoutingInject, ScoutingPolicy, ScoutingState,
+    ScoutingEvent, ScoutingHelloReceivedRef, ScoutingInject, ScoutingPolicy, ScoutingState,
 };
 
 /// Shared host state for one active-scouting window.
@@ -1077,11 +1077,11 @@ pub fn window_datagram<R: Runtime>(
         // under its own verdict.
         if staged {
             // The window's mode rides the event: the generated machine has no datamodel, so its
-            // two `hello.received` arms guard on this typed field.
-            engine.raise_hello_received(ScoutingHelloReceivedPayload {
+            // two `hello.received` arms guard on this typed field. Lent for the one call that
+            // processes it, so no payload is queued.
+            engine.process_hello_received_with(ScoutingHelloReceivedRef {
                 exit_on_first: u8::from(exit_on_first),
             });
-            engine.step();
         }
         staged
     } else {
