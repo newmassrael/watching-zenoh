@@ -583,12 +583,22 @@ type SecuredLinks = <crate::coop_host::Links as wz_capi_coop::ComposedLinks>::Wi
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "tls-mbedtls")))]
 type SecuredLinks = crate::coop_host::Links;
 
+/// The joiner of the groups a cooperative session joins on the host: its UDP groups, and its
+/// `reth/` groups beside them where the build has the raweth transport (`raweth-transport`).
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    feature = "multicast-transport",
+    not(feature = "raweth-transport")
+))]
+type HostGroupJoiner = wz_capi_coop::host_group::HostGroups<crate::coop_host::Multicast>;
+#[cfg(all(not(feature = "engine-tokio"), feature = "raweth-transport"))]
+type HostGroupJoiner =
+    crate::coop_host::WithRaweth<wz_capi_coop::host_group::HostGroups<crate::coop_host::Multicast>>;
+
 /// The links a cooperative session opens over the host's sockets, as [`open_on_coop`] composes
 /// them: the host's, over a secure channel and joining groups where the build does either.
 #[cfg(all(not(feature = "engine-tokio"), feature = "multicast-transport"))]
-type SocketLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<
-    wz_capi_coop::host_group::HostGroups<crate::coop_host::Multicast>,
->;
+type SocketLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<HostGroupJoiner>;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
 type SocketLinks = SecuredLinks;
 
@@ -2037,11 +2047,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Err(_) => return crate::result::Z_ERR_INVALID,
     };
     // A group is joined on the host's sockets, under the session's two link policies, as the
-    // tokio engine's group sockets are.
+    // tokio engine's group sockets are, and a `reth/` group on a raw packet socket.
     #[cfg(feature = "multicast-transport")]
-    let links = links.with_groups(wz_capi_coop::host_group::HostGroups::<
-        crate::coop_host::Multicast,
-    >::of_policy(&policy));
+    let groups =
+        wz_capi_coop::host_group::HostGroups::<crate::coop_host::Multicast>::of_policy(&policy);
+    #[cfg(feature = "raweth-transport")]
+    let groups = crate::coop_host::with_raweth(groups);
+    #[cfg(feature = "multicast-transport")]
+    let links = links.with_groups(groups);
     // The word that the program's clock moved on, read before the clock is handed to the engine.
     #[cfg(feature = "time-base")]
     let clock_moves = crate::time_base::clock_moves(&clock);

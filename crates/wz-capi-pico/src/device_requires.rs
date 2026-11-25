@@ -231,8 +231,8 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
 }
 
 /// A group as the cooperative engine reads it before its host joiner is asked
-/// (`wz_session_core::group_locator::parse_group_locator`): a UDP multicast group, or a group the
-/// open cannot join.
+/// (`wz_session_core::group_locator::parse_group_locator`): a UDP multicast group, a group over
+/// raw Ethernet where the build joins one (`raweth-transport`), or a group the open cannot join.
 #[cfg(all(not(feature = "engine-tokio"), feature = "multicast-transport"))]
 fn read_group(endpoint: &str) -> Result<EndpointReading, Refused> {
     use wz_session_core::facilities::Endpoint;
@@ -242,6 +242,8 @@ fn read_group(endpoint: &str) -> Result<EndpointReading, Refused> {
             proto: Proto::Udp,
             named: false,
         })),
+        #[cfg(feature = "raweth-transport")]
+        Ok(group) if group.raweth().is_some() => Ok(Ok(Endpoint::RawEthernet)),
         _ => Err((
             crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
             "the open refuses this config: its group is not one the host joins",
@@ -357,6 +359,30 @@ mod tests {
         .unwrap_err();
         assert_eq!(code, crate::result::Z_ERR_TRANSPORT_OPEN_FAILED);
         assert!(reason.contains("address"), "{reason}");
+    }
+
+    /// A listened `reth/` endpoint is a group over raw Ethernet where the build joins one, which
+    /// asks for the link-layer socket and no IP multicast; a build without the raweth transport
+    /// has no link for the scheme. Turned red by a raweth group read as a UDP one, or by a build
+    /// without the transport that takes it.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_listened_raweth_group_requires_the_raw_socket_or_is_unknown() {
+        use crate::config::Z_CONFIG_LISTEN_KEY;
+        let got = requirement_of(&config(&[(
+            Z_CONFIG_LISTEN_KEY,
+            "reth/30:03:8c:c8:00:a2#iface=lo",
+        )]));
+        if cfg!(feature = "raweth-transport") {
+            let got = got.unwrap();
+            assert!(got.contains("\"raw-ethernet\""), "{got}");
+            assert!(!got.contains("\"multicast\""), "{got}");
+        } else {
+            assert_eq!(
+                got.unwrap_err().0,
+                crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
+            );
+        }
     }
 
     /// A listen endpoint the cooperative engine reads is answered with its socket.

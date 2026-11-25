@@ -449,12 +449,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "the plan of a session's arena read row by row, `PlanFrom::Config` and `CoopEngine::open` "
         "with the opens beside it, the plan laid out from the config at the open, which the "
         "crate's own tests run whatever it says (`tests::arena` and every engine test) and the "
-        "pico ABI's `peer` and `config-policy` builds open through",
+        "pico ABI's `peer` and `config-policy` builds open through; `raweth` gates the "
+        "`raweth_group` re-export of the runtime's joiner of `reth/` groups, which the pico "
+        "ABI's `raweth-transport` wraps the host's groups in and the runtime's own "
+        "`raweth_group` unit tests run",
         frozenset(
             {
                 "app-transport",
                 "group-host",
                 "listen",
+                "raweth",
                 "runtime-plan",
                 "scout",
                 "scout-datagram",

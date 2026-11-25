@@ -275,8 +275,15 @@ multicast-declarations = [
 ]
 # Open-debt item 911 — pico's `Z_FEATURE_RAWETH_TRANSPORT` (vendor default 0): `z_open` with a
 # `listen` endpoint `reth/<mac>#...` joins a group over raw Ethernet as the session's one
-# transport, as pico opens its raweth transport. Off here as there.
-raweth-transport = ["engine-tokio", "multicast-transport", "wz-capi-core/raweth-transport"]
+# transport, as pico opens its raweth transport. Off here as there. Either engine joins it: the
+# tokio engine's group link, or the cooperative engine's `reth/` groups over the host's raw packet
+# sockets (`wz-capi-coop`'s `raweth`), both on Linux, where pico has the transport.
+raweth-transport = [
+    "multicast-transport",
+    "wz-session-core/transport-link-raweth",
+    "wz-capi-core?/raweth-transport",
+    "wz-capi-coop?/raweth",
+]
 # `link-udp` (`Z_FEATURE_LINK_UDP_UNICAST`): a `udp/` endpoint to dial. `scout` implies it, the
 # scouting group being a UDP one. The cooperative engine dials UDP in every build, so this
 # selects no engine.
