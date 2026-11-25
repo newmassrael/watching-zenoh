@@ -1099,8 +1099,8 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
 enum Stepped {
     /// The session ended.
     Closed,
-    /// A step of one thread read a record of a batch the link holds the rest of, and left the
-    /// links, the clock and the gets as they stood: the step that reads the batch's last record
+    /// The step read records of what a link took from its stack, which holds more of it, and
+    /// left the links, the clock and the gets as they stood: the step that reads the last of it
     /// moves them.
     Read,
     /// The step moved the links on by this reading of the session's clock, in microseconds.
@@ -6179,8 +6179,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session
     /// that ended. The step reads the clock once, after its tasks ran, and measures everything it
-    /// does by that reading, which it returns ([`Stepped`]). A step of one thread that read a
-    /// record of a batch the link holds the rest of reads no clock and moves nothing.
+    /// does by that reading, which it returns ([`Stepped`]). A step that read records of a link
+    /// that holds more input it has already taken from its stack reads no clock and moves nothing.
     fn step(&self, core: &mut Core<L, C>) -> Stepped {
         // What a lost link's peer is still owed comes before anything the links bring now.
         #[cfg(feature = "liveliness")]
@@ -6189,17 +6189,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         let was_idle = self.samples.is_idle();
         core.run_tasks();
-        // One thread's round takes one record a step (`Round::has_room`), so a batch is read a
-        // step a record, each after the callbacks of the one before returned. The links are moved
-        // once, by the step that reads the batch's last record: a move a record would look at every
-        // port and turn every face's replay once a message, and batching would save nothing. A
-        // round that was not empty took no record (a step from inside a callback), and that step
-        // moves the links as any other.
-        if !<CoopForm as ThreadForm>::OTHER_THREADS
-            && was_idle
-            && !self.samples.is_idle()
-            && core.transport.holds_input()
-        {
+        // A step reads what the round has room for and no more: one record in a build of one
+        // thread, the records of one datagram in a build of threads, whose next datagram waits
+        // while a record lies in the one lent (`Round::has_room`, `RoundGate`). What the link
+        // took from its stack in one receive is then read a step at a time, each after the
+        // callbacks of the one before returned. The links are moved once, by the step that reads
+        // the last of it: a move a step would look at every port and turn every face's replay once
+        // a message, and batching would save nothing. A round that was not empty took no record (a
+        // step from inside a callback, or while another thread hands a round out), and that step
+        // moves the links as any other. Only a link's input counts: what it took in one receive
+        // ends, where a group takes a datagram of its socket each step for as long as they come.
+        if was_idle && !self.samples.is_idle() && core.transport.links.holds_input() {
             return Stepped::Read;
         }
         let now_us = core.now_us();
@@ -6255,11 +6255,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// One take of the session for a step after `wait`: its links, what publishes handed to it,
     /// and whether a periodic job is due by the clock reading the step made. What publishes handed
     /// to the session while it was held leaves on this step too, so a program that only reads its
-    /// session sends it; let go of once the session is. Whether the session is still open, and
-    /// the time a job is due.
-    fn step_after(&self, wait: IdleWait) -> (bool, Option<u64>) {
+    /// session sends it; let go of once the session is. What the step came to, and the time a
+    /// job is due.
+    fn step_after(&self, wait: IdleWait) -> (Stepped, Option<u64>) {
         let Some(mut core) = self.live() else {
-            return (false, None);
+            return (Stepped::Closed, None);
         };
         #[cfg(feature = "threads")]
         let handed = matches!(wait, IdleWait::Input { .. });
@@ -6269,20 +6269,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             self.hand_back.handed_back();
         }
         let stepped = self.step(&mut core.0);
-        let open = stepped != Stepped::Closed;
-        self.input_held
-            .store(open && core.0.transport.holds_input(), Ordering::Relaxed);
+        self.input_held.store(
+            stepped != Stepped::Closed && core.0.transport.holds_input(),
+            Ordering::Relaxed,
+        );
         let jobs_due_ms = match stepped {
             Stepped::Moved(now_us) => core.0.jobs_due_at(now_us),
             Stepped::Read | Stepped::Closed => None,
         };
-        // What was handed to the session leaves with the step that moves the links, after the
-        // batch's last record.
+        // What was handed to the session leaves with the step that moves the links.
         #[cfg(any(feature = "listen", feature = "group"))]
         if stepped != Stepped::Read {
             self.send_handed_now(&mut core.0);
         }
-        (open, jobs_due_ms)
+        (stepped, jobs_due_ms)
     }
 
     /// The id of something the session holds and never names to a peer (`next_local`).
@@ -8394,27 +8394,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
         let (mut stepped, mut jobs_due_ms) = self.step_after(wait);
         let mut handed = self.deliver();
-        // One thread: the round took one record of what the links hold (`Round::has_room`), so
-        // the step goes on in this read, each record read once the callbacks of the one before
-        // returned, until the links hold nothing more or a step hands nothing out. The step that
-        // reads the last record moves the links and finds the jobs due (`Stepped`).
-        while !<CoopForm as ThreadForm>::OTHER_THREADS
-            && handed
-            && stepped
-            && self.input_held.load(Ordering::Relaxed)
+        // A step that read part of what a link took from its stack moved nothing (`Stepped::Read`):
+        // the read goes on with the rest, each part read once the callbacks of the one before
+        // returned, until the step that reads the last of it moves the links and finds the jobs
+        // due. One thread: the round took one record of what the links hold (`Round::has_room`),
+        // so the read goes on as well while the links hold input and a step hands something out.
+        while stepped == Stepped::Read
+            || (!<CoopForm as ThreadForm>::OTHER_THREADS
+                && handed
+                && stepped != Stepped::Closed
+                && self.input_held.load(Ordering::Relaxed))
         {
-            let (open, due) = self.step_after(IdleWait::None);
-            stepped = open;
+            let (next, due) = self.step_after(IdleWait::None);
+            stepped = next;
             jobs_due_ms = jobs_due_ms.or(due);
             handed = self.deliver();
         }
         if let Some(started_ms) = jobs_due_ms {
             self.run_due_tickers(started_ms);
         }
-        if stepped {
-            Ok(())
-        } else {
+        if stepped == Stepped::Closed {
             Err(SessionClosed)
+        } else {
+            Ok(())
         }
     }
 
