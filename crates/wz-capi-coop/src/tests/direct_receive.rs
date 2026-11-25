@@ -28,10 +28,7 @@ const COUNT: u8 = 3;
 /// nothing of it held in the round. The get consolidates nothing, so the reply is handed as it
 /// comes and not with what its leg held to its end. Turned red by a reply offered to the round
 /// (the read counts none) or handed out while the read holds the session.
-#[cfg(all(
-    feature = "query",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "query", not(wz_round)))]
 #[test]
 fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
     use wz_capi_port::ReplyCallback;
@@ -85,10 +82,7 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
 /// the table's order with the session free, nothing of it held in the round, and its Final follows
 /// the replies. Turned red by a query offered to the round (the read counts none), handed while the
 /// read holds the session, or a Final sent before a reply.
-#[cfg(all(
-    feature = "queryable",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "queryable", not(wz_round)))]
 #[test]
 fn a_query_is_handed_to_its_queryables_by_the_read_with_the_session_free() {
     use wz_capi_port::QueryableSink;
@@ -447,10 +441,7 @@ fn a_callback_that_closes_its_session_reads_its_key_until_it_returns() {
 /// session: a record it read would be handed to a callback inside another. The CONTROL is the
 /// put, which reaches the subscriber. Turned red by a read that steps the link from inside a
 /// delivery other than a read's.
-#[cfg(all(
-    feature = "local-subscriber",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "local-subscriber", not(wz_round)))]
 #[test]
 fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
     let router = Router::start(CatchAll::None);
@@ -488,10 +479,7 @@ fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
 /// nothing, and the put counts the first alone. The CONTROL is the first subscriber, handed the
 /// sample. Turned red by a put that begins a call on every row it reaches under one lock before
 /// the first callback runs.
-#[cfg(all(
-    feature = "local-subscriber",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "local-subscriber", not(wz_round)))]
 #[test]
 fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
     let router = Router::start(CatchAll::None);
@@ -586,10 +574,7 @@ fn a_stream_of_batches_still_sends_the_keep_alive_on_time() {
 /// wait. The CONTROL is the leg halfway to its deadline: still open. Turned red by a read on held
 /// input that leaves the look at the life or the pump's due work to the next read that waits
 /// (`CoopEngine::link_turn`), or that still reads the clock for its wait (`link_wait`).
-#[cfg(all(
-    feature = "query",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "query", not(wz_round)))]
 #[test]
 fn reads_on_held_input_still_serve_what_falls_due() {
     use wz_session_core::reply_sink::ReplyKind;
@@ -756,7 +741,7 @@ fn a_steady_stream_runs_no_bookkeeping_per_batch() {
 /// read, and no pass of a task runs for them: the read steps the link itself. Turned red by a read
 /// that stops the walk of a frame at each record and reads the rest of it again at a later take,
 /// or that runs the session's tasks to read it.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 #[test]
 fn a_frame_of_n_records_is_read_in_one_take() {
     let router = Router::start(CatchAll::None);
@@ -804,7 +789,7 @@ fn a_frame_of_n_records_is_read_in_one_take() {
 /// does not hold. Turned red by a step that holds the send place (the retraction's hold finds it
 /// held: a debug build fails, a release build owes it and sends no retraction), or by a retraction
 /// told twice.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 #[test]
 fn an_undeclaration_inside_the_reads_step_is_told_once() {
     let router = Router::start(CatchAll::None);
@@ -848,7 +833,7 @@ fn an_undeclaration_inside_the_reads_step_is_told_once() {
 /// again: the replay's lap holds the link's send place, which the step does not hold, and nothing
 /// is left owed for a later read. Turned red by a lap handed no wire inside the step
 /// (`CoopEngine::live_on_link`), which tells nothing, or by a redeclare that counts no face.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 #[test]
 fn a_redeclare_inside_the_reads_step_is_told() {
     let router = Router::start(CatchAll::None);
@@ -893,7 +878,7 @@ fn a_redeclare_inside_the_reads_step_is_told() {
 /// holds the link's receive part alone, so a send made there, or by another thread meanwhile,
 /// waits for no step and no callback. Turned red by a step that holds the send place while it
 /// hands records out (`CoopEngine::pump_turn` lending the place): the try finds it held.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 #[test]
 fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
     let router = Router::start(CatchAll::None);

@@ -30,11 +30,11 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
     type RouterPlace = super::RouterPlace;
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     type Router = SessionReassembly;
     // The Router lies beside the one link the read steps itself, apart from the session's state
     // (`super::direct`).
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     type Router = ();
 }
 

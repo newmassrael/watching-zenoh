@@ -259,7 +259,7 @@ struct Seen {
     subscribers: Vec<u64>,
     /// The id of each subscriber the router was told went, in the order the retractions arrived
     /// (the direct read's tests read it).
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     undeclared_subscribers: Vec<u64>,
     interests: usize,
     /// The Interest each subscriber declaration that answers one names, in the order they arrived.
@@ -570,11 +570,7 @@ fn run_router(
                                 wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
                                     subscriber,
                                 ) => seen.subscribers.push(subscriber.id),
-                                #[cfg(not(any(
-                                    feature = "threads",
-                                    feature = "listen",
-                                    feature = "group"
-                                )))]
+                                #[cfg(not(wz_round))]
                                 wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(
                                     gone,
                                 ) => seen.undeclared_subscribers.push(gone.id),
@@ -654,11 +650,7 @@ fn run_router(
                         wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) => {
                             seen.subscribers.push(subscriber.id);
                         }
-                        #[cfg(not(any(
-                            feature = "threads",
-                            feature = "listen",
-                            feature = "group"
-                        )))]
+                        #[cfg(not(wz_round))]
                         wz_codecs::lent::DeclareVariant::CodecZenohUndeclSubscriber(gone) => {
                             seen.undeclared_subscribers.push(gone.id);
                         }
@@ -1407,11 +1399,7 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
         engine.takes.core.load(Ordering::SeqCst),
     );
     let _ = SessionDrive::read(&*engine, false);
-    let wait_reads = usize::from(cfg!(not(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group"
-    ))));
+    let wait_reads = usize::from(cfg!(not(wz_round)));
     assert_eq!(
         engine.clock_reads() - reads,
         1 + wait_reads,
@@ -3795,7 +3783,7 @@ mod replay;
 #[cfg(wz_round)]
 mod round;
 // The cells a link's task takes: a build whose read steps its one link itself runs none.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",
@@ -3820,10 +3808,6 @@ mod tx_pool;
 /// list and not the other turns this red.
 #[test]
 fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
-    let queues = cfg!(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group"
-    ));
+    let queues = cfg!(wz_round);
     assert_eq!(cfg!(wz_round), queues);
 }

@@ -29,7 +29,7 @@ use super::FacePlane;
 use super::GetPlane;
 #[cfg(feature = "queryable")]
 use super::QueryPlane;
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 use super::Registry;
 #[cfg(feature = "queryable")]
 use super::{query, FinalHold, RefusedFinal};
@@ -81,7 +81,7 @@ pub(super) struct PlacedTables {
 /// documentation.
 pub(crate) struct StatePlaces {
     /// Where the registry is lent to the dispatch of a link that runs as a task.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     registry_lend: MaybeUninit<LendCell<Registry>>,
     /// Where the reassembly Router is lent to the links' receives.
     router_lend: MaybeUninit<LendCell<SessionReassembly>>,
@@ -142,7 +142,7 @@ impl StatePlaces {
     pub(super) unsafe fn steps(at: NonNull<Self>) -> StepPlaces {
         let at = at.as_ptr();
         StepPlaces {
-            #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+            #[cfg(wz_round)]
             // SAFETY: the caller's contract; the field is aligned for a cell and the owner's alone.
             registry: unsafe {
                 Placed::written_at(value_at(addr_of_mut!((*at).registry_lend)), |cell| {

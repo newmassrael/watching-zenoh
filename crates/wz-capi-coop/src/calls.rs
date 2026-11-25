@@ -22,7 +22,7 @@ use crate::engine::SubscriberCall;
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ),
-    any(feature = "threads", feature = "listen", feature = "group")
+    wz_round
 ))]
 use crate::engine::WatchCall;
 use crate::form::CoopForm;
@@ -51,7 +51,7 @@ impl RoundCalls for CoopCalls {
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ),
-        any(feature = "threads", feature = "listen", feature = "group")
+        wz_round
     ))]
     type Watch = WatchCall;
     #[cfg(not(all(
@@ -59,7 +59,7 @@ impl RoundCalls for CoopCalls {
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ),
-        any(feature = "threads", feature = "listen", feature = "group")
+        wz_round
     )))]
     type Watch = core::convert::Infallible;
     #[cfg(feature = "query")]
@@ -87,7 +87,7 @@ impl RoundCalls for CoopCalls {
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ),
-        any(feature = "threads", feature = "listen", feature = "group")
+        wz_round
     ))]
     type Watches = wz_session_core::session_tables::Present;
     #[cfg(not(all(
@@ -95,7 +95,7 @@ impl RoundCalls for CoopCalls {
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ),
-        any(feature = "threads", feature = "listen", feature = "group")
+        wz_round
     )))]
     type Watches = wz_session_core::session_tables::Absent;
     #[cfg(feature = "local-subscriber")]
@@ -121,15 +121,9 @@ impl PlaneCalls for CoopCalls {
     type LocalAnswers = wz_session_core::session_tables::Absent;
     // The read that hands each record out as it is read hands a peer's reply to its get itself
     // (`engine::replies`).
-    #[cfg(any(
-        feature = "local-queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
+    #[cfg(any(feature = "local-queryable", not(wz_round)))]
     type Captures = wz_session_core::session_tables::Present;
-    #[cfg(not(any(
-        feature = "local-queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    )))]
+    #[cfg(not(any(feature = "local-queryable", not(wz_round))))]
     type Captures = wz_session_core::session_tables::Absent;
     type Queues = crate::engine::CoopLocks;
 }
@@ -195,7 +189,7 @@ impl RoundCall for QueryableCall {
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ),
-    any(feature = "threads", feature = "listen", feature = "group")
+    wz_round
 ))]
 impl RoundCall for WatchCall {
     fn end(self) -> bool {
@@ -208,7 +202,7 @@ impl RoundCall for WatchCall {
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ),
-    any(feature = "threads", feature = "listen", feature = "group")
+    wz_round
 ))]
 impl wz_session_core::round::WatchCall for WatchCall {
     fn same_row(&self, other: &Self) -> bool {

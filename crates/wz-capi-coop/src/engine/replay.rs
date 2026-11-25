@@ -662,7 +662,7 @@ impl Retract<'_> {
 /// `tx`, which the caller holds with the link's place, taken before the session's lock
 /// (`CoopEngine::live_on_link`): the send neither waits nor is owed, so the retraction is told
 /// as it is made. Nothing while the place holds no wire.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 fn tell_on<C: ClockSource + 'static>(
     _wire: &impl LendsSession<Session = super::LinkSession<C>>,
     tx: super::LinkTx<'_, C>,
@@ -677,7 +677,7 @@ fn tell_on<C: ClockSource + 'static>(
 /// lock alone reaches where each record holds its link, as every send of the session on a face
 /// is made there ([`super::send_on`]). It leaves the face owed nothing: a replay tells only
 /// declarations that stand, so a retraction is told as it is made or not at all.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 fn tell_on<C: ClockSource + 'static>(
     wire: &impl LendsSession<Session = super::LinkSession<C>>,
     _tx: super::LinkTx<'_, C>,

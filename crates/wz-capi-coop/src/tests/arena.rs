@@ -225,14 +225,14 @@ fn host_plan(config: &CoopConfig) -> Result<ArenaPlan, ArenaRefused> {
 
 /// The runtime tables a session `config` opens, as the engine's form sizes them: a form whose
 /// links run as tasks sizes their cells by the clock's task, the one-link read reserves none.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 fn runtime_tables(config: &CoopConfig) -> crate::engine::RuntimeTables {
     crate::engine::RuntimeTables::of::<PosixClock>(config)
 }
 
 /// The runtime tables a session `config` opens, as the engine's form sizes them: a form whose
 /// links run as tasks sizes their cells by the clock's task, the one-link read reserves none.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 fn runtime_tables(config: &CoopConfig) -> crate::engine::RuntimeTables {
     crate::engine::RuntimeTables::of(config)
 }
@@ -863,10 +863,7 @@ fn a_build_that_puts_nothing_in_the_round_lays_out_none_of_it() {
 fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    #[cfg(any(
-        not(feature = "runtime-plan"),
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
+    #[cfg(any(not(feature = "runtime-plan"), not(wz_round)))]
     assert!(
         built.rows().all(|row| row.part() != "registry lend"),
         "a read that steps its one link, or a region, lends no registry from the arena"
@@ -878,7 +875,7 @@ fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
     );
     #[cfg(feature = "runtime-plan")]
     let lends: &[(&str, usize)] = &[
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(wz_round)]
         ("registry lend", crate::engine::REGISTRY_LEND_BYTES),
         ("router lend", crate::engine::ROUTER_LEND_BYTES),
     ];

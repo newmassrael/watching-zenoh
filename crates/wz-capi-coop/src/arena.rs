@@ -160,10 +160,7 @@ use crate::engine::LegHold;
 use crate::engine::LegSink;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-#[cfg(all(
-    feature = "runtime-plan",
-    any(feature = "threads", feature = "listen", feature = "group")
-))]
+#[cfg(all(feature = "runtime-plan", wz_round))]
 use crate::engine::REGISTRY_LEND_BYTES;
 #[cfg(feature = "runtime-plan")]
 use crate::engine::ROOM_PLACE_BYTES;
@@ -504,12 +501,8 @@ const LANE_ROWS: usize =
 const LANE_ROWS: usize = 0;
 /// The places the session lends its Router and, where its links run as tasks, its registry in for
 /// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
-const STEP_LEND_ROWS: usize = cfg!(feature = "runtime-plan") as usize
-    * (1 + cfg!(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group"
-    )) as usize);
+const STEP_LEND_ROWS: usize =
+    cfg!(feature = "runtime-plan") as usize * (1 + cfg!(wz_round) as usize);
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
@@ -1909,10 +1902,7 @@ impl ArenaPlan {
         // The places the session lends its registry and its Router in for a step, a place each
         // (`crate::engine::StepPlaces`); a read that steps its one link itself dispatches under the
         // session's lock and lends no registry.
-        #[cfg(all(
-            feature = "runtime-plan",
-            any(feature = "threads", feature = "listen", feature = "group")
-        ))]
+        #[cfg(all(feature = "runtime-plan", wz_round))]
         self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
         #[cfg(feature = "runtime-plan")]
         self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);

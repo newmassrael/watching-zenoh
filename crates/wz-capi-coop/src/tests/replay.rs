@@ -390,7 +390,7 @@ fn a_pace_the_build_cannot_reach_is_refused_and_changes_nothing() {
 /// declaration was made in that window. Turned red, in a build that reaches no pace, by an
 /// announce that tells such a link at once (`announce_on`'s `emits_now`): the peer hears it
 /// twice.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 #[test]
 fn a_declaration_made_before_the_first_lap_is_told_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
