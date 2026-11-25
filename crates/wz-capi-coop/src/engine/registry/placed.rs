@@ -302,14 +302,10 @@ mod tests {
         let registry = unsafe {
             addr_of!((*StateRegion::registry_at(block.0).as_ptr()).registry).cast::<Registry>()
         };
-        // SAFETY: the application's tables and the sets' table, fields of the placed registry, each
-        // a value at its empty or placed state, read and not written.
-        let (tables, sets) = unsafe {
-            (
-                &*addr_of!((*registry).app.tables),
-                &*addr_of!((*registry).sets),
-            )
-        };
+        // SAFETY: the application's part and the sets' table, fields of the placed registry, each
+        // a value at its empty or placed state, referenced alone and not written.
+        let (app, sets) = unsafe { (&*addr_of!((*registry).app), &*addr_of!((*registry).sets)) };
+        let tables = &app.tables;
         assert_eq!(tables.keyexprs().capacity(), rows.keyexprs);
         assert_eq!(tables.subscribers().capacity(), rows.subscribers);
         assert!(tables.subscribers().is_empty());

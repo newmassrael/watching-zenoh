@@ -28,8 +28,6 @@ use crate::engine::SubscriberCall;
     any(test, feature = "threads", feature = "listen", feature = "group")
 ))]
 pub(crate) use wz_session_core::round::AnswersQueries;
-#[cfg(feature = "query")]
-pub(crate) use wz_session_core::round::LegHolders;
 #[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) use wz_session_core::round::ReadRoom;
 pub(crate) use wz_session_core::round::RoundRows;
