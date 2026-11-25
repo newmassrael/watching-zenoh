@@ -1507,66 +1507,27 @@ const fn counts_of(limits: &SessionLimits, held: &Held) -> Result<Counts, Unplan
 /// nor refuses it. Refused only by counts past the address space, or by a limit of no bound over
 /// an entity the build has a pool of.
 const fn open_plan(limits: &SessionLimits, held: &Held) -> Result<Plan, Unplanned> {
-    // Copied whole from the build's plan and then given the counts the open states: a frame of
-    // the many pools at none is written out pool by pool where it is copied, and the build's plan
-    // differs from the open's in no pool the open does not write.
-    plan_over(OPEN_BASE, limits, held)
-}
-
-/// `frame` with the counts an open under `limits` that states `held` makes written over it:
-/// each held value's pool, and each pool of an entity the build can lay ([`ENTITY_POOLS`]), at
-/// none included. Every other pool keeps the frame's: [`OPEN_FRAME`]'s, which the build's plan
-/// keeps too, so the build's plan is a frame of every open's.
-const fn plan_over(mut plan: Plan, limits: &SessionLimits, held: &Held) -> Result<Plan, Unplanned> {
     let entities = planned!(pooled_entities(limits, caps::HELD_SESSIONS));
+    // Copied whole and then given the counts the open states, each in its own pool: a plan written
+    // pool by pool spells out the count of every pool, the many an open leaves at none included.
+    let mut plan = OPEN_FRAME;
     let mut rows: (&[HeldRow], &[usize]) = (&HELD_ROWS, &held.0);
     while let ([row, rows_rest @ ..], [count, counts_rest @ ..]) = rows {
         put(&mut plan.slots, row.pool, *count);
         rows = (rows_rest, counts_rest);
     }
-    // The entities' pools, each written whatever the frame holds there; which pools they are is
-    // known when the library is compiled, so no other pool is asked.
+    // The entities' pools, which the frame leaves at none: a pool the build lays of no entity is
+    // none here too, and its count, known when the library is compiled, writes nothing.
     let listed = Plan::listed(&entities).slots;
-    let mut pools: (&mut [usize], &[usize], &[usize]) = (&mut plan.slots, &listed, &ENTITY_POOLS);
-    while let ([slot, slots_rest @ ..], [count, counts_rest @ ..], [entity, entities_rest @ ..]) =
-        pools
-    {
-        if *entity != 0 {
+    let mut pools: (&mut [usize], &[usize]) = (&mut plan.slots, &listed);
+    while let ([slot, slots_rest @ ..], [count, counts_rest @ ..]) = pools {
+        if *count != 0 {
             *slot = *count;
         }
-        pools = (slots_rest, counts_rest, entities_rest);
+        pools = (slots_rest, counts_rest);
     }
     Ok(plan)
 }
-
-/// The pools an open writes an entity's count into, not zero where it does: each pool of an
-/// entity the build lays a pool of ([`Plan::listed`]), as one of each entity lists them.
-const ENTITY_POOLS: [usize; POOLS] = Plan::listed(&Counts {
-    publishers: 1,
-    subscribers: 1,
-    queryables: 1,
-    liveliness_tokens: 1,
-    liveliness_subscribers: 1,
-    queriers: 1,
-    keyexprs: 1,
-    gets: 1,
-    liveliness_gets: 1,
-    matching_listeners: 1,
-    decl_watches: 1,
-    transport_events_listeners: 1,
-    advanced_publishers: 1,
-    advanced_subscribers: 1,
-    link_events_listeners: 1,
-    ..Counts::NONE
-})
-.slots;
-
-/// The frame an open's plan is written over ([`open_plan`]): the build's plan, or the frame it
-/// is written over itself where the build's counts make no pools.
-const OPEN_BASE: Plan = match BUILT_PLAN {
-    Ok(plan) => plan,
-    Err(_) => OPEN_FRAME,
-};
 
 /// The plan of an open before the counts it states: `HELD_SESSIONS` sessions' places and
 /// `HELD_CONFIGS` configs, every other pool at none ([`open_plan`]).
@@ -1717,11 +1678,10 @@ fn reserve_from_heap(plan: &Plan) -> Option<Pools> {
 /// the counts are the build's constants and the limits it opens sessions under, so nothing of it
 /// is left to the first object a program makes, which lays its own stage's pools of it
 /// ([`lay_stage`]).
-const BUILT_PLAN: Result<Plan, Unplanned> =
-    match plan_over(OPEN_FRAME, &session_limits(), &Held::BUILD) {
-        Ok(plan) => plan.checked(),
-        Err(unplanned) => Err(unplanned),
-    };
+const BUILT_PLAN: Result<Plan, Unplanned> = match open_plan(&session_limits(), &Held::BUILD) {
+    Ok(plan) => plan.checked(),
+    Err(unplanned) => Err(unplanned),
+};
 
 /// The plan an object taken before any open reserves its stage's pools from: the build's
 /// ([`BUILT_PLAN`]).
@@ -2946,39 +2906,6 @@ mod tests {
             }
         }
         assert!(compared >= 3, "the opening limits' counts make pools");
-    }
-
-    /// The build's plan differs from the frame of an open only in the pools an open writes, its
-    /// held values' and its entities', so an open's plan written over the build's is the one
-    /// written over the frame, an entity stated at none and every held value at none included.
-    /// Turned red by an entity's pool left out of `ENTITY_POOLS`, which an open would leave at
-    /// the build's count.
-    #[test]
-    fn an_opens_plan_over_the_builds_is_its_plan_over_the_frame() {
-        let built = BUILT_PLAN.expect("the build's counts make pools");
-        assert_eq!(OPEN_BASE, built);
-        for (pool, (built, frame)) in built.slots.iter().zip(OPEN_FRAME.slots.iter()).enumerate() {
-            if built != frame {
-                assert!(
-                    HELD_ROWS.iter().any(|row| row.pool == pool) || ENTITY_POOLS[pool] != 0,
-                    "pool {pool}"
-                );
-            }
-        }
-        let mut limits = alloc::vec![session_limits()];
-        let mut none = session_limits();
-        if none.select_max_declared_keyexprs(Quota::at_most(0)).is_ok() {
-            limits.push(none);
-        }
-        for limits in &limits {
-            for held in [Held::BUILD, Held([0; HELD]), Held([1; HELD])] {
-                assert_eq!(
-                    plan_over(OPEN_BASE, limits, &held),
-                    plan_over(OPEN_FRAME, limits, &held),
-                    "{limits:?} {held:?}"
-                );
-            }
-        }
     }
 
     /// The build's counts: its sessions, each holding as many of each entity as the session's
