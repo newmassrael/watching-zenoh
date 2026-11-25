@@ -58,9 +58,9 @@ use core::fmt;
 // The split the request plane uses: the host profile has the native atomics, the `no_std` profile
 // gets the critical-section ones for the cores that have none.
 #[cfg(not(feature = "no_std"))]
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::AtomicU32;
 #[cfg(feature = "no_std")]
-use portable_atomic::AtomicU64;
+use portable_atomic::AtomicU32;
 
 use crate::bounded::{
     Arena, CapacityFull, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Region,
@@ -629,20 +629,33 @@ impl<Key: KeyBacking> KeyexprRow<Key> {
 ///
 /// The count is the declaration's one count: the table's own declarations and entities take and
 /// give back holds of it under the session's lock, and a holder that keeps the row's address takes
-/// and gives back its own here, by the row and the id it holds. The last hold is let go of only by
-/// the table ([`SessionTables::undeclare_keyexpr`]), which removes the row and has the declaration
-/// retracted.
+/// and gives back its own here, by the row it holds. The last hold is let go of only by the table
+/// ([`SessionTables::undeclare_keyexpr`]), which removes the row and has the declaration retracted.
+///
+/// A holder names the row by its address, so the count's word carries only what tells the row's
+/// declarations apart: the generation of the row's slot, which moves each time a row leaves it.
+/// A hold kept past a retraction that took the declaration whatever held it is then told from the
+/// declaration that took the row next, up to the bound the generation has: a stale hold given back
+/// after the slot was taken again a multiple of 65536 times reads as the new one's. The generation
+/// is not held at its last value to close that: a slot that stopped being taken would leave a
+/// bounded table one row short for good, a refusal every later declaration would meet, against a
+/// stale holder outliving that many declarations of one row, which only a program that retracts a
+/// key it still holds can make.
 #[derive(Debug)]
 pub struct KeyexprHead {
-    /// The handle of the row, generation and all, in the upper half, the declaration's id and the
-    /// count of its holders in the lower: one word, so a hold taken or given back at the address
-    /// is of the declaration its holder names, and of none that took the row's place since, even
-    /// one of the same id after a retraction whatever held the first.
-    count: AtomicU64,
+    /// The generation of the row's slot in the upper half and the count of the declaration's
+    /// holders in the lower: one word of the machine's atomic width, so a hold taken or given back
+    /// at the address is of the declaration its holder took it of.
+    count: AtomicU32,
     /// The length of the declared key, in bytes.
     key_len: u32,
     /// The address of the tables the row lies in.
     table: usize,
+    /// The id the wire names the declaration by.
+    id: ExprId,
+    /// The index half of the row's handle, which the address keeps whatever its generation; `0`
+    /// until the table names the row ([`Self::name_row`]).
+    place: u16,
 }
 
 /// Why a declaration's row took no more hold at its address ([`KeyexprHead::retain`]).
@@ -650,69 +663,74 @@ pub struct KeyexprHead {
 pub enum RowHoldRefused {
     /// The count holds as many holders as it can.
     Full,
-    /// The row holds no declaration of the row and id asked: its last holder let go of it, or a
+    /// The row holds no declaration at the generation asked: its last holder let go of it, or a
     /// retraction took it whatever held it, whatever took the row's place since.
     Released,
 }
 
 impl KeyexprHead {
-    /// The head of a declaration of `id` on a key of `key_len` bytes in the tables at `table`, held
-    /// once. It names no row until the table names the one it was put in ([`Self::name_row`]).
+    /// The head of a declaration of `id` on a key of `key_len` bytes in the tables at `table`. It
+    /// is held by none, and names no row, until the table names the row it was put in
+    /// ([`Self::name_row`]): a hold kept of the row's last declaration takes and gives back
+    /// nothing in between.
     fn new(id: ExprId, key_len: usize, table: usize) -> Self {
         Self {
-            count: AtomicU64::new(Self::word(0, id, 1)),
+            count: AtomicU32::new(0),
             key_len: u32::try_from(key_len).unwrap_or(u32::MAX),
             table,
+            id,
+            place: 0,
         }
     }
 
-    /// Name `row` as the row this head lies in. The table calls it once, after the insert and
-    /// before anyone else can read the address, so nothing races the store.
-    fn name_row(&self, row: KeyexprHandle) {
-        let now = self.count.load(core::sync::atomic::Ordering::Relaxed);
+    /// Name `row` as the row this head lies in, held once by the table that declared it, at
+    /// `row`'s generation.
+    fn name_row(&mut self, row: KeyexprHandle) {
+        let bits = row.to_bits().get();
+        self.place = (bits & 0xffff) as u16;
         self.count.store(
-            Self::word(row.to_bits().get(), Self::id_of(now), Self::holds_of(now)),
+            Self::word(Self::generation_of(row), 1),
             core::sync::atomic::Ordering::Release,
         );
     }
 
-    /// The count's word of `holds` holders of the declaration `id` in the row whose handle's bits
-    /// are `row` (`0` for none).
-    fn word(row: u32, id: ExprId, holds: KeyexprHolds) -> u64 {
-        (u64::from(row) << 32) | (u64::from(id) << 16) | u64::from(holds)
+    /// The count's word of `holds` holders at `generation`.
+    fn word(generation: u16, holds: KeyexprHolds) -> u32 {
+        (u32::from(generation) << 16) | u32::from(holds)
     }
 
-    /// The bits of the row's handle in `word`, `0` while no row is named.
-    fn row_of(word: u64) -> u32 {
-        (word >> 32) as u32
+    /// The generation `row` was taken at.
+    fn generation_of(row: KeyexprHandle) -> u16 {
+        (row.to_bits().get() >> 16) as u16
     }
 
-    /// The declaration's id in `word`.
-    fn id_of(word: u64) -> ExprId {
-        (word >> 16) as ExprId
+    /// The generation in `word`.
+    fn generation_in(word: u32) -> u16 {
+        (word >> 16) as u16
     }
 
     /// The count of holders in `word`.
-    fn holds_of(word: u64) -> KeyexprHolds {
+    fn holds_of(word: u32) -> KeyexprHolds {
         (word & 0xffff) as KeyexprHolds
     }
 
-    /// Whether `word` counts the declaration `id` in `row`.
-    fn names(word: u64, row: KeyexprHandle, id: ExprId) -> bool {
-        Self::row_of(word) == row.to_bits().get() && Self::id_of(word) == id
+    /// The handle of the row at the generation in `word`, `None` before the row is named.
+    fn row_in(&self, word: u32) -> Option<KeyexprHandle> {
+        core::num::NonZeroU32::new(
+            (u32::from(Self::generation_in(word)) << 16) | u32::from(self.place),
+        )
+        .and_then(KeyexprHandle::from_bits)
     }
 
     /// The id the wire names the declaration by.
     pub fn id(&self) -> ExprId {
-        Self::id_of(self.count.load(core::sync::atomic::Ordering::Relaxed))
+        self.id
     }
 
-    /// The row the head lies in, `None` before the table names it.
+    /// The row the head lies in, at the generation its count names, `None` before the table
+    /// names it.
     pub fn row(&self) -> Option<KeyexprHandle> {
-        core::num::NonZeroU32::new(Self::row_of(
-            self.count.load(core::sync::atomic::Ordering::Relaxed),
-        ))
-        .and_then(KeyexprHandle::from_bits)
+        self.row_in(self.count.load(core::sync::atomic::Ordering::Relaxed))
     }
 
     /// Its holders now.
@@ -726,29 +744,30 @@ impl KeyexprHead {
         self.key_len as usize
     }
 
-    /// One more hold of the declaration `id` in `row`, for a holder that already holds one:
-    /// refused, taking none, when the count holds as many as it can, and when the row holds no
-    /// declaration of `id` at `row`'s generation (its last holder let go of it, or a retraction
-    /// took it, whatever took the row's place since).
-    pub fn retain(&self, row: KeyexprHandle, id: ExprId) -> Result<(), RowHoldRefused> {
-        self.take_hold(|now| Self::names(now, row, id)).map(|_| ())
+    /// One more hold of the declaration in `row`, for a holder that already holds one: refused,
+    /// taking none, when the count holds as many as it can, and when the row holds no declaration
+    /// at `row`'s generation (its last holder let go of it, or a retraction took it, whatever
+    /// took the row's place since).
+    pub fn retain(&self, row: KeyexprHandle) -> Result<(), RowHoldRefused> {
+        let generation = Self::generation_of(row);
+        self.take_hold(|now| Self::generation_in(now) == generation)
+            .map(|_| ())
     }
 
     /// One more hold of whatever declaration the row holds now, for a holder that names it by
-    /// the address alone while another holder keeps it standing: the row and the id it took, to
-    /// give back by ([`Self::release_shared`]). Refused as [`Self::retain`] is, and for a head no
-    /// row is named for yet.
+    /// the address alone while another holder keeps it standing: the row, at the generation the
+    /// hold was taken at, and the declaration's id, to give it back by ([`Self::release_shared`]).
+    /// Refused as [`Self::retain`] is, and for a head no row is named for yet.
     pub fn hold(&self) -> Result<(KeyexprHandle, ExprId), RowHoldRefused> {
-        let taken = self.take_hold(|now| Self::row_of(now) != 0)?;
-        core::num::NonZeroU32::new(Self::row_of(taken))
-            .and_then(KeyexprHandle::from_bits)
-            .map(|row| (row, Self::id_of(taken)))
+        let taken = self.take_hold(|_| self.place != 0)?;
+        self.row_in(taken)
+            .map(|row| (row, self.id))
             .ok_or(RowHoldRefused::Released)
     }
 
     /// One more hold when `ours` reads the word as the declaration the holder asks for: the word
     /// the hold was added to.
-    fn take_hold(&self, ours: impl Fn(u64) -> bool) -> Result<u64, RowHoldRefused> {
+    fn take_hold(&self, ours: impl Fn(u32) -> bool) -> Result<u32, RowHoldRefused> {
         let mut now = self.count.load(core::sync::atomic::Ordering::Relaxed);
         loop {
             let holds = Self::holds_of(now);
@@ -758,7 +777,7 @@ impl KeyexprHead {
             if holds == KeyexprHolds::MAX {
                 return Err(RowHoldRefused::Full);
             }
-            // Under the bound, so the count does not carry into the id.
+            // Under the bound, so the count does not carry into the generation.
             match self.count.compare_exchange_weak(
                 now,
                 now.wrapping_add(1),
@@ -771,15 +790,16 @@ impl KeyexprHead {
         }
     }
 
-    /// Let go of one hold of the declaration `id` in `row` when it is not the last: `false`,
-    /// taking nothing, when it is the last, or the row holds no declaration of `id` at `row`'s
-    /// generation. The last is let go of by the table, under the session's lock
+    /// Let go of one hold of the declaration in `row` when it is not the last: `false`, taking
+    /// nothing, when it is the last, or the row holds no declaration at `row`'s generation. The
+    /// last is let go of by the table, under the session's lock
     /// ([`SessionTables::undeclare_keyexpr`]), which removes the row: a count that reached none
     /// here would leave a row no one removes.
-    pub fn release_shared(&self, row: KeyexprHandle, id: ExprId) -> bool {
+    pub fn release_shared(&self, row: KeyexprHandle) -> bool {
+        let generation = Self::generation_of(row);
         let mut now = self.count.load(core::sync::atomic::Ordering::Relaxed);
         loop {
-            if !Self::names(now, row, id) || Self::holds_of(now) <= 1 {
+            if Self::generation_in(now) != generation || Self::holds_of(now) <= 1 {
                 return false;
             }
             match self.count.compare_exchange_weak(
@@ -1844,7 +1864,7 @@ impl<P: Storage> Declaring<'_, P> {
     fn hold(&mut self, prefix: Option<KeyexprHandle>) {
         if let Some(prefix) = prefix {
             if let Some(row) = self.keyexprs.get(prefix) {
-                let _ = row.head.retain(prefix, row.id());
+                let _ = row.head.retain(prefix);
             }
         }
     }
@@ -1999,7 +2019,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             self.keyexprs
                 .iter()
                 .find(|(_, row)| row.holds() > 0 && text(&row.key) == key)
-                .map(|(handle, row)| (handle, row.id(), row.head.retain(handle, row.id())))
+                .map(|(handle, row)| (handle, row.id(), row.head.retain(handle)))
         };
         match found {
             Some((handle, id, Ok(()))) => {
@@ -2025,7 +2045,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 head: KeyexprHead::new(id, key.len(), table),
             })
             .map_err(|_| RegisterError::TableFull)?;
-        if let Some(row) = self.keyexprs.get(handle) {
+        if let Some(row) = self.keyexprs.get_mut(handle) {
             row.head.name_row(handle);
         }
         Ok(KeyexprDeclared {
@@ -2047,7 +2067,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn retain_keyexpr(&self, handle: KeyexprHandle) -> bool {
         self.keyexprs
             .get(handle)
-            .is_some_and(|row| row.head.retain(handle, row.id()).is_ok())
+            .is_some_and(|row| row.head.retain(handle).is_ok())
     }
 
     /// Whether `head` is of a row of these tables: the address its row names as its tables'
@@ -2071,7 +2091,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         // Its count goes to none first: a holder at the row's address takes no more hold of it and
         // gives its own back to the table, which finds the row gone.
         row.head.count.store(
-            KeyexprHead::word(0, id, 0),
+            KeyexprHead::word(KeyexprHead::generation_of(handle), 0),
             core::sync::atomic::Ordering::Release,
         );
         let _ = entry.remove();

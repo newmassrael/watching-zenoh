@@ -3399,18 +3399,18 @@ fn region_tables_of_zero_bytes_placed_by_their_description_declare_and_undeclare
     }
 }
 
-/// A declaration's row is counted at its own address by the id its holder holds: one more hold
-/// there up to the count's bound, the holds given back there down to the last, which only the
-/// table lets go of; a hold for another id is neither taken nor given back there, and the row names
-/// its own tables and no other.
+/// A declaration's row is counted at its own address by the generation its holder's row was taken
+/// at: one more hold there up to the count's bound, the holds given back there down to the last,
+/// which only the table lets go of; a hold at another generation is neither taken nor given back
+/// there, and the row names its own tables and no other.
 ///
 /// # Control
 ///
 /// A `retain` that does not stop at the bound reds the `Full` assertion; a `release_shared` that
 /// lets go of the last reds the assertion that the row stands until `undeclare_keyexpr`; a count
-/// that does not carry the id reds the assertions on the other id.
+/// that does not carry the generation reds the assertions on the other generation.
 #[test]
-fn a_rows_count_is_taken_at_its_address_by_its_id_and_its_last_hold_by_the_table() {
+fn a_rows_count_is_taken_at_its_address_by_its_generation_and_its_last_hold_by_the_table() {
     let mut tables = Tables::new();
     let other = Tables::new();
     let declared = tables.declare_keyexpr("demo/row").unwrap();
@@ -3427,26 +3427,23 @@ fn a_rows_count_is_taken_at_its_address_by_its_id_and_its_last_hold_by_the_table
         (head.id(), head.key_len(), head.holds()),
         (declared.id, "demo/row".len(), 1)
     );
-    let stranger = declared.id.wrapping_add(1);
-    assert_eq!(
-        head.retain(declared.handle, stranger),
-        Err(RowHoldRefused::Released)
-    );
-    assert_eq!(head.retain(declared.handle, declared.id), Ok(()));
-    assert!(!head.release_shared(declared.handle, stranger));
+    // The same row at another generation: a declaration that left it, or one that took it since.
+    let stranger = core::num::NonZeroU32::new(declared.handle.to_bits().get() ^ 0x0001_0000)
+        .and_then(KeyexprHandle::from_bits)
+        .unwrap();
+    assert_eq!(head.retain(stranger), Err(RowHoldRefused::Released));
+    assert_eq!(head.retain(declared.handle), Ok(()));
+    assert!(!head.release_shared(stranger));
     assert_eq!(head.holds(), 2);
     while head.holds() < KeyexprHolds::MAX {
-        head.retain(declared.handle, declared.id).unwrap();
+        head.retain(declared.handle).unwrap();
     }
-    assert_eq!(
-        head.retain(declared.handle, declared.id),
-        Err(RowHoldRefused::Full)
-    );
+    assert_eq!(head.retain(declared.handle), Err(RowHoldRefused::Full));
     assert!(
         !tables.retain_keyexpr(declared.handle),
         "the table's own hold meets the same bound"
     );
-    while head.release_shared(declared.handle, declared.id) {}
+    while head.release_shared(declared.handle) {}
     assert_eq!(
         head.holds(),
         1,
@@ -3457,50 +3454,72 @@ fn a_rows_count_is_taken_at_its_address_by_its_id_and_its_last_hold_by_the_table
     assert!(tables.keyexprs().is_empty());
 }
 
-/// A row a declaration was retracted from whatever held it, taken again by a declaration of the
-/// same id, counts the new declaration's holders only: a hold of the first given back at the
-/// address lets go of nothing, and none is taken there for it. The row's generation is in the
-/// count's word, so the id coming round again names no hold of the first.
+/// A row a declaration was retracted from whatever held it, taken again by the next declaration,
+/// counts the new declaration's holders only: a hold of the first given back at the address lets
+/// go of nothing, and none is taken there for it, as long as the slot was taken again fewer than
+/// 65536 times since. At 65536 the generation in the count's word has come round, and the stale
+/// hold reads as the new declaration's: the bound [`KeyexprHead`] states, pinned here.
 ///
 /// # Control
 ///
-/// A word that names the id alone, and not the row's handle, reds the assertions on the first
-/// declaration's hold after the second declaration took its row.
+/// A word that does not carry the slot's generation reds the assertions on the first
+/// declaration's hold after the second declaration took its row; a generation wider or narrower
+/// than the handle's reds the last assertion.
 #[test]
-fn a_hold_of_a_retracted_declaration_lets_go_of_nothing_in_the_row_that_took_its_place() {
+fn a_retracted_declarations_hold_spares_its_rows_next_declaration_below_65536_reuses() {
     let mut tables = Tables::new();
     let first = tables.declare_keyexpr("demo/row/first").unwrap();
     let at: *const KeyexprHead = tables.keyexprs().get(first.handle).unwrap().head();
-    // SAFETY: the table keeps its rows where they were put; the head is read here while the first
-    // declaration stands, and below once the second one stands in the same row, to the end.
+    // SAFETY: the table keeps its rows where they were put; the head is read while the first
+    // declaration stands and while a later one stands in the same row, never in between.
     let head = unsafe { &*at };
     assert_eq!(head.row(), Some(first.handle), "the head names its row");
-    assert_eq!(head.retain(first.handle, first.id), Ok(()));
+    assert_eq!(head.retain(first.handle), Ok(()));
     assert_eq!(tables.retract_keyexpr(first.handle), Some(first.id));
-    let second = tables
-        .declare_keyexpr_where("demo/row/second", false, |id| id == first.id)
-        .unwrap();
+    let second = tables.declare_keyexpr("demo/row/second").unwrap();
     let again: *const KeyexprHead = tables.keyexprs().get(second.handle).unwrap().head();
     assert!(
         core::ptr::eq(at, again),
         "the second declaration takes the first's row"
     );
-    assert_eq!(second.id, first.id, "and its id");
     assert_ne!(second.handle, first.handle, "at the row's next generation");
     assert_eq!(head.row(), Some(second.handle));
-    assert_eq!(head.retain(second.handle, second.id), Ok(()));
+    assert_eq!(head.id(), second.id);
+    assert_eq!(head.retain(second.handle), Ok(()));
     assert!(
-        !head.release_shared(first.handle, first.id),
+        !head.release_shared(first.handle),
         "the first declaration's hold lets go of nothing"
     );
     assert_eq!(
-        head.retain(first.handle, first.id),
+        head.retain(first.handle),
         Err(RowHoldRefused::Released),
         "and takes none"
     );
     assert_eq!(head.holds(), 2);
     assert_eq!(head.hold(), Ok((second.handle, second.id)));
     assert_eq!(head.holds(), 3);
+    assert_eq!(tables.retract_keyexpr(second.handle), Some(second.id));
+    // The slot taken again until its generation is the first declaration's once more.
+    let mut last = second.handle;
+    for _ in 2..=u32::from(u16::MAX) {
+        let taken = tables.declare_keyexpr("demo/row/again").unwrap();
+        last = taken.handle;
+        assert!(tables.retract_keyexpr(taken.handle).is_some());
+    }
+    assert_ne!(
+        last, first.handle,
+        "65535 reuses: the generation has not come round"
+    );
+    let round = tables.declare_keyexpr("demo/row/round").unwrap();
+    assert_eq!(
+        round.handle, first.handle,
+        "the 65536th takes the first's generation"
+    );
+    assert_eq!(head.retain(round.handle), Ok(()));
+    assert!(
+        head.release_shared(first.handle),
+        "past the bound the stale hold reads as the new declaration's"
+    );
 }
 
 /// Rows of a growable table stay where they were put however many declarations come after them,
