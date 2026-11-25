@@ -684,6 +684,8 @@ jobs:
           # first time it is taken, so the port holds its in-place lock there. Its unit tests count
           # what a lock's first take allocates, which each host answers for its own arm.
           for crate in wz-capi-port wz-capi-core wz-capi-pico wz-capi-c wz-capi-dissect wz-capi-replay; do
+            # wz-capi-pico's default build is the cooperative engine, on both hosts: its host
+            # runtime (wz-runtime-posix) is Winsock on Windows and the POSIX one on macOS.
             built=FAIL
             (cd crates && cargo build -p "$crate") && built=PASS
             verdict "$crate builds:" "$built"
@@ -913,7 +915,10 @@ jobs:
   # callback runs on its one thread. On Windows the engine's host is `wz-runtime-posix`'s Windows
   # module (the performance counter, the system's random number generator, the precise system
   # time, Winsock); on Linux it is the POSIX host the build machines already run it on, which
-  # makes the Linux row the control of the program and the script.
+  # makes the Linux row the control of the program and the script; on macOS it is the same POSIX
+  # host over Darwin's calls (a socket made close-on-exec and kept from SIGPIPE by calls of its
+  # own, `getentropy`, `__error`), which no machine of this repository builds, so this row is
+  # the only reading of it.
   #
   # Steps, in this order because each later build replaces the library of the one before in the
   # same target directory: the Windows host's own unit tests; the library on the cooperative
@@ -938,6 +943,8 @@ jobs:
         include:
           - os: ubuntu-22.04
             host: linux
+          - os: macos-latest
+            host: macos
           - os: windows-latest
             host: windows
     env:
@@ -1063,9 +1070,11 @@ jobs:
 
       # The same program against the library without `std` (`WZ_PICO_FORM=nostd`: `os-posix` on
       # Linux, `os-windows` on Windows, the `capi-nostd` profile for the host's own target), in a
-      # target directory of its own, so it replaces no library of the steps above.
+      # target directory of its own, so it replaces no library of the steps above. Not on macOS:
+      # the library without `std` there is a form of its own (its profile's flags, a Darwin dynamic
+      # library linked without `std`), which nothing in this repository has built yet.
       - name: a single-threaded pico C program on the library without std (observed)
-        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' && runner.os != 'macOS' }}
         timeout-minutes: 30
         continue-on-error: true
         shell: bash

@@ -165,11 +165,11 @@ core = ["rx-busy-poll", "open-plan"]
 # allocator), which the crate's default names first. It is not a capability: no plane comes or
 # goes with it, every host engine selects it, and only a Zephyr image builds the layer without it
 # (`os-zephyr`), from a manifest of its own.
-# `engine-tokio`: the engine a pico build runs its sessions on (docs/capi-pico-on-coop-engine.md),
-# with the two switches of its drive. A configuration that chooses the cooperative engine on the
-# global axis `engine` (below) is resolved from the same list with every feature that selects the
-# tokio engine left out and `engine-coop` named (`wz_config.py` `engine_features`).
-pico = ["std", "engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
+# `engine-coop`: the engine a pico build runs its sessions on (docs/c-abi-engine-and-memory.md, E1
+# and P1). A configuration that chooses the tokio engine on the global axis `engine` (below) is
+# resolved from the same list with `engine-coop` replaced by that option's `features`, the engine
+# and the two switches of its drive (`wz_config.py` `engine_features`).
+pico = ["std", "engine-coop"]
 c = []
 
 # The operating-system facilities every HOST build asks for whatever its capabilities
@@ -1114,6 +1114,9 @@ os_needs = []
 upstream_on = ["zenoh", "zenoh-c"]
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico", "c"]
+# Off in the pico preset (decision Q7 of docs/c-abi-engine-and-memory.md): zenoh-pico has no such
+# plane, and the pico ABI runs it on the tokio engine alone until the cooperative engine starts it.
+default_off_abis = ["pico"]
 implies = ["peer"]
 help = "A session told of a node by one it holds a link to dials it."
 
@@ -3880,6 +3883,34 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the rows of a group's members: its multicast transport keeps each peer on the heap, and the count a profile states for a group's sessions is a quota within these rows, not their capacity; the default is the member table the cooperative engine's group session already held."
 
 [[limit]]
+id = "MAX_MEMBER_KEYEXPRS"
+kconfig = "WZ_LIMIT_MAX_MEMBER_KEYEXPRS"
+kind = "bound"
+driven = "remote"
+default = 16
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# dropped.
+wire = "none"
+help = '''
+The key expressions one member of a multicast group may have declared to
+this session at a time, to name them by a short id of its own. Each member
+holds its own, and they are let go of when it leaves. One more is refused
+and counted, and a message that names it is dropped, as one naming an
+undeclared id is. The group's face reserves this many aliases for each of
+its MAX_GROUP_MEMBERS members when the session opens. The default is
+MAX_PEER_KEYEXPR_ALIASES, one peer's.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh holds the key ids a peer declared in a map of its face that grows with each declaration, and zenoh-pico keeps the resources each member of a group declared in a list of that peer with no count, dropped with the peer (`vendor/zenoh-pico/src/transport/peer.c` @ `_z_resource_slist_free(&src->_remote_resources);`)."
+cite = ["`zenoh/src/net/routing/dispatcher/face.rs` @ `pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,`"]
+
+[[limit]]
 id = "MAX_CONNECTIVITY_REPLAY_EVENTS"
 kconfig = "WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS"
 kind = "bound"
@@ -5679,6 +5710,7 @@ id = "sn-resolution"
 kind = "choice"
 kconfig = "WZ_POLICY_SN_RESOLUTION"
 choices = ["bits-32", "bits-8", "bits-16", "bits-64"]
+wire_codes = { bits-32 = 2, bits-8 = 0, bits-16 = 1, bits-64 = 3 }
 default = "bits-32"
 upstream = "Advertises the 32-bit sequence-number resolution in its InitSyn and in the Join of a group unless its configuration states another: zenoh reads `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and zenoh-pico builds in `Z_SN_RESOLUTION 0x02` with no setting for another."
 scope = "session"
@@ -6327,11 +6359,12 @@ by default.
 id = "engine"
 kconfig = "WZ_ENGINE"
 prompt = "The engine a pico ABI build runs its sessions on"
-default = "tokio"
+default = "coop"
 help = '''
-The tokio engine runs every capability of the pico ABI; the cooperative engine is the one
-sans-I/O engine the C ABI presets move to, and runs every capability but those of the tokio
-engine's own drive (its drive thread, its busy read) and the planes not yet ported to it.
+The cooperative engine is the one sans-I/O engine the C ABI presets run on, and the base of the
+pico ABI names it; it runs every capability but those of the tokio engine's own drive (its drive
+thread, its busy read) and the planes not yet ported to it. The tokio engine runs those until
+it leaves the C library (phase P5).
 '''
 
 [[axis_option]]
@@ -6339,9 +6372,11 @@ id = "tokio"
 axis = "engine"
 kconfig = "WZ_ENGINE_TOKIO"
 prompt = "The tokio engine: each session on a runtime of its own"
+# What the base's `engine-coop` is replaced by in a build that chooses this option.
+features = ["engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
 help = '''
 `engine-tokio` with the two switches of its drive (`serial-drive-own-thread`, `rx-busy-poll`),
-as the base of the pico ABI names them.
+named in the place of the base's `engine-coop`.
 '''
 
 [[axis_option]]
@@ -6352,9 +6387,8 @@ prompt = "The cooperative engine: each session stepped by the program or its rea
 help = '''
 `engine-coop`: a session is stepped by the program's own calls (zp_read, zp_spin_once) in
 zenoh-pico's single-threaded arm, and by the read task the program starts in its multi-threaded
-arm, as zenoh-pico's are. The base's tokio switches are left out of the build; a configuration
-that also turns on a capability only the tokio engine runs is refused when it is resolved, by the
-capability's name.
+arm, as zenoh-pico's are. It is the base's engine; a configuration that also turns on a
+capability only the tokio engine runs is refused when it is resolved, by the capability's name.
 '''
 
 [[image]]

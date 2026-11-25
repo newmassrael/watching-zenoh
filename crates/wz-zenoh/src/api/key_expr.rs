@@ -40,11 +40,24 @@ use zenoh_result::ZResult;
 /// to undeclare it. The session implements it, and a declaration holds it by a [`Weak`], so a
 /// session that is gone has nothing left to undeclare.
 pub(crate) trait WireAnchor: fmt::Debug + Send + Sync {
-    /// Declares `prefix` on the wire, and says the id it was given, or `None` when it is not worth one.
-    fn declare_prefix(&self, prefix: &str, force: bool) -> ZResult<Option<ExprId>>;
+    /// Declares `prefix` on the wire, and says the hold it took, or `None` when it is not worth
+    /// one.
+    fn declare_prefix(&self, prefix: &str, force: bool) -> ZResult<Option<PrefixHold>>;
 
-    /// Undeclares the prefix of `expr_id`.
-    fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()>;
+    /// Undeclares the prefix `hold` holds.
+    fn undeclare_prefix(&self, hold: PrefixHold) -> ZResult<()>;
+}
+
+/// A prefix a session declared, as its declaration keeps it: the id the wire names it by, and the
+/// row of the session's count of the declaration's holders the hold was taken in, as the bits of
+/// the row's handle, by which the session lets go of it: a declaration that went leaves its id to
+/// a later one once the ids wrap, and its row names nothing. `None` for a session that counts its
+/// holds by the id.
+#[derive(Debug)]
+#[must_use = "a prefix held is undeclared (`WireAnchor::undeclare_prefix`), or it stays declared"]
+pub(crate) struct PrefixHold {
+    pub(crate) expr_id: ExprId,
+    pub(crate) row: Option<std::num::NonZeroU32>,
 }
 
 /// The handle by which a key expression is declared on a session, and by which it tells whether a
@@ -60,6 +73,8 @@ fn same_session(declared: &Weak<dyn WireAnchor>, session: &SessionAnchor) -> boo
 #[derive(Debug)]
 pub(crate) struct KeyExprWireDeclaration {
     expr_id: ExprId,
+    /// The row the session's hold was taken in ([`PrefixHold::row`]).
+    row: Option<std::num::NonZeroU32>,
     prefix_len: u32,
     session: Weak<dyn WireAnchor>,
     undeclared: bool,
@@ -68,8 +83,9 @@ pub(crate) struct KeyExprWireDeclaration {
 impl KeyExprWireDeclaration {
     pub(crate) fn new(prefix: &str, session: &SessionAnchor, force: bool) -> ZResult<Option<Self>> {
         let prefix_len = prefix.len() as u32;
-        Ok(session.declare_prefix(prefix, force)?.map(|expr_id| Self {
-            expr_id,
+        Ok(session.declare_prefix(prefix, force)?.map(|hold| Self {
+            expr_id: hold.expr_id,
+            row: hold.row,
             prefix_len,
             session: Arc::downgrade(session),
             undeclared: false,
@@ -82,7 +98,10 @@ impl KeyExprWireDeclaration {
         } else {
             self.undeclared = true;
             match self.session.upgrade() {
-                Some(session) => session.undeclare_prefix(self.expr_id),
+                Some(session) => session.undeclare_prefix(PrefixHold {
+                    expr_id: self.expr_id,
+                    row: self.row,
+                }),
                 None => Ok(()),
             }
         }
@@ -699,16 +718,19 @@ mod anchor_tests {
     }
 
     impl WireAnchor for Fake {
-        fn declare_prefix(&self, prefix: &str, force: bool) -> ZResult<Option<ExprId>> {
+        fn declare_prefix(&self, prefix: &str, force: bool) -> ZResult<Option<PrefixHold>> {
             if self.refuse {
                 return Ok(None);
             }
             let mut d = self.declared.lock().unwrap();
             d.push((prefix.to_string(), force));
-            Ok(Some(d.len() as ExprId))
+            Ok(Some(PrefixHold {
+                expr_id: d.len() as ExprId,
+                row: None,
+            }))
         }
-        fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
-            self.undeclared.lock().unwrap().push(expr_id);
+        fn undeclare_prefix(&self, hold: PrefixHold) -> ZResult<()> {
+            self.undeclared.lock().unwrap().push(hold.expr_id);
             Ok(())
         }
     }

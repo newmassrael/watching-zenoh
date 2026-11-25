@@ -18,17 +18,19 @@
 use core::ffi::c_int;
 use core::net::SocketAddr;
 
-use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
 // Compiled where the runtime declares the heap profile's seams (`with_heap_link_seams!`), as every
 // implementation of them below is.
 wz_runtime_coop::with_heap_link_seams! {
     use wz_runtime_coop::session_drive::WaitOn;
 }
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
 
+#[cfg(target_os = "macos")]
+use crate::net::set_no_sigpipe;
 use crate::net::{
-    call_at, errno, family_of, name_of, poll_writable, set_close_on_exec, set_flag,
+    call_at, errno, family_of, name_of, open_socket, poll_writable, set_close_on_exec, set_flag,
     set_nonblocking, PosixNetError,
 };
 
@@ -41,13 +43,17 @@ pub struct PosixTcpSocket {
 
 /// A TCP socket of `at`'s family: the descriptor, or the `errno` of the refusal.
 fn stream_socket(at: &SocketAddr) -> Result<c_int, PosixNetError> {
-    // SAFETY: plain system call with value arguments.
-    let fd = unsafe { libc::socket(family_of(at), libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if fd < 0 {
-        return Err(PosixNetError::Socket(errno()));
-    }
-    Ok(fd)
+    open_socket(family_of(at), libc::SOCK_STREAM).map_err(PosixNetError::Socket)
 }
+
+/// The flags of a stream's send: it does not wait (`MSG_DONTWAIT`), and a peer that closed the
+/// stream is the send's `EPIPE` and not a SIGPIPE (`MSG_NOSIGNAL`; on macOS the socket's
+/// `SO_NOSIGPIPE`, set when it is made or accepted, says it instead).
+#[cfg(not(target_os = "macos"))]
+const SEND_FLAGS: c_int = libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT;
+/// See the form of this constant for the other hosts.
+#[cfg(target_os = "macos")]
+const SEND_FLAGS: c_int = libc::MSG_DONTWAIT;
 
 /// A failed open of a stream socket as the stack's refusal of the link: a family the kernel has
 /// no socket of is permanent for the locator, no descriptor left is worth a later try, a port
@@ -230,10 +236,12 @@ impl StreamListen for PosixTcpListener {
                 | libc::ENETDOWN
                 | libc::ENOPROTOOPT
                 | libc::EHOSTDOWN
-                | libc::ENONET
                 | libc::EHOSTUNREACH
                 | libc::EOPNOTSUPP
                 | libc::ENETUNREACH => Ok(None),
+                // Linux's name for a host off the network; Darwin has no such number.
+                #[cfg(not(target_os = "macos"))]
+                libc::ENONET => Ok(None),
                 // No descriptor or memory to give it: the connection stays queued and a later
                 // call tries again, as a full table is retried.
                 libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM => {
@@ -257,6 +265,12 @@ impl StreamListen for PosixTcpListener {
             || set_nonblocking(fd, false).is_err()
             || set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).is_err()
         {
+            return Ok(None);
+        }
+        // And on macOS kept from SIGPIPE as a dialled one is (`net::open_socket`), whatever the
+        // listener's own setting passed on.
+        #[cfg(target_os = "macos")]
+        if set_no_sigpipe(fd).is_err() {
             return Ok(None);
         }
         if socket.learn_ends().is_err() {
@@ -284,31 +298,24 @@ impl StreamSocket for PosixTcpSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        self.local
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.peer
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: self.local,
+            peer: self.peer,
+        }
     }
 
     const WRITES_NOW: bool = true;
 
-    // One `send` that does not wait (`MSG_DONTWAIT`), taken again when a signal interrupts it:
-    // the stack takes what its buffer has room for at that moment, and a buffer with none is
-    // `EAGAIN`, read as nothing taken. `MSG_NOSIGNAL`: a peer that closed the stream is an error
-    // here, not a SIGPIPE.
+    // One `send` that does not wait (`SEND_FLAGS`), taken again when a signal interrupts it: the
+    // stack takes what its buffer has room for at that moment, and a buffer with none is `EAGAIN`,
+    // read as nothing taken. A peer that closed the stream is an error here, not a SIGPIPE.
     fn write(&self, bytes: &[u8]) -> Result<usize, PosixNetError> {
         loop {
             // SAFETY: `bytes` is live and readable for its length.
-            let sent = unsafe {
-                libc::send(
-                    self.fd,
-                    bytes.as_ptr().cast(),
-                    bytes.len(),
-                    libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
-                )
-            };
+            let sent =
+                unsafe { libc::send(self.fd, bytes.as_ptr().cast(), bytes.len(), SEND_FLAGS) };
             if sent >= 0 {
                 return Ok(sent as usize);
             }
@@ -398,6 +405,11 @@ impl Drop for PosixTcpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This end's address and the peer's, of a stream over IP.
+    fn ip_ends(stream: &PosixTcpSocket) -> (SocketAddr, SocketAddr) {
+        stream.ends().ip().expect("a stream over IP")
+    }
     use core::mem::size_of;
     use core::net::{Ipv4Addr, Ipv6Addr};
     use std::io::{Read, Write};
@@ -447,9 +459,9 @@ mod tests {
         let far = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("an IPv6 listener");
         let near = PosixTcpSocket::connect(far.local_addr().unwrap()).expect("a connection");
         let (taken, from) = far.accept().expect("the far end");
-        assert_eq!(near.peer(), far.local_addr().unwrap());
-        assert_eq!(near.local(), from);
-        assert_eq!(taken.local_addr().unwrap(), near.peer());
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, from);
+        assert_eq!(taken.local_addr().unwrap(), ip_ends(&near).1);
 
         let listener =
             PosixTcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, 0))).expect("a listener");
@@ -457,8 +469,8 @@ mod tests {
         assert_ne!(listener.local().port(), 0);
         let dialler = TcpStream::connect(listener.local()).expect("a connection");
         let accepted = accepted(&listener);
-        assert_eq!(accepted.peer(), dialler.local_addr().unwrap());
-        assert_eq!(accepted.local(), listener.local());
+        assert_eq!(ip_ends(&accepted).1, dialler.local_addr().unwrap());
+        assert_eq!(ip_ends(&accepted).0, listener.local());
     }
 
     /// A dial the kernel has no socket family for is the stack's permanent refusal; a dial with no
@@ -710,9 +722,9 @@ mod tests {
     #[test]
     fn a_connection_names_both_its_ends() {
         let (near, far) = pair();
-        assert_eq!(near.peer(), far.local_addr().unwrap());
-        assert_eq!(near.local(), far.peer_addr().unwrap());
-        assert_ne!(near.local().port(), 0);
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, far.peer_addr().unwrap());
+        assert_ne!(ip_ends(&near).0.port(), 0);
     }
 
     /// A loopback port that refuses every connect for as long as the value lives: a TCP socket
@@ -727,10 +739,7 @@ mod tests {
 
     impl RefusingPort {
         fn hold() -> Self {
-            // SAFETY: plain system call with value arguments.
-            let fd =
-                unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-            assert!(fd >= 0, "a TCP socket");
+            let fd = open_socket(libc::AF_INET, libc::SOCK_STREAM).expect("a TCP socket");
             assert_eq!(
                 call_at(fd, at(0), libc::bind),
                 Ok(()),
@@ -766,8 +775,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let (mut far, _) = listener.accept().expect("the far end");
-        assert_eq!(near.peer(), listener.local_addr().unwrap());
-        assert_eq!(near.local(), far.peer_addr().unwrap());
+        assert_eq!(ip_ends(&near).1, listener.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, far.peer_addr().unwrap());
         near.write_all(b"made")
             .expect("a made connection carries bytes");
         let mut got = [0u8; 4];
@@ -862,7 +871,8 @@ mod tests {
         assert_eq!(far.read(&mut buf).expect("a read"), 0);
     }
 
-    /// Whether `TCP_NODELAY` is on for `fd`.
+    /// Whether `TCP_NODELAY` is on for `fd`: any value but 0, as Darwin reads the option back as
+    /// the flag's own bit where Linux reads 1.
     fn nodelay_of(fd: c_int) -> bool {
         let mut on: c_int = 0;
         let mut len = size_of::<c_int>() as libc::socklen_t;
@@ -877,7 +887,39 @@ mod tests {
             )
         };
         assert_eq!(rc, 0);
-        on == 1
+        on != 0
+    }
+
+    /// On macOS a stream this crate holds, dialled or accepted, is kept from SIGPIPE
+    /// (`SO_NOSIGPIPE`), Darwin's form of the `MSG_NOSIGNAL` a send passes elsewhere: a C program
+    /// that loads the library and writes to a peer that left is told `EPIPE`, not ended. A test
+    /// binary ignores SIGPIPE, so the option is read back rather than the signal awaited. Turned
+    /// red by a dial that leaves the option off; the accepted half also by an accept that does,
+    /// where the listener's own setting is not passed on.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_dialled_and_an_accepted_stream_raise_no_sigpipe_on_macos() {
+        let no_sigpipe = |fd: c_int| -> bool {
+            let mut on: c_int = 0;
+            let mut len = size_of::<c_int>() as libc::socklen_t;
+            // SAFETY: `on` and `len` are live and writable, and `len` is `on`'s size.
+            let rc = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_NOSIGPIPE,
+                    (&mut on as *mut c_int).cast(),
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            on != 0
+        };
+        let (near, _far) = pair();
+        assert!(no_sigpipe(near.fd), "a dialled stream");
+        let (listener, port) = listening();
+        let _dialler = std_connect(port);
+        assert!(no_sigpipe(accepted(&listener).fd), "an accepted stream");
     }
 
     #[test]
@@ -925,8 +967,8 @@ mod tests {
         let (listener, port) = listening();
         let far = std_connect(port);
         let near = accepted(&listener);
-        assert_eq!(near.local(), at(port));
-        assert_eq!(near.peer(), far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, at(port));
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
         assert!(nodelay_of(near.fd));
     }
 
@@ -954,8 +996,11 @@ mod tests {
         let (listener, port) = listening();
         let first = std_connect(port);
         let second = std_connect(port);
-        assert_eq!(accepted(&listener).peer(), first.local_addr().unwrap());
-        assert_eq!(accepted(&listener).peer(), second.local_addr().unwrap());
+        assert_eq!(ip_ends(&accepted(&listener)).1, first.local_addr().unwrap());
+        assert_eq!(
+            ip_ends(&accepted(&listener)).1,
+            second.local_addr().unwrap()
+        );
     }
 
     #[test]

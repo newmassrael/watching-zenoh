@@ -1071,6 +1071,33 @@ pub struct InPlaceRecord<'a, 'f> {
         )
     ))]
     record: LentRecord<'a, 'f>,
+    // The member of a group that sent the record, by whose own ids the keys it names are read
+    // (0: the one peer of a link), and whether the keyexpr it declares is past what that member
+    // may hold. Only a group that lends its records and keeps its members apart has a member.
+    #[cfg(all(
+        feature = "session-multicast",
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    sender: u64,
+    #[cfg(all(
+        feature = "session-multicast",
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    past_sender_bound: bool,
     _frame: core::marker::PhantomData<(&'a (), &'f [u8])>,
 }
 
@@ -1197,6 +1224,30 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
             sn,
             priority,
             record,
+            #[cfg(all(
+                feature = "session-multicast",
+                feature = "alloc",
+                feature = "codec-declare",
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            sender: 0,
+            #[cfg(all(
+                feature = "session-multicast",
+                feature = "alloc",
+                feature = "codec-declare",
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            past_sender_bound: false,
             _frame: core::marker::PhantomData,
         }
     }
@@ -1390,6 +1441,93 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     /// The carrying frame's priority band.
     pub fn priority(&self) -> crate::qos::Priority {
         self.priority
+    }
+
+    /// The sender of the record among those whose declarations one table of the session holds:
+    /// the tag of the member of a group that sent it, under which the keyexpr ids it names are
+    /// read and bound ([`crate::wire_id::sender_peer_key`]), or 0 for the one peer of a link.
+    pub fn sender(&self) -> u64 {
+        #[cfg(all(
+            feature = "session-multicast",
+            feature = "alloc",
+            feature = "codec-declare",
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        ))]
+        {
+            self.sender
+        }
+        #[cfg(not(all(
+            feature = "session-multicast",
+            feature = "alloc",
+            feature = "codec-declare",
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        )))]
+        {
+            0
+        }
+    }
+
+    /// This record as sent by the group member tagged `sender`.
+    #[cfg(all(
+        feature = "session-multicast",
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    pub(crate) fn from_sender(mut self, sender: u64) -> Self {
+        self.sender = sender;
+        self
+    }
+
+    /// This record, a keyexpr declaration its member made past the ids it may hold
+    /// (`MAX_MEMBER_KEYEXPRS`): the table of the session's aliases binds nothing for it and
+    /// counts it as one it has no room for.
+    #[cfg(all(
+        feature = "session-multicast",
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    pub(crate) fn past_sender_bound(mut self) -> Self {
+        self.past_sender_bound = true;
+        self
+    }
+
+    /// Whether the record's member had declared as many keyexprs as it may hold
+    /// ([`Self::past_sender_bound`]).
+    #[cfg(all(
+        feature = "session-multicast",
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    pub(crate) fn is_past_sender_bound(&self) -> bool {
+        self.past_sender_bound
     }
 
     /// The Push, as it is decoded: its keyexpr, extensions and payload are

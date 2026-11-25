@@ -41,6 +41,10 @@ use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
+#[cfg(feature = "multicast-declarations")]
+use wz_session_core::limit_binding::Quota;
+#[cfg(feature = "multicast-declarations")]
+use wz_session_core::limits::MaxPeerKeyexprAliasesHeld;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
 #[cfg(feature = "query")]
@@ -457,6 +461,11 @@ pub(super) struct RegistryOf<H: Holders> {
     /// build without `listen` and `group`) removes none, and keeps no table of them.
     #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
     owed: BoundedVec<OwedTokens, { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS }, Lent>,
+    /// The aliases one face's peer may hold (`MAX_PEER_KEYEXPR_ALIASES`), which a set a group's face
+    /// held, at the group's own quota (`Self::hold_member_aliases`), is held to again when it is
+    /// given back for the next face.
+    #[cfg(feature = "multicast-declarations")]
+    peer_aliases: MaxPeerKeyexprAliasesHeld,
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
@@ -594,6 +603,8 @@ impl<H: Holders> RegistryOf<H> {
             holders,
             #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
             owed,
+            #[cfg(feature = "multicast-declarations")]
+            peer_aliases: limits.max_peer_keyexpr_aliases_held(),
             #[cfg(test)]
             pools,
             #[cfg(feature = "local-queryable")]
@@ -823,6 +834,33 @@ impl<H: Holders> RegistryOf<H> {
         self.owe_tokens_of(at);
         if let Some(set) = self.sets.get_mut(at) {
             set.give_back();
+            #[cfg(feature = "multicast-declarations")]
+            set.peer.subscribers.limit_aliases_to(self.peer_aliases);
+        }
+    }
+
+    /// Hold the aliases of `face`, a group's, to no fewer than its members may declare together:
+    /// each member's own keyexprs for every member the group admits (`GROUP_FACE_ALIASES`), which
+    /// the open reserved in the session's pool. A face whose quota admits them already, one bound
+    /// by the pool alone among them, keeps it, as does a build whose limits keep the build's value
+    /// alone.
+    #[cfg(feature = "multicast-declarations")]
+    pub(super) fn hold_member_aliases(&mut self, face: HeldFace) {
+        let Some(set) = self.place(face).and_then(|at| self.sets.get_mut(at)) else {
+            return;
+        };
+        let aliases = &mut set.peer.subscribers;
+        if aliases
+            .alias_quota()
+            .get()
+            .admits(crate::arena::GROUP_FACE_ALIASES)
+        {
+            return;
+        }
+        if let Ok(quota) =
+            MaxPeerKeyexprAliasesHeld::select(Quota::at_most(crate::arena::GROUP_FACE_ALIASES))
+        {
+            aliases.limit_aliases_to(quota);
         }
     }
 
@@ -830,7 +868,13 @@ impl<H: Holders> RegistryOf<H> {
     /// where they lie, and every place free but the dial role's, a tomb's among them.
     pub(super) fn remove_accepted_faces(&mut self) {
         self.writing();
-        let Self { sets, holders, .. } = self;
+        let Self {
+            sets,
+            holders,
+            #[cfg(feature = "multicast-declarations")]
+            peer_aliases,
+            ..
+        } = self;
         // A session of its dial role's face alone has no row to write, and so no set to give back.
         for (set, holder) in sets.iter_mut().zip(holders.rows_mut().iter_mut()) {
             if *holder == DIAL_FACE {
@@ -838,6 +882,8 @@ impl<H: Holders> RegistryOf<H> {
             }
             if names_face(*holder) {
                 set.give_back();
+                #[cfg(feature = "multicast-declarations")]
+                set.peer.subscribers.limit_aliases_to(*peer_aliases);
             }
             *holder = NO_FACE;
         }
@@ -1502,6 +1548,51 @@ mod tests {
         );
     }
 
+    /// A group's face holds its members' aliases together, what the open reserved for it, and the
+    /// set it held, given back, holds the next face's peer to one peer's again.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn a_groups_face_holds_its_members_aliases_until_its_set_is_given_back() {
+        let group = Quota::at_most(crate::arena::GROUP_FACE_ALIASES);
+        if MaxPeerKeyexprAliasesHeld::select(group).is_err() {
+            // A build whose limits keep the build's value alone states no quota of a face.
+            return;
+        }
+        let fewer = MaxPeerKeyexprAliasesHeld::select(Quota::at_most(2))
+            .expect("two is inside the domain where a group's quota is");
+        let mut held = held(2);
+        let face = held
+            .registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
+        let quota = |registry: &Registry| {
+            registry.sets[face.at()]
+                .peer
+                .subscribers
+                .alias_quota()
+                .get()
+        };
+        let one_peer = quota(&held.registry);
+        // A face held below what the group's members may declare together.
+        held.registry.sets[face.at()]
+            .peer
+            .subscribers
+            .limit_aliases_to(fewer);
+        assert_eq!(quota(&held.registry), Quota::at_most(2), "CONTROL");
+        held.registry.hold_member_aliases(face);
+        assert_eq!(
+            quota(&held.registry),
+            group,
+            "the group's face holds every member's"
+        );
+        held.registry.remove_face(face);
+        assert_eq!(
+            quota(&held.registry),
+            one_peer,
+            "the set given back holds the next face to one peer's"
+        );
+    }
+
     /// Every face keeps the keys of what its peer declares in the session's key arena: the dial
     /// face's set and the sets the open lent that faces take as they come (a group's, which the
     /// session adds as it joins the group, `join_groups`). A subscriber each face's peer declares
@@ -1774,7 +1865,7 @@ mod tests {
                 false,
                 KeyForm::default(),
                 super::super::LivelinessRow::new(
-                    WireKey::literal().into_holds(),
+                    WireKey::literal().into_anchor(),
                     LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
                         if sample.kind == LivelinessSampleKind::Delete {
                             into.lock()

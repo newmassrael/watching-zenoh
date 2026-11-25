@@ -593,7 +593,7 @@ fn vanishing_subscriber_peer(
             SessionInitParams {
                 whatami: WhatAmI::Client,
                 zid: zid.into(),
-                seq_num_res: 2,
+                seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                 req_id_res: 2,
                 batch_size: 65535,
                 lease_ms: 10_000,

@@ -47,7 +47,7 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds};
+use wz_capi_port::{HeldQueryId, KeyAnchor, QblId, QueryHolder, QueryableSink, Refusal};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -77,10 +77,10 @@ use super::{key_on_link, CoopEngine};
 /// ended once the query was handed to the callback, or dropped unhanded, with no lock held; an
 /// undeclared row is let go of by whoever ends its last call.
 pub(crate) struct QueryableRow {
-    /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
-    /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
-    /// of the session held.
-    holds: WireHolds,
+    /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
+    /// lock of the session held: the declarations the key and the retraction name are the tables'
+    /// row's to hold.
+    _anchor: KeyAnchor,
     /// The program's callback, called where the row lies through a shared borrow, with the holder
     /// of the face each query came in on; a refused declaration lets it go with the row.
     sink: QueryableSink,
@@ -88,17 +88,11 @@ pub(crate) struct QueryableRow {
     latch: Latch,
 }
 
-impl super::RowHolds for QueryableRow {
-    fn into_holds(self) -> WireHolds {
-        self.holds
-    }
-}
-
 impl QueryableRow {
-    /// A queryable keeping `holds`, answering through `sink`.
-    pub(crate) fn new(holds: WireHolds, sink: QueryableSink) -> Self {
+    /// A queryable keeping `anchor`, answering through `sink`.
+    pub(crate) fn new(anchor: KeyAnchor, sink: QueryableSink) -> Self {
         Self {
-            holds,
+            _anchor: anchor,
             sink,
             latch: Latch::new(),
         }
@@ -633,7 +627,7 @@ mod round_tests {
     /// A queryable's row, boxed so it lies where it is while a call of it runs.
     fn row() -> Box<QueryableRow> {
         Box::new(QueryableRow::new(
-            WireKey::literal().into_holds(),
+            WireKey::literal().into_anchor(),
             QueryableSink::shared(|_, _, _| {}),
         ))
     }

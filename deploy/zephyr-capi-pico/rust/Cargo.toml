@@ -44,6 +44,9 @@ multi-thread = ["wz-capi-pico/multi-thread"]
 # host's library. The engine's base (sessions, the client's pub/sub surface) is in every build.
 wz-capi-pico = { path = "../../../crates/wz-capi-pico", default-features = false, features = [
     "os-zephyr",
+    # zenoh-pico's unicast UDP link (`Z_FEATURE_LINK_UDP_UNICAST`): the image dials a `udp/`
+    # endpoint (its Kconfig's default), and a build without the link refuses that scheme.
+    "link-udp",
     "queryable",
     "liveliness",
     # zenoh-pico's scouting (`Z_FEATURE_SCOUTING`, on in its default build and in both images) over

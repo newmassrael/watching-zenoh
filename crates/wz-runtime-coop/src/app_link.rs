@@ -70,7 +70,8 @@ use crate::session_drive::{
     OpenedLink, PendingDial, SessionLinks, StackWake, WaitOn,
 };
 use crate::stream_link::{
-    stream_ends_fit, StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
+    stream_ends_fit, StreamDial, StreamDriver, StreamEnds, StreamListen, StreamSocket,
+    STREAM_RX_CAPACITY,
 };
 use crate::udp_link::{datagram_ends_fit, DatagramSocket, Received, UdpDriver, UDP_RX_CAPACITY};
 
@@ -674,12 +675,12 @@ impl StreamSocket for AppStreamSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        self.local
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.peer
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: self.local,
+            peer: self.peer,
+        }
     }
 
     // Every byte is taken: what the program does not take now is held for it.
@@ -1372,21 +1373,24 @@ impl SessionLinks for AppLinks {
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The buffers are claimed before the program is asked for a link, so a session whose
         // tables are full asks it for none.
-        match to.proto {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
             LinkProto::Udp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
                 let socket = AppDatagramSocket::dial_bounded(
                     &self.transport,
                     &self.waits,
-                    to.at,
+                    ip.at,
                     self.open_bound.as_ref(),
                 )?;
                 self.owner_waits
-                    .place_datagram(self.cells.as_ref(), socket, to.at, rx, tx)
+                    .place_datagram(self.cells.as_ref(), socket, ip.at, rx, tx)
             }
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-                let stream = self.dial.dial(to.at)?;
+                let stream = self.dial.dial(ip.at)?;
                 self.owner_waits
                     .place_stream(self.cells.as_ref(), stream, rx, tx)
             }
@@ -1401,7 +1405,10 @@ impl SessionLinks for AppLinks {
     /// buffers are claimed before the program is asked, as a waiting open's are, and go back with
     /// an open that is refused or given up.
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
-        let (kind, rx, datagram) = match to.proto {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        let (kind, rx, datagram) = match ip.proto {
             LinkProto::Udp => (AppLinkKind::Datagram, self.datagram_rx, true),
             LinkProto::Tcp => (AppLinkKind::StreamDial, STREAM_RX_CAPACITY, false),
             LinkProto::Tls => return Err(LinkOpenError::Unsupported),
@@ -1415,7 +1422,7 @@ impl SessionLinks for AppLinks {
                 waits: self.waits.wake.clone(),
             }),
             buffers: Some(buffers),
-            to: to.at,
+            to: ip.at,
             datagram,
             owner_waits: self.owner_waits,
             cells: self.cells,
@@ -1426,15 +1433,18 @@ impl SessionLinks for AppLinks {
         &self,
         at: Locator,
     ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
-        match at.proto {
+        let Some(ip) = at.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
             LinkProto::Tcp => Ok(Box::new(AppLinkListener {
-                listener: self.dial.listen(at.at)?,
+                listener: self.dial.listen(ip.at)?,
                 lent: self.lent,
                 owner_waits: self.owner_waits,
                 cells: self.cells,
             })),
             LinkProto::Udp => {
-                let locator = Locator::udp(at.at).to_string();
+                let locator = Locator::udp(ip.at).to_string();
                 let held = open_link(
                     &self.transport,
                     &self.waits,
@@ -1444,7 +1454,7 @@ impl SessionLinks for AppLinks {
                 )?;
                 Ok(Box::new(AppDatagramListener {
                     held,
-                    at: at.at,
+                    at: ip.at,
                     datagram_rx: self.datagram_rx,
                     lent: self.lent,
                     owner_waits: self.owner_waits,
@@ -1696,7 +1706,9 @@ mod tests {
                 String::from("tcp/192.0.2.9:7447")
             )
         );
-        assert_eq!(stream.peer(), PEER);
+        assert!(
+            matches!(stream.ends(), StreamEnds::Ip { proto: LinkProto::Tcp, peer, .. } if peer == PEER)
+        );
         drop(stream);
         assert_eq!(
             script.closes.lock().unwrap().len(),

@@ -123,7 +123,31 @@ wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
 # R311y487 - the close-frame teardown measurement drives the exported C ABI as
 # one of its three clients, so the measurement lives in ONE file beside the
 # pico + demo legs it is compared against (rlib crate-type makes this linkable).
-wz-capi-pico = { path = "../wz-capi-pico" }
+# The tokio engine's build, named: the crate's default is the cooperative engine, whose lent-only
+# selectors `wz-runtime-tokio` (a dependency of this crate) refuses to share a graph with. These are
+# the features the crate's default named before the cooperative engine became it; phase P5 moves
+# this measurement to the cooperative engine with the tokio engine's removal from the C library.
+wz-capi-pico = { path = "../wz-capi-pico", default-features = false, features = [
+    "std",
+    "engine-tokio",
+    "serial-drive-own-thread",
+    "rx-busy-poll",
+    "link-udp",
+    "peer",
+    "multicast-transport",
+    "scout",
+    "query",
+    "queryable",
+    "liveliness",
+    "liveliness-get",
+    "advanced",
+    "gossip",
+    "multi-thread",
+    "unstable-api",
+    "connectivity",
+    "config-policy",
+    "conformance-digest",
+] }
 # R2221 (open-debt item 569) — the BINARY DOOR a framework links, driven here
 # over bytes a genuine zenohd wrote. Every lane witness reads
 # `wz_capture::Dissection`; the consuming surface reads the fixed-layout

@@ -663,7 +663,10 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
             #[cfg(all(feature = "codec-declare", feature = "rx-lent-control"))]
             IterationEvent::InPlace(record) => {
                 if let Some(declare) = record.declare() {
-                    self.dispatch_declare_view(declare, peer_keyexpr_table);
+                    self.dispatch_declare_view(
+                        declare,
+                        MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
+                    );
                 }
             }
             _ => {}

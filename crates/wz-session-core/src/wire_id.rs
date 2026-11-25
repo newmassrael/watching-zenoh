@@ -52,6 +52,21 @@ pub const fn declared_peer_key(wire: u64) -> u64 {
     peer_key(declared_expr_id(wire))
 }
 
+/// The key the id `id` a sender declared has in an alias table that holds the declarations of
+/// more than one sender, the members of a group among them: `sender` in the high half and the id
+/// in the low, so the same id from two senders is two keys, as each peer's declarations are a name
+/// space of their own. A table of one peer's declarations reads them as sender 0, whose key is
+/// [`peer_key`] itself.
+pub const fn sender_peer_key(sender: u64, id: ExprId) -> u64 {
+    (sender << 32) | peer_key(id)
+}
+
+/// [`sender_peer_key`] of the id a `DeclareKeyExpr` or `UndeclareKeyExpr` names, narrowed as
+/// [`declared_peer_key`] narrows it.
+pub const fn declared_sender_peer_key(sender: u64, wire: u64) -> u64 {
+    sender_peer_key(sender, declared_expr_id(wire))
+}
+
 /// A request's id, which its responses name
 /// (`commons/zenoh-protocol/src/network/request.rs` @ `pub type RequestId = u32;`).
 pub type RequestId = u32;

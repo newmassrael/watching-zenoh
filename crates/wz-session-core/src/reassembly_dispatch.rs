@@ -565,7 +565,7 @@ pub enum SnRing {
     /// The ring's mask ([`crate::sn::mask_from_res`]) is known. A continuation
     /// is admitted iff its SN is ring-consecutive to the chain's last
     /// ([`crate::sn::consecutive`]).
-    Known(u64),
+    Known(crate::sn::Sn),
     /// The ring is not known. A continuation is admitted iff its SN is exactly
     /// the chain's last plus one as plain integers; anything else ends the chain
     /// as [`AbortReason::Unresolvable`].
@@ -588,7 +588,17 @@ impl SnRing {
     /// link was lossy, which is a claim about a ring it never saw.
     pub fn admits(self, last: u64, next: u64) -> Result<(), AbortReason> {
         match self {
-            Self::Known(mask) if crate::sn::consecutive(mask, last, next) => Ok(()),
+            // The chain keeps the SNs the wire carried, which a reader that knows no ring compares
+            // whole; on a known ring the word's low bits are the residue the ring judges.
+            Self::Known(mask)
+                if crate::sn::consecutive(
+                    mask,
+                    crate::sn::from_wire(last),
+                    crate::sn::from_wire(next),
+                ) =>
+            {
+                Ok(())
+            }
             Self::Known(_) => Err(AbortReason::OutOfOrder),
             Self::Unknown if last.checked_add(1) == Some(next) => Ok(()),
             Self::Unknown => Err(AbortReason::Unresolvable),
@@ -1216,7 +1226,7 @@ where
     pub fn ingest<F: FnOnce(&[u8])>(
         &mut self,
         frag: Fragment<'_>,
-        sn_mask: u64,
+        sn_mask: crate::sn::Sn,
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
@@ -1265,7 +1275,7 @@ where
     pub fn ingest_lending<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         frag: Fragment<'_>,
-        sn_mask: u64,
+        sn_mask: crate::sn::Sn,
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
@@ -1280,7 +1290,7 @@ where
     pub fn ingest_keeping<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         frag: Fragment<'_>,
-        sn_mask: u64,
+        sn_mask: crate::sn::Sn,
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
@@ -2004,7 +2014,7 @@ mod tests {
     }
 
     /// The default-resolution (0x02, 28-bit) ring every test compares at.
-    const MASK: u64 = crate::sn::mask_from_res(0x02);
+    const MASK: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     fn dispatcher<const S: usize, const C: usize>() -> ReassemblyDispatcher<S, C> {
         ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000))
@@ -2954,7 +2964,7 @@ mod duty_tests {
     use std::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
-    const MASK: u64 = crate::sn::mask_from_res(0x02);
+    const MASK: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     type TestSlot = Slot<1, 64, HeapStaging<1, 64>>;
 
@@ -3509,7 +3519,7 @@ mod chain_boundary_marker_tests {
     use std::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
-    const MASK: u64 = crate::sn::mask_from_res(0x02);
+    const MASK: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     /// The dispatcher under the ARMED contract — what a session whose peer
     /// negotiated patch >= 1 actually runs. One slot on purpose in the
@@ -3972,9 +3982,9 @@ mod unknown_ring_tests {
     const PEER: &[u8] = &[0xAA; 16];
     /// The three rings the 2-bit `seq_num_res` can name below the widest, each
     /// as its mask: 7, 14 and 28 bits (`sn::mask_from_res`).
-    const RING_7: u64 = crate::sn::mask_from_res(0x00);
-    const RING_14: u64 = crate::sn::mask_from_res(0x01);
-    const RING_28: u64 = crate::sn::mask_from_res(0x02);
+    const RING_7: crate::sn::Sn = crate::sn::mask_from_res(0x00);
+    const RING_14: crate::sn::Sn = crate::sn::mask_from_res(0x01);
+    const RING_28: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     fn dispatcher<const S: usize, const C: usize>() -> ReassemblyDispatcher<S, C> {
         ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000))
@@ -4056,6 +4066,31 @@ mod unknown_ring_tests {
         }
     }
 
+    /// A known ring judges a chain's SNs by their residue on it, whatever word the build holds a
+    /// sequence number in: wire values past 32 bits one step apart on the ring continue the chain,
+    /// and two steps apart end it.
+    #[test]
+    fn a_known_ring_judges_wire_sns_past_32_bits_by_their_residue() {
+        let base = 0x1_0000_0000u64 + 5;
+        let mut d = dispatcher::<4, 64>();
+        assert_eq!(
+            d.ingest(frag(base, 1, b"a"), RING_28, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.ingest(frag(base + 1, 0, b"b"), RING_28, 0, |_| {}),
+            IngestOutcome::Reassembled
+        );
+        let mut gap = dispatcher::<4, 64>();
+        gap.ingest(frag(base, 1, b"a"), RING_28, 0, |_| {});
+        assert_eq!(
+            gap.ingest(frag(base + 2, 0, b"b"), RING_28, 0, |_| {
+                panic!("an aborted chain delivers nothing")
+            }),
+            IngestOutcome::Aborted(AbortReason::OutOfOrder)
+        );
+    }
+
     /// THE STEP ONLY A RING CAN JUDGE: `127 -> 0` is one step on the 7-bit ring,
     /// a jump on the 14 and 28-bit ones, and with no ring it is unresolvable. The
     /// three answers are the whole reason the router refuses to guess.
@@ -4100,8 +4135,8 @@ mod unknown_ring_tests {
     #[test]
     fn a_known_ring_through_the_new_door_is_the_old_door() {
         let run: [(u64, u8, &[u8]); 9] = [
-            (RING_7 - 1, 1, &b"a"[..]),
-            (RING_7, 1, &b"b"[..]),
+            (crate::sn::to_wire(RING_7) - 1, 1, &b"a"[..]),
+            (crate::sn::to_wire(RING_7), 1, &b"b"[..]),
             (0, 0, &b"c"[..]),
             (5, 1, &b"d"[..]),
             (7, 1, &b"e"[..]),
@@ -4283,7 +4318,7 @@ mod one_peer_tests {
     const OTHER: &[u8] = &[0xBB; 16];
 
     /// The default-resolution (0x02, 28-bit) ring every test compares at.
-    const MASK: u64 = crate::sn::mask_from_res(0x02);
+    const MASK: crate::sn::Sn = crate::sn::mask_from_res(0x02);
 
     type One = ReassemblyDispatcher<2, 64, HeapStaging<2, 64>, OnePeer>;
     type Many = ReassemblyDispatcher<2, 64>;

@@ -1,22 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! Multi-client unixpipe listen capability, pico half (§5.27, R311y392).
+//! A pico session listens on a `unixpipe/` endpoint: its `z_open` binds a listener that holds
+//! many peers off one base path, as a `tcp/` one does, on either engine.
 //!
-//! Replaces the retired `unixpipe_listen_failfast` discriminator (R311y391). That
-//! test asserted pico's `z_open(listen=unixpipe/..)` was REJECTED at bind, because
-//! the R311y380 single-connection unixpipe acceptor could not feed the mesh accept
-//! loop. R311y392 made the unixpipe acceptor MULTI-CLIENT (a zenoh-compatible
-//! invitation handshake + per-connection dedicated sub-pipe pair), so
-//! `BoundListener::supports_mesh_multi_peer()` flipped `true` and `drive_listen`'s
-//! bind-time guard no longer rejects it — pico can now genuinely LISTEN over
-//! unixpipe, holding N inbound peers off one listener like tcp.
-//!
-//! `transport-link-unixpipe` is a SUPERSET feature, not a zenoh-pico-native link
-//! (real pico has no unixpipe), and it is off-default — so the whole module is
-//! gated on it; without it `bind_endpoint("unixpipe/..")` fails at the
-//! accept-backend gate. This is the ONLY lane that opens a real
-//! `BoundListener::Unixpipe` through the pico C ABI.
+//! `transport-link-unixpipe` is a link pico has none of, off by default, so the module is gated on
+//! it; a cooperative build without it refuses the scheme (`unixpipe_link_refused`). The sample
+//! that crosses such a link is `unixpipe_link_roundtrip`'s.
 
 #![cfg(feature = "peer")]
 
@@ -30,28 +20,22 @@ mod multiclient {
         Z_CONFIG_LISTEN_KEY, Z_OK,
     };
 
-    /// `z_open(listen="unixpipe/..")` now SUCCEEDS: the multi-client acceptor makes
-    /// a unixpipe listener mesh-capable, so `drive_listen`'s bind-time guard
-    /// (consulting `BoundListener::supports_mesh_multi_peer`) no longer rejects it
-    /// and `z_open` returns `Z_OK` — a listening pico session over unixpipe.
+    /// `z_open(listen="unixpipe/..")` succeeds, and the listener holds the request FIFO its dials
+    /// invite on while it is open.
     ///
-    /// RED reproduction (proof this binds to the flipped guard, not the vehicle):
-    /// RESTORE the old rejection — make `BoundListener::supports_mesh_multi_peer`
-    /// return `false` for `Unixpipe` again, or re-add a hardcoded unixpipe reject in
-    /// `drive_listen` -> `tx.send(false)` -> `z_open` returns `Z_ERR_GENERIC` -> this
-    /// `assert_eq!(rc, Z_OK)` fails. With the feature ON,
-    /// `bind_endpoint("unixpipe/..")` genuinely binds a `BoundListener::Unixpipe`
-    /// (the multi-client acceptor), so a success here is the guard's flipped
-    /// verdict, not a bind fluke.
+    /// The base path is short on purpose: the cooperative engine holds a base path in a row of
+    /// `MAX_LOCATOR_LEN` bytes less `unixpipe/` and the longest suffix of an end's FIFO.
+    ///
+    /// RED reproduction: on the cooperative engine, open the session over its sockets' links
+    /// alone (drop `coop_host::with_unixpipe` from `open_on_coop` in `src/session.rs`), and the
+    /// `unixpipe/` locator is refused as `Unsupported`; on the tokio engine, make
+    /// `BoundListener::supports_mesh_multi_peer` answer `false` for `Unixpipe`, and
+    /// `drive_listen` refuses the listener at bind.
     #[test]
     fn pico_z_open_accepts_a_unixpipe_listen_at_bind() {
-        let base = std::env::temp_dir()
-            .join(format!("wz-capi-pico-multiclient-{}", std::process::id()))
-            .to_string_lossy()
-            .into_owned();
-        // Pre-clean any stale FIFO node from a crashed prior run (no-flaky).
-        let _ = std::fs::remove_file(format!("{base}_uplink"));
-
+        let base = format!("/tmp/wzpl{}", std::process::id());
+        let request = format!("{base}_uplink");
+        // A node a crashed run left is made again by the listen, which tolerates one.
         let endpoint = CString::new(format!("unixpipe/{base}")).expect("nul-free path");
         unsafe {
             let mut cfg: z_owned_config_t = std::mem::zeroed();
@@ -66,18 +50,14 @@ mod multiclient {
             );
             let mut session: z_owned_session_t = std::mem::zeroed();
             let rc = z_open(&mut session, z_config_move(&mut cfg), std::ptr::null());
-            assert_eq!(
-                rc, Z_OK,
-                "pico z_open(listen=unixpipe/..) must SUCCEED: the multi-client \
-                 acceptor makes a unixpipe listener mesh-capable (R311y392)"
-            );
-            // Close the listening session so its background accept loop thread does
-            // not leak past the test.
+            assert_eq!(rc, Z_OK, "pico z_open(listen=unixpipe/..) must bind");
+            let held = std::fs::metadata(&request).is_ok();
             z_close(z_session_loan_mut(&mut session), std::ptr::null());
             z_session_drop(z_session_move(&mut session));
+            assert!(held, "the listener holds no request FIFO at {request}");
         }
 
-        // The acceptor's teardown unlinks the base request node; best-effort here.
-        let _ = std::fs::remove_file(format!("{base}_uplink"));
+        // The listener's teardown removes the request node; best-effort here.
+        let _ = std::fs::remove_file(&request);
     }
 }

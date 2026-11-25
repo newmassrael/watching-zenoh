@@ -268,15 +268,16 @@ impl Default for KeySet {
 /// `transport/link/tx/sequence_number_resolution`, whose default is 32 bits, and zenoh-pico
 /// builds in `Z_SN_RESOLUTION 0x02` with no setting for another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SnResolution {
     /// `bits-32`.
-    Bits32,
+    Bits32 = 2,
     /// `bits-8`.
-    Bits8,
+    Bits8 = 0,
     /// `bits-16`.
-    Bits16,
+    Bits16 = 1,
     /// `bits-64`.
-    Bits64,
+    Bits64 = 3,
 }
 
 impl SnResolution {
@@ -287,6 +288,17 @@ impl SnResolution {
             Self::Bits8 => "bits-8",
             Self::Bits16 => "bits-16",
             Self::Bits64 => "bits-64",
+        }
+    }
+
+    /// The value's place among the values (`PolicyValue::ALL`), the bit a domain keeps
+    /// for it: apart from the discriminant, which is the value's code on the wire.
+    pub const fn position(self) -> usize {
+        match self {
+            Self::Bits32 => 0,
+            Self::Bits8 => 1,
+            Self::Bits16 => 2,
+            Self::Bits64 => 3,
         }
     }
 
@@ -3096,7 +3108,7 @@ impl PolicyValue for SnResolution {
             option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_16"),
             option_env!("WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_64"),
         ],
-        Self::DEFAULT as usize,
+        Self::DEFAULT.position(),
         DEFAULTS_ONLY,
     );
     const DEFAULT: Self = match Self::stated() {
@@ -3110,7 +3122,7 @@ impl PolicyValue for SnResolution {
     const BOUNDARY: Option<&'static str> = None;
 
     fn index(self) -> usize {
-        self as usize
+        self.position()
     }
 }
 
@@ -3120,7 +3132,7 @@ const _: () = assert!(
 );
 
 const _: () = assert!(
-    default_is_allowed::<SnResolution>(SnResolution::DEFAULT as usize),
+    default_is_allowed::<SnResolution>(SnResolution::DEFAULT.position()),
     "the default of sn-resolution is outside its WZ_POLICY_*_ALLOWS_*"
 );
 

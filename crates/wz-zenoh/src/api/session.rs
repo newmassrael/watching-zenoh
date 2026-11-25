@@ -82,7 +82,7 @@ use crate::api::{
     encoding::Encoding,
     handlers::{Callback, DefaultHandler},
     info::SessionInfo,
-    key_expr::{KeyExpr, KeyExprUndeclaration, SessionAnchor, WireAnchor},
+    key_expr::{KeyExpr, KeyExprUndeclaration, PrefixHold, SessionAnchor, WireAnchor},
     liveliness::Liveliness,
     matching::{MatchingStatus, MatchingStatusType},
     publisher::Priority,
@@ -853,13 +853,16 @@ impl Engine {
         }
     }
 
-    /// Hold a declaration of `keyexpr`: its id, or `None` once the engine's id space, the wire's
-    /// `ExprId`, is spent, when the key is used whole as one not worth a declaration is. Any
-    /// other refusal of the engine is an error.
-    fn acquire_keyexpr(&self, keyexpr: &str) -> ZResult<Option<ExprId>> {
+    /// Hold a declaration of `keyexpr`: the hold, or `None` once the engine's id space, the
+    /// wire's `ExprId`, is spent, when the key is used whole as one not worth a declaration is.
+    /// Any other refusal of the engine is an error.
+    fn acquire_keyexpr(&self, keyexpr: &str) -> ZResult<Option<PrefixHold>> {
         match self {
             Engine::Tokio(state) => match state.shared.as_engine().acquire_keyexpr(keyexpr) {
-                Ok(id) => Ok(Some(id)),
+                Ok(hold) => Ok(Some(PrefixHold {
+                    expr_id: hold.mapping_id(),
+                    row: hold.row().map(|row| row.to_bits()),
+                })),
                 Err(wz_capi_port::Refusal::NoEntityId) => Ok(None),
                 Err(refused) => Err(zerror!(
                     "the engine refused a key expression declaration: {refused}"
@@ -872,18 +875,28 @@ impl Engine {
                 .keys
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .acquire(keyexpr)),
+                .acquire(keyexpr)
+                .map(|expr_id| PrefixHold { expr_id, row: None })),
         }
     }
 
-    fn release_keyexpr(&self, mapping_id: ExprId) {
+    /// Let go of `hold`: by its row on the engine, which counts a declaration's holders in it, and
+    /// by its id on a node, which counts them by the id.
+    fn release_keyexpr(&self, hold: PrefixHold) {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().release_keyexpr(mapping_id),
+            Engine::Tokio(state) => {
+                if let Some(row) = hold
+                    .row
+                    .and_then(wz_session_core::session_tables::KeyexprHandle::from_bits)
+                {
+                    state.shared.release_keyexpr(row);
+                }
+            }
             Engine::Router(router) => router
                 .keys
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .release(mapping_id),
+                .release(hold.expr_id),
         }
     }
 
@@ -1808,11 +1821,11 @@ impl Engine {
         match *self {}
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> ZResult<Option<ExprId>> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> ZResult<Option<PrefixHold>> {
         match *self {}
     }
 
-    fn release_keyexpr(&self, _mapping_id: ExprId) {
+    fn release_keyexpr(&self, _hold: PrefixHold) {
         match *self {}
     }
 
@@ -7012,7 +7025,7 @@ impl Session {
 }
 
 impl WireAnchor for SessionInner {
-    fn declare_prefix(&self, prefix: &str, _force: bool) -> ZResult<Option<ExprId>> {
+    fn declare_prefix(&self, prefix: &str, _force: bool) -> ZResult<Option<PrefixHold>> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
@@ -7023,11 +7036,11 @@ impl WireAnchor for SessionInner {
         self.engine.acquire_keyexpr(prefix)
     }
 
-    fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
+    fn undeclare_prefix(&self, hold: PrefixHold) -> ZResult<()> {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        self.engine.release_keyexpr(expr_id);
+        self.engine.release_keyexpr(hold);
         Ok(())
     }
 }
@@ -7606,22 +7619,27 @@ mod tests {
     fn the_anchor_of_a_session_declares_and_undeclares_a_prefix_until_it_is_closed() {
         let session = open(peer("a1b2c9")).wait().expect("opens");
         let anchor = session.anchor();
-        let id = anchor
-            .declare_prefix("demo/prefix", false)
-            .expect("an open session declares")
-            .expect("and gives an id");
-        // The same prefix is held again, under the same id.
-        assert_eq!(
+        let hold = |what: &str| {
             anchor
                 .declare_prefix("demo/prefix", false)
-                .expect("held again"),
-            Some(id)
+                .expect(what)
+                .expect("and gives an id")
+        };
+        let first = hold("an open session declares");
+        // The same prefix is held again, under the same id, and once more for after the close.
+        let second = hold("held again");
+        let third = hold("held a third time");
+        assert_eq!(
+            (second.expr_id, second.row),
+            (first.expr_id, first.row),
+            "the same declaration, in the same row"
         );
-        anchor.undeclare_prefix(id).expect("one hold released");
-        anchor.undeclare_prefix(id).expect("the other released");
+        assert_eq!(third.expr_id, first.expr_id);
+        anchor.undeclare_prefix(first).expect("one hold released");
+        anchor.undeclare_prefix(second).expect("another released");
         session.close().wait().expect("closes");
         assert!(anchor.declare_prefix("demo/prefix", false).is_err());
-        assert!(anchor.undeclare_prefix(id).is_err());
+        assert!(anchor.undeclare_prefix(third).is_err());
     }
 
     #[test]

@@ -217,11 +217,14 @@ impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // lwIP's links here are UDP sockets: a stream would be its raw TCP API, which no link
         // of this crate is written over.
-        if to.proto != LinkProto::Udp {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        if ip.proto != LinkProto::Udp {
             return Err(LinkOpenError::Unsupported);
         }
         // Port 0 asks lwIP for a free one, one per initiator session.
-        let (socket, addr, port) = self.bind_dialled(0, to.at)?;
+        let (socket, addr, port) = self.bind_dialled(0, ip.at)?;
         self.opened(|place| LwipUdpDriver::new_in(place, socket, addr, port))
     }
 }
@@ -322,7 +325,7 @@ mod tests {
             SessionInitParams {
                 whatami: wz_session_core::WhatAmI::Peer,
                 zid: [zid; 4].into(),
-                seq_num_res: 2,
+                seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                 req_id_res: 2,
                 batch_size: 1024,
                 lease_ms: 10_000,

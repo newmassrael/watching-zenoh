@@ -23,8 +23,8 @@ use core::ffi::c_int;
 use core::net::SocketAddr;
 
 use windows_sys::Win32::Networking::WinSock as ws;
-use wz_runtime_coop::session_drive::LinkOpenError;
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
+use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
 
 use super::{
@@ -310,12 +310,12 @@ impl StreamSocket for WindowsTcpSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        self.local
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.peer
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: self.local,
+            peer: self.peer,
+        }
     }
 
     const WRITES_NOW: bool = true;
@@ -433,6 +433,11 @@ impl Drop for WindowsTcpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This end's address and the peer's, of a stream over IP.
+    fn ip_ends(stream: &WindowsTcpSocket) -> (SocketAddr, SocketAddr) {
+        stream.ends().ip().expect("a stream over IP")
+    }
     use core::net::{Ipv4Addr, Ipv6Addr};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -511,8 +516,8 @@ mod tests {
     #[test]
     fn a_connection_names_both_its_ends_and_has_nagle_off() {
         let (near, far) = pair();
-        assert_eq!(near.peer(), far.local_addr().unwrap());
-        assert_eq!(near.local(), far.peer_addr().unwrap());
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, far.peer_addr().unwrap());
         assert!(nodelay_of(near.socket));
     }
 
@@ -522,16 +527,16 @@ mod tests {
         let far = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("an IPv6 listener");
         let near = WindowsTcpSocket::connect(far.local_addr().unwrap()).expect("a connection");
         let (_taken, from) = far.accept().expect("the far end");
-        assert_eq!(near.peer(), far.local_addr().unwrap());
-        assert_eq!(near.local(), from);
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, from);
 
         let listener = WindowsTcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, 0)))
             .expect("a listener");
         assert!(listener.local().is_ipv6());
         let dialler = TcpStream::connect(listener.local()).expect("a connection");
         let accepted = accepted(&listener);
-        assert_eq!(accepted.peer(), dialler.local_addr().unwrap());
-        assert_eq!(accepted.local(), listener.local());
+        assert_eq!(ip_ends(&accepted).1, dialler.local_addr().unwrap());
+        assert_eq!(ip_ends(&accepted).0, listener.local());
     }
 
     #[test]
@@ -601,8 +606,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let (mut far, _) = listener.accept().expect("the far end");
-        assert_eq!(near.peer(), listener.local_addr().unwrap());
-        assert_eq!(near.local(), far.peer_addr().unwrap());
+        assert_eq!(ip_ends(&near).1, listener.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, far.peer_addr().unwrap());
         near.write_all(b"made")
             .expect("a made connection carries bytes");
         let mut got = [0u8; 4];
@@ -782,8 +787,8 @@ mod tests {
         let (listener, port) = listening();
         let mut far = TcpStream::connect(("127.0.0.1", port)).expect("a connection");
         let near = accepted(&listener);
-        assert_eq!(near.local(), at(port));
-        assert_eq!(near.peer(), far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, at(port));
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
         assert!(nodelay_of(near.socket));
         let mut buf = [0u8; 16];
         assert_eq!(near.try_read(&mut buf), Ok(None));

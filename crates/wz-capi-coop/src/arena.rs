@@ -961,19 +961,31 @@ impl EntityRows {
         }
     }
 
-    /// The rows of the write filters' one table: a publisher's and a querier's each.
-    pub const fn filters(&self) -> Option<usize> {
-        self.of_kind(EntityKind::Publisher)
-            .checked_add(self.of_kind(EntityKind::Querier))
+    /// The write filters the matching listeners declared on a key judge through, one each: none
+    /// in a build that keeps no such listener (`key-matching-listener`).
+    pub const fn key_listeners(&self) -> usize {
+        if cfg!(feature = "key-matching-listener") {
+            self.of_kind(EntityKind::MatchingListener)
+        } else {
+            0
+        }
     }
 
-    /// The rows of the Interests the session holds open: a write filter or a matching listener
-    /// opens at most one, and one that finds its key already asked opens none.
-    pub const fn interests(&self) -> Option<usize> {
-        match self.filters() {
-            Some(filters) => filters.checked_add(self.of_kind(EntityKind::MatchingListener)),
+    /// The rows of the write filters' one table: a publisher's and a querier's each, and a key
+    /// listener's.
+    pub const fn filters(&self) -> Option<usize> {
+        match self
+            .of_kind(EntityKind::Publisher)
+            .checked_add(self.of_kind(EntityKind::Querier))
+        {
+            Some(entities) => entities.checked_add(self.key_listeners()),
             None => None,
         }
+    }
+
+    /// The rows of the Interests the session holds open: a write filter opens at most one.
+    pub const fn interests(&self) -> Option<usize> {
+        self.filters()
     }
 }
 
@@ -1809,7 +1821,7 @@ impl ArenaPlan {
                 NO_PEER_ROWS
             }
         };
-        let pools = match pool_rows(limits, faces) {
+        let pools = match pool_rows(limits, faces, member_alias_groups(shape.groups)) {
             Ok(pools) => pools,
             Err(refused) => {
                 self.refuse(refused);
@@ -1992,6 +2004,7 @@ impl ArenaPlan {
             publishers: rows.of_kind(EntityKind::Publisher),
             queriers: rows.of_kind(EntityKind::Querier),
             matching_listeners: rows.of_kind(EntityKind::MatchingListener),
+            key_listeners: rows.key_listeners(),
             pending_gets: 0,
             held_replies: 0,
         }
@@ -2397,25 +2410,33 @@ const fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused>
 ///
 /// A session of many faces lends a pool of each kind the faces share: the session's value of the
 /// kind's limit under the build's, and no more than the faces could hold together, each at the
-/// bound of one peer the session resolved. A session of one face has no one to share with: its
-/// tables take spans of their own of that face's bounds, with no link and no pool state, as many
-/// rows as its inline tables held (and fewer where the session's limit is lower).
+/// bound of one peer the session resolved, and `groups` of them, the faces of groups whose
+/// members' keyexprs are each their own, at `GROUP_FACE_ALIASES` aliases. A session of one face
+/// has no one to share with: its tables take spans of their own of that face's bounds, with no
+/// link and no pool state, as many rows as its inline tables held (and fewer where the session's
+/// limit is lower).
 ///
 /// A pool or a span names its rows by `u16`, so a count past [`MAX_POOL_ROWS`] refuses the open
 /// by the limit that set it: the session's limit for a pool, the face's for a span. Refused too
 /// when a limit is over the build's value.
-const fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, ArenaRefused> {
+const fn pool_rows(
+    limits: &SessionLimits,
+    faces: usize,
+    groups: usize,
+) -> Result<PeerPoolRows, ArenaRefused> {
     if !SHARES_ROWS {
         // A build whose faces keep what their peers write inline lends no pool and no span.
         return Ok(NO_POOL_ROWS);
     }
+    let face_aliases = tried!(limit_rows::<{ caps::MAX_PEER_KEYEXPR_ALIASES }>(
+        ALIAS_LIMITS.face,
+        limits.max_peer_keyexpr_aliases(),
+    ));
     Ok(PeerPoolRows {
-        aliases: tried!(kind_rows(
+        aliases: tried!(rows_within(
+            faces_aliases(faces, groups, face_aliases.1),
             faces,
-            tried!(limit_rows::<{ caps::MAX_PEER_KEYEXPR_ALIASES }>(
-                ALIAS_LIMITS.face,
-                limits.max_peer_keyexpr_aliases(),
-            )),
+            face_aliases,
             tried!(limit_rows::<{ caps::SESSION_MAX_PEER_KEYEXPR_ALIASES }>(
                 ALIAS_LIMITS.session,
                 limits.session_max_peer_keyexpr_aliases(),
@@ -2470,6 +2491,39 @@ const ALIAS_LIMITS: PoolLimit = PoolLimit {
     session: ArenaLimit::SessionMaxPeerKeyexprAliases,
 };
 
+/// The aliases the face of a group holds where each member's keyexprs are its own
+/// (`multicast-declarations`): `MAX_MEMBER_KEYEXPRS` for each of the `MAX_GROUP_MEMBERS` members, so
+/// the session's pool reserves at its open what every member may declare and none runs out after.
+#[cfg(feature = "multicast-declarations")]
+pub(crate) const GROUP_FACE_ALIASES: usize =
+    caps::MAX_GROUP_MEMBERS.saturating_mul(caps::MAX_MEMBER_KEYEXPRS);
+
+/// The groups of a session that joins `groups` whose faces hold `GROUP_FACE_ALIASES`: each one a
+/// task cell holds, as [`PlanShape::faces`] counts them, in a build whose members' keyexprs are their own,
+/// and none in another.
+const fn member_alias_groups(groups: usize) -> usize {
+    if cfg!(feature = "multicast-declarations") {
+        least(groups, caps::MAX_TASKS)
+    } else {
+        0
+    }
+}
+
+/// The aliases `faces` faces hold together at most, `face` each, `groups` of them a group's
+/// `GROUP_FACE_ALIASES` instead.
+pub(crate) const fn faces_aliases(faces: usize, groups: usize, face: usize) -> usize {
+    #[cfg(feature = "multicast-declarations")]
+    {
+        face.saturating_mul(faces.saturating_sub(groups))
+            .saturating_add(GROUP_FACE_ALIASES.saturating_mul(groups))
+    }
+    #[cfg(not(feature = "multicast-declarations"))]
+    {
+        let _ = groups;
+        face.saturating_mul(faces)
+    }
+}
+
 /// The limits of the peers' declarations of one kind.
 const DECL_LIMITS: PoolLimit = PoolLimit {
     face: ArenaLimit::MaxRemoteDecls,
@@ -2492,13 +2546,22 @@ pub(crate) const fn kind_rows(
     face: (ArenaLimit, usize),
     session: (ArenaLimit, usize),
 ) -> Result<usize, ArenaRefused> {
-    let all = face.1.saturating_mul(faces);
+    rows_within(face.1.saturating_mul(faces), faces, face, session)
+}
+
+/// [`kind_rows`] of `faces` faces that hold `all` rows together at most.
+const fn rows_within(
+    all: usize,
+    faces: usize,
+    face: (ArenaLimit, usize),
+    session: (ArenaLimit, usize),
+) -> Result<usize, ArenaRefused> {
     let (limit, rows) = if session.1 < all {
         session
     } else if faces > 1 {
         (session.0, all)
     } else {
-        face
+        (face.0, all)
     };
     if rows > MAX_POOL_ROWS {
         return Err(ArenaRefused::Limit {

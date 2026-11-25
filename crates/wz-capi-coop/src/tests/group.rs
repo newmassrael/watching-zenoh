@@ -185,7 +185,7 @@ fn profile() -> GroupProfile {
         lease_ms: 10_000,
         join_interval_ms: 100,
         max_sessions: None,
-        seq_num_res: 0x02,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: false,
@@ -982,7 +982,7 @@ mod mapped {
     use std::sync::Arc;
 
     use wz_capi_port::group::GroupDeclarations;
-    use wz_capi_port::{FilterPlane, KeyHolds, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
 
     use super::{
         eventually, member_config, open_member, put, subscribe, until_members_know_each_other,
@@ -1029,7 +1029,8 @@ mod mapped {
         until_members_know_each_other(&first, &second);
         let id = first
             .acquire_keyexpr("demo/mapped/q")
-            .expect("a session with ids left declares a keyexpr");
+            .expect("a session with ids left declares a keyexpr")
+            .mapping_id();
         eventually("the declaration to leave", || {
             carried(&network, 1, b"mapped/q")
         });
@@ -1103,9 +1104,10 @@ mod mapped {
         let network = Arc::new(Network::default());
         let first = open_mapped(&network, 1).expect("the first joins");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
-        let id = first
+        let held = first
             .acquire_keyexpr("demo/mapped/b")
             .expect("a session with ids left declares a keyexpr");
+        let id = held.mapping_id();
         let second = open_mapped(&network, 2).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
         until_members_know_each_other(&first, &second);
@@ -1136,7 +1138,7 @@ mod mapped {
                 .iter()
                 .any(|payload| payload == b"by-its-literal")
         });
-        first.release_keyexpr(id);
+        held.release(&*first);
         SessionDrive::close(&*second);
         SessionDrive::close(&*first);
     }
@@ -2225,9 +2227,8 @@ mod in_place {
     /// Below the engine: the group's receive over a datagram its transport keeps. A host with room
     /// for no other stops the walk before the next message, and with room for one record stops it
     /// before the next record; each walk goes on from where the last stopped, the frame admitted
-    /// by its sequence number once, until the datagram is read whole. A build whose group reads
-    /// owned batches reads each datagram whole whatever the host's room.
-    #[cfg(not(any(feature = "transport-stats", feature = "multicast-declarations")))]
+    /// by its sequence number once, until the datagram is read whole.
+    #[cfg(not(feature = "transport-stats"))]
     #[test]
     fn a_kept_group_datagram_is_read_on_from_where_the_host_stopped() {
         use core::net::SocketAddr;
@@ -2358,6 +2359,7 @@ mod member_keyexprs {
     use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
     use wz_session_core::declare_build::{build_declare_kexpr, build_declare_subscriber};
     use wz_session_core::frame_encode::{encode_frame_with_declare, encode_frame_with_push};
+    use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
     use wz_session_core::push_build::build_push_aliased;
 
     use super::in_place::{beacon, hand_in};
@@ -2450,6 +2452,33 @@ mod member_keyexprs {
         eventually(
             "each member's subscriber to open the filter on its own key",
             || !session.write_filter_active(on_a) && !session.write_filter_active(on_b),
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// The first member leaves after both declared the id 1: what it declared goes with it, and
+    /// the member that stays keeps its own declaration of the same id, so its put by the id still
+    /// reaches the key it declared, and only that one.
+    #[test]
+    fn a_member_that_leaves_takes_its_keyexprs_and_the_other_keeps_its_own() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let on_a = subscribe(&session, "demo/alias/a");
+        let on_b = subscribe(&session, "demo/alias/b");
+        declare_one_id_for_two_keys(&network);
+        let [(leaving, _), (staying, _)] = MEMBERS;
+        let mut close = [0u8; 8];
+        let len = encode_multicast_close_into_slice(&mut close).expect("a close");
+        hand_in(&network, 1, leaving, &close[..len]);
+        let push = build_push_aliased(1, None, b"after").expect("a put by the id");
+        hand_in(&network, 1, staying, &encode_frame_with_push(1, push, true));
+        eventually("the staying member's put on its own key", || {
+            !on_b.lock().unwrap().is_empty()
+        });
+        assert!(
+            on_a.lock().unwrap().is_empty(),
+            "nothing reaches the key of the member that left"
         );
         SessionDrive::close(&*session);
     }

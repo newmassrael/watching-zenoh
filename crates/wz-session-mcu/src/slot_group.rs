@@ -71,6 +71,16 @@ pub const REJOIN_MS: u64 = 1_000;
 /// stock peers share (zenoh-pico's `Z_SN_RESOLUTION`, `0x02`, the 28-bit ring).
 pub const GROUP_SN_RESOLUTION: u8 = 0x02;
 
+// The group's width is a constant of the image, not a value an open is handed, so the test every
+// open makes of a width holds it to the build's `sn-resolution` domain when the image is compiled.
+const _: () = assert!(
+    wz_session_core::sn::sn_resolution_admitted(
+        wz_session_core::policy::SnResolution::from_wire_code(GROUP_SN_RESOLUTION)
+    )
+    .is_ok(),
+    "the group's sequence-number width is outside the build's sn-resolution domain"
+);
+
 /// The batch a group's members agree on, in bytes: a JOIN that advertises another is refused, and
 /// a put whose frame is longer leaves as a fragment chain. zenoh-pico's `BATCH_MULTICAST_SIZE`.
 pub const GROUP_BATCH_BYTES: u16 = 2_048;
