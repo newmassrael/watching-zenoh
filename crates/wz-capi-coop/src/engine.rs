@@ -1663,6 +1663,200 @@ struct LinkLeg<'a> {
     planned: bool,
 }
 
+/// What one link's send of a put came to ([`LinkLeg::send_to`]).
+struct LegSent {
+    /// What the send means for the publish ([`leg_outcome`]).
+    outcome: Result<usize, FanoutError>,
+    /// The link had no outbound slot for a send that may not wait: the fan-out stops at its face.
+    stop: bool,
+    /// Whether the link was sent the head its publisher's plan wrote.
+    #[cfg(test)]
+    planned: bool,
+}
+
+impl LegSent {
+    /// A send that does not wait, ended before the head was asked for.
+    #[cfg(feature = "listen")]
+    fn of(outcome: Result<usize, FanoutError>, stop: bool) -> Self {
+        Self {
+            outcome,
+            stop,
+            #[cfg(test)]
+            planned: false,
+        }
+    }
+}
+
+impl LinkLeg<'_> {
+    /// Send the put over the link of `actions`, as `how` says it is sent
+    /// ([`CoopEngine::send_on_links`]). A link that does not take the plain form (one that
+    /// rewrites the keys the session originates) is sent the owned message in its place.
+    fn send_to<C: ClockSource + 'static>(
+        &self,
+        actions: &LinkActions<C>,
+        how: FaceSend,
+    ) -> LegSent {
+        let LinkLeg {
+            named,
+            payload,
+            kind,
+            meta,
+            send,
+            head,
+            planned,
+        } = *self;
+        let wz_session_core::session_actions::SendAs {
+            reliable,
+            express,
+            priority,
+        } = send;
+        #[cfg(not(feature = "listen"))]
+        let _ = how;
+        let mut outcome = Ok(0);
+        #[cfg(test)]
+        let mut headed = false;
+        // Each link names the key as its own key-wire form says. A publication is written from
+        // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
+        // own shorter writer, unless the session or the build leaves it to the owned send below.
+        // A planned put's key was named on every link when it was planned.
+        let key = if planned {
+            named
+        } else {
+            key_on_link(actions, named)
+        };
+        let plain = kind == SampleKind::Put && meta.is_plain_apart_from_qos();
+        // A send that may not wait is told apart from one whose link has room: one with none
+        // ends the fan-out at this face, and a chain of fragments, which such a send does not
+        // begin, is sent as the caller's own send.
+        #[cfg(feature = "listen")]
+        if how == FaceSend::Probe {
+            let probed = if plain {
+                actions.try_send_plain_put_qos(
+                    key,
+                    payload,
+                    meta.qos,
+                    wz_session_core::session_actions::SendAs {
+                        reliable,
+                        express,
+                        priority,
+                    },
+                )
+            } else {
+                actions.try_send_publication_qos(
+                    key,
+                    kind,
+                    payload,
+                    meta,
+                    wz_session_core::session_actions::SendAs {
+                        reliable,
+                        express,
+                        priority,
+                    },
+                )
+            };
+            let answer = match probed {
+                Some(Ok(Probed::NoRoom)) => ProbeAnswer::NoRoom,
+                Some(Ok(Probed::Sent)) => ProbeAnswer::Sent,
+                Some(Err(error)) => {
+                    let sent = leg_outcome(Err(error));
+                    if sent.is_err() {
+                        outcome = sent;
+                    }
+                    ProbeAnswer::Failed
+                }
+                Some(Ok(Probed::Chain)) | None => ProbeAnswer::Chain,
+            };
+            match after_probe(answer) {
+                AfterProbe::StopHere => return LegSent::of(outcome, true),
+                AfterProbe::Next => return LegSent::of(outcome, false),
+                AfterProbe::SendAsOwn => {}
+            }
+        }
+        let lent = if plain {
+            let send = wz_session_core::session_actions::SendAs {
+                reliable,
+                express,
+                priority,
+            };
+            // A link that names the key by the declaration the head was written for is sent
+            // the head, the payload's length and the payload; any other is sent the Put's parts.
+            match head.filter(|head| planned || head.names(key.wire())) {
+                Some(head) => {
+                    #[cfg(test)]
+                    headed = true;
+                    actions.send_put_with_head(key, payload, &head, send)
+                }
+                None => actions.send_plain_put_qos(key, payload, meta.qos, send),
+            }
+        } else {
+            actions.send_publication_qos(
+                key,
+                kind,
+                payload,
+                meta,
+                wz_session_core::session_actions::SendAs {
+                    reliable,
+                    express,
+                    priority,
+                },
+            )
+        };
+        let sent = if let Some(lent) = lent {
+            leg_outcome(lent)
+        } else if !lent_push::LENT_PUBLICATION_MAY_DECLINE {
+            // No send of this build declines one, so the owned builders are not linked.
+            Err(FanoutError::ExceedsCapacity)
+        } else {
+            let suffix = key.wire().suffix();
+            let push = match (kind, key.wire().id()) {
+                (SampleKind::Put, 0) => {
+                    push_build::build_push_literal_with_meta(key.text(), payload, meta)
+                }
+                (SampleKind::Del, 0) => {
+                    push_build::build_push_del_literal_with_meta(key.text(), meta)
+                }
+                (SampleKind::Put, mapping_id) => {
+                    push_build::build_push_aliased_with_meta(mapping_id, suffix, payload, meta)
+                }
+                (SampleKind::Del, mapping_id) => {
+                    push_build::build_push_del_aliased_with_meta(mapping_id, suffix, meta)
+                }
+            };
+            match push {
+                Ok(push) => leg_outcome(actions.send_network_message_qos(
+                    NetworkMessage::Push(Box::new(push)),
+                    reliable,
+                    express,
+                    priority,
+                )),
+                Err(_) => Err(FanoutError::ExceedsCapacity),
+            }
+        };
+        if sent.is_err() {
+            outcome = sent;
+        }
+        LegSent {
+            outcome,
+            stop: false,
+            #[cfg(test)]
+            planned: headed,
+        }
+    }
+}
+
+/// Send `leg` over the link `wire` holds as `how` says, the link's session lent as [`send_on`]
+/// lends it. `None` while the link is not lent.
+fn publish_on<C: ClockSource + 'static>(
+    wire: &Wire<C>,
+    leg: &LinkLeg<'_>,
+    how: FaceSend,
+) -> Option<LegSent> {
+    match wire.try_session(|session| leg.send_to(&session.actions, how)) {
+        Lend::Lent(sent) => Some(sent),
+        Lend::Held | Lend::Empty => None,
+    }
+}
+
 /// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
 enum ToPublish<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The session, held for the publish.
@@ -4455,6 +4649,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             })
     }
 
+    /// The links of the faces that are up, each with its face's place: what a put is sent over.
+    fn up_wires_at(&self) -> impl Iterator<Item = (usize, &Wire<C>)> {
+        self.transport
+            .links
+            .placed()
+            .filter_map(|(at, face)| match &face.link {
+                Link::Up(wire) => Some((at, wire)),
+                _ => None,
+            })
+    }
+
     /// The link of the face a query that came in under `generation` came over, while it is up:
     /// where the query's answer goes. Found by the face's record of the link, as a lend of the
     /// link may find it held by the face's own read.
@@ -6453,24 +6658,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         skip: Option<&DroppedOn>,
         pass: Pass,
     ) -> (Result<usize, FanoutError>, Option<u64>) {
-        let LinkLeg {
-            named,
-            payload,
-            kind,
-            meta,
-            send,
-            head,
-            planned,
-        } = *leg;
-        let wz_session_core::session_actions::SendAs {
-            reliable,
-            express,
-            priority,
-        } = send;
         let mut outcome = Ok(0);
         #[cfg(not(any(feature = "listen", feature = "group")))]
         let _ = skip;
-        for (at, _, actions) in core.transport.ups_at() {
+        for (at, wire) in core.up_wires_at() {
             #[cfg(any(feature = "listen", feature = "group"))]
             let dropped_on = skip.is_some_and(|dropped| self.rooms.skips(dropped, at));
             #[cfg(not(any(feature = "listen", feature = "group")))]
@@ -6485,125 +6676,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let _sending = SendingOn::enter(&self.sending_on, place);
             #[cfg(test)]
             self.takes.face_marks.fetch_add(1, Ordering::Relaxed);
-            // Each link names the key as its own key-wire form says. A publication is written from
-            // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
-            // own shorter writer, unless the session or the build leaves it to the owned send below.
-            // A planned put's key was named on every link when it was planned.
-            let key = if planned {
-                named
-            } else {
-                key_on_link(actions, named)
+            // A link not lent to the put skips it, as a link that is down does.
+            let Some(sent) = publish_on(wire, leg, how) else {
+                continue;
             };
-            let plain = kind == SampleKind::Put && meta.is_plain_apart_from_qos();
-            // A send that may not wait is told apart from one whose link has room: one with none
-            // ends the fan-out at this face, and a chain of fragments, which such a send does not
-            // begin, is sent as the caller's own send.
-            #[cfg(feature = "listen")]
-            if how == FaceSend::Probe {
-                let probed = if plain {
-                    actions.try_send_plain_put_qos(
-                        key,
-                        payload,
-                        meta.qos,
-                        wz_session_core::session_actions::SendAs {
-                            reliable,
-                            express,
-                            priority,
-                        },
-                    )
-                } else {
-                    actions.try_send_publication_qos(
-                        key,
-                        kind,
-                        payload,
-                        meta,
-                        wz_session_core::session_actions::SendAs {
-                            reliable,
-                            express,
-                            priority,
-                        },
-                    )
-                };
-                let answer = match probed {
-                    Some(Ok(Probed::NoRoom)) => ProbeAnswer::NoRoom,
-                    Some(Ok(Probed::Sent)) => ProbeAnswer::Sent,
-                    Some(Err(error)) => {
-                        let sent = leg_outcome(Err(error));
-                        if sent.is_err() {
-                            outcome = sent;
-                        }
-                        ProbeAnswer::Failed
-                    }
-                    Some(Ok(Probed::Chain)) | None => ProbeAnswer::Chain,
-                };
-                match after_probe(answer) {
-                    AfterProbe::StopHere => return (outcome, Some(place)),
-                    AfterProbe::Next => continue,
-                    AfterProbe::SendAsOwn => {}
-                }
+            #[cfg(test)]
+            if sent.planned {
+                self.takes.planned.fetch_add(1, Ordering::Relaxed);
             }
-            let lent = if plain {
-                let send = wz_session_core::session_actions::SendAs {
-                    reliable,
-                    express,
-                    priority,
-                };
-                // A link that names the key by the declaration the head was written for is sent
-                // the head, the payload's length and the payload; any other is sent the Put's parts.
-                match head.filter(|head| planned || head.names(key.wire())) {
-                    Some(head) => {
-                        #[cfg(test)]
-                        self.takes.planned.fetch_add(1, Ordering::Relaxed);
-                        actions.send_put_with_head(key, payload, &head, send)
-                    }
-                    None => actions.send_plain_put_qos(key, payload, meta.qos, send),
-                }
-            } else {
-                actions.send_publication_qos(
-                    key,
-                    kind,
-                    payload,
-                    meta,
-                    wz_session_core::session_actions::SendAs {
-                        reliable,
-                        express,
-                        priority,
-                    },
-                )
-            };
-            let sent = if let Some(lent) = lent {
-                leg_outcome(lent)
-            } else if !lent_push::LENT_PUBLICATION_MAY_DECLINE {
-                // No send of this build declines one, so the owned builders are not linked.
-                Err(FanoutError::ExceedsCapacity)
-            } else {
-                let suffix = key.wire().suffix();
-                let push = match (kind, key.wire().id()) {
-                    (SampleKind::Put, 0) => {
-                        push_build::build_push_literal_with_meta(key.text(), payload, meta)
-                    }
-                    (SampleKind::Del, 0) => {
-                        push_build::build_push_del_literal_with_meta(key.text(), meta)
-                    }
-                    (SampleKind::Put, mapping_id) => {
-                        push_build::build_push_aliased_with_meta(mapping_id, suffix, payload, meta)
-                    }
-                    (SampleKind::Del, mapping_id) => {
-                        push_build::build_push_del_aliased_with_meta(mapping_id, suffix, meta)
-                    }
-                };
-                match push {
-                    Ok(push) => leg_outcome(actions.send_network_message_qos(
-                        NetworkMessage::Push(Box::new(push)),
-                        reliable,
-                        express,
-                        priority,
-                    )),
-                    Err(_) => Err(FanoutError::ExceedsCapacity),
-                }
-            };
-            if sent.is_err() {
-                outcome = sent;
+            if sent.outcome.is_err() {
+                outcome = sent.outcome;
+            }
+            if sent.stop {
+                return (outcome, Some(place));
             }
         }
         (outcome, None)
