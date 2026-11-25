@@ -225,19 +225,16 @@ pub trait RequesterTables {
         peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
     );
 
-    /// [`Self::dispatch_iteration_event`] for a caller that handed each Response of a frame the
-    /// copying receive decoded to the pending gets itself (`ReplyRegistry::take_response`): the
-    /// pending snapshots are told the frame, the pending gets its `ResponseFinal`s alone.
+    /// [`Self::dispatch_iteration_event`] to the Finals alone, for a caller that handed each answer
+    /// of a frame the copying receive decoded to the pending gets and snapshots itself, in their
+    /// order, before this (`ReplyRegistry::take_response`, `LivelinessGetRegistry::claim_token`):
+    /// each Final then ends its get after every answer the frame carried.
     #[cfg(any(
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-get"
     ))]
-    fn dispatch_iteration_event_but_replies<T: Storage, O: Storage>(
-        &mut self,
-        event: IterationEvent<'_, '_>,
-        peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
-    );
+    fn dispatch_finals_of(&mut self, event: IterationEvent<'_, '_>);
 
     /// Whether a snapshot terminated since the last drain, its prune still to run.
     #[cfg(feature = "liveliness-get")]
@@ -276,16 +273,9 @@ impl<R: ReplySink, G: ReplySink, P: Storage> RequesterTables for Requesters<R, G
         feature = "codec-response-final",
         feature = "liveliness-get"
     ))]
-    fn dispatch_iteration_event_but_replies<T: Storage, O: Storage>(
-        &mut self,
-        event: IterationEvent<'_, '_>,
-        peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
-    ) {
+    fn dispatch_finals_of(&mut self, event: IterationEvent<'_, '_>) {
         #[cfg(feature = "liveliness-get")]
-        self.liveliness_gets
-            .dispatch_iteration_event(event, peer_table);
-        #[cfg(not(feature = "liveliness-get"))]
-        let _ = peer_table;
+        self.liveliness_gets.dispatch_finals_of(event);
         #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
         self.replies.dispatch_finals_of(event);
     }
@@ -332,12 +322,7 @@ impl RequesterTables for NoRequesters {
         feature = "codec-response-final",
         feature = "liveliness-get"
     ))]
-    fn dispatch_iteration_event_but_replies<T: Storage, O: Storage>(
-        &mut self,
-        _event: IterationEvent<'_, '_>,
-        _peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
-    ) {
-    }
+    fn dispatch_finals_of(&mut self, _event: IterationEvent<'_, '_>) {}
 
     #[cfg(feature = "liveliness-get")]
     fn has_finalized(&self) -> bool {
@@ -1385,12 +1370,12 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         self.planes_beside_subscribers(cx, peers, requesters, event, others, false);
     }
 
-    /// [`Self::dispatch_event_among`] to every plane but the subscribers' and the pending gets'
-    /// replies, for a caller that took the subscribers' side of each of the event's records and
-    /// handed each Response to the pending gets itself, in their order, before this
-    /// (`SubscriberPeer::take_record`, `ReplyRegistry::take_response`): the planes below then
-    /// resolve through the aliases the subscribers' side bound, as they do after it in
-    /// [`Self::dispatch_event_among`], and a `ResponseFinal` ends its get after its replies.
+    /// [`Self::dispatch_event_among`] to every plane but the subscribers' and the answers to the
+    /// pending gets and snapshots, for a caller that took the subscribers' side of each of the
+    /// event's records and handed each answer to its get itself, in their order, before this
+    /// (`SubscriberPeer::take_record`, `RequesterTables::dispatch_finals_of`): the planes below
+    /// then resolve through the aliases the subscribers' side bound, as they do after it in
+    /// [`Self::dispatch_event_among`], and a Final ends its get after its answers.
     #[inline(never)]
     pub fn dispatch_event_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
         &mut self,
@@ -1403,8 +1388,8 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         self.planes_beside_subscribers(cx, peers, requesters, event, others, true);
     }
 
-    /// The planes after the subscribers' side of an event, the pending gets told its Responses
-    /// unless `replies_taken`. Inlined into each of the two calls above, so each keeps the one
+    /// The planes after the subscribers' side of an event, the pending gets and snapshots told
+    /// its answers unless `replies_taken`. Inlined into each of the two calls above, so each keeps the one
     /// frame the planes' temporaries lie in.
     #[inline(always)]
     fn planes_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
@@ -1567,7 +1552,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "liveliness-get"
         ))]
         if replies_taken {
-            requesters.dispatch_iteration_event_but_replies(event, peer_table);
+            requesters.dispatch_finals_of(event);
         } else {
             requesters.dispatch_iteration_event(event, peer_table);
         }

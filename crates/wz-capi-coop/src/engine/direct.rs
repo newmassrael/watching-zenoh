@@ -212,6 +212,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
             IterationEvent::InPlace(ref record) if record.response().is_some() => {
                 self.engine.hand_lent_reply(self.records.face, record);
             }
+            // An alive token answering a pending liveliness get is handed to it as a reply is;
+            // any other declaration of an interest is dispatched as every record is.
+            #[cfg(feature = "liveliness-get")]
+            IterationEvent::InPlace(ref record)
+                if record
+                    .declare()
+                    .is_some_and(|declare| declare.interest_id.is_some()) =>
+            {
+                if let Some(mut held) = self.engine.hand_lent_token(self.records.face, record) {
+                    self.records
+                        .dispatch(&mut held.0.session.registry, event, Planes::All);
+                }
+            }
             // The subscribers' side of each record first, a Push's sample handed out one row at a
             // time, then the other planes', as the dispatch of the whole frame orders them.
             IterationEvent::Poll(DriverLoopOutcome::FramePayload {

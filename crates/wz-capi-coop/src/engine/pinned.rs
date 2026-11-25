@@ -77,7 +77,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Take the subscribers' side of `messages`, the records of a frame of face `face` the copying
     /// receive decoded, one record at a time in their order: each Push's sample is handed to each
     /// subscriber its key reaches, one call at a time with the session let go of, each Response's
-    /// reply is handed to the get it answers in the same way (`replies`), and any other record is
+    /// reply, and each alive token answering a pending liveliness get, is handed to the get it
+    /// answers in the same way (`replies`), and any other record is
     /// taken under the lock as the frame's dispatch takes it. What the frame's other planes take
     /// follows (`Planes::BesideSubscribers`). A session closed meanwhile takes no
     /// record after the one whose callback closed it.
@@ -100,6 +101,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     self.hand_reply(held, face, &reply);
                 }
                 continue;
+            }
+            // An alive token answering a pending liveliness get is that get's alone, handed to
+            // its callback as a reply is.
+            #[cfg(feature = "liveliness-get")]
+            if let wz_session_core::network_message::NetworkMessage::Declare(declare) = message {
+                let mut room = wz_session_core::wireexpr_resolve::KeyexprBuf::new();
+                if let Some(interest_id) = held
+                    .0
+                    .session
+                    .registry
+                    .claim_token(face, declare, &mut room)
+                {
+                    let key = wz_session_core::wireexpr_resolve::KeyexprOut::as_str(&room);
+                    self.hand_token(held, face, interest_id, key);
+                    continue;
+                }
             }
             let Some(owned) =
                 held.0

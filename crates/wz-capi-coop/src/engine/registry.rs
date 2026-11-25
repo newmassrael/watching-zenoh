@@ -1344,6 +1344,67 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
+    /// The alive token `declare`, a record of a frame of face `face` the copying receive decoded,
+    /// answers a pending liveliness get with: its key written into `room` and the interest id it
+    /// answers (`LivelinessGetRegistry::claim_token`), for a read that hands it to the get with
+    /// the session let go of (`replies`). A declaration that answers no pending get, and a face
+    /// the session no longer holds, claim nothing.
+    #[cfg(all(
+        feature = "liveliness-get",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn claim_token(
+        &mut self,
+        face: HeldFace,
+        declare: &wz_session_core::transport_profile::owned::DeclareOwned,
+        room: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<u64> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.gets.liveliness_gets.claim_token(declare, spaces, room)
+    }
+
+    /// [`Self::claim_token`] for the Declare `record` lends where its frame lies. A record that is
+    /// no Declare claims nothing.
+    #[cfg(all(
+        feature = "liveliness-get",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn claim_lent_token(
+        &mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'_, '_>,
+        room: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<u64> {
+        let declare = record.declare()?;
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face
+            .peer
+            .subscribers
+            .mapping_spaces_over(own)
+            .from_sender(record.sender());
+        face.gets
+            .liveliness_gets
+            .claim_token_view(declare, spaces, room)
+    }
+
+    /// Hand the alive token at `keyexpr` to the pending liveliness get `interest_id` of face
+    /// `face` (`Self::claim_token`), as the face's dispatch hands it. A face the session no longer
+    /// holds hands it to none.
+    #[cfg(all(
+        feature = "liveliness-get",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn fire_token(&mut self, face: HeldFace, interest_id: u64, keyexpr: &str) {
+        if let Some(Split { face, .. }) = self.split_unwritten(self.place(face)) {
+            face.gets
+                .liveliness_gets
+                .dispatch_reply_borrowed(interest_id, keyexpr);
+        }
+    }
+
     /// How often a face's tables were looked up since the open: what a lent Push's count of its
     /// lookups starts from ([`Self::counted_push`]).
     #[cfg(all(

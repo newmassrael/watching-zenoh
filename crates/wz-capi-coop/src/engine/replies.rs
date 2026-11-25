@@ -19,9 +19,13 @@
 
 use super::*;
 
+#[cfg(feature = "liveliness-get")]
+use wz_session_core::declare::liveliness_get::token_reply;
 use wz_session_core::driver_loop::{InPlaceRecord, OwedToProjection};
 use wz_session_core::reply::{InboundReply, LentReply, ReplyRoom};
 use wz_session_core::reply_sink::ReplyView;
+#[cfg(feature = "liveliness-get")]
+use wz_session_core::wireexpr_resolve::{KeyexprBuf, KeyexprOut};
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the reply of the Response `record` of face `face` lends to the get it answers, with
@@ -67,6 +71,56 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ) {
         self.gets.capture();
         held.0.session.registry.fire_reply(face, reply);
+        self.hand_captured(held, reply);
+    }
+
+    /// Hand the alive token the Declare `record` of face `face` lends to the liveliness get it
+    /// answers, with the session let go of, as a peer's reply is handed (`Self::hand_reply`). The
+    /// session, still held, for a record that answers no pending get, which the caller dispatches
+    /// as any other; nothing for one handed, and in a closed session.
+    #[cfg(feature = "liveliness-get")]
+    pub(super) fn hand_lent_token(
+        &self,
+        face: HeldFace,
+        record: &InPlaceRecord<'_, '_>,
+    ) -> Option<LiveCore<'_, L, C>> {
+        let mut room = KeyexprBuf::new();
+        let mut held = self.live()?;
+        let Some(interest_id) = held
+            .0
+            .session
+            .registry
+            .claim_lent_token(face, record, &mut room)
+        else {
+            return Some(held);
+        };
+        self.hand_token(held, face, interest_id, KeyexprOut::as_str(&room));
+        None
+    }
+
+    /// Hand the alive token at `keyexpr`, claimed under `held` for the pending liveliness get
+    /// `interest_id` of face `face`, to that get, as a peer's reply is handed
+    /// (`Self::hand_reply`).
+    #[cfg(feature = "liveliness-get")]
+    pub(super) fn hand_token(
+        &self,
+        mut held: LiveCore<'_, L, C>,
+        face: HeldFace,
+        interest_id: u64,
+        keyexpr: &str,
+    ) {
+        self.gets.capture();
+        held.0
+            .session
+            .registry
+            .fire_token(face, interest_id, keyexpr);
+        self.hand_captured(held, &token_reply(interest_id, keyexpr));
+    }
+
+    /// Let go of `held`, then hand `reply` to the callback of the leg the answers fired since
+    /// the get plane began capturing reached, its count given back after. A leg none reached is
+    /// handed nothing.
+    fn hand_captured(&self, held: LiveCore<'_, L, C>, reply: &dyn ReplyView) {
         let reached = self.gets.captured();
         drop(held);
         let Some(leg) = reached else {
