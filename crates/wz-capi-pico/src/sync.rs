@@ -86,7 +86,7 @@ pub type z_moved_mutex_t = os::RawMutex;
 /// Initialise a mutex in the caller's storage (pico `z_mutex_init`).
 #[no_mangle]
 pub unsafe extern "C" fn z_mutex_init(m: *mut z_owned_mutex_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if m.is_null() {
             return Z_ERR_NULL;
         }
@@ -97,7 +97,7 @@ pub unsafe extern "C" fn z_mutex_init(m: *mut z_owned_mutex_t) -> ZResult {
 /// Destroy a mutex (pico `z_mutex_drop`).
 #[no_mangle]
 pub unsafe extern "C" fn z_mutex_drop(m: *mut z_moved_mutex_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if m.is_null() {
             return Z_ERR_NULL;
         }
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn z_mutex_take(obj: *mut z_owned_mutex_t, src: *mut z_mov
 /// Lock, blocking (pico `z_mutex_lock`).
 #[no_mangle]
 pub unsafe extern "C" fn z_mutex_lock(m: *mut z_loaned_mutex_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if m.is_null() {
             return Z_ERR_NULL;
         }
@@ -161,7 +161,7 @@ pub unsafe extern "C" fn z_mutex_lock(m: *mut z_loaned_mutex_t) -> ZResult {
 /// happened to exercise, so the family goes out whole.
 #[no_mangle]
 pub unsafe extern "C" fn z_mutex_try_lock(m: *mut z_loaned_mutex_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if m.is_null() {
             return Z_ERR_NULL;
         }
@@ -172,7 +172,7 @@ pub unsafe extern "C" fn z_mutex_try_lock(m: *mut z_loaned_mutex_t) -> ZResult {
 /// Unlock (pico `z_mutex_unlock`).
 #[no_mangle]
 pub unsafe extern "C" fn z_mutex_unlock(m: *mut z_loaned_mutex_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if m.is_null() {
             return Z_ERR_NULL;
         }
@@ -200,7 +200,7 @@ pub type z_moved_condvar_t = os::RawCondvar;
 /// load-bearing rather than incidental.
 #[no_mangle]
 pub unsafe extern "C" fn z_condvar_init(cv: *mut z_owned_condvar_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if cv.is_null() {
             return Z_ERR_NULL;
         }
@@ -211,7 +211,7 @@ pub unsafe extern "C" fn z_condvar_init(cv: *mut z_owned_condvar_t) -> ZResult {
 /// Destroy a condvar (pico `z_condvar_drop`).
 #[no_mangle]
 pub unsafe extern "C" fn z_condvar_drop(cv: *mut z_moved_condvar_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if cv.is_null() {
             return Z_ERR_NULL;
         }
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn z_condvar_take(obj: *mut z_owned_condvar_t, src: *mut z
 /// Wake one waiter (pico `z_condvar_signal`).
 #[no_mangle]
 pub unsafe extern "C" fn z_condvar_signal(cv: *mut z_loaned_condvar_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if cv.is_null() {
             return Z_ERR_NULL;
         }
@@ -264,7 +264,7 @@ pub unsafe extern "C" fn z_condvar_wait(
     cv: *mut z_loaned_condvar_t,
     m: *mut z_loaned_mutex_t,
 ) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if cv.is_null() || m.is_null() {
             return Z_ERR_NULL;
         }
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn z_condvar_wait_until(
     m: *mut z_loaned_mutex_t,
     abstime: *const z_clock_t,
 ) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if cv.is_null() || m.is_null() || abstime.is_null() {
             return Z_ERR_NULL;
         }
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn z_task_init(
     fun: Option<extern "C" fn(*mut c_void) -> *mut c_void>,
     arg: *mut c_void,
 ) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if task.is_null() {
             return Z_ERR_NULL;
         }
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn z_task_init(
 /// `task` must be null or a valid moved task this crate started.
 #[no_mangle]
 pub unsafe extern "C" fn z_task_join(task: *mut z_moved_task_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if task.is_null() {
             return Z_ERR_NULL;
         }
@@ -380,7 +380,7 @@ pub unsafe extern "C" fn z_task_join(task: *mut z_moved_task_t) -> ZResult {
 /// As [`z_task_join`].
 #[no_mangle]
 pub unsafe extern "C" fn z_task_detach(task: *mut z_moved_task_t) -> ZResult {
-    guard_val(Z_ERR_SYSTEM_GENERIC, || {
+    guard_val(|| {
         if task.is_null() {
             return Z_ERR_NULL;
         }

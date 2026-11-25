@@ -10,7 +10,7 @@
 //! mark, the closures' release latches) is the core's state, which the additional library reaches
 //! through the extension interface instead.
 
-use crate::result::{ZResult, Z_ERR_GENERIC};
+use crate::result::ZResult;
 
 /// Run `body`: a plain call in every build. A panic aborts at the C boundary (the owner's panic
 /// policy for the C libraries, as zenoh-pico is C and upstream zenoh's release profile aborts):
@@ -23,32 +23,23 @@ pub(crate) fn catch<R>(body: impl FnOnce() -> R) -> Option<R> {
     Some(body())
 }
 
-/// Run an export body that returns a status code. `fallback` is the answer of a body that does
-/// not run to the end, which none does: [`catch`] is a plain call and a panic aborts.
-#[inline]
-pub(crate) fn guard<F>(fallback: ZResult, body: F) -> ZResult
-where
-    F: FnOnce() -> ZResult,
-{
-    catch(body).unwrap_or(fallback)
-}
-
-/// Run an export body that returns a status code, its fallback [`Z_ERR_GENERIC`] ([`guard`]).
-#[inline]
+/// Run an export body that returns a status code. It has no fallback answer, as no body stops
+/// short of its end: [`catch`] is a plain call and a panic aborts.
+#[inline(always)]
 pub(crate) fn guarded<F>(body: F) -> ZResult
 where
     F: FnOnce() -> ZResult,
 {
-    guard(Z_ERR_GENERIC, body)
+    body()
 }
 
-/// Run an export body returning a value (e.g. a `usize` length), `fallback` as in [`guard`].
-#[inline]
-pub(crate) fn guard_val<F, T>(fallback: T, body: F) -> T
+/// Run an export body returning a value (e.g. a `usize` length), as [`guarded`] does.
+#[inline(always)]
+pub(crate) fn guard_val<F, T>(body: F) -> T
 where
     F: FnOnce() -> T,
 {
-    catch(body).unwrap_or(fallback)
+    body()
 }
 
 /// A raw C pointer the caller has asserted is safe to move across threads.
@@ -71,8 +62,8 @@ mod tests {
     use super::*;
 
     /// The boundary is a plain call in every build: a body runs once and its value is answered,
-    /// through the guards too, whatever their fallback. Turned red by a catch that drops the value
-    /// or runs the body twice.
+    /// through the guards too. Turned red by a catch or a guard that drops the value or runs the
+    /// body twice.
     #[test]
     fn a_body_runs_once_and_is_answered_with_its_value() {
         let mut runs = 0u8;
@@ -84,8 +75,15 @@ mod tests {
             Some(7)
         );
         assert_eq!(runs, 1);
-        assert_eq!(guard_val(0u8, || 5), 5);
+        assert_eq!(
+            guard_val(|| {
+                runs += 1;
+                5u8
+            }),
+            5
+        );
+        assert_eq!(runs, 2);
         assert_eq!(guarded(|| crate::result::Z_OK), crate::result::Z_OK);
-        assert_eq!(guard(Z_ERR_GENERIC, || 3), 3);
+        assert_eq!(guarded(|| 3), 3);
     }
 }

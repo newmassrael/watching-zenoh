@@ -1223,11 +1223,9 @@ pub unsafe extern "C" fn z_internal_slice_check(obj: *const z_owned_slice_t) -> 
 /// cached `{ start, len }` self-view.
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_loan(obj: *const z_owned_slice_t) -> *const z_loaned_slice_t {
-    guard_val(core::ptr::null(), || {
-        match handle_ref::<z_owned_slice_t, SliceState>(obj) {
-            Some(state) => &state.self_view as *const z_loaned_slice_t,
-            None => core::ptr::null(),
-        }
+    guard_val(|| match handle_ref::<z_owned_slice_t, SliceState>(obj) {
+        Some(state) => &state.self_view as *const z_loaned_slice_t,
+        None => core::ptr::null(),
     })
 }
 
@@ -1578,7 +1576,7 @@ pub unsafe extern "C" fn z_bytes_to_string(
 /// Pointer to a slice's bytes (pico `z_slice_data`).
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_data(slice: *const z_loaned_slice_t) -> *const u8 {
-    guard_val(core::ptr::null(), || {
+    guard_val(|| {
         if slice.is_null() {
             return core::ptr::null();
         }
@@ -1589,7 +1587,7 @@ pub unsafe extern "C" fn z_slice_data(slice: *const z_loaned_slice_t) -> *const 
 /// Length of a slice (pico `z_slice_len`).
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_len(slice: *const z_loaned_slice_t) -> usize {
-    guard_val(0, || {
+    guard_val(|| {
         if slice.is_null() {
             return 0;
         }
@@ -1616,11 +1614,9 @@ pub unsafe extern "C" fn z_internal_string_check(obj: *const z_owned_string_t) -
 /// state's cached `{ start, len }` self-view.
 #[no_mangle]
 pub unsafe extern "C" fn z_string_loan(obj: *const z_owned_string_t) -> *const z_loaned_string_t {
-    guard_val(core::ptr::null(), || {
-        match handle_ref::<z_owned_string_t, StringState>(obj) {
-            Some(state) => &state.self_view as *const z_loaned_string_t,
-            None => core::ptr::null(),
-        }
+    guard_val(|| match handle_ref::<z_owned_string_t, StringState>(obj) {
+        Some(state) => &state.self_view as *const z_loaned_string_t,
+        None => core::ptr::null(),
     })
 }
 
@@ -1655,7 +1651,7 @@ pub unsafe extern "C" fn z_string_drop(obj: *mut z_moved_string_t) {
 /// Pointer to a string's (NUL-terminated) bytes (pico `z_string_data`).
 #[no_mangle]
 pub unsafe extern "C" fn z_string_data(string: *const z_loaned_string_t) -> *const c_char {
-    guard_val(core::ptr::null(), || {
+    guard_val(|| {
         if string.is_null() {
             core::ptr::null()
         } else {
@@ -1668,7 +1664,7 @@ pub unsafe extern "C" fn z_string_data(string: *const z_loaned_string_t) -> *con
 /// `z_string_len`).
 #[no_mangle]
 pub unsafe extern "C" fn z_string_len(string: *const z_loaned_string_t) -> usize {
-    guard_val(0, || if string.is_null() { 0 } else { (*string)._len })
+    guard_val(|| if string.is_null() { 0 } else { (*string)._len })
 }
 
 /// Adopt a loaned string into an owned one, emptying the source view (pico
@@ -1769,7 +1765,7 @@ pub unsafe extern "C" fn z_view_slice_empty(slice: *mut z_view_slice_t) {
 /// `true` iff the view slice is empty (pico `z_view_slice_is_empty`).
 #[no_mangle]
 pub unsafe extern "C" fn z_view_slice_is_empty(slice: *const z_view_slice_t) -> bool {
-    guard_val(true, || slice.is_null() || (*slice)._len == 0)
+    guard_val(|| slice.is_null() || (*slice)._len == 0)
 }
 
 /// Borrow a view slice immutably (pico `z_view_slice_loan`). A pointer
@@ -1833,7 +1829,7 @@ pub unsafe extern "C" fn z_bytes_slice_iterator_next(
     iter: *mut z_bytes_slice_iterator_t,
     out: *mut z_view_slice_t,
 ) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         if iter.is_null() || out.is_null() {
             return false;
         }
@@ -1914,7 +1910,7 @@ pub unsafe extern "C" fn z_string_clone(
 /// `bytes` must be null or a live loaned payload.
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_len(bytes: *const z_loaned_bytes_t) -> usize {
-    guard_val(0, || bytes_ref(bytes).map_or(0, |buf| buf.len()))
+    guard_val(|| bytes_ref(bytes).map_or(0, |buf| buf.len()))
 }
 
 /// Whether a payload carries no bytes (pico `z_bytes_is_empty`).
@@ -1923,7 +1919,7 @@ pub unsafe extern "C" fn z_bytes_len(bytes: *const z_loaned_bytes_t) -> usize {
 /// As [`z_bytes_len`].
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_is_empty(bytes: *const z_loaned_bytes_t) -> bool {
-    guard_val(true, || z_bytes_len(bytes) == 0)
+    guard_val(|| z_bytes_len(bytes) == 0)
 }
 
 /// Copy a loaned slice's bytes into an owned payload (pico
@@ -2190,7 +2186,7 @@ pub unsafe extern "C" fn z_slice_empty(slice: *mut z_owned_slice_t) {
 /// `slice` must be null or a live loaned slice.
 #[no_mangle]
 pub unsafe extern "C" fn z_slice_is_empty(slice: *const z_loaned_slice_t) -> bool {
-    guard_val(true, || z_slice_len(slice) == 0)
+    guard_val(|| z_slice_len(slice) == 0)
 }
 
 // --- string constructors + accessors -----------------------------------------
@@ -2215,7 +2211,7 @@ pub unsafe extern "C" fn z_string_empty(str_out: *mut z_owned_string_t) {
 /// `str_in` must be null or a live loaned string.
 #[no_mangle]
 pub unsafe extern "C" fn z_string_is_empty(str_in: *const z_loaned_string_t) -> bool {
-    guard_val(true, || z_string_len(str_in) == 0)
+    guard_val(|| z_string_len(str_in) == 0)
 }
 
 /// Copy a NUL-terminated C string into an owned string (pico
@@ -2351,9 +2347,7 @@ pub unsafe extern "C" fn z_view_string_empty(str_out: *mut z_view_string_t) {
 /// `str_in` must be null or a valid view string.
 #[no_mangle]
 pub unsafe extern "C" fn z_view_string_is_empty(str_in: *const z_view_string_t) -> bool {
-    guard_val(true, || {
-        str_in.is_null() || (*str_in)._start.is_null() || (*str_in)._len == 0
-    })
+    guard_val(|| str_in.is_null() || (*str_in)._start.is_null() || (*str_in)._len == 0)
 }
 
 /// Mutably borrow a view string (pico `z_view_string_loan_mut`) — the offset-0

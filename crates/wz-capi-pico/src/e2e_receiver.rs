@@ -464,7 +464,7 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_slot_sender(
     slot: usize,
     out: *mut u64,
 ) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         if out.is_null() {
             return false;
         }
@@ -537,7 +537,7 @@ pub unsafe extern "C" fn wz_ext_internal_e2e_receiver_null(
 pub unsafe extern "C" fn wz_ext_internal_e2e_receiver_check(
     this_: *const wz_ext_owned_e2e_receiver_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 #[cfg(test)]

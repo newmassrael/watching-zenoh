@@ -285,7 +285,7 @@ EXTENSION_INTERFACE = "ext_interface"
 # `Send`. Each library compiles them for itself; `ffi`'s other items (the in-callback mark, the
 # closures' release latches) are the core's state, which the interface carries.
 BOUNDARY_TOOLKIT: dict[str, frozenset[str]] = {
-    "ffi": frozenset({"catch", "guard", "guarded", "guard_val", "SendPtr"}),
+    "ffi": frozenset({"catch", "guarded", "guard_val", "SendPtr"}),
 }
 # Re-exports of `alloc` for a build without `std`.
 TOOLKIT_MODULES = frozenset({"prelude"})

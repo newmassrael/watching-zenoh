@@ -542,7 +542,7 @@ pub unsafe extern "C" fn wz_ext_internal_payload_schema_null(
 pub unsafe extern "C" fn wz_ext_internal_payload_schema_check(
     this_: *const wz_ext_owned_payload_schema_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 /// Fill in the default payload options: a storage of no value and no byte.
@@ -657,7 +657,7 @@ pub unsafe extern "C" fn wz_ext_message_payload_new(
 pub unsafe extern "C" fn wz_ext_message_payload_key_expr(
     this_: *const wz_ext_loaned_message_payload_t,
 ) -> *const c_char {
-    guard_val(core::ptr::null(), || {
+    guard_val(|| {
         behind::<Held>(word(this_)).map_or(core::ptr::null(), |held| {
             // The key lives in the payload, past the lock.
             let held = locked(held);
@@ -1207,5 +1207,5 @@ pub unsafe extern "C" fn wz_ext_internal_message_payload_null(
 pub unsafe extern "C" fn wz_ext_internal_message_payload_check(
     this_: *const wz_ext_owned_message_payload_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }

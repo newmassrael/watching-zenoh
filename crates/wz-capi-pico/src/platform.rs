@@ -94,7 +94,7 @@ pub unsafe extern "C" fn z_sleep_s(time: usize) -> ZResult {
 /// the export's own arguments where the body reads them, so an export is one load and a jump.
 #[inline(never)]
 fn sleep_for(time: usize, unit: Unit) -> ZResult {
-    guard_val(Z_OK, || {
+    guard_val(|| {
         os::sleep(unit, time);
         Z_OK
     })
@@ -194,7 +194,7 @@ pub unsafe extern "C" fn zp_clock_elapsed_s_since(
 /// [`elapsed_since`] — of the `z_clock_elapsed_*` trio too.
 #[inline(never)]
 unsafe fn elapsed_between(instant: *mut z_clock_t, epoch: *mut z_clock_t, unit: Unit) -> c_ulong {
-    guard_val(0, || {
+    guard_val(|| {
         if instant.is_null() || epoch.is_null() {
             return 0;
         }
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn z_time_now_as_str(
     buf: *mut core::ffi::c_char,
     buflen: c_ulong,
 ) -> *const core::ffi::c_char {
-    guard_val(core::ptr::null(), || {
+    guard_val(|| {
         if buf.is_null() || buflen == 0 {
             return buf;
         }
@@ -337,7 +337,7 @@ pub unsafe extern "C" fn z_time_elapsed_s(time: *mut z_time_t) -> c_ulong {
 /// The shared body of the three `z_time_elapsed_*` exports.
 #[inline(never)]
 unsafe fn wall_elapsed(time: *mut z_time_t, unit: Unit) -> c_ulong {
-    guard_val(0, || {
+    guard_val(|| {
         if time.is_null() {
             return 0;
         }

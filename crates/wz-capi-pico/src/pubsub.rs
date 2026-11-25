@@ -3614,7 +3614,7 @@ pub unsafe extern "C" fn z_sample_payload(
 /// `Z_SAMPLE_KIND_DEFAULT` (pico would dereference and crash).
 #[no_mangle]
 pub unsafe extern "C" fn z_sample_kind(sample: *const z_loaned_sample_t) -> z_sample_kind_t {
-    crate::ffi::guard_val(Z_SAMPLE_KIND_PUT, || {
+    crate::ffi::guard_val(|| {
         if sample.is_null() {
             return Z_SAMPLE_KIND_PUT;
         }
@@ -3713,7 +3713,7 @@ pub unsafe extern "C" fn z_source_info_new(
     source_id: *const crate::entity::z_entity_global_id_t,
     source_sn: u32,
 ) -> z_source_info_t {
-    crate::ffi::guard_val(z_source_info_t::empty(), || z_source_info_t {
+    crate::ffi::guard_val(|| z_source_info_t {
         _source_id: if source_id.is_null() {
             z_source_info_t::empty()._source_id
         } else {
@@ -3731,7 +3731,7 @@ pub unsafe extern "C" fn z_source_info_new(
 pub unsafe extern "C" fn z_source_info_id(
     info: *const z_source_info_t,
 ) -> crate::entity::z_entity_global_id_t {
-    crate::ffi::guard_val(z_source_info_t::empty()._source_id, || {
+    crate::ffi::guard_val(|| {
         if info.is_null() {
             z_source_info_t::empty()._source_id
         } else {
@@ -3746,7 +3746,7 @@ pub unsafe extern "C" fn z_source_info_id(
 /// `info` must be null or a valid source-info record.
 #[no_mangle]
 pub unsafe extern "C" fn z_source_info_sn(info: *const z_source_info_t) -> u32 {
-    crate::ffi::guard_val(0, || {
+    crate::ffi::guard_val(|| {
         if info.is_null() {
             0
         } else {
@@ -3770,7 +3770,7 @@ pub unsafe extern "C" fn z_source_info_sn(info: *const z_source_info_t) -> u32 {
 pub unsafe extern "C" fn z_sample_source_info(
     sample: *const z_loaned_sample_t,
 ) -> *const z_source_info_t {
-    crate::ffi::guard_val(core::ptr::null(), || match sample_marshal(sample) {
+    crate::ffi::guard_val(|| match sample_marshal(sample) {
         Some(m) => match m.source_info.as_ref() {
             Some(info) => info as *const z_source_info_t,
             None => core::ptr::null(),
@@ -3797,11 +3797,9 @@ pub unsafe extern "C" fn z_sample_reliability(sample: *const z_loaned_sample_t) 
     const Z_RELIABILITY_RELIABLE: c_int = 0;
     /// pico `Z_RELIABILITY_BEST_EFFORT`.
     const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
-    crate::ffi::guard_val(Z_RELIABILITY_RELIABLE, || {
-        match sample_marshal(sample).map(|m| m.reliability) {
-            Some(Reliability::BestEffort) => Z_RELIABILITY_BEST_EFFORT,
-            _ => Z_RELIABILITY_RELIABLE,
-        }
+    crate::ffi::guard_val(|| match sample_marshal(sample).map(|m| m.reliability) {
+        Some(Reliability::BestEffort) => Z_RELIABILITY_BEST_EFFORT,
+        _ => Z_RELIABILITY_RELIABLE,
     })
 }
 
@@ -3819,7 +3817,7 @@ pub unsafe extern "C" fn z_sample_congestion_control(sample: *const z_loaned_sam
     const Z_CONGESTION_CONTROL_DROP: c_int = 0;
     /// pico `Z_CONGESTION_CONTROL_BLOCK`.
     const Z_CONGESTION_CONTROL_BLOCK: c_int = 1;
-    crate::ffi::guard_val(Z_CONGESTION_CONTROL_DROP, || {
+    crate::ffi::guard_val(|| {
         // R2946 — `BlockFirst` reports DROP, as pico itself would: its QoS byte
         // decode reads the `nodrop` bit alone (`_z_n_qos_get_congestion_control`),
         // and zenoh's block-first byte carries `nodrop` clear. Named rather than
@@ -3840,7 +3838,7 @@ pub unsafe extern "C" fn z_sample_congestion_control(sample: *const z_loaned_sam
 /// `sample` must be null or a live loaned sample.
 #[no_mangle]
 pub unsafe extern "C" fn z_sample_express(sample: *const z_loaned_sample_t) -> bool {
-    crate::ffi::guard_val(false, || sample_qos(sample).is_some_and(|q| q.is_express()))
+    crate::ffi::guard_val(|| sample_qos(sample).is_some_and(|q| q.is_express()))
 }
 
 /// A sample's priority (pico `z_sample_priority`).
@@ -3855,7 +3853,7 @@ pub unsafe extern "C" fn z_sample_express(sample: *const z_loaned_sample_t) -> b
 pub unsafe extern "C" fn z_sample_priority(sample: *const z_loaned_sample_t) -> c_int {
     /// pico `Z_PRIORITY_DATA` (`api/constants.h:247`).
     const Z_PRIORITY_DATA: c_int = 5;
-    crate::ffi::guard_val(Z_PRIORITY_DATA, || match sample_qos(sample) {
+    crate::ffi::guard_val(|| match sample_qos(sample) {
         Some(q) => c_int::from(q.priority().wire_byte()),
         None => Z_PRIORITY_DATA,
     })
