@@ -18,12 +18,22 @@ sessions are open over the program's own transport, each family is measured in a
 independent windows, each a warm-up and then a fixed number of rounds with the allocator counting,
 and the test prints one line a family:
 
-    no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>
+    no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m> grown=<g>
     no-heap: <family> not-built
 
 `allocs` and `bytes` are those of the window that allocated least, `rounds` the rounds of one
-window, `windows` how many windows were counted and `max_allocs` the allocations of the window that
-allocated most.
+window, `windows` how many windows were counted, `max_allocs` the allocations of the window that
+allocated most and `grown` the blocks the family's whole run took and still held at its end, its
+warm-ups' among them. A table that grows its capacity at its first use after open and keeps it
+allocates in a warm-up and in no counted round, so only `grown` sees it; a family is locked only
+when every window and its run read 0.
+
+The library without `std` cannot run under a Rust test (it brings its own allocator and panic
+handler), so its families are read off a C program, `crates/wz-capi-pico/tests/c/
+pico_no_heap_after_open.c`, built against that library and run as two processes, each counting
+every allocation its process makes from its open to its close: one window of every round, no
+warm-up left out, so its `grown` is 0 by construction and its `allocs` hold what a warm-up would.
+Its lines are a second reading; `--check` and `--fill` read every reading they are given as one.
 
 ## Why the least window
 
@@ -58,14 +68,15 @@ or not measured yet names the store inventory entry it is registered under (`deb
 
     a family whose least window is above its row times one plus
     the tolerance                                                  FAIL
-    a locked family that allocates in any window                   FAIL
+    a locked family that allocates in any window, or whose run
+    kept a block it took                                           FAIL
     a family of the table the reading has no line for              FAIL
     a family of the reading the table has no row for               FAIL
     a row above 0 whose debt is still the placeholder              FAIL
     a malformed reading or table                                   FAIL
     a row not filled yet, or a family the build did not have       NOT-MEASURED
     a family below its row                                         PASS, the tighter row printed
-    a family that read 0 in every window                           PASS, the locked row printed
+    a family that read 0 in every window and kept nothing          PASS, the locked row printed
 
 NOT-MEASURED is never a pass: the exit status is 1 for a FAIL, 3 for NOT-MEASURED and no FAIL,
 and 0 only when every row was judged and held.
@@ -74,10 +85,10 @@ and 0 only when every row was judged and held.
 
     --selftest           every rule driven through a fixture that breaks it, and a clean one
     --declared           the table well formed, and its families exactly the ones the test
-                         declares (Layer C0, no build)
-    --check READING      judge a reading against the table
-    --fill READING       print the `families` object a reading writes, to commit; a filled row is
-                         never loosened by it
+                         and the C program declare (Layer C0, no build)
+    --check READING...   judge the readings, read as one, against the table
+    --fill READING...    print the `families` object the readings write, to commit; a filled row
+                         is never loosened by it
 
 `--table PATH` reads another table than the committed one.
 """
@@ -97,6 +108,10 @@ ROOT = Path(__file__).resolve().parents[2]
 TABLE = Path("deploy/no_heap_ratchet.json")
 # The test whose families the table holds; `--declared` reads their names from it.
 TEST_FILE = Path("crates/wz-capi-pico/tests/no_heap_after_open.rs")
+# The C program that reads the families of the library without `std`; `--declared` reads their
+# names from its `#define NO_HEAP_FAMILY_<ROLE> "<name>"` lines.
+PROGRAM_FILE = Path("crates/wz-capi-pico/tests/c/pico_no_heap_after_open.c")
+PROGRAM_FAMILY = re.compile(r'^#define NO_HEAP_FAMILY_[A-Z_]+ "([^"]+)"\s*$', re.M)
 SCHEMA = "wz-no-heap-ratchet/1"
 TABLE_KEYS = {"about", "schema", "tolerance", "families"}
 # What the table says of each capability of the measured build's profile: the families that
@@ -109,8 +124,9 @@ ROW_KEYS = {"allocs_per_round", "locked", "debt"}
 PREFIX = "no-heap:"
 NOT_BUILT = "not-built"
 FAMILY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-MEASURED = re.compile(r"^allocs=(\d+) bytes=(\d+) rounds=(\d+) windows=(\d+) max_allocs=(\d+)$")
-MEASURED_FORM = "allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>"
+MEASURED = re.compile(
+    r"^allocs=(\d+) bytes=(\d+) rounds=(\d+) windows=(\d+) max_allocs=(\d+) grown=(\d+)$")
+MEASURED_FORM = "allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m> grown=<g>"
 # A debt is an entry of the store's inventory (`debt-<id>`), as every new open debt is; the
 # placeholder stands only until the row is measured.
 DEBT_ID = re.compile(r"debt-[a-z0-9][a-z0-9-]*")
@@ -131,8 +147,9 @@ class Refused(Exception):
 
 @dataclass(frozen=True)
 class Reading:
-    """One family's line: the least window's counts, the rounds of a window, the windows counted
-    and the most window's allocations, or None for each when the build has not the family."""
+    """One family's line: the least window's counts, the rounds of a window, the windows counted,
+    the most window's allocations and the blocks the run kept, or None for each when the build has
+    not the family."""
 
     family: str
     allocs: int | None
@@ -140,6 +157,7 @@ class Reading:
     rounds: int | None
     windows: int | None = None
     max_allocs: int | None = None
+    grown: int | None = None
 
     @property
     def built(self) -> bool:
@@ -155,20 +173,24 @@ class Reading:
         return self._per_round_up(self.allocs)
 
     def zero_everywhere(self) -> bool:
-        """Whether every window read 0, which is what locks a family."""
-        return self.max_allocs == 0
+        """Whether every window read 0 and the run kept no block, which is what locks a family."""
+        return self.max_allocs == 0 and self.grown == 0
 
     def figure(self) -> float:
         """The figure of the unlocked row this reading writes: the least window's, or, when that
-        is 0 and another window's is not, the most window's (a row at 0 is a locked one)."""
-        assert self.allocs is not None and self.max_allocs is not None
-        return self.ceiling() if self.allocs > 0 else self._per_round_up(self.max_allocs)
+        is 0, the most window's or the blocks the run kept, whichever is more (a row at 0 is a
+        locked one)."""
+        assert self.allocs is not None and self.max_allocs is not None and self.grown is not None
+        if self.allocs > 0:
+            return self.ceiling()
+        return self._per_round_up(max(self.max_allocs, self.grown))
 
     def shown(self) -> str:
         assert self.allocs is not None and self.max_allocs is not None and self.rounds
         return (f"least of {self.windows} window(s): {self.allocs} allocation(s) of {self.nbytes} "
                 f"byte(s) in {self.rounds} round(s), {self.allocs / self.rounds:.3f} a round; "
-                f"most: {self.max_allocs}, {self.max_allocs / self.rounds:.3f} a round")
+                f"most: {self.max_allocs}, {self.max_allocs / self.rounds:.3f} a round; "
+                f"kept by the run: {self.grown}")
 
 
 @dataclass(frozen=True)
@@ -210,7 +232,7 @@ def parse_reading(text: str) -> tuple[dict[str, Reading], list[str]]:
             if measured is None:
                 findings.append(f"{where}: is neither `{MEASURED_FORM}` nor `{NOT_BUILT}`")
                 continue
-            allocs, nbytes, rounds, windows, max_allocs = (int(g) for g in measured.groups())
+            allocs, nbytes, rounds, windows, max_allocs, grown = (int(g) for g in measured.groups())
             if rounds == 0:
                 findings.append(f"{where}: counts no round, so it measures nothing")
                 continue
@@ -225,7 +247,7 @@ def parse_reading(text: str) -> tuple[dict[str, Reading], list[str]]:
                 findings.append(f"{where}: one window is both the least and the most, so "
                                 f"max_allocs is allocs")
                 continue
-            reading = Reading(family, allocs, nbytes, rounds, windows, max_allocs)
+            reading = Reading(family, allocs, nbytes, rounds, windows, max_allocs, grown)
         if family in found:
             findings.append(f"{where}: family {family} is read twice")
             continue
@@ -456,6 +478,11 @@ def judge(found: dict[str, Reading], rows: dict[str, Row], tolerance: float) -> 
         if row.locked:
             if reading.zero_everywhere():
                 out.append(Judged(family, "PASS", f"{shown}; locked at 0"))
+            elif reading.max_allocs == 0:
+                out.append(Judged(family, "FAIL", f"{shown}; the family is locked at 0 and its run "
+                                                  f"kept {reading.grown} block(s) it took after "
+                                                  f"open, outside the counted rounds: capacity a "
+                                                  f"warm-up grows once is the regression"))
             else:
                 out.append(Judged(family, "FAIL", f"{shown}; the family is locked at 0 allocations "
                                                   f"a round and a window allocated, so what "
@@ -477,9 +504,14 @@ def judge(found: dict[str, Reading], rows: dict[str, Row], tolerance: float) -> 
             out.append(Judged(family, "PASS", f"{shown}; it reached 0 in every window, so lock the "
                                               f"row and close {row.debt}", dict(LOCKED_ROW)))
             continue
-        not_yet = ("" if reading.allocs > 0 else
-                   "; its least window reads 0 but another does not, and a family is locked only "
-                   "when every window reads 0")
+        if reading.allocs > 0:
+            not_yet = ""
+        elif reading.max_allocs == 0:
+            not_yet = ("; every window reads 0 but its run kept a block it took, and a family is "
+                       "locked only when its run keeps none")
+        else:
+            not_yet = ("; its least window reads 0 but another does not, and a family is locked "
+                       "only when every window reads 0")
         if reading.figure() < row.ceiling:
             out.append(Judged(family, "PASS", f"{shown}; under the row's {row.ceiling}, so tighten "
                                               f"it{not_yet}", fill_row(reading, row)))
@@ -556,8 +588,13 @@ def declared_families(text: str) -> list[str]:
     return DECLARED_FAMILY.findall(text)
 
 
-def declared(table_text: str, test_text: str) -> list[str]:
-    """What keeps the table from holding exactly the families the test declares."""
+def program_families(text: str) -> list[str]:
+    return PROGRAM_FAMILY.findall(text)
+
+
+def declared(table_text: str, test_text: str, program_text: str | None = None) -> list[str]:
+    """What keeps the table from holding exactly the families the test and, when given, the C
+    program declare."""
     try:
         _tolerance, rows = load_table(table_text)
     except Refused as why:
@@ -566,12 +603,19 @@ def declared(table_text: str, test_text: str) -> list[str]:
     if not families:
         return [f"{TEST_FILE} declares no family this gate can read (`('<name>', Round, Part)` "
                 f"in `FAMILIES`): the reader stopped matching, which a green would hide"]
+    if program_text is not None:
+        from_program = program_families(program_text)
+        if not from_program:
+            return [f"{PROGRAM_FILE} declares no family this gate can read (`#define "
+                    f"NO_HEAP_FAMILY_<ROLE> \"<name>\"`): the reader stopped matching, which a "
+                    f"green would hide"]
+        families = families + from_program
     out = [f"family {f} is declared twice in {TEST_FILE}" for f in sorted(set(families))
            if families.count(f) > 1]
     out += [f"family {f} is measured by {TEST_FILE} and has no row in the table: a row is added "
             f"with the family" for f in sorted(set(families) - set(rows))]
-    out += [f"family {f} has a row and {TEST_FILE} measures no such family" for f in
-            sorted(set(rows) - set(families))]
+    out += [f"family {f} has a row and neither {TEST_FILE} nor {PROGRAM_FILE} measures such a "
+            f"family" for f in sorted(set(rows) - set(families))]
     return out
 
 
@@ -587,10 +631,10 @@ def _row(ceiling: float | None, locked: bool = False, debt: str | None = "debt-d
 
 
 def _line(family: str, allocs: int, rounds: int = 100, nbytes: int = 640, windows: int = 5,
-          max_allocs: int | None = None) -> str:
+          max_allocs: int | None = None, grown: int = 0) -> str:
     most = allocs if max_allocs is None else max_allocs
     return (f"{PREFIX} {family} allocs={allocs} bytes={nbytes} rounds={rounds} windows={windows} "
-            f"max_allocs={most}")
+            f"max_allocs={most} grown={grown}")
 
 
 def _run(reading: str, table: str) -> tuple[int, str]:
@@ -658,6 +702,17 @@ def selftest() -> int:
         assert status == 1 and "FAIL get" in shown and "locked at 0" in shown, (least, most, shown)
         cases += 1
 
+    # A locked row fails when its run kept a block every window missed, and an unlocked row
+    # whose windows all read 0 is not locked while its run keeps one.
+    status, shown = _run(clean.replace(_line("get", 0), _line("get", 0, grown=1)), base)
+    assert status == 1 and "FAIL get" in shown and "warm-up" in shown, shown
+    cases += 1
+    status, shown = _run(clean.replace(_line("put-small", 200), _line("put-small", 0, grown=2)),
+                         base)
+    assert status == 0 and format_row("put-small", LOCKED_ROW) not in shown, shown
+    assert format_row("put-small", _row(0.02)) in shown and "keeps none" in shown, shown
+    cases += 1
+
     # A family of the table the reading lacks fails; one the table lacks fails.
     status, shown = _run(clean.replace(_line("get", 0), ""), base)
     assert status == 1 and "FAIL get" in shown and "has no line" in shown, shown
@@ -691,6 +746,7 @@ def selftest() -> int:
         (f"{PREFIX} put-small allocs=2 bytes=3", "neither"),
         (f"{PREFIX} put-small allocs=2 bytes=3 rounds=100", "neither"),
         (f"{PREFIX} put-small allocs=2 bytes=3 rounds=100 windows=5", "neither"),
+        (f"{PREFIX} put-small allocs=2 bytes=3 rounds=100 windows=5 max_allocs=2", "neither"),
         (_line("put-small", -2), "neither"),
         (_line("Put_Small", 2), "names no family"),
         (_line("put-small", 2, rounds=0), "counts no round"),
@@ -762,6 +818,18 @@ def selftest() -> int:
     assert declared(base, spread) == [], declared(base, spread)
     cases += 1
 
+    # The C program's families join the test's, and a program the reader finds none in is refused.
+    program_text = '#define NO_HEAP_FAMILY_DIAL "nostd-put"\n'
+    with_program = _table(**{"put-small": _row(2.0), "get": _row(0, locked=True, debt=None),
+                             "nostd-put": _row(None, debt=DEBT_PLACEHOLDER)})
+    assert declared(with_program, test_text, program_text) == [], \
+        declared(with_program, test_text, program_text)
+    assert any("measures such a family" in f for f in declared(with_program, test_text)), \
+        "a row only the program measures passed without it"
+    assert any("declares no family" in f for f in declared(base, test_text, "nothing here")), \
+        "no program family read"
+    cases += 1
+
     # Each capability of the profile is held by a row: its families read and built, or a reason
     # that names its code; one with neither, or whose family was not built, is NOT-MEASURED.
     caps_table = json.dumps({"about": "fixture", "schema": SCHEMA, "tolerance": 0.05,
@@ -791,8 +859,10 @@ def main(argv: list[str] | None = None) -> int:
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--selftest", action="store_true")
     mode.add_argument("--declared", action="store_true", help="check the table and its families")
-    mode.add_argument("--check", type=Path, metavar="READING", help="judge a reading")
-    mode.add_argument("--fill", type=Path, metavar="READING", help="print the rows a reading writes")
+    mode.add_argument("--check", type=Path, nargs="+", metavar="READING",
+                      help="judge the readings, read as one")
+    mode.add_argument("--fill", type=Path, nargs="+", metavar="READING",
+                      help="print the rows the readings write")
     ap.add_argument("--table", type=Path, default=ROOT / TABLE)
     ap.add_argument("--profile", type=Path, metavar="PROFILE",
                     help="with --check: every capability this profile turns on is held by a row")
@@ -805,7 +875,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  no-heap-ratchet FAIL: {args.table} cannot be read: {error}", file=sys.stderr)
         return 1
     if args.declared:
-        findings = declared(table_text, (ROOT / TEST_FILE).read_text(encoding="utf-8"))
+        findings = declared(table_text, (ROOT / TEST_FILE).read_text(encoding="utf-8"),
+                            (ROOT / PROGRAM_FILE).read_text(encoding="utf-8"))
         for finding in findings:
             print(f"  no-heap-ratchet FAIL: {finding}", file=sys.stderr)
         if findings:
@@ -816,12 +887,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  no-heap-ratchet: {len(rows)} family(ies) declared, {measured} measured, "
               f"{locked} locked at 0")
         return 0
-    path = args.check if args.check is not None else args.fill
-    try:
-        reading_text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as error:
-        print(f"  no-heap-ratchet FAIL: the reading {path} cannot be read: {error}", file=sys.stderr)
-        return 1
+    paths = args.check if args.check is not None else args.fill
+    texts: list[str] = []
+    for path in paths:
+        try:
+            texts.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError as error:
+            print(f"  no-heap-ratchet FAIL: the reading {path} cannot be read: {error}",
+                  file=sys.stderr)
+            return 1
+    reading_text = "\n".join(texts)
     if args.check is not None:
         capabilities = None
         if args.profile is not None:
