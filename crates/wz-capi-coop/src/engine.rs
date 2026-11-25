@@ -7123,16 +7123,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn send_handed_now(&self, core: &mut Core<L, C>) {
         let whole = WireKey::literal();
         loop {
-            let taken = {
+            // The empty table almost every step finds returns under the lock, before a leg's
+            // place exists: an `Option` of a leg carried out of the block is a copy of a whole
+            // leg, made even when it holds none.
+            let leg = {
                 let mut handed = self.handed();
-                let leg = handed.take_first();
-                if leg.is_none() {
+                let Some(leg) = handed.take_first() else {
                     self.owed.store(false, Ordering::SeqCst);
-                }
+                    return;
+                };
                 leg
-            };
-            let Some(leg) = taken else {
-                return;
             };
             {
                 let opts = leg.options();

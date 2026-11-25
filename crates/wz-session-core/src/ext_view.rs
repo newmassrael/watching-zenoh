@@ -162,15 +162,20 @@ pub fn walked<
     Walked(chain.map(|list| list.inner().iter()))
 }
 
-/// The walk [`walked`] answers: the list's own walk, or none. A step is the list's step, where a
-/// flattened option would carry the bookkeeping of a front and a back walk into every one of the
-/// walks a build compiles.
-struct Walked<'a, W: sce_forge_runtime::codec::ListWalk<K>, const K: usize>(
-    Option<sce_forge_runtime::codec::ListIter<'a, W, K>>,
-);
+/// [`walked`] over a walk of a chain already begun, or none: a chain a record carries other than
+/// as a list of its own (what follows the marker of a Put whose payload is sliced, or the whole
+/// chain of one whose payload is inline) is walked by the same one step.
+pub fn walked_from<I: Iterator>(walk: Option<I>) -> impl Iterator<Item = I::Item> {
+    Walked(walk)
+}
 
-impl<'a, W: sce_forge_runtime::codec::ListWalk<K>, const K: usize> Iterator for Walked<'a, W, K> {
-    type Item = W::Entry<'a>;
+/// The walk [`walked`] and [`walked_from`] answer: the chain's own walk, or none. A step is the
+/// chain's step, where a flattened option would carry the bookkeeping of a front and a back walk
+/// into every one of the walks a build compiles, and be three walks long wherever it is moved.
+struct Walked<I>(Option<I>);
+
+impl<I: Iterator> Iterator for Walked<I> {
+    type Item = I::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.as_mut()?.next()
