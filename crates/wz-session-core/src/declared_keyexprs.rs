@@ -20,6 +20,9 @@
 //! hash map of strings, the fixed and the lent policies' are bounded at
 //! [`caps::MAX_DECLARED_KEYEXPRS`], and the lent policy's keys are blocks of the session's key
 //! arena ([`KeyRef`](crate::key_arena::KeyRef)), so a row is a few words whatever its key's length.
+//!
+//! [`OwnMappingSpace`]: crate::wireexpr_resolve::OwnMappingSpace
+//! [`Storage`]: crate::bounded::Storage
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;

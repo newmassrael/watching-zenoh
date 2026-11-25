@@ -277,12 +277,14 @@ impl OpenClosures {
     }
 
     /// One more held open here, or one more keep of the owner's place (`kept`), which no wait
-    /// waits for.
+    /// waits for. The place must stand: its owner holds it, or, once the owner let go of it, a hold
+    /// or a keep counted before does (a background listener's place, which the session's table of
+    /// listeners holds and its fan holds again for each call).
     fn count_one(&self, kept: bool) {
         let mut state = self.state.lock();
         debug_assert!(
-            !state.retired,
-            "a closure or a keep is counted in an owner still held"
+            !(state.retired && state.unheld()),
+            "a closure or a keep is counted in a place already given back"
         );
         if kept {
             state.kept = state.kept.saturating_add(1);

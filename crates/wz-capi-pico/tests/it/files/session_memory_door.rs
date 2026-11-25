@@ -152,7 +152,9 @@ fn the_total_is_the_sum_of_the_bounded_rows() {
 fn the_tables_are_the_session_cores_rows_for_the_limits_the_session_opened_under() {
     with_two_sessions(|_listener, dialer| {
         let (_, rows) = unsafe { report(dialer) };
-        let tables = session_tables(&SessionLimits::defaults(), &Captures::default());
+        // A config that states no limit opens under zenoh-pico's preset, as every session of the
+        // ABI does.
+        let tables = session_tables(&SessionLimits::PICO_PRESET, &Captures::default());
         assert!(
             rows.len() > tables.rows().len(),
             "the ABI adds its own rows"
@@ -175,8 +177,8 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
         assert_eq!((handle.door.bounded, handle.door.count), (1, 1));
         assert!(handle.basis.is_empty());
 
-        // A config that states no limit opens under the build's snapshot.
-        let limits = SessionLimits::defaults();
+        // A config that states no limit opens under zenoh-pico's preset.
+        let limits = SessionLimits::PICO_PRESET;
         let queue = row(&dialled, "link transmit queues");
         assert_eq!(queue.basis, TX_BASIS);
         assert_eq!(
@@ -273,7 +275,8 @@ fn a_document_that_lowers_the_batch_size_is_the_batch_the_report_counts() {
     use wz_capi_pico::result::Z_ERR_CONFIG_INVALID_VALUE;
     use wz_capi_pico::z_config_drop;
 
-    let mut lowered = SessionLimits::defaults();
+    // The document states its limit over the preset the session would open under without it.
+    let mut lowered = SessionLimits::PICO_PRESET;
     let selectable = lowered
         .select_pico_unicast_batch_bytes(LOWERED_BATCH_BYTES)
         .is_ok();
@@ -322,10 +325,10 @@ fn a_document_that_lowers_the_batch_size_is_the_batch_the_report_counts() {
         for (door, core) in rows.iter().zip(tables.rows()) {
             assert_eq!(door.door.entry_bytes, core.entry_bytes, "{door:?}");
         }
-        // The listener, opened with no document, still counts its queues at the build's size.
+        // The listener, opened with no document, still counts its queues at the preset's size.
         assert_eq!(
             row(&at_build, "link transmit queues").door.entry_bytes,
-            SessionLimits::defaults().pico_unicast_batch_bytes()
+            SessionLimits::PICO_PRESET.pico_unicast_batch_bytes()
         );
 
         let sum: usize = rows

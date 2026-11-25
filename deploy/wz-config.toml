@@ -2639,8 +2639,8 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the matching listeners a session declares, and zenoh-pico has no constant for them; the default holds sixteen, more than any of zenoh-pico's own tests holds on one session at once."
 
 [limit.pico_preset]
-value = 1
-reason = "zenoh-pico bounds its matching listeners by no count; its examples and its matching API test hold one at a time, on the publisher or querier under test."
+value = 2
+reason = "zenoh-pico bounds its matching listeners by no count; its examples and its matching API test hold one at a time. A matching listener is held per publisher or querier, and the preset holds two queriers (its queryable API test declares a second), so a session listening on each of its two holds two."
 
 [[limit]]
 id = "MAX_DECL_WATCHES"

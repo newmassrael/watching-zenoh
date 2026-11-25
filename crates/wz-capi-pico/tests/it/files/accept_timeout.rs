@@ -71,6 +71,9 @@ fn a_silent_link_is_dropped_at_the_accept_timeout_the_build_states() {
         );
     }
 
+    // The listener's bound starts at its accept, which on the loopback can complete before this
+    // thread is back from `connect`: the instant before the dial is the one no accept precedes.
+    let dialled = Instant::now();
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the listener accepts");
     let connected = Instant::now();
 
@@ -100,9 +103,9 @@ fn a_silent_link_is_dropped_at_the_accept_timeout_the_build_states() {
         connected.elapsed()
     );
     assert!(
-        connected.elapsed() >= bound,
-        "dropped after {:?}, before the {bound:?} it was given",
-        connected.elapsed()
+        dialled.elapsed() >= bound,
+        "dropped {:?} after the dial, before the {bound:?} it was given",
+        dialled.elapsed()
     );
 
     unsafe {

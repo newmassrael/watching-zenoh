@@ -119,9 +119,18 @@ NEGOTIATE_RE = re.compile(r"^    pub fn (negotiate_[a-z0-9_]+_against_peer)\b")
 # surface a consumer reads (the R2195 lesson about deriving paths from Rust).
 PUB_FN_RE = re.compile(r"^    pub (?:const )?fn ([a-z0-9_]+)\b")
 
-# `R::with_mutex_mut(&self.slot` / `R::with_mutex(&self.slot` -- how every slot
-# in `SessionLinkActions` is reached.
-SLOT_WRITE_RE = re.compile(r"R::with_mutex(?:_mut)?\(&self\.([a-z0-9_]+)")
+# `R::with_mutex_mut(&self.slot` / `R::with_mutex(&self.slot` -- how a slot of
+# `SessionLinkActions` was reached -- and `self.fact_slot(|s| ..)`, how it is reached since the
+# session's facts went behind one lock and a door each (`fact_doors!` in session_actions.rs, every
+# door named `fact_` and its field). The door form left this gate reading NO slot: every
+# negotiation read as UNCLASSIFIED and every body axis as having no accessor, which is a gate
+# reporting its own blindness as the tree's defect.
+SLOT_ACCESS = r"(?:R::with_mutex(?:_mut)?\(&self\.|\bself\.fact_)"
+SLOT_WRITE_RE = re.compile(SLOT_ACCESS + r"([a-z0-9_]+)")
+# A row of that table: `fact_is_qos => is_qos: bool`, `fact_x => handshake.x: T`. The door form is
+# read BY NAME, so the table is held to the naming (`run`): a door named apart from its field would
+# file a slot under a name this gate never reads.
+FACT_DOOR_RE = re.compile(r"^\s*fact_([a-z0-9_]+)\s*=>\s*([a-z0-9_.]+)\s*:", re.M)
 # One setter hop: `self.set_x(...)`.
 SETTER_CALL_RE = re.compile(r"\bself\.(set_[a-z0-9_]+)\(")
 # R2944 — one METHOD hop, chosen by what the callee DOES rather than by its
@@ -132,7 +141,8 @@ SETTER_CALL_RE = re.compile(r"\bself\.(set_[a-z0-9_]+)\(")
 # calls (`self.is_qos()` is `|s| *s`, no `=`) from being taken for the slot.
 METHOD_CALL_RE = re.compile(r"\bself\.([a-z0-9_]+)\(")
 SLOT_ASSIGN_RE = re.compile(
-    r"R::with_mutex_mut\(&self\.([a-z0-9_]+),\s*\|[a-z_]+\|\s*\*[a-z_]+\s*=[^=]"
+    r"(?:R::with_mutex_mut\(&self\.|\bself\.fact_)([a-z0-9_]+)(?:,\s*|\()"
+    r"\|[a-z_]+\|\s*\*[a-z_]+\s*=[^=]"
 )
 # Every impl-level `fn`, public or not: the hop's population. A private helper
 # is still this impl's code, and it is where a refactor puts a shared write.
@@ -246,7 +256,7 @@ def accessors_reading(slot: str, bodies: dict[str, str]) -> list[str]:
     Setters and the negotiation methods themselves are excluded: an axis
     witnessed by its own mutator would be witnessed by construction.
     """
-    needle = re.compile(r"&self\." + re.escape(slot) + r"\b")
+    needle = re.compile(r"(?:&self\.|\bself\.fact_)" + re.escape(slot) + r"\b")
     out = []
     for name, body in bodies.items():
         if name.startswith("set_") or name.startswith("negotiate_"):
@@ -273,7 +283,7 @@ def body_accessors(
     accessor hands back all of them at once and a call to it says nothing about
     which one an assertion is measuring.
     """
-    slot = re.compile(r"&self\." + re.escape(CAPS_SLOT) + r"\b")
+    slot = re.compile(r"(?:&self\.|\bself\.fact_)" + re.escape(CAPS_SLOT) + r"\b")
     named = re.compile(r"\b" + re.escape(field) + r"\b")
     out = []
     for name, body in bodies.items():
@@ -432,6 +442,12 @@ def run(root: pathlib.Path) -> int:
         )
 
     failures: list[str] = []
+    for door, path in FACT_DOOR_RE.findall(actions):
+        if door != path.rsplit(".", 1)[-1]:
+            failures.append(
+                f"negotiated-axis: the door `fact_{door}` reaches `{path}`, and this gate "
+                f"reads a door as `fact_` and its field; name the door after its field"
+            )
     if not axes:
         failures.append(
             "negotiated-axis: the axis population is EMPTY -- neither "
@@ -641,6 +657,12 @@ fn epsilon_is_asserted() {
 '''
 
 
+def door_form(src: str) -> str:
+    """A fixture as the tree writes it since the session's facts went behind doors: each
+    `R::with_mutex_mut(&self.slot, f)` becomes `self.fact_slot(f)`."""
+    return re.sub(r"R::with_mutex_mut\(&self\.([a-z0-9_]+),\s*", r"self.fact_\1(", src)
+
+
 def selftest() -> int:
     """Drive the gate against a fixture whose shape the OLD probe swallowed.
 
@@ -702,6 +724,16 @@ def selftest() -> int:
                   green + FIXTURE_EPSILON_WITNESS, root, probe)
         rc |= arm(8, "a helper that only READS resolves nothing and is RED", 1,
                   FIXTURE_ACTIONS + FIXTURE_HELPER_READS,
+                  green + FIXTURE_EPSILON_WITNESS, root, probe)
+        # Arms 9-10: the same two shapes with every slot reached through its door, as the
+        # tree writes it. Arm 9 is green only if every axis RESOLVED through the doors (a
+        # negotiation, a setter, a helper and the peer-caps accessors); arm 10 keeps a door
+        # that is only READ from passing for a write.
+        rc |= arm(9, "the shapes written through fact doors, asserted, are GREEN", 0,
+                  door_form(FIXTURE_ACTIONS + FIXTURE_HELPER_HOP),
+                  green + FIXTURE_EPSILON_WITNESS, root, probe)
+        rc |= arm(10, "a helper that only READS its door resolves nothing and is RED", 1,
+                  door_form(FIXTURE_ACTIONS + FIXTURE_HELPER_READS),
                   green + FIXTURE_EPSILON_WITNESS, root, probe)
     return rc
 

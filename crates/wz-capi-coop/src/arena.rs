@@ -70,9 +70,9 @@
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
-//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the
-//!   tables that keep their keys in it. A peer's key that finds no room there is dropped and
-//!   counted, as zenoh-pico drops a declaration its heap cannot hold;
+//!   ([`KeySpace`]), lent after the record and before the tables that keep their keys in it. A
+//!   peer's key that finds no room there is dropped and counted, as zenoh-pico drops a
+//!   declaration its heap cannot hold;
 //! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
 //!   and the places it keeps its objects of the session's entities in, one for each row the
 //!   session keeps of each kind it names ([`HeldPlaces`]), so what the ABI holds of a session is
@@ -1336,7 +1336,7 @@ impl SessionRows {
 
     /// The bytes of the ring the session's advanced publishers' caches keep their samples in
     /// (`ADVANCED_CACHE_BYTES`): one table of one buffer, claimed for the session's life
-    /// ([`CacheSpan::claimed`]).
+    /// (`CacheSpan::claimed`).
     #[cfg(feature = "advanced-cache")]
     pub fn cache_bytes(&self) -> usize {
         self.cache_bytes

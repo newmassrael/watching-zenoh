@@ -40,6 +40,13 @@
 //! The arena's state lies at the start of its span, and every [`KeyRef`] points at it. Like a
 //! table lent from an [`Arena`], a key must be dropped before the memory the arena was reserved
 //! from is given back: the session drops every table that holds one before its arena.
+//!
+//! [`Arena`]: crate::bounded::Arena
+//! [`KeyRef`]: crate::key_arena::KeyRef
+//! [`BLOCK_HEADER`]: crate::key_arena::BLOCK_HEADER
+//! [`BLOCK_ALIGN`]: crate::key_arena::BLOCK_ALIGN
+//! [`KeysExhausted`]: crate::key_arena::KeysExhausted
+//! [`KeySpace`]: crate::key_arena::KeySpace
 
 use core::cell::Cell;
 use core::fmt;

@@ -634,7 +634,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
         &self.peer
     }
 
-    /// The two halves apart: the application's LivelinessSubscriberTable<C, P> and the peer's PeerTokens<P>, for a caller
+    /// The two halves apart: the application's `LivelinessSubscriberTable<C, P>` and the peer's `PeerTokens<P>`, for a caller
     /// that hands the second to a method of the first, as a session whose application half is
     /// shared with other faces must.
     pub fn split_mut(&mut self) -> (&mut LivelinessSubscriberTable<C, P>, &mut PeerTokens<P>) {
@@ -2033,7 +2033,7 @@ impl LivelinessSubscriberRegistry<BoxedLivelinessSampleSink> {
 // R311gb (Track 2) — test gate now explicit (was inherited from the
 // module's `codec-declare` gate); exercises `dispatch_declare` (owned
 // `DeclareOwnedVariant`), now `all(codec-declare, alloc)`-gated.
-#[cfg(all(test, feature = "codec-declare"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-declare"))]
 mod tests {
     //! R311ds — behavioural tests migrated here from the
     //! wz-runtime-tokio `declare/liveliness_subscriber.rs` shell

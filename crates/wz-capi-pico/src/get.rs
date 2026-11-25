@@ -16,7 +16,7 @@
 //! `drop(context)` once, when no further reply can arrive
 //! (`_z_query`/`_z_trigger_query_reply_final`, and `_z_drop_handler_execute`
 //! directly when `remaining_finals == 0`, `src/net/primitives.c:560-562`). Here
-//! a get lies in a place of its session's ([`GetPlace`]), the C closure in it, and
+//! a get lies in a place of its session's (`GetPlace`), the C closure in it, and
 //! each face's pending query holds one count of the place through the leg's reply
 //! callback: the leg's end, whatever ends it, lets its count go, and the last
 //! count let go of gives the place back, which drops the closure → the C

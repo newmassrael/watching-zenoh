@@ -50,7 +50,7 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = ["alloc", "no_std"] }
 # R2917 — the acceptor session e2e, over this profile's own `AcceptorTopology`
 # (Zephyr sockets), so without the crate's default lwIP topology but with its heap
-# (`heap`: the topology trait and the `Rc` sink are the heap form's, which this
+# (`heap`: the topology trait and the `CellRc` sink are the heap form's, which this
 # profile has a k_malloc allocator for).
 wz-mcu-session-acceptor = { path = "../../../crates/wz-mcu-session-acceptor", default-features = false, features = ["heap"] }
 

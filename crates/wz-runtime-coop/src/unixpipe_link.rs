@@ -38,8 +38,7 @@ use crate::session_drive::{
     SessionLinks, UnixpipeLocator, WaitOn,
 };
 use crate::stream_link::{
-    link_over, stream_ends_fit, StreamDriver, StreamEnds, StreamLink, StreamSocket,
-    STREAM_RX_CAPACITY,
+    link_over, stream_ends_fit, StreamDriver, StreamEnds, StreamSocket, STREAM_RX_CAPACITY,
 };
 
 /// The mode a link's FIFOs are created with when its locator names none: owner only.
@@ -592,6 +591,8 @@ where
 }
 
 /// A dial of [`UnixpipeLinks`]: the stack's, or a unixpipe one.
+// Held by value in its face's link, as `ip_stack::IpDial` is: a link being made is not boxed.
+#[allow(clippy::large_enum_variant)]
 pub enum UnixpipeLinksDial<D, O: FifoOpen> {
     /// A dial of the stack the unixpipe links stand beside.
     Links(D),
@@ -759,7 +760,7 @@ mod tests {
     use core::cell::Cell;
     use core::net::{Ipv4Addr, SocketAddr};
 
-    use wz_session_core::link::{BoxedLinkDriver, LinkEndsText, LinkSendOutcome};
+    use wz_session_core::link::{LinkEndsText, LinkSendOutcome};
     use wz_session_core::reliability::Reliability;
 
     use crate::session_drive::{Dialled, NoWaits, UnixpipePath};

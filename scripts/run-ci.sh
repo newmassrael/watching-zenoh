@@ -9776,7 +9776,10 @@ layer_c1am_cargo_test_adminspace() {
     # R3322 -- 8 -> 9: `two_spellings_of_one_zid_are_the_same_zid` joins
     # `same_zid`, the comparison of two spellings of one id. PRINTED by the
     # hosted run, whose red printed the missing leg.
-    _runci_guarded_test "C1AM zid_hex 9" 9 \
+    # 9 -> 10: `the_writer_renders_le_reversed_with_no_leading_zero` holds the
+    # writer every profile has to the recipe (the slot profile's unit tests,
+    # 0042e2984). PRINTED by hosted run 45486715960, whose red printed 10.
+    _runci_guarded_test "C1AM zid_hex 10" 10 \
         cargo test -p wz-session-core --lib zid_hex --quiet || return 1
     # The one `zid_to_zenoh_hex` test is the replication digest's, which is the wz-storage
     # crate's since the server-layer split (step 4).
@@ -12277,9 +12280,11 @@ layer_c1g_cargo_test_observer() {
     # ask with one request id are answered each on its own session's send path, and for one
     # session it sends and delivers what the one-session observer does, byte for byte, and a
     # host that holds the `Final`s back drains the replies alone. The file compiles only where
-    # the fixed-backing one above does not. 4 = what that command PRINTED.
+    # the fixed-backing one above does not. 4 = what that command PRINTED. 4 -> 7: a peer whose
+    # tables are lent is answered in the rows it was lent, and its interest and liveliness answers
+    # drain in place (6dbd65eae); PRINTED by hosted run 45486715960, whose red printed 7.
     wz_test_args wz-session-core slot_observer_heap
-    _runci_guarded_test C1g 4 \
+    _runci_guarded_test C1g 7 \
         cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete --quiet || return 1
     # R3315 -- the observer's place. The observer is 16 KB and the Zephyr node's stack is
     # 32 KB: a value of it passed through an install cost the node's main function 69 KB of
@@ -12337,11 +12342,14 @@ layer_c1g_cargo_test_observer() {
     # ResponseFinal) where their frame lies: the walk of every kind against the owned
     # walk, extension refusals included (4 = what that command PRINTED), and each
     # registry that consumes one fed the owned and the lent form and held to the same
-    # answer (8 = what that PRINTED). Both need the whole set of registries the slot
-    # profile carries, which is why they are not part of the leg above.
+    # answer. 41 = what that PRINTED: the filter is a substring, so it takes three
+    # modules: declare::lent_tests (9, the registries; 8 until 72a366964),
+    # peer_tables::lent_tests (13, since 60d0d8e31) and slot_observer::lent_tests (19,
+    # since bf3d317d6), all of which need this registry set. Both need the whole set of
+    # registries the slot profile carries, which is why they are not part of the leg above.
     _runci_guarded_test C1g 4 \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,declare-final,codec-response-final,session-slot --quiet -- record_walk_tests::control || return 1
-    _runci_guarded_test C1g 8 \
+    _runci_guarded_test C1g 41 \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,codec-request,codec-response,codec-response-final,declare-subscriber,declare-queryable,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,session-slot --quiet -- lent_tests || return 1
     # S9d -- the control messages WRITTEN from the caller's own text
     # (`lent_control`): every writer byte-equal to the owned builder it mirrors across
@@ -14175,11 +14183,16 @@ layer_c1m_session_lwip() {
     # +1 in every leg that runs the lib without `session-slot` (21 -> 22, 22 -> 23, 25 -> 26): the
     # in-memory network carries an IPv6 host's datagrams (`memory::tests`). The hosted run of
     # 3148fdfc84 printed 22 here; the other numbers are counted from the source.
-    _runci_guarded_test "C1m mcu default" 22 \
+    # 22 -> 23, printed: hosted runs 45386940970 and 45486715960 printed 23. The in-memory link
+    # lends its outbound slots (`7ec73acff`), and its test of them
+    # (`memory::tests::a_frame_written_into_a_lent_slot_reaches_the_peer_and_the_slots_are_bounded`)
+    # runs in every leg without `session-slot`; it landed without moving this guard.
+    _runci_guarded_test "C1m mcu default" 23 \
         cargo test -p wz-session-mcu --quiet || return 1
     # 23 -> 24, printed: the merge of main at `0e24b2486` (Round 4581) into the limits rounds
     # prints one more here, which neither tree printed before it.
-    _runci_guarded_test "C1m mcu unicast app layer" 24 \
+    # 24 -> 25, printed: the in-memory link's lent-slot test (`7ec73acff`), as in the default leg.
+    _runci_guarded_test "C1m mcu unicast app layer" 25 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1

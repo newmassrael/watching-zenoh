@@ -1423,7 +1423,8 @@ mod tests {
     }
 
     /// A hint read where it lies and copied back is the hint, and its codec form is the one the
-    /// view makes.
+    /// view makes. A hint is the heap profile's.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_hint_read_where_it_lies_is_the_hint() {
         let hint = EncodingHint {

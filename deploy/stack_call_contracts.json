@@ -209,9 +209,9 @@
     },
     {
       "id": "entropy-draw",
-      "where": {"file": "session_actions.rs", "anchor": "src.try_next_u64().ok()"},
+      "where": {"file": "session_actions.rs", "anchor": "entropy.try_next_u64().ok()"},
       "callees": "EntropySource>::try_next_u64$",
-      "why": "the draw of the session's initial value"
+      "why": "the draws of a handshake's secrets (each auth method's challenge, the multilink challenge and the cookie nonce) from the session's one source"
     },
     {
       "id": "lent-write",
@@ -239,14 +239,14 @@
     },
     {
       "id": "record-walk-each",
-      "where": {"file": "network_message.rs", "anchor": "each(WalkedRecord::"},
-      "callees": "^wz_session_core::(drive::(walk_records_in_place|frame_records_extent)|driver_loop::walk_lent_payload|network_message::(try_for_each_record|try_for_each_record_while|for_each_record))::\\{closure#\\d+\\}$",
-      "why": "the walk hands each record, owned or lent (lend_push, lend_request, lend_response, lend_declare, lend_unknown and the rest), to its consumer through `&mut dyn FnMut`, so its body and each kind's reader are compiled once for every consumer; the consumer is a closure of one of the walk's callers, as record-walk-go-on, or try_for_each_record_while's that counts a lent record's class first"
+      "where": {"file": "network_message.rs", "anchor": "each.take_record(WalkedRecord::"},
+      "callees": "network_message::EachRecord>::take_record$",
+      "why": "the walk hands each record, owned or lent (lend_push, lend_request, lend_response, lend_declare, lend_unknown and the rest), to its consumer through `&mut dyn EachRecord`, so its body and each kind's reader are compiled once for every consumer; the one impl of the trait is the blanket one over a closure, whose take_record calls the closure directly: the closure of one of the walk's callers, as record-walk-go-on, or try_for_each_record_while's that counts a lent record's class first"
     },
     {
       "id": "record-walk-each-oam",
-      "where": {"file": "network_message.rs", "anchor": "each(walked)"},
-      "callees": "^wz_session_core::(drive::(walk_records_in_place|frame_records_extent)|driver_loop::walk_lent_payload|network_message::(try_for_each_record|try_for_each_record_while|for_each_record))::\\{closure#\\d+\\}$",
+      "where": {"file": "network_message.rs", "anchor": "each.take_record(walked)"},
+      "callees": "network_message::EachRecord>::take_record$",
       "why": "lend_oam hands its record to the consumer as record-walk-each does, bound to a name first because the counters' build hands the Oam and every other build a skipped record"
     },
     {

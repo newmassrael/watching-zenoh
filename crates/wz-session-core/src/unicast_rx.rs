@@ -12,6 +12,8 @@
 //!
 //! The methods that dispatch are never inlined: a driver that is a task polls them from its
 //! `poll`, and inlined they made that `poll` the size of the whole receive, once per driver type.
+//!
+//! [`UnicastRx`]: crate::unicast_rx::UnicastRx
 
 use core::mem::MaybeUninit;
 

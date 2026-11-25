@@ -6,8 +6,8 @@
 //!
 //! A task cannot be handed a borrow (an executor polls it with nothing but its context), so the
 //! lend is a place the task looks in: the owner lends the value for the length of a step
-//! ([`StepLend::lend_for`]), and each call of a task takes it out for its own length and puts it
-//! back ([`StepLend::with`]). No task holds the value past a step, and none holds it beside
+//! (`StepLend::lend_for`), and each call of a task takes it out for its own length and puts it
+//! back (`StepLend::with`). No task holds the value past a step, and none holds it beside
 //! another; the owner reads and writes it by `&mut` between steps, with nothing counted.
 
 use alloc::rc::Rc;

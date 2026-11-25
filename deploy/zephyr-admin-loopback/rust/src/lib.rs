@@ -259,16 +259,21 @@ struct SteppingSocket {
 impl StreamSocket for SteppingSocket {
     type Error = ZephyrNetError;
 
-    fn local(&self) -> core::net::SocketAddr {
-        self.inner.local()
+    type Link<
+        B: wz_runtime_coop::link_storage::RxStore + 'static,
+        X: wz_runtime_coop::link_storage::TxStore + 'static,
+    >
+        = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
+    where
+        Self: 'static;
+
+    fn ends(&self) -> wz_runtime_coop::stream_link::StreamEnds<'_> {
+        self.inner.ends()
     }
 
-    fn peer(&self) -> core::net::SocketAddr {
-        self.inner.peer()
-    }
-
-    fn send_parts(&self, parts: &[&[u8]]) -> Result<(), ZephyrNetError> {
-        self.inner.send_parts(parts)
+    // The inner socket blocks, so its write returns once the stack has taken every byte.
+    fn write(&self, bytes: &[u8]) -> Result<usize, ZephyrNetError> {
+        self.inner.write(bytes)
     }
 
     fn wait_readable(&self, timeout_ms: core::ffi::c_int) {

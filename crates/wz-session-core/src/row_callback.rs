@@ -21,6 +21,15 @@
 //! [`LocalLatch`], which has the same rules and no read-modify-write of its word; one whose calls
 //! may run on other threads (a read task beside the program's calls) counts them on a
 //! [`CallLatch`]. The engine names which by its [`ThreadForm`].
+//!
+//! [`RowCallback::begin`]: crate::row_callback::RowCallback::begin
+//! [`RowCallback::end`]: crate::row_callback::RowCallback::end
+//! [`RowCallback::retire`]: crate::row_callback::RowCallback::retire
+//! [`CallLatch`]: crate::row_callback::CallLatch
+//! [`LocalLatch`]: crate::row_callback::LocalLatch
+//! [`ThreadForm`]: crate::row_callback::ThreadForm
+//! [`RowCallback`]: crate::row_callback::RowCallback
+//! [`CClosure`]: crate::row_callback::CClosure
 
 use core::ffi::c_void;
 use core::ptr::NonNull;

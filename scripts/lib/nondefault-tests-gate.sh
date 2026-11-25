@@ -615,6 +615,13 @@ transport-link-ws|"
     # module beside `std`'s for its own tests (`os::sys::tests::`), a spawned thread's identity and
     # end, the condition variable's wake and the mutex's try.
     "wz-capi-port|hook|os-sys|os::sys::tests::"
+    # The host's locks themselves with `std` (`wz-host-sync`'s `std`): the typed forms are
+    # `std`'s where `std`'s lock lies in its own bytes and the in-place ones elsewhere, and either
+    # way a lock whose holder panicked reads as poisoned (`tests::` and `in_place::tests::`, the
+    # two poisoning tests only this feature compiles). The whole crate: the census refused the
+    # tree with "wz-host-sync has 2 test(s) only a feature build reaches ... leaving 2 claimed by
+    # NOTHING", the feature being new and no row naming it.
+    "wz-host-sync|hook|std|"
     # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
     # a build made as the reference is compiles none of.
     "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload|"
@@ -784,6 +791,13 @@ transport-link-ws|"
     # compiled with `time-base`): a wait for the next dial ends at the word, and the word joins a
     # wait on links and makes none where there was none.
     "wz-capi-coop|hook|time-base|clock_moves_tests::"
+    # The advanced publishers' and subscribers' places in the session's arena and the ring their
+    # caches keep their samples in (`advanced`, which turns on `advanced-cache`): a plan with every
+    # row lays out their places and the ring beside the key arena (`tests::arena::`), and an open
+    # keeps a zeroed ring of its own (`tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches`).
+    # One build for the two rows.
+    "wz-capi-coop|hook|advanced|tests::arena::"
+    "wz-capi-coop|hook|advanced|tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches"
     # The declaration watch (`decl_watch`, compiled with `remote-declaration-watch` or
     # `declarations-synced-event`): the router's declarations told to the watches of their kind,
     # what it held told first to a watch that came after, the end of its initial declarations told
