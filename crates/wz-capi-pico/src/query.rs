@@ -980,7 +980,7 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> Result<*mut c_voi
         };
         match holder.keep_query(marshal) {
             Ok(Some(id)) => Deferred {
-                engine: engine.clone(),
+                engine: Clone::clone(engine),
                 id,
             },
             Ok(None) => return Err(crate::result::Z_ERR_GENERIC),

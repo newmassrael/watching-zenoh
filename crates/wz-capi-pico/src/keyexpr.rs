@@ -219,7 +219,7 @@ impl WireDeclaration {
             None => self.hold.unheld(),
         };
         Ok(Self {
-            session: self.session.clone(),
+            session: Clone::clone(&self.session),
             hold: ManuallyDrop::new(hold),
             prefix_len: self.prefix_len,
         })
