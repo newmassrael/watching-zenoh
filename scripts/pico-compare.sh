@@ -17,6 +17,17 @@
 #                                             the same search for the zenoh-c family: the benches built against the
 #                                             pinned zenoh-c release (variant P) and against wz-capi-c (variant W),
 #                                             which is provisioned and built under target/ by the mode itself
+#   scripts/pico-compare.sh subprofile [size] [count] [rate]
+#                                             where the SUBSCRIBER's time goes, for each library: scripts/host-bench's
+#                                             count_sub, fed by its paced_pub, run under `strace -f -c` (the system
+#                                             calls of each kind one received message costs), `perf stat` (its
+#                                             instructions, cycles, switches, migrations, cache and branch misses),
+#                                             `perf record` (the top functions, self and with children) and
+#                                             valgrind's callgrind (the exact instructions, in all and by function),
+#                                             each counter at two counts so that start and end cancel (subprofile
+#                                             below). Left under target/pico-compare/subprofile-runs/host-<time>/
+#                                             (report.txt, record.txt, each run's tables and the tools' files); exit
+#                                             0 when every leg of both arms was measured, 2 when one was not
 #   scripts/pico-compare.sh parity <pico|c|rust> [boots] [sizes]
 #                                             the host side of the parity matrix (docs/upstream-parity.md section 5b):
 #                                             upstream's own example programs (z_put z_sub z_get z_queryable z_pub_thr
@@ -84,7 +95,7 @@
 # for example WZ_CAPI_RX_BUSY_POLL_US=10), PICO_CMP_NO_BUILD=1 (use the libraries already built), PICO_CMP_ENGINE
 # (`tokio` or `coop`: the engine the wz library is built on, to compare the two; unset, the one the package for a
 # host ships on, which its profile configs/profiles/host-peer-ext.conf chooses). `rtt`, `thr`, `nodrop`, `profile`,
-# `tids`, `perf` and `batch` build the wz library on that engine and print it with their readings; `parity`
+# `tids`, `subprofile`, `perf` and `batch` build the wz library on that engine and print it with their readings; `parity`
 # builds each original's preset and `nodrop-c` the zenoh-c family, which have one engine each. PICO_CMP_STDLIB
 # (`std` or `nostd`, `perf` only): the standard library the wz library is built with, to compare the two;
 # unset, the one form the release ships (perf_matrix.py bench-stdlib).
@@ -165,7 +176,7 @@ if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" 
     echo "$wz_engine" >"$out/wz-engine"
 fi
 case "${1:-}" in
-    rtt | thr | nodrop | profile | tids)
+    rtt | thr | nodrop | profile | tids | subprofile)
         [ -n "$wz_engine" ] || stamped_engine "$(cat "$out/wz-engine" 2>/dev/null)"
         ;;
 esac
@@ -251,7 +262,7 @@ case "${1:-}" in
     nodrop-c)
         build_zenoh_c_family
         ;;
-    nodrop|profile|tids)
+    nodrop|profile|tids|subprofile)
         for bench in paced_pub count_sub; do
             for variant in P W; do
                 build_bench "$bench" "$variant"
@@ -420,6 +431,267 @@ tids() {
         awk '{ split($2, a, "("); c[$1 " " a[1]]++ } END { for (k in c) print c[k], k }' "$dir/strace" | sort -rn | sed -n 1,14p | sed 's/^/    /'
         rm -rf "$dir"
     done
+}
+
+# ── subprofile: where the subscriber's time goes ─────────────────────────────────────────────────────────────
+#
+# subprofile [size] [count] [rate]: count_sub of each library, fed [size] (8) byte messages at [rate] (10000) a
+# second by paced_pub of the same library, under four tools in turn: `strace -f -c`, `perf stat`, `perf record` and
+# valgrind's callgrind. A counter charges a run's start and end (the library's load, the session's open and close,
+# the timers of the time it listens) to whatever count it received, and strace and callgrind slow the subscriber
+# too far for a rate to be read from them. So each arm runs twice under each counter, fed PICO_CMP_SUBPROF_BASE (2000) and [count] (12000) messages, its subscriber
+# listening for the same time in both: what the second run counts past the first, over the messages it received
+# past the first, is what one message costs, and what the two share cancels. `perf record` samples, and is read
+# as shares of the larger run alone. callgrind runs the subscriber some fifty times slower, so it is fed at
+# PICO_CMP_SUBPROF_CALLGRIND_RATE (1000) and its publisher waits PICO_CMP_SUBPROF_WAIT_S (8) for the subscriber to
+# listen, where the other tools wait 2; every subscriber listens PICO_CMP_SUBPROF_SLACK_S (10) past the last put
+# of the larger run, to drain what it is behind. The libraries keep no frame pointers (the `ship` profile, cmake
+# Release), so `perf record` unwinds by their unwind tables (PICO_CMP_SUBPROF_CALLGRAPH, default dwarf; fp for a
+# build that keeps them).
+
+SUBPROF_EVENTS=instructions,cycles,context-switches,cpu-migrations,cache-misses,branch-misses
+
+# subprofile_trial <tool> <variant> <count> <rate> <size> <listen> <lead> <stem>: one run of the subscriber of
+# <variant> under <tool> (strace, perfstat, perfrecord or callgrind) for <listen> seconds, and of the publisher,
+# started <lead> seconds after it and putting <count> messages; leaves <stem>.sub, <stem>.pub and the tool's file.
+subprofile_trial() {
+    local tool="$1" variant="$2" count="$3" rate="$4" size="$5" listen="$6" lead="$7" stem="$8"
+    local port seconds pace tool_words=()
+    # paced_pub takes whole seconds, so the rate is the one that puts <count> in them.
+    seconds=$(((count + rate - 1) / rate))
+    pace="$(awk -v c="$count" -v s="$seconds" 'BEGIN { printf "%.6f", c / s }')"
+    case "$tool" in
+        strace) tool_words=(strace -f -c -o "$stem.strace") ;;
+        perfstat) tool_words=(perf stat -x , -o "$stem.perfstat" -e "$SUBPROF_EVENTS" --) ;;
+        perfrecord)
+            tool_words=(perf record -g --call-graph "${PICO_CMP_SUBPROF_CALLGRAPH:-dwarf}" -o "$stem.perf.data" --)
+            ;;
+        *) tool_words=(valgrind --tool=callgrind "--callgrind-out-file=$stem.callgrind") ;;
+    esac
+    port=$((20000 + RANDOM % 20000))
+    compose "$variant" "$sub_cpus" timeout $((listen + lead + 120)) "${tool_words[@]}" "$out/bin/count_sub_$variant" \
+        -m peer -l "tcp/127.0.0.1:$port" -d "$listen"
+    "${CMD[@]}" >"$stem.sub" 2>&1 &
+    local sub=$!
+    sleep "$lead"
+    compose "$variant" "$pub_cpus" timeout $((seconds + 60)) "$out/bin/paced_pub_$variant" -m peer \
+        -e "tcp/127.0.0.1:$port" -s "$size" -r "$pace" -t "$seconds"
+    "${CMD[@]}" >"$stem.pub" 2>&1
+    wait "$sub" 2>/dev/null
+}
+
+# subprofile_number <file> <word>: the number a program printed after `<word>=` on its last line that has one.
+subprofile_number() {
+    sed -n "s/.*$2=\([0-9][0-9]*\).*/\1/p" "$1" 2>/dev/null | tail -n 1
+}
+
+# subprofile_ir <callgrind file>: the instructions a run executed in all, from the file's own total.
+subprofile_ir() {
+    sed -n 's/^\(summary\|totals\): *\([0-9][0-9]*\).*/\2/p' "$1" 2>/dev/null | tail -n 1
+}
+
+# subprofile_table <strace|perfstat|annotate> <lower> <upper> <messages> [top]: the rows of two runs' tables, each
+# system call kind's count (strace -c), each event's count (perf stat -x) or each function's instructions
+# (callgrind_annotate) in the upper run past the lower one, over the <messages> the upper run received past the
+# lower; the largest first, the first [top] of them. A table with no row prints nothing.
+subprofile_table() {
+    python3 -I - "$@" <<'PY'
+import re
+import sys
+
+kind, lower, upper, messages = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+top = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+# callgrind_annotate's row: the count, a share when it prints one, then the function.
+ROW = re.compile(r"^\s*([\d,]+)\s+(?:\(\s*[\d.]+%\)\s+)?(\S.*?)\s*$")
+# A hybrid CPU's counters come one row per core type (`cpu_core/cycles/`), and a restricted one carries `:u`.
+PMU = re.compile(r"^cpu_\w+/(.*)/$")
+
+
+def strace_rows(path):
+    rows = {}
+    for line in open(path, errors="replace"):
+        words = line.split()
+        # "% time  seconds  usecs/call  calls  [errors]  syscall": the calls are the fourth word either way.
+        if len(words) < 5 or words[0].startswith(("%", "-")) or words[-1] == "total":
+            continue
+        try:
+            rows[words[-1]] = int(words[3])
+        except ValueError:
+            pass
+    return rows
+
+
+def perfstat_rows(path):
+    rows = {}
+    for line in open(path, errors="replace"):
+        fields = line.strip().split(",")
+        if len(fields) < 3 or line.startswith("#"):
+            continue
+        try:
+            value = int(float(fields[0]))
+        except ValueError:
+            # "<not counted>" or "<not supported>": a core type the process did not run on, or no such counter.
+            continue
+        event = PMU.sub(r"\1", fields[2]).split(":")[0]
+        rows[event] = rows.get(event, 0) + value
+    return rows
+
+
+def annotate_rows(path):
+    rows = {}
+    for line in open(path, errors="replace"):
+        match = ROW.match(line)
+        if match and match.group(2) != "PROGRAM TOTALS":
+            name = match.group(2)
+            rows[name] = rows.get(name, 0) + int(match.group(1).replace(",", ""))
+    return rows
+
+
+read = {"strace": strace_rows, "perfstat": perfstat_rows}.get(kind, annotate_rows)
+low, high = read(lower), read(upper)
+rows = sorted(((high.get(k, 0) - low.get(k, 0), k) for k in set(low) | set(high)), reverse=True)
+for extra, name in rows[:top] if top else rows:
+    print(f"    {extra / messages:14.3f}  {name}")
+PY
+}
+
+# subprofile_has <tool>: whether the programs the leg runs are on PATH.
+subprofile_has() {
+    case "$1" in
+        strace) command -v strace >/dev/null 2>&1 ;;
+        perfstat | perfrecord) command -v perf >/dev/null 2>&1 ;;
+        *) command -v valgrind >/dev/null 2>&1 && command -v callgrind_annotate >/dev/null 2>&1 ;;
+    esac
+}
+
+# subprofile_records <stem> <variant> <listing>: the top 25 rows of `perf report` of one run, without children or
+# with them, its whole listing left beside the data.
+subprofile_records() {
+    local stem="$1" variant="$2" listing="$3"
+    perf report -i "$stem.perf.data" --stdio "--$listing" --sort dso,symbol -g none --percent-limit 0 \
+        >"$stem.$listing.txt" 2>&1
+    echo "  perf record sub=$variant: top 25 by share of samples, --$listing:"
+    grep -E '^ +[0-9]+\.[0-9]+%' "$stem.$listing.txt" | head -n 25 | sed 's/^/  /'
+}
+
+# subprofile_arm <tool> <variant> <base> <count> <run>: the lines of one arm under one tool, from its runs; returns
+# 2 when the arm was not measured.
+subprofile_arm() {
+    local tool="$1" variant="$2" base="$3" count="$4" run="$5"
+    local lo="$run/$tool-$variant-$base" hi="$run/$tool-$variant-$count"
+    local sent_lo sent_hi recv_lo recv_hi messages ir_lo ir_hi listing rows
+    sent_hi="$(subprofile_number "$hi.pub" sent)"
+    recv_hi="$(subprofile_number "$hi.sub" received)"
+    if [ "$tool" = perfrecord ]; then
+        echo "  perf record sub=$variant: n=$count sent=${sent_hi:-?} received=${recv_hi:-?}"
+        if [ ! -s "$hi.perf.data" ]; then
+            echo "  perf record sub=$variant: NOT-MEASURED, perf left no samples (perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null); see $hi.sub)"
+            return 2
+        fi
+        subprofile_records "$hi" "$variant" no-children
+        subprofile_records "$hi" "$variant" children
+        return 0
+    fi
+    sent_lo="$(subprofile_number "$lo.pub" sent)"
+    recv_lo="$(subprofile_number "$lo.sub" received)"
+    echo "  $tool sub=$variant: n=$base sent=${sent_lo:-?} received=${recv_lo:-?}; n=$count sent=${sent_hi:-?} received=${recv_hi:-?}"
+    if [ -z "$recv_lo" ] || [ -z "$recv_hi" ] || [ "$recv_hi" -le "$recv_lo" ]; then
+        echo "  $tool sub=$variant: NOT-MEASURED, the larger run did not receive more than the smaller one"
+        echo "    publisher said: $(tail -n 2 "$hi.pub" 2>/dev/null | tr '\n' '|')"
+        echo "    subscriber said: $(tail -n 2 "$hi.sub" 2>/dev/null | tr '\n' '|')"
+        return 2
+    fi
+    messages=$((recv_hi - recv_lo))
+    # A message put and never received is not in the divisor; saying so keeps a short drain from passing unseen.
+    if [ "$recv_lo" != "${sent_lo:-}" ] || [ "$recv_hi" != "${sent_hi:-}" ]; then
+        echo "  $tool sub=$variant: received is not sent; the costs below are over the messages received"
+    fi
+    case "$tool" in
+        strace | perfstat)
+            if [ ! -s "$lo.$tool" ] || [ ! -s "$hi.$tool" ]; then
+                echo "  $tool sub=$variant: NOT-MEASURED, $tool left no table (see $lo.sub and $hi.sub)"
+                return 2
+            fi
+            rows="$(subprofile_table "$tool" "$lo.$tool" "$hi.$tool" "$messages")"
+            if [ -z "$rows" ]; then
+                echo "  $tool sub=$variant: NOT-MEASURED, $tool counted nothing (see $lo.$tool and $hi.$tool)"
+                return 2
+            fi
+            echo "  $tool sub=$variant: per received message (n=$count past n=$base, over $messages messages):"
+            echo "$rows"
+            return 0
+            ;;
+    esac
+    ir_lo="$(subprofile_ir "$lo.callgrind")"
+    ir_hi="$(subprofile_ir "$hi.callgrind")"
+    if [ -z "$ir_lo" ] || [ -z "$ir_hi" ]; then
+        echo "  callgrind sub=$variant: NOT-MEASURED, callgrind left no total (see $lo.sub and $hi.sub)"
+        return 2
+    fi
+    echo "  callgrind sub=$variant: Ir n=$base $ir_lo, n=$count $ir_hi; per received message $(awk -v a="$ir_lo" \
+        -v b="$ir_hi" -v m="$messages" 'BEGIN { printf "%.1f", (b - a) / m }') (over $messages messages)"
+    for listing in no yes; do
+        callgrind_annotate --threshold=100 --inclusive="$listing" "$lo.callgrind" >"$lo.inclusive-$listing.txt" 2>&1
+        callgrind_annotate --threshold=100 --inclusive="$listing" "$hi.callgrind" >"$hi.inclusive-$listing.txt" 2>&1
+        echo "  callgrind sub=$variant: top 25 functions by Ir per received message, inclusive=$listing:"
+        subprofile_table annotate "$lo.inclusive-$listing.txt" "$hi.inclusive-$listing.txt" "$messages" 25
+    done
+}
+
+subprofile() {
+    local size="${1:-8}" count="${2:-12000}" rate="${3:-10000}" base="${PICO_CMP_SUBPROF_BASE:-2000}"
+    local cg_rate="${PICO_CMP_SUBPROF_CALLGRIND_RATE:-1000}" wait_s="${PICO_CMP_SUBPROF_WAIT_S:-8}"
+    local slack="${PICO_CMP_SUBPROF_SLACK_S:-10}"
+    local run tool variant n lead trial_rate listen status=0 counts=()
+    for n in "$size" "$count" "$rate" "$base" "$cg_rate" "$wait_s" "$slack"; do
+        [[ "$n" =~ ^[0-9]+$ ]] || { echo "pico-compare: NOT-MEASURED, $n is not a whole number"; exit 2; }
+    done
+    [ "$rate" -gt 0 ] && [ "$cg_rate" -gt 0 ] && [ "$count" -gt "$base" ] \
+        || { echo "pico-compare: NOT-MEASURED, a rate is 0 or [count] $count is not above PICO_CMP_SUBPROF_BASE $base"; exit 2; }
+    run="$out/subprofile-runs/host-$(date -u +%Y%m%dT%H%M%S)"
+    mkdir -p "$run"
+    {
+        echo "tree=$(git rev-parse HEAD)"
+        echo "host=$(hostname)"
+        echo "kernel=$(uname -r)"
+        echo "cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)"
+        echo "perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null)"
+        echo "perf=$(perf --version 2>/dev/null)"
+        echo "valgrind=$(valgrind --version 2>/dev/null)"
+        echo "strace=$(strace -V 2>/dev/null | head -1)"
+        echo "size=$size base=$base count=$count rate=$rate callgrind_rate=$cg_rate wait_s=$wait_s slack_s=$slack"
+        echo "callgraph=${PICO_CMP_SUBPROF_CALLGRAPH:-dwarf} events=$SUBPROF_EVENTS"
+        echo "sub_cpus=$sub_cpus pub_cpus=$pub_cpus wz_env=${wz_env:-none} wz_engine=$wz_engine"
+    } >"$run/record.txt"
+    echo "subscriber profile, $size B, n=$base and n=$count at $rate msg/s (callgrind $cg_rate); subscriber on $sub_cpus, publisher on $pub_cpus; wz env: ${wz_env:-none}; wz engine: $wz_engine" \
+        | tee -a "$run/report.txt"
+    for tool in strace perfstat perfrecord callgrind; do
+        if ! subprofile_has "$tool"; then
+            echo "  $tool: NOT-MEASURED, the program it runs is not on PATH" | tee -a "$run/report.txt"
+            status=2
+            continue
+        fi
+        lead=2
+        trial_rate="$rate"
+        if [ "$tool" = callgrind ]; then
+            lead="$wait_s"
+            trial_rate="$cg_rate"
+        fi
+        counts=("$base" "$count")
+        [ "$tool" = perfrecord ] && counts=("$count")
+        # One listening time for both counts of an arm, long enough for the larger.
+        listen=$((lead + 2 + (count + trial_rate - 1) / trial_rate + slack))
+        for variant in P W; do
+            for n in "${counts[@]}"; do
+                subprofile_trial "$tool" "$variant" "$n" "$trial_rate" "$size" "$listen" "$lead" "$run/$tool-$variant-$n"
+            done
+            subprofile_arm "$tool" "$variant" "$base" "$count" "$run" >"$run/arm.txt" || status=2
+            tee -a "$run/report.txt" <"$run/arm.txt"
+            rm -f "$run/arm.txt"
+        done
+    done
+    echo "pico-compare: subprofile run $run (report.txt, record.txt, the tables and tool files of each run)"
+    return "$status"
 }
 
 # nodrop-c [reps] [sizes]: `nodrop` for the zenoh-c family, with the same benches, trial and search. In the pair
@@ -908,12 +1180,13 @@ case "$mode" in
     nodrop) nodrop "$@" ;;
     nodrop-c) nodrop_c "$@" ;;
     profile) profile "$@" ;;
+    subprofile) subprofile "$@" ;;
     parity) parity "$@" ;;
     perf) perf_matrix "$@" ;;
     batch) batch_control "$@" ;;
     fanin) fanin "$@" ;;
     *)
-        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | batch [sizes,comma,separated] [count] | fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs]" >&2
+        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | subprofile [size] [count] [rate] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | batch [sizes,comma,separated] [count] | fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs]" >&2
         exit 2
         ;;
 esac
