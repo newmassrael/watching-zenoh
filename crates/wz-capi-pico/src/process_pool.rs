@@ -1141,7 +1141,6 @@ impl Pools {
     }
 
     /// Whether `place` lies in the memory of the pools.
-    #[cfg(test)]
     fn lies_in(&self, place: NonNull<u8>) -> bool {
         (place.as_ptr() as usize).wrapping_sub(self.base.as_ptr() as usize) < self.bytes
     }
@@ -1306,12 +1305,14 @@ impl Reserved {
 
 impl Reserved {
     /// Give `place` back to the pool of the stage it lies in; `false` when it lies in none.
-    /// Each stage's give-back answers whether the place is its own, so no stage is asked twice.
+    /// The stage is found by its bounds first, so one give-back body serves every stage: asked of
+    /// each stage in turn, the give-back is laid out once for each.
     fn give_back(&mut self, place: NonNull<u8>) -> bool {
         self.stages
             .iter_mut()
             .flatten()
-            .any(|pools| pools.give_back(place))
+            .find(|pools| pools.lies_in(place))
+            .is_some_and(|pools| pools.give_back(place))
     }
 }
 
