@@ -167,6 +167,9 @@ os-zephyr = [
     "wz-session-core/limits-lent-at-open",
     "wz-session-core/session-fixed-storage",
     "wz-session-core/session-keeps-keyexprs",
+    # Every log record compiled out: no logger is installed in this form (the `log` dependency).
+    "dep:log",
+    "log/max_level_off",
 ]
 # `os-posix`: the library on a POSIX host without `std`, the MCU build plus an OS layer
 # (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
@@ -195,6 +198,9 @@ os-posix = [
     # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
     "wz-ext-pubsub?/host-sync",
     "wz-node-time?/host-sync",
+    # Every log record compiled out: no logger is installed in this form (the `log` dependency).
+    "dep:log",
+    "log/max_level_off",
 ]
 # `os-windows`: the same library on Windows without `std`, for the MSVC targets
 # (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`). The cooperative engine over the system's own
@@ -225,6 +231,9 @@ os-windows = [
     # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
     "wz-ext-pubsub?/host-sync",
     "wz-node-time?/host-sync",
+    # Every log record compiled out: no logger is installed in this form (the `log` dependency).
+    "dep:log",
+    "log/max_level_off",
 ]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
@@ -890,6 +899,12 @@ wz-app-frame = { path = "../wz-app-frame", optional = true }
 # layer is spelled in no engine's types (docs/capi-pico-on-coop-engine.md, D1). Without its
 # default features: its host half comes with this crate's `std`.
 wz-capi-port = { path = "../wz-capi-port", default-features = false }
+# The `log` facade, taken only to set its compile-time ceiling in the forms without `std`
+# (`os-posix`, `os-windows`, `os-zephyr`): the statechart runtime logs its diagnostics through
+# it, and those forms install no logger and have no door that installs one, so every record is
+# discarded. Link-time optimisation does not drop the sites on its own (the level check is a load
+# of the facade's static), so each kept a record built on its stack and the facade beside it.
+log = { version = "0.4", optional = true, default-features = false }
 # The tokio RUNTIME is not a dependency of this crate: it is the tokio engine's
 # (`wz-capi-core`), and the modules of the capabilities only that engine has reach
 # it through the engine, as `wz_capi_core::runtime`. An ABI depends on its engines,
