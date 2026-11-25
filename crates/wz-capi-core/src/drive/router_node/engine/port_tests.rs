@@ -239,7 +239,8 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
                 },
             ),
         )
-        .expect("a node has queryables");
+        .expect("a node has queryables")
+        .id;
 
     // The peer asks, over the link: the reply is the router's.
     let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
@@ -965,7 +966,8 @@ fn a_kept_query_answers_and_ends_through_the_port(
                 },
             ),
         )
-        .expect("a session has queryables");
+        .expect("a session has queryables")
+        .id;
 
     // Each ask names a key of its own, so the keep of the last one is told from a keep of an
     // earlier ask that arrived late.
@@ -1273,7 +1275,8 @@ mod shared_memory {
                     },
                 ),
             )
-            .expect("a session has queryables");
+            .expect("a session has queryables")
+            .id;
         (got, id)
     }
 
@@ -1444,7 +1447,8 @@ mod shared_memory {
                     },
                 ),
             )
-            .expect("a session has queryables");
+            .expect("a session has queryables")
+            .id;
 
         let got: Got = Arc::default();
         until_each_is_told(&[&got], || {
@@ -1546,7 +1550,8 @@ mod shared_memory {
                     },
                 ),
             )
-            .expect("a node has queryables");
+            .expect("a node has queryables")
+            .id;
 
         let (on_shared, on_plain, on_node): (Got, Got, Got) = Default::default();
         let (shared_engine, plain_engine) = (shared.as_engine(), plain.as_engine());
@@ -1785,20 +1790,20 @@ fn the_node_lends_a_subscriptions_key_as_its_own_literal_until_it_is_retracted()
     assert_eq!(kept(id), None, "retracted, the record and its key are gone");
 }
 
-/// The node lends a queryable's key back as the text it keeps for it, naming no declaration as it
-/// declares none, until the queryable is retracted.
+/// The node's declaration of a queryable answers its key as the text it keeps for it, naming no
+/// declaration as it declares none, and its record keeps that text until the queryable is
+/// retracted.
 ///
 /// # Control
 ///
 /// Lending the program's own buffer in place of the node's copy reds the address assertion (that
-/// buffer is let go of before the key is asked for); a view left after the retraction reds the
-/// last.
+/// buffer is let go of before the key is read); a record left after the retraction reds the last.
 #[test]
 fn the_node_lends_a_queryables_key_as_its_own_literal_until_it_is_retracted() {
     let (router, _peer) = pair();
     let engine = router.as_engine();
     let asked = String::from("wz/port/lent/qbl/**");
-    let id = engine
+    let wz_capi_port::Declared { id, key: view } = engine
         .declare_queryable_on_wire(
             &asked,
             WireKey::literal(),
@@ -1810,14 +1815,25 @@ fn the_node_lends_a_queryables_key_as_its_own_literal_until_it_is_retracted() {
         .expect("a node with ids left declares");
     let asked_at = asked.as_ptr();
     drop(asked);
-    let view = engine
-        .queryable_keyexpr(id)
-        .expect("a declared queryable lends its key");
     assert_ne!(view.start, asked_at, "the node keeps a copy of its own");
     // SAFETY: the node keeps the text until the queryable is retracted, which it is not yet.
     let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
     assert_eq!(text, b"wz/port/lent/qbl/**");
     assert_eq!(view.own, None, "the node declares no key");
+    let kept = |id: QblId| {
+        router
+            .engine
+            .queryables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|hosted| (hosted.key.as_ptr(), hosted.key.len()))
+    };
+    assert_eq!(
+        kept(id),
+        Some((view.start, view.len)),
+        "CONTROL: the record keeps the text the declaration lent"
+    );
     engine.undeclare_queryable(id);
-    assert_eq!(engine.queryable_keyexpr(id), None);
+    assert_eq!(kept(id), None, "retracted, the record and its key are gone");
 }

@@ -284,7 +284,8 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
                 },
             ),
         )
-        .expect("the engine has queryables in this build");
+        .expect("the engine has queryables in this build")
+        .id;
     let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let ended = Arc::new(Mutex::new(0usize));
     struct End(Arc<Mutex<usize>>);
@@ -588,7 +589,8 @@ fn reply_key_under(
                 },
             ),
         )
-        .expect("the engine has queryables in this build");
+        .expect("the engine has queryables in this build")
+        .id;
     router.send(super::Command::QueryById(9, 43, "/x"));
     super::until(&engine, "the peer to hear the reply", || {
         router.seen(|seen| seen.reply_keys.len()) == 1

@@ -615,7 +615,8 @@ mod asked {
                     },
                 ),
             )
-            .expect("the engine has queryables in this build");
+            .expect("the engine has queryables in this build")
+            .id;
     }
 
     #[test]
@@ -689,7 +690,8 @@ mod asked {
                     },
                 ),
             )
-            .expect("the engine has queryables in this build");
+            .expect("the engine has queryables in this build")
+            .id;
         until_members_know_each_other(&first, &second);
 
         let (issued, seen) = ask(&first, "demo/group/kept");

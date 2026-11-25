@@ -116,7 +116,8 @@ fn a_query_is_handed_to_its_queryables_by_the_read_with_the_session_free() {
                         .expect("a reply on the query's own key");
                 }),
             )
-            .expect("the engine has queryables in this build");
+            .expect("the engine has queryables in this build")
+            .id;
     }
     until(&engine, "the router to see the queryables", || {
         router.seen(|s| s.declares) >= 2

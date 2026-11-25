@@ -429,7 +429,7 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         _sink: wz_capi_port::QueryableSink,
-    ) -> Result<QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<QblId>, Refusal> {
         Err(Refusal::NotBuilt)
     }
 }

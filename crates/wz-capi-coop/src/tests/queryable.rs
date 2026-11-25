@@ -31,7 +31,8 @@ fn declare(
             None,
             QueryableSink::shared(move |query, out, holder| answer(holder, query, out)),
         )
-        .expect("the engine has queryables in this build");
+        .expect("the engine has queryables in this build")
+        .id;
 }
 
 /// The router's query is answered by the session's queryable, and the Final follows the reply.

@@ -54,6 +54,7 @@ fn declare(
             QueryableSink::shared(move |query, out, holder| answer(holder, query, out)),
         )
         .expect("the engine has queryables in this build")
+        .id
 }
 
 /// A queryable that answers each query with `payload`, on the query's own key.

@@ -198,7 +198,7 @@ impl NodeGroup {
                 let _ = out.reply_keyed(&served, &record);
             },
         );
-        let Ok(queryable) = engine.declare_queryable_on_wire(
+        let Ok(wz_capi_port::Declared { id: queryable, .. }) = engine.declare_queryable_on_wire(
             &record_key,
             WireKey::literal(),
             true,

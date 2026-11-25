@@ -551,7 +551,7 @@ impl SessionEngine for SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> Result<wz_capi_port::QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<wz_capi_port::QblId>, Refusal> {
         self.declared_on_wire(wire, |wire| {
             self.declare_port_queryable_on_links(
                 keyexpr.to_owned(),
@@ -568,11 +568,6 @@ impl SessionEngine for SharedSession {
     #[cfg(feature = "queryable")]
     fn undeclare_queryable(&self, id: wz_capi_port::QblId) {
         SharedSession::undeclare_queryable(self, id);
-    }
-
-    #[cfg(feature = "queryable")]
-    fn queryable_keyexpr(&self, id: wz_capi_port::QblId) -> Option<wz_capi_port::KeyView> {
-        SharedSession::queryable_keyexpr(self, id)
     }
 
     // A reply holds the keep's value while it runs, so a release from another thread meanwhile
@@ -772,7 +767,7 @@ impl SessionEngine for SharedSession {
         reach: wz_capi_port::DeclarationReach,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> Result<wz_capi_port::QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<wz_capi_port::QblId>, Refusal> {
         let wz_capi_port::DeclarationReach {
             allowed_origin,
             links,
@@ -957,7 +952,7 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> Result<wz_capi_port::QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<wz_capi_port::QblId>, Refusal> {
         // The registry mints a callback per face with the face's own session; each calls the one
         // sink the port was handed with that session as a `QueryHolder`, beside the node's closed
         // latch, which is what a reply on a kept query checks first.

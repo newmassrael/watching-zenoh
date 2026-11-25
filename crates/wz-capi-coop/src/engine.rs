@@ -9240,7 +9240,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<QblId, Declined> {
+    ) -> Result<Declared<QblId>, Declined> {
         let Some(mut guard) = self.live() else {
             drop(wire);
             return Err(Declined::Closed);
@@ -9288,6 +9288,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             declared.id, id,
             "the tables number a row as they said they would"
         );
+        // The text is the row's own, which does not move while the row stands. The tables made
+        // the row above; were it gone, the answer names no key, and the door binds no loan.
+        let lent = {
+            let tables = tables(&core.session.registry);
+            tables
+                .queryables()
+                .get(declared.handle)
+                .map_or(KeyView::ABSENT, |row| {
+                    let key = row.key();
+                    lent_key(tables, key.as_str(), key.named().or(key.prefix()))
+                })
+        };
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce(DeclaredRow::of(declared.handle));
         // So is each group.
@@ -9316,7 +9328,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         drop(guard);
         #[cfg(feature = "local-queryable")]
         self.deliver();
-        Ok(id)
+        Ok(Declared { id, key: lent })
     }
 
     #[cfg(feature = "query")]
@@ -9804,16 +9816,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         #[cfg(feature = "local-queryable")]
         self.deliver();
-    }
-
-    // The text is the row's own, which does not move while the row stands.
-    #[cfg(feature = "queryable")]
-    fn queryable_keyexpr(&self, id: QblId) -> Option<KeyView> {
-        let core = self.live()?;
-        let tables = tables(&core.0.session.registry);
-        let (_, row) = tables.queryables().iter().find(|(_, row)| row.id() == id)?;
-        let key = row.key();
-        Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())))
     }
 
     #[cfg(feature = "liveliness")]

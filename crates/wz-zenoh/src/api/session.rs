@@ -1458,6 +1458,7 @@ impl Engine {
                             promotion,
                         ),
                     )
+                    .map(|declared| declared.id)
                     .map_err(|refused| zerror!("the engine refused a queryable: {refused}").into())
             }
         }

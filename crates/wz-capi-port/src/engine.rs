@@ -44,8 +44,8 @@ use crate::peers::PeerIdentity;
 use crate::told::{ToldKey, ToldLedger, ToldPlane};
 use crate::{
     BatchStep, Declared, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HoldRefused,
-    KeyHold, KeyView, LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId,
-    QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    KeyHold, LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink,
+    Refusal, ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -646,7 +646,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     ///
     /// The record of the queryable keeps `keyexpr` and holds the declarations `wire` and
     /// `retraction` name until the queryable is retracted: the entity keeps no copy of its key and
-    /// lends it from the record ([`Self::queryable_keyexpr`]).
+    /// lends it from the record, as the declaration answers it with the id ([`Declared::key`]).
     fn declare_queryable_on_wire(
         &self,
         keyexpr: &str,
@@ -655,7 +655,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<QblId, Refusal> {
+    ) -> Result<Declared<QblId>, Refusal> {
         let _ = (keyexpr, wire, complete, allowed_origin, retraction, sink);
         Err(Refusal::NotBuilt)
     }
@@ -664,16 +664,6 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// nothing.
     fn undeclare_queryable(&self, id: QblId) {
         let _ = id;
-    }
-
-    /// The key queryable `id` was declared on, as the engine's record of the queryable keeps it:
-    /// its text, and the declaration the record holds that the key is lent with, when it holds
-    /// one ([`Self::declare_queryable_on_wire`]). Valid until the queryable is retracted, the
-    /// record holding both until then; `None` for an id that names no queryable, and from an
-    /// engine with no queryable in this build, which is the provided answer.
-    fn queryable_keyexpr(&self, id: QblId) -> Option<KeyView> {
-        let _ = id;
-        None
     }
 
     /// Answer the kept query `id` ([`crate::QueryHolder::keep_query`]) now, with what `answer`
@@ -834,7 +824,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         reach: DeclarationReach,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<QblId, Refusal> {
+    ) -> Result<Declared<QblId>, Refusal> {
         let DeclarationReach {
             allowed_origin,
             links,

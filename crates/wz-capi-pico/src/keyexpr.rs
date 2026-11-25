@@ -156,6 +156,18 @@ impl RecordKey {
     pub(crate) fn lent(session: &crate::session::EngineHold, own: Option<OwnKey>) -> Self {
         Self { session, own }
     }
+
+    /// The declaration the key was lent with, which a queryable's test reads where its state keeps
+    /// it, the queryable's door keeping no other.
+    #[cfg(all(
+        test,
+        feature = "queryable",
+        feature = "peer",
+        not(feature = "engine-tokio")
+    ))]
+    pub(crate) fn own(&self) -> Option<OwnKey> {
+        self.own
+    }
 }
 
 /// The bit slot 3 of a key lent from the session's record carries ([`record_loan`]), the

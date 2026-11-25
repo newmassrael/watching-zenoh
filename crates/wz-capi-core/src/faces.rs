@@ -5324,15 +5324,6 @@ impl SharedSession {
         self.lock().tables.declared_prefix(row, key)
     }
 
-    /// The key queryable `id` was declared on, as its SSOT entry keeps it, with the declaration
-    /// the entry holds that the key begins with. The text is the entry's heap buffer, which stays
-    /// where it is when the entries move and goes with the entry.
-    pub fn queryable_keyexpr(&self, id: QblId) -> Option<wz_capi_port::KeyView> {
-        let guard = self.lock();
-        let entry = guard.qbls.iter().find(|entry| entry.id == id)?;
-        Some(lent_entry_key(&guard.tables, &entry.keyexpr, entry.held))
-    }
-
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
     /// — the SSOT every new face is replayed from. In the order of their rows: a
     /// row a retracted declaration left is taken by the next one, so this is the
@@ -7529,6 +7520,7 @@ impl SharedSession {
             sink,
         )
         .ok()
+        .map(|declared| declared.id)
     }
 
     /// [`Self::declare_queryable_on_wire`] for a queryable limited to the links of `links`
@@ -7543,7 +7535,7 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<QblId, wz_capi_port::Refusal> {
+    ) -> Result<wz_capi_port::Declared<QblId>, wz_capi_port::Refusal> {
         let mut guard = self.lock();
         let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, retraction))
         {
@@ -7592,6 +7584,9 @@ impl SharedSession {
         if !links.is_restricted() {
             Self::answer_on_groups(&mut guard, &entry);
         }
+        // The text is the entry's heap buffer, which stays where it is when the entries move and
+        // goes with the entry.
+        let lent = lent_entry_key(&guard.tables, &entry.keyexpr, entry.held);
         guard.qbls.push(entry);
         drop(guard);
         // A queryable the session's own gets reach is a match for every listener that
@@ -7604,7 +7599,7 @@ impl SharedSession {
                 &key,
             );
         }
-        Ok(id)
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     /// Drop a C queryable: remove it from the SSOT so no future face replays
@@ -8045,12 +8040,13 @@ mod matching_aggregate_tests {
                 .get(row)
                 .map(|row| row.holds())
         };
-        let id = shared
-            .declare_queryable_on_wire(
+        let wz_capi_port::Declared { id, key: lent } = shared
+            .declare_queryable_on_links(
                 key.to_owned(),
                 WireKey::aliased_tail(hold.mapping_id(), 0).at_row(Some(row)),
                 false,
                 Locality::Any,
+                LinkRestriction::Any,
                 None,
                 Arc::new(|_: &TokioQueryHolder| {
                     Box::new(|_: &dyn QueryView, _: &mut dyn ReplyOut| {}) as Box<_>
@@ -8058,9 +8054,8 @@ mod matching_aggregate_tests {
             )
             .expect("a session with ids left declares");
         assert_eq!(holds(&shared), Some(2), "the program's and the entry's");
-        let lent = shared
-            .queryable_keyexpr(id)
-            .expect("the entry keeps the key");
+        let kept = |shared: &SharedSession| shared.lock().qbls.iter().any(|entry| entry.id == id);
+        assert!(kept(&shared), "CONTROL: the entry stands");
         // SAFETY: the entry keeps the text where it lent it until the queryable is retracted below.
         let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
         assert_eq!(text, key.as_bytes());
@@ -8070,7 +8065,7 @@ mod matching_aggregate_tests {
             (row, hold.mapping_id(), key.len())
         );
         shared.undeclare_queryable(id);
-        assert_eq!(shared.queryable_keyexpr(id), None, "gone with its entry");
+        assert!(!kept(&shared), "gone with its entry");
         assert_eq!(holds(&shared), Some(1), "the entry gave its hold back");
         hold.release(&shared);
     }
@@ -11653,7 +11648,8 @@ mod sink_release_tests {
                 }
             }),
         )
-        .expect("an open session declares");
+        .expect("an open session declares")
+        .id;
         let opts = wz_session_core::query_options::QueryOptions::get()
             .with_allowed_destination(Locality::SessionLocal);
         SessionEngine::get_on_wire(

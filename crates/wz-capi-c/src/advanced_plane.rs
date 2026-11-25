@@ -184,7 +184,8 @@ impl AdvancedPublisherPlane for CPlane {
                 None,
                 sink,
             )
-            .map_err(|_| Self::refusal("cache queryable"))?;
+            .map_err(|_| Self::refusal("cache queryable"))?
+            .id;
         Ok(CacheQueryable {
             engine: Arc::clone(&self.engine),
             id,

@@ -280,14 +280,16 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
         )
     };
     let declare = |key: &str, counts: &Counts| {
-        engine.declare_queryable_on_wire(
-            key,
-            WireKey::literal(),
-            false,
-            Locality::Remote,
-            None,
-            sink(counts),
-        )
+        engine
+            .declare_queryable_on_wire(
+                key,
+                WireKey::literal(),
+                false,
+                Locality::Remote,
+                None,
+                sink(counts),
+            )
+            .map(|declared| declared.id)
     };
 
     let undeclared = Counts::default();
@@ -363,6 +365,7 @@ fn a_queryable_undeclared_while_a_query_owes_it_a_call_is_let_go_of_after_it() {
                 sink(me),
             )
             .expect("a row is free")
+            .id
     };
     let both = [declare(0), declare(1)];
     *ids.lock().unwrap() = Some(both);

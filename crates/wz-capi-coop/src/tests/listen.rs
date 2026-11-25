@@ -165,7 +165,8 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
                 },
             ),
         )
-        .expect("the engine has queryables in this build");
+        .expect("the engine has queryables in this build")
+        .id;
     }
     let replies = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let ended = Arc::new(Mutex::new(0usize));

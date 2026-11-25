@@ -562,14 +562,16 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
         )
     };
     let declare = |key: &str| {
-        engine.declare_queryable_on_wire(
-            key,
-            WireKey::literal(),
-            false,
-            Locality::Remote,
-            None,
-            sink(&let_go),
-        )
+        engine
+            .declare_queryable_on_wire(
+                key,
+                WireKey::literal(),
+                false,
+                Locality::Remote,
+                None,
+                sink(&let_go),
+            )
+            .map(|declared| declared.id)
     };
     let before = router.seen(|s| s.declares);
     let first = declare("demo/qbl/1").expect("a row is free");

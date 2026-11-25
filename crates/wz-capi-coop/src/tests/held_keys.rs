@@ -484,14 +484,16 @@ fn a_queryables_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() {
         )
     };
     let declare = |rest: &str| {
-        engine.declare_queryable_on_wire(
-            &format!("demo/named{rest}"),
-            WireKey::aliased_tail(id, rest.len()),
-            false,
-            Locality::Any,
-            None,
-            sink(),
-        )
+        engine
+            .declare_queryable_on_wire(
+                &format!("demo/named{rest}"),
+                WireKey::aliased_tail(id, rest.len()),
+                false,
+                Locality::Any,
+                None,
+                sink(),
+            )
+            .map(|declared| declared.id)
     };
     let queryable = declare("/x").expect("declared");
     assert_eq!(

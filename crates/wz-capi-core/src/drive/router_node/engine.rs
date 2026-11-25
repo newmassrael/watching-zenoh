@@ -106,7 +106,7 @@ struct Subscribed {
 }
 
 /// A queryable of the program's: the id the node's data plane holds it under, and the key it was
-/// declared on, which the program is lent back ([`SessionEngine::queryable_keyexpr`]). The key is
+/// declared on, which the program is lent back ([`SessionEngine::declare_queryable_on_wire`]). The key is
 /// a buffer of its own, so it stays where it is when the map moves the entry.
 struct Hosted {
     host: u64,
@@ -590,7 +590,7 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<QblId>, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         // The node's queries are held through the node itself, which the one sink is called with.
@@ -607,18 +607,16 @@ impl SessionEngine for RouterState {
                 },
             ),
         );
+        // Named whole, as the node names every key: the text its record keeps, a buffer of its own
+        // that stays where it is when the map moves the entry.
+        let key: Box<str> = keyexpr.into();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.engine
             .queryables
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                id,
-                Hosted {
-                    host,
-                    key: keyexpr.into(),
-                },
-            );
-        Ok(id)
+            .insert(id, Hosted { host, key });
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     fn undeclare_queryable(&self, id: QblId) {
@@ -628,20 +626,11 @@ impl SessionEngine for RouterState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
-        if let Some(hosted) = hosted {
-            self.forwarder.unhost_queryable(hosted.host);
+        if let Some(Hosted { host, key }) = hosted {
+            self.forwarder.unhost_queryable(host);
+            // The key the program was lent goes once the queryable is let go of.
+            drop(key);
         }
-    }
-
-    // A node names every key whole and declares none, so the key is lent as a literal, the text
-    // the node keeps for the queryable.
-    fn queryable_keyexpr(&self, id: QblId) -> Option<wz_capi_port::KeyView> {
-        self.engine
-            .queryables
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
-            .map(|hosted| wz_capi_port::KeyView::literal(&hosted.key))
     }
 
     // A reply holds the keep's value while it runs, so a release from another thread meanwhile
