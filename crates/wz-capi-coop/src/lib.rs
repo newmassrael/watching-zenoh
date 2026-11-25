@@ -150,7 +150,7 @@ mod tests;
 #[cfg(feature = "time-base")]
 pub use engine::ClockMoves;
 pub use engine::{
-    ClockMovesWord, ComposedLinks, CoopConfig, CoopDrive, CoopEngine, EndpointRefusal,
+    ClockMovesWord, ComposedLinks, CoopConfig, CoopDrive, CoopEngine, CoopLinks, EndpointRefusal,
     EngineHandle, EngineHold, KeyWireFormRefused, OpenError, OpenKeyIds, Refusal,
 };
 /// Why the session's runtime had no task for a link or a group ([`OpenError::NoTask`]).

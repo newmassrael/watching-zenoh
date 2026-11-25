@@ -187,6 +187,18 @@ mod tests {
         a_take_holds_until_its_guard_drops::<OneThread>();
     }
 
+    /// A stack that serves the sessions the form's lock counts is a stack the engine opens its
+    /// links over, whichever form is in force. Turned red by an engine bound that does not follow
+    /// the count of `SessionLock`.
+    #[cfg(feature = "app-transport")]
+    #[test]
+    fn a_stack_of_the_session_locks_count_is_an_engines_stack() {
+        fn opens_over<L: crate::CoopLinks>() -> bool {
+            true
+        }
+        assert!(opens_over::<crate::app_link::AppLinks<super::SessionCount>>());
+    }
+
     /// The form in force is the one the build's `threads` names: other threads call in exactly
     /// when it is on. Turned red by a choice of the form that does not follow the feature.
     #[test]

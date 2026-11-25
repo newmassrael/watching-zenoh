@@ -17,7 +17,7 @@ use wz_capi_port::reach::{ReachEngine, Reachable};
 use wz_capi_port::EngineHolder;
 use wz_runtime_coop::kept::Shared;
 
-use super::{ClockSource, CoopEngine, SessionLinks};
+use super::{ClockSource, CoopEngine, CoopLinks};
 
 /// A holder of a session's engine: cloning takes a count of the engine, dropping gives it back,
 /// and the last holder drops the engine where it lies and gives the session's arena back.
@@ -65,7 +65,7 @@ impl<E> AsRef<E> for EngineHold<E> {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHold<CoopEngine<L, C>> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHold<CoopEngine<L, C>> {
     /// A reach of the engine that keeps nothing of it standing.
     pub fn downgrade(this: &Self) -> EngineHandle<CoopEngine<L, C>> {
         EngineHandle::reaching(this.reach)
@@ -103,7 +103,7 @@ impl<E> EngineHandle<E> {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<CoopEngine<L, C>> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<CoopEngine<L, C>> {
     /// A holder of the engine, while its session is open and one of its holders is left.
     pub fn upgrade(&self) -> Option<EngineHold<CoopEngine<L, C>>> {
         let engine = self.reach.reach()?.into_raw().cast::<CoopEngine<L, C>>();
@@ -126,7 +126,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<C
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHolder
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHolder
     for EngineHold<CoopEngine<L, C>>
 {
     type Handle = EngineHandle<CoopEngine<L, C>>;
@@ -149,7 +149,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHolder
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// A holder of this engine, taken while one of its holders is left.
     #[cfg(feature = "threads")]
     pub(super) fn hold(&self) -> Option<EngineHold<Self>> {
@@ -162,7 +162,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 // SAFETY: every engine lies where its open placed it (`engine_of`), the value of a `Shared` counted
 // by its holders: a count is taken only while one is held. The engine is taken out of its row at
 // its close and first in its drop, before its place is given back.
-unsafe impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Reachable
+unsafe impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Reachable
     for CoopEngine<L, C>
 {
     fn retain_live(&self) -> bool {

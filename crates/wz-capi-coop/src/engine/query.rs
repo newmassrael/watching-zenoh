@@ -48,8 +48,8 @@ use wz_capi_port::os::{self, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{HeldQueryId, KeyAnchor, QblId, QueryHolder, QueryableSink, Refusal};
 
+use super::CoopLinks;
 use super::LinkActions;
-use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::query::QueryResponder;
@@ -255,21 +255,19 @@ pub(super) fn responder_for<'a>(
 /// so a query is answered with no buffer of its replies and as many replies as its queryable makes;
 /// the payload bound the session states (`MAX_REPLY_PAYLOAD_BYTES`) still refuses a longer one.
 /// The query's Final follows when its hold is let go of ([`CoopEngine::answer`]).
-pub(super) struct Onward<'a, L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+pub(super) struct Onward<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: &'a CoopEngine<L, C>,
     generation: u64,
 }
 
-impl<'a, L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Onward<'a, L, C> {
+impl<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Onward<'a, L, C> {
     /// The replies to a query that came in under `generation`.
     pub(super) fn to(engine: &'a CoopEngine<L, C>, generation: u64) -> Self {
         Self { engine, generation }
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> StagesReplies
-    for Onward<'_, L, C>
-{
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> StagesReplies for Onward<'_, L, C> {
     fn stage_reply(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
         self.engine.send_reply(self.generation, parts)
     }
@@ -468,11 +466,11 @@ impl Drop for Answering {
 }
 
 /// The session as a queryable's callbacks hold queries through ([`QueryHolder`]).
-pub(super) struct CoopHolder<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+pub(super) struct CoopHolder<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     pub(super) engine: super::EngineHandle<CoopEngine<L, C>>,
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for CoopHolder<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for CoopHolder<L, C> {
     fn keep_query(&self, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
         let engine = self.engine.upgrade().ok_or(Refusal::Closed)?;
         let Some((at, generation, rid)) = Answering::innermost() else {
@@ -491,7 +489,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// How many arrivals at a queryable were refused for want of a row to hold their Final.
     #[cfg(test)]
     pub(crate) fn queries_refused(&self) -> u64 {

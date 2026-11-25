@@ -9,7 +9,7 @@ use super::*;
 use wz_runtime_coop::faces::Dial;
 use wz_session_core::locator_directory::LocatorText;
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Give a link taken off a port a face, and run its session as the acceptor. A link that
     /// arrives when the session holds as many faces as `max_faces`, or has as many handshakes
     /// under way as `accept_pending`, is closed unread: its peer learns the node is full from the
@@ -89,7 +89,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Dial `endpoint` as a face of its own, beside the dial role's, and return the id it is
     /// known by. What the session declares is declared over it once its handshake completes (the
     /// session steps it as it does the first face's), what is declared after goes to it too, a

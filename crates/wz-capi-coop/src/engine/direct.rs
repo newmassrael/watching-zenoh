@@ -160,14 +160,12 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
 /// What a step of the one link's pump hands its records to: each dispatched under the session's
 /// lock, which is let go of before the record is handed out, so its callback finds the session
 /// free and the next record is read after the callback returned.
-struct DirectSink<'a, L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+struct DirectSink<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: &'a CoopEngine<L, C>,
     records: &'a mut FaceRecords<C>,
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
-    for DirectSink<'_, L, C>
-{
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EventSink for DirectSink<'_, L, C> {
     fn event(&mut self, event: IterationEvent<'_, '_>) {
         let push = lent_push(&event);
         // What the Pushes before this record put off is done before it, as it was after each.
@@ -227,7 +225,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
 
 /// The one link's session and what its life's effects are carried out with, behind the face's
 /// lock: the read holds it while it steps the pump.
-pub(super) struct DirectSlot<L: SessionLinks + 'static, C: ClockSource + 'static> {
+pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The session's one Router, which the pump's receive is lent for each read.
     router: SessionReassembly,
     /// Where the Router is lent to the pump's receive.
@@ -252,7 +250,7 @@ pub(super) struct DirectSlot<L: SessionLinks + 'static, C: ClockSource + 'static
     pump_due_us: u64,
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> {
     /// The link's life, once the open built it.
     fn life(&mut self) -> Option<&mut UnicastLink> {
         if !self.life_made {
@@ -363,12 +361,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, 
 /// The face of a session whose read steps the one link itself: the link's session and what its
 /// life is carried out with ([`DirectSlot`]), behind the form's lock, which a read holds while it
 /// steps the pump; and what the link's end shares with the read.
-pub(super) struct DirectFace<L: SessionLinks + 'static, C: ClockSource + 'static> {
+pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     slot: StateLock<Confined<DirectSlot<L, C>>>,
     end: EndFlags,
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
     /// The face of a session whose Router is `router`, lent through `lend`, with no link yet.
     pub(super) fn new(
         router: SessionReassembly,
@@ -417,7 +415,7 @@ struct LinkTurn {
     ended: Option<OpenError>,
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Open the session's one link: the first endpoint dialled, and the link stepped on this thread
     /// until it is up, or the life ends the session with why the last endpoint came to no link. A
     /// session with no endpoint to dial is open at once. Never inlined, as the open of a build

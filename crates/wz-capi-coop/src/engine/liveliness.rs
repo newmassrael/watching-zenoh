@@ -20,10 +20,10 @@
 
 use core::ptr::NonNull;
 
+#[cfg(feature = "group")]
+use super::CoopLinks;
 use super::LinkActions;
 use wz_capi_port::{KeyAnchor, LivelinessSink, SubId, TokenId, WireKey};
-#[cfg(feature = "group")]
-use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::named_key::NamedKey;
@@ -51,7 +51,7 @@ pub(super) fn declare_token<C: ClockSource + 'static>(
 }
 
 #[cfg(feature = "group")]
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L, C> {
     /// Tell each group the session joined of the token `handle` names, as its row in the
     /// session's tables states it (`group`).
     pub(super) fn announce_token_to_groups(

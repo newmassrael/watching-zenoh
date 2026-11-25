@@ -1036,7 +1036,7 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
 }
 
 /// One session the program steps; see the module doc.
-pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     /// The session's one link as the read steps it, apart from the session's state, so that a
     /// callback the link's records reach takes the state while the link lends them
     /// (`direct`). Before `core`: dropped first, as the link's session holds handles of the
@@ -1271,11 +1271,9 @@ struct Confined<T>(T);
 /// ([`KeySpace::guard_by_owner_lock`]): the arena's counts are touched only under this lock, so a
 /// key let go of after the lock (a row taken out of a table and dropped outside it) fails a debug
 /// build at once instead of racing a reader that holds the lock.
-struct CoreLock<L: SessionLinks + 'static, C: ClockSource + 'static>(
-    StateLock<Confined<Core<L, C>>>,
-);
+struct CoreLock<L: CoopLinks + 'static, C: ClockSource + 'static>(StateLock<Confined<Core<L, C>>>);
 
-impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     /// `core` behind the lock, its key arena guarded by it from now on.
     fn new(core: Core<L, C>) -> Self {
         core.session.keys.guard_by_owner_lock();
@@ -1305,14 +1303,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
 }
 
 /// A hold of [`CoreLock`]: the key arena is marked held from its taking to its drop.
-struct CoreGuard<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
+struct CoreGuard<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     guard: StateGuard<'a, Confined<Core<L, C>>>,
     // The thread's mark of the hold, which a debug build reads: a second take of this lock on
     // this thread, or a C ABI's place given back under it, fails there instead of waiting.
     _held: wz_capi_port::sync::SessionHeld,
 }
 
-impl<'a, L: SessionLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
+impl<'a, L: CoopLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
     fn taken(
         guard: StateGuard<'a, Confined<Core<L, C>>>,
         held: wz_capi_port::sync::SessionHeld,
@@ -1322,7 +1320,7 @@ impl<'a, L: SessionLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + 'static> Deref for CoreGuard<'_, L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> Deref for CoreGuard<'_, L, C> {
     type Target = Confined<Core<L, C>>;
 
     fn deref(&self) -> &Confined<Core<L, C>> {
@@ -1330,13 +1328,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Deref for CoreGuard<'_
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for CoreGuard<'_, L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> DerefMut for CoreGuard<'_, L, C> {
     fn deref_mut(&mut self) -> &mut Confined<Core<L, C>> {
         &mut self.guard
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_, L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_, L, C> {
     // Out of line where the body marks the arena, in a debug build: every hold of the session is
     // let go through it. A release build's body is empty, and a call to it would be all it costs.
     #[cfg_attr(debug_assertions, inline(never))]
@@ -1376,7 +1374,7 @@ pub(crate) const ROOM_PLACE_BYTES: usize = core::mem::size_of::<Option<RoomPlace
 
 /// The bytes of the rooms of a session over `links`, which the open places in the session's
 /// arena (`ArenaPlan::holding_rooms`): how large they are is the stack's waits'.
-pub(crate) const fn link_rooms_bytes<L: SessionLinks>(_links: &L) -> usize {
+pub(crate) const fn link_rooms_bytes<L: CoopLinks>(_links: &L) -> usize {
     core::mem::size_of::<LinkRooms<L::Waits>>()
 }
 
@@ -1636,7 +1634,7 @@ struct LinkLeg<'a> {
 }
 
 /// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
-enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
+enum ToPublish<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The session, held for the publish.
     Live(LiveCore<'a, L, C>),
     /// The session is closed.
@@ -1660,6 +1658,13 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 // (`HeldKey`, `SessionKeys`) is shared and let go of only under this lock, and read outside it
 // only for its text, which nothing writes while the key is held.
 unsafe impl<T> Send for Confined<T> {}
+
+/// The network stacks an engine opens its links over: those that serve sessions whose handles are
+/// counted as [`SessionLock`] counts them ([`SessionCount`]), so the form's choice of lock reaches
+/// every stack the engine is built over.
+pub trait CoopLinks: SessionLinks<SessionCount> {}
+
+impl<L: SessionLinks<SessionCount> + ?Sized> CoopLinks for L {}
 
 /// The runtime a link's session runs on, read under [`SessionLock`].
 type LinkRuntime<C> = CoopRuntime<C, dyn wz_session_core::link::BoxedLinkDriver, SessionLock>;
@@ -1820,14 +1825,14 @@ impl StepPlaces {
 /// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it. As it
 /// lets go, the round of deliveries it wrote is sealed (`Round::seal`), so what the session wrote
 /// under its lock is handed out by the delivery that follows.
-struct LiveCore<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
+struct LiveCore<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// Let go in the hold's own drop, after the seal, so that no caller holds a copy of the lock's
     /// release beside the call to it.
     core: core::mem::ManuallyDrop<CoreGuard<'a, L, C>>,
     lane: &'a Round,
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + 'static> Deref for LiveCore<'_, L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> Deref for LiveCore<'_, L, C> {
     type Target = Confined<Core<L, C>>;
 
     fn deref(&self) -> &Confined<Core<L, C>> {
@@ -1835,13 +1840,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Deref for LiveCore<'_,
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for LiveCore<'_, L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> DerefMut for LiveCore<'_, L, C> {
     fn deref_mut(&mut self) -> &mut Confined<Core<L, C>> {
         &mut self.core
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, L, C> {
     // Out of line, as `CoopEngine::live` is: every operation lets the session go through it, the
     // round sealed and the lock let go in this one body.
     #[inline(never)]
@@ -1864,13 +1869,13 @@ struct ReadTask {
 /// stepped until the engine's run of read tasks is no longer this one's (`reader_run`). A value
 /// of a type that can be named, so the start boxes nothing and makes no word for the stop.
 #[cfg(feature = "threads")]
-pub(crate) struct ReaderBody<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+pub(crate) struct ReaderBody<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: EngineHold<CoopEngine<L, C>>,
     run: usize,
 }
 
 #[cfg(feature = "threads")]
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> {
     /// Step the session until the task is told to stop or the session ends.
     pub(crate) fn run(self) {
         // Each step blocks in the read of the session's links, so the loop waits there and spins
@@ -1904,7 +1909,7 @@ struct LinksSettled {
 /// policy and arena stay here beside the ABI's places, what the links carry is the transport's
 /// ([`TransportState`]) and what the session declared and asked is the session's
 /// ([`SessionState`]). Each layer is reached through its own field, so it moves out whole.
-struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
+struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The session's tasks, and the runtime their cells and timers lie in, which the set holds.
     local: CoopLocalSet<C>,
     clock: C,
@@ -2060,7 +2065,7 @@ impl SessionParts for CoopSession {
 
 /// One face of the session: the link it holds, and where the telling of the session's
 /// declarations to that link's peer stands (`replay`).
-struct Face<C: ClockSource + 'static, L: SessionLinks> {
+struct Face<C: ClockSource + 'static, L: CoopLinks> {
     id: FaceId,
     link: Link<LinkSession<C>, L::Dial, FaceEnd>,
     replay: Replay,
@@ -2070,7 +2075,7 @@ struct Face<C: ClockSource + 'static, L: SessionLinks> {
     told: FaceTold,
 }
 
-impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
+impl<C: ClockSource + 'static, L: CoopLinks> FaceRecord for Face<C, L> {
     type Session = LinkSession<C>;
     type Pump = L::Pump;
     type Dial = L::Dial;
@@ -2957,7 +2962,7 @@ type LinkHalves<C> = (
 /// The bytes of each link's cells a session over `links` on the clock `C` lays out: a cell for
 /// each link's driver as large as the largest the links open, one for its gates, one for its
 /// actions and one for the two halves they hold.
-pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl SessionLinks) -> LinkCells<usize> {
+pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl CoopLinks) -> LinkCells<usize> {
     LinkCells {
         driver: links.link_cell_bytes(),
         gate: CellRc::<LinkGate<C>>::cell_bytes(),
@@ -3386,7 +3391,7 @@ enum Dialled {
     Exhausted(OpenError),
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
     /// spawned on the session's local set and stepped once so that an initiator's InitSyn is sent
     /// now and not after the wait of the next read. The link is the same whichever end opened
@@ -4542,7 +4547,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Open a session over `links` to the first endpoint of `config` that completes the
     /// handshake, stepping it on this thread until it does. `entropy` mints the zid the config
     /// does not state and each attempt's cookie key, for this open and every redial after it.
@@ -6953,7 +6958,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// End the gets whose deadline passed by `now_us`: a get whose deadline has passed ends with
     /// zenoh's timeout reply and its Final, at the step's bookkeeping, because the entries are the
     /// registry's.
@@ -6984,7 +6989,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// One take of the session for a step after `wait`: its links, what publishes handed to it,
     /// and whether a periodic job is due by the clock reading the step made. What publishes handed
     /// to the session while it was held leaves on this step too, so a program that only reads its
@@ -7327,7 +7332,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
 // A key's hold and a periodic job's handle name the session by these alone, so the doors that
 // reach the engine as its own type make no table of all of its operations for them.
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::KeyHolds
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::KeyHolds
     for CoopEngine<L, C>
 {
     #[inline(never)]
@@ -7364,7 +7369,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Tickers
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Tickers
     for CoopEngine<L, C>
 {
     #[cfg(feature = "ticker")]
@@ -7392,9 +7397,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::
 // The operations a door of a C ABI calls on the session's tables are out of line: the engine is
 // one type per build, so each is one body the doors call, counted as the engine's, and not a
 // copy inside each door.
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
-    for CoopEngine<L, C>
-{
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for CoopEngine<L, C> {
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
@@ -8917,7 +8920,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 /// The places the session's arena laid out at its open for the ABI's objects of its entities
 /// ([`HeldPlaces::with_entity`]), one for each row the session keeps of a kind, lent and given
 /// back under the session's lock, as every table of its arena is.
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender for CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender for CoopEngine<L, C> {
     /// Closed or not: a place is the session's memory and not its state, and the declaration the
     /// place is taken for answers a closed session itself, as it would with a place to spare.
     fn claim_place(&self, kind: EntityKind) -> Option<EntityPlace> {
@@ -8935,7 +8938,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
 /// (`CacheSpan`), lent under a lock of its own: a cache's put and its queryable's answer take
 /// it, from whatever thread, and neither takes the session's lock with it.
 #[cfg(feature = "advanced-cache")]
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::CacheBytes
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::CacheBytes
     for CoopEngine<L, C>
 {
     /// Closed or not: the ring is the session's memory and not its state, and stands until the
@@ -8957,7 +8960,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::
 /// given back whole when the engine goes, which a holder's hold on the engine keeps from happening
 /// first. So a key shared or let go of after the close takes no lock, and a holder the close itself
 /// lets go of, under the lock, does not wait on it.
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
     #[inline(never)]
     fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {
         let Some(core) = self.live() else {
@@ -8989,9 +8992,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys fo
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
-    for CoopEngine<L, C>
-{
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for CoopEngine<L, C> {
     fn zid(&self) -> [u8; 16] {
         SessionEngine::zid(self)
     }
@@ -9225,9 +9226,7 @@ struct FanCancelled;
 /// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
 /// that waits for the callbacks returns whether or not the session is stepped.
 #[cfg(feature = "query")]
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller
-    for CoopEngine<L, C>
-{
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
     fn cancel_fan(&self, key: FanKey) {
         loop {
             let leg = self.live().and_then(|mut core| {
@@ -9249,7 +9248,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
     /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
     /// one take of the session, as zenoh-pico's put reads its filter's state and takes only its
@@ -9310,12 +9309,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 /// holders ([`EngineHold`]). Its operations are the port's [`SessionDrive`] of this engine, called by name, so an
 /// ABI built over one kind of links reaches its session through no table of functions, and the
 /// engine it hands out is the engine's own type.
-pub struct CoopDrive<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+pub struct CoopDrive<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: EngineHold<CoopEngine<L, C>>,
     handle_place: Option<HandlePlace>,
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C> {
     /// The engine the session's entities keep.
     pub fn engine(&self) -> EngineHold<CoopEngine<L, C>> {
         self.engine.clone()
@@ -9384,7 +9383,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopDrive<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopDrive<L, C> {
     /// The C program let go of its session (zenoh-pico's `z_session_drop`), which closes it: the
     /// read task, which holds the engine too, is stopped and joined, and an entity declared on the
     /// session that outlives it finds it closed.
@@ -9410,7 +9409,7 @@ impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G
 }
 
 #[cfg(feature = "queryable")]
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static>
     crate::round::AnswersQueries<crate::round::CoopCalls> for CoopEngine<L, C>
 {
     fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64) {
@@ -9418,7 +9417,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {
     fn drop(&mut self) {
         // No handle reaches the engine once its last holder let go: its row is vacated before its
         // place is given back, which a session never closed has not done yet.
