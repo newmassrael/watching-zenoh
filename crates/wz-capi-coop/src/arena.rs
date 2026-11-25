@@ -661,15 +661,20 @@ const fn place_parts(kind: EntityKind) -> [ArenaPart; 2] {
 /// names, a place of that layout for each row the session keeps of the kind. What it holds there is
 /// reserved with the session and takes no memory of its own, and an open whose arena cannot hold it
 /// opens nothing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeldPlaces {
     handle: Option<Layout>,
     entities: [Option<Layout>; ENTITY_KINDS],
-    /// The bytes and the alignment of each place for a value lodged by counts, the largest asked
-    /// ([`Self::with_lodgings`]), and how many places.
-    lodging_size: usize,
-    lodging_align: usize,
-    lodgings: usize,
+    /// The table of places for values lodged by counts ([`Self::with_lodgings`]), laid out by the
+    /// largest asked; `None` once one asked is past what an arena holds.
+    lodging: Option<LodgingRows>,
+}
+
+impl Default for HeldPlaces {
+    /// No place at all.
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 /// Where an open's arena comes from and which places of the ABI's it holds beside the session's
@@ -782,14 +787,24 @@ impl ArenaRegion {
     }
 }
 
+/// The table of lodgings of no place: none, its places laid out for the watchers of the faces'
+/// snapshots the engine lodges itself in a build that has them, so an open counts those places and
+/// lays none out ([`ArenaPlan::holding`]).
+#[cfg(feature = "connectivity")]
+const NO_LODGINGS: Option<LodgingRows> = LodgingRows::NONE.with(
+    wz_capi_port::lodge::Lent::<wz_capi_port::face_rows::Gathering>::LAYOUT,
+    0,
+);
+/// The table of lodgings of no place.
+#[cfg(not(feature = "connectivity"))]
+const NO_LODGINGS: Option<LodgingRows> = Some(LodgingRows::NONE);
+
 impl HeldPlaces {
     /// No place at all.
     pub const NONE: Self = Self {
         handle: None,
         entities: [None; ENTITY_KINDS],
-        lodging_size: 0,
-        lodging_align: 0,
-        lodgings: 0,
+        lodging: NO_LODGINGS,
     };
 
     /// A place of `layout` for the ABI's handle of the session, and none for its entities.
@@ -806,13 +821,9 @@ impl HeldPlaces {
     /// as the largest asked, lent and given back from any thread
     /// ([`wz_capi_port::PlaceLender::lend_lodging`]). A `const fn`, as [`Self::with_entity`].
     pub const fn with_lodgings(mut self, layout: Layout, count: usize) -> Self {
-        if layout.size() > self.lodging_size {
-            self.lodging_size = layout.size();
+        if let Some(rows) = self.lodging {
+            self.lodging = rows.with(layout, count);
         }
-        if layout.align() > self.lodging_align {
-            self.lodging_align = layout.align();
-        }
-        self.lodgings = self.lodgings.saturating_add(count);
         self
     }
 
@@ -2382,20 +2393,21 @@ impl ArenaPlan {
                 self.places.held = self.places.held.with(at);
             }
         }
+        let Some(rows) = held.lodging else {
+            return Err(ArenaRefused::TooLarge);
+        };
         // The engine lodges a watcher of the faces' snapshots for each transport events listener
-        // the session holds (`SessionEngine::watch_faces`), in the ABI's table of lodgings.
+        // the session holds (`SessionEngine::watch_faces`), in the ABI's table of lodgings, whose
+        // places are laid out for it already (`NO_LODGINGS`).
         #[cfg(feature = "connectivity")]
-        let held = &held.with_lodgings(
-            wz_capi_port::lodge::Lent::<wz_capi_port::face_rows::Gathering>::LAYOUT,
+        let Some(rows) = rows.more(
             self.session
                 .entities
                 .of_kind(EntityKind::TransportEventsListener),
-        );
-        if held.lodgings != 0 && held.lodging_size != 0 && self.places.lodging.count() == 0 {
-            let Some(rows) = LodgingRows::of(held.lodging_size, held.lodging_align, held.lodgings)
-            else {
-                return Err(ArenaRefused::TooLarge);
-            };
+        ) else {
+            return Err(ArenaRefused::TooLarge);
+        };
+        if rows.count() != 0 && self.places.lodging.count() == 0 {
             self.places.lodging = rows;
             self.put(ArenaPart::LodgingPlaces, rows.count(), rows.stride());
         }

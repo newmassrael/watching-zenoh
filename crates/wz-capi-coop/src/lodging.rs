@@ -38,13 +38,13 @@ const fn round_up(bytes: usize, align: usize) -> Option<usize> {
     }
 }
 
-/// The table of lodging places a plan lays out: how many cells, and how each is laid out.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The table of lodging places a plan lays out: how many cells, and how each is laid out. Worked
+/// out in a `const` context where the places are known when the ABI is built
+/// ([`crate::arena::HeldPlaces::with_lodgings`]), so an open only counts the cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LodgingRows {
-    /// The bytes of each place.
-    size: usize,
-    /// The alignment of each place.
-    align: usize,
+    /// The layout of each place, which a lend hands out as it is.
+    place: Layout,
     /// Where a place starts in its cell, past the head.
     offset: usize,
     /// The bytes of one cell, a multiple of the alignment of its head and of its place.
@@ -53,45 +53,81 @@ pub(crate) struct LodgingRows {
     count: usize,
 }
 
+impl Default for LodgingRows {
+    /// No table.
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 impl LodgingRows {
     /// No table.
     pub(crate) const NONE: Self = Self {
-        size: 0,
-        align: 0,
+        place: Layout::new::<()>(),
         offset: 0,
         stride: 0,
         count: 0,
     };
 
-    /// A table of `count` places of `size` bytes aligned to `align`, a power of two. `None`
-    /// when a cell asks for more alignment than a span of the arena starts on, or the table is
-    /// past the address space.
-    pub(crate) const fn of(size: usize, align: usize, count: usize) -> Option<Self> {
+    /// A table of `count` places of `place`. `None` when a cell asks for more alignment than a
+    /// span of the arena starts on, or the table is past the address space.
+    pub(crate) const fn of(place: Layout, count: usize) -> Option<Self> {
         let head_align = core::mem::align_of::<PlaceHead>();
-        let cell_align = if align > head_align {
-            align
+        let cell_align = if place.align() > head_align {
+            place.align()
         } else {
             head_align
         };
-        if !align.is_power_of_two() || cell_align > ARENA_ALIGN {
+        if cell_align > ARENA_ALIGN {
             return None;
         }
-        let offset = match round_up(core::mem::size_of::<PlaceHead>(), align) {
+        let offset = match round_up(core::mem::size_of::<PlaceHead>(), place.align()) {
             Some(offset) => offset,
             None => return None,
         };
-        let stride = match offset.checked_add(size) {
+        let stride = match offset.checked_add(place.size()) {
             Some(end) => round_up(end, cell_align),
             None => None,
         };
         match stride {
             Some(stride) if stride.checked_mul(count).is_some() => Some(Self {
-                size,
-                align,
+                place,
                 offset,
                 stride,
                 count,
             }),
+            _ => None,
+        }
+    }
+
+    /// This table with `count` more places, every place as large and as aligned as the largest
+    /// of its own and `layout`; `None` as for [`Self::of`].
+    pub(crate) const fn with(self, layout: Layout, count: usize) -> Option<Self> {
+        let size = if layout.size() > self.place.size() {
+            layout.size()
+        } else {
+            self.place.size()
+        };
+        let align = if layout.align() > self.place.align() {
+            layout.align()
+        } else {
+            self.place.align()
+        };
+        let place = match Layout::from_size_align(size, align) {
+            Ok(place) => place,
+            Err(_) => return None,
+        };
+        match self.count.checked_add(count) {
+            Some(count) => Self::of(place, count),
+            None => None,
+        }
+    }
+
+    /// This table with `count` more places of its own layout; `None` past the address space.
+    #[cfg(feature = "connectivity")]
+    pub(crate) const fn more(self, count: usize) -> Option<Self> {
+        match self.count.checked_add(count) {
+            Some(count) if self.stride.checked_mul(count).is_some() => Some(Self { count, ..self }),
             _ => None,
         }
     }
@@ -196,10 +232,10 @@ impl LodgingPlaces {
     /// lets it go, or at once when the place is dropped unused; `None` when every place is lent or
     /// the table's places are smaller or less aligned than `layout`.
     pub(crate) fn lend(&self, layout: Layout) -> Option<LentBytes> {
-        if layout.size() > self.rows.size || layout.align() > self.rows.align {
+        let place = self.rows.place;
+        if layout.size() > place.size() || layout.align() > place.align() {
             return None;
         }
-        let place = Layout::from_size_align(self.rows.size, self.rows.align).ok()?;
         (0..self.rows.count).find_map(|at| {
             let head = self.head(at);
             // SAFETY: the head was written when the table was made and stands while the session
@@ -212,7 +248,7 @@ impl LodgingPlaces {
                 .ok()?;
             // SAFETY: the count is live, held by the session that lends.
             unsafe { marked.keeper.as_ref() }.retain();
-            // SAFETY: the place follows its head in the cell, `size` bytes aligned to `align`
+            // SAFETY: the place follows its head in the cell, laid out as `place`
             // (`LodgingRows::of`), and holds no value now that its mark is this lend's; the
             // memory stands until `give_back` releases the count taken above, after the mark.
             Some(unsafe {
@@ -287,8 +323,7 @@ mod tests {
     #[test]
     fn a_lodging_place_is_lent_once_and_keeps_the_memory_it_lies_in() {
         let layout = Lent::<u64>::LAYOUT;
-        let rows =
-            LodgingRows::of(layout.size(), layout.align(), 2).expect("a table of two places");
+        let rows = LodgingRows::of(layout, 2).expect("a table of two places");
         assert_eq!(rows.count(), 2);
         assert_eq!(
             rows.stride() % layout.align(),
@@ -355,12 +390,17 @@ mod tests {
     }
 
     /// A table of no place asks the arena for nothing and lends nothing; one whose cell asks for
-    /// more alignment than an arena's spans start on, or whose alignment is no power of two, is no
-    /// table. Turned red by a table of none that takes a span or lends, or an alignment let through.
+    /// more alignment than an arena's spans start on is no table. Turned red by a table of none
+    /// that takes a span or lends, or an alignment let through.
     #[test]
     fn a_table_of_no_place_lends_nothing_and_a_misaligned_one_is_refused() {
-        assert_eq!(LodgingRows::of(8, ARENA_ALIGN * 2, 1), None);
-        assert_eq!(LodgingRows::of(8, 3, 1), None);
+        let past = Layout::from_size_align(8, ARENA_ALIGN * 2).expect("a layout");
+        assert_eq!(LodgingRows::of(past, 1), None);
+        assert_eq!(
+            LodgingRows::NONE.with(past, 0),
+            None,
+            "nor is a table grown to it"
+        );
         let mut arena = Arena::empty();
         let mut lend = TableLender::new(&mut arena);
         let span = LodgingRows::NONE.lent_from(&mut lend);
@@ -370,5 +410,38 @@ mod tests {
         let places = unsafe { span.kept_by(NonNull::from(&kept)) };
         assert!(places.lend(Layout::new::<u8>()).is_none());
         assert_eq!(places.lent(), 0);
+    }
+
+    /// A table grown by a layout lays every place out as the largest and most aligned asked and
+    /// counts the places of both, as one made of that layout and that count; a count past the
+    /// address space is no table. Turned red by a merge that keeps the smaller size or alignment,
+    /// or drops either count.
+    #[test]
+    fn a_table_grown_by_a_layout_holds_the_largest_place_and_every_count() {
+        let small = Layout::from_size_align(24, 4).expect("a layout");
+        let aligned = Layout::from_size_align(8, 8).expect("a layout");
+        let grown = LodgingRows::of(small, 1)
+            .and_then(|rows| rows.with(aligned, 2))
+            .expect("a table");
+        let made = LodgingRows::of(Layout::from_size_align(24, 8).expect("a layout"), 3);
+        assert_eq!(Some(grown), made);
+        assert_eq!(grown.count(), 3);
+        assert_eq!(
+            grown.with(small, usize::MAX),
+            None,
+            "a count past the space"
+        );
+    }
+
+    /// A table counted once more keeps its layout and adds the count; one past the address space
+    /// is no table. Turned red by a count that is not added, or a product left unchecked.
+    #[cfg(feature = "connectivity")]
+    #[test]
+    fn a_table_counted_once_more_keeps_its_layout() {
+        let rows = LodgingRows::of(Layout::new::<u64>(), 1).expect("a table");
+        let more = rows.more(2).expect("a table of three");
+        assert_eq!(more.count(), 3);
+        assert_eq!(more.stride(), rows.stride());
+        assert_eq!(rows.more(usize::MAX), None);
     }
 }
