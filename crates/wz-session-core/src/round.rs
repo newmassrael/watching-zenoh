@@ -1270,6 +1270,19 @@ impl<C: RoundCalls> Round<C> {
         unsafe { arena.place_with(|at: *mut Self| Self::write_in(at, rows)) }
     }
 
+    /// The session's round over `rows`, built at `at`, a place of the session's own memory that
+    /// an arena does not lend (a field of its region): owned by one owner and reached by handles
+    /// that count nothing, as [`Self::placed_over`]'s round is.
+    ///
+    /// # Safety
+    /// `at` is aligned and valid for writes of one round, which nothing else drops or reaches but
+    /// through the owner handed back; the memory stays, unmoved, until after that owner is dropped.
+    pub unsafe fn placed_at(at: NonNull<Self>, rows: RoundRows<C>) -> Placed<Self> {
+        // SAFETY: `write_in` writes every field of a round at the place it is given, which the
+        // caller gives aligned and valid for writes of one, and keeps for the owner.
+        unsafe { Placed::written_at(at, |at: *mut Self| Self::write_in(at, rows)) }
+    }
+
     /// An empty round written where `at` points, field by field.
     ///
     /// # Safety
