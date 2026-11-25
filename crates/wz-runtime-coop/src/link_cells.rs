@@ -14,9 +14,10 @@
 //! heap, so a link is one type whichever memory it lives in.
 //!
 //! Making a cell, letting go of a handle and giving the cell back are one body each for each form
-//! of a table's flag a build uses ([`CountKind::Flag`]), and generic over nothing else: what is left for each kind of value is writing it into its cell with what drops it,
-//! and the last handle drops it through that, whatever view of it the handle is (the value's own
-//! type, a trait object of it or a part of it), so a kind of link adds no body of its own here.
+//! of a table's flag a build uses ([`CountKind::Flag`]), and generic over nothing else: what is
+//! left for each kind of value is writing it into its cell with what drops it, and the last handle
+//! drops it through that, whatever view of it the handle is (the value's own type, a trait object
+//! of it or a part of it), so a kind of link adds no body of its own here.
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use core::alloc::Layout;
@@ -199,8 +200,9 @@ pub struct CellRc<T: ?Sized, N: CountKind = OneTask> {
 // SAFETY: a handle of the atomic kind counts its cell with read-modify-writes ordered as an
 // `Arc`'s are, so clones and let gos on several threads keep one count, and the last handle drops
 // the value after every other handle let go. Its cell is the heap's, which any thread gives back,
-// or one of a table of atomic flags (`Atomic::Flag`), given back by an ordered store. The value is reached through shared references only, so sending a
-// handle or sharing one needs the value to be `Send` and `Sync`, as `Arc` asks.
+// or one of a table of atomic flags (`Atomic::Flag`), given back by an ordered store. The value
+// is reached through shared references only, so sending a handle or sharing one needs the value
+// to be `Send` and `Sync`, as `Arc` asks.
 #[cfg(target_has_atomic = "8")]
 unsafe impl<T: ?Sized + Send + Sync> Send for CellRc<T, Atomic> {}
 // SAFETY: as for `Send` above.
