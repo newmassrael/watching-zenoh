@@ -151,6 +151,7 @@ impl EncodingState {
     /// callback holds. A schema is copied into a payload block, as the kept value's
     /// payload and attachment are, refused with [`NoRoom`] when the area has none free; an
     /// encoding of no schema, or of an empty one, takes none.
+    #[cfg(any(test, feature = "queryable"))]
     pub(crate) fn kept(&self) -> Result<Self, NoRoom> {
         let (schema_start, block) = match self.view().schema {
             None => (core::ptr::null(), None),

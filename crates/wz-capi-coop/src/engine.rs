@@ -1587,7 +1587,8 @@ type LinkHandle<C> = SessionHandle<C, dyn wz_session_core::link::BoxedLinkDriver
 /// that a runtime of another lock type fails the build here; its leading `_` keeps it out of the
 /// dead-code lint.
 fn _a_link_session_lends_its_values_unlocked<C: ClockSource>(
-    held: <LinkRuntime<C> as wz_session_core::link::SessionRuntime>::Mutex<u8>,
+    held: <SessionLock as wz_runtime_coop::sync::LockKind>::Mutex<u8>,
+    _runtime: core::marker::PhantomData<LinkRuntime<C>>,
 ) -> wz_runtime_coop::sync::OwnerHeld<u8, UnderCoreLock> {
     held
 }
@@ -1848,8 +1849,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// the open ([`HeldPlaces`]) and to the ABI under this lock ([`PlaceLender::claim_place`]).
     places: EntityPlaces,
     /// The places the session lends its registry and its Router in for a pass of its tasks: after
-    /// every holder of a handle of them (the transport, the tasks, `registry_lend`).
-    steps: StepPlaces,
+    /// every holder of a handle of them (the transport, the tasks, `registry_lend`). Held for its
+    /// owner's drop alone: the session reaches the places through those handles.
+    _steps: StepPlaces,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -4297,7 +4299,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             session_time,
             places: lent.places,
-            steps: lent.steps,
+            _steps: lent.steps,
             arena: lent.arena,
         };
         let apart = LentApart {

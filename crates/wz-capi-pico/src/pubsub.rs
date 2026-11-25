@@ -46,13 +46,16 @@ use crate::encoding::OwnedEncoding;
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
-use crate::prelude::*;
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
     Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_held, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
+// The cooperative engine is its own type, so its operations are the trait's methods in scope; the
+// tokio engine is a trait object, whose methods need no import.
+#[cfg(not(feature = "engine-tokio"))]
+use wz_capi_port::SessionEngine as _;
 use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, SubscriberSink, WireKey};
 
 /// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
