@@ -200,7 +200,8 @@ where
         }
     }
 
-    /// No peer held, built on the heap and never as a value on the stack.
+    /// No peer held, built on the heap and never as a value on the stack; `None` when the heap has
+    /// no room for it.
     ///
     /// A planner holds its rows inline, so a large one is hundreds of kilobytes, and `Box::new(Self::new())`
     /// builds it on the stack first: an unoptimised build passes it through several frames, and a thread of
@@ -209,7 +210,7 @@ where
     /// starts at zero. A field of another kind has to be read against this, which the pattern below makes
     /// the compiler ask of whoever adds one.
     #[cfg(feature = "alloc")]
-    pub fn new_boxed() -> alloc::boxed::Box<Self> {
+    pub fn try_boxed() -> Option<alloc::boxed::Box<Self>> {
         // Exhaustive on purpose: see above.
         let _fields_are_read = |planner: Self| {
             let Self {
@@ -234,9 +235,9 @@ where
         unsafe {
             let at = alloc::alloc::alloc_zeroed(layout).cast::<Self>();
             if at.is_null() {
-                alloc::alloc::handle_alloc_error(layout);
+                return None;
             }
-            alloc::boxed::Box::from_raw(at)
+            Some(alloc::boxed::Box::from_raw(at))
         }
     }
 
@@ -640,7 +641,7 @@ mod tests {
     #[test]
     fn a_planner_built_on_the_heap_holds_and_dials_as_one_built_by_value() {
         let mut by_value = Plan::new();
-        let mut on_heap = Plan::new_boxed();
+        let mut on_heap = Plan::try_boxed().expect("the heap has room");
         assert_eq!(on_heap.state(&1), None);
         let (mut host, mut next_id) = (
             Host {

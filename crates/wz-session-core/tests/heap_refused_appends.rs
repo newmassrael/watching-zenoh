@@ -145,3 +145,15 @@ fn an_encoding_the_heap_has_no_room_to_render_is_none() {
         Some(b"text/plain;utf8".to_vec())
     );
 }
+
+/// A planner the heap has no room for is none, where an allocation that ends the process on the
+/// refusal would end this test; one the heap has room for holds no peer. Turned red by
+/// `PeerPlanner::try_boxed` answering a refusal with `handle_alloc_error`.
+#[cfg(feature = "session-unicast")]
+#[test]
+fn a_planner_the_heap_refuses_is_none() {
+    type Plan = wz_session_core::peer_planner::PeerPlanner<u8, u64, 4, 6>;
+    assert!(refused(Plan::try_boxed).is_none());
+    let planner = Plan::try_boxed().expect("the heap has room");
+    assert_eq!(planner.state(&1), None);
+}
