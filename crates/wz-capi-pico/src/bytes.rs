@@ -127,6 +127,24 @@ pub(crate) fn try_boxed_bytes(bytes: &[u8]) -> Result<Box<[u8]>, NoRoom> {
     Ok(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(at.as_ptr(), len)) })
 }
 
+/// A copy of a payload's segment ends, or [`NoRoom`] when the heap refuses its room: a clone of
+/// them whose refusal is answered, not ended in the program. Written in the room taken, so the
+/// copy carries no growth of its own.
+fn try_copy_ends(ends: &[usize]) -> Result<Vec<usize>, NoRoom> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(ends.len()).map_err(|_| NoRoom)?;
+    let room = copy
+        .spare_capacity_mut()
+        .get_mut(..ends.len())
+        .ok_or(NoRoom)?;
+    for (place, &end) in room.iter_mut().zip(ends) {
+        place.write(end);
+    }
+    // SAFETY: the first `ends.len()` places, within the room reserved, were written above.
+    unsafe { copy.set_len(ends.len()) };
+    Ok(copy)
+}
+
 /// `value` put after the last of `items`, or [`NoRoom`] with `items` as they were and `value`
 /// let go of when the heap refuses the room: a push with no path that ends the program.
 pub(crate) fn try_push<T>(items: &mut Vec<T>, value: T) -> Result<(), NoRoom> {
@@ -576,7 +594,7 @@ impl ByteBuf {
             },
             _ => Self::new(),
         };
-        *part.bounds = (*like.bounds).clone();
+        *part.bounds = try_copy_ends(&like.bounds)?;
         Ok(part)
     }
 
@@ -626,7 +644,7 @@ impl ByteBuf {
             },
             None => Self::copy_of(self.as_slice())?,
         };
-        *clone.bounds = (*self.bounds).clone();
+        *clone.bounds = try_copy_ends(&self.bounds)?;
         Ok(clone)
     }
 
@@ -2616,6 +2634,37 @@ mod block_tests {
         assert_eq!(items.len(), room);
         assert_eq!(items.capacity(), room);
         assert_eq!(items.first(), Some(&0));
+    }
+
+    /// A copy of a payload that keeps segment ends is refused when the heap has no room for the
+    /// ends, its share of the block let go of, where a clone of them would end the program; a
+    /// payload that keeps none asks the heap for nothing. Turned red by a copy of the ends made by
+    /// `clone` in `ByteBuf::try_clone` or in `ByteBuf::part_of`.
+    #[test]
+    fn a_full_heap_refuses_a_copy_of_a_payloads_segment_ends() {
+        let mut writer = ByteBuf::copy_of(b"x").expect("room");
+        writer
+            .append_segments(&ByteBuf::copy_of(b"ab").expect("room"))
+            .expect("room");
+        assert_eq!(*writer.bounds, [1, 3]);
+        let refusal = crate::test_heap::refused(|| writer.try_clone().err());
+        assert_eq!(refusal, Some(NoRoom));
+        assert_eq!(writer.holders(), 1, "the refused copy's share let go of");
+
+        let parts: [&[u8]; 1] = [b"xab"];
+        let mut starts = [core::ptr::null::<u8>(); 1];
+        let block = Block::kept_parts(&parts, &mut starts).expect("room");
+        let refusal = crate::test_heap::refused(|| {
+            // SAFETY: `kept_parts` wrote the writer's three bytes at `starts[0]` of `block`.
+            let part = unsafe { ByteBuf::part_of(Some(&block), starts[0], &writer) };
+            part.err()
+        });
+        assert_eq!(refusal, Some(NoRoom));
+        assert!(block.is_unique(), "the refused part's share let go of");
+
+        let plain = ByteBuf::copy_of(b"plain").expect("room");
+        let copy = crate::test_heap::refused(|| plain.try_clone()).expect("no ends to copy");
+        assert_eq!(copy.as_slice(), b"plain");
     }
 
     /// A block whose holders are past half the address space is not shared again: the share is
