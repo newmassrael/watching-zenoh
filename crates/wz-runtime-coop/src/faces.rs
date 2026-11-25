@@ -604,9 +604,13 @@ pub trait FacePlaces<F> {
 }
 
 /// The faces of a session that takes faces beside its dial role's: a place for each, held or
-/// free, made at the open for as many as the session holds at once and never grown.
+/// free, made at the open for as many as the session holds at once and never grown. Only the
+/// places up to the last one held are kept in the row, the others reserved behind it, so every
+/// walk over the faces ends at the last face and passes over no free place past it: a session
+/// that keeps places for many faces and holds one or two walks one or two at each step.
 pub struct ManyFaces<F> {
     faces: Vec<Option<F>>,
+    places: usize,
 }
 
 impl<F> FacePlaces<F> for ManyFaces<F> {
@@ -616,12 +620,11 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
         let places = places.max(1);
         let mut faces = Vec::with_capacity(places);
         faces.push(Some(dial));
-        faces.resize_with(places, || None);
-        Self { faces }
+        Self { faces, places }
     }
 
     fn places(&self) -> usize {
-        self.faces.len()
+        self.places
     }
 
     fn get(&self, at: usize) -> Option<&F> {
@@ -667,8 +670,16 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
     }
 
     fn put(&mut self, at: usize, face: F) -> Result<(), F> {
+        if at == 0 || at >= self.places {
+            return Err(face);
+        }
+        // The free places up to `at` join the row; the room for every place was reserved by
+        // `with_dial`, so none allocates.
+        if at >= self.faces.len() {
+            self.faces.resize_with(at.saturating_add(1), || None);
+        }
         match self.faces.get_mut(at) {
-            Some(place) if at > 0 && place.is_none() => {
+            Some(place) if place.is_none() => {
                 *place = Some(face);
                 Ok(())
             }
@@ -680,13 +691,19 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
         if at == 0 {
             return None;
         }
-        self.faces.get_mut(at)?.take()
+        let face = self.faces.get_mut(at)?.take();
+        // The row ends at the last place still held, the dial role's at the least.
+        let held = self
+            .faces
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(1, |last| last.saturating_add(1));
+        self.faces.truncate(held);
+        face
     }
 
     fn keep_dial_only(&mut self) {
-        for place in self.faces.iter_mut().skip(1) {
-            *place = None;
-        }
+        self.faces.truncate(1);
     }
 }
 
@@ -2600,6 +2617,57 @@ mod tests {
         table.keep_dial_only();
         assert_eq!(table.iter().collect::<Vec<_>>(), [&10]);
         assert_eq!(table.places(), 3, "the places stay, free");
+    }
+
+    /// A table of many faces walks its places up to the last one held and no further: a face put
+    /// at a far place brings the free places before it into the walk, and the walk ends at the
+    /// last face again once that face is taken out or every face but the dial role's goes. The
+    /// places reserved past the row stay, and a face put at the last of them takes no memory.
+    ///
+    /// # Control
+    ///
+    /// A `take` that left the row as long as it was (no `truncate`) reds the row's length after
+    /// the face at place 4 is taken out.
+    #[test]
+    fn a_table_of_many_faces_walks_its_places_up_to_the_last_face_held() {
+        let mut table = ManyFaces::with_dial(10_u32, 11);
+        let room = table.faces.capacity();
+        assert_eq!(
+            table.faces.len(),
+            1,
+            "the dial role's place alone is walked"
+        );
+        assert_eq!(table.put(4, 14), Ok(()));
+        assert_eq!(table.faces.len(), 5, "the walk reaches the face at place 4");
+        assert_eq!(table.put(1, 11), Ok(()));
+        assert_eq!(
+            table.faces.len(),
+            5,
+            "a face before the last does not lengthen the walk"
+        );
+        assert_eq!(table.take(4), Some(14));
+        assert_eq!(
+            table.faces.len(),
+            2,
+            "the walk ends at the face at place 1 again"
+        );
+        assert_eq!(table.placed().collect::<Vec<_>>(), [(0, &10), (1, &11)]);
+        assert_eq!(table.get(4), None, "a place past the walk holds no face");
+        assert_eq!(table.take(4), None, "nor is one taken from it");
+        assert_eq!(table.put(10, 20), Ok(()), "the last place is put");
+        assert_eq!(table.put(11, 21), Err(21), "past the table");
+        assert_eq!(
+            table.faces.capacity(),
+            room,
+            "no place was added to the room reserved"
+        );
+        table.keep_dial_only();
+        assert_eq!(
+            table.faces.len(),
+            1,
+            "the dial role's place alone is walked again"
+        );
+        assert_eq!(table.places(), 11, "the places stay, free");
     }
 
     /// The face of a session that only dials is its dial role's alone, at the one place, whatever

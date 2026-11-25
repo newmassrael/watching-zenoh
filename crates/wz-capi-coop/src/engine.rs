@@ -6581,9 +6581,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session
-    /// that ended. The step reads the clock once, after its tasks ran, and measures everything it
-    /// does by that reading, which it returns ([`Stepped`]). A step that read records of a link
-    /// that holds more input it has already taken from its stack reads no clock and moves nothing.
+    /// that ended. The step reads the clock once, and its tasks' timers and everything it does
+    /// after them are measured by that reading, which it returns ([`Stepped`]). A step whose
+    /// tasks ran first reads it before them; a deadline passed while they ran is then found by
+    /// the next step, so a sweep is late by one step's run of its tasks at most. A step that read
+    /// records of a link that holds more input it has already taken from its stack reads no clock
+    /// and moves nothing.
     fn step(&self, core: &mut Core<L, C>) -> Stepped {
         // What a lost link's peer is still owed comes before anything the links bring now.
         #[cfg(feature = "liveliness")]
@@ -6602,11 +6605,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(not(feature = "group"))]
         let group_going_on = false;
         let going_on = was_idle && (group_going_on || core.transport.links.holds_input());
-        if going_on {
+        // The one reading of a step whose tasks run first, which every bound after them shares.
+        let read_us = if going_on {
             core.run_tasks_at(None);
+            None
         } else {
-            core.run_tasks();
-        }
+            let now_us = core.now_us();
+            core.run_tasks_at(Some(now_us));
+            Some(now_us)
+        };
         // A step reads what the round has room for and no more: one record in a build of one
         // thread, the records of one datagram in a build of threads, whose next datagram waits
         // while a record lies in the one lent (`Round::has_room`, `RoundGate`). What the link
@@ -6635,11 +6642,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         {
             core.group_reads = 0;
         }
-        let now_us = core.now_us();
-        // The timers the steps of this receive passed over.
-        if going_on {
-            core.run_tasks_at(Some(now_us));
-        }
+        // The timers the steps of this receive passed over, by the step's one reading.
+        let now_us = match read_us {
+            Some(now_us) => now_us,
+            None => {
+                let now_us = core.now_us();
+                core.run_tasks_at(Some(now_us));
+                now_us
+            }
+        };
         // A link's receive sweeps nothing, so the session ends the chains of its one reassembly
         // Router past their deadline here, once a step and by its reading, whichever link's task
         // ran; on the epoch its links staged them on, which is not the clock's own.
@@ -6661,8 +6672,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 // A liveliness snapshot that expired ends the same way. Its terminated ids are
                 // staged for a reconnect cache this engine does not keep (it declares again from
                 // its own entries), so they are drained and dropped: staged ones would pile up.
+                // A table with no get pending and none ended has nothing to sweep or drain, and the
+                // drain makes a buffer of the table's whole ceiling: neither is done at every step.
                 #[cfg(feature = "liveliness-get")]
-                {
+                if !gets.liveliness_gets.is_empty() || gets.liveliness_gets.has_finalized() {
                     gets.liveliness_gets.sweep_timed_out(now_ms);
                     drop(gets.liveliness_gets.take_finalized());
                 }

@@ -1116,8 +1116,9 @@ fn an_operation_lets_the_session_go_for_the_next_one_on_another_thread() {
     let _ = engine.declarations_synced();
 }
 
-/// A read step on a session with nothing due reads the session's clock once, after its tasks ran,
-/// and moves every face, sweeps the gets and looks for a due job by that one reading; its wait,
+/// A read step on a session with nothing due reads the session's clock once, before its tasks ran,
+/// and wakes their timers, moves every face, sweeps the gets and looks for a due job by that one
+/// reading, none for its tasks apart from it; its wait,
 /// with no deadline to work out, reads it not at all. The session's lock is taken twice: for the
 /// wait and for the step. The counts are the same in every build: the sweep of the gets, each
 /// face and the look for a due job share the step's reading and its take.
@@ -1128,12 +1129,18 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
     until(&engine, "the declarations to be told", || {
         engine.declarations_synced()
     });
-    let (reads, takes) = (
+    let (reads, task_reads, takes) = (
         engine.clock_reads(),
+        engine.task_clock_reads(),
         engine.takes.core.load(Ordering::SeqCst),
     );
     let _ = SessionDrive::read(&*engine, false);
     assert_eq!(engine.clock_reads() - reads, 1, "one reading for the step");
+    assert_eq!(
+        engine.task_clock_reads() - task_reads,
+        0,
+        "the step's tasks ran on its one reading, with none of their own"
+    );
     assert_eq!(
         engine.takes.core.load(Ordering::SeqCst) - takes,
         2,
@@ -1505,9 +1512,9 @@ fn settled_links_are_moved_only_once_a_link_ends() {
 /// datagram's samples: a step reads one record (one thread) or as many as the round has room for
 /// (threads) while the link keeps the rest, and leaves the links where they stood. Datagrams the
 /// stack still queues are not the link's input and each is a receive of its own. Its tasks read
-/// the clock for their timers once, in the step that received the datagram: the steps that go on
-/// with it wake no timer until the last, by that step's own reading, so a timer is late by one
-/// receive's reading at most. Turned red by a step that moves the links each time it reads (the
+/// no clock of their own: the step that received the datagram wakes their timers by its one
+/// reading, and the steps that go on with it wake none until the last, by that step's own
+/// reading, so a timer is late by one receive's reading at most. Turned red by a step that moves the links each time it reads (the
 /// `Stepped::Read` return taken out of `CoopEngine::step`), which moves them once a step, a read
 /// that ends with that step while the link keeps the rest, or a step that goes on with the
 /// receive's input and reads the clock for its timers (`run_tasks` in place of
@@ -1567,8 +1574,8 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     );
     assert_eq!(
         engine.task_clock_reads() - task_clock_reads,
-        1,
-        "one reading of the clock for the tasks' timers, by the step that received the datagram"
+        0,
+        "the tasks' timers are woken by the steps' own readings, with none of their own"
     );
     #[cfg(any(feature = "listen", feature = "group"))]
     assert_eq!(
