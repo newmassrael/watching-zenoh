@@ -84,8 +84,19 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
 enum Command {
     DeclareSubscriber(wz_session_core::wire_id::EntityId, &'static str),
     /// Declare queryable `.0` on the key, complete as `.2` says. Declared only: it answers
-    /// nothing, which is all a test of what matches needs.
+    /// nothing, which is all a test of what matches needs. Only the builds whose tests watch or
+    /// match a peer's queryables send it.
+    #[cfg(any(
+        feature = "query",
+        feature = "queryable",
+        feature = "key-matching-listener"
+    ))]
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
+    #[cfg(any(
+        feature = "query",
+        feature = "queryable",
+        feature = "key-matching-listener"
+    ))]
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
     /// Push `.1` samples on the key in one batch window, so that one frame carries them all; the
@@ -608,6 +619,11 @@ fn run_router(
                     wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
                 );
             }
+            #[cfg(any(
+                feature = "query",
+                feature = "queryable",
+                feature = "key-matching-listener"
+            ))]
             Ok(Command::DeclareQueryable(id, key, complete)) => {
                 let _ = actions.send_declare_queryable(
                     id,
@@ -615,6 +631,11 @@ fn run_router(
                     complete,
                 );
             }
+            #[cfg(any(
+                feature = "query",
+                feature = "queryable",
+                feature = "key-matching-listener"
+            ))]
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
             }

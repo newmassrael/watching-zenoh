@@ -791,11 +791,12 @@ fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
         built.rows().all(|row| row.part() != "registry lend"),
         "a read that steps its one link lends no registry"
     );
-    for (part, bytes) in [
+    let lends: &[(&str, usize)] = &[
         #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         ("registry lend", crate::engine::REGISTRY_LEND_BYTES),
         ("router lend", crate::engine::ROUTER_LEND_BYTES),
-    ] {
+    ];
+    for &(part, bytes) in lends {
         let laid = row(&built, part);
         assert_eq!((laid.count, laid.entry_bytes), (1, bytes), "{part}");
     }
