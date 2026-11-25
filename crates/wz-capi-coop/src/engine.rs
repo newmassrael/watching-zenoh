@@ -118,7 +118,7 @@ use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{
     router_session_task_bytes, OpenedLink, SessionDatagramLink, SessionLinks, SessionRole,
 };
-use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
+use wz_runtime_coop::session_drive::{LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::sync::ConfinedOwner;
 use wz_runtime_coop::transport::{
@@ -2083,7 +2083,7 @@ impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
 
 /// The times the life of each link of a session opened with `config` is counted in: a dial and
 /// its handshake by the open's timeout, an accepted link's handshake by the acceptor's.
-fn link_times(config: &CoopConfig) -> LinkTimes {
+fn link_times<E>(config: &CoopConfig<E>) -> LinkTimes {
     LinkTimes {
         open_timeout_ms: config.open_timeout_ms,
         redial_ms: config.redial_ms,

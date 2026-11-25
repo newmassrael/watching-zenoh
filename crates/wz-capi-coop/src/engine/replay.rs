@@ -39,6 +39,7 @@ use super::LinkActions;
 use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
+use wz_session_core::link_life::LinkPhase;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
@@ -403,7 +404,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[inline(never)]
     pub(super) fn retract_at(&mut self, place: usize, send: &dyn TellTo<C>) {
         for face in self.transport.links.faces_mut() {
-            let Some(wire) = face.up() else {
+            // The wire and the replay are fields apart: the replay's cursor moves while the wire
+            // is held.
+            if face.life.phase() != LinkPhase::Up {
+                continue;
+            }
+            let Some(wire) = face.link.wire() else {
                 continue;
             };
             // A build that reaches no pace told the peer everything when its link came up.
