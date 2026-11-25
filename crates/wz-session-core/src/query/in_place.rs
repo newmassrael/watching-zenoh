@@ -309,7 +309,7 @@ impl QueryPeer {
             rid: request.rid,
             target,
             qos,
-            requester: self.requester,
+            requester: self.requester(),
             keyexpr,
             facts: crate::keyexpr_match::KeyFacts::of(keyexpr),
             parameters: projection.parameters,

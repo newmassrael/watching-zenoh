@@ -294,7 +294,7 @@ impl QueryPeer {
             rid: request.rid,
             target: crate::request_routing_context::read_request_target(request),
             qos,
-            requester: self.requester,
+            requester: self.requester(),
             keyexpr,
             facts: crate::keyexpr_match::KeyFacts::of(keyexpr),
             parameters: projection.parameters,
