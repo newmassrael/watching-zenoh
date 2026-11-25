@@ -237,6 +237,58 @@ needed_by       = ["file-round", ".githooks/pre-commit", ".githooks/pre-push"]
 # do not run.
 verify = "bash scripts/run-ci.sh"
 
+# THE PERFORMANCE MEASUREMENTS, each a run that holds its machine alone (bx RFC 0072): `bx --command pico-perf`,
+# `bx --command pico-perf-tcp`, `bx --command pico-subprofile` (with `--host <alias>` to choose the machine). A
+# figure of the matrix or of the subscriber's profile is a time, and another run, a remote build step or a CI job
+# on the same machine is measured with it: the matrix runs a disturbed cell again and finally loses it, and a
+# profile has no check at all. So the declaration, the one place that can say it, has bx wait until every run on
+# the machine has ended, admit nothing after it while it waits and runs, and drain the machine's remote execution.
+# The full matrix (`docs/pico-perf-matrix.md`), the same matrix over TCP alone, and where the subscriber's time
+# goes (`subprofile`, 8 B, 12000 messages at 10000 a second). The pinning is the script's own: taken from the machine's topology unless the caller's
+# environment names it, so any machine bx places the run on is one it can pin.
+#
+# `alone_uncovered`: a unit of the machine's external work (a CI runner, bx RFC 0073) that no runner on another
+# machine covers can only be gated, which stops its next step and not the one it is running. The run waits up to
+# 900 s for coverage, one hold of the starvation bound below, so it never holds the machine's other work back
+# longer than that bound allows for coverage alone, and then runs beside the gate. The file says the policy; bx
+# sends it as `wait:900`.
+#
+# THE STARVATION BOUND, the values bx RFC 0073 section 4.14 recommends, written out so they are read here and not
+# from bx's defaults. `alone_quiet_within = "15m"`: a hold longer than that starved another project's nightly
+# build into its deadline when the machine was held for a measurement (bx RFC 0072, 4.4.1). `alone_on_starve =
+# "retry"`: a measurement is not urgent, and letting go between holds gives the machine back to its other work
+# where `refuse` would only move the retry to the caller. `alone_starve_backoff = "15m"`, doubled at each let-go
+# (15, 30, 60 minutes), and `alone_starve_cycles = 4`: a run that never finds the machine quiet is refused 2 h 45
+# min after it came to the queue, naming what kept the machine busy, rather than holding it in turns until its
+# deadline. That leaves 1 h 15 min of a job's default four hours for the run itself, the build of the arms
+# included; a caller expecting a longer run gives `bx --timeout`.
+[commands.pico-perf]
+run = "bash scripts/pico-compare.sh perf 3 8,64,1024"
+alone = true
+alone_uncovered = { wait_s = 900 }
+alone_quiet_within = "15m"
+alone_on_starve = "retry"
+alone_starve_backoff = "15m"
+alone_starve_cycles = 4
+
+[commands.pico-perf-tcp]
+run = "PICO_CMP_PERF_TRANSPORTS=tcp bash scripts/pico-compare.sh perf 3 8,64,1024"
+alone = true
+alone_uncovered = { wait_s = 900 }
+alone_quiet_within = "15m"
+alone_on_starve = "retry"
+alone_starve_backoff = "15m"
+alone_starve_cycles = 4
+
+[commands.pico-subprofile]
+run = "bash scripts/pico-compare.sh subprofile 8 12000 10000"
+alone = true
+alone_uncovered = { wait_s = 900 }
+alone_quiet_within = "15m"
+alone_on_starve = "retry"
+alone_starve_backoff = "15m"
+alone_starve_cycles = 4
+
 # Regenerating the committed `out/**` from the SCXML sources (`scripts/regen-codegen.sh`): it builds
 # the pinned `sce-codegen` and then the xtask, which compiles `wz-session-core`, so it is a heavy
 # build that used to be refused a build machine because it writes the tree. Declared as an action,
