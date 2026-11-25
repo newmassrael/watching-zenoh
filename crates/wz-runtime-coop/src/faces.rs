@@ -521,13 +521,23 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
 
     /// Pay a debt that came after the holder paid and before it let go: neither the holder, which
     /// looked before the debt, nor its debtor, whose try found the place held, would pay it.
+    #[inline]
     fn pay_after(&self) {
         // Orders the holder's let go before its look, and the debtor's debt before its try: one
         // of the two sees the other's write, so a debt is never left with neither to pay it.
         fence(Ordering::SeqCst);
         if self.owed.load(Ordering::SeqCst) != 0 {
-            let _ = self.place.try_lend(|held| self.pay(held));
+            self.pay_late();
         }
+    }
+
+    /// The try that pays a debt found after the holder let go ([`Self::pay_after`]). Out of line
+    /// and cold: every lend of a site looks at the debt word as it lets go, and only a debt owed
+    /// in that window takes the place again, so each lend keeps inline only its look.
+    #[cold]
+    #[inline(never)]
+    fn pay_late(&self) {
+        let _ = self.place.try_lend(|held| self.pay(held));
     }
 }
 
@@ -2921,6 +2931,29 @@ mod tests {
             0,
             "a debt owed to an empty place is not the next link's"
         );
+    }
+
+    /// A debt that came in the window after a holder paid and before it let go is paid by the
+    /// look the holder makes as it lets go, through a try of the place, which is free by then;
+    /// with nothing owed, the look takes no lend. Turned red by a look that leaves the debt
+    /// unpaid (`FaceSite::pay_after` not reaching `FaceSite::pay_late`), or one that pays
+    /// when nothing is owed.
+    #[test]
+    fn a_debt_owed_after_the_holder_paid_is_paid_as_it_lets_go() {
+        let (aborted, ended, paid) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        assert!(site.hold(paying_parts(&aborted, &ended, &paid)).is_none());
+        site.pay_after();
+        assert_eq!(
+            paid.load(Ordering::SeqCst),
+            0,
+            "CONTROL: nothing owed, nothing paid"
+        );
+        // The debtor's bit, written while the holder had paid and not yet let go.
+        site.owed.store(4, Ordering::SeqCst);
+        site.pay_after();
+        assert_eq!(paid.load(Ordering::SeqCst), 4, "the late debt is paid once");
+        assert_eq!(site.owed.load(Ordering::SeqCst), 0, "and owed no more");
     }
 
     impl LendsSession for ApartWire {
