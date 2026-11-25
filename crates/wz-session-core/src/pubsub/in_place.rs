@@ -195,6 +195,19 @@ fn lent_body<'s, 'f>(push: &'s PushRead<'f>) -> Result<Option<LentBody<'s, 'f>>,
     }
 }
 
+/// The key a side's memory keeps a wireexpr's answer under ([`crate::match_set::PeerMatches`]):
+/// an id the sender `sender` declared, in its own space (`M=1`) and with no suffix, which names
+/// one key for as long as the side's aliases do not change. `None` for any other form: a suffix,
+/// our own space, or the literal of id 0, whose key is matched each time it arrives.
+fn declared_key(body: &wz_codecs::wireexpr::WireexprViewVariant<'_>, sender: u64) -> Option<u64> {
+    let (id, suffix, senders) = crate::wireexpr_resolve::id_suffix_and_space_viewed(body);
+    if senders && id != 0 && suffix.is_none() {
+        Some(crate::wire_id::sender_peer_key(sender, id))
+    } else {
+        None
+    }
+}
+
 impl<Q: Storage> SubscriberPeer<Q> {
     /// Deliver a Push the in-place receive path lent: the subscriber side of
     /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
@@ -305,6 +318,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             naming,
             compose,
             class,
+            matches,
             ..
         } = self;
         let mut room = LentRoom::default();
@@ -324,18 +338,34 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // a message from a peer, as the copying receive takes it. The rows it reaches are handed
         // it in one fan-out, each told its turn.
         let mut turn = FanOut::begin();
-        subs.deliver_from_peer(
-            sample.keyexpr,
-            *class,
-            PeerDelivery {
-                no_allocation: true,
-                ..PeerDelivery::default()
-            },
-            |id, row| {
-                cx.deliver_ref(id, row, &sample, turn);
-                turn = FanOut::later();
-            },
-        );
+        // A key the peer declared and names by its id alone reaches what it reached last time
+        // while nothing that decides it changed: its answer is kept in the side's memory.
+        let mark = match declared_key(&push.view.keyexpr.body, sender) {
+            Some(wire) => matches.entry(wire, naming.names),
+            None => None,
+        };
+        match mark {
+            Some(mark) => {
+                subs.deliver_from_peer_marked(sample.keyexpr, *class, mark, |id, row| {
+                    cx.deliver_ref(id, row, &sample, turn);
+                    turn = FanOut::later();
+                });
+            }
+            None => {
+                subs.deliver_from_peer(
+                    sample.keyexpr,
+                    *class,
+                    PeerDelivery {
+                        no_allocation: true,
+                        ..PeerDelivery::default()
+                    },
+                    |id, row| {
+                        cx.deliver_ref(id, row, &sample, turn);
+                        turn = FanOut::later();
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1379,5 +1409,145 @@ mod tests {
         assert_eq!(projected, Some(alloc::format!("{literal}x")));
         #[cfg(feature = "rx-lent-only")]
         assert_eq!(projected, None, "a build that lends only projects nothing");
+    }
+
+    /// Each change of a side's aliases is counted, and an answer its memory kept under one count
+    /// is not read under another; a new class forgets them too.
+    #[test]
+    fn a_change_of_the_peers_aliases_or_class_forgets_what_its_side_kept() {
+        let mut r = SubscriberRegistry::new();
+        let wire = crate::wire_id::sender_peer_key(0, 5);
+        let set = crate::match_set::SubscriberSet::EMPTY;
+        let names = r.peer.naming.names;
+        r.peer.matches.entry(wire, names).unwrap().keep(1, set);
+        assert!(r
+            .peer
+            .matches
+            .entry(wire, names)
+            .unwrap()
+            .answer(1)
+            .is_some());
+
+        let literal = crate::id_map::key_text("demo/a").expect("fits");
+        let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases_mut(), 5, literal);
+        assert_ne!(r.peer.naming.names, names, "a binding is a change");
+        let names = r.peer.naming.names;
+        assert!(r
+            .peer
+            .matches
+            .entry(wire, names)
+            .unwrap()
+            .answer(1)
+            .is_none());
+
+        r.peer.matches.entry(wire, names).unwrap().keep(1, set);
+        r.peer.set_class(None);
+        assert!(r
+            .peer
+            .matches
+            .entry(wire, names)
+            .unwrap()
+            .answer(1)
+            .is_none());
+    }
+
+    /// The session's one table set with callbacks told apart by number.
+    #[cfg(not(feature = "key-set-closed"))]
+    enum NumberRows {}
+
+    #[cfg(not(feature = "key-set-closed"))]
+    impl crate::session_tables::RowCallbacks for NumberRows {
+        type Subscriber = u32;
+        type Queryable = u32;
+        type LivelinessSubscriber = u32;
+        type Matching = u32;
+        type Reply = u32;
+        type QueryablePresence = crate::session_tables::Present;
+        type LivelinessPresence = crate::session_tables::Present;
+        type FilterPresence = crate::session_tables::Present;
+        type GetPresence = crate::session_tables::Present;
+    }
+
+    #[cfg(not(feature = "key-set-closed"))]
+    type NumberTables = crate::session_tables::SessionTables<NumberRows>;
+
+    /// A delivery context that records the number of each row it is handed and the key.
+    #[cfg(not(feature = "key-set-closed"))]
+    #[derive(Default)]
+    struct KeysHeard(Vec<(u32, String)>);
+
+    #[cfg(not(feature = "key-set-closed"))]
+    impl SampleDelivery<u32, crate::session_tables::SubscriberHandle> for KeysHeard {
+        fn deliver(
+            &mut self,
+            _id: crate::session_tables::SubscriberHandle,
+            row: crate::sink::RowAccess<'_, u32>,
+            sample: &dyn SampleView,
+            _turn: FanOut,
+        ) {
+            self.0.push((*row.row(), sample.keyexpr().to_string()));
+        }
+    }
+
+    /// The rows of `tables` the Push `push` reaches through `peer`'s lent delivery, and its key.
+    #[cfg(not(feature = "key-set-closed"))]
+    fn heard_through(
+        peer: &mut SubscriberPeer,
+        tables: &mut NumberTables,
+        push: &PushRead<'_>,
+    ) -> Vec<(u32, String)> {
+        let mut heard = KeysHeard::default();
+        let record = InPlaceRecord::push_of_frame(push, false, 7, crate::qos::Priority::DEFAULT);
+        peer.dispatch_iteration_event(tables, &mut heard, IterationEvent::InPlace(record));
+        heard.0
+    }
+
+    /// A peer's id is delivered to the subscribers of the key it names when its message arrives,
+    /// however often a message on it was delivered before: rebinding the id moves the next message
+    /// to the new key's subscribers, and a subscriber declared meanwhile hears it.
+    // A build whose key set is closed refuses every key until its image gives the gate its table.
+    #[cfg(not(feature = "key-set-closed"))]
+    #[test]
+    fn a_declared_ids_messages_follow_its_binding_and_the_subscribers_declared() {
+        let mut peer: SubscriberPeer = SubscriberPeer::default();
+        let mut tables = NumberTables::new();
+        for (key, number) in [("demo/a", 1), ("demo/b", 2)] {
+            tables
+                .declare_subscriber(
+                    key,
+                    Locality::Any,
+                    crate::session_tables::KeyForm::default(),
+                    number,
+                )
+                .expect("a table of the build's bound has room");
+        }
+        let bind = |peer: &mut SubscriberPeer, key: &str| {
+            let literal = crate::id_map::key_text(key).expect("fits");
+            let _ = crate::id_map::IdMap::bind(&mut peer.naming.aliases_mut(), 5, literal);
+        };
+        bind(&mut peer, "demo/a");
+        let built = crate::push_build::build_push_aliased(5, None, b"v").expect("build");
+        let wire = wire_of(&built);
+        let push = view_of(&wire);
+        let on_a = std::vec![(1, "demo/a".to_string())];
+        assert_eq!(heard_through(&mut peer, &mut tables, &push), on_a);
+        assert_eq!(heard_through(&mut peer, &mut tables, &push), on_a);
+
+        bind(&mut peer, "demo/b");
+        let on_b = std::vec![(2, "demo/b".to_string())];
+        assert_eq!(heard_through(&mut peer, &mut tables, &push), on_b);
+
+        tables
+            .declare_subscriber(
+                "demo/b",
+                Locality::Remote,
+                crate::session_tables::KeyForm::default(),
+                3,
+            )
+            .expect("a table of the build's bound has room");
+        assert_eq!(
+            heard_through(&mut peer, &mut tables, &push),
+            std::vec![(2, "demo/b".to_string()), (3, "demo/b".to_string())]
+        );
     }
 }
