@@ -701,7 +701,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
             let write = move |row: &mut MaybeUninit<DirectFace<L, C>>| {
                 // SAFETY: the row is aligned and valid for writes of a face, holds none, and is
                 // kept where it lies by the table for as long as the face is.
-                unsafe { DirectFace::init_at(NonNull::from(row).cast(), at, router, lend) }
+                unsafe { DirectFace::<L, C>::init_at(NonNull::from(row).cast(), at, router, lend) }
             };
             // SAFETY: `write` leaves a whole face in its row, and does not unwind.
             if unsafe { taken.push_in_place(write) }.is_none() {
