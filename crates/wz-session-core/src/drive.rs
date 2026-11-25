@@ -1888,6 +1888,65 @@ pub enum CopyReason {
     FrameHeadUndecodable,
 }
 
+/// What the reader of a link's datagrams keeps from one datagram to the next
+/// ([`dispatch_datagram`]): the one record an inbound record is decoded into, made once, so a
+/// datagram costs it nothing however many records it carries; and where the dispatch of a
+/// datagram its link keeps ([`crate::driver_loop::EventSink::holds_datagram`]) stopped, for the
+/// step that is lent the same bytes again to read on from there instead of from the start.
+///
+/// The receive of one link reads its datagrams one at a time and owns its reader, so noting where
+/// a dispatch stopped and taking it back are writes of its own and no hold of a lock.
+#[cfg(feature = "codec-frame")]
+pub struct DatagramReader {
+    record: crate::network_message::RecordBuf,
+    resume: DatagramResume,
+}
+
+#[cfg(feature = "codec-frame")]
+impl DatagramReader {
+    /// A reader with its record made and no step to read on from.
+    pub fn new() -> Self {
+        Self {
+            record: crate::network_message::new_record_buf(),
+            resume: DatagramResume::default(),
+        }
+    }
+
+    /// Whether the dispatch of the datagram last lent stopped before its end, so its link is to
+    /// keep it and lend it again. Never, with no allocator: such a build keeps no datagram.
+    #[inline]
+    pub fn resumes(&self) -> bool {
+        #[cfg(feature = "alloc")]
+        {
+            self.resume.at.is_some()
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            false
+        }
+    }
+}
+
+#[cfg(feature = "codec-frame")]
+impl Default for DatagramReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Where the dispatch of a datagram its link keeps stopped ([`DatagramReader`]). Holds nothing
+/// in a build with no allocator, which keeps no datagram.
+#[cfg(feature = "codec-frame")]
+#[derive(Default)]
+struct DatagramResume {
+    /// The transport message to read next, as its offset in the datagram, and, for a `Frame`
+    /// some of whose records were handed, where its next record starts, as an offset in that
+    /// message. That `Frame` was admitted (its SN taken, its bytes counted) when it was first
+    /// read, and is not admitted again.
+    #[cfg(feature = "alloc")]
+    at: Option<(usize, Option<usize>)>,
+}
+
 /// How [`dispatch_datagram`] hands over a Push, a Request or a Response record:
 /// lent where the frame lies when this build can deliver it so, owned otherwise.
 ///
@@ -1959,8 +2018,8 @@ const REASSEMBLED_RECORD_FORM: crate::network_message::RecordForm = RECORD_FORM;
 ///   registry delivers a Push as a borrowed sample, the queryable registry a
 ///   Request as a borrowed query, the reply registry a Response as a borrowed
 ///   reply;
-/// - any other record is decoded into its owned message in `record`, a
-///   one-record buffer the caller keeps across datagrams, and reported as a
+/// - any other record is decoded into its owned message in the `reader`'s
+///   one-record buffer, which the caller keeps across datagrams, and reported as a
 ///   [`DriverLoopOutcome::FramePayload`] of that one message; a build that lends its
 ///   control records (`rx-lent-control`) lends a Declare, an Interest and a
 ///   ResponseFinal as the data kinds are, and decodes no record into an owned message.
@@ -1996,6 +2055,10 @@ const REASSEMBLED_RECORD_FORM: crate::network_message::RecordForm = RECORD_FORM;
 /// Whatever the path, `on_event` runs inside the link's lend, so what it does
 /// is on the stack above the receive; a profile measures that before it
 /// selects this path.
+///
+/// `reader` is what the caller keeps from one datagram to the next ([`DatagramReader`]): the
+/// record each record is decoded into, and where the last dispatch of a datagram its link keeps
+/// stopped, which this call reads on from and notes again where it stops, if it does.
 #[cfg(feature = "codec-frame")]
 pub fn dispatch_datagram<
     R: SessionRuntime,
@@ -2005,7 +2068,7 @@ pub fn dispatch_datagram<
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
     engine: &mut SessionEngine<R, T>,
-    record: &mut crate::network_message::RecordBuf,
+    reader: &mut DatagramReader,
     on_event: &mut F,
 ) -> DatagramPath {
     // A link that keeps its datagram is read where it lies and stopped where the host has no
@@ -2014,8 +2077,9 @@ pub fn dispatch_datagram<
     let kept = on_event.holds_datagram();
     #[cfg(not(feature = "alloc"))]
     let kept = false;
-    dispatch_units(unit, actions, kept, on_event, |unit, resume, on_event| {
-        dispatch_datagram_unit(unit, resume, kept, actions, engine, record, on_event)
+    let DatagramReader { record, resume } = reader;
+    dispatch_units(unit, resume, kept, on_event, |unit, from, on_event| {
+        dispatch_datagram_unit(unit, from, kept, actions, engine, record, on_event)
     })
 }
 
@@ -2026,38 +2090,31 @@ pub fn dispatch_datagram<
 /// turn.
 ///
 /// A datagram its link keeps (`kept`, [`crate::driver_loop::EventSink::holds_datagram`]) is
-/// read from where the last step stopped, and before each message after the first, and inside a
-/// `Frame` before each record after the first, the host is asked whether it takes another; where
-/// it does not, the dispatch notes where it stopped
-/// ([`SessionLinkActions::set_datagram_resume`]) and the link keeps the datagram for a later
-/// step, in its own buffer, which it does not read into again until the dispatch has gone
-/// through it.
+/// read from where the last step stopped (`resume`, taken), and before each message after the
+/// first, and inside a `Frame` before each record after the first, the host is asked whether it
+/// takes another; where it does not, the dispatch notes where it stopped in `resume`
+/// ([`DatagramReader::resumes`]) and the link keeps the datagram for a later step, in its own
+/// buffer, which it does not read into again until the dispatch has gone through it.
 ///
 /// `unit_at` is handed the unit, where the next record of a `Frame` an earlier step stopped in
 /// starts, and the sink, and answers the path the unit took, the bytes of the datagram it went
 /// through, and whether it stopped before a record. A type of its own and not a trait object: a
 /// build links one receive of the two, so the walk and the read of a unit are one body there.
 #[cfg(feature = "codec-frame")]
-fn dispatch_units<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::EventSink + ?Sized>(
+fn dispatch_units<F: crate::driver_loop::EventSink + ?Sized>(
     datagram: &[u8],
-    actions: &SessionLinkActions<R, T>,
+    resume: &mut DatagramResume,
     kept: bool,
     on_event: &mut F,
     mut unit_at: impl FnMut(&[u8], Option<usize>, &mut F) -> (DatagramPath, usize, bool),
 ) -> DatagramPath {
     // Only a kept datagram has a step to go on from, and only a build with an allocator keeps one.
     #[cfg(feature = "alloc")]
-    let resume = if kept {
-        actions
-            .take_datagram_resume()
-            .map(|resume| (resume.unit, resume.record))
-    } else {
-        None
-    };
+    let from = if kept { resume.at.take() } else { None };
     #[cfg(not(feature = "alloc"))]
-    let resume: Option<(usize, Option<usize>)> = None;
-    let mut at = resume.map_or(0, |(unit, _)| unit);
-    let mut next_record = resume.and_then(|(_, record)| record);
+    let from: Option<(usize, Option<usize>)> = None;
+    let mut at = from.map_or(0, |(unit, _)| unit);
+    let mut next_record = from.and_then(|(_, record)| record);
     let mut path = None;
     // Where the dispatch stopped (the unit, and the record of a `Frame` it stopped in), noted
     // once after the walk: the host asked for no more before a unit, or a `Frame` stopped before
@@ -2088,11 +2145,11 @@ fn dispatch_units<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Event
         }
     }
     #[cfg(feature = "alloc")]
-    if let Some((unit, record)) = stop {
-        actions.set_datagram_resume(crate::session_actions::DatagramResume { unit, record });
+    if stop.is_some() {
+        resume.at = stop;
     }
     #[cfg(not(feature = "alloc"))]
-    let _ = (stop, actions);
+    let _ = (stop, resume);
     path.unwrap_or(DatagramPath::InPlace)
 }
 
@@ -2218,8 +2275,9 @@ fn dispatch_copied_of<
 /// - its payload goes to the Router, which copies it into the chain's slot;
 /// - a chain it completes is read IN ITS SLOT, borrowed for the delivery call,
 ///   record by record as a `Frame`'s payload is: a Push is lent where the slot
-///   holds it, any other record decoded into `record`. The copying path decodes
-///   the whole message into a list first, out of a copy of the slot.
+///   holds it, any other record decoded into the `reader`'s record. The
+///   copying path decodes the whole message into a list first, out of a copy
+///   of the slot.
 ///
 /// Every other unit takes the path [`dispatch_datagram`] takes, and its events
 /// go to `on_event` as they are, with two differences: a `Frame` the SN gate
@@ -2247,7 +2305,7 @@ pub fn dispatch_datagram_reassembling<
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
     engine: &mut SessionEngine<R, T>,
-    record: &mut crate::network_message::RecordBuf,
+    reader: &mut DatagramReader,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     now_ms: u64,
     on_event: &mut F,
@@ -2268,16 +2326,9 @@ where
         actions,
         now_ms,
     };
-    dispatch_units(unit, actions, kept, on_event, |unit, resume, on_event| {
-        dispatch_datagram_reassembling_unit(
-            unit,
-            resume,
-            kept,
-            engine,
-            record,
-            &mut rejoin,
-            on_event,
-        )
+    let DatagramReader { record, resume } = reader;
+    dispatch_units(unit, resume, kept, on_event, |unit, from, on_event| {
+        dispatch_datagram_reassembling_unit(unit, from, kept, engine, record, &mut rejoin, on_event)
     })
 }
 

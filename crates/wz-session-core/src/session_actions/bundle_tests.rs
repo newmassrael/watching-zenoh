@@ -2442,6 +2442,81 @@ mod unicast_transport {
         );
     }
 
+    /// A datagram its link keeps is read on from where the last turn stopped, which the receive
+    /// notes beside its record: two KeepAlives in one datagram are read over two lends of the same
+    /// bytes, one a lend, and the turn between says the link is to keep it. A kept datagram read
+    /// to its end has nothing left, and finding so takes no lock. Turned red by a receive that
+    /// reads a kept datagram from its start again, that does not say the link is to keep it, or
+    /// that notes where it stopped under a lock.
+    #[cfg(all(feature = "rx-in-place", feature = "alloc"))]
+    #[test]
+    fn a_kept_datagram_is_read_on_from_where_its_receive_noted_it_stopped() {
+        use super::holds_in;
+        use crate::driver_loop::EventSink;
+
+        /// A host whose link keeps its datagram and that takes one message a lend.
+        #[derive(Default)]
+        struct OneALend {
+            events: usize,
+        }
+
+        impl EventSink for OneALend {
+            fn event(&mut self, _event: IterationEvent<'_, '_>) {
+                self.events += 1;
+            }
+
+            fn takes_another(&mut self) -> bool {
+                false
+            }
+
+            fn holds_datagram(&self) -> bool {
+                true
+            }
+        }
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let transport =
+            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
+        let keep_alive = wz_codecs::wire_const::T_MID_KEEP_ALIVE;
+        let datagram = [keep_alive, keep_alive];
+        let mut host = OneALend::default();
+
+        let mut first = transport.input_at(0);
+        first.datagram(&datagram, &mut engine, &*actions, &mut host);
+        assert_eq!(
+            host.events, 1,
+            "the first message, and no other in this lend"
+        );
+        assert!(first.resumes_datagram(), "the link is to keep the datagram");
+
+        let mut second = transport.input_at(0);
+        second.datagram(&datagram, &mut engine, &*actions, &mut host);
+        assert_eq!(
+            host.events, 2,
+            "the second message, read on from where the first lend stopped"
+        );
+        assert!(!second.resumes_datagram(), "read to its end");
+
+        let mut third = transport.input_at(0);
+        let holds = holds_in(|| {
+            third.datagram(&[], &mut engine, &*actions, &mut host);
+        });
+        assert_eq!(
+            host.events, 2,
+            "a kept datagram with nothing left reads nothing"
+        );
+        assert!(!third.resumes_datagram());
+        assert_eq!(
+            holds, 0,
+            "where the receive stands is its own, under no lock"
+        );
+    }
+
     /// A transport over a link handed to it made is due when its session is, and a life that
     /// asks for a look moves only the transport that holds it. Turned red by a made link that adds
     /// a wake of its own, or a due instant that reads another transport's life.
