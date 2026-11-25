@@ -676,6 +676,49 @@ fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
     );
 }
 
+/// The buffers of a session's links a report of its memory reads (`link_buffers`) are the plan's
+/// rows, count and bytes, for a client and, in a build that listens, a listener: one reckoning
+/// for both. In a build whose links share pools the receive buffers are the pool's, under
+/// `RX_POOL_BUFFERS`; otherwise one for each link. Turned red by a plan that lays its link rows
+/// out by another reckoning than the one a report reads, or a report that counts a buffer for
+/// each link of a pooled build.
+#[test]
+fn the_link_buffers_a_report_reads_are_the_plans_rows() {
+    use crate::arena::{link_buffers, links_of, LINKS_SHARE_POOLS};
+
+    let mut configs = vec![client_config()];
+    if cfg!(feature = "listen") {
+        configs.push(CoopConfig {
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            ..client_config()
+        });
+    }
+    let limits = SessionLimits::defaults();
+    for config in configs {
+        let plan = ArenaPlan::of(&config, &limits).expect("lays an arena out");
+        let links = links_of(&config).expect("within the address space");
+        let buffers =
+            link_buffers(links, config.batch_size, &limits).expect("the plan's batch and pools");
+        let receive = row(&plan, "link receive buffers");
+        let transmit = row(&plan, "link transmit slots");
+        assert_eq!(
+            (receive.count, receive.entry_bytes),
+            (buffers.receive, buffers.bytes)
+        );
+        assert_eq!(
+            (transmit.count, transmit.entry_bytes),
+            (buffers.transmit, buffers.bytes)
+        );
+        assert_eq!(buffers.bytes, usize::from(config.batch_size));
+        assert_eq!(plan.reassembly().1, buffers.chains);
+        if LINKS_SHARE_POOLS {
+            assert!(buffers.receive <= caps::RX_POOL_BUFFERS.min(links));
+        } else {
+            assert_eq!(buffers.receive, links);
+        }
+    }
+}
+
 /// A list of endpoints counts its `udp/` ones, in the host's form and in a source's alike.
 /// Turned red by a count that reads another scheme as udp, or a source's count that drops one.
 #[test]

@@ -603,16 +603,13 @@ fn memory_basis(
     tx_queue: &TxQueueConf,
     limits: &SessionLimits,
 ) -> crate::session_memory::MemoryBasis {
-    let rx = pico_link_rx(limits);
-    crate::session_memory::MemoryBasis {
-        limits: *limits,
-        links: crate::session_memory::links_of(listen, dials, limits),
-        queue_batches: crate::session_memory::link_tx_batches(tx_queue),
-        batch_bytes: usize::from(pico_unicast_batch(limits)),
-        rx_bytes: rx.buffer_size,
-        // `pico_link_rx` hands the engine `usize::MAX` where the snapshot states no bound.
-        message_bytes: limits.pico_frag_max_bytes().most(),
-    }
+    crate::session_memory::MemoryBasis::of(
+        limits,
+        crate::session_memory::links_of(listen, dials, limits),
+        pico_unicast_batch(limits),
+        tx_queue,
+        &pico_link_rx(limits),
+    )
 }
 
 /// The session as the handle holds it. The tokio engine boxes its session out of line so that the
@@ -3562,12 +3559,19 @@ mod build_numbers {
                 let (tx_queue, _) = pico_link_policy(&SessionPolicy::defaults(), &limits);
                 let basis = memory_basis(None, true, &tx_queue, &limits);
                 assert_eq!(basis.limits, limits);
-                let queue = memory_row(&basis.report(), c"link transmit queues");
+                let memory = basis.report();
+                let queue = memory_row(&memory, c"link transmit queues");
                 assert_eq!(queue.entry_bytes, value);
-                assert_eq!(
-                    queue.count,
-                    Some(crate::session_memory::link_tx_batches(&tx_queue))
-                );
+                // One link: every priority's queue on the tokio engine, its one slot on the
+                // cooperative engine, which also reads into a buffer of the stated batch.
+                #[cfg(feature = "engine-tokio")]
+                assert_eq!(queue.count, Some(tx_queue.sizes.iter().sum::<usize>()));
+                #[cfg(not(feature = "engine-tokio"))]
+                {
+                    assert_eq!(queue.count, Some(wz_capi_coop::arena::LINK_TX_SLOTS));
+                    let receive = memory_row(&memory, c"link receive buffers");
+                    assert_eq!((receive.count, receive.entry_bytes), (Some(1), value));
+                }
             },
         );
     }
@@ -3585,7 +3589,19 @@ mod build_numbers {
             |limits| {
                 let memory = memory_basis(None, true, &tx_queue(&limits), &limits).report();
                 let reassembly = memory_row(&memory, c"link reassembly");
-                assert_eq!((reassembly.count, reassembly.entry_bytes), (Some(2), value));
+                // Two for the dial's link on the tokio engine; the session's one table on the
+                // cooperative engine.
+                #[cfg(feature = "engine-tokio")]
+                let chains = 2;
+                #[cfg(not(feature = "engine-tokio"))]
+                let chains =
+                    wz_capi_coop::arena::link_buffers(1, pico_unicast_batch(&limits), &limits)
+                        .expect("the snapshot's batch")
+                        .chains;
+                assert_eq!(
+                    (reassembly.count, reassembly.entry_bytes),
+                    (Some(chains), value)
+                );
             },
         );
         stated(

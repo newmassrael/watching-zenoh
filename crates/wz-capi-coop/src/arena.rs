@@ -1746,27 +1746,13 @@ impl ArenaPlan {
             limits.pico_frag_max_bytes(),
             caps::PICO_FRAG_MAX_BYTES,
         );
-        // The links read into a pool they share, a buffer held by a link only while it holds part
-        // of a batch or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`);
-        // a pool of more buffers than links would hold one no link can take. They encode their
-        // frames into a pool of slots they share as well, a slot held by a link from its grant to
-        // its send, or until a frame its stream took in part is written
-        // (`wz_runtime_coop::link_storage::PooledTx`). A build that only dials holds its dial and
-        // the faces it attaches, and lends each link a buffer and a slot of its own.
-        #[cfg(feature = "listen")]
-        {
-            let rx_buffers = self.lent(
-                ArenaLimit::RxPoolBuffers,
-                Quota::at_most(limits.rx_pool_buffers()),
-                caps::RX_POOL_BUFFERS,
-            );
-            self.transport.rx_buffers = least(rx_buffers, links);
-            let tx_slots = self.lent(
-                ArenaLimit::TxPoolSlots,
-                Quota::at_most(limits.tx_pool_slots()),
-                caps::TX_POOL_SLOTS,
-            );
-            self.transport.tx_slots = least(tx_slots, links);
+        // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
+        match pooled_buffers(links, limits) {
+            Ok((rx_buffers, tx_slots)) => {
+                self.transport.rx_buffers = rx_buffers;
+                self.transport.tx_slots = tx_slots;
+            }
+            Err(refused) => self.refuse(refused),
         }
         #[cfg(wz_round)]
         {
@@ -2625,6 +2611,71 @@ const fn lent_under(
     match value.lent_under(Quota::at_most(ceiling)) {
         Ok(rows) => Ok(rows),
         Err(why) => Err(ArenaRefused::Limit { limit, why }),
+    }
+}
+
+/// Whether a session's links share a pool of receive buffers and one of outbound slots, as a build
+/// that listens lends them (`RX_POOL_BUFFERS`, `TX_POOL_SLOTS`), rather than each link holding a
+/// buffer and a slot of its own.
+pub const LINKS_SHARE_POOLS: bool = cfg!(feature = "listen");
+
+/// The buffers a session's links read their batches into and encode their frames into, and the
+/// buffers they stage the chains of fragmented messages in, as the session's plan lays them out
+/// ([`link_buffers`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkBuffers {
+    /// The receive buffers the plan lends the links.
+    pub receive: usize,
+    /// The outbound slots the plan lends the links.
+    pub transmit: usize,
+    /// The bytes of each receive buffer and of each slot: the batch the session advertises.
+    pub bytes: usize,
+    /// The reassembly buffers of the session's one table, which its links share.
+    pub chains: usize,
+}
+
+/// The buffers of the links of a session that holds `links` links at most and advertises `batch`
+/// under `limits`: what its plan lays out for them, from the same reckoning
+/// ([`ArenaPlan::lay_out`]), so a report of the session's memory reads what its open reserves.
+/// Refused as the plan refuses the batch or a pool's limit.
+pub const fn link_buffers(
+    links: usize,
+    batch: u16,
+    limits: &SessionLimits,
+) -> Result<LinkBuffers, ArenaRefused> {
+    let bytes = tried!(link_batch(batch, limits));
+    let (receive, transmit) = tried!(pooled_buffers(links, limits));
+    Ok(LinkBuffers {
+        receive,
+        transmit,
+        bytes,
+        chains: SESSION_CHAIN_BUFFERS,
+    })
+}
+
+/// The receive buffers and the outbound slots of `links` links under `limits`. A build that
+/// listens lends pools the links share, each holding a buffer only while it holds part of a batch
+/// or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`) and a slot from
+/// its grant to its send, or until a frame its stream took in part is written
+/// (`wz_runtime_coop::link_storage::PooledTx`): the pool's limit, and no more than the links, as a
+/// buffer no link can take is memory nothing uses. A build that only dials holds its dial and the
+/// faces it attaches, and lends each link a buffer and a slot of its own.
+const fn pooled_buffers(
+    links: usize,
+    limits: &SessionLimits,
+) -> Result<(usize, usize), ArenaRefused> {
+    if LINKS_SHARE_POOLS {
+        let rx = tried!(lent::<{ caps::RX_POOL_BUFFERS }>(
+            ArenaLimit::RxPoolBuffers,
+            Quota::at_most(limits.rx_pool_buffers()),
+        ));
+        let tx = tried!(lent::<{ caps::TX_POOL_SLOTS }>(
+            ArenaLimit::TxPoolSlots,
+            Quota::at_most(limits.tx_pool_slots()),
+        ));
+        Ok((least(rx, links), least(tx, links)))
+    } else {
+        Ok((links, links))
     }
 }
 
