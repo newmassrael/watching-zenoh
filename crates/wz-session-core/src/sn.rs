@@ -142,12 +142,73 @@ pub fn saturating_u32(sn: Sn) -> u32 {
     <SnWord<{ SN_RESOLUTION_HAS_64 }> as SnStorage>::saturating_u32(sn)
 }
 
-// The ring arithmetic of one word, its body written once: the session's rings run on `Sn`
-// (the functions at the top of this module), and an observer judges the rings of the peers it
-// reads at the width the wire carries, whatever the build's own word is (`wire`).
-// `$widest` is the widest `seq_num_res` code a ring of the word can be.
+// The ring arithmetic of one word, its body written once and stamped on the word's carrier
+// (`SnWord`): the 64-bit carrier answers for the wire, which every observer judges a peer's ring
+// on ([`wire`]), and the build's carrier answers for its sessions (the doors at the top of this
+// module). Where the build's word is 64 bits the two are the one carrier, so the session's doors
+// and the wire's reach the same body and the build holds one copy of it. `$widest` is the
+// widest `seq_num_res` code a ring of the word can be.
 macro_rules! ring_arithmetic {
     ($word:ty, $widest:expr) => {
+        /// The ring mask of a `seq_num_res` code on this word ([`crate::sn::mask_from_res`]).
+        pub const fn mask_from_res(seq_num_res: u8) -> $word {
+            match seq_num_res {
+                0x00 => 0x7F,
+                0x01 => 0x3FFF,
+                0x02 => 0x0FFF_FFFF,
+                _ => <$word>::MAX >> 1,
+            }
+        }
+
+        /// The narrowest ring holding `sn` ([`crate::sn::narrowest_mask_covering`]).
+        pub const fn narrowest_mask_covering(sn: $word) -> $word {
+            let mut res = 0u8;
+            while res < $widest && Self::mask_from_res(res) < sn {
+                res = res.saturating_add(1);
+            }
+            Self::mask_from_res(res)
+        }
+
+        /// Half the ring ([`crate::sn::half`]).
+        pub const fn half(mask: $word) -> $word {
+            mask >> 1
+        }
+
+        /// Half-window precedence ([`crate::sn::precedes`]).
+        pub const fn precedes(mask: $word, left: $word, right: $word) -> bool {
+            let distance = right.wrapping_sub(left) & mask;
+            distance != 0 && distance <= Self::half(mask)
+        }
+
+        /// Ring-consecutive check ([`crate::sn::consecutive`]).
+        pub const fn consecutive(mask: $word, left: $word, right: $word) -> bool {
+            right.wrapping_sub(left) & mask == 1
+        }
+
+        /// Modular decrement ([`crate::sn::decrement`]).
+        pub const fn decrement(mask: $word, sn: $word) -> $word {
+            sn.wrapping_sub(1) & mask
+        }
+
+        /// Modular increment ([`crate::sn::increment`]).
+        pub const fn increment(mask: $word, sn: $word) -> $word {
+            sn.wrapping_add(1) & mask
+        }
+    };
+}
+
+impl SnWord<true> {
+    ring_arithmetic!(u64, 0x03);
+}
+
+impl SnWord<false> {
+    ring_arithmetic!(u32, 0x02);
+}
+
+// The doors to one carrier's arithmetic, each a call the compiler inlines: a door holds no body
+// of its own, so two sets of doors to one carrier leave one copy of each body in the build.
+macro_rules! ring_doors {
+    ($word:ty, $carrier:ty) => {
         /// Map the 2-bit `seq_num_res` wire code to the SN ring MASK (ring size -
         /// 1). Mirrors zenoh-pico `_z_sn_max` / `_z_sn_modulo_mask` (utils.c):
         /// `0x00` -> 7-bit, `0x01` -> 14-bit, `0x02` -> 28-bit, `0x03` -> 63-bit
@@ -159,40 +220,34 @@ macro_rules! ring_arithmetic {
         /// from the 2-bit field, so the arm is unreachable from the wire). On a
         /// 32-bit word the widest arm is half the word; a session on such a word
         /// never runs `0x03` ([`crate::sn::SN_RES_WIDEST`]).
+        #[inline(always)]
         pub const fn mask_from_res(seq_num_res: u8) -> $word {
-            match seq_num_res {
-                0x00 => 0x7F,
-                0x01 => 0x3FFF,
-                0x02 => 0x0FFF_FFFF,
-                _ => <$word>::MAX >> 1,
-            }
+            <$carrier>::mask_from_res(seq_num_res)
         }
 
         /// The narrowest SN ring a session can negotiate that holds `sn`: the first of
         /// the masks [`mask_from_res`] answers for, in order up to the widest code of the
         /// word, that is at least `sn`. An `sn` past the widest ring is answered with the
         /// widest, which no sender of a conforming session can pass.
+        #[inline(always)]
         pub const fn narrowest_mask_covering(sn: $word) -> $word {
-            let mut res = 0u8;
-            while res < $widest && mask_from_res(res) < sn {
-                res = res.saturating_add(1);
-            }
-            mask_from_res(res)
+            <$carrier>::narrowest_mask_covering(sn)
         }
 
         /// Half the ring (`_z_sn_half`): the largest forward distance still
         /// considered "ahead" by [`precedes`].
+        #[inline(always)]
         pub const fn half(mask: $word) -> $word {
-            mask >> 1
+            <$carrier>::half(mask)
         }
 
         /// Half-window precedence (`_z_sn_precedes`): does `right` strictly follow
         /// `left` on the ring of `mask`? True iff the modular distance
         /// `(right - left) & mask` is non-zero and at most [`half`] the ring.
         /// Equality is NOT precedence (a duplicate SN is stale).
+        #[inline(always)]
         pub const fn precedes(mask: $word, left: $word, right: $word) -> bool {
-            let distance = right.wrapping_sub(left) & mask;
-            distance != 0 && distance <= half(mask)
+            <$carrier>::precedes(mask, left, right)
         }
 
         /// Ring-consecutive check (`_z_sn_consecutive`): is `right` exactly one
@@ -202,16 +257,18 @@ macro_rules! ring_arithmetic {
         /// First consumer: the reassembly dispatcher's strict in-order
         /// continuation check (§2.5) — a plain `==` on `wrapping_add(1)` diverges
         /// from this at the ring seam (R311ka F-5).
+        #[inline(always)]
         pub const fn consecutive(mask: $word, left: $word, right: $word) -> bool {
-            right.wrapping_sub(left) & mask == 1
+            <$carrier>::consecutive(mask, left, right)
         }
 
         /// Modular decrement (`_z_sn_decrement`). Used to seed a peer's last-seen
         /// SN from its JOIN-advertised `next_sn` (the next SN it WILL send): the
         /// baseline is one before, so the first data frame at exactly `next_sn`
         /// passes [`precedes`].
+        #[inline(always)]
         pub const fn decrement(mask: $word, sn: $word) -> $word {
-            sn.wrapping_sub(1) & mask
+            <$carrier>::decrement(mask, sn)
         }
 
         /// Modular increment (`_z_sn_increment`): the TX-side step on the same
@@ -221,19 +278,23 @@ macro_rules! ring_arithmetic {
         /// — the equivalent walk, see `SessionLinkActions::next_outbound_frame_sn`),
         /// and the fragment walk (`frame_encode::fragment_body`) steps with this
         /// (R311kb).
+        #[inline(always)]
         pub const fn increment(mask: $word, sn: $word) -> $word {
-            sn.wrapping_add(1) & mask
+            <$carrier>::increment(mask, sn)
         }
     };
 }
 
-ring_arithmetic!(Sn, SN_RES_WIDEST);
+ring_doors!(Sn, SnWord<{ SN_RESOLUTION_HAS_64 }>);
 
 /// The ring arithmetic at the width the wire carries, 64 bits whatever [`Sn`] is: what an
 /// observer judges a peer's ring with, since the ring is the peer's and may be one the build's
-/// own sessions never run. The same bodies as the session's.
+/// own sessions never run. Where [`Sn`] is 64 bits these doors and the session's reach the
+/// same body.
 pub mod wire {
-    ring_arithmetic!(u64, 0x03);
+    use super::SnWord;
+
+    ring_doors!(u64, SnWord<true>);
 }
 
 /// A1c — per-channel TX sequence-number mint state (zenoh-pico
