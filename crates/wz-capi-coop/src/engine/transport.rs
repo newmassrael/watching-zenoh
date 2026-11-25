@@ -29,6 +29,12 @@ impl<C: ClockSource + 'static, L: SessionLinks + 'static> TransportFaces for Fac
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
     type RouterPlace = super::RouterPlace;
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    type Router = SessionReassembly;
+    // The Router lies beside the one link the read steps itself, apart from the session's state
+    // (`super::direct`).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    type Router = ();
 }
 
 /// What the session tells the groups it joined of its entities (`group`): this engine's, since

@@ -70,7 +70,7 @@
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
-//!   ([`KeySpace`]), lent after the record and before the tables that keep their keys in it. A
+//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the tables that keep their keys in it. A
 //!   peer's key that finds no room there is dropped and counted, as zenoh-pico drops a
 //!   declaration its heap cannot hold;
 //! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
@@ -124,6 +124,7 @@ use wz_runtime_coop::RuntimePlace;
 use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
@@ -131,21 +132,25 @@ use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::policy::HeldPublishDrop;
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
-#[cfg(feature = "query")]
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::slot_observer::HeapSinks;
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
+use wz_session_core::slot_observer::{RequesterRows, SlotObserverOf};
 
+#[cfg(feature = "query")]
+use crate::engine::LegHold;
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
+use crate::engine::LegSink;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-use crate::engine::{
-    CoopTables, FACE_SET_BYTES, REGISTRY_LEND_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES,
-};
-#[cfg(feature = "query")]
-use crate::engine::{LegHold, LegSink};
+#[cfg(feature = "runtime-plan")]
+use crate::engine::{CoopTables, FACE_SET_BYTES};
+use crate::engine::{REGISTRY_LEND_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES};
 use crate::open_source::EndpointList;
 use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -670,18 +675,36 @@ impl ArenaRegion {
         }
     }
 
+    /// The rows of the session's tables the region lays out ([`ArenaPlan::tables`]).
+    pub const fn tables(&self) -> TableRows {
+        self.plan.tables()
+    }
+
+    /// The limits a session of the region opens under, and no other.
+    pub const fn limits(&self) -> &SessionLimits {
+        &self.limits
+    }
+
     /// Lay out on `plan`, [`ArenaPlan::vacant`] as made, this region's rows for an open of
     /// `config`, the plan [`ArenaPlan::count`] would lay out for a config of the region's shape
-    /// and limits. A region holds a row of text for each endpoint it may dial, so a config that
-    /// dials fewer leaves rows unwritten, and one that dials more is refused under
-    /// `MAX_STATIC_CONNECT`; any other number of the config, or limits, not the region's is
-    /// refused under [`ArenaLimit::ShapeDiffersFromBuild`] or
-    /// [`ArenaLimit::LimitsDifferFromBuild`], whose rows would be sized for another session.
+    /// and limits, refused as [`Self::admit`] refuses the config.
     pub(crate) fn lay_out_on<E: EndpointList>(
         &self,
         plan: &mut ArenaPlan,
         config: &CoopConfig<E>,
     ) -> Result<(), ArenaRefused> {
+        self.admit(config)?;
+        plan.clone_from(&self.plan);
+        Ok(())
+    }
+
+    /// Whether a session of `config` opens in this region. A region holds a row of text for each
+    /// endpoint it may dial, so a config that dials fewer leaves rows unwritten, and one that dials
+    /// more is refused under `MAX_STATIC_CONNECT`; any other number of the config, or limits, not
+    /// the region's is refused under [`ArenaLimit::ShapeDiffersFromBuild`] or
+    /// [`ArenaLimit::LimitsDifferFromBuild`], whose rows would be sized for another session. What
+    /// an open whose rows are a type's fields asks in place of a plan: it lays out nothing.
+    pub fn admit<E: EndpointList>(&self, config: &CoopConfig<E>) -> Result<(), ArenaRefused> {
         let shape = PlanShape::of(config);
         hold(ArenaLimit::MaxStaticConnect, shape.dials, self.shape.dials)?;
         // The handshakes a config admits size nothing for a session that listens on nothing
@@ -708,7 +731,6 @@ impl ArenaRegion {
                 why: UnlentRows::NoCeiling,
             });
         }
-        plan.clone_from(&self.plan);
         Ok(())
     }
 }
@@ -945,7 +967,7 @@ impl GetTables {
 
 /// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
 /// (`engine::registry::Gets`) and lays out none.
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
@@ -1796,10 +1818,17 @@ impl ArenaPlan {
             limits.max_decl_observers(),
             caps::MAX_DECL_OBSERVERS,
         );
-        let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
-            watchers,
-        ));
-        self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
+        // A build of the region's form lays the lists out in its region, at the build's bound; the
+        // limit is still held, so a config over the build's is refused under its name either way.
+        #[cfg(feature = "runtime-plan")]
+        {
+            let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
+                watchers,
+            ));
+            self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
+        }
+        #[cfg(not(feature = "runtime-plan"))]
+        let _laid_out_in_the_region = watchers;
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
             self.lent(
@@ -1829,7 +1858,8 @@ impl ArenaPlan {
         };
         // A row of tables, each the spans of one face's registries: a face takes one whole. A build
         // that asks no query holds no table of gets (`NoRequesters`), and its plan no row of them.
-        #[cfg(feature = "query")]
+        // A build of the region's form holds its face's gets in its region (`RegistryRegion`).
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         {
             let get_bytes = self.sized(FaceGets::arena_bytes(self.session.gets.rows));
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
@@ -1893,7 +1923,9 @@ impl ArenaPlan {
             dial: shape.dial_role(),
         };
         // The sets of face tables themselves, one for each face, in one table
-        // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it.
+        // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it. A
+        // build of the region's form holds its one set, its tables and their rows in its region.
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::FaceTables,
             self.session.peers.sets(),
@@ -1914,10 +1946,15 @@ impl ArenaPlan {
             self.session.peers.sets(),
             ROOM_PLACE_BYTES,
         );
-        let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
-        self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
+        #[cfg(feature = "runtime-plan")]
+        {
+            let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
+            self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
+        }
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
-        // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
+        // tables' own (`pool_rows`); none in a build whose faces keep those rows inline, as a
+        // build of the region's form does.
+        #[cfg(feature = "runtime-plan")]
         if SHARES_ROWS {
             let pools = self.session.peers.pools;
             let aliases = self.sized(pools.alias_bytes());
@@ -1979,6 +2016,9 @@ impl ArenaPlan {
                 );
             }
         }
+        // A build of the region's form holds the session's tables and its key arena in its region
+        // (`crate::region::StateRegion`).
+        #[cfg(feature = "runtime-plan")]
         self.put_entities();
         self.settled()
     }
@@ -2020,6 +2060,7 @@ impl ArenaPlan {
     }
 
     /// The rows of the session's declarations ([`EntityRows`]).
+    #[cfg(feature = "runtime-plan")]
     const fn put_entities(&mut self) {
         // The session's one table set, holding the kinds moved onto it so far: the write filters,
         // the matching listeners and the Interests they hold among them.
@@ -3008,6 +3049,16 @@ pub trait ArenaMemory: Sync {
     /// Never asked for zero bytes.
     fn reserve(&self, layout: Layout) -> Option<NonNull<u8>>;
 
+    /// [`Self::reserve`], every byte of it zero: what a session's region is reserved by, whose
+    /// fields are empty at zero bytes. Given back by [`Self::release`]. A memory that has its
+    /// own zeroed reservation (the allocator's) answers with it instead of writing the bytes.
+    fn reserve_zeroed(&self, layout: Layout) -> Option<NonNull<u8>> {
+        let base = self.reserve(layout)?;
+        // SAFETY: `reserve` gave `layout.size()` bytes at `base` to the caller alone.
+        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, layout.size()) };
+        Some(base)
+    }
+
     /// Give back what [`Self::reserve`] gave.
     ///
     /// # Safety
@@ -3026,6 +3077,11 @@ impl ArenaMemory for AllocatorMemory {
     fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
         // SAFETY: the layout is not of zero bytes, which the trait's contract rules out.
         NonNull::new(unsafe { alloc::alloc::alloc(layout) })
+    }
+
+    fn reserve_zeroed(&self, layout: Layout) -> Option<NonNull<u8>> {
+        // SAFETY: as for `reserve`.
+        NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
     }
 
     unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
@@ -3340,6 +3396,55 @@ mod tests {
 
     fn empty_plan() -> ArenaPlan {
         ArenaPlan::vacant()
+    }
+
+    /// The allocator, its reservations written over with a byte that is not zero: a memory with no
+    /// zeroed reservation of its own.
+    struct Dirty;
+
+    /// The byte [`Dirty`] writes over what it reserves.
+    const DIRTY: u8 = 0xa5;
+
+    impl ArenaMemory for Dirty {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            let base = AllocatorMemory.reserve(layout)?;
+            // SAFETY: the allocator gave `layout.size()` bytes at `base` to this call alone.
+            unsafe { core::ptr::write_bytes(base.as_ptr(), DIRTY, layout.size()) };
+            Some(base)
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
+            unsafe { AllocatorMemory.release(base, layout) }
+        }
+    }
+
+    /// A zeroed reservation is zero in every byte, from a memory whose own reservations are not
+    /// and from the allocator's own zeroed one. Turned red by a zeroed reservation that leaves a
+    /// byte as the memory gave it.
+    #[test]
+    fn a_zeroed_reservation_is_zero_in_every_byte() {
+        let layout = Layout::from_size_align(256, ARENA_ALIGN).expect("a small layout");
+        let read = |memory: &dyn ArenaMemory, zeroed: bool| {
+            let base = if zeroed {
+                memory.reserve_zeroed(layout)
+            } else {
+                memory.reserve(layout)
+            }
+            .expect("the allocator answers");
+            // SAFETY: the memory gave `layout.size()` bytes at `base`, read once and given back.
+            unsafe {
+                let bytes = core::slice::from_raw_parts(base.as_ptr(), layout.size()).to_vec();
+                memory.release(base, layout);
+                bytes
+            }
+        };
+        assert!(
+            read(&Dirty, false).iter().all(|byte| *byte == DIRTY),
+            "CONTROL: the memory's own reservation is not zero"
+        );
+        assert!(read(&Dirty, true).iter().all(|byte| *byte == 0));
+        assert!(read(&AllocatorMemory, true).iter().all(|byte| *byte == 0));
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.

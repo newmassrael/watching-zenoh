@@ -2374,6 +2374,28 @@ impl Inner {
     }
 }
 
+/// Why a node's local plane was not made ([`SharedSession::new`]): the plane's open is refused
+/// and the node with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaneRefused {
+    /// The host had no entropy for the plane's cookie signing key.
+    EntropyUnavailable,
+    /// The runtime had no room for the plane's action bundle.
+    HeapRefused,
+}
+
+impl From<wz_runtime_tokio::session_glue::EntropyUnavailable> for PlaneRefused {
+    fn from(_: wz_runtime_tokio::session_glue::EntropyUnavailable) -> Self {
+        Self::EntropyUnavailable
+    }
+}
+
+impl From<wz_session_core::link::HeapRefused> for PlaneRefused {
+    fn from(_: wz_session_core::link::HeapRefused) -> Self {
+        Self::HeapRefused
+    }
+}
+
 /// The registry behind a `z_owned_session_t`, shared between the C thread
 /// (which declares and publishes) and the drive thread (which brings faces up
 /// and dispatches inbound samples).
@@ -2852,7 +2874,7 @@ impl SharedSession {
         clock: TokioTime,
         zid: SessionZid,
         session_policy: SessionPolicy,
-    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+    ) -> Result<Self, PlaneRefused> {
         Self::new_with_resources(clock, zid, SessionResources::under(session_policy))
     }
 
@@ -2864,7 +2886,7 @@ impl SharedSession {
         zid: SessionZid,
         node_hlc: NodeHlc,
         session_policy: SessionPolicy,
-    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+    ) -> Result<Self, PlaneRefused> {
         Self::new_with_resources(
             clock,
             zid,
@@ -2882,7 +2904,7 @@ impl SharedSession {
         clock: TokioTime,
         zid: SessionZid,
         resources: SessionResources,
-    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+    ) -> Result<Self, PlaneRefused> {
         let SessionResources {
             node_hlc,
             shm_clients,
@@ -2943,7 +2965,7 @@ impl SharedSession {
                 limits: session_limits,
             },
         )?;
-        let actions = new_session_actions(driver, params, clock);
+        let actions = new_session_actions(driver, params, clock)?;
         // Nothing establishes the plane, whose link no handshake runs over: its sends (the
         // declarations of its own registrations) are let through from the start.
         actions.open_without_handshake();

@@ -202,6 +202,7 @@ async fn a_link_leaving_an_aggregate_announces_a_link_only_close() {
         JoinOutcome::Joined(handle) => handle,
         JoinOutcome::InvalidPubkey => panic!("the second link must aggregate, got InvalidPubkey"),
         JoinOutcome::OverLimit => panic!("the second link must aggregate, got OverLimit"),
+        JoinOutcome::HeapRefused => panic!("the second link must aggregate, got HeapRefused"),
     };
     assert_eq!(
         a_primary.link_count(),

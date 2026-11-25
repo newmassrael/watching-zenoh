@@ -265,7 +265,7 @@ fn hex_of(zid: u8) -> String {
 fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16) -> Rig<S> {
     let zid_hex = hex_of(zid);
     let runtime: Rt = s.runtime.start(Frozen).expect("the runtime starts once");
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
     // The application's registrations, on the observer every session of the node dispatches to.
     let locator = format!("tcp/127.0.0.1:{port}");
@@ -302,7 +302,7 @@ fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16
     );
     let acceptor = stack.acceptor(LwipTcpListen::new(link, &s.listener));
     let host: &'static Host<S> = Box::leak(Box::new(SessionHost::new(
-        CoopLocalSet::new(&runtime),
+        CoopLocalSet::try_new(&runtime).expect("the heap has room"),
         &s.sessions,
         &s.pumps,
         stack,

@@ -614,7 +614,7 @@ mod tests {
         let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
         let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
 
-        let runtime = CoopRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = driver.clone().into_sink();
         let actions =
@@ -622,7 +622,8 @@ mod tests {
                 sink,
                 params(),
                 clock,
-            );
+            )
+            .expect("the heap has room");
         // The reply leaves as a data send, which a session lets through only once established.
         actions.enter_established();
 
@@ -734,14 +735,15 @@ mod tests {
             let node_at = SocketAddr::from(([10, 0, 0, 1], 7473));
             let peer_at = SocketAddr::from(([10, 0, 0, 2], 7474));
             let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let sink = driver.into_sink();
             let actions =
                 SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
                     sink,
                     SessionInitParams { policy, ..params() },
                     CoopTime::new(&runtime),
-                );
+                )
+                .expect("the heap has room");
 
             let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
             let other = match value {

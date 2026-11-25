@@ -396,6 +396,21 @@ impl<P: Storage> Default for PeerTokens<P> {
     }
 }
 
+// SAFETY: of the region policy, at all zero bytes: the declared tokens are a `FixedIdMap`
+// (`ZeroEmpty`); the bounds are `Limited` (`ZeroEmpty`), bounds of nothing until the session states
+// them; the key arena handle is a `LentKeys` of none; the refused count is zero.
+unsafe impl crate::bounded::ZeroEmpty for PeerTokens<crate::bounded::Region> {}
+
+#[cfg(feature = "storage-profile")]
+impl PeerTokens<crate::bounded::Region> {
+    /// Where a table of the region policy at `at` in a region keeps its handle to the region's key
+    /// arena: the line of a region's description
+    /// ([`place_region`](crate::key_arena::place_region)) that hands it the arena.
+    pub const fn key_line(at: usize) -> usize {
+        at.wrapping_add(core::mem::offset_of!(Self, keys))
+    }
+}
+
 impl PeerTokens<Static> {
     /// A peer of the static policy that has declared no token. `const`, so a session
     /// slot that holds one can be a `static`.

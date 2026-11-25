@@ -1193,7 +1193,7 @@ pub fn validate_keyexpr(text: &str) -> Result<(), KeyexprRefusal> {
 // ──────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "alloc")]
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
 /// The text an outbound-keyexpr refusal quotes ([`OutboundKeyexprError`]): a `String`
 /// on the heap profile, and on a build with no allocator a text of
@@ -1212,10 +1212,14 @@ pub type DiagnosticText = heapless::String<DIAGNOSTIC_TEXT_BYTES>;
 #[cfg(all(feature = "storage-profile", not(feature = "alloc")))]
 pub const DIAGNOSTIC_TEXT_BYTES: usize = 48;
 
-/// `text` as a [`DiagnosticText`].
+/// `text` as a [`DiagnosticText`], or the empty text when the heap has no room for the copy: the
+/// refusal that quotes it stands without the quote, and a full heap never ends the program here.
 #[cfg(feature = "alloc")]
 fn diagnostic_text(text: &str) -> DiagnosticText {
-    text.to_string()
+    let mut out = DiagnosticText::new();
+    // Refused, `out` is left empty, which is the answer.
+    let _ = crate::bounded::push_heap_text(&mut out, text);
+    out
 }
 
 /// `text` as a [`DiagnosticText`], cut at the last character boundary that fits.

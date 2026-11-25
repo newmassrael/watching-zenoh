@@ -47,7 +47,8 @@ async fn accepting_under(
     params.cookie = cookie.to_vec();
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);

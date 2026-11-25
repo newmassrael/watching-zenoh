@@ -119,7 +119,7 @@ impl MemoryNetwork {
         if queues.contains_key(&local) {
             return Err(LinkOpenError::Exhausted);
         }
-        Ok(self.claim(&mut queues, local, peer))
+        self.claim(&mut queues, local, peer)
     }
 
     /// Bind an end on `addr` at a port nobody holds, taken from the ephemeral
@@ -135,17 +135,21 @@ impl MemoryNetwork {
         let port = self
             .next_unclaimed_port(&queues, addr)
             .ok_or(LinkOpenError::Exhausted)?;
-        Ok(self.claim(&mut queues, SocketAddr::new(addr, port), peer))
+        self.claim(&mut queues, SocketAddr::new(addr, port), peer)
     }
 
     /// Register `local`'s queue and build the end that owns it. The caller has
     /// checked, under the borrow it passes in, that nothing is bound there.
+    /// [`LinkOpenError::Exhausted`] when the heap has no room for the end, `local` left unbound.
     fn claim(
         self: &Rc<Self>,
         queues: &mut Queues,
         local: SocketAddr,
         peer: Option<SocketAddr>,
-    ) -> CellRc<MemoryEnd> {
+    ) -> Result<CellRc<MemoryEnd>, LinkOpenError> {
+        // The end's cell is had before its port is registered, so a refused one leaves the network
+        // as it was, and the end is written where it stays.
+        let cell = CellRc::<MemoryEnd>::claim(None).ok_or(LinkOpenError::Exhausted)?;
         queues.insert(local, VecDeque::new());
         let end = MemoryEnd {
             net: self.clone(),
@@ -156,7 +160,8 @@ impl MemoryNetwork {
             },
             tx: TxLender::new(MemoryTx::new()),
         };
-        CellRc::boxed(end)
+        cell.made(|at| at.write(end))
+            .ok_or(LinkOpenError::Exhausted)
     }
 
     /// The next port on `addr`, from the ephemeral range, that `queues` does not
@@ -410,6 +415,25 @@ mod tests {
             frame_bytes(dialling.pump.try_recv()),
             Some(b"world".to_vec())
         );
+    }
+
+    /// An end the heap has no room for is refused as a network with no port left, and leaves the
+    /// port unbound: the same bind with the heap's room takes it. Turned red by a claim that
+    /// registers the port before it has the end's cell, or ends the process on the refusal.
+    #[test]
+    fn an_end_the_heap_has_no_room_for_is_exhausted_and_leaves_its_port_free() {
+        let net = MemoryNetwork::new();
+        let at = SocketAddr::from((HOST_A, 7450));
+        let refused = crate::test_heap::refused(|| net.bind(at, None).err());
+        std::assert!(matches!(refused, Some(LinkOpenError::Exhausted)));
+        std::assert!(
+            net.bind(at, None).is_ok(),
+            "the refused bind left the port to the next"
+        );
+
+        let ephemeral =
+            crate::test_heap::refused(|| net.bind_ephemeral(HOST_B.into(), Some(at)).err());
+        std::assert!(matches!(ephemeral, Some(LinkOpenError::Exhausted)));
     }
 
     /// An end lends its slots for a frame to be encoded into: a lent frame reaches the peer as the

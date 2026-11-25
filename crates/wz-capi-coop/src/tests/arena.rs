@@ -852,7 +852,9 @@ fn the_plan_lays_out_the_key_arena_the_limits_state() {
 /// The plan lends each keyed row of the session at the lent policy's size, which keeps the place
 /// of its key and not its text: a subscription's row and a face's peer tables are shorter than the
 /// static policy's, whose rows keep a key of `MAX_KEYEXPR_BYTES` inline, and the text of every key
-/// lies in the plan's one key arena row.
+/// lies in the plan's one key arena row. A build of the region's form lends none of those rows
+/// from its arena (`crate::region::StateRegion`).
+#[cfg(feature = "runtime-plan")]
 #[test]
 fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
     use wz_session_core::bounded::Static;

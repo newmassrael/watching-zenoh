@@ -14,7 +14,7 @@
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn keyexpr_chunk_kind(k: &[u8], s: u32, e: u32) -> u8 {
-    if e > (k).len() as u32 {
+    if e > k.len() as u32 {
         return 0;
     }
     if s >= e {

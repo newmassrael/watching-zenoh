@@ -42,16 +42,13 @@
 //! lets the MCU session stack — handshake + reassembly consumer — reach
 //! ARMv6-M, the no-alloc M0 session reach the AP `Arc` blocked.
 
-#[cfg(not(feature = "session-slot"))]
-use alloc::rc::Rc;
-
 use wz_runtime_core::TimeSource;
 use wz_session_core::entropy::EntropySource;
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::entropy::EntropyUnavailable;
-#[cfg(not(feature = "session-slot"))]
-use wz_session_core::link::ShareValues;
 use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
+#[cfg(not(feature = "session-slot"))]
+use wz_session_core::link::{HeapRefused, ShareValues};
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::session_actions::SessionLinkActions;
 #[cfg(feature = "session-slot")]
@@ -100,8 +97,8 @@ impl<U> core::ops::Deref for NoShared<U> {
 impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> ShareValues
     for CoopRuntime<C, D, K>
 {
-    fn share<U>(value: U) -> Self::Shared<U> {
-        crate::link_cells::CellRc::boxed(value)
+    fn share<U>(value: U) -> Result<Self::Shared<U>, HeapRefused> {
+        crate::link_cells::CellRc::try_boxed(value).ok_or(HeapRefused)
     }
 }
 
@@ -191,8 +188,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     type EntropyDraw = SessionEntropy;
 
     #[cfg(not(feature = "session-slot"))]
-    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
-        crate::link_cells::CellRc::boxed(actions)
+    fn wrap_actions<T: TimeSource>(
+        actions: SessionLinkActions<Self, T>,
+    ) -> Result<Self::ActionsHandle<T>, HeapRefused> {
+        crate::link_cells::CellRc::try_boxed(actions).ok_or(HeapRefused)
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &D {
@@ -227,15 +226,29 @@ pub type SessionHandle<C, D = dyn BoxedLinkDriver, K = crate::sync::Shared> =
 /// draw) is refused as no entropy, the fail-closed answer.
 #[cfg(not(feature = "session-slot"))]
 #[derive(Clone)]
-pub struct SessionEntropy(Rc<core::cell::RefCell<dyn EntropySource>>);
+pub struct SessionEntropy(crate::link_cells::CellRc<core::cell::RefCell<dyn EntropySource>>);
 
 #[cfg(not(feature = "session-slot"))]
 impl SessionEntropy {
-    /// The handle on `source`, the session's one source.
-    pub fn new(source: impl EntropySource + 'static) -> Self {
-        let source: Rc<core::cell::RefCell<dyn EntropySource>> =
-            Rc::new(core::cell::RefCell::new(source));
-        Self(source)
+    /// The handle on `source`, the session's one source, or the bytes of the cell the heap
+    /// refused, `source` let go of.
+    pub fn try_new<E: EntropySource + 'static>(source: E) -> Result<Self, usize> {
+        type SourceCell<S> = crate::link_cells::CellRc<core::cell::RefCell<S>>;
+        SourceCell::<E>::in_cells(None, core::cell::RefCell::new(source))
+            .map(Self::of_cell)
+            .map_err(|_| SourceCell::<E>::cell_bytes())
+    }
+
+    /// The handle on the source `cell` holds.
+    fn of_cell<E: EntropySource + 'static>(
+        cell: crate::link_cells::CellRc<core::cell::RefCell<E>>,
+    ) -> Self {
+        // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
+        Self(unsafe {
+            cell.unsize(
+                |value| -> core::ptr::NonNull<core::cell::RefCell<dyn EntropySource>> { value },
+            )
+        })
     }
 }
 
@@ -283,12 +296,14 @@ fn _session_link_actions_composes_on_lwip<C: ClockSource>(
 /// challenges are drawn at each InitAck by the session's handshake binding, from the
 /// session's one source ([`SessionEntropy`]) the pump that builds its engine is handed.
 /// Before that, a bundle holds no nonce (`cookie_nonce` is `None`, fail-closed).
+///
+/// [`HeapRefused`] when the heap has no room for the bundle: the open is refused.
 #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
 pub fn new_session_actions<C>(
     driver: crate::link_cells::CellRc<dyn BoxedLinkDriver>,
     params: wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
-) -> SessionHandle<C>
+) -> Result<SessionHandle<C>, HeapRefused>
 where
     C: ClockSource,
 {
@@ -417,10 +432,37 @@ mod cookie_nonce_draw_tests {
     }
 
     fn build() -> SessionHandle<StoppedClock> {
-        let runtime = CoopRuntime::new(StoppedClock);
+        let runtime = CoopRuntime::try_new(StoppedClock).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let driver = crate::link_cells::heap_sink(NullDriver);
-        new_session_actions(driver, params(), clock)
+        let driver = crate::link_cells::heap_sink(NullDriver).expect("the heap has room");
+        new_session_actions(driver, params(), clock).expect("the heap has room")
+    }
+
+    /// A heap with no room for a shared value's cell, or for the cell of a bundle's handle,
+    /// refuses it, and the value is let go of: the open that asked is refused and the program
+    /// goes on. Turned red by `ShareValues::share` or `wrap_actions` making their cells with a
+    /// maker that ends the program on a refused heap, or answering a handle past the refusal.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_value_the_heap_has_no_room_for_is_refused() {
+        type Rt = CoopRuntime<StoppedClock>;
+        let shared = crate::table_tests::refused(|| <Rt as ShareValues>::share(7u32).err());
+        assert_eq!(shared, Some(HeapRefused));
+
+        let runtime = Rt::try_new(StoppedClock).expect("the heap has room");
+        let driver = crate::link_cells::heap_sink(NullDriver).expect("the heap has room");
+        let actions = SessionLinkActions::<Rt, CoopTime<StoppedClock>>::build(
+            driver,
+            params(),
+            CoopTime::new(&runtime),
+        )
+        .expect("the heap has room");
+        let wrapped = crate::table_tests::refused(|| Rt::wrap_actions(actions).err());
+        assert_eq!(wrapped, Some(HeapRefused));
+        assert!(
+            <Rt as ShareValues>::share(7u32).is_ok(),
+            "a heap with room makes the cell"
+        );
     }
 
     /// The bundle is one link's and keeps no source, so it holds no nonce until a handshake's
@@ -429,7 +471,9 @@ mod cookie_nonce_draw_tests {
     fn a_bundle_holds_no_nonce_until_its_binding_draws_one() {
         let actions = build();
         assert_eq!(actions.cookie_nonce(), None, "no source, no nonce");
-        assert!(actions.draw_cookie_nonce(&mut SessionEntropy::new(Counting(0))));
+        assert!(actions.draw_cookie_nonce(
+            &mut SessionEntropy::try_new(Counting(0)).expect("the heap has room")
+        ));
         assert!(actions.cookie_nonce().is_some());
     }
 
@@ -437,7 +481,7 @@ mod cookie_nonce_draw_tests {
     #[test]
     fn two_draws_on_one_bundle_take_two_nonces() {
         let actions = build();
-        let mut entropy = SessionEntropy::new(Counting(0));
+        let mut entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         assert!(
             actions.draw_cookie_nonce(&mut entropy),
             "a live source must draw"
@@ -458,7 +502,9 @@ mod cookie_nonce_draw_tests {
         let mut probe = Counting(0);
         let expected = probe.try_next_u64().unwrap();
         let actions = build();
-        assert!(actions.draw_cookie_nonce(&mut SessionEntropy::new(Counting(0))));
+        assert!(actions.draw_cookie_nonce(
+            &mut SessionEntropy::try_new(Counting(0)).expect("the heap has room")
+        ));
         assert_eq!(actions.cookie_nonce(), Some(expected));
     }
 
@@ -468,7 +514,7 @@ mod cookie_nonce_draw_tests {
     fn the_links_of_a_session_draw_from_its_one_source() {
         let mut probe = Counting(0);
         let (first, second) = (probe.try_next_u64().unwrap(), probe.try_next_u64().unwrap());
-        let session = SessionEntropy::new(Counting(0));
+        let session = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let (a, b) = (build(), build());
         assert!(a.draw_cookie_nonce(&mut session.clone()));
         assert!(b.draw_cookie_nonce(&mut session.clone()));
@@ -478,12 +524,28 @@ mod cookie_nonce_draw_tests {
         );
     }
 
+    /// A source whose cell the heap has no room for is no handle, and with room it is the handle
+    /// a session draws from. Turned red by `try_new` made through a cell maker that ends the
+    /// process on the refusal.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_source_the_heap_has_no_room_for_is_no_handle() {
+        assert!(crate::table_tests::refused(|| SessionEntropy::try_new(Counting(0))).is_err());
+        let mut probe = Counting(0);
+        let expected = probe.try_next_u64().unwrap();
+        let actions = build();
+        let mut entropy = SessionEntropy::try_new(Counting(0)).expect("room for the cell");
+        assert!(actions.draw_cookie_nonce(&mut entropy));
+        assert_eq!(actions.cookie_nonce(), Some(expected));
+    }
+
     #[test]
     fn a_dry_source_leaves_the_slot_fail_closed() {
         // Not "no binding" but "admit no OpenSyn". A fallback to a constant
         // here would be indistinguishable from a working binding.
         let actions = build();
-        assert!(!actions.draw_cookie_nonce(&mut SessionEntropy::new(Dry)));
+        assert!(!actions
+            .draw_cookie_nonce(&mut SessionEntropy::try_new(Dry).expect("the heap has room")));
         assert_eq!(
             actions.cookie_nonce(),
             None,
@@ -511,7 +573,7 @@ mod cookie_nonce_draw_tests {
         }
 
         let actions = build();
-        let mut entropy = SessionEntropy::new(DriesUp(true));
+        let mut entropy = SessionEntropy::try_new(DriesUp(true)).expect("the heap has room");
         assert!(
             actions.draw_cookie_nonce(&mut entropy),
             "the first draw lands"

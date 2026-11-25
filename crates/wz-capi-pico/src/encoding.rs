@@ -571,8 +571,14 @@ pub unsafe extern "C" fn z_encoding_to_string(
             Some(view) => (view.packed_id, view.schema),
             None => (u32::from(ENCODING_ID_DEFAULT) << 1, None),
         };
-        let rendered = wz_session_core::encoding_hint::parts_to_bytes(packed_id, schema);
-        store_owned_string(string, &rendered)
+        // A rendering the heap has no room for is pico's out of memory, the string left null.
+        match wz_session_core::encoding_hint::try_parts_to_bytes(packed_id, schema) {
+            Some(rendered) => store_owned_string(string, &rendered),
+            None => {
+                *string = z_owned_string_t::null_value();
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
+            }
+        }
     })
 }
 

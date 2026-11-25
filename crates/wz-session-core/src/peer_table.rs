@@ -253,7 +253,7 @@ pub struct PeerTable<K, const N: usize> {
 }
 
 impl<K, const N: usize> PeerTable<K, N> {
-    /// Names every field of the table. [`PeerPlanner::new_boxed`](crate::peer_planner::PeerPlanner::new_boxed)
+    /// Names every field of the table. [`PeerPlanner::try_boxed`](crate::peer_planner::PeerPlanner::try_boxed)
     /// takes the all-zero bytes of a table for an empty one, which holds while every field is a
     /// length-bounded vector or a count; a field added here stops this from compiling, so that
     /// whoever adds it reads that claim against it.

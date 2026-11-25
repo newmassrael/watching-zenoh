@@ -436,7 +436,7 @@ macro_rules! mac_from_build {
 
 /// The Zephyr profile's runtime: the wz-runtime-coop cooperative executor (the
 /// SSOT) parameterised by [`ZephyrClock`]. Construct with
-/// `CoopRuntime::new(ZephyrClock::<TICK_HZ>)`. NOT a reimplementation — the task
+/// `CoopRuntime::try_new(ZephyrClock::<TICK_HZ>)`. NOT a reimplementation — the task
 /// pool / waker / timer queue are wz-runtime-coop's, only the clock seam is
 /// Zephyr-specific.
 pub type ZephyrRuntime<const TICK_HZ: u32> = CoopRuntime<ZephyrClock<TICK_HZ>>;

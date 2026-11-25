@@ -87,20 +87,50 @@ pub trait FaceRecord {
     /// The face's number.
     fn id(&self) -> FaceId;
 
+    /// How the session of the face's link ends ([`LinkEnd`]): a task's handle, or the end of a
+    /// link whose session the owner steps itself.
+    type End: LinkEnd;
+
     /// The face's link.
-    fn link(&self) -> &Link<Self::Session, Self::Dial>;
+    fn link(&self) -> &Link<Self::Session, Self::Dial, Self::End>;
 
     /// The face's link, to replace.
-    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Dial>;
+    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Dial, Self::End>;
 }
 
-/// One link of a face: the session's half of it (`S`), the task that runs it, the link as the
-/// session's step reads it, and what its owner waits on for its input and its room, read off the
-/// link when it is made. It reads as the session's half (`Deref`): what the session sends over
-/// the link is that half's.
-pub struct Wire<S> {
+/// How a face's owner tells that the session of a link ended, and ends it ([`Wire`]). A
+/// link whose session runs as a task of the session's set ends with its task ([`TaskEnd`]); a
+/// link whose session its owner steps itself ends as the owner's last step of it said, and is
+/// let go of by the owner once no step of it is under way.
+pub trait LinkEnd {
+    /// Whether the link's session has ended.
+    fn finished(&self) -> bool;
+
+    /// End the link's session, whatever it is doing. One a step of its owner is running ends
+    /// once that step has returned.
+    fn abort(&self);
+}
+
+/// The end of a link whose session runs as a task of the session's set: the task's handle.
+pub type TaskEnd = CoopLocalJoinHandle<DriverOutcome>;
+
+impl LinkEnd for TaskEnd {
+    fn finished(&self) -> bool {
+        self.is_finished()
+    }
+
+    fn abort(&self) {
+        CoopLocalJoinHandle::abort(self);
+    }
+}
+
+/// One link of a face: the session's half of it (`S`), how its session ends (`E`, [`LinkEnd`]),
+/// the link as the session's step reads it, and what its owner waits on for its input and its
+/// room, read off the link when it is made. It reads as the session's half (`Deref`): what the
+/// session sends over the link is that half's.
+pub struct Wire<S, E = TaskEnd> {
     session: S,
-    task: CoopLocalJoinHandle<DriverOutcome>,
+    end: E,
     link: CellRc<dyn SessionDatagramLink>,
     input: Option<WaitOn>,
     room: Option<WaitOn>,
@@ -121,35 +151,35 @@ fn waits_for_buffer(link: &CellRc<dyn SessionDatagramLink>) -> bool {
     }
 }
 
-impl<S> Wire<S> {
-    /// The link whose session half is `session`, run by `task`: `link` is what the session's
+impl<S, E: LinkEnd> Wire<S, E> {
+    /// The link whose session half is `session`, ended by `end`: `link` is what the session's
     /// step reads, behind whatever gates the session put on it, and `input_wait` and `room_wait`
     /// what its owner waits on for its input and its room, read off the link without the gates
     /// ([`SessionDatagramLink::input_wait`], [`SessionDatagramLink::room_wait`]).
     pub fn new(
         session: S,
-        task: CoopLocalJoinHandle<DriverOutcome>,
+        end: E,
         link: CellRc<dyn SessionDatagramLink>,
         input_wait: Option<WaitOn>,
         room_wait: Option<WaitOn>,
     ) -> Self {
         Self {
             session,
-            task,
+            end,
             link,
             input: input_wait,
             room: room_wait,
         }
     }
 
-    /// Whether the link's task has ended.
+    /// Whether the link's session has ended ([`LinkEnd::finished`]).
     pub fn finished(&self) -> bool {
-        self.task.is_finished()
+        self.end.finished()
     }
 
-    /// End the link's task.
+    /// End the link's session ([`LinkEnd::abort`]).
     pub fn abort(&self) {
-        self.task.abort();
+        self.end.abort();
     }
 
     /// Whether the link holds input it has already taken from its stack.
@@ -168,7 +198,7 @@ impl<S> Wire<S> {
     }
 }
 
-impl<S> Deref for Wire<S> {
+impl<S, E> Deref for Wire<S, E> {
     type Target = S;
 
     fn deref(&self) -> &S {
@@ -179,15 +209,15 @@ impl<S> Deref for Wire<S> {
 /// A face's link: up, in its handshake, being dialled, waiting to be dialled, or standing by. A
 /// dial under way is held in its face's link, so a face has one dial at most and the faces' table
 /// is the dials' table too.
-pub enum Link<S, D> {
+pub enum Link<S, D, E = TaskEnd> {
     /// Established: the session's sends go through it.
-    Up(Wire<S>),
+    Up(Wire<S, E>),
     /// A handshake under way, given up at `deadline_us`. The dial role's face has dialled the
     /// endpoint before `next` and goes on to the one after; another face holds a link it dialled
     /// once or took off a port, and is removed when the handshake fails.
     Opening {
         /// The link in its handshake.
-        wire: Wire<S>,
+        wire: Wire<S, E>,
         /// The endpoint the dial role dials next when this one fails.
         next: usize,
         /// When the handshake is given up.
@@ -217,9 +247,9 @@ pub enum Link<S, D> {
     },
 }
 
-impl<S, D> Link<S, D> {
+impl<S, D, E> Link<S, D, E> {
     /// The link's wire while it is up or in its handshake.
-    pub fn wire(&self) -> Option<&Wire<S>> {
+    pub fn wire(&self) -> Option<&Wire<S, E>> {
         match self {
             Link::Up(wire) | Link::Opening { wire, .. } => Some(wire),
             _ => None,
@@ -976,7 +1006,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     }
 
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
-    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial>) {
+    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial, F::End>) {
         if let Some(face) = self.face_mut(at) {
             *face.link_mut() = link;
         }
@@ -1424,6 +1454,7 @@ mod tests {
         type Session = Session;
         type Pump = Rc<Quiet>;
         type Dial = Answer;
+        type End = TaskEnd;
 
         fn id(&self) -> FaceId {
             self.id
@@ -1621,9 +1652,55 @@ mod tests {
         if finished {
             local.run_until_idle();
         }
-        let link = CellRc::boxed(Quiet { holds }).into_link();
+        let link = CellRc::try_boxed(Quiet { holds })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         Wire::new(session, task, link, input_wait, room_wait)
+    }
+
+    /// The end of a link its owner steps itself: finished once its last step said so, and asked
+    /// to end by an abort it keeps for the owner.
+    #[derive(Default)]
+    struct HeldEnd {
+        finished: Cell<bool>,
+        aborted: Cell<bool>,
+    }
+
+    impl LinkEnd for Rc<HeldEnd> {
+        fn finished(&self) -> bool {
+            self.finished.get()
+        }
+
+        fn abort(&self) {
+            self.aborted.set(true);
+        }
+    }
+
+    /// A wire reads its link's end through the end it was made with, whichever it is: a task's
+    /// handle, or the end of a link whose session its owner steps itself. Turned red by a wire
+    /// that reads or ends a task of its own beside the end it was given.
+    #[test]
+    fn a_wire_ends_its_link_by_the_end_it_was_made_with() {
+        let end = Rc::new(HeldEnd::default());
+        let link = CellRc::boxed(Quiet { holds: false }).into_link();
+        let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
+        let wire = Wire::new(
+            session(true, None),
+            Rc::clone(&end),
+            link,
+            input_wait,
+            room_wait,
+        );
+        assert!(!wire.finished(), "CONTROL: a link whose session runs");
+        end.finished.set(true);
+        assert!(wire.finished(), "the wire read the end it was given");
+        assert!(!end.aborted.get(), "CONTROL: nothing ended the link yet");
+        wire.abort();
+        assert!(
+            end.aborted.get(),
+            "the wire's abort reached the end it was given"
+        );
     }
 
     /// A link its owner waits on by `on`, owing its stack a write when `owes`.
@@ -1651,7 +1728,9 @@ mod tests {
     /// An established wire over a link waited on by `on`, owing a write when `owes`.
     fn waited_wire(local: &CoopLocalSet<Still>, on: WaitOn, owes: bool) -> Wire<Session> {
         let task = local.spawn_local(async { DriverOutcome::Terminated });
-        let link = CellRc::boxed(Waited { on, owes }).into_link();
+        let link = CellRc::try_boxed(Waited { on, owes })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         Wire::new(session(true, None), task, link, input_wait, room_wait)
     }
@@ -1713,8 +1792,8 @@ mod tests {
     /// A link in its handshake is brought up once the handshake completed; one up already stays.
     #[test]
     fn an_opening_link_is_brought_up() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(
             Link::Opening {
                 wire: wire(&local, session(true, None), false, false),
@@ -1734,8 +1813,8 @@ mod tests {
     #[cfg(feature = "listen")]
     #[test]
     fn a_node_is_held_by_another_face_while_its_link_is_up() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let node = [7u8, 1];
         let mut faces = supervisor(Link::Held { zid: held_node() }, 2);
         let other = TestFace {
@@ -1757,8 +1836,8 @@ mod tests {
     /// that reaches it, and a face past the table reads as one waiting with no time to dial again.
     #[test]
     fn a_face_is_read_as_its_link_stands() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(
             dialing(
                 DialEndpoint::Listed(0),
@@ -1899,8 +1978,8 @@ mod tests {
     /// reaches it; a face with no link, or one past the table, reached none.
     #[test]
     fn a_face_stands_by_for_its_node_only_while_another_face_reaches_it() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let node = [7u8, 1];
         let mut faces = supervisor(
             Link::Opening {
@@ -1931,8 +2010,8 @@ mod tests {
     /// deadline it is given up at; ending the link's task is what makes it the second.
     #[test]
     fn a_handshake_end_names_the_close_the_task_end_or_the_deadline() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let opening = |session| Link::Opening {
             wire: wire(&local, session, false, false),
             next: 0,
@@ -2169,8 +2248,8 @@ mod tests {
         }
         assert_eq!(clock_reads, 1, "only the waiting face read the clock");
 
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         faces.put_link(0, Link::Up(wire(&local, session(true, None), true, false)));
         assert!(faces.holds_input());
         assert!(matches!(
@@ -2185,8 +2264,8 @@ mod tests {
     /// owe and wakes its owner on room.
     #[test]
     fn a_read_waits_on_each_links_handle_and_on_its_room_while_it_owes() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let group = LinkWait::input(WaitOn::Socket(9));
         for (owes, first) in [
             (false, LinkWait::input(WaitOn::Socket(3))),
@@ -2213,11 +2292,13 @@ mod tests {
     #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_wait_tells_each_waited_link_what_it_found_and_a_move_reads_them_all() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let waited = |session: Session, on: WaitOn| -> TestLink {
             let task = local.spawn_local(async { DriverOutcome::Terminated });
-            let link = CellRc::boxed(Waited { on, owes: false }).into_link();
+            let link = CellRc::try_boxed(Waited { on, owes: false })
+                .expect("the heap has room")
+                .into_link();
             let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
             Link::Up(Wire::new(session, task, link, input_wait, room_wait))
         };
@@ -2272,8 +2353,8 @@ mod tests {
     /// buffer, or by one dropped without bounding the wait.
     #[test]
     fn a_read_past_its_reserved_room_looks_again_and_grows_nothing() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let first = LinkWait::input(WaitOn::Socket(3));
         let group = LinkWait::input(WaitOn::Socket(9));
         for (room, waited, ms) in [(2, vec![first, group], 10), (1, vec![first], 1)] {
@@ -2299,8 +2380,8 @@ mod tests {
     #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn a_publish_gathers_the_links_owing_a_write_without_allocating() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), true)), 3);
         let quiet = TestFace {
             id: 1,
@@ -2332,8 +2413,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "more links owe a write than the outbound slots they hold")]
     fn more_links_owing_than_the_slots_they_hold_is_named_in_a_test_build() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let past = OWING_WAITS.saturating_add(1);
         let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), true)), past);
         for id in 1..past {
@@ -2488,8 +2569,8 @@ mod tests {
             );
         }
 
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let link = LinkWait::input(WaitOn::Socket(3));
         let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), false)), 1);
         match faces.idle_wait(10, &mut || 0u64, [], Some(wake)) {
@@ -2507,8 +2588,8 @@ mod tests {
     /// waits into a buffer of its own, which after the open is one of the heap.
     #[test]
     fn a_read_while_another_waits_with_the_buffer_waits_behind_and_allocates_nothing() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let link = LinkWait::input(WaitOn::Socket(3));
         let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), false)), 1);
         let first = faces.idle_wait(10, &mut || 0u64, [], None);
@@ -2543,8 +2624,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "a read waited on more than the open reserved room for")]
     fn a_read_past_the_reserved_room_is_named_in_a_test_build() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), false)), 1);
         let others = [
             LinkWait::input(WaitOn::Socket(4)),
@@ -2555,8 +2636,8 @@ mod tests {
 
     #[test]
     fn ending_lets_dials_go_first_then_tells_established_peers_and_keeps_the_dial_role() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(dialing(DialEndpoint::Listed(0), None, 1, 10), 3);
         faces.end_dials_and_ports();
         assert!(

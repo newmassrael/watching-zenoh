@@ -23,7 +23,7 @@ use wz_codecs::whatami::WhatAmI;
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
 
 use super::SessionLinkActions;
-use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime, ShareValues};
+use crate::link::{BoxedLinkDriver, HeapRefused, LinkSendOutcome, SessionRuntime, ShareValues};
 use crate::reliability::Reliability;
 use crate::session_init_params::{
     cookie_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
@@ -108,9 +108,36 @@ impl crate::entropy::EntropySource for NoEntropy {
     }
 }
 
+std::thread_local! {
+    /// How many of this thread's next pointers the runtime makes before it refuses the rest, as a
+    /// heap with that much room would; `None` makes every one.
+    static ROOM: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
+}
+
+/// One pointer made, or the heap's refusal when `ROOM` has run out.
+fn take_room() -> Result<(), HeapRefused> {
+    ROOM.with(|room| match room.get() {
+        None => Ok(()),
+        Some(0) => Err(HeapRefused),
+        Some(left) => {
+            room.set(Some(left - 1));
+            Ok(())
+        }
+    })
+}
+
+/// `f`'s answer with room for `pointers` pointers.
+fn with_room<A>(pointers: usize, f: impl FnOnce() -> A) -> A {
+    ROOM.with(|room| room.set(Some(pointers)));
+    let answer = f();
+    ROOM.with(|room| room.set(None));
+    answer
+}
+
 impl ShareValues for PlainRuntime {
-    fn share<U>(value: U) -> Self::Shared<U> {
-        Arc::new(value)
+    fn share<U>(value: U) -> Result<Self::Shared<U>, HeapRefused> {
+        take_room()?;
+        Ok(Arc::new(value))
     }
 }
 
@@ -144,8 +171,11 @@ impl SessionRuntime for PlainRuntime {
 
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 
-    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
-        Arc::new(actions)
+    fn wrap_actions<T: TimeSource>(
+        actions: SessionLinkActions<Self, T>,
+    ) -> Result<Self::ActionsHandle<T>, HeapRefused> {
+        take_room()?;
+        Ok(Arc::new(actions))
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &Self::Driver {
@@ -245,8 +275,52 @@ fn bundle() -> (
     let link = Arc::new(CountingLink::default());
     let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
     let actions =
-        SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+            .expect("the heap has room");
     (actions, link)
+}
+
+/// A bundle the heap has no room for is refused, whichever of its three pointers (the link's
+/// half, the kernel's half, the handle) is the one refused, and what it was handed is let go of.
+/// Turned red by `new_generic` answering a bundle past a refused half, or by `build` keeping
+/// the sink past the refusal.
+#[test]
+fn a_bundle_the_heap_has_no_room_for_is_refused() {
+    let link = Arc::new(CountingLink::default());
+    for room in 0..3 {
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let made = with_room(room, || {
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+        });
+        assert!(
+            matches!(made, Err(HeapRefused)),
+            "room for {room} pointers of three is a refused bundle"
+        );
+        assert_eq!(
+            Arc::strong_count(&link),
+            1,
+            "the refused bundle lets the sink go"
+        );
+    }
+    let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+    let made = with_room(3, || {
+        SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+    });
+    assert!(made.is_ok(), "room for all three pointers is the bundle");
+}
+
+/// A datagram the link let go of before the session read it is charged to the session's receive
+/// drops, once for each, and to nothing it sends. Turned red by `drive::note_rx_dropped`
+/// charging no counter, or the transmit side's.
+#[cfg(feature = "transport-stats")]
+#[test]
+fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
+    let (actions, _link) = bundle();
+    crate::drive::note_rx_dropped(&actions, 2);
+    crate::drive::note_rx_dropped(&actions, 1);
+    let report = actions.stats_report();
+    assert_eq!(report.rx.n_dropped, 3, "each dropped datagram is counted");
+    assert_eq!(report.tx.n_dropped, 0, "nothing sent was dropped");
 }
 
 /// The halves a holder writes where it keeps them are the halves the bundle is made of: the link's
@@ -758,7 +832,8 @@ mod lent_handshake {
     ) {
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params, StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params, StillClock)
+                .expect("the heap has room");
         let binding =
             SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions), NoEntropy);
         (actions, binding)
@@ -1038,7 +1113,8 @@ mod lent_frame_refusal {
         let link = DryLink::of_width(512, false);
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
         assert_eq!(
             put(&actions),
             Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
@@ -1063,7 +1139,8 @@ mod lent_frame_refusal {
         let link = DryLink::of_width(512, true);
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
         assert_eq!(put(&actions), Some(Ok(())));
         let (budget, _) = actions.negotiated_tx_limits_for(Reliability::Reliable);
         assert_eq!(
@@ -1082,7 +1159,8 @@ mod lent_frame_refusal {
         let link = DryLink::of_width(4, true);
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
         assert_eq!(
             put(&actions),
             Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
@@ -1184,7 +1262,8 @@ mod lent_control_order {
         });
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
         actions.enter_established();
         assert_eq!(actions.batch_start(), Ok(()));
         let key = crate::named_key::NamedKey::literal("home/order").expect("a key");

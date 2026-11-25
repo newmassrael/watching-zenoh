@@ -209,7 +209,7 @@ fn a_session_opens_over_ws_between_slot_nodes_and_costs_the_heap_nothing() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link: LinkRef = Box::leak(Box::new(link));
     let runtime: Rt = RUNTIME.start(Frozen).expect("the runtime starts once");
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
     LISTENER
         .listen_in(PORT, &LISTENER_CELLS)
@@ -230,13 +230,13 @@ fn a_session_opens_over_ws_between_slot_nodes_and_costs_the_heap_nothing() {
         LwipTcpDial::new(link, &DIAL_CELLS).with_service(serve),
     );
     let dialler: Host<1, 1> = SessionHost::new(
-        CoopLocalSet::new(&runtime),
+        CoopLocalSet::try_new(&runtime).expect("the heap has room"),
         &DIAL_SESSIONS,
         &DIAL_PUMPS,
         dial_stack,
     );
     let accepting: Host<1, 1> = SessionHost::new(
-        CoopLocalSet::new(&runtime),
+        CoopLocalSet::try_new(&runtime).expect("the heap has room"),
         &ACCEPT_SESSIONS,
         &ACCEPT_PUMPS,
         accept_stack,

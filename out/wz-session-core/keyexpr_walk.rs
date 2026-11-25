@@ -20,8 +20,8 @@ use super::keyexpr_chunk_includes;
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn keyexpr_walk(p: &[u8], t: &[u8], relation: u8, wild_single: bool, wild_double: bool, wild_dsl: bool) -> u8 {
-    let pn: u32 = (p).len() as u32;
-    let tn: u32 = (t).len() as u32;
+    let pn: u32 = p.len() as u32;
+    let tn: u32 = t.len() as u32;
     let t_stops: bool = relation != 0 && wild_double;
     let mut ts: u32 = 0;
     let mut te: u32 = keyexpr_chunk_end::keyexpr_chunk_end(t, 0);

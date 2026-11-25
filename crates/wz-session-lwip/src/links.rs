@@ -356,8 +356,8 @@ mod tests {
         fn lwip_links_carry_a_handshake_between_an_acceptor_and_an_initiator() {
             let (_serial, link) = wz_link_lwip::lwip_test_link();
             let links = test_links(Rc::new(link));
-            let runtime = CoopRuntime::new(FrozenClock);
-            let local = CoopLocalSet::new(&runtime);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
+            let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
             let OpenedLink {
                 sink: acceptor_sink,
@@ -365,12 +365,14 @@ mod tests {
             } = links.open_acceptor(7541).expect("bind acceptor");
             let acceptor_link = acceptor_sink.clone();
             let acceptor_actions =
-                new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime));
+                new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime))
+                    .expect("the heap has room");
             let _acceptor = spawn_session(
                 &local,
                 acceptor_pump,
                 acceptor_actions.clone(),
-                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+                wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+                    .expect("the heap has room"),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -393,12 +395,14 @@ mod tests {
                 CoopTime<FrozenClock>,
             >::new_generic(
                 initiator_sink, params(0xb1), CoopTime::new(&runtime)
-            );
+            )
+            .expect("the heap has room");
             let _initiator = spawn_session(
                 &local,
                 initiator_pump,
                 initiator_actions.clone(),
-                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
+                wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(0))
+                    .expect("the heap has room"),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),

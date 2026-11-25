@@ -236,8 +236,8 @@ type Actions = SessionLinkActions<CoopRuntime<Frozen>, CoopTime<Frozen>>;
 /// carried to Established by the drive loop, and dropped.
 fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
     let links = links_over(link);
-    let runtime = CoopRuntime::new(Frozen);
-    let local = CoopLocalSet::new(&runtime);
+    let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     let config = |role| SessionDriveConfig {
         timeouts: SessionTimeouts::spec_defaults(),
         role,
@@ -249,12 +249,14 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         pump: acceptor_pump,
     } = links.open_acceptor(port).expect("bind the acceptor");
     let acceptor_actions =
-        new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime));
+        new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime))
+            .expect("the heap has room");
     let _acceptor = spawn_session(
         &local,
         acceptor_pump,
         acceptor_actions.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         config(SessionRole::Acceptor),
         |_| {},
@@ -270,12 +272,14 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         ))))
         .expect("open the initiator");
     let initiator_actions =
-        Actions::new_generic(initiator_sink, params(0xb1), CoopTime::new(&runtime));
+        Actions::new_generic(initiator_sink, params(0xb1), CoopTime::new(&runtime))
+            .expect("the heap has room");
     let _initiator = spawn_session(
         &local,
         initiator_pump,
         initiator_actions.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(0))
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         config(SessionRole::Initiator),
         |_| {},

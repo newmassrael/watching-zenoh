@@ -15,6 +15,7 @@
 use alloc::boxed::Box;
 #[cfg(any(feature = "group", feature = "connectivity"))]
 use alloc::vec::Vec;
+use core::mem::MaybeUninit;
 use core::ops::Deref;
 
 use wz_session_core::byte_cells::LentByteCells;
@@ -42,12 +43,13 @@ use wz_session_core::unicast_rx::RouterLend;
 #[cfg(feature = "group")]
 use super::GroupRecord;
 use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
+use crate::executor::SpawnRefusal;
 use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
 use crate::faces::{
     Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord,
-    IdleWait, Link, LinkSupervisor, Wire,
+    IdleWait, Link, LinkEnd, LinkSupervisor, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
@@ -57,8 +59,9 @@ use crate::locator_text::parse_listen_locator;
 use crate::locator_text::parse_locator;
 use crate::reassembly_rx::SessionReassembly;
 use crate::session_drive::{
-    spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink, PendingDial, PumpFields,
-    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    place_session_with_router, spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink,
+    PendingDial, PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump,
+    SessionRole, WaitOn,
 };
 use crate::session_runtime::{SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
@@ -68,6 +71,17 @@ use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTim
 /// values it lends the session.
 type LinkRuntime<T> =
     CoopRuntime<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
+
+/// The session of a link over the transport of `T` whose pump its owner holds and steps itself
+/// ([`TransportState::place_link`]): it stages its fragments in the session's one Router, lent
+/// through the place the link holds, as a task's pump does.
+pub type LinkPump<T, P> = SessionPump<
+    <T as TransportFaces>::Clock,
+    P,
+    dyn BoxedLinkDriver,
+    RouterLend<SessionReassembly, <T as TransportFaces>::RouterPlace>,
+    <T as TransportFaces>::Lock,
+>;
 
 /// The handle on the actions of a link's session over the transport of `T`.
 type LinkHandle<T> =
@@ -112,6 +126,31 @@ pub trait TransportFaces {
     /// The handle on the place the session lends its Router in ([`TransportState::lend`]): a
     /// counted cell, or one the session's arena holds.
     type RouterPlace: Deref<Target = LendCell<SessionReassembly>> + Clone + 'static;
+    /// The Router as the transport holds it ([`TransportState::router`]): the session's one
+    /// Router, or nothing where the session keeps its Router apart from its state, beside the
+    /// pump of the one link it steps itself, so that a receive that lends the Router does so with
+    /// nothing of the session's state held.
+    type Router: TransportRouter;
+}
+
+/// The Router a transport holds of its session ([`TransportFaces::Router`]): what the transport
+/// asks of it as a link is lost.
+pub trait TransportRouter {
+    /// End the chains the peer `zid` has under way.
+    fn abort_peer_chains(&mut self, zid: &[u8]);
+}
+
+impl TransportRouter for SessionReassembly {
+    fn abort_peer_chains(&mut self, zid: &[u8]) {
+        // The count of the chains ended is the Router's own record, read by no caller here.
+        let _ended = self.abort_peer(zid);
+    }
+}
+
+/// A transport whose session keeps its Router apart holds none, and ends no chain of it: the
+/// holder of the Router ends a lost peer's chains itself.
+impl TransportRouter for () {
+    fn abort_peer_chains(&mut self, _zid: &[u8]) {}
 }
 
 /// A dial under way over the network of `T`.
@@ -170,8 +209,9 @@ pub struct TransportState<T: TransportFaces> {
     /// buffers for them, each claimed by a chain while it is open, lent from the arena
     /// (`ArenaPlan::reassembly`). The session sweeps it and ends a
     /// lost peer's chains; its links' receives reach it only while the session's pass of its tasks
-    /// lends it ([`RouterLend::lend_for`]).
-    pub router: SessionReassembly,
+    /// lends it ([`RouterLend::lend_for`]). None where the session keeps it apart
+    /// ([`TransportFaces::Router`]).
+    pub router: T::Router,
     /// Where the session lends its Router to its links' receives, each link's task holding the
     /// place: lent for the length of a pass of the tasks and at no other time.
     pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
@@ -213,6 +253,48 @@ pub struct WireMaking<'a, C: ClockSource + 'static> {
     pub clock: &'a CoopTime<C>,
     /// The deadlines of the link's handshake.
     pub timeouts: SessionTimeouts,
+}
+
+/// What a link the session places itself is opened as ([`TransportState::place_wire`]): the
+/// face it serves, the role of its handshake, and the endpoint it was dialled to or taken on.
+pub struct OpenedAs<'e> {
+    /// The face the link serves.
+    pub face: FaceId,
+    /// The role of the link's handshake.
+    pub role: SessionRole,
+    /// The endpoint the link was dialled to or taken on, when it was dialled from the session's.
+    pub endpoint: Option<&'e DialEndpoint>,
+}
+
+/// Where the session of a link its owner steps itself is built, and how the owner ends it
+/// ([`TransportState::place_wire`]).
+pub struct PumpPlace<'p, T: TransportFaces, E> {
+    /// The place the pump is built in, which its owner drops it in.
+    pub place: &'p mut MaybeUninit<LinkPump<T, CellRc<dyn SessionDatagramLink>>>,
+    /// How the owner tells the link's session ended, and ends it.
+    pub end: E,
+}
+
+/// A link whose session its owner steps itself, made ([`TransportState::place_wire`]): the
+/// wire its face keeps, what the session hands its reads to, and the pump, in its place.
+pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock>, E> {
+    /// The wire the face keeps.
+    pub wire: Wire<K::Session, E>,
+    /// What the owner hands each step of the pump.
+    pub dispatch: K::Dispatch,
+    /// The pump, in its place.
+    pub pump: &'p mut LinkPump<T, CellRc<dyn SessionDatagramLink>>,
+}
+
+/// What the making of a link's session builds before the session runs
+/// ([`TransportState::build_wire`]).
+struct WireBuilt<T: TransportFaces, D, S> {
+    fields: PumpFields<T::Clock, CellRc<dyn SessionDatagramLink>, dyn BoxedLinkDriver, T::Lock>,
+    dispatch: D,
+    session: S,
+    link: CellRc<dyn SessionDatagramLink>,
+    input_wait: Option<WaitOn>,
+    room_wait: Option<WaitOn>,
 }
 
 /// The next step of the dial role's walk over the session's endpoints
@@ -480,6 +562,25 @@ impl<T: TransportFaces> TransportState<T> {
             .map_err(TransportRefusal::NoTask)
     }
 
+    /// [`Self::spawn_link`] with no task: the link's session built in `place`, which its owner
+    /// holds, steps itself and drops once no step of it is under way
+    /// ([`place_session_with_router`]). The session's Router is lent to it through the place the
+    /// link holds, as to a task's pump, for the steps its owner lends the Router around. `None`
+    /// when the Router was not built in its place.
+    // Always inlined: its one caller holds these values in its own frame.
+    #[inline(always)]
+    pub fn place_link<'p, P>(
+        &self,
+        place: &'p mut MaybeUninit<LinkPump<T, P>>,
+        runtime: CoopRuntime<T::Clock, dyn BoxedLinkDriver, T::Lock>,
+        fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
+    ) -> Option<&'p mut LinkPump<T, P>>
+    where
+        P: SessionDatagramLink + 'static,
+    {
+        place_session_with_router(place, runtime, fields, self.lend.clone())
+    }
+
     /// Open the link of the group `endpoint` names (`group`), read here once for every stack
     /// (`parse_group_locator`). A member's link is reported by the endpoint the group was joined
     /// by, in a row of `GROUP_ROW_LEN` bytes, which holds the bound of every kind the build joins:
@@ -705,7 +806,8 @@ impl<T: TransportFaces> TransportState<T> {
     /// pump behind the gates the session puts it behind (`calls`), placed in theirs, and its task
     /// spawned. What the session's tables keep of the link is the session's to do (`LinkCalls`).
     /// [`TransportRefusal::EntropyUnavailable`] when an acceptor's source is dry, since its
-    /// binding would refuse every handshake.
+    /// binding would refuse every handshake; [`TransportRefusal::HeapRefused`] when the heap has
+    /// no room for the link's shared handle.
     // Always inlined: its one caller is never inlined, so what is built here lies in that frame,
     // which has returned before the link's task first runs.
     #[inline(always)]
@@ -717,11 +819,77 @@ impl<T: TransportFaces> TransportState<T> {
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
         making: WireMaking<'_, T::Clock>,
-    ) -> Result<Wire<K::Session>, TransportRefusal> {
+    ) -> Result<Wire<K::Session>, TransportRefusal>
+    where
+        K::Dispatch: EventSink + 'static,
+    {
+        let local = making.local;
+        let built = self.build_wire(calls, face, opened, role, endpoint, making)?;
+        let task = self.spawn_link(local, built.fields, built.dispatch)?;
+        Ok(Wire::new(
+            built.session,
+            task,
+            built.link,
+            built.input_wait,
+            built.room_wait,
+        ))
+    }
+
+    /// [`Self::make_wire`] with no task: the link's session built in `place`, which its owner
+    /// holds and steps itself ([`Self::place_link`]), ended by `end`. The wire, what the link's
+    /// session hands its reads to, which the owner hands each step of the pump, and the pump.
+    /// [`TransportRefusal::NoTask`] when the pump was not built in its place.
+    // Always inlined, as `make_wire` is: its one caller is never inlined.
+    #[inline(always)]
+    pub fn place_wire<'p, K: LinkCalls<T::Clock, T::Lock>, E: LinkEnd>(
+        &self,
+        calls: &mut K,
+        opened: OpenedLink<PumpOf<T>>,
+        opened_as: OpenedAs<'_>,
+        making: WireMaking<'_, T::Clock>,
+        place: PumpPlace<'p, T, E>,
+    ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal> {
+        let runtime = making.local.runtime().retyped();
+        let OpenedAs {
+            face,
+            role,
+            endpoint,
+        } = opened_as;
+        let built = self.build_wire(calls, face, opened, role, endpoint, making)?;
+        let PumpPlace { place, end } = place;
+        let pump = self
+            .place_link(place, runtime, built.fields)
+            .ok_or(TransportRefusal::NoTask(SpawnRefusal::NoTaskCell))?;
+        Ok(PlacedWire {
+            wire: Wire::new(
+                built.session,
+                end,
+                built.link,
+                built.input_wait,
+                built.room_wait,
+            ),
+            dispatch: built.dispatch,
+            pump,
+        })
+    }
+
+    /// What [`Self::make_wire`] and [`Self::place_wire`] share: the link's actions and their
+    /// halves placed in their cells, the session's tables told of the link, its pump behind the
+    /// gates, placed in theirs, and the parts the session's pump is built of.
+    #[inline(always)]
+    fn build_wire<K: LinkCalls<T::Clock, T::Lock>>(
+        &self,
+        calls: &mut K,
+        face: FaceId,
+        opened: OpenedLink<PumpOf<T>>,
+        role: SessionRole,
+        endpoint: Option<&DialEndpoint>,
+        making: WireMaking<'_, T::Clock>,
+    ) -> Result<WireBuilt<T, K::Dispatch, K::Session>, TransportRefusal> {
         let OpenedLink { sink, pump } = opened;
         let WireMaking {
             params,
-            local,
+            local: _,
             entropy,
             clock,
             timeouts,
@@ -744,23 +912,24 @@ impl<T: TransportFaces> TransportState<T> {
         {
             return Err(TransportRefusal::EntropyUnavailable);
         }
+        // One handle to the link, which its gates hold: a stack whose pump is a shared handle
+        // already gives that one (`SessionLinks::share_pump`). Had before the session's tables
+        // learn of the link, so a heap with no room for it leaves them as they were.
+        let pump =
+            <T::Links as SessionLinks>::share_pump(pump).ok_or(TransportRefusal::HeapRefused)?;
         #[cfg(feature = "shared-key-ids")]
         let key_form = Some(self.key_form_of(endpoint));
         #[cfg(not(feature = "shared-key-ids"))]
         let key_form = None;
         calls.link_made(face, &actions, key_form);
-        // One handle to the link, which its gates hold: a stack whose pump is a shared handle
-        // already gives that one (`SessionLinks::share_pump`).
-        let pump = <T::Links as SessionLinks>::share_pump(pump);
         // What the session's read waits on for the link's input and its room, read off it before
         // its gates take it.
         let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());
         let gate = self.place_gate(calls.gate(pump, &actions), endpoint)?;
         let link = gate.clone().into_link();
         let (dispatch, session) = calls.wire_parts(face, actions.clone(), &gate);
-        let task = self.spawn_link(
-            local,
-            PumpFields {
+        Ok(WireBuilt {
+            fields: PumpFields {
                 link: link.clone(),
                 actions,
                 entropy: entropy.clone(),
@@ -772,8 +941,11 @@ impl<T: TransportFaces> TransportState<T> {
                 },
             },
             dispatch,
-        )?;
-        Ok(Wire::new(session, task, link, input_wait, room_wait))
+            session,
+            link,
+            input_wait,
+            room_wait,
+        })
     }
 
     /// Begin a dial of the session's endpoint at row `at` and ask it once: one the network has not
@@ -850,7 +1022,7 @@ impl<T: TransportFaces> TransportState<T> {
             // Read in place: a loss is taken after the open, where nothing is copied to the heap.
             .and_then(|wire| wire.actions().peer_session_zid());
         if let Some(zid) = peer {
-            self.router.abort_peer(zid.as_slice());
+            self.router.abort_peer_chains(zid.as_slice());
         }
     }
 

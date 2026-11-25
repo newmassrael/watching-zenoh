@@ -527,23 +527,33 @@ impl ReplyWire {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: ReplySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
-        let _p_header_c_0: bool = src.consolidation().is_some();
-        let _p_header_z_0: bool = src.extensions().is_some();
-        let _c_header: u8 = (((src.header() & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
-        w.write_u8(_c_header)?;
-        if let Some(_v) = src.consolidation() {
-            w.write_vle_u64(_v)?;
-        }
-        if let Some(_v) = src.extensions() {
-            for (_i, _e) in _v.enumerate() {
-                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
-            }
-        }
+        Self::write_envelope(src.header(), src.consolidation(), src.extensions(), w)?;
         match src.body() {
             ReplyVariantSource::CodecZenohMsgPut(_b) => super::msg_put::MsgPutWire::write_source(_b, w)?,
             ReplyVariantSource::CodecZenohMsgDel(_b) => super::msg_del::MsgDelWire::write_source(_b, w)?,
             ReplyVariantSource::Default { body: _b, .. } => super::msg_put::MsgPutWire::write_source(_b, w)?,
+        }
+        Ok(())
+    }
+
+    /// The writes [`Self::write_source`] makes before the body of the arm
+    /// `src` holds, over the fields they read, each handed in as `src`
+    /// returned it: one copy for the values whose fields have these types,
+    /// whatever arm each holds (docs/adr/0126).
+    #[inline(never)]
+    fn write_envelope<K: SceSink>(_s_header: u8, _s_consolidation: Option<u64>, _s_extensions: Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>, w: &mut K) -> Result<(), K::Error> {
+        let _k_extensions: usize = _s_extensions.clone().map_or(0, |_l| _l.len());
+        let _p_header_c_0: bool = _s_consolidation.is_some();
+        let _p_header_z_0: bool = _s_extensions.clone().is_some();
+        let _c_header: u8 = (((_s_header & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        w.write_u8(_c_header)?;
+        if let Some(_v) = _s_consolidation {
+            w.write_vle_u64(_v)?;
+        }
+        if let Some(_v) = _s_extensions.clone() {
+            for (_i, _e) in _v.enumerate() {
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
         }
         Ok(())
     }

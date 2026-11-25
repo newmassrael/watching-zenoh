@@ -93,6 +93,11 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static, K: LockKind> SessionDatag
         self.pump.lost()
     }
 
+    // What the link dropped was dropped whatever the gate holds back: it is counted as it is.
+    fn take_rx_dropped(&self) -> usize {
+        self.pump.take_rx_dropped()
+    }
+
     fn holds_input(&self) -> bool {
         self.pump.holds_input()
     }
@@ -190,14 +195,15 @@ mod tests {
     #[test]
     fn a_link_gives_the_session_nothing_between_its_handshake_and_its_admission() {
         let net = MemoryNetwork::new();
-        let runtime = CoopRuntime::new(Frozen);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         let OpenedLink { sink, pump } = MemoryLinks::new(net.clone(), ACCEPTOR)
             .open_acceptor(7447)
             .expect("bind the acceptor's end");
         let acceptor =
-            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let into = heard.clone();
@@ -216,7 +222,8 @@ mod tests {
             &local,
             gate.clone(),
             acceptor.clone(),
-            wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
+            wz_runtime_coop::session_runtime::SessionEntropy::try_new(PosixEntropy)
+                .expect("the heap has room"),
             CoopTime::new(&runtime),
             config(SessionRole::Acceptor),
             dispatch_to(observer, acceptor.clone()),
@@ -226,12 +233,14 @@ mod tests {
             .open_initiator(Locator::udp(std::net::SocketAddr::from((ACCEPTOR, 7447))))
             .expect("open the initiator's end");
         let initiator =
-            new_session_actions(sink, params(WhatAmI::Client, 0xc1), CoopTime::new(&runtime));
+            new_session_actions(sink, params(WhatAmI::Client, 0xc1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let _initiator_task = spawn_session(
             &local,
             pump,
             initiator.clone(),
-            wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
+            wz_runtime_coop::session_runtime::SessionEntropy::try_new(PosixEntropy)
+                .expect("the heap has room"),
             CoopTime::new(&runtime),
             config(SessionRole::Initiator),
             dispatch_to(
@@ -279,12 +288,13 @@ mod tests {
     /// an admission kept in a cell of the heap that the gate and the engine's wire share.
     #[test]
     fn a_gate_and_its_admission_take_no_memory_of_the_heap() {
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let OpenedLink { sink, pump } = MemoryLinks::new(MemoryNetwork::new(), ACCEPTOR)
             .open_acceptor(7447)
             .expect("bind the acceptor's end");
         let acceptor =
-            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let mut made = None;
         let allocations = crate::tests::redial_heap::counted(|| {
             let gate = AdmissionGate::new(pump, acceptor.clone());
@@ -299,5 +309,35 @@ mod tests {
             made.is_some_and(|gate| gate.admitted.get()),
             "CONTROL: the gate made is admitted"
         );
+    }
+
+    /// A gate answers what its link dropped by asking the link. Turned red by a gate that answers
+    /// it itself (the trait's provided form) instead of passing the question on.
+    #[test]
+    fn a_gate_answers_what_its_link_dropped() {
+        struct Dropping(Cell<usize>);
+
+        impl SessionDatagramLink for Dropping {
+            fn service(&self) {}
+
+            fn try_recv(&self) -> Option<RxFrame> {
+                None
+            }
+
+            fn take_rx_dropped(&self) -> usize {
+                self.0.replace(0)
+            }
+        }
+
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let OpenedLink { sink, .. } = MemoryLinks::new(MemoryNetwork::new(), ACCEPTOR)
+            .open_acceptor(7447)
+            .expect("bind the acceptor's end");
+        let acceptor =
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime))
+                .expect("the heap has room");
+        let gate = AdmissionGate::new(Dropping(Cell::new(2)), acceptor);
+        assert_eq!(gate.take_rx_dropped(), 2, "the link's drops");
+        assert_eq!(gate.take_rx_dropped(), 0, "a take empties the count");
     }
 }

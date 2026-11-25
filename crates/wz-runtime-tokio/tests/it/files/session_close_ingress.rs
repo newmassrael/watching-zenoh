@@ -274,7 +274,8 @@ fn established_session_over(
     Arc<SessionLinkActions>,
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(SessionFsmUnicastEvent::OutboundStart);

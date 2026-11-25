@@ -84,7 +84,8 @@ fn fresh_setup_recording_with(
 ) {
     let recording = Arc::new(RecordingOutboundDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine, recording)
@@ -195,7 +196,8 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
     // transition and the FSM must stay at SentInitAck.
     let recording_driver = Arc::new(NoopOutboundDriver::default());
     let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver;
-    let actions = new_session_actions(driver_arc, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver_arc, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
 
@@ -237,7 +239,8 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
 async fn r89_missing_cookie_blocks_transition_to_sentopen_ack() {
     let recording_driver = Arc::new(NoopOutboundDriver::default());
     let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver;
-    let actions = new_session_actions(driver_arc, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver_arc, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
 
@@ -349,7 +352,8 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     let recording_driver = Arc::new(RecordingOutboundDriver::default());
     let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver.clone();
     let params = fixture_session_init_params();
-    let actions = new_session_actions(driver_arc, params, TokioTime::new());
+    let actions =
+        new_session_actions(driver_arc, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
 
@@ -487,7 +491,8 @@ async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
             outbound,
             fixture_session_init_params(),
             TokioTime::new(),
-        );
+        )
+        .expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::InboundStart);
@@ -926,7 +931,8 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     initiator_params.seq_num_res = wz_session_core::policy::SnResolution::Bits8;
     initiator_params.req_id_res = 1;
     initiator_params.batch_size = 2048;
-    let initiator = new_session_actions(initiator_out, initiator_params, TokioTime::new());
+    let initiator = new_session_actions(initiator_out, initiator_params, TokioTime::new())
+        .expect("the heap has room");
     let mut initiator_engine = new_session_engine(&initiator);
     initiator_engine
         .initialize()
@@ -954,7 +960,8 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
     let mut params = fixture_session_init_params();
     params.seq_num_res = wz_session_core::policy::SnResolution::Bits32;
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
@@ -1237,7 +1244,8 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
         outbound,
         fixture_session_init_params(),
         TokioTime::new(),
-    );
+    )
+    .expect("the heap has room");
     assert_eq!(
         actions.cookie_nonce(),
         None,
@@ -1390,7 +1398,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     params.seq_num_res = wz_session_core::policy::SnResolution::Bits64;
     params.req_id_res = 3;
     params.batch_size = 65535;
-    let actions = new_session_actions(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new()).expect("the heap has room");
 
     // No peer InitSyn parsed yet → init_ack_params returns own
     // params verbatim (the slot is `None`).
@@ -1427,7 +1435,7 @@ fn the_send_limits_are_the_capabilities_of_each_establishment() {
     params.seq_num_res = wz_session_core::policy::SnResolution::Bits64;
     params.req_id_res = 3;
     params.batch_size = 65535;
-    let actions = new_session_actions(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new()).expect("the heap has room");
 
     let caps = |seq_num_res, batch_size| PeerInitCaps {
         seq_num_res,
@@ -1478,7 +1486,7 @@ fn r121d_init_ack_params_keeps_own_when_own_lower() {
     params.seq_num_res = wz_session_core::policy::SnResolution::Bits16;
     params.req_id_res = 1;
     params.batch_size = 512;
-    let actions = new_session_actions(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new()).expect("the heap has room");
 
     actions.set_peer_init_caps(Some(PeerInitCaps {
         seq_num_res: 3,

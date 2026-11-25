@@ -14,7 +14,7 @@
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn keyexpr_has_dsl(k: &[u8], s: u32, e: u32) -> bool {
-    if e > (k).len() as u32 {
+    if e > k.len() as u32 {
         return false;
     }
     let mut i: u32 = s;

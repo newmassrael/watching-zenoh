@@ -256,8 +256,10 @@ impl TwoSessions {
         group_port: u16,
     ) -> Result<Self, String> {
         let clock = Clock::default();
-        let runtime = CoopRuntime::new(clock);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(clock)
+            .ok_or_else(|| String::from("the heap has no room for the runtime"))?;
+        let local = CoopLocalSet::try_new(&runtime)
+            .ok_or_else(|| String::from("the heap has no room for the local set"))?;
         let links = LwipLinks::new(link.clone());
         let policy = resolve_policy();
         let limits = resolve_limits();
@@ -269,12 +271,14 @@ impl TwoSessions {
         let router_cost = before.saturating_sub(heap_free_bytes());
         // The board's one source: both sessions draw their handshake's secrets from it, each
         // through a handle on it.
-        let entropy = SessionEntropy::new(FreertosEntropy);
+        let entropy = SessionEntropy::try_new(FreertosEntropy)
+            .map_err(|_| String::from("the heap has no room for the board's entropy source"))?;
         let router = new_session_actions(
             sink,
             unicast_params(0xa1, &policy, &limits)?,
             CoopTime::new(&runtime),
-        );
+        )
+        .map_err(|_| String::from("the heap has no room for the router's session"))?;
         let router_log = Rc::new(RouterLog::default());
         let log = router_log.clone();
         // The fixture runs for the whole scenario; its handle is never awaited.
@@ -304,7 +308,8 @@ impl TwoSessions {
             sink,
             unicast_params(0xb1, &policy, &limits)?,
             CoopTime::new(&runtime),
-        );
+        )
+        .map_err(|_| String::from("the heap has no room for the client's session"))?;
         let client_task = spawn_session(
             &local,
             pump,

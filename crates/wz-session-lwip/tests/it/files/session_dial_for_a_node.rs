@@ -122,9 +122,13 @@ fn next_datagram_after_the_init_ack(
     let runtime = cell
         .start::<LwipUdpDriver>(Frozen)
         .expect("the runtime starts once");
-    let local = CoopLocalSet::new(&runtime);
-    let host: SessionHost<Frozen, LinkRc, Counting, 1, 1> =
-        SessionHost::new(CoopLocalSet::new(&runtime), sessions, pumps, link.clone());
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+    let host: SessionHost<Frozen, LinkRc, Counting, 1, 1> = SessionHost::new(
+        CoopLocalSet::try_new(&runtime).expect("the heap has room"),
+        sessions,
+        pumps,
+        link.clone(),
+    );
     let links = LwipLinks::new(link.clone(), sockets);
     let mut sink: SessionRxSocket =
         wz_link_lwip::test_bind::session_rx(&link, sink_port).expect("bind the far end");

@@ -56,9 +56,9 @@
 //! Host-test level: no board runs it, and the stack the slot takes is not
 //! measured here.
 
-// Not on the slot profile WITH `reassembly`: there `SessionPump::new` does not
+// Not on the slot profile WITH `reassembly`: there `SessionPump::try_new` does not
 // exist, because the pump's staging table must lie in a cell of the pump table
-// (`PumpSlots::claim`), and this file builds its pumps with `new`. The same windows
+// (`PumpSlots::claim`), and this file builds its pumps with `try_new`. The same windows
 // on that profile are `session_pump_allocations`', whose pumps are claimed from a
 // table. The slot profile without `reassembly` is this file's and is built and run
 // by the C1m leg that names it; clippy builds the other, which is why the gate is
@@ -408,21 +408,24 @@ mod placing_on_the_heap {
         peer: Option<([u8; 4], u16)>,
         zid: u8,
     ) -> (Handle, SessionEntropy, LwipSessionLink<Rc<LwipLink>>) {
-        let driver = wz_runtime_coop::link_cells::CellRc::boxed(driver_over(socket, peer));
+        let driver = wz_runtime_coop::link_cells::CellRc::try_boxed(driver_over(socket, peer))
+            .expect("the heap has room");
         let sink: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver> =
             driver.clone().into_sink();
         let actions = if zid == 0xa1 {
             new_session_actions(sink, params(zid), CoopTime::new(runtime))
+                .expect("the heap has room")
         } else {
             SessionLinkActions::<Rt, CoopTime<Frozen>>::new_generic(
                 sink,
                 params(zid),
                 CoopTime::new(runtime),
             )
+            .expect("the heap has room")
         };
         (
             actions,
-            SessionEntropy::new(Counting(zid)),
+            SessionEntropy::try_new(Counting(zid)).expect("the heap has room"),
             LwipSessionLink::new(link.clone(), driver),
         )
     }
@@ -549,7 +552,7 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
     #[cfg(feature = "session-slot")]
     let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
     #[cfg(not(feature = "session-slot"))]
-    let runtime = CoopRuntime::new(Frozen);
+    let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
     let port = 7701;
 
     // The sockets are bound, and the pumps and applications built, outside any
@@ -585,27 +588,29 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
     let (on_acceptor, acceptor_seen) = application(&acceptor_actions);
     let (on_initiator, initiator_seen) = application(&initiator_actions);
     let mut acceptor = End {
-        pump: SessionPump::new(
+        pump: SessionPump::try_new(
             runtime.clone(),
             acceptor_link,
             acceptor_actions.clone(),
             acceptor_entropy,
             CoopTime::new(&runtime),
             config(SessionRole::Acceptor),
-        ),
+        )
+        .expect("the heap has room"),
         actions: acceptor_actions,
         on_event: on_acceptor,
         seen: acceptor_seen,
     };
     let mut initiator = End {
-        pump: SessionPump::new(
+        pump: SessionPump::try_new(
             runtime.clone(),
             initiator_link,
             initiator_actions.clone(),
             initiator_entropy,
             CoopTime::new(&runtime),
             config(SessionRole::Initiator),
-        ),
+        )
+        .expect("the heap has room"),
         actions: initiator_actions,
         on_event: on_initiator,
         seen: initiator_seen,

@@ -87,7 +87,8 @@ async fn a_blocking_message_on_a_congested_link_ends_the_running_session_without
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(FullLink {
         written: written.clone(),
     });
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(SessionFsmUnicastEvent::OutboundStart);

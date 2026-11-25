@@ -1826,7 +1826,7 @@ mod tests {
         }));
         let mut socket = Socket(Rc::clone(&wire));
         let params = params();
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let stage = GroupTxStage::new(&params);
         for payload in PAYLOADS {
@@ -1880,7 +1880,7 @@ mod tests {
         }));
         let mut socket = Socket(Rc::clone(&wire));
         let params = params();
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let stats = Rc::new(TransportStats::default());
         let stage = GroupTxStage::new(&params);
@@ -2593,7 +2593,7 @@ mod tests {
         let wire = Rc::new(RefCell::new(Wire::default()));
         let mut socket = Socket(Rc::clone(&wire));
         let params = params();
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let stage = GroupTxStage::new(&params);
         for _ in 0..MAX_MULTICAST_REPLIES {
@@ -2720,7 +2720,7 @@ mod tests {
         let wire = Rc::new(RefCell::new(Wire::default()));
         let link = GroupLink::new(Socket(Rc::clone(&wire)));
         let params = params();
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let stage = GroupTxStage::new(&params);
         let mut session_side = link.clone();
@@ -2866,7 +2866,7 @@ mod tests {
         }));
         let mut socket = Socket(Rc::clone(&wire));
         let params = params();
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let stage = GroupTxStage::new(&params);
         let mut quiet = |_event: IterationEvent<'_, '_>| {};
@@ -2920,7 +2920,7 @@ mod tests {
         let mut params = params();
         // A beacon at the first step only, so that the stop is what writes the window.
         params.join_interval_ms = 60_000;
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let stage = GroupTxStage::new(&params);
         let mut quiet = |_event: IterationEvent<'_, '_>| {};

@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! The engine's form: how its calls stand to its threads, chosen once here, and what that choice
+//! decides of the locks the engine's state lies behind.
+//!
+//! A build with `threads` runs a read task beside the program's calls, so the session's state is
+//! behind the host's or the kernel's lock and its rows count their calls on an atomic latch. A
+//! build without it makes every call from one thread at a time: the state is behind a flag
+//! (`one_thread_lock`) and the latches count with no read-modify-write. Everything that differs
+//! between the two is a type of [`LockForm`], so a lock the engine adds (a face's, a link's send
+//! half) is the form's lock and not a choice of its own; both forms are compiled in every build
+//! and only [`CoopForm`] names the one in force.
+
+mod one_thread_lock;
+
+use core::ops::DerefMut;
+
+use wz_capi_port::os::{Mutex, MutexGuard};
+use wz_session_core::row_callback::{OneThread, ThreadForm, Threads};
+
+use one_thread_lock::{OneThreadGuard, OneThreadLock};
+
+/// How the engine's calls stand to its threads: a read task may deliver beside the program's calls
+/// (`threads`), or every call runs on the thread that steps the session.
+#[cfg(feature = "threads")]
+pub(crate) type CoopForm = Threads;
+/// How the engine's calls stand to its threads: a read task may deliver beside the program's calls
+/// (`threads`), or every call runs on the thread that steps the session.
+#[cfg(not(feature = "threads"))]
+pub(crate) type CoopForm = OneThread;
+
+/// The latch each row of the engine's tables counts its calls on: [`CoopForm`]'s.
+#[cfg(feature = "threads")]
+pub(crate) type Latch = wz_session_core::row_callback::CallLatch;
+/// The latch each row of the engine's tables counts its calls on: [`CoopForm`]'s.
+#[cfg(not(feature = "threads"))]
+pub(crate) type Latch = wz_session_core::row_callback::LocalLatch;
+
+// The latch named above is the one the form names, so a row and the round agree on the form.
+const _: fn(Latch) -> <CoopForm as ThreadForm>::Latch = |latch| latch;
+
+/// The lock of a form: what keeps a value of the engine to one thread at a time, held through a
+/// guard until it drops.
+pub(crate) trait LockForm: ThreadForm {
+    /// A value behind the lock.
+    type Lock<T>;
+    /// A hold of a [`Self::Lock`], let go as it drops.
+    type Guard<'a, T: 'a>: DerefMut<Target = T>;
+
+    /// `value`, behind a lock nobody holds.
+    fn new<T>(value: T) -> Self::Lock<T>;
+
+    /// The value, held until the guard drops; a take while it is held waits until it is not.
+    fn lock<'a, T: 'a>(lock: &'a Self::Lock<T>) -> Self::Guard<'a, T>;
+
+    /// The value, held until the guard drops; `None`, without waiting, while it is held.
+    fn try_lock<'a, T: 'a>(lock: &'a Self::Lock<T>) -> Option<Self::Guard<'a, T>>;
+
+    /// The value, through the only reference there is.
+    fn get_mut<T>(lock: &mut Self::Lock<T>) -> &mut T;
+}
+
+/// Other threads may call in: the host's lock, or the kernel's.
+impl LockForm for Threads {
+    type Lock<T> = Mutex<T>;
+    type Guard<'a, T: 'a> = MutexGuard<'a, T>;
+
+    #[inline]
+    fn new<T>(value: T) -> Mutex<T> {
+        Mutex::new(value)
+    }
+
+    #[inline]
+    fn lock<'a, T: 'a>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
+        lock.lock()
+    }
+
+    #[inline]
+    fn try_lock<'a, T: 'a>(lock: &'a Mutex<T>) -> Option<MutexGuard<'a, T>> {
+        lock.try_lock()
+    }
+
+    #[inline]
+    fn get_mut<T>(lock: &mut Mutex<T>) -> &mut T {
+        lock.get_mut()
+    }
+}
+
+/// One thread at a time: a flag, as zenoh-pico's lock is nothing without its threads.
+impl LockForm for OneThread {
+    type Lock<T> = OneThreadLock<T>;
+    type Guard<'a, T: 'a> = OneThreadGuard<'a, T>;
+
+    #[inline]
+    fn new<T>(value: T) -> OneThreadLock<T> {
+        OneThreadLock::new(value)
+    }
+
+    #[inline]
+    fn lock<'a, T: 'a>(lock: &'a OneThreadLock<T>) -> OneThreadGuard<'a, T> {
+        lock.lock()
+    }
+
+    #[inline]
+    fn try_lock<'a, T: 'a>(lock: &'a OneThreadLock<T>) -> Option<OneThreadGuard<'a, T>> {
+        lock.try_lock()
+    }
+
+    #[inline]
+    fn get_mut<T>(lock: &mut OneThreadLock<T>) -> &mut T {
+        lock.get_mut()
+    }
+}
+
+/// A value behind the lock of the engine's form.
+pub(crate) type StateLock<T> = <CoopForm as LockForm>::Lock<T>;
+
+/// A hold of a [`StateLock`].
+pub(crate) type StateGuard<'a, T> = <CoopForm as LockForm>::Guard<'a, T>;
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::{CoopForm, LockForm};
+    use wz_session_core::row_callback::{OneThread, ThreadForm, Threads};
+
+    /// A take of `F`'s lock holds the value until its guard drops: a try meanwhile finds it
+    /// held, one after takes it with what the hold wrote, and the value owned whole is that too.
+    fn a_take_holds_until_its_guard_drops<F: LockForm>() {
+        let mut lock = F::new(1_u8);
+        let mut held = F::lock(&lock);
+        *held = 2;
+        assert!(F::try_lock(&lock).is_none(), "held, a try takes nothing");
+        drop(held);
+        assert_eq!(
+            F::try_lock(&lock).map(|value| *value),
+            Some(2),
+            "let go, a try takes what the hold wrote"
+        );
+        assert_eq!(
+            *F::get_mut(&mut lock),
+            2,
+            "owned whole, the value is the last written"
+        );
+    }
+
+    /// Both forms' locks keep a value as a lock does. Turned red by a form whose guard does not
+    /// let go as it drops, or whose try takes a held value.
+    #[test]
+    fn each_forms_lock_holds_its_value_until_the_guard_drops() {
+        a_take_holds_until_its_guard_drops::<Threads>();
+        a_take_holds_until_its_guard_drops::<OneThread>();
+    }
+
+    /// The form in force is the one the build's `threads` names: other threads call in exactly
+    /// when it is on. Turned red by a choice of the form that does not follow the feature.
+    #[test]
+    fn the_form_in_force_follows_the_threads_feature() {
+        assert_eq!(
+            <CoopForm as ThreadForm>::OTHER_THREADS,
+            cfg!(feature = "threads")
+        );
+    }
+}

@@ -678,7 +678,10 @@ impl ReconnectingSession {
             };
             match outcome {
                 DriverOutcome::IterationLimit => return ReconnectDriveOutcome::IterationLimit,
-                DriverOutcome::Terminated => {
+                // This drive builds no part of its loop on the heap and never answers
+                // `Refused`; were it to, the session ended unrun and is reopened as one
+                // whose link was lost.
+                DriverOutcome::Terminated | DriverOutcome::Refused => {
                     // R311y525 — the flush runs BEFORE the stop check, and the
                     // ordering is the faithful one: pico fires
                     // `_z_liveliness_subscription_undeclare_all` from TRANSPORT
@@ -928,7 +931,7 @@ pub async fn open_session_with_reconnect(
             wire_dialed_link_with_rx(dialed, link_rx, &params.policy, &params.limits);
         let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();
-        let actions = new_session_actions(sink, params, clock);
+        let actions = new_session_actions(sink, params, clock)?;
         // R311ju — first open routes through the same shared `initiator_open`
         // body every reopen attempt uses (engine build + activation + open loop).
         let opened = initiator_open(

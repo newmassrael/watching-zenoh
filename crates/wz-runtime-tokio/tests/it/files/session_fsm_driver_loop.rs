@@ -57,7 +57,8 @@ fn fresh_setup() -> (
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
@@ -394,7 +395,8 @@ async fn the_declaration_watch_runs_from_the_establishment_until_the_peers_final
         }
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
             Arc::new(NoopOutboundDriver::default());
-        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let actions =
+            new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         drive_to_established(&mut engine);
@@ -456,7 +458,8 @@ fn watched_session(
         .ok()?;
     params.limits = limits;
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     drive_to_established(&mut engine);
@@ -532,7 +535,8 @@ async fn a_quiet_window_settles_only_an_accepted_links_sync_under_when_begun() {
         }
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
             Arc::new(NoopOutboundDriver::default());
-        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let actions =
+            new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         if accepted {
@@ -922,7 +926,8 @@ async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
     let mut params = fixture_session_init_params();
     params.batch_size = 512;
     params.link_rx.wider_init_ack_batch = WiderInitAckBatch::Refuse;
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     drive_to_sent_init_syn(&mut engine);
@@ -954,7 +959,8 @@ async fn an_init_ack_naming_a_larger_batch_is_adopted_under_zenohs_rule() {
         WiderInitAckBatch::Adopt,
         "zenoh's rule is the default"
     );
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     drive_to_sent_init_syn(&mut engine);
@@ -1936,7 +1942,8 @@ fn fresh_recording_setup() -> (
 ) {
     let recorder = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     (recorder, actions, engine)

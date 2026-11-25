@@ -61,7 +61,8 @@ const ITER_CAP_OPEN: usize = 64;
 /// usrpwd `dispatch` installed, plus its initialized engine.
 fn side(driver: &Arc<LifecycleRecordingDriver>, dispatch: AuthDispatch) -> Arc<SessionLinkActions> {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     actions.install_auth_dispatch(dispatch);
     actions
 }

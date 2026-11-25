@@ -107,6 +107,16 @@ enum Command {
     /// In one batch window, so that one frame carries both: push `.2` on the key `.1`, then
     /// retract subscriber `.0` of the router's.
     PushThenUndeclareSubscriber(u64, &'static str, &'static [u8]),
+    /// In one batch window: declare the key `.1` under id `.0` of the router's space, push `.2`
+    /// naming the id, send a KeepAlive and push `.3` naming the id again. The KeepAlive drains the
+    /// open batch before it, so the declaration and the first Push share a frame and the second
+    /// Push follows the KeepAlive.
+    DeclarePushKeepAlivePush(
+        wz_session_core::wire_id::ExprId,
+        &'static str,
+        &'static [u8],
+        &'static [u8],
+    ),
     /// Send the final of the initial declarations, as a peer does once it has declared what it
     /// held when the link came up.
     #[cfg(any(
@@ -385,10 +395,11 @@ fn run_router(
     let links = router_links(init.batch_size);
     let OpenedLink { sink, pump } = links.open_acceptor(port).expect("bind the router's end");
     let _ = ready.send(());
-    let runtime = CoopRuntime::new(PosixClock);
-    let local = CoopLocalSet::new(&runtime);
+    let runtime = CoopRuntime::try_new(PosixClock).expect("the heap has room");
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
-    let actions = new_session_actions(sink, init, CoopTime::new(&runtime));
+    let actions =
+        new_session_actions(sink, init, CoopTime::new(&runtime)).expect("the heap has room");
     let observer = std::rc::Rc::new(std::cell::RefCell::new(ApplicationLayerObserver::new()));
     if catch_all == CatchAll::Held {
         let samples = seen.clone();
@@ -453,7 +464,8 @@ fn run_router(
         &local,
         pump,
         actions.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(PosixEntropy)
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
@@ -683,6 +695,26 @@ fn run_router(
                 let _ = actions.batch_start();
                 let _ = actions.send_push_literal(key, value, true);
                 actions.send_undeclare_subscriber(id);
+                let _ = actions.batch_stop();
+            }
+            Ok(Command::DeclarePushKeepAlivePush(id, key, first, second)) => {
+                let aliased = |value: &[u8]| {
+                    NetworkMessage::Push(Box::new(
+                        wz_session_core::push_build::build_push_aliased(id, None, value)
+                            .expect("a Push naming an id"),
+                    ))
+                };
+                let declare = wz_session_core::declare_build::build_declare_kexpr(id, key)
+                    .expect("a declaration");
+                let _ = actions.batch_start();
+                let _ = actions.send_network_message(
+                    NetworkMessage::Declare(Box::new(declare)),
+                    true,
+                    false,
+                );
+                let _ = actions.send_network_message(aliased(first), true, false);
+                actions.send_keep_alive();
+                let _ = actions.send_network_message(aliased(second), true, false);
                 let _ = actions.batch_stop();
             }
             Ok(Command::PushAliasThenUndeclare(id, value)) => {
@@ -3424,6 +3456,7 @@ mod closure_drops;
 mod congestion;
 mod decl_watch;
 mod dial_in_flight;
+mod direct_receive;
 mod entity_tables;
 #[cfg(all(
     feature = "listen",
@@ -3483,8 +3516,13 @@ mod program_clock;
 mod queryable;
 pub(crate) mod redial_heap;
 mod redial_wait;
+// The state of a session whose shape the build fixes: a build that plans at the open has none.
+#[cfg(not(feature = "runtime-plan"))]
+mod region;
 mod replay;
 mod round;
+// The cells a link's task takes: a build whose read steps its one link itself runs none.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",

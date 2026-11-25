@@ -478,12 +478,12 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION for the reason the table above is: our id space is the one of
     /// the session's own bundle, and two sessions have two.
     #[cfg(feature = "alloc")]
-    own_mapping_space: Option<SharedOwnMappingSpace>,
+    own_mapping_space: crate::bounded::ZeroOption<SharedOwnMappingSpace>,
     /// The key ids every node of the deployment shares, when the session holds them
     /// (`shared-key-ids`): an id neither declared space holds is read in it. Installed, as the
     /// own space is, by the engine that opened the session; `None` keeps the two spaces alone.
     #[cfg(feature = "shared-key-ids")]
-    shared_key_ids: Option<crate::shared_key_ids::SharedKeyIds>,
+    shared_key_ids: crate::bounded::ZeroOption<crate::shared_key_ids::SharedKeyIds>,
     /// R231 — this session's own zid prefix (1..=16 bytes),
     /// negotiated during the session-FSM open handshake. When set,
     /// [`dispatch_push`](SubscriberTable::dispatch_push) suppresses wire-arrived
@@ -508,7 +508,7 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION: two sessions of one process may carry two zids, and an echo
     /// is a sample that names the zid of the session it came back on.
     // Inline whatever the policy: sixteen bytes no table lends.
-    own_zid: Option<OwnZid>,
+    own_zid: OwnZid,
 }
 
 /// This session's own zid as the self-echo check compares it: 1 to 16 bytes inline and their
@@ -522,6 +522,21 @@ struct OwnZid {
 
 #[cfg(feature = "storage-profile")]
 impl OwnZid {
+    /// No zid: a length of none, which no zid has, so naming of all zero bytes holds none.
+    const NONE: Self = Self {
+        bytes: [0; 16],
+        len: 0,
+    };
+
+    /// The zid's bytes, `None` where none is held.
+    fn held(&self) -> Option<&[u8]> {
+        if self.len == 0 {
+            None
+        } else {
+            Some(self.as_slice())
+        }
+    }
+
     /// The zid `zid` spells, or `None` for one not 1 to 16 bytes long.
     fn of(zid: &[u8]) -> Option<Self> {
         if !(1..=16).contains(&zid.len()) {
@@ -2287,10 +2302,17 @@ pub(crate) struct MatchMemo<P: Storage> {
     /// How many times a slot was written. A repeated key may be answered from the slot the key
     /// before it was, but only while no slot has been written since.
     writes: u64,
-    /// The slot the last delivery was answered from, and `writes` as it was then; `None` when
-    /// that delivery was not answered from a slot at all (a key too deep to match).
-    last: Option<(usize, u64)>,
+    /// The slot the last delivery was answered from, counted from 1, and 0 when that delivery
+    /// was not answered from a slot at all (a key too deep to match): a count rather than an
+    /// `Option`, so a memory of all zero bytes remembers no delivery.
+    last_at: usize,
+    /// `writes` as it was when the slot `last_at` names answered.
+    last_writes: u64,
 }
+
+// SAFETY: its slots are a sequence of a policy whose sequences are empty at all zero bytes
+// (`ZeroSeqs`), and a memory of no write and no last answer is two zero counts.
+unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for MatchMemo<P> {}
 
 impl<P: Storage> MatchMemo<P> {
     /// A memory of `memo_slots::<P>(stated)` empty slots.
@@ -2303,8 +2325,23 @@ impl<P: Storage> MatchMemo<P> {
         Self {
             slots,
             writes: 0,
-            last: None,
+            last_at: 0,
+            last_writes: 0,
         }
+    }
+
+    /// The slot the last delivery was answered from, still as it was then.
+    fn last_answer(&self) -> Option<usize> {
+        match self.last_at.checked_sub(1) {
+            Some(at) if self.last_writes == self.writes => Some(at),
+            _ => None,
+        }
+    }
+
+    /// Remember that the slot `at` answered the delivery now.
+    fn answered_by(&mut self, at: usize) {
+        self.last_at = at.saturating_add(1);
+        self.last_writes = self.writes;
     }
 
     /// How many slots the memory holds: the count it was made with. A fixed table's is the
@@ -2454,26 +2491,24 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
         return scan_subscribers(rows, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
     if repeats_previous {
-        if let Some((at, writes)) = memo.last {
-            if writes == memo.writes {
-                if let Some(Some(slot)) = memo.slots.get(at) {
-                    if slot.epoch == epoch && slot.remote == is_remote {
-                        for position in slot.hits.iter() {
-                            if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
-                                deliver(id, sink);
-                            }
+        if let Some(at) = memo.last_answer() {
+            if let Some(Some(slot)) = memo.slots.get(at) {
+                if slot.epoch == epoch && slot.remote == is_remote {
+                    for position in slot.hits.iter() {
+                        if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
+                            deliver(id, sink);
                         }
-                        return slot.hits.len();
                     }
+                    return slot.hits.len();
                 }
             }
         }
     }
-    memo.last = None;
+    memo.last_at = 0;
     let at = memo.slot_of(key);
     if let Some(Some(slot)) = memo.slots.get(at) {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
-            memo.last = Some((at, memo.writes));
+            memo.answered_by(at);
             for position in slot.hits.iter() {
                 if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
                     deliver(id, sink);
@@ -2523,7 +2558,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     });
     // A count of writes, read only for equality with the one a remembered slot was written at.
     memo.writes = memo.writes.wrapping_add(1);
-    memo.last = Some((at, memo.writes));
+    memo.answered_by(at);
     fired
 }
 
@@ -2784,10 +2819,10 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
                 keys: Default::default(),
                 #[cfg(feature = "alloc")]
-                own_mapping_space: None,
+                own_mapping_space: crate::bounded::ZeroOption::NONE,
                 #[cfg(feature = "shared-key-ids")]
-                shared_key_ids: None,
-                own_zid: None,
+                shared_key_ids: crate::bounded::ZeroOption::NONE,
+                own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::default(),
@@ -2818,10 +2853,10 @@ impl SubscriberPeer<crate::bounded::Static> {
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
                 keys: crate::bounded::InlineKeys,
                 #[cfg(feature = "alloc")]
-                own_mapping_space: None,
+                own_mapping_space: crate::bounded::ZeroOption::NONE,
                 #[cfg(feature = "shared-key-ids")]
-                shared_key_ids: None,
-                own_zid: None,
+                shared_key_ids: crate::bounded::ZeroOption::NONE,
+                own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::new_static(),
@@ -2837,6 +2872,57 @@ impl SubscriberPeer<crate::bounded::Static> {
             class: None,
             _policy: core::marker::PhantomData,
         }
+    }
+}
+
+/// The rows of a [`SubscriberPeer`] of the region policy, which a region lays out beside it: the
+/// staging of the answers to the peer's interests, at the build's bound. The peer's aliases and
+/// interests are inline in the side, at their bounds, as the region policy keeps a peer's rows.
+pub struct SubscriberPeerRows {
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+    staged: [core::mem::MaybeUninit<SubInterestReply>; caps::MAX_PENDING_DECLARES],
+}
+
+// SAFETY: the staging's rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl crate::bounded::ZeroEmpty for SubscriberPeerRows {}
+
+/// The lines a region's description holds for one [`SubscriberPeer`] of the region policy, at
+/// most: its staging's rows; and its two handles to the key arena, its aliases' and its interests'.
+pub const SUBSCRIBER_PEER_LINES: usize = 2;
+
+// SAFETY: of the region policy, at all zero bytes: the aliases are a `FixedIdMap` and the interests
+// a static sequence (`ZeroEmpty`), the staging a `LentSeq` of no rows, each key arena handle a
+// `LentKeys` of none; the bounds are `Limited` (`ZeroEmpty`), bounds of nothing until the session
+// states them; the own id space and the shared key ids are `ZeroOption`s of none, the own zid is
+// one of no bytes (`OwnZid::NONE`), the class is `None` (`ClassId` is a transparent `NonZeroU16`);
+// the shared-memory state is `ZeroEmpty`; every count and epoch is zero; the composing row is
+// `ComposeInline` (`ZeroEmpty`). Nothing drops a value, every sequence holding none.
+unsafe impl crate::bounded::ZeroEmpty for SubscriberPeer<crate::bounded::Region> {}
+
+impl SubscriberPeer<crate::bounded::Region> {
+    /// The description of a side of the region policy at `at` in a region and its
+    /// [`SubscriberPeerRows`] at `rows`: the line of its staging's rows and its handles to the
+    /// region's key arena, those the build keeps.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<SUBSCRIBER_PEER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY;
+        #[cfg(feature = "storage-profile")]
+        let lines = lines.keys_at(at.wrapping_add(core::mem::offset_of!(Self, naming.keys)));
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+        let lines = lines
+            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
+            .seq(crate::bounded::SeqPlace::of::<SubInterestReply>(
+                at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
+                rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
+                caps::MAX_PENDING_DECLARES,
+            ));
+        #[cfg(not(feature = "storage-profile"))]
+        let _ = at;
+        #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
+        let _ = rows;
+        lines
     }
 }
 
@@ -3148,7 +3234,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// error under this workspace's deny-warnings docs policy.)
     #[cfg(feature = "alloc")]
     pub fn set_own_mapping_space(&mut self, space: SharedOwnMappingSpace) {
-        self.naming.own_mapping_space = Some(space);
+        self.naming.own_mapping_space.set(Some(space));
     }
 
     /// R311y739 — release the installed own space; `M=0` aliases refuse again.
@@ -3156,7 +3242,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// session teardown / re-init, exactly as `clear_own_zid` pairs its install.
     #[cfg(feature = "alloc")]
     pub fn clear_own_mapping_space(&mut self) {
-        self.naming.own_mapping_space = None;
+        self.naming.own_mapping_space.set(None);
     }
 
     /// Install the key ids every node of the deployment shares: from now on an id that neither
@@ -3165,14 +3251,14 @@ impl<P: Storage> SubscriberPeer<P> {
     /// its link carries anything; a second install replaces the first.
     #[cfg(feature = "shared-key-ids")]
     pub fn set_shared_key_ids(&mut self, ids: crate::shared_key_ids::SharedKeyIds) {
-        self.naming.shared_key_ids = Some(ids);
+        self.naming.shared_key_ids.set(Some(ids));
     }
 
     /// Release the installed dictionary: an id neither declared space holds resolves to
     /// nothing again.
     #[cfg(feature = "shared-key-ids")]
     pub fn clear_shared_key_ids(&mut self) {
-        self.naming.shared_key_ids = None;
+        self.naming.shared_key_ids.set(None);
     }
 
     /// R311y739 — BOTH id spaces, for this registry and for every consumer the
@@ -3320,7 +3406,7 @@ impl<P: Storage> SubscriberPeer<P> {
         let Some(own) = OwnZid::of(zid) else {
             return false;
         };
-        self.naming.own_zid = Some(own);
+        self.naming.own_zid = own;
         true
     }
 
@@ -3330,7 +3416,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// every wire-arrived Push fires its matching subscribers.
     #[cfg(feature = "storage-profile")]
     pub fn clear_own_zid(&mut self) {
-        self.naming.own_zid = None;
+        self.naming.own_zid = OwnZid::NONE;
     }
 
     /// R231 — expose the currently-installed own zid for diagnostic
@@ -3339,7 +3425,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// `source_info.zid_prefix()`.
     #[cfg(feature = "storage-profile")]
     pub fn own_zid(&self) -> Option<&[u8]> {
-        self.naming.own_zid.as_ref().map(OwnZid::as_slice)
+        self.naming.own_zid.held()
     }
 
     /// R121d — absorb a `Declare` envelope's inner body so the
@@ -3569,7 +3655,7 @@ impl<P: Storage> PeerNaming<P> {
         #[cfg(not(feature = "alloc"))]
         let own = tables;
         #[cfg(feature = "shared-key-ids")]
-        if let Some(ids) = &self.shared_key_ids {
+        if let Some(ids) = self.shared_key_ids.as_ref() {
             return MappingSpaces::<P, O>::of_aliases(&self.aliases, own).with_shared(ids);
         }
         MappingSpaces::<P, O>::of_aliases(&self.aliases, own)
@@ -5018,6 +5104,33 @@ mod tests {
     // Fixtures build the borrowed codec views then `.into_owned()` at the
     // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
     use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
+
+    /// An own zid of all zero bytes is none, as one cleared is; one set reads back its bytes.
+    /// Turned red by `OwnZid::held` reading a length of zero as a zid.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn an_own_zid_of_zero_bytes_is_none() {
+        // SAFETY: sixteen bytes and a length, all integers.
+        let zeroed: OwnZid = unsafe { core::mem::zeroed() };
+        assert_eq!(zeroed.held(), None);
+        assert_eq!(OwnZid::NONE.held(), None);
+        let set = OwnZid::of(&[1, 2, 3]).unwrap();
+        assert_eq!(set.held(), Some(&[1_u8, 2, 3][..]));
+    }
+
+    /// A match memory of all zero bytes remembers no answer; one answered remembers its slot until
+    /// a slot is written. Turned red by `last_answer` reading a zero `last_at` as slot 0.
+    #[test]
+    fn a_match_memory_of_zero_bytes_remembers_no_answer() {
+        // SAFETY: `MatchMemo` is `ZeroEmpty`.
+        let mut memo: MatchMemo<crate::bounded::Region> = unsafe { core::mem::zeroed() };
+        assert_eq!(memo.last_answer(), None);
+        assert_eq!(memo.slot_count(), 0);
+        memo.answered_by(0);
+        assert_eq!(memo.last_answer(), Some(0));
+        memo.writes = memo.writes.wrapping_add(1);
+        assert_eq!(memo.last_answer(), None);
+    }
 
     #[test]
     fn dispatch_fires_callback_on_matching_keyexpr() {

@@ -1049,13 +1049,13 @@ pub struct ShmReceiveState {
     /// `wz-runtime-tokio::shm_provider::PosixShmResolver`). `None` until bring-up
     /// installs it; a descriptor arriving with none installed drops. Shared, so one
     /// resolver serves every registry of a session.
-    resolver: Option<alloc::sync::Arc<dyn ShmResolver + Send + Sync>>,
+    resolver: crate::bounded::ZeroOption<alloc::sync::Arc<dyn ShmResolver + Send + Sync>>,
     /// R3040 -- the means of acknowledging the peer's slices: one decrement of the
     /// counter the peer named for the message's priority, per slice. A sender keeps
     /// a hard reference to every buffer it sends, which keeps it confirmed, until
     /// this is called for it. `None` when the peer named no counters, which
     /// upstream does for a best-effort link.
-    handoff: Option<alloc::sync::Arc<dyn ShmHandoff>>,
+    handoff: crate::bounded::ZeroOption<alloc::sync::Arc<dyn ShmHandoff>>,
     /// Messages dropped because a descriptor arrived on a session that never
     /// negotiated shared memory: the peer named a segment it had no right to name
     /// (or the state was never stamped), and the segment was deliberately not
@@ -1068,14 +1068,18 @@ pub struct ShmReceiveState {
     unresolved_drops: u64,
 }
 
+// SAFETY: nothing negotiated is `false`, a resolver and a handoff of none are `ZeroOption`s of
+// zero bytes, and no drop counted is a zero count.
+unsafe impl crate::bounded::ZeroEmpty for ShmReceiveState {}
+
 impl ShmReceiveState {
     /// A state of nothing negotiated, installed or counted, as `Default` makes it; `const`, so
     /// a peer's side of the static policy that holds one can be a `static`.
     pub const fn new() -> Self {
         Self {
             negotiated: false,
-            resolver: None,
-            handoff: None,
+            resolver: crate::bounded::ZeroOption::NONE,
+            handoff: crate::bounded::ZeroOption::NONE,
             unnegotiated_drops: 0,
             unresolved_drops: 0,
         }
@@ -1084,7 +1088,7 @@ impl ShmReceiveState {
     /// Install the resolver. Shared, so the session hands the same one to every
     /// registry that receives a payload.
     pub fn set_resolver(&mut self, resolver: alloc::sync::Arc<dyn ShmResolver + Send + Sync>) {
-        self.resolver = Some(resolver);
+        self.resolver.set(Some(resolver));
     }
 
     /// Restamp the LIVE negotiated capability of the session feeding this state.
@@ -1096,7 +1100,7 @@ impl ShmReceiveState {
     /// withdraws, which a new establishment does first, so a registry never writes
     /// the counters of a peer the session has moved on from.
     pub fn set_handoff(&mut self, handoff: Option<alloc::sync::Arc<dyn ShmHandoff>>) {
-        self.handoff = handoff;
+        self.handoff.set(handoff);
     }
 
     /// Whether the un-swap will currently honour a descriptor.

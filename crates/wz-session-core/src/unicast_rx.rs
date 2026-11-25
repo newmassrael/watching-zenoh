@@ -54,80 +54,80 @@ pub trait RxReassembly {
     }
 
     /// End the chains past their deadline at `now_ms`, telling `on_event` how many.
-    fn sweep_chains(&mut self, now_ms: u64, on_event: &mut dyn EventSink);
+    fn sweep_chains<F: EventSink + ?Sized>(&mut self, now_ms: u64, on_event: &mut F);
 
     /// Report `outcome`, one of the copying receive, through the reassembly: the fragment it
     /// carries is staged, a chain it completes is reported after it, and a channel-gate rejection
     /// clears its channel's chain.
     #[cfg(feature = "alloc")]
-    fn report_copied<R: SessionRuntime, T: TimeSource>(
+    fn report_copied<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         outcome: &DriverLoopOutcome,
         actions: &SessionLinkActions<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     );
 
     /// Report `outcome`, one of what a receive in place parked (the rest of a compressed batch),
     /// through the reassembly.
     #[cfg(all(feature = "alloc", feature = "rx-in-place"))]
-    fn report_parked<R: SessionRuntime, T: TimeSource>(
+    fn report_parked<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         outcome: &DriverLoopOutcome,
         actions: &SessionLinkActions<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     );
 
     /// Dispatch one datagram where the link holds it, its fragments staged here.
     #[cfg(feature = "rx-in-place")]
-    fn dispatch_in_place<R: SessionRuntime, T: TimeSource>(
+    fn dispatch_in_place<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         record: &mut RecordBuf,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) -> DatagramPath;
 }
 
 /// A receive that rejoins no fragment: every outcome is reported as it is, and a fragment is
 /// handed up by the copying path, for a caller that reassembles to take.
 impl RxReassembly for () {
-    fn sweep_chains(&mut self, _now_ms: u64, _on_event: &mut dyn EventSink) {}
+    fn sweep_chains<F: EventSink + ?Sized>(&mut self, _now_ms: u64, _on_event: &mut F) {}
 
     #[cfg(feature = "alloc")]
-    fn report_copied<R: SessionRuntime, T: TimeSource>(
+    fn report_copied<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         outcome: &DriverLoopOutcome,
         _actions: &SessionLinkActions<R, T>,
         _now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) {
         on_event.event(crate::driver_loop::IterationEvent::Poll(outcome));
     }
 
     #[cfg(all(feature = "alloc", feature = "rx-in-place"))]
-    fn report_parked<R: SessionRuntime, T: TimeSource>(
+    fn report_parked<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         outcome: &DriverLoopOutcome,
         _actions: &SessionLinkActions<R, T>,
         _now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) {
         on_event.event(crate::driver_loop::IterationEvent::Poll(outcome));
     }
 
     #[cfg(feature = "rx-in-place")]
-    fn dispatch_in_place<R: SessionRuntime, T: TimeSource>(
+    fn dispatch_in_place<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         record: &mut RecordBuf,
         _now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) -> DatagramPath {
         crate::drive::dispatch_datagram(unit, actions, engine, record, on_event)
     }
@@ -140,18 +140,18 @@ where
     S: ChainStaging<SLOTS, CAP>,
     P: crate::reassembly_dispatch::ChainPeers,
 {
-    fn sweep_chains(&mut self, now_ms: u64, on_event: &mut dyn EventSink) {
+    fn sweep_chains<F: EventSink + ?Sized>(&mut self, now_ms: u64, on_event: &mut F) {
         let mut forward = |event: IterationEvent<'_, '_>| on_event.event(event);
         crate::reassembly_dispatch::sweep_reporting(self, now_ms, &mut forward);
     }
 
     #[cfg(feature = "alloc")]
-    fn report_copied<R: SessionRuntime, T: TimeSource>(
+    fn report_copied<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         outcome: &DriverLoopOutcome,
         actions: &SessionLinkActions<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) {
         // One observer type for both reports, so the report a receive in place reaches through a
         // compressed batch is the same instance (`report_outcome_in_place`).
@@ -161,12 +161,12 @@ where
     }
 
     #[cfg(all(feature = "alloc", feature = "rx-in-place"))]
-    fn report_parked<R: SessionRuntime, T: TimeSource>(
+    fn report_parked<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         outcome: &DriverLoopOutcome,
         actions: &SessionLinkActions<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) {
         // The observer type the reassembling dispatch reports a compressed batch through too, so
         // the two reach one instance of the report.
@@ -176,14 +176,14 @@ where
     }
 
     #[cfg(feature = "rx-in-place")]
-    fn dispatch_in_place<R: SessionRuntime, T: TimeSource>(
+    fn dispatch_in_place<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         record: &mut RecordBuf,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) -> DatagramPath {
         crate::drive::dispatch_datagram_reassembling(
             unit, actions, engine, record, self, now_ms, on_event,
@@ -273,14 +273,14 @@ where
     }
 
     // The session sweeps the Router it owns once a step, with nothing lent.
-    fn sweep_chains(&mut self, _now_ms: u64, _on_event: &mut dyn EventSink) {}
+    fn sweep_chains<F: EventSink + ?Sized>(&mut self, _now_ms: u64, _on_event: &mut F) {}
 
-    fn report_copied<R: SessionRuntime, T: TimeSource>(
+    fn report_copied<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         outcome: &DriverLoopOutcome,
         actions: &SessionLinkActions<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) {
         let reported = self.with(|router| router.report_copied(outcome, actions, now_ms, on_event));
         if reported.is_none() {
@@ -289,12 +289,12 @@ where
     }
 
     #[cfg(feature = "rx-in-place")]
-    fn report_parked<R: SessionRuntime, T: TimeSource>(
+    fn report_parked<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         outcome: &DriverLoopOutcome,
         actions: &SessionLinkActions<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) {
         let reported = self.with(|router| router.report_parked(outcome, actions, now_ms, on_event));
         if reported.is_none() {
@@ -307,14 +307,14 @@ where
     // link; a receive asks `ready` before it takes input, so the arm is the totality answer, and
     // counted so that a test sees it never runs.
     #[cfg(feature = "rx-in-place")]
-    fn dispatch_in_place<R: SessionRuntime, T: TimeSource>(
+    fn dispatch_in_place<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         record: &mut RecordBuf,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) -> DatagramPath {
         self.with(|router| {
             router.dispatch_in_place(unit, actions, engine, record, now_ms, on_event)
@@ -477,7 +477,7 @@ impl<Router: RxReassembly> UnicastRx<Router> {
     /// End the fragment chains past their deadline at `now_ms`, telling `on_event` how many
     /// (`IterationEvent::ReassemblyTimeout`). A receive that rejoins no fragment has none.
     #[inline(never)]
-    pub fn sweep(&mut self, now_ms: u64, on_event: &mut dyn EventSink) {
+    pub fn sweep<F: EventSink + ?Sized>(&mut self, now_ms: u64, on_event: &mut F) {
         self.router.sweep_chains(now_ms, on_event);
     }
 
@@ -486,12 +486,12 @@ impl<Router: RxReassembly> UnicastRx<Router> {
     /// this before it reads its link, so a batch of two messages does not wait for the peer.
     #[cfg(feature = "alloc")]
     #[inline(never)]
-    pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
+    pub fn dispatch_pending<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) -> bool {
         match crate::drive::dispatch_pending(actions, engine) {
             Some(outcome) => {
@@ -506,13 +506,13 @@ impl<Router: RxReassembly> UnicastRx<Router> {
     /// One datagram the copying receive read, dispatched and reported through the reassembly.
     #[cfg(feature = "alloc")]
     #[inline(never)]
-    pub fn dispatch_frame<R: SessionRuntime, T: TimeSource>(
+    pub fn dispatch_frame<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         frame: RxFrame,
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) {
         let outcome = crate::drive::dispatch_link_event(LinkEvent::Rx(frame), actions, engine);
         self.router
@@ -524,12 +524,12 @@ impl<Router: RxReassembly> UnicastRx<Router> {
     /// (`crate::drive::dispatch_parked_in_place`): whether there was any.
     #[cfg(all(feature = "alloc", feature = "rx-in-place"))]
     #[inline(never)]
-    pub fn dispatch_parked_in_place<R: SessionRuntime, T: TimeSource>(
+    pub fn dispatch_parked_in_place<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) -> bool {
         match crate::drive::dispatch_parked_in_place(actions, engine) {
             Some(outcome) => {
@@ -546,13 +546,13 @@ impl<Router: RxReassembly> UnicastRx<Router> {
     /// and the path it took counted. `on_event` runs inside the link's lend.
     #[cfg(feature = "rx-in-place")]
     #[inline(never)]
-    pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
+    pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) -> DatagramPath {
         let path = self.router.dispatch_in_place(
             unit,
@@ -691,6 +691,52 @@ mod tests {
         });
         assert_eq!(ended, Some(1));
         assert_eq!(rx.router().active_chains(), 0);
+    }
+
+    /// The receive takes its sink as a type parameter: a named sink type is handed what the sweep
+    /// raises through its own `event`, and a sink behind a trait object still is, so a host that
+    /// holds one keeps working.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_sweep_reports_to_a_named_sink_and_to_a_trait_object() {
+        use crate::reassembly_dispatch::{Fragment, ReassemblyConfig};
+        const TIMEOUT_MS: u64 = 500;
+        struct Timeouts(usize);
+        impl EventSink for Timeouts {
+            fn event(&mut self, event: IterationEvent<'_, '_>) {
+                if let IterationEvent::ReassemblyTimeout(count) = event {
+                    self.0 += count;
+                }
+            }
+        }
+        let begun = || {
+            let mut router: ReassemblyDispatcher<2, 64> =
+                ReassemblyDispatcher::new(ReassemblyConfig::new(2, TIMEOUT_MS));
+            router.ingest(
+                Fragment {
+                    peer_key: &[0x11; 16],
+                    reliable: true,
+                    sn: 1,
+                    more: 1,
+                    payload: b"part",
+                    priority: crate::qos::Priority::DEFAULT,
+                    markers: crate::extfragment::FragmentMarkers::NONE,
+                },
+                crate::sn::mask_from_res(0x02),
+                0,
+                |_| {},
+            );
+            UnicastRx::new(router)
+        };
+        let mut named = Timeouts(0);
+        begun().sweep(TIMEOUT_MS, &mut named);
+        assert_eq!(named.0, 1, "the named sink is told of the chain that ended");
+        let mut behind = Timeouts(0);
+        {
+            let object: &mut dyn EventSink = &mut behind;
+            begun().sweep(TIMEOUT_MS, object);
+        }
+        assert_eq!(behind.0, 1, "and so is one behind a trait object");
     }
 
     /// A receive over a lent Router ends no chain when it sweeps, past the chain's deadline and

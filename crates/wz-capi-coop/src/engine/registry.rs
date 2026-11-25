@@ -17,7 +17,7 @@
 //!
 //! What a peer writes by its own choice (its aliases, its declarations and the repeats of them,
 //! its interests) is not lent to each set at the bound of one peer: each kind of row lies in one
-//! pool of the session's ([`PeerPools`]), lent at the open as the sets are, and a face's tables
+//! pool of the session's (`PeerPools`), lent at the open as the sets are, and a face's tables
 //! are lists of the rows its peer holds there. A face keeps the bound of one peer; the pool bounds
 //! what the faces hold together, and a face that goes gives back its rows, and only its.
 //!
@@ -36,17 +36,26 @@
     feature = "declarations-synced-event"
 ))]
 use super::decl_watch::WatchObserver;
+use wz_session_core::bounded::BoundedVec;
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::bounded::{Arena, LendRefused};
+
+use crate::RowPolicy;
 use wz_session_core::driver_loop::IterationEvent;
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 #[cfg(feature = "multicast-declarations")]
 use wz_session_core::limit_binding::Quota;
 #[cfg(feature = "multicast-declarations")]
 use wz_session_core::limits::MaxPeerKeyexprAliasesHeld;
 use wz_session_core::limits::SessionLimits;
-use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::peer_tables::PeerPools;
+use wz_session_core::peer_tables::PeerTables;
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::peer_tables::{PeerRows, SHARES_ROWS};
 #[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
@@ -59,16 +68,25 @@ use wz_session_core::slot_observer::NoRequesters;
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::slot_observer::ObserverRows;
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 use wz_session_core::slot_observer::OtherPeers;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 #[cfg(feature = "query")]
 use super::{LegHold, LegSink};
 use super::{RoundDelivery, SubscriberRow};
-use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
+use crate::arena::MAX_FACE_SETS;
+#[cfg(feature = "runtime-plan")]
+use crate::arena::{FacePeers, GetTables};
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
@@ -98,13 +116,13 @@ pub(super) const DIAL_FACE: FaceId = 1 << 62;
 /// The tokens a face that went still owes the liveliness subscribers, held apart from the set it
 /// gave back, their rows in the session's pool (`Registry::owed`).
 #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>;
+type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<RowPolicy>;
 
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
 #[cfg(feature = "query")]
-pub(super) type Gets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
+pub(super) type Gets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, RowPolicy>;
 /// A session that asks no query has no pending get on any face: its requester side is none, and
 /// the observer's fan and drains keep no path for gets.
 #[cfg(not(feature = "query"))]
@@ -112,11 +130,11 @@ pub(super) type Gets = NoRequesters;
 
 /// What a face's peer writes and is owed. The rows are lent from the session's arena at its open,
 /// one set for each face the session may hold at once (`crate::arena::FacePeers`).
-pub(super) type Peer = PeerTables<Lent>;
+pub(super) type Peer = PeerTables<RowPolicy>;
 
 /// What the session holds for one face: what its peer wrote and what the session asked of it.
 ///
-/// A set is built where the registry keeps it ([`Self::rowless_in`], then [`Self::lend`]) and is
+/// A set is built where the registry keeps it ([`Self::rowless_in`], then `Self::lend`) and is
 /// never moved from there: a face that comes takes a set where it lies and one that goes empties it
 /// there, its rows of the session's pools going back to them. A set holds a few words for each of
 /// its tables, and the session's tables are placed once and not moved.
@@ -136,7 +154,7 @@ pub(super) struct FaceTables {
 impl FaceTables {
     /// A set for no face yet, written field by field into `place`, which is overwritten without
     /// dropping what it held: tables of no rows, each refusing what is asked of it until
-    /// [`Self::lend`] lends it rows, the peer's held to `limits`. Not inlined: the peer's tables,
+    /// `Self::lend` lends it rows, the peer's held to `limits`. Not inlined: the peer's tables,
     /// nearly all of the set, are written where they lie by `init_in`, and of the set only its
     /// gets are a value in this frame.
     #[inline(never)]
@@ -172,6 +190,7 @@ impl FaceTables {
     /// peer's tables, from `arena`, in that order, the peer's keys kept in `keys`, the session's
     /// key arena, held to `limits`. Refused when the arena has not the rows; the set stays whole,
     /// with what was lent before the refusal.
+    #[cfg(feature = "runtime-plan")]
     fn lend(
         &mut self,
         arena: &mut Arena,
@@ -229,6 +248,8 @@ fn names_face(holder: FaceId) -> bool {
 mod adding;
 mod held;
 use held::Holders;
+#[cfg(not(feature = "runtime-plan"))]
+pub(crate) mod placed;
 
 /// Where the set face `id` holds lies, `holders` naming the face of each set by the set's
 /// place: never a free set, whose row names no face.
@@ -282,7 +303,11 @@ pub(super) struct HistoryCursor {
 /// The faces other than the one a call acts on, which the matching verdicts of that call count:
 /// the sets before the call's own and after it, and the rows of the index of held sets that
 /// name their faces.
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 pub(super) struct Others<'a> {
     before: &'a [FaceTables],
     after: &'a [FaceTables],
@@ -290,7 +315,11 @@ pub(super) struct Others<'a> {
     held_after: &'a [FaceId],
 }
 
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 impl Others<'_> {
     fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         let before = self.before.iter().zip(self.held_before);
@@ -302,7 +331,11 @@ impl Others<'_> {
     }
 }
 
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 impl OtherPeers for Others<'_> {
     fn subscribes(
         &self,
@@ -384,7 +417,7 @@ impl MatchingSink for NoWatch {
 
 /// What the application registered on the session: its tables' rows lent from the session's
 /// arena at its open, each as many as the limit the open resolved.
-pub(super) type App = SlotObserverOf<CoopSinks, Lent, NoWatch>;
+pub(super) type App = SlotObserverOf<CoopSinks, RowPolicy, NoWatch>;
 
 /// What a write filter's verdict and a matching listener's are read off: every face's peer's
 /// declarations, each search of them counted for the tests ([`RegistryOf::peers_declare`]).
@@ -440,14 +473,14 @@ pub(super) struct RegistryOf<H: Holders> {
     delivery: RoundDelivery,
     /// The session's pools of what its peers write by their own choice, which every face's tables
     /// keep their rows in from the open on: what a test reads the pools' counts by.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-plan"))]
     pools: PeerPools,
     /// Every set of face tables, each where it was built and never moved from, in a table the arena
     /// lent at the open with a row for each face the config admits: the dial role's face's first
     /// and always held by it, then the faces to come. A face past them is refused
     /// (`FacesFull`), so the session's memory is the arena alone. A set no face holds is kept,
     /// emptied, for the next face.
-    sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
+    sets: BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     /// The face that holds each set, by the set's place among `sets`, [`NO_FACE`] for a set no
     /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds
     /// the first. The place is the face's in every table of the session (its link's, its room's).
@@ -461,7 +494,7 @@ pub(super) struct RegistryOf<H: Holders> {
     /// of one face, whose one face never goes. A session of no face besides the dial role's (a
     /// build without `listen` and `group`) removes none, and keeps no table of them.
     #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-    owed: BoundedVec<OwedTokens, { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS }, Lent>,
+    owed: BoundedVec<OwedTokens, { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS }, RowPolicy>,
     /// The aliases one face's peer may hold (`MAX_PEER_KEYEXPR_ALIASES`), which a set a group's face
     /// held, at the group's own quota (`Self::hold_member_aliases`), is held to again when it is
     /// given back for the next face.
@@ -554,6 +587,7 @@ impl<H: Holders> RegistryOf<H> {
     /// declare keeps its keys in `keys`, the session's key arena, as the session's own
     /// declarations do. What the application's subscribers match goes to `delivery`. Refused when
     /// the arena has not the rows, which one reserved by the plan that counts them always has.
+    #[cfg(feature = "runtime-plan")]
     pub(super) fn new(
         limits: &SessionLimits,
         arena: &mut Arena,
@@ -606,7 +640,7 @@ impl<H: Holders> RegistryOf<H> {
             owed,
             #[cfg(feature = "multicast-declarations")]
             peer_aliases: limits.max_peer_keyexpr_aliases_held(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "runtime-plan"))]
             pools,
             #[cfg(feature = "local-queryable")]
             local,
@@ -1296,8 +1330,9 @@ fn reconcile_face(app: &App, face: &mut FaceTables) {
 /// `keys`, the session's key arena, and what its peer writes in the rows `pools`, the session's,
 /// hands it, and hand it back: a set is never a value of its own in this frame. `None` when
 /// `sets` holds every row it was lent.
+#[cfg(feature = "runtime-plan")]
 fn push_rowless<'s>(
-    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
+    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     keys: KeySpace,
     pools: &mut PeerPools,
     limits: &SessionLimits,
@@ -1311,8 +1346,9 @@ fn push_rowless<'s>(
 /// dial face's of a session that dials nothing, which never has a peer to write into them. With one
 /// face's own spans, taking them here would leave the one face that comes none. `None` when
 /// `sets` holds every row it was lent.
+#[cfg(feature = "runtime-plan")]
 fn push_unpeered<'s>(
-    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
+    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     keys: KeySpace,
     limits: &SessionLimits,
 ) -> Option<&'s mut FaceTables> {
@@ -1332,9 +1368,10 @@ fn push_unpeered<'s>(
 ///
 /// Never inlined: the open calls it in a loop, and a loop whose first turn the compiler peels
 /// would carry the set's writing and lending twice.
+#[cfg(feature = "runtime-plan")]
 #[inline(never)]
 fn lend_set(
-    sets: &mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
+    sets: &mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     arena: &mut Arena,
     keys: KeySpace,
     pools: &mut PeerPools,
@@ -1350,7 +1387,9 @@ fn lend_set(
     set.lend(arena, keys, pools, gets, peer, limits)
 }
 
-#[cfg(test)]
+// The registry's own tests build it from an arena, as a build that lays its arena out at the open
+// does; a build of the region's form is held by the region's tests (`crate::tests::region`).
+#[cfg(all(test, feature = "runtime-plan"))]
 mod tests {
     //! Each face's tables are lent from the session's arena: the dial face's at the open, an
     //! accepted face's from the spares the open lent, and past those tables of no rows that refuse
@@ -2062,7 +2101,7 @@ mod tests {
             &AllocatorMemory,
         )
         .expect("the host has the memory");
-        let mut sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent> = sets_arena
+        let mut sets: BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy> = sets_arena
             .arena_mut()
             .lend(1)
             .expect("the arena has a row for the set");
@@ -2557,7 +2596,7 @@ mod tests {
         }
         std::println!(
             "  a lent table's header: {} B; a key arena's handle: {} B",
-            size_of::<BoundedVec<u8, 1, Lent>>(),
+            size_of::<BoundedVec<u8, 1, RowPolicy>>(),
             size_of::<LentKeys>()
         );
         let printed: usize = tables.iter().map(|(_, bytes)| bytes).sum();

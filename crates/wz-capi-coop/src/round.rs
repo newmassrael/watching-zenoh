@@ -9,16 +9,17 @@
 #[cfg(any(feature = "listen", feature = "group"))]
 use core::cell::Cell;
 
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::link::{LostCause, RxFrame};
 #[cfg(test)]
 use wz_session_core::placed::Placed;
 use wz_session_core::placed::PlacedRef;
 use wz_session_core::plane_lock::LockFamily;
 use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
-use wz_session_core::row_callback::ThreadForm;
 use wz_session_core::sink::SampleRef;
 
 #[cfg(feature = "query")]
@@ -48,24 +49,9 @@ pub use wz_session_core::round::{RoundCounts, RoundRowCounts};
 /// The engine's round of deliveries.
 pub(crate) type Round = wz_session_core::round::Round<CoopCalls>;
 
-/// How the engine's calls stand to its threads: a read task may deliver beside the program's calls
-/// (`threads`), or every call runs on the thread that steps the session.
-#[cfg(feature = "threads")]
-pub(crate) type CoopForm = wz_session_core::row_callback::Threads;
-/// How the engine's calls stand to its threads: a read task may deliver beside the program's calls
-/// (`threads`), or every call runs on the thread that steps the session.
-#[cfg(not(feature = "threads"))]
-pub(crate) type CoopForm = wz_session_core::row_callback::OneThread;
-
-/// The latch each row of the engine's tables counts its calls on: [`CoopForm`]'s.
-#[cfg(feature = "threads")]
-pub(crate) type Latch = wz_session_core::row_callback::CallLatch;
-/// The latch each row of the engine's tables counts its calls on: [`CoopForm`]'s.
-#[cfg(not(feature = "threads"))]
-pub(crate) type Latch = wz_session_core::row_callback::LocalLatch;
-
-// The latch named above is the one the form names, so a row and the round agree on the form.
-const _: fn(Latch) -> <CoopForm as ThreadForm>::Latch = |latch| latch;
+/// How the engine's calls stand to its threads, and the latch its rows count calls on: the
+/// engine's form ([`crate::form`]).
+pub(crate) use crate::form::{CoopForm, Latch};
 
 /// The bytes of one record of the engine's round.
 pub(crate) const RECORD_BYTES: usize = RoundRows::<CoopCalls>::RECORD_BYTES;
@@ -103,6 +89,7 @@ const fn most_subscribers(subscribers: usize, liveliness: usize) -> usize {
 
 /// What one record of a session whose limits are `limits` can take of its round ([`ReadRoom`]):
 /// an entry, and a callback for each subscriber it reaches, under the build's `SUBS` and `LIVE`.
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) fn read_room<const SUBS: usize, const LIVE: usize>(limits: &SessionLimits) -> ReadRoom {
     let subscribers = limits
         .max_subscriptions()
@@ -399,7 +386,9 @@ pub(crate) unsafe fn takes_a_group_read(
 /// `pump`, which gives the session nothing while the round has not the room one record can take
 /// (`room`, decision Q4), nor while a record lies in the datagram a link lent: not the next
 /// datagram, and not the next record of one the link keeps. What the peer sends meanwhile waits in
-/// the link, and the transport's flow control carries the wait back to it.
+/// the link, and the transport's flow control carries the wait back to it. A build whose read
+/// hands each record out as it is read puts no link behind it (`engine::direct`).
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) struct RoundGate<P> {
     pump: P,
     round: PlacedRef<Round>,
@@ -424,6 +413,7 @@ enum Stack {
     Quiet,
 }
 
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 impl<P> RoundGate<P> {
     /// `pump`, gated by `round` for the room `room` of one of its records.
     ///
@@ -468,6 +458,7 @@ impl<P> RoundGate<P> {
 }
 
 #[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 impl<P: SessionDatagramLink> RoundGate<P> {
     /// What a wait over the link's input found in its stack, `ready` or not, or, `true`, that the
     /// session's links moved (`FaceSession::input_seen`).
@@ -493,6 +484,7 @@ impl<P: SessionDatagramLink> RoundGate<P> {
     }
 }
 
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 impl<P: SessionDatagramLink> RoundGate<P> {
     /// Lend the link's next datagram to `f`. A link that leaves it where it lies until it is next
     /// asked to receive tells the round where it lies while it is lent, so a record of it may be
@@ -515,6 +507,7 @@ impl<P: SessionDatagramLink> RoundGate<P> {
     }
 }
 
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
     /// A link whose datagram a record is read from is not serviced: its stack may read the next
     /// datagram into the buffer the record lies in.
@@ -588,6 +581,11 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
         self.pump.lost()
     }
 
+    // What the link dropped was dropped whatever the gate holds back: it is counted as it is.
+    fn take_rx_dropped(&self) -> usize {
+        self.pump.take_rx_dropped()
+    }
+
     fn holds_input(&self) -> bool {
         self.pump.holds_input()
     }
@@ -622,6 +620,10 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
 
     fn keep(&self) {
         self.pump.keep()
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.pump.lends_until_next_receive()
     }
 
     fn input_wait(&self) -> Option<WaitOn> {

@@ -12,11 +12,16 @@
 //   count_sub -m peer -l tcp/127.0.0.1:PORT -d SECONDS [-k KEY]
 //
 // It listens for SECONDS and prints one line: `count_sub received=<n>`.
+//
+// Against a library of one thread (Z_FEATURE_MULTI_THREAD 0, the form a deployment of one task ships) no
+// task reads for the program, so the subscriber spins its session for the SECONDS itself, with no sleep
+// between spins, as upstream's single-threaded examples drive theirs; a sleep would cap the rate it reads.
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "bench_api.h"
@@ -77,7 +82,17 @@ int main(int argc, char **argv) {
         printf("count_sub: unable to declare the subscriber\n");
         return 1;
     }
+#if Z_FEATURE_MULTI_THREAD == 1
     sleep(seconds);
+#else
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    const time_t end = now.tv_sec + (time_t)seconds;
+    while (now.tv_sec < end) {
+        (void)zp_spin_once(z_loan(s));
+        clock_gettime(CLOCK_MONOTONIC, &now);
+    }
+#endif
     printf("count_sub received=%lu\n", atomic_load_explicit(&received, memory_order_relaxed));
     fflush(stdout);
     z_drop(z_move(s));

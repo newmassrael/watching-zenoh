@@ -77,6 +77,10 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+// The unit tests' allocator, which refuses on a thread that asks it to.
+#[cfg(test)]
+mod test_heap;
+
 // R2827 — the application layer attached to the session drive.
 pub mod app_layer;
 // Decision D7's contract: a node is asked to hold a peer by its zid. The transports (the admin

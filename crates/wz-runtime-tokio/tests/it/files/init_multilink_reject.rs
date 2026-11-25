@@ -56,7 +56,8 @@ struct Answer {
 async fn multilink_acceptor_answers(init_syn_wire: Vec<u8>) -> Answer {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     // The dispatch an accept seam that negotiates multilink installs; without
     // it the `0x4` extension is not read at all and nothing could be refused.
     actions.install_multilink_dispatch(accept_multilink_dispatch());

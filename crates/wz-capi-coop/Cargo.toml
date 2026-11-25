@@ -221,6 +221,7 @@ key-matching-listener = []
 # pools (`peer-row-pools`), so a face that goes gives its set back at once.
 listen = [
     "interest-answer",
+    "runtime-plan",
     "wz-runtime-coop/listen",
     "wz-session-core/peer-row-pools",
 ]
@@ -240,6 +241,7 @@ app-transport = ["wz-runtime-coop/app-link"]
 # (`codec-push`). Off, a config that names a group is refused by name and the text has none of it.
 group = [
     "interest-answer",
+    "runtime-plan",
     "wz-runtime-coop/group",
     "wz-session-mcu/transport-multicast",
     "wz-session-mcu/codec-push",
@@ -361,9 +363,11 @@ tx-lend-only = ["wz-session-core/tx-lend-only"]
 # (`arena::PlanFrom::Config`, `CoopEngine::open` and the opens beside it), and kept row by row
 # (`ArenaPlan::rows`). Off, every open is by a region the build laid out when it was compiled
 # (`arena::ArenaRegion`): the image carries neither the walk of the rows nor a table of them, a
-# plan keeping the bytes its rows take and the rows each layer lends from. A C ABI whose config may
-# state a policy, listen or join a group turns it on; the crate's own tests have it whatever this
-# says.
+# plan keeping the bytes its rows take and the rows each layer lends from; the session's registry
+# and its key arena are fields of a region the build lays out (`region::StateRegion`), reserved
+# zeroed beside the arena. A C ABI whose config may state a policy turns it on, and `listen` and
+# `group` do, whose faces come and go from pools the arena lends. The crate's own tests open by
+# config whatever this says; without it their registry is the region's.
 runtime-plan = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside

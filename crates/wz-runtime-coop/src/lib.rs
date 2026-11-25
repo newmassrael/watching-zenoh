@@ -84,9 +84,9 @@
 //! - **Real timer queue**: [`timer::TimerQueue`] lands as a
 //!   deadline-keyed `BinaryHeap<Reverse<TimerEntry>>`; sleep /
 //!   timeout futures register `(deadline_us, Waker)` on first
-//!   Pending poll instead of self-waking. `CoopRuntime::new`
+//!   Pending poll instead of self-waking. `CoopRuntime::try_new`
 //!   takes a [`ClockSource`] (breaking sig from R311av's
-//!   `CoopRuntime::new()`); [`CoopRuntime::run_until_idle`] calls
+//!   `CoopRuntime::try_new()`); [`CoopRuntime::run_until_idle`] calls
 //!   `timers.pop_expired(clock.now_us())` before polling the task
 //!   pool so wake-on-deadline becomes the natural shape. The
 //!   deploy main loop can now `wfi()`-sleep between IRQs because
