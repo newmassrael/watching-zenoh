@@ -116,6 +116,8 @@ mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
 mod engine;
+// How the engine's calls stand to its threads, and the locks that choice decides.
+mod form;
 /// The storage policy of the session's tables, named once so every table of the engine and the
 /// rows each is given agree on it.
 pub(crate) type RowPolicy = wz_session_core::bounded::Lent;

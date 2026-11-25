@@ -812,10 +812,29 @@ pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFramin
     socket: S,
     /// How batches lie on the stream.
     framing: F,
-    rx_buf: RefCell<B>,
-    /// The length of `rx_buf`: a batch's length and the batch behind it.
-    rx_len: usize,
-    /// How many bytes at the front of `rx_buf` were received.
+    /// What the link's receive keeps ([`RxHalf`]).
+    rx: RxHalf<B>,
+    /// What the link's sends keep ([`TxHalf`]).
+    tx: TxHalf<T>,
+    /// Why the link is gone, once it is: written by a receive that reads the stream's end or fails
+    /// a read, and by a send that fails a write, and read by both.
+    lost: Cell<Option<LostCause>>,
+    /// The last failure the socket reported, kept for the deploy to report.
+    error: Cell<Option<S::Error>>,
+    /// Whether the link's owner waits on its stream ([`Self::waited_by_owner`]), so its loop does
+    /// not.
+    owner_waits: bool,
+}
+
+/// The half of a [`StreamDriver`] a receive reaches: the buffer the stream is read into and what
+/// of it was handed to the session. Nothing that sends reaches it, so a receive that holds it lends
+/// a batch from it while a send runs beside the lend; the one way the receive reaches the send half
+/// is the write of what the link owes before it answers the peer's end inside the framing.
+struct RxHalf<B> {
+    buf: RefCell<B>,
+    /// The length of `buf`: a batch's length and the batch behind it.
+    len: usize,
+    /// How many bytes at the front of `buf` were received.
     held: Cell<usize>,
     /// How many of those bytes the session was handed already: the batch the last receive lent,
     /// which lies where it is until the next receive, and the empty batches before it. The next
@@ -834,16 +853,15 @@ pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFramin
     keeping: Cell<bool>,
     /// The batches the copying receive let go of for want of heap room, until the loop takes them.
     #[cfg(feature = "alloc")]
-    rx_drops: crate::link_storage::RxDrops,
+    drops: crate::link_storage::RxDrops,
+}
+
+/// The half of a [`StreamDriver`] a send reaches: the memory the session encodes its frames into
+/// and what of it the stream still owes. A send, a question of room and a service's write reach it;
+/// a receive reaches it only to write what is owed before the peer's end.
+struct TxHalf<T: TxStore> {
     /// The memory the session encodes its frames into, and which of it is out.
-    tx: TxLender<T>,
-    /// Why the link is gone, once it is.
-    lost: Cell<Option<LostCause>>,
-    /// The last failure the socket reported, kept for the deploy to report.
-    error: Cell<Option<S::Error>>,
-    /// Whether the link's owner waits on its stream ([`Self::waited_by_owner`]), so its loop does
-    /// not.
-    owner_waits: bool,
+    lender: TxLender<T>,
     /// Whether the stream took the last write whole without waiting
     /// ([`StreamSocket::WRITES_NOW`]): the next frame is then not preceded by a question of its
     /// room, the write itself being the question. `false` before the first write and for a
@@ -886,22 +904,26 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
         Self {
             socket,
             framing,
-            rx_buf: RefCell::new(rx_buf),
-            rx_len,
-            held: Cell::new(held.min(rx_len)),
-            spent: Cell::new(0),
-            ready: Cell::new(false),
-            #[cfg(test)]
-            moved: Cell::new(0),
-            keeping: Cell::new(false),
-            #[cfg(feature = "alloc")]
-            rx_drops: crate::link_storage::RxDrops::new(),
-            tx: TxLender::new(tx),
+            rx: RxHalf {
+                buf: RefCell::new(rx_buf),
+                len: rx_len,
+                held: Cell::new(held.min(rx_len)),
+                spent: Cell::new(0),
+                ready: Cell::new(false),
+                #[cfg(test)]
+                moved: Cell::new(0),
+                keeping: Cell::new(false),
+                #[cfg(feature = "alloc")]
+                drops: crate::link_storage::RxDrops::new(),
+            },
+            tx: TxHalf {
+                lender: TxLender::new(tx),
+                room_known: Cell::new(false),
+                owed: RefCell::new(OwedQueue::new()),
+            },
             lost: Cell::new(None),
             error: Cell::new(None),
             owner_waits: false,
-            room_known: Cell::new(false),
-            owed: RefCell::new(OwedQueue::new()),
         }
     }
 
@@ -937,7 +959,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
 
     /// Whether a whole batch lies in the buffer for the next receive, which then needs no read.
     fn batch_held(&self) -> bool {
-        self.ready.get()
+        self.rx.ready.get()
     }
 
     /// Hand the next whole batch to `f` where the buffer holds it, reading the socket until there
@@ -952,7 +974,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
             return false;
         }
         // A receive from inside `f` finds the buffer lent and reads nothing.
-        let Ok(mut buf) = self.rx_buf.try_borrow_mut() else {
+        let Ok(mut buf) = self.rx.buf.try_borrow_mut() else {
             return false;
         };
         // A link of a pool that holds no buffer and finds none free reads nothing: what its peer
@@ -960,8 +982,8 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
         let Some(bytes) = buf.bytes() else {
             return false;
         };
-        let mut start = self.spent.get();
-        let mut held = self.held.get();
+        let mut start = self.rx.spent.get();
+        let mut held = self.rx.held.get();
         // Once a batch is lent, the front is read once more and only to say whether a whole batch
         // lies behind it for the next receive (`ready`): one reading of the front serves both.
         let mut lent = false;
@@ -970,7 +992,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
             // answered lies whole between them: the sums below stay inside it.
             let unit = self.framing.front(
                 bytes.get_mut(start..held).unwrap_or_default(),
-                self.rx_len,
+                self.rx.len,
                 !lent,
             );
             match unit {
@@ -980,11 +1002,11 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                 Front::Batch { at, len, used } => {
                     let body = start.wrapping_add(at);
                     let end = body.wrapping_add(len);
-                    self.keeping.set(false);
+                    self.rx.keeping.set(false);
                     f(bytes.get(body..end).unwrap_or_default());
                     // A batch kept is lent again by the next receive; one let go is passed over
                     // there.
-                    if !self.keeping.replace(false) {
+                    if !self.rx.keeping.replace(false) {
                         start = start.wrapping_add(used);
                         self.framing.passed();
                     }
@@ -1013,7 +1035,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                             }
                         }
                         #[cfg(test)]
-                        self.moved.set(self.moved.get() + (held - start));
+                        self.rx.moved.set(self.rx.moved.get() + (held - start));
                         held = held.wrapping_sub(start);
                         start = 0;
                     }
@@ -1037,15 +1059,15 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                 }
             }
         };
-        self.spent.set(start);
-        self.held.set(held);
-        self.ready.set(ready);
+        self.rx.spent.set(start);
+        self.rx.held.set(held);
+        self.rx.ready.set(ready);
         // Nothing of the link's own is left in the buffer, no part of a batch and no batch kept:
         // a pooled buffer goes back for any link to read into. The facts of a part of a batch are
         // this link's (`held`, `spent`), so its buffer stays its own while one is there.
         if B::POOLED && start == held {
-            self.spent.set(0);
-            self.held.set(0);
+            self.rx.spent.set(0);
+            self.rx.held.set(0);
             buf.idle();
         }
         lent
@@ -1054,7 +1076,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     /// Whether the link owes the stream anything ([`Owed`], or a unit of the framing's own).
     fn owes(&self) -> bool {
         // A queue being written owes what it held when the write began.
-        !self.owed.try_borrow().is_ok_and(|owed| owed.is_empty()) || self.framing.owes_control()
+        !self.tx.owed.try_borrow().is_ok_and(|owed| owed.is_empty()) || self.framing.owes_control()
     }
 
     /// Write the framing's own units, once no frame is owed before them: `true` once nothing
@@ -1079,7 +1101,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                 return true;
             }
             // A queue already being written is left to that write, which owes the rest.
-            let Ok(mut owed) = self.owed.try_borrow_mut() else {
+            let Ok(mut owed) = self.tx.owed.try_borrow_mut() else {
                 return false;
             };
             let Some(front) = owed.front_mut() else {
@@ -1088,7 +1110,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
             };
             // SAFETY: the slot is held by the link, out of its pool until the pop below or
             // `drop_owed` gives it back, so nothing writes it.
-            let rest = unsafe { self.tx.held(front.slot, front.from, front.end) };
+            let rest = unsafe { self.tx.lender.held(front.slot, front.from, front.end) };
             let want = rest.len();
             match self.socket.write(rest) {
                 Ok(taken) if taken < want => {
@@ -1097,7 +1119,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                 }
                 Ok(_) => {
                     if let Some(done) = owed.pop() {
-                        self.tx.release(done.slot);
+                        self.tx.lender.release(done.slot);
                     }
                 }
                 Err(e) => {
@@ -1116,12 +1138,12 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     fn drop_owed(&self) {
         // No caller holds the queue across this call (`write_owed` lets it go before it fails),
         // so the queue is free here; a holder up the stack would keep its slots to release.
-        if let Ok(mut owed) = self.owed.try_borrow_mut() {
+        if let Ok(mut owed) = self.tx.owed.try_borrow_mut() {
             while let Some(done) = owed.pop() {
-                self.tx.release(done.slot);
+                self.tx.lender.release(done.slot);
             }
         }
-        self.room_known.set(false);
+        self.tx.room_known.set(false);
     }
 
     /// The stream failed a write with `error`: the link ends, REPORTED and not swallowed.
@@ -1144,24 +1166,24 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
             (from, 0)
         } else {
             if self.lost.get().is_some() {
-                self.tx.release(slot);
+                self.tx.lender.release(slot);
                 return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
             }
             // SAFETY: the session handed the slot over and the link holds it: nothing writes it.
-            let frame = unsafe { self.tx.held(slot, from, end) };
+            let frame = unsafe { self.tx.lender.held(slot, from, end) };
             match self.socket.write(frame) {
                 Ok(taken) if taken >= frame.len() => {
-                    self.tx.release(slot);
+                    self.tx.lender.release(slot);
                     // A write that waited took the frame whole and says nothing of the room left.
-                    self.room_known.set(S::WRITES_NOW);
+                    self.tx.room_known.set(S::WRITES_NOW);
                     return LinkSendOutcome::Sent;
                 }
                 Ok(taken) => {
-                    self.room_known.set(false);
+                    self.tx.room_known.set(false);
                     (from.saturating_add(taken), taken)
                 }
                 Err(e) => {
-                    self.tx.release(slot);
+                    self.tx.lender.release(slot);
                     self.fail(e);
                     return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
                 }
@@ -1174,14 +1196,14 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     /// taken: none for a frame that waits whole behind another.
     fn owe(&self, owed: Owed, skip: usize) -> LinkSendOutcome {
         // A queue being written takes nothing more until the write ends: the frame is refused.
-        let refused = match self.owed.try_borrow_mut() {
+        let refused = match self.tx.owed.try_borrow_mut() {
             Ok(mut queue) => queue.push(owed),
             Err(_) => Err(owed),
         };
         match refused {
             Ok(()) => LinkSendOutcome::Sent,
             Err(owed) => {
-                self.tx.release(owed.slot);
+                self.tx.lender.release(owed.slot);
                 self.cannot_owe(skip)
             }
         }
@@ -1218,7 +1240,7 @@ where
         debug_assert!(
             sent != LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
                 || self.owes()
-                || self.tx.slots() < SESSION_TX_SLOTS,
+                || self.tx.lender.slots() < SESSION_TX_SLOTS,
             "a stream link that lends its session's slots and owes nothing had none for a frame"
         );
         sent
@@ -1251,7 +1273,7 @@ where
         // and a droppable message is dropped at once, as zenoh-pico drops one that finds its
         // transmit lock held (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
         // `return _z_mutex_try_lock(&ztc->_mutex_tx);`).
-        if owed_written && !self.tx.claimable() {
+        if owed_written && !self.tx.lender.claimable() {
             return RoomAnswer::at_once(LinkRoom::Congested);
         }
         if !owed_written {
@@ -1263,7 +1285,7 @@ where
             };
             return RoomAnswer { room, waited_us };
         }
-        if self.room_known.get() {
+        if self.tx.room_known.get() {
             return RoomAnswer::at_once(LinkRoom::Free);
         }
         let (room, waited_us) = self.socket.wait_writable(wait_us);
@@ -1287,17 +1309,17 @@ where
     // slot free writes what it owes first, as far as the stream takes it without waiting, and lends
     // the slot that frees. One the stream frees none for is refused, as before.
     fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
-        if let Some(grant) = self.tx.acquire(F::HEADROOM) {
+        if let Some(grant) = self.tx.lender.acquire(F::HEADROOM) {
             return Some(grant);
         }
         if self.owes() && self.write_owed() {
-            return self.tx.acquire(F::HEADROOM);
+            return self.tx.lender.acquire(F::HEADROOM);
         }
         None
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
-        self.tx.storage(slot)
+        self.tx.lender.storage(slot)
     }
 
     fn tx_slot_send(
@@ -1309,36 +1331,40 @@ where
         _priority: Priority,
     ) -> LinkSendOutcome {
         let Some((prefix, mask)) = self.framing.prefix(len) else {
-            self.tx.release(slot);
+            self.tx.lender.release(slot);
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         };
         if let Some(key) = mask {
-            if !self.tx.mask(slot, start, len, key) {
-                self.tx.release(slot);
+            if !self.tx.lender.mask(slot, start, len, key) {
+                self.tx.lender.release(slot);
                 return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
             }
         }
-        match self.tx.frame_prefixed(slot, start, len, prefix.as_ref()) {
+        match self
+            .tx
+            .lender
+            .frame_prefixed(slot, start, len, prefix.as_ref())
+        {
             Some((from, end)) => self.send(slot, from, end),
             None => {
-                self.tx.release(slot);
+                self.tx.lender.release(slot);
                 LinkSendOutcome::Dropped(LinkDropCause::Oversize)
             }
         }
     }
 
     fn tx_slot_abort(&self, slot: TxSlot) {
-        self.tx.release(slot);
+        self.tx.lender.release(slot);
     }
 
     #[cfg(feature = "session-unicast-accept")]
     fn tx_slot_spare(&self) -> bool {
-        self.tx.spare()
+        self.tx.lender.spare()
     }
 
     #[cfg(feature = "session-unicast-accept")]
     fn tx_slot_claimable(&self) -> bool {
-        self.tx.claimable()
+        self.tx.lender.claimable()
     }
 
     fn open_blocking(&self) {}
@@ -1378,8 +1404,8 @@ where
     // slot. One that lends nothing builds no frame in its storage and takes any batch the session
     // hands it.
     fn link_mtu(&self) -> usize {
-        if self.tx.lends() {
-            F::mtu(self.tx.slot_len())
+        if self.tx.lender.lends() {
+            F::mtu(self.tx.lender.slot_len())
         } else {
             DEFAULT_LINK_MTU
         }
@@ -1388,7 +1414,7 @@ where
     // The receive buffer bounds the batch whatever the send side lends: a batch is counted with
     // its length, and the buffer holds both.
     fn link_rx_capacity(&self) -> usize {
-        F::rx_capacity(self.rx_len).min(DEFAULT_LINK_MTU)
+        F::rx_capacity(self.rx.len).min(DEFAULT_LINK_MTU)
     }
 }
 
@@ -1422,7 +1448,7 @@ where
 
     #[cfg(feature = "session-unicast-accept")]
     fn waits_for_buffer(&self) -> bool {
-        self.rx_buf.try_borrow().is_ok_and(|buf| buf.starved())
+        self.rx.buf.try_borrow().is_ok_and(|buf| buf.starved())
     }
 
     fn owes_write(&self) -> bool {
@@ -1443,7 +1469,7 @@ where
     }
 
     fn keep(&self) {
-        self.keeping.set(true);
+        self.rx.keeping.set(true);
     }
 
     // The receive buffer is written by a receive alone (`receive`: its read of the stream and the
@@ -1474,12 +1500,12 @@ where
     // The batch the lending receive hands over, copied out.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        crate::link_storage::copied_receive(self, &self.rx_drops)
+        crate::link_storage::copied_receive(self, &self.rx.drops)
     }
 
     #[cfg(feature = "alloc")]
     fn take_rx_dropped(&self) -> usize {
-        self.rx_drops.take()
+        self.rx.drops.take()
     }
 
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
@@ -2045,12 +2071,12 @@ mod tests {
             first.wrapping_add(3 + STREAM_BATCH_LENGTH_BYTES),
             "the batch behind it is lent where the stream put it"
         );
-        assert_eq!(link.moved.get(), 0, "nothing moved yet");
+        assert_eq!(link.rx.moved.get(), 0, "nothing moved yet");
         assert!(!link.holds_input(), "part of a batch is not one");
         queue(&link, &batch(b"three")[3..]);
         assert_eq!(received(&link).as_deref(), Some(&b"three"[..]));
         assert_eq!(
-            link.moved.get(),
+            link.rx.moved.get(),
             3,
             "the part of the third batch, moved once before the read"
         );
