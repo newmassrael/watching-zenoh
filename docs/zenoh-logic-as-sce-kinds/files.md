@@ -436,6 +436,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-host-sync/src/counter.rs` | S9 | |
 | `crates/wz-host-sync/src/in_place.rs` | S9 | |
 | `crates/wz-host-sync/src/lib.rs` | S9 | |
+| `crates/wz-host-sync/src/once.rs` | S9 | |
 | `crates/wz-host-sync/src/std_lock.rs` | S9 | |
 | `crates/wz-host-sync/src/unix.rs` | S9 | |
 | `crates/wz-host-sync/src/windows.rs` | S9 | |
