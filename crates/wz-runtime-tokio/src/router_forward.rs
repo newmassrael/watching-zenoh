@@ -4402,7 +4402,7 @@ impl RouterForwarder {
             .collect();
         for (kind, snapshot) in &events {
             for sink in &sinks {
-                sink(*kind, snapshot);
+                sink.tell(*kind, snapshot);
             }
         }
     }
@@ -23461,11 +23461,13 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let told = Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = told.clone();
-        let watch = fwd.watch_faces(Arc::new(move |kind, snapshot| {
-            kept.lock()
-                .unwrap()
-                .push((kind, snapshot.zid[0], snapshot.whatami));
-        }));
+        let watch = fwd.watch_faces(FaceEventSink::of_arc(Arc::new(
+            move |kind: FaceEventKind, snapshot: &FaceSnapshot| {
+                kept.lock()
+                    .unwrap()
+                    .push((kind, snapshot.zid[0], snapshot.whatami));
+            },
+        )));
         assert!(fwd.face_snapshots().is_empty());
 
         let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);

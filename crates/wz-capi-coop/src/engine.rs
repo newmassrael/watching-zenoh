@@ -296,9 +296,9 @@ pub(crate) fn face_event_rows(max_faces: usize, groups: usize) -> usize {
 }
 #[cfg(feature = "connectivity")]
 mod told;
-use wz_session_core::face::{FaceEventKind, FaceLinkRow};
+use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceRowSink};
 #[cfg(feature = "connectivity")]
-use wz_session_core::face::{FaceEventSink, FaceRowSink, FaceSnapshot};
+use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
 #[cfg(feature = "connectivity")]
@@ -4928,18 +4928,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             moves.watch(wake.waker.clone());
             Some(wake)
         });
-        // No watcher yet: the queue's rows are reserved now, so a program that watches after the
-        // open is told its faces with nothing allocated. The plane lies in the row the plan laid
-        // out for it (`ArenaPlan::lay_planes`).
+        // No watcher yet: the plane holds its watchers and its rows itself, so a program that
+        // watches after the open is told its faces with nothing allocated. The plane is built in
+        // the row the plan laid out for it (`ArenaPlan::lay_planes`), never in this frame.
         #[cfg(feature = "connectivity")]
-        let watchers = lent
-            .arena
-            .arena_mut()
-            .place(FacePlane::with_room(face_event_rows(
-                config.max_faces,
-                config.groups.len(),
-            )))
-            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        let watchers = FacePlane::place_in(
+            lent.arena.arena_mut(),
+            face_event_rows(config.max_faces, config.groups.len()),
+        )
+        .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
         // after its open is admitted in place. The admission lies in the row the plan laid out for
         // it (`ArenaPlan::lay_admission`); its rows are the heap's, and a heap that refuses them
@@ -7847,7 +7844,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         if SessionEngine::is_closed(self) {
             return Err(Declined::Closed);
         }
-        Ok(self.faces.watch(sink))
+        // A refused sink is let go of here, with the plane's lock let go of.
+        self.faces.watch(sink).map_err(|_| Declined::TableFull)
+    }
+
+    // Without the plane no face is told, so a watch of the rows is refused as one of the
+    // snapshots is: the provided answer would lend a place of the heap to a watcher it then lets
+    // go of untold.
+    #[cfg(not(feature = "connectivity"))]
+    fn watch_face_rows(&self, sink: FaceRowSink) -> Result<u64, Declined> {
+        let _ = sink;
+        Err(Declined::NotBuilt)
     }
 
     #[cfg(feature = "connectivity")]

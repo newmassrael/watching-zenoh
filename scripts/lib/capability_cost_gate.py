@@ -283,10 +283,7 @@ HEAP_ABORT = r"handle_alloc_error"
 # Forbidden patterns whose control build (one that must link the pattern) is not yet a case, each
 # with why: the selftest holds every other forbidden pattern to a case that requires it. A pattern
 # leaves this table in the commit that adds its control.
-CONTROL_PENDING = {
-    HEAP_ABORT: "whether a std build still links the symbol once LTO has inlined the allocator's "
-                "error path is read with nm before pico-client-coop requires it",
-}
+CONTROL_PENDING: dict[str, str] = {}
 # The engine a pico build runs its sessions on (`engine-tokio` / `engine-coop`,
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
@@ -803,7 +800,9 @@ CASES: tuple[Case, ...] = (
          1_060_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
-         require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
+         # HEAP_ABORT: the control of the form without std, which forbids it. The standard
+         # library's own runtime allocates as it cannot fail, so a build with std links the abort.
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME, HEAP_ABORT),
          # 442 exports: `wz_ext_callbacks_refused` (d80d315d1), the callbacks a full thread table
          # leaves unrun.
          exports=442, cargo_configs=(PACKED_RELOCS_CONFIG,),

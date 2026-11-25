@@ -12,7 +12,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
-use wz_session_core::face::FaceEventKind;
+use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
@@ -57,13 +57,15 @@ fn counting_faces(session: &Stepped) -> Arc<Mutex<(usize, usize)>> {
     let counts = Arc::new(Mutex::new((0usize, 0usize)));
     let into = counts.clone();
     session
-        .watch_faces(Arc::new(move |kind, _| {
-            let mut counts = into.lock().unwrap();
-            match kind {
-                FaceEventKind::Up => counts.0 += 1,
-                FaceEventKind::Down => counts.1 += 1,
-            }
-        }))
+        .watch_faces(FaceEventSink::of_arc(Arc::new(
+            move |kind: FaceEventKind, _: &FaceSnapshot| {
+                let mut counts = into.lock().unwrap();
+                match kind {
+                    FaceEventKind::Up => counts.0 += 1,
+                    FaceEventKind::Down => counts.1 += 1,
+                }
+            },
+        )))
         .expect("an open session watches its faces");
     counts
 }

@@ -7191,7 +7191,7 @@ mod multicast_face_tests {
     /// [`two_sessions_put_and_get_through_their_group_faces`] gives.
     #[tokio::test]
     async fn a_member_is_announced_and_listed_as_a_multicast_transport() {
-        use crate::faces::{FaceEventKind, FaceSnapshot};
+        use crate::faces::{FaceEventKind, FaceEventSink, FaceSnapshot};
 
         let local = tokio::task::LocalSet::new();
         local
@@ -7205,9 +7205,11 @@ mod multicast_face_tests {
                 let events: Arc<Mutex<Vec<(FaceEventKind, FaceSnapshot)>>> =
                     Arc::new(Mutex::new(Vec::new()));
                 let heard = events.clone();
-                a.watch_faces(Arc::new(move |kind, snapshot: &FaceSnapshot| {
-                    heard.lock().expect("events").push((kind, snapshot.clone()));
-                }));
+                a.watch_faces(FaceEventSink::of_arc(Arc::new(
+                    move |kind: FaceEventKind, snapshot: &FaceSnapshot| {
+                        heard.lock().expect("events").push((kind, snapshot.clone()));
+                    },
+                )));
                 let a_task = join(
                     &bus,
                     1,

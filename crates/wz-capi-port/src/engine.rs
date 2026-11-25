@@ -276,11 +276,14 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// Tell `sink` each time a face comes up or goes down, from now on, a row at a time: each of
     /// its links in order, or the one row of a face with none, and answer the id that stops it
     /// ([`Self::unwatch_faces`]). Where the sink runs and when the watch is refused are as for
-    /// [`Self::watch_faces`]. An engine that writes its rows in place tells them with nothing
-    /// allocated for an event; the provided answer watches the snapshots and hands each on as its
-    /// rows ([`crate::face_rows::rows_of_snapshots`]).
+    /// [`Self::watch_faces`], and [`Refusal::TableFull`] by an engine whose table of watchers is
+    /// at its bound. An engine that writes its rows in place tells them with nothing allocated for
+    /// an event; the provided answer watches the snapshots and hands each on as its rows
+    /// ([`crate::face_rows::rows_of_snapshots`]), the watcher of rows in a place of its own:
+    /// [`Refusal::NoRoom`], with `sink` let go of, when the heap has none.
     fn watch_face_rows(&self, sink: FaceRowSink) -> Result<u64, Refusal> {
-        self.watch_faces(crate::face_rows::rows_of_snapshots(sink))
+        let place = crate::lodge::Lent::try_boxed().map_err(|_| Refusal::NoRoom)?;
+        self.watch_faces(crate::face_rows::rows_of_snapshots(sink, place))
     }
 
     /// Stop the face watch `id`, of snapshots or of rows: `true` when one was registered under

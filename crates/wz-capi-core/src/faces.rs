@@ -5887,7 +5887,7 @@ impl SharedSession {
             .map(|(_, sink)| sink.clone())
             .collect();
         for sink in sinks {
-            sink(kind, snapshot);
+            sink.tell(kind, snapshot);
         }
     }
 
@@ -7910,7 +7910,10 @@ mod matching_aggregate_tests {
             Err(Refusal::Closed)
         );
         assert_eq!(
-            SessionEngine::watch_faces(&shared, Arc::new(|_kind, _face| {})),
+            SessionEngine::watch_faces(
+                &shared,
+                FaceEventSink::of_arc(Arc::new(|_: FaceEventKind, _: &FaceSnapshot| {}))
+            ),
             Err(Refusal::Closed),
             "a closed session refuses to watch its faces"
         );
