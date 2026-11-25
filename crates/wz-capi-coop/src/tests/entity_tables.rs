@@ -244,16 +244,18 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     );
     assert_eq!(count("session tables"), Some(1));
     assert_eq!(plan.tables().keyexprs, 6);
+    assert_eq!(plan.tables().key_listeners, key_listeners);
     assert_eq!(
         plan.tables().write_filters(),
-        7,
-        "a write filter is a row of the session's one table set, a publisher's or a querier's"
+        7 + key_listeners,
+        "a write filter is a row of the session's one table set, a publisher's, a querier's or a \
+         key listener's"
     );
     assert_eq!(plan.tables().matching_listeners, 5);
     assert_eq!(
         plan.tables().interests(),
-        12,
-        "an Interest is a row of the session's one table set, one for each filter and listener"
+        7 + key_listeners,
+        "an Interest is a row of the session's one table set, one for each write filter"
     );
     assert_eq!(
         count("write filters"),
