@@ -2131,9 +2131,6 @@ struct UpFacts {
     /// face of this engine holds one link, so it is the face's one row.
     #[cfg(feature = "connectivity")]
     row: Option<FaceLinkRow>,
-    /// What the link's snapshot says beyond its row.
-    #[cfg(feature = "connectivity")]
-    link: LinkFacts,
 }
 
 impl UpFacts {
@@ -2154,8 +2151,6 @@ impl UpFacts {
             ended: false,
             #[cfg(feature = "connectivity")]
             row,
-            #[cfg(feature = "connectivity")]
-            link: LinkFacts::of_actions(&*session.actions),
         }
     }
 
@@ -2170,13 +2165,13 @@ impl UpFacts {
         self.row.as_ref().filter(|row| row.links != 0)
     }
 
-    /// The face's snapshot, as `FaceSnapshot::of_actions` read it off the link as it came up.
+    /// The face's snapshot, as `FaceSnapshot::of_actions` reads it off the link: its row, and
+    /// what `link`, read off the link as the snapshot is made, says beyond it.
     #[cfg(feature = "connectivity")]
-    fn snapshot(&self) -> Option<FaceSnapshot> {
+    fn snapshot(&self, link: &LinkFacts) -> Option<FaceSnapshot> {
         let row = self.row.as_ref()?;
         let mut face = FaceSnapshot::of_face_row(row);
-        face.links
-            .extend(LinkSnapshot::of_row_with(row, &self.link));
+        face.links.extend(LinkSnapshot::of_row_with(row, link));
         Some(face)
     }
 }
@@ -10039,9 +10034,8 @@ mod up_facts_tests {
     use alloc::string::String;
     use wz_session_core::face::{FaceLinkRow, FaceSnapshot, LinkFacts, LinkSnapshot};
 
-    /// The facts of a face whose peer is `zid`, its row naming `links` links, its link
-    /// described beyond the row by `link`.
-    fn facts(zid: u8, links: usize, link: LinkFacts) -> UpFacts {
+    /// The facts of a face whose peer is `zid`, its row naming `links` links.
+    fn facts(zid: u8, links: usize) -> UpFacts {
         let face = FaceSnapshot {
             zid: [zid; 16],
             whatami: 1,
@@ -10056,7 +10050,6 @@ mod up_facts_tests {
             peer: None,
             ended: false,
             row: Some(row),
-            link,
         }
     }
 
@@ -10065,27 +10058,32 @@ mod up_facts_tests {
     /// keeps the row of a face alone, which `face_link_at` would hand out as a link with no ends.
     #[test]
     fn only_a_row_that_names_its_link_stands() {
-        let up = facts(7, 1, LinkFacts::default());
+        let up = facts(7, 1);
         assert_eq!(up.standing_row().map(|row| row.zid), Some([7; 16]));
-        let alone = facts(7, 0, LinkFacts::default());
+        let alone = facts(7, 0);
         assert!(alone.standing_row().is_none(), "a face alone");
         assert_eq!(
-            alone.snapshot().map(|face| face.links.len()),
+            alone
+                .snapshot(&LinkFacts::default())
+                .map(|face| face.links.len()),
             Some(0),
             "a face alone stands with no link, as its snapshot read off the link did"
         );
         let none = UpFacts {
             row: None,
-            ..facts(7, 1, LinkFacts::default())
+            ..facts(7, 1)
         };
         assert!(none.standing_row().is_none(), "a half-open face");
-        assert!(none.snapshot().is_none(), "a half-open face");
+        assert!(
+            none.snapshot(&LinkFacts::default()).is_none(),
+            "a half-open face"
+        );
     }
 
-    /// The snapshot of a face read from its facts carries what its link said beyond its row as
-    /// it came up: the band and the class its QoS extension negotiated, the name on the peer's
-    /// certificate and the NICs. Turned red by a snapshot built from the row alone
-    /// (`LinkSnapshot::of_row`), which reads each of them as not known.
+    /// The snapshot of a face read from its facts carries what its link says beyond its row: the
+    /// band and the class its QoS extension negotiated, the name on the peer's certificate and
+    /// the NICs. Turned red by a snapshot built from the row alone (`LinkSnapshot::of_row`),
+    /// which reads each of them as not known.
     #[test]
     fn a_snapshot_from_the_facts_keeps_what_the_link_said_beyond_its_row() {
         let said = LinkFacts {
@@ -10094,9 +10092,7 @@ mod up_facts_tests {
             priorities: Some((2, 5)),
             reliable: Some(false),
         };
-        let face = facts(3, 1, said.clone())
-            .snapshot()
-            .expect("a face that stands");
+        let face = facts(3, 1).snapshot(&said).expect("a face that stands");
         assert_eq!(face.zid, [3; 16]);
         assert!(face.is_qos);
         let links = face.links.as_slice();
@@ -10114,7 +10110,7 @@ mod up_facts_tests {
     /// face would stand after its session ended.
     #[test]
     fn facts_of_an_ended_session_no_longer_stand() {
-        let mut up = facts(4, 1, LinkFacts::default());
+        let mut up = facts(4, 1);
         assert!(up.standing().is_some());
         up.ended = true;
         assert!(up.standing().is_none(), "its session ended");

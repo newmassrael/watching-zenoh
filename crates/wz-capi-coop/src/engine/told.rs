@@ -191,11 +191,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// came up, then each member of a group the session joined, a transport of its own as both
     /// upstreams report it (`group`).
     pub(super) fn standing_faces(&self) -> Vec<FaceSnapshot> {
-        let faces = self
-            .transport
-            .links
-            .faces()
-            .filter_map(|face| face.facts()?.snapshot());
+        let faces = self.transport.links.faces().filter_map(|face| {
+            // What the link says beyond its row is read off it here, with the snapshot that
+            // takes the heap anyway: kept in the facts, its names would take the heap when
+            // the link comes up, after the open.
+            let link = face.link.wire().map_or_else(LinkFacts::default, |wire| {
+                LinkFacts::of_actions(&*wire.actions)
+            });
+            face.facts()?.snapshot(&link)
+        });
         #[cfg(feature = "group")]
         let faces = faces.chain(
             self.transport

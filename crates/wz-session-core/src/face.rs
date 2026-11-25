@@ -80,7 +80,7 @@ impl LinkSnapshot {
 
     /// The link of `row` as [`Self::of_row`] reads it, with what its snapshot says beyond the row
     /// (`facts`): the same link [`FaceSnapshot::of_actions`] reads, where `facts` were read off
-    /// the same session ([`LinkFacts::of_actions`]).
+    /// the same session (`LinkFacts::of_actions`).
     pub fn of_row_with(row: &FaceLinkRow, facts: &LinkFacts) -> Option<Self> {
         let mut link = Self::of_row(row)?;
         link.interfaces = facts.interfaces.clone();
@@ -169,8 +169,9 @@ pub struct GroupLink {
 }
 
 /// What a link's snapshot says beyond its row ([`FaceLinkRow`]), none of which changes while the
-/// link lives: read once, as the link comes up, by a session that keeps it to answer snapshots
-/// with no read of the link ([`LinkSnapshot::of_row_with`]).
+/// link lives: what a session that keeps its faces' rows reads off a link as it makes a snapshot
+/// of it ([`LinkSnapshot::of_row_with`]). The names it holds are on the heap, as a snapshot's
+/// are, so a session that takes no heap after its open keeps the rows alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkFacts {
     /// As [`LinkSnapshot::interfaces`].
@@ -192,26 +193,39 @@ impl LinkFacts {
         actions: &SessionLinkActions<R, T>,
     ) -> Self {
         let subject = actions.link_subject();
-        #[cfg(feature = "session-extqos")]
-        let (priorities, reliable) = {
-            let negotiated = actions.qos_link_metadata();
-            (
-                negotiated
-                    .priorities
-                    .map(|band| (band.start() as u8, band.end() as u8)),
-                negotiated
-                    .reliability
-                    .map(|class| matches!(class, crate::reliability::Reliability::Reliable)),
-            )
-        };
-        #[cfg(not(feature = "session-extqos"))]
-        let (priorities, reliable) = (None, None);
+        let (priorities, reliable) = negotiated_band(actions);
         Self {
             interfaces: subject.and_then(|s| s.interfaces.clone()),
             cert_common_name: subject.and_then(|s| s.cert_common_name.clone()),
             priorities,
             reliable,
         }
+    }
+}
+
+/// The band and the class the QoS extension of the handshake of the session `actions` carried
+/// for its links, as a link's snapshot states them (`LinkSnapshot::priorities`,
+/// `LinkSnapshot::reliable`).
+#[cfg(feature = "session-unicast")]
+fn negotiated_band<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) -> (Option<(u8, u8)>, Option<bool>) {
+    #[cfg(feature = "session-extqos")]
+    {
+        let negotiated = actions.qos_link_metadata();
+        (
+            negotiated
+                .priorities
+                .map(|band| (band.start() as u8, band.end() as u8)),
+            negotiated
+                .reliability
+                .map(|class| matches!(class, crate::reliability::Reliability::Reliable)),
+        )
+    }
+    #[cfg(not(feature = "session-extqos"))]
+    {
+        let _ = actions;
+        (None, None)
     }
 }
 
@@ -277,11 +291,7 @@ impl FaceSnapshot {
         let mtu = u16::try_from(actions.negotiated_batch_mtu()).unwrap_or(u16::MAX);
         // What the handshake negotiated for the links of the transport: the band and the class the
         // QoS extension carried, which the links of the face share.
-        let LinkFacts {
-            priorities,
-            reliable,
-            ..
-        } = LinkFacts::of_actions(actions);
+        let (priorities, reliable) = negotiated_band(actions);
         let links = actions
             .link_endpoints_all()
             .into_iter()
