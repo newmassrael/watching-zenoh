@@ -2260,6 +2260,12 @@ pub mod unicast_rx;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod transport_place;
 
+/// The unicast transport of a session that holds one face as one value: its link's life, its
+/// receive and its timers, handed the link's reports, its datagrams and the time. Gated like
+/// [`unicast_rx`].
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+pub mod unicast_transport;
+
 /// The words of the session lifecycle that need no allocator: the open verdict, the
 /// refusals, the open key and the capability document. Unconditional, so a node of the
 /// fixed-memory profile answers an open in the words the heap profile does;

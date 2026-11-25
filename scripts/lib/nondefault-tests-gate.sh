@@ -1672,6 +1672,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # a receive built in place starts with none, and each path is counted under its own name. The
     # filter is the module path. The module is built with `storage-profile` and `session-unicast`.
     "wz-session-core|hook|storage-profile,session-unicast,rx-in-place|unicast_rx::"
+    # The one-face session's transport handed a datagram (`rx-in-place`), over a real session's
+    # machine and actions: the application layer's deadline is raised before the datagram is read,
+    # and the receive counts the path it took. The bundle's tests build with a handshake codec
+    # (`codec-init-body`); the filter is the test module's path.
+    "wz-session-core|hook|storage-profile,session-unicast,rx-in-place,codec-init-body|session_actions::bundle_tests::unicast_transport::"
     # The limits a creator states to the tables it opens (`limits::enforcement::`): the bounds
     # read by the key-id dictionary and the link's noted requests (`shared-key-ids`) and by the
     # program's links (`app-link`) are tests no other row builds.
