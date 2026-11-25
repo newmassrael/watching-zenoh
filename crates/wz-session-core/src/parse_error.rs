@@ -79,6 +79,22 @@ pub enum InboundParseError {
         /// The entry's identity (its header without the chain flag).
         eid: u8,
     },
+    /// An ext chain carried an extension its message declares whose body that
+    /// extension's own reader refuses: a timestamp whose id is zero, a Request's
+    /// target past `2`, a source info cut short.
+    ///
+    /// zenoh 1.10.2 reads every declared extension with its typed reader as the
+    /// chain walk meets it and refuses the whole message on what the reader refuses
+    /// (`commons/zenoh-codec/src/network/push.rs` @
+    /// `let (t, ext): (ext::TimestampType, bool) = eodec.read(&mut *reader)?;`).
+    /// The chain decode reads such an entry by its encoding alone, so an analyzer
+    /// still sees it; this is the participant's refusal
+    /// (`crate::ext_admit::ExtAdmission::MalformedExt`). Distinct from
+    /// [`Self::Codec`], which is the chain's own structure failing.
+    MalformedExt {
+        /// The entry's identity (its header without the chain flag).
+        eid: u8,
+    },
     /// The message announced a protocol version other than
     /// [`wz_codecs::wire_const::PROTOCOL_VERSION`], so the rest of its body is
     /// laid out by a protocol this reader does not implement.
@@ -124,6 +140,9 @@ impl fmt::Display for InboundParseError {
             ),
             Self::ReservedExtEncoding { eid } => {
                 write!(f, "inbound ext {:#04x} has the reserved encoding 0b11", eid)
+            }
+            Self::MalformedExt { eid } => {
+                write!(f, "inbound ext {:#04x} has a body its reader refuses", eid)
             }
             Self::ForeignVersion { version } => write!(
                 f,
