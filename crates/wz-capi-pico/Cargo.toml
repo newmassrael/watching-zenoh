@@ -717,8 +717,10 @@ rx-busy-poll = ["engine-tokio", "wz-capi-core/rx-busy-poll"]
 # peer, made as zenoh's unixpipe link makes them. zenoh-pico has no such link, so this is a link of
 # wz's past the pico preset, off by default. It selects no engine: the tokio engine's unixpipe
 # link, or on the cooperative one the host's named FIFOs (`wz-runtime-posix`'s `unixpipe`, Linux
-# and Android) beside its sockets (`src/coop_host.rs`). Without it a `unixpipe/` endpoint is a
-# locator no link opens, and the open fails.
+# and Android) beside its sockets (`src/coop_host.rs`). Another Unix host is refused by name
+# (`src/lib.rs`); on a host with no named FIFO (Windows) the feature is inert, as upstream's
+# unixpipe link is. Without it a `unixpipe/` endpoint is a locator no link opens, and the open
+# fails.
 transport-link-unixpipe = ["wz-capi-core?/transport-link-unixpipe", "wz-runtime-posix?/unixpipe"]
 
 # R311y406 — off-default `quic/` ACCEPT transport, forwarding wz-runtime-tokio's

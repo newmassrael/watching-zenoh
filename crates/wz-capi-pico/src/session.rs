@@ -634,12 +634,21 @@ type TtyLinks = crate::coop_host::WithSerial<NetLinks>;
 type TtyLinks = NetLinks;
 
 /// The links a cooperative session opens over the host: its sockets' and ttys', and its named
-/// FIFOs' beside them where the build has unixpipe links (`transport-link-unixpipe`).
-#[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-unixpipe"))]
+/// FIFOs' beside them where the build has unixpipe links (`transport-link-unixpipe`) on a host
+/// that opens them (`coop_host::WithUnixpipe`). On a host with no named FIFO (Windows) the
+/// feature is inert, so the fallback is negated with the feature AND its hosts together.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    feature = "transport-link-unixpipe",
+    any(target_os = "linux", target_os = "android")
+))]
 pub(crate) type HostLinks = crate::coop_host::WithUnixpipe<TtyLinks>;
 #[cfg(all(
     not(feature = "engine-tokio"),
-    not(feature = "transport-link-unixpipe")
+    not(all(
+        feature = "transport-link-unixpipe",
+        any(target_os = "linux", target_os = "android")
+    ))
 ))]
 pub(crate) type HostLinks = TtyLinks;
 
@@ -2175,8 +2184,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "transport-link-serial")]
     let links = crate::coop_host::with_serial(links).waited_by_owner();
     // The host's named FIFOs are links beside those, waited for the same way: a `unixpipe/`
-    // locator is dialled and listened on over them.
-    #[cfg(feature = "transport-link-unixpipe")]
+    // locator is dialled and listened on over them, on the hosts that open them.
+    #[cfg(all(
+        feature = "transport-link-unixpipe",
+        any(target_os = "linux", target_os = "android")
+    ))]
     let links = crate::coop_host::with_unixpipe(links).waited_by_owner();
     #[cfg(feature = "app-transport")]
     let links = match request.app_transport {
