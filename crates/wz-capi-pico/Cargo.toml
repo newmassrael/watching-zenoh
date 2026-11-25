@@ -37,14 +37,40 @@ repository.workspace = true
 readme.workspace = true
 description = "zenoh-pico-compatible C ABI (cdylib) over the wz cooperative session engine — a binary drop-in for zenoh-pico C programs (§5.27 api-compat-pico R1)."
 
-# The two configurations the crate can hold at once, which Layers C1bf and C1bz build in place of
-# `--all-features` (`scripts/lib/doc_feature_sets.py`): the library has one engine, so the
-# tokio engine's set gives up the cooperative forms and the cooperative set gives up the tokio
-# engine, and with it every capability only that engine runs.
+# The configurations the crate can hold at once, which Layers C1bf and C1bz build in place of
+# `--all-features` (`scripts/lib/doc_feature_sets.py`). A library has one engine and is for one
+# system (`src/lib.rs`), so the tokio engine's set gives up both cooperative systems, the host's
+# set gives up the tokio engine and the Zephyr image, and the image's set gives up the tokio engine,
+# the host and every capability `src/lib.rs` refuses beside `os-zephyr` alone: the host's
+# multicast scouting (and so `peer` and `multicast-transport`, which bring it), the planes that
+# need a host's lock, clock or threads, and the links over the host's own sockets, ttys and FIFOs.
 [package.metadata.wz-docs]
 feature-sets = [
     { name = "tokio", except = ["os-host", "os-zephyr"] },
-    { name = "coop", except = ["engine-tokio"] },
+    { name = "host", except = ["engine-tokio", "os-zephyr"] },
+    { name = "zephyr", except = [
+        "engine-tokio",
+        "os-host",
+        "scout",
+        "advanced",
+        "admin-space",
+        "clock-source",
+        "e2e-receiver",
+        "e2e-sender",
+        "e2e-supervision",
+        "event-ring",
+        "instance-key",
+        "message-catalog",
+        "raweth-transport",
+        "replay-cache",
+        "resource-snapshot",
+        "segment-sender",
+        "supervision",
+        "time-base",
+        "transport-link-serial",
+        "transport-link-unixpipe",
+        "transport-link-ws",
+    ] },
 ]
 
 [lib]
