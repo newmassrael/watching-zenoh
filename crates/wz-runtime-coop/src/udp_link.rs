@@ -1044,8 +1044,8 @@ impl<P: Storage> PortRows<P> {
 
     // The queue is read only for a peer that has a datagram in it, which its row tells.
     fn take_for(&mut self, port: u32, peer: SocketAddr) -> Option<Held> {
-        let row = self.row_mut(port, peer).filter(|row| row.queued > 0)?;
-        row.queued -= 1;
+        let row = self.row_mut(port, peer)?;
+        row.queued = row.queued.checked_sub(1)?;
         let at = self
             .queue
             .iter()
