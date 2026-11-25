@@ -1464,9 +1464,13 @@ fn the_samples_of_one_batch_are_handed_in_the_read_that_hands_the_first() {
 /// a sample each, hands every one of them and moves the session's links once, after the last, and
 /// looks at the queue of handed publishes once, in a build of one thread as in one of threads: a
 /// step reads one record (one thread) or one frame (threads) while the link holds the rest, and
-/// leaves the links where they stood. Turned red by a step that moves the links each time it reads
-/// (the `Stepped::Read` return taken out of `CoopEngine::step`), which moves them once a frame, or
-/// a read that ends with that step while the link holds more.
+/// leaves the links where they stood. Its tasks read the clock for their timers once, in the step
+/// that received the frames: the steps that go on with them wake no timer until the last, by that
+/// step's own reading, so a timer is late by one receive's reading at most. Turned red by a step
+/// that moves the links each time it reads (the `Stepped::Read` return taken out of
+/// `CoopEngine::step`), which moves them once a frame, a read that ends with that step while the
+/// link holds more, or a step that goes on with the receive's input and reads the clock for its
+/// timers (`run_tasks` in place of `run_tasks_at(None)` there), once a frame.
 #[test]
 fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     const FRAMES: u8 = 8;
@@ -1495,6 +1499,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     #[cfg(feature = "transport-stats")]
     let frames = engine.transport_stats().rx.t_msgs;
     let polls = engine.link_polls();
+    let task_clock_reads = engine.task_clock_reads();
     #[cfg(any(feature = "listen", feature = "group"))]
     let handed = engine.takes.handed.load(Ordering::SeqCst);
     let _ = SessionDrive::read(&*engine, false);
@@ -1515,6 +1520,11 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
         engine.link_polls() - polls,
         1,
         "one move of the links for what the receive took"
+    );
+    assert_eq!(
+        engine.task_clock_reads() - task_clock_reads,
+        1,
+        "one reading of the clock for the tasks' timers, by the step that received the frames"
     );
     #[cfg(any(feature = "listen", feature = "group"))]
     assert_eq!(

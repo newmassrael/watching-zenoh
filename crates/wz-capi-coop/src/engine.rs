@@ -1881,6 +1881,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// How often the links were moved on ([`Self::poll_links`]), which the tests count.
     #[cfg(test)]
     link_polls: core::cell::Cell<usize>,
+    /// How often a pass of the session's tasks read the clock to wake its timers
+    /// ([`Self::run_tasks`]), which the tests count.
+    #[cfg(test)]
+    task_clock_reads: core::cell::Cell<usize>,
     /// The periodic jobs the program started on the session ([`wz_capi_port::Tickers::start_ticker`]).
     #[cfg(feature = "ticker")]
     tickers: Tickers,
@@ -4035,9 +4039,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// its links' receives for as long ([`RouterLend::lend_for`]). Every pass of the session's
     /// own is made here, so a link's receive finds its Router lent whenever its task runs; a pass
     /// a group's wait makes lends nothing, and a link's receive takes no input in it.
-    /// Out of line: nine places step the session's tasks, the lend around them one body.
+    /// The pass wakes the timers due by the clock, read now ([`Self::run_tasks_at`]).
+    /// Out of line: nine places step the session's tasks.
     #[inline(never)]
     fn run_tasks(&mut self) {
+        #[cfg(test)]
+        self.task_clock_reads.set(self.task_clock_reads.get() + 1);
+        let now_us = self.clock.now_us();
+        self.run_tasks_at(Some(now_us));
+    }
+
+    /// [`Self::run_tasks`] with no reading of the clock: the timers due by `due_at` are woken
+    /// first when it is given, none when it is not ([`CoopLocalSet::run_ready`]).
+    /// Out of line: every pass of the session's tasks is made here, the lend around them one body.
+    #[inline(never)]
+    fn run_tasks_at(&mut self, due_at: Option<u64>) {
         let Self {
             local,
             transport: TransportState { router, lend, .. },
@@ -4046,7 +4062,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             ..
         } = self;
         registry_lend.lend_for(&mut session.registry, || {
-            lend.lend_for(router, || local.run_until_idle())
+            lend.lend_for(router, || local.run_ready(due_at))
         });
     }
 
@@ -4383,6 +4399,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             clock_reads: core::cell::Cell::new(0),
             #[cfg(test)]
             link_polls: core::cell::Cell::new(0),
+            #[cfg(test)]
+            task_clock_reads: core::cell::Cell::new(0),
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             session_time,
@@ -4762,6 +4780,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn link_polls(&self) -> usize {
         self.core.lock().0.link_polls.get()
+    }
+
+    /// How often a pass of the session's tasks read the clock to wake its timers since the open
+    /// ([`Core::run_tasks`]): what a test of the cost of a batch counts. Read under the lock.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn task_clock_reads(&self) -> usize {
+        self.core.lock().0.task_clock_reads.get()
     }
 
     /// Run `f` on the session's one reassembly Router with the time now on the epoch its chains
@@ -6209,7 +6234,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core.retract_owed();
         }
         let was_idle = self.samples.is_idle();
-        core.run_tasks();
+        // A step that goes on with what a link took from its stack in an earlier receive wakes no
+        // timer and reads no clock for its tasks: a timer due meanwhile is woken by the step that
+        // reads the last of it, by that step's own reading below. A timer is so late by one
+        // receive's reading at most, as zenoh-pico's read task looks at its lease and keep-alive
+        // after the batch it read.
+        let going_on = was_idle && core.transport.links.holds_input();
+        if going_on {
+            core.run_tasks_at(None);
+        } else {
+            core.run_tasks();
+        }
         // A step reads what the round has room for and no more: one record in a build of one
         // thread, the records of one datagram in a build of threads, whose next datagram waits
         // while a record lies in the one lent (`Round::has_room`, `RoundGate`). What the link
@@ -6224,6 +6259,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return Stepped::Read;
         }
         let now_us = core.now_us();
+        // The timers the steps of this receive passed over.
+        if going_on {
+            core.run_tasks_at(Some(now_us));
+        }
         // A link's receive sweeps nothing, so the session ends the chains of its one reassembly
         // Router past their deadline here, once a step and by its reading, whichever link's task
         // ran; on the epoch its links staged them on, which is not the clock's own.
