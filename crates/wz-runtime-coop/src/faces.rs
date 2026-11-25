@@ -17,7 +17,6 @@
 //! the session's open admits, and none grows after: a face or a dial past the room is refused
 //! (P3).
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ops::Deref;
 
@@ -34,8 +33,8 @@ use wz_session_core::zid_hex::same_zid;
 use crate::face_life::{FaceRole, Phase, Signals};
 use crate::link_cells::CellRc;
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
-    SessionDatagramLink, SessionLinks, WaitOn,
+    LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial, SessionDatagramLink,
+    SessionLinks, WaitOn,
 };
 use crate::CoopLocalJoinHandle;
 
@@ -450,9 +449,10 @@ pub enum HandshakeEnd {
 }
 
 /// A port the session listens on, and the row of the endpoint its links are stated for, when the
-/// session states one.
+/// session states one. A build without `listen` opens no port, so it holds none of them.
+#[cfg(feature = "listen")]
 struct Listening<P> {
-    listener: Box<dyn LinkListener<P>>,
+    listener: alloc::boxed::Box<dyn crate::session_drive::LinkListener<P>>,
     endpoint: Option<usize>,
     /// What the port gave the last read's wait to wait on, when the port is asked for a
     /// connection only once a wait found it ready (`LinkListener::asked_when_ready`); `None` for
@@ -463,6 +463,7 @@ struct Listening<P> {
 }
 
 /// What a link taken off a port came to ([`LinkSupervisor::accept_at`]).
+#[cfg(feature = "listen")]
 pub enum Accepted<P> {
     /// A connection, with the endpoint its port is stated for.
     Link(OpenedLink<P>, Option<DialEndpoint>),
@@ -512,17 +513,22 @@ pub enum IdleWait {
 impl IdleWait {
     /// Wait on the links and ports with `waits`, the waits of their stack
     /// ([`SessionLinks::waits`]), sleeping with `sleep` (milliseconds) where there is nothing to
-    /// wait on. The wait keeps the session's buffer it was made in, holding the entries the stack
-    /// found ready ([`LinkWaits::wait_ready`]), for the session to take back
-    /// ([`LinkSupervisor::waited`]). Out of line: a session's open and each of its
-    /// reads wait.
+    /// wait on. The wait keeps the session's buffer it was made in, for the session to take back
+    /// ([`LinkSupervisor::waited`]): in a build with ports or groups, holding the entries the
+    /// stack found ready ([`LinkWaits::wait_ready`]), which only such a build reads; in one
+    /// without, as it was made. Out of line: a session's open and each of its reads wait.
     #[inline(never)]
     pub fn wait(&mut self, waits: &impl LinkWaits, sleep: impl FnOnce(u32)) {
         match self {
             IdleWait::None => {}
             IdleWait::Input { on, ms } => {
-                let ready = waits.wait_ready(on, *ms);
-                on.truncate(ready);
+                #[cfg(any(feature = "listen", feature = "group"))]
+                {
+                    let ready = waits.wait_ready(on, *ms);
+                    on.truncate(ready);
+                }
+                #[cfg(not(any(feature = "listen", feature = "group")))]
+                waits.wait(on, *ms);
             }
             IdleWait::Sleep(ms) | IdleWait::Behind(ms) => sleep(*ms),
         }
@@ -782,6 +788,7 @@ pub struct LinkSupervisor<L: SessionLinks, F, P = ManyFaces<F>> {
     /// taken out, so its place names it for that whole time, and the session names the face's
     /// other tables by the same place. A place no face holds is free for the next.
     faces: P,
+    #[cfg(feature = "listen")]
     listeners: Vec<Listening<L::Pump>>,
     /// The one buffer a read's waits are gathered in, reserved at the open for every link, port
     /// and wake a read waits on at once; `None` while a read waits with it, so that a read on
@@ -803,13 +810,14 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// places in all (one at least, the dial role's), each face with a dial under way at most, and
     /// `waits` waits a read makes at once, reserved now; `None` when the heap refuses that room,
     /// which an open answers as it answers an arena that cannot be reserved. The ports are the
-    /// open's, taken as it listens ([`Self::listen`]). Faces taken after are numbered from 1.
+    /// open's, taken as it listens (`listen`). Faces taken after are numbered from 1.
     pub fn new(links: L, dial: F, places: usize, waits: usize) -> Option<Self> {
         let mut room = Vec::new();
         room.try_reserve_exact(waits).ok()?;
         Some(Self {
             links,
             faces: P::with_dial(dial, places),
+            #[cfg(feature = "listen")]
             listeners: Vec::new(),
             waits: Some(room),
             next_face: 1,
@@ -882,11 +890,19 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     }
 
     /// Whether a port is to be asked for a connection at the next step: one asked at every step,
-    /// or one a wait found ready ([`Self::accept_at`]).
+    /// or one a wait found ready (`accept_at`). Never in a build without `listen`, which holds
+    /// no port.
     pub fn ports_to_ask(&self) -> bool {
-        self.listeners
-            .iter()
-            .any(|listening| listening.on.is_none() || listening.ready)
+        #[cfg(feature = "listen")]
+        {
+            self.listeners
+                .iter()
+                .any(|listening| listening.on.is_none() || listening.ready)
+        }
+        #[cfg(not(feature = "listen"))]
+        {
+            false
+        }
     }
 
     /// How many places a face holds, the dial role's among them.
@@ -927,6 +943,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
 
     /// Listen on `at`, whose links are stated for the endpoint in row `endpoint` of the session's
     /// texts when the session states one.
+    #[cfg(feature = "listen")]
     pub fn listen(&mut self, at: Locator, endpoint: Option<usize>) -> Result<(), LinkOpenError> {
         let listener = self.links.open_listener(at)?;
         self.moved();
@@ -939,12 +956,20 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         Ok(())
     }
 
-    /// Whether the session listens on any port.
+    /// Whether the session listens on any port: never in a build without `listen`.
     pub fn listens(&self) -> bool {
-        !self.listeners.is_empty()
+        #[cfg(feature = "listen")]
+        {
+            !self.listeners.is_empty()
+        }
+        #[cfg(not(feature = "listen"))]
+        {
+            false
+        }
     }
 
     /// The locator each port is bound to, with the port the stack chose where 0 was asked for.
+    #[cfg(feature = "listen")]
     pub fn listening(&self) -> impl Iterator<Item = Locator> + '_ {
         self.listeners
             .iter()
@@ -953,6 +978,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
 
     /// Take a connection off the port at `at`: `None` past the last port. A port broken for good
     /// is let go of, so the port after it is then at `at`.
+    #[cfg(feature = "listen")]
     pub fn accept_at(&mut self, at: usize) -> Option<Accepted<L::Pump>> {
         let listening = self.listeners.get_mut(at)?;
         // A port a wait names is asked only once a wait found it ready: under a stream of input
@@ -1227,6 +1253,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         }
         // Asked at each wait: a listener whose own work is under way (a WebSocket handshake) or
         // that takes no connection now gives no wait on its port until that changes.
+        #[cfg(feature = "listen")]
         for listening in &mut self.listeners {
             let on = listening.listener.input_wait();
             let was = listening.on;
@@ -1304,6 +1331,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
                         .input_seen(on.iter().any(|ready| ready.on == port));
                 }
             }
+            #[cfg(feature = "listen")]
             for listening in &mut self.listeners {
                 if listening
                     .on
@@ -1339,6 +1367,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
                 *link = Link::Waiting { at_us: u64::MAX };
             }
         }
+        #[cfg(feature = "listen")]
         self.listeners.clear();
     }
 
@@ -1363,12 +1392,14 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::boxed::Box;
     use alloc::rc::Rc;
     use alloc::vec;
     use core::cell::Cell;
     use core::sync::atomic::Ordering;
     use wz_session_core::link::RxFrame;
 
+    use crate::session_drive::LinkListener;
     use crate::{ClockSource, CoopLocalSet, CoopRuntime};
 
     struct Still;
@@ -1485,8 +1516,10 @@ mod tests {
 
     /// A network whose ports are each waited on by `Socket(9)` and never hold a connection: how
     /// often one was asked for a connection, and whether its ports are asked only when ready.
+    #[cfg(feature = "listen")]
     struct Ports(Rc<Cell<u32>>, bool);
 
+    #[cfg(feature = "listen")]
     impl SessionLinks for Ports {
         type Pump = Rc<Quiet>;
         type Dial = Answer;
@@ -1514,8 +1547,10 @@ mod tests {
 
     /// A port waited on by `Socket(9)` that holds no connection, counting each time it is asked,
     /// and asked only when ready as `.1` says.
+    #[cfg(feature = "listen")]
     struct Empty(Rc<Cell<u32>>, bool);
 
+    #[cfg(feature = "listen")]
     impl LinkListener<Rc<Quiet>> for Empty {
         fn local(&self) -> Locator {
             Locator::tcp(core::net::SocketAddr::from(([127, 0, 0, 1], 7447)))
@@ -1536,8 +1571,10 @@ mod tests {
     }
 
     /// The waits of a stack that found none of what it waited on ready.
+    #[cfg(feature = "listen")]
     struct NoneReady;
 
+    #[cfg(feature = "listen")]
     impl LinkWaits for NoneReady {
         fn wait(&self, _on: &[LinkWait], _timeout_ms: u32) {}
 
@@ -1687,6 +1724,7 @@ mod tests {
     fn a_change_of_a_face_is_counted_and_a_look_is_not() {
         let mut faces = supervisor(Link::Waiting { at_us: 5 }, 2);
         assert!(!faces.ports_to_ask(), "no port, none to ask");
+        assert!(!faces.listens(), "no port is listened on");
         let before = faces.moves();
         assert!(faces.face(0).is_some());
         assert_eq!(faces.faces().count(), 1);
@@ -2118,6 +2156,7 @@ mod tests {
     /// A read asks each port for its wait when it waits, not once when the port opened: a port
     /// that gives none now is looked at again after a bounded sleep. Turned red by a wait read
     /// once at the listen and kept.
+    #[cfg(feature = "listen")]
     #[test]
     fn a_read_asks_each_port_for_its_wait_at_each_wait() {
         let mut faces = supervisor(Link::Waiting { at_us: u64::MAX }, 1);
@@ -2362,9 +2401,61 @@ mod tests {
         assert!(matches!(wait, IdleWait::Input { ref on, .. } if *on == [link]));
     }
 
+    /// A wait asks its stack which entries were ready only in a build that reads them (`listen`
+    /// or `group`), and leaves those alone in its buffer; a build without either asks for the
+    /// plain wait and leaves the buffer as it was made. Turned red by an arm that asks the other
+    /// call, or a build without ports that cuts its buffer to what was found ready.
+    #[test]
+    fn a_wait_asks_which_entries_were_ready_only_where_they_are_read() {
+        /// Counts each kind of wait; its stack finds nothing ready.
+        #[derive(Default)]
+        struct Counted {
+            plain: core::sync::atomic::AtomicU32,
+            ready: core::sync::atomic::AtomicU32,
+        }
+
+        impl LinkWaits for Counted {
+            fn wait(&self, _on: &[LinkWait], _timeout_ms: u32) {
+                self.plain.fetch_add(1, Ordering::Relaxed);
+            }
+
+            fn wait_ready(&self, _on: &mut [LinkWait], _timeout_ms: u32) -> usize {
+                self.ready.fetch_add(1, Ordering::Relaxed);
+                0
+            }
+
+            fn wait_room(&self, _on: WaitOn, _timeout_us: u64) -> bool {
+                true
+            }
+        }
+
+        let link = LinkWait::input(WaitOn::Socket(3));
+        let stack = Counted::default();
+        let mut wait = IdleWait::Input {
+            on: vec![link],
+            ms: 10,
+        };
+        wait.wait(&stack, |_| panic!("no sleep"));
+        let IdleWait::Input { on, .. } = wait else {
+            panic!("the wait keeps its buffer");
+        };
+        let asked = (
+            stack.plain.load(Ordering::Relaxed),
+            stack.ready.load(Ordering::Relaxed),
+        );
+        if cfg!(any(feature = "listen", feature = "group")) {
+            assert_eq!(asked, (0, 1), "the wait that tells what was ready");
+            assert!(on.is_empty(), "nothing was found ready");
+        } else {
+            assert_eq!(asked, (1, 0), "the plain wait");
+            assert_eq!(on, [link], "the buffer as it was made");
+        }
+    }
+
     /// The looks at a port a test of `accept_at` makes, its port asked only when ready as
     /// `when_ready` says: one before any wait, three after a wait that found nothing ready, three
     /// after one whose stack cannot tell. How often the port was asked.
+    #[cfg(feature = "listen")]
     fn asks_of_a_port(when_ready: bool) -> u32 {
         let asked = Rc::new(Cell::new(0));
         let mut faces: LinkSupervisor<Ports, TestFace> = LinkSupervisor::new(
@@ -2408,6 +2499,7 @@ mod tests {
     /// batch asks the stack nothing. CONTROL: a port that is not so is asked at every look.
     /// Turned red by a step that asks every port (the readiness test taken out of `accept_at`),
     /// or a wait that marks a port it did not find ready.
+    #[cfg(feature = "listen")]
     #[test]
     fn a_port_is_asked_for_a_connection_only_after_a_wait_found_it_ready() {
         assert_eq!(
@@ -2423,6 +2515,7 @@ mod tests {
     /// for its wait, a wait that found nothing ready leaves it unasked
     /// (`a_port_is_asked_for_a_connection_only_after_a_wait_found_it_ready`). Turned red by a port
     /// left to a wait the read made no room for, which is then never asked.
+    #[cfg(feature = "listen")]
     #[test]
     fn a_port_its_read_has_no_room_to_wait_on_is_asked_at_every_look() {
         let asked = Rc::new(Cell::new(0));
