@@ -341,11 +341,12 @@ impl GroupLabel {
         }
     }
 
-    /// `member` as a transport: the session core's snapshot of a group member, over a UDP link.
+    /// `member` as a transport: the session core's snapshot of a group member, over the link its
+    /// group is.
     fn snapshot(&self, member: &MulticastMember) -> Option<FaceSnapshot> {
         FaceSnapshot::of_group_member(
             member,
-            GroupMemberLink::udp(&self.group, member, &self.group, &self.endpoint),
+            GroupMemberLink::of_group(&self.group, member, &self.group, &self.endpoint),
             self.is_shm,
         )
     }
