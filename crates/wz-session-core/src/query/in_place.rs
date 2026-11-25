@@ -680,7 +680,6 @@ mod tests {
 
     /// What a queryable is shown of `view`, as owned values: what `recording` notes.
     fn seen_of(view: &dyn crate::query_sink::QueryView) -> Seen {
-        use crate::query_sink::QueryView as _;
         Seen {
             keyexpr: String::from(view.keyexpr()),
             parameters: view.parameters().map(<[u8]>::to_vec),
