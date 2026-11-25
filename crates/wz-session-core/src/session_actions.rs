@@ -12322,6 +12322,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
+    /// Whether the node had room for this link when it was opened; `true` for a link the node
+    /// does not guard. A link it had none for is refused for the node being full and not for a
+    /// second link to the node on the other end. See
+    /// [`crate::link_admission::LinkAdmission::has_row`].
+    #[cfg(all(
+        feature = "alloc",
+        target_has_atomic = "ptr",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    ))]
+    pub(crate) fn link_has_row(&self) -> bool {
+        R::with_mutex_mut(&self.link.link_lease, |slot| {
+            slot.as_ref()
+                .is_none_or(crate::link_admission::LinkLease::has_row)
+        })
+    }
+
     /// This link has left its node's admission: its place is free for the next link to the same
     /// node. The node calls it when the link's face goes; the lease's drop does it otherwise.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]

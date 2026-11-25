@@ -134,6 +134,13 @@ pub trait LinkAdmission: Send + Sync {
     fn confirm(&self, token: u64) -> bool;
     /// The link `token` is gone. Harmless for a token that holds nothing.
     fn release(&self, token: u64);
+    /// Whether the node had room for the link `token` when it was opened. A link it had none
+    /// for is refused at [`Self::reserve`] for the node being full, not for a second link to a
+    /// node it holds, and its peer is told so as upstream tells the peer of a node past its
+    /// `max_sessions`. An admission that bounds no links has room for each, the default.
+    fn has_row(&self, _token: u64) -> bool {
+        true
+    }
 }
 
 /// A link's place in a node's [`LinkAdmission`], released when the link's session is dropped.
@@ -182,6 +189,11 @@ impl LinkLease {
     /// See [`LinkAdmission::confirm`].
     pub fn confirm(&self) -> bool {
         self.authority.confirm(self.token)
+    }
+
+    /// See [`LinkAdmission::has_row`].
+    pub fn has_row(&self) -> bool {
+        self.authority.has_row(self.token)
     }
 
     /// See [`LinkAdmission::release`]. Called by the node when the link's face leaves, and by the
@@ -487,6 +499,12 @@ impl LinkBook {
     pub fn rows(&self) -> Quota {
         self.rows
     }
+
+    /// Whether `token` is one [`Self::open`] gave a link it had a row for, and not the token of
+    /// a link opened while every row was held.
+    pub const fn has_row(token: u64) -> bool {
+        token != NO_ROW
+    }
 }
 
 /// A node's [`LinkAdmission`]: a [`LinkBook`] behind the lock the runtime `R` lends the session.
@@ -547,6 +565,10 @@ impl<R: Runtime> LinkAdmission for LinkRegistry<R> {
 
     fn release(&self, token: u64) {
         R::with_mutex_mut(&self.book, |book| book.release(token));
+    }
+
+    fn has_row(&self, token: u64) -> bool {
+        LinkBook::has_row(token)
     }
 }
 
@@ -872,6 +894,10 @@ mod book_tests {
         let first = node.open(false);
         let second = node.open(true);
         let past = node.open(false);
+        assert!(
+            LinkBook::has_row(first) && LinkBook::has_row(second) && !LinkBook::has_row(past),
+            "the two links with rows are told apart from the one past them"
+        );
         assert!(
             !node.reserve(past, &[0x03]),
             "a link with no row is refused, to a node no other link reaches"
