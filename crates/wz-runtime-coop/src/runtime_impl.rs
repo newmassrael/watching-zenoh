@@ -226,7 +226,14 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// allocates the runtime's state.
     #[cfg(not(feature = "session-slot"))]
     pub fn new(clock: C) -> Self {
-        Self::over(clock, ExecutorState::growing(), TimerQueue::growing())
+        Self::made(Self::try_new(clock))
+    }
+
+    /// [`Self::new`], or `None`, having kept nothing of the heap, when the heap has no room for
+    /// the runtime's state.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn try_new(clock: C) -> Option<Self> {
+        Self::try_over(clock, ExecutorState::try_growing()?, TimerQueue::growing())
     }
 
     /// A runtime whose task table and timer table are reserved now, as `rows` says, and never
@@ -241,9 +248,18 @@ impl<C: ClockSource> CoopRuntime<C> {
     #[cfg(not(feature = "session-slot"))]
     #[inline(always)]
     pub fn reserved(clock: C, rows: RuntimeRows) -> Self {
-        Self::over(
+        Self::made(Self::try_reserved(clock, rows))
+    }
+
+    /// [`Self::reserved`], or `None`, having kept nothing of the heap, when the heap has no room
+    /// for the runtime's state or its task table. A timer table the heap has no room for is made
+    /// with no entries, and every sleep is then refused an entry, counted.
+    #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
+    pub fn try_reserved(clock: C, rows: RuntimeRows) -> Option<Self> {
+        Self::try_over(
             clock,
-            ExecutorState::reserved(rows.tasks, rows.task_bytes),
+            ExecutorState::try_reserved(rows.tasks, rows.task_bytes)?,
             TimerQueue::of_rows(rows.timers),
         )
     }
@@ -258,9 +274,17 @@ impl<C: ClockSource> CoopRuntime<C> {
     #[cfg(not(feature = "session-slot"))]
     #[inline(always)]
     pub fn reserved_for_one(clock: C, rows: RuntimeRows) -> Self {
-        Self::over(
+        Self::made(Self::try_reserved_for_one(clock, rows))
+    }
+
+    /// [`Self::reserved_for_one`], or `None`, having kept nothing of the heap, as
+    /// [`Self::try_reserved`] answers.
+    #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
+    pub fn try_reserved_for_one(clock: C, rows: RuntimeRows) -> Option<Self> {
+        Self::try_over(
             clock,
-            ExecutorState::reserved_one(rows.tasks, rows.task_bytes),
+            ExecutorState::try_reserved_one(rows.tasks, rows.task_bytes)?,
             TimerQueue::of_rows(rows.timers),
         )
     }
@@ -276,22 +300,45 @@ impl<C: ClockSource> CoopRuntime<C> {
     #[cfg(not(feature = "session-slot"))]
     #[inline(always)]
     pub fn opening(clock: C, rows: RuntimeRows, added: usize) -> Self {
-        Self::over(
+        Self::made(Self::try_opening(clock, rows, added))
+    }
+
+    /// [`Self::opening`], or `None`, having kept nothing of the heap, as [`Self::try_reserved`]
+    /// answers, and when the heap has no room for the added cells' table.
+    #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
+    pub fn try_opening(clock: C, rows: RuntimeRows, added: usize) -> Option<Self> {
+        Self::try_over(
             clock,
-            ExecutorState::opening(rows.tasks, rows.task_bytes, added),
+            ExecutorState::try_opening(rows.tasks, rows.task_bytes, added)?,
             TimerQueue::of_rows(rows.timers),
         )
     }
 
+    /// The runtime over `executor` and `timers`, its state on the heap; `None`, the tables let
+    /// go of, when the heap has no room for the state.
     #[cfg(not(feature = "session-slot"))]
-    fn over(clock: C, executor: ExecutorState, timers: TimerQueue) -> Self {
-        Self {
-            inner: kept::Shared::boxed(RuntimeInner {
-                executor,
-                timers,
-                clock,
-            }),
+    fn try_over(clock: C, executor: ExecutorState, timers: TimerQueue) -> Option<Self> {
+        let inner = kept::Shared::try_boxed(RuntimeInner {
+            executor,
+            timers,
+            clock,
+        })
+        .ok()?;
+        Some(Self {
+            inner,
             driver: PhantomData,
+        })
+    }
+
+    /// The runtime a making of the heap answered, or the end of the program when the heap had no
+    /// room for it, as a `Box` of the runtime's state ends it: the makings that cannot answer a
+    /// refusal. A maker that can answers one with the `try_` making.
+    #[cfg(not(feature = "session-slot"))]
+    fn made(runtime: Option<Self>) -> Self {
+        match runtime {
+            Some(runtime) => runtime,
+            None => alloc::alloc::handle_alloc_error(Layout::new::<RuntimeInner<C>>()),
         }
     }
 }

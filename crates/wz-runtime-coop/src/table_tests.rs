@@ -997,6 +997,24 @@ fn a_runtime_placed_for_an_open_that_adds_cells_is_refused_by_a_full_heap() {
     }
 }
 
+/// A runtime the heap has no room for is not made, whichever making is asked, and the same
+/// making with the heap's memory is. Turned red by a making that ends the process on the refusal
+/// (`Shared::boxed` for its state, `TaskStore::new` for its cells).
+#[test]
+fn a_runtime_the_heap_has_no_room_for_is_not_made() {
+    let rows = RuntimeRows {
+        tasks: 2,
+        task_bytes: 64,
+        timers: 2,
+    };
+    assert!(refused(|| CoopRuntime::try_new(Still)).is_none());
+    assert!(refused(|| CoopRuntime::try_reserved(Still, rows)).is_none());
+    assert!(refused(|| CoopRuntime::try_reserved_for_one(Still, rows)).is_none());
+    assert!(refused(|| CoopRuntime::try_opening(Still, rows, 1)).is_none());
+    assert!(CoopRuntime::try_new(Still).is_some());
+    assert!(CoopRuntime::try_opening(Still, rows, 1).is_some());
+}
+
 /// A spawn during an open whose added cell the heap refuses its bytes is refused as the heap's,
 /// counted apart from a task too large, and ends nothing; the same spawn with the heap's memory
 /// takes the cell. Turned red by a refusal that ends the program, or one named or counted as a

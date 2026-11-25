@@ -430,7 +430,8 @@ impl TaskStore {
     /// to give back what spawns give them. Bytes past the address space are not reserved: the cells
     /// are made with none and a spawn is refused at the call, counted. A count past it makes no
     /// cells. `AT_MOST_ONE`: a count past one is held to one, which the layout and the writing of
-    /// the cells are then made for.
+    /// the cells are then made for. The tests' making: a heap that refuses ends the program.
+    #[cfg(test)]
     fn new<const AT_MOST_ONE: bool>(
         count: usize,
         bytes: Option<usize>,
@@ -444,8 +445,12 @@ impl TaskStore {
         }
     }
 
-    /// [`Self::new`], or `None`, having kept nothing of the heap, when the heap refuses the block
-    /// or the store's count.
+    /// `count` free cells in one block of the heap: each with `bytes` of the block behind the
+    /// cells, at steps of the cells' alignment, when `bytes` is given; bare otherwise, with `unfit`
+    /// to give back what spawns give them. Bytes past the address space are not reserved: the cells
+    /// are made with none and a spawn is refused at the call, counted. A count past it makes no
+    /// cells. `AT_MOST_ONE`: a count past one is held to one. `None`, having kept nothing of the
+    /// heap, when the heap refuses the block or the store's count.
     fn try_new<const AT_MOST_ONE: bool>(
         count: usize,
         bytes: Option<usize>,
@@ -585,8 +590,8 @@ fn give_back_fitted(cells: &[TaskCell]) {
 }
 
 /// The cells of a table that takes memory after it is made, beside the cells it reserved: what
-/// only such a table does, behind `TakesMemory`, which only `ExecutorState::growing` and
-/// `ExecutorState::opening` make, so a runtime whose table is reserved links none of it.
+/// only such a table does, behind `TakesMemory`, which only `ExecutorState::try_growing` and
+/// `ExecutorState::try_opening` make, so a runtime whose table is reserved links none of it.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 trait TakesMemory: Send + Sync {
     /// The cell at `index` among these cells, read inside the section `cs` the caller holds.
@@ -695,11 +700,15 @@ impl TakesMemory for Taking {
         let (cell, buf) = match found {
             Some(taken) => taken,
             None if self.grows => {
-                let chunk = TaskStore::new::<false>(
+                // A heap with no room for the chunk, or for its row in the table of chunks, refuses
+                // the task as one with no room for its cell's bytes, counted.
+                let Some(chunk) = TaskStore::try_new::<false>(
                     self.count().max(FIRST_CHUNK),
                     None,
                     Some(give_back_fitted),
-                );
+                ) else {
+                    return Err(SpawnRefusal::HeapRefused);
+                };
                 let Some(first) = chunk.cells().first() else {
                     return Ok(Taken::Full { any, room });
                 };
@@ -708,7 +717,19 @@ impl TakesMemory for Taking {
                     meta.state = State::Spawning;
                     meta.set = set;
                 });
-                crate::cs::with(|cs| self.chunks.borrow(cs).borrow_mut().push(chunk));
+                // The row is reserved and the chunk placed in one section, so no other context
+                // takes the room between them; a chunk that finds none is handed back and let go.
+                let unplaced = crate::cs::with(|cs| {
+                    let mut chunks = self.chunks.borrow(cs).borrow_mut();
+                    if chunks.try_reserve(1).is_err() {
+                        return Some(chunk);
+                    }
+                    chunks.push(chunk);
+                    None
+                });
+                if unplaced.is_some() {
+                    return Err(SpawnRefusal::HeapRefused);
+                }
                 (first, ptr::null_mut())
             }
             None => return Ok(Taken::Full { any, room }),
@@ -1085,16 +1106,15 @@ impl ExecutorState {
         }
     }
 
-    /// A table that grows when every cell is taken.
+    /// A table that grows when every cell is taken; `None`, having kept nothing of the heap, when
+    /// the heap has no room for its state.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    pub(crate) fn growing() -> Self {
-        let mut state = Self::over(
-            Cells::Store(TaskStore::new::<false>(0, None, None)),
-            None,
-            &MANY_CELLS,
-        );
-        state.taking = Some(Box::new(Taking::over(Vec::new(), true)));
-        state
+    pub(crate) fn try_growing() -> Option<Self> {
+        let store = TaskStore::try_new::<false>(0, None, None)?;
+        let taking = crate::kept::try_box(Taking::over(Vec::new(), true)).ok()?;
+        let mut state = Self::over(Cells::Store(store), None, &MANY_CELLS);
+        state.taking = Some(taking);
+        Some(state)
     }
 
     /// `tasks` cells of `task_bytes` each, reserved now in one block, and `added` bare cells beside
@@ -1102,16 +1122,23 @@ impl ExecutorState {
     /// needs, kept for the next task it fits. Once [`Self::seal`] is called the table is fixed, and
     /// a spawn that finds no free cell it fits is refused, counted; so is one that finds every
     /// added cell taken. The table never holds more cells than it was made with.
+    /// `None`, having kept nothing of the heap, when the heap has no room for the cells or their
+    /// table.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    pub(crate) fn opening(tasks: usize, task_bytes: usize, added: usize) -> Self {
-        let store = TaskStore::new::<false>(tasks, Some(task_bytes), None);
-        match Self::opening_in(store, added) {
-            Some(state) => state,
-            None => alloc::alloc::handle_alloc_error(Layout::new::<Taking>()),
-        }
+    pub(crate) fn try_opening(tasks: usize, task_bytes: usize, added: usize) -> Option<Self> {
+        Self::opening_in(
+            TaskStore::try_new::<false>(tasks, Some(task_bytes), None)?,
+            added,
+        )
     }
 
-    /// [`Self::opening`] over the cells `store` reserved, or `None`, with `store` let go of and
+    /// [`Self::try_opening`] for the tests, on a heap that has room.
+    #[cfg(test)]
+    pub(crate) fn opening(tasks: usize, task_bytes: usize, added: usize) -> Self {
+        Self::try_opening(tasks, task_bytes, added).expect("the heap has room")
+    }
+
+    /// [`Self::try_opening`] over the cells `store` reserved, or `None`, with `store` let go of and
     /// nothing of the heap kept, when the heap refuses the added cells or their table.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn opening_in(store: Shared<TaskStore>, added: usize) -> Option<Self> {
@@ -1143,28 +1170,42 @@ impl ExecutorState {
     }
 
     /// `tasks` cells of `task_bytes` each, reserved now in one block: a spawn past them is
-    /// refused, counted, and none allocates.
+    /// refused, counted, and none allocates. `None`, having kept nothing of the heap, when the
+    /// heap has no room for the block.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    pub(crate) fn reserved(tasks: usize, task_bytes: usize) -> Self {
-        Self::reserved_in(TaskStore::new::<false>(tasks, Some(task_bytes), None))
+    pub(crate) fn try_reserved(tasks: usize, task_bytes: usize) -> Option<Self> {
+        TaskStore::try_new::<false>(tasks, Some(task_bytes), None).map(Self::reserved_in)
     }
 
-    /// [`Self::reserved`] over the cells `store` reserved.
+    /// [`Self::try_reserved`] for the tests, on a heap that has room.
+    #[cfg(test)]
+    pub(crate) fn reserved(tasks: usize, task_bytes: usize) -> Self {
+        Self::try_reserved(tasks, task_bytes).expect("the heap has room")
+    }
+
+    /// [`Self::try_reserved`] over the cells `store` reserved.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved_in(store: Shared<TaskStore>) -> Self {
         let cell_bytes = store.cell_bytes;
         Self::over(Cells::Store(store), cell_bytes, &MANY_CELLS)
     }
 
-    /// [`Self::reserved`] for one task at most: one cell of `task_bytes`, none for `tasks` of 0,
+    /// [`Self::try_reserved`] for one task at most: one cell of `task_bytes`, none for `tasks` of 0,
     /// and a count past one held to one. A spawn while the cell holds a task, or a result its
-    /// handle has not read, is refused, counted; none allocates.
+    /// handle has not read, is refused, counted; none allocates. `None`, having kept nothing of
+    /// the heap, when the heap has no room for the cell.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    pub(crate) fn reserved_one(tasks: usize, task_bytes: usize) -> Self {
-        Self::reserved_one_in(TaskStore::new::<true>(tasks, Some(task_bytes), None))
+    pub(crate) fn try_reserved_one(tasks: usize, task_bytes: usize) -> Option<Self> {
+        TaskStore::try_new::<true>(tasks, Some(task_bytes), None).map(Self::reserved_one_in)
     }
 
-    /// [`Self::reserved_one`] over the cell `store` reserved, one at most.
+    /// [`Self::try_reserved_one`] for the tests, on a heap that has room.
+    #[cfg(test)]
+    pub(crate) fn reserved_one(tasks: usize, task_bytes: usize) -> Self {
+        Self::try_reserved_one(tasks, task_bytes).expect("the heap has room")
+    }
+
+    /// [`Self::try_reserved_one`] over the cell `store` reserved, one at most.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved_one_in(store: Shared<TaskStore>) -> Self {
         let cell_bytes = store.cell_bytes;
@@ -2170,6 +2211,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A table that grows refuses a task the heap has no room to grow it for, counted as a heap
+    /// refusal, and takes the next once the heap has room; a table the heap has no room for is
+    /// not made. Turned red by a growth that asks the heap for a chunk or its row it cannot fail
+    /// to get (`TaskStore::new`, a `push` without a reservation), which ends the process.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_growing_table_refuses_a_task_the_heap_has_no_room_to_grow_it_for() {
+        let state = ExecutorState::try_growing().expect("the heap has room");
+        assert_eq!(
+            crate::table_tests::refused(|| state.claim_bytes(0, 8, 8).map(|_| ())),
+            Err(SpawnRefusal::HeapRefused)
+        );
+        assert_eq!(state.refusals().heap_refused, 1);
+        assert_eq!(state.capacity(), 0, "nothing was added");
+        assert!(
+            state.claim_bytes(0, 8, 8).is_ok(),
+            "the heap has room again"
+        );
+        assert!(crate::table_tests::refused(ExecutorState::try_growing).is_none());
+        assert!(crate::table_tests::refused(|| ExecutorState::try_reserved(2, 64)).is_none());
     }
 
     /// A reserved table of no cells refuses a task its cells would fit for want of a cell, and one

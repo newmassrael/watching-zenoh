@@ -190,9 +190,10 @@ pub struct TimerQueue {
     grow: Option<GrowFn>,
 }
 
-/// Place a deadline in a new entry of the table.
+/// Place a deadline in a new entry of the table, or hand it back when the heap has no room for
+/// the entry.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-type GrowFn = fn(&mut Vec<TimerSlot>, TimerEntry);
+type GrowFn = fn(&mut Vec<TimerSlot>, TimerEntry) -> Result<(), TimerEntry>;
 
 /// What a pass and a look ahead do over the entries of a table a deadline has been placed in.
 struct TableWalk {
@@ -296,7 +297,8 @@ impl TimerQueue {
     /// Register `waker` to be woken when wall-clock micros reach `deadline_us`.
     /// `false` when a fixed table has every entry taken: the refusal is counted
     /// ([`Self::refusals`]) and nothing is registered, so the caller wakes itself
-    /// instead. A grown table adds an entry and answers `true`.
+    /// instead. A grown table adds an entry and answers `true`, or refuses as a fixed one
+    /// does when the heap has no room for the entry.
     pub fn register(&self, deadline_us: u64, waker: Waker) -> bool {
         crate::cs::with(|cs| {
             let seq = {
@@ -324,13 +326,19 @@ impl TimerQueue {
                 return true;
             };
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            if let (Some(grow), Slots::Owned(owned)) = (self.grow, &self.slots) {
-                if let Ok(mut slots) = owned.borrow(cs).try_borrow_mut() {
-                    grow(&mut slots, entry);
-                    self.hold_walk();
-                    return true;
-                }
-            }
+            let entry = match (self.grow, &self.slots) {
+                (Some(grow), Slots::Owned(owned)) => match owned.borrow(cs).try_borrow_mut() {
+                    Ok(mut slots) => match grow(&mut slots, entry) {
+                        Ok(()) => {
+                            self.hold_walk();
+                            return true;
+                        }
+                        Err(entry) => entry,
+                    },
+                    Err(_) => entry,
+                },
+                _ => entry,
+            };
             // The entry was not placed: its waker goes with it.
             drop(entry);
             let refused = self.refused.borrow(cs);
@@ -429,14 +437,19 @@ impl TimerQueue {
     }
 }
 
-/// Place `entry` in a new entry of a table that grows.
+/// Place `entry` in a new entry of a table that grows, or hand it back when the heap has no room
+/// for the entry.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-fn grow_by_one(slots: &mut Vec<TimerSlot>, entry: TimerEntry) {
+fn grow_by_one(slots: &mut Vec<TimerSlot>, entry: TimerEntry) -> Result<(), TimerEntry> {
+    if slots.try_reserve(1).is_err() {
+        return Err(entry);
+    }
     slots.push(TimerSlot(Some(entry)));
+    Ok(())
 }
 
 /// `count` empty entries in one allocation of their size; none for a count past the address
-/// space, whose table then refuses every sleep an entry, counted.
+/// space or one the heap has no room for, whose table then refuses every sleep an entry, counted.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 fn empty_slots(count: usize) -> Box<[TimerSlot]> {
     let layout = match Layout::array::<TimerSlot>(count) {
@@ -446,7 +459,7 @@ fn empty_slots(count: usize) -> Box<[TimerSlot]> {
     // SAFETY: the layout's size is not zero.
     let block = unsafe { alloc::alloc::alloc(layout) };
     if block.is_null() {
-        alloc::alloc::handle_alloc_error(layout);
+        return Box::default();
     }
     let first = block.cast::<TimerSlot>();
     for at in 0..count {
@@ -518,6 +531,29 @@ mod tests {
         assert_eq!(queue.capacity(), 0);
         assert!(!queue.register(5, noop_waker()));
         assert_eq!(queue.refusals(), 1);
+    }
+
+    /// A table the heap has no room for is made with no entries, and a sleep then finds none and
+    /// is refused, counted; a table that grows refuses a deadline the heap has no room to add an
+    /// entry for, counted, and places the next once it has. Turned red by `empty_slots` or
+    /// `grow_by_one` asking the heap for memory it cannot fail to get (`handle_alloc_error`,
+    /// `push` without a reservation), which ends the process.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_table_the_heap_has_no_room_for_refuses_its_sleeps() {
+        assert_eq!(crate::table_tests::refused(|| empty_slots(3)).len(), 0);
+        let queue = crate::table_tests::refused(|| TimerQueue::reserved(3));
+        assert_eq!(queue.capacity(), 0);
+        assert!(!queue.register(5, noop_waker()));
+        assert_eq!(queue.refusals(), 1);
+
+        let growing = TimerQueue::growing();
+        assert!(!crate::table_tests::refused(
+            || growing.register(1, noop_waker())
+        ));
+        assert_eq!((growing.capacity(), growing.refusals()), (0, 1));
+        assert!(growing.register(2, noop_waker()), "the heap has room again");
+        assert_eq!((growing.capacity(), growing.pending_count()), (1, 1));
     }
 
     /// The table asked for from inside its own borrow is handed over as one of no entries.
