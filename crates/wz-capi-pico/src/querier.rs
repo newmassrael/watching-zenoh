@@ -477,7 +477,7 @@ pub unsafe extern "C" fn z_querier_get(
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_querier_get_options_t,
 ) -> ZResult {
-    let len = crate::get::parameters_strlen(parameters);
+    let len = crate::abi::c_str_len(parameters);
     z_querier_get_with_parameters_substr(querier, parameters, len, callback, options)
 }
 
