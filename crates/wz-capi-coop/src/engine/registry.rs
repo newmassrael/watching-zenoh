@@ -516,7 +516,7 @@ pub(super) struct RegistryOf<H: Holders> {
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
     /// The program's watches of what the peers declare, which the application layer's observers
-    /// hold events in the round for while a link's frame is dispatched (`decl_watch`).
+    /// hold events for while a link's frame is dispatched (`decl_watch`).
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -645,12 +645,25 @@ impl<H: Holders> RegistryOf<H> {
         // after the faces' takes the bytes the plan counts for them wherever it lends them.
         #[cfg(feature = "local-queryable")]
         let local = Gets::lent(arena, keys, gets.rows, limits)?;
-        // The watches hold what the peers declare in the round the application's deliveries go to.
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
+        // The watches hold what the peers declare in the round the application's deliveries go to,
+        // where the links are read by a task or a listener; a read that steps its one link itself
+        // hands it after each record from a room of the watches' own.
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "threads", feature = "listen", feature = "group")
         ))]
         let decl_watches = DeclWatches::under(limits, &delivery.round)?;
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            not(any(feature = "threads", feature = "listen", feature = "group"))
+        ))]
+        let decl_watches = DeclWatches::under(limits)?;
         Ok(Self {
             app,
             delivery,
@@ -1070,8 +1083,13 @@ impl<H: Holders> RegistryOf<H> {
         }
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(face) {
+            #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
             // SAFETY: a face's frame is dispatched under the session's lock.
-            unsafe { self.decl_watches.heard_synced() };
+            unsafe {
+                self.decl_watches.heard_synced()
+            };
+            #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+            self.decl_watches.heard_synced();
         }
         // What the observers are told after this frame is a group's until a link's frame says
         // otherwise, so a group's members are never told as a link's peer.
