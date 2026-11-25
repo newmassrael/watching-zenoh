@@ -2580,21 +2580,13 @@ impl SubscriberRow {
     }
 
     /// Hand `sample` to the callback, unless the subscriber was undeclared since the call was
-    /// begun: the one place a sample is handed to a subscriber's callback.
+    /// begun: the one place a sample is handed to a subscriber's callback. The sample is lent as it
+    /// lies to every subscriber; the sink leaves out a timestamp its callback is not to see.
     fn hand(&self, sample: &SampleRef<'_>) {
         if self.latch.retired() {
             return;
         }
-        let hidden;
-        // A sample that carries no timestamp has none to hide: it is handed as it lies, with no
-        // copy made of it for each call.
-        let sample = if self.expose || sample.timestamp.is_none() {
-            sample
-        } else {
-            hidden = sample.without_timestamp();
-            &hidden
-        };
-        self.sink.call_ref(sample);
+        self.sink.call_ref(sample, self.expose);
     }
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:

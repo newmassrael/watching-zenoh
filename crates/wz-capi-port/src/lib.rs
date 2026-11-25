@@ -180,9 +180,16 @@ pub type CCall =
 pub type CDrop = unsafe extern "C" fn(context: *mut core::ffi::c_void);
 
 /// How a plain subscriber callback is called ([`PlainCallback`]): with the function it holds, its
-/// context, and the session's own sample ([`SampleRef`]), whose parts it reads as fields.
-pub type SampleMarshal =
-    unsafe fn(call: CCall, context: *mut core::ffi::c_void, sample: &SampleRef<'_>);
+/// context, the session's own sample ([`SampleRef`]), whose parts it reads as fields, and whether
+/// the callback is shown its timestamp. The sample is lent as it lies to every subscriber, so a
+/// marshal told to hide the timestamp leaves it out of what it hands the program; nothing copies
+/// the sample to hide it.
+pub type SampleMarshal = unsafe fn(
+    call: CCall,
+    context: *mut core::ffi::c_void,
+    sample: &SampleRef<'_>,
+    shows_timestamp: bool,
+);
 
 /// A subscriber callback given as a Rust function over its context ([`SubscriberSink::raw`]).
 type RawSampleFn = unsafe fn(context: *mut core::ffi::c_void, sample: &SampleRef<'_>);
@@ -277,18 +284,43 @@ unsafe fn let_go_c(context: *mut core::ffi::c_void, drop: Option<CDrop>, then: O
 extern "C" fn no_call(_argument: *const core::ffi::c_void, _context: *mut core::ffi::c_void) {}
 
 /// The marshal of a subscriber closure given no function: it calls nothing.
-fn no_sample_call(_call: CCall, _context: *mut core::ffi::c_void, _sample: &SampleRef<'_>) {}
+fn no_sample_call(
+    _call: CCall,
+    _context: *mut core::ffi::c_void,
+    _sample: &SampleRef<'_>,
+    _shows_timestamp: bool,
+) {
+}
 
 /// The marshal of a subscriber callback given as a Rust function ([`SubscriberSink::raw`]).
 ///
 /// # Safety
 /// `call` is a `RawSampleFn` `SubscriberSink::raw` erased, and that constructor's contract
 /// holds for this call.
-unsafe fn raw_sample_call(call: CCall, context: *mut core::ffi::c_void, sample: &SampleRef<'_>) {
+unsafe fn raw_sample_call(
+    call: CCall,
+    context: *mut core::ffi::c_void,
+    sample: &SampleRef<'_>,
+    shows_timestamp: bool,
+) {
     // SAFETY: the caller's: `call` was erased from this type, and is called only as it.
     let call = unsafe { core::mem::transmute::<CCall, RawSampleFn>(call) };
-    // SAFETY: the caller's: `SubscriberSink::raw`'s contract.
-    unsafe { call(context, sample) }
+    shown(sample, shows_timestamp, |sample| {
+        // SAFETY: the caller's: `SubscriberSink::raw`'s contract.
+        unsafe { call(context, sample) }
+    });
+}
+
+/// Hand `sample` to a Rust callback, which reads the sample itself: as it lies when the callback
+/// sees its timestamp or it carries none, else a sample of its own with no timestamp and every
+/// other part lent as it lies. A C program's marshal is told to hide it instead
+/// ([`SampleMarshal`]) and copies nothing.
+fn shown(sample: &SampleRef<'_>, shows_timestamp: bool, call: impl FnOnce(&SampleRef<'_>)) {
+    if shows_timestamp || sample.timestamp.is_none() {
+        call(sample)
+    } else {
+        call(&sample.without_timestamp())
+    }
 }
 
 // SAFETY: a plain callback is made only by `SubscriberSink::raw` or `SubscriberSink::c`, whose
@@ -355,24 +387,29 @@ impl SubscriberSink {
     }
 
     /// Hand `sample` to the callback: a plain one is handed the session's sample read once off
-    /// the view ([`SampleRef::of`]), for an engine that holds its sample as a view.
+    /// the view ([`SampleRef::of`]), for an engine that holds its sample as a view. The view shows
+    /// the timestamp the callback is to see: one that hides it is a view that answers none.
     pub fn call(&self, sample: &dyn SampleView) {
         match self {
             // SAFETY: the constructor's contract: the call may be made from here, now.
             Self::Plain(plain) => unsafe {
-                (plain.marshal)(plain.call, plain.context, &SampleRef::of(sample))
+                (plain.marshal)(plain.call, plain.context, &SampleRef::of(sample), true)
             },
             Self::Shared(call) => call(sample),
         }
     }
 
     /// Hand the session's own `sample` to the callback as it lies, for an engine that holds its
-    /// sample so: a plain one reads its parts with no call through a view.
-    pub fn call_ref(&self, sample: &SampleRef<'_>) {
+    /// sample so, its timestamp shown only when `shows_timestamp` (`entity-timestamp-opt-in`): a
+    /// plain one reads its parts with no call through a view, and leaves out a timestamp it is not
+    /// to show.
+    pub fn call_ref(&self, sample: &SampleRef<'_>, shows_timestamp: bool) {
         match self {
             // SAFETY: the constructor's contract: the call may be made from here, now.
-            Self::Plain(plain) => unsafe { (plain.marshal)(plain.call, plain.context, sample) },
-            Self::Shared(call) => call(sample),
+            Self::Plain(plain) => unsafe {
+                (plain.marshal)(plain.call, plain.context, sample, shows_timestamp)
+            },
+            Self::Shared(call) => shown(sample, shows_timestamp, |sample| call(sample)),
         }
     }
 }
@@ -1639,7 +1676,7 @@ mod tests {
         sample.attachment = Some(&b"att"[..]);
         let at = core::ptr::from_ref(&sample) as usize;
 
-        sink.call_ref(&sample);
+        sink.call_ref(&sample, true);
         assert_eq!(HANDED.load(Ordering::SeqCst), at, "the engine's own sample");
         assert_eq!(READ.load(Ordering::SeqCst), 14);
 
@@ -1676,7 +1713,12 @@ mod tests {
         ) {
             CALLED.store(context as usize, Ordering::SeqCst);
         }
-        unsafe fn marshal(call: CCall, context: *mut core::ffi::c_void, sample: &SampleRef<'_>) {
+        unsafe fn marshal(
+            call: CCall,
+            context: *mut core::ffi::c_void,
+            sample: &SampleRef<'_>,
+            _shows_timestamp: bool,
+        ) {
             MARSHALLED.fetch_add(sample.keyexpr.len(), Ordering::SeqCst);
             // SAFETY: `program` reads nothing through its argument.
             unsafe { call(core::ptr::null(), context) };
@@ -1701,7 +1743,7 @@ mod tests {
             )
         };
         let sample = SampleRef::new("demo/c", b"", SampleKind::Put, Reliability::Reliable);
-        sink.call_ref(&sample);
+        sink.call_ref(&sample, true);
         assert_eq!(CALLED.load(Ordering::SeqCst), 0x5d, "the program's context");
         assert_eq!(MARSHALLED.load(Ordering::SeqCst), 6, "through the marshal");
         assert_eq!(ORDER.load(Ordering::SeqCst), 0, "nothing let go of yet");
@@ -1714,11 +1756,79 @@ mod tests {
 
         // SAFETY: as above; with no function the marshal is never called.
         let silent = unsafe { SubscriberSink::c(marshal, None, context, None, None) };
-        silent.call_ref(&sample);
+        silent.call_ref(&sample, true);
         assert_eq!(
             MARSHALLED.load(Ordering::SeqCst),
             6,
             "no call with no function"
+        );
+    }
+
+    /// A sink told to hide the timestamp hides it from every kind of callback, and shows the one it
+    /// is told to show: a C program's marshal is handed the session's sample as it lies with the
+    /// choice to apply, and a Rust function or closure, which reads the sample itself, a sample
+    /// with none. Turned red by a marshal handed a copy of the sample or another choice, or a Rust
+    /// callback handed a timestamp it is not to see or not handed one it is.
+    #[test]
+    fn a_sink_hides_the_timestamp_it_is_told_to() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::sample::SampleKind;
+        static HANDED: AtomicUsize = AtomicUsize::new(0);
+        static SHOWN: AtomicUsize = AtomicUsize::new(2);
+        unsafe fn marshal(
+            _call: CCall,
+            _context: *mut core::ffi::c_void,
+            sample: &SampleRef<'_>,
+            shows_timestamp: bool,
+        ) {
+            HANDED.store(core::ptr::from_ref(sample) as usize, Ordering::SeqCst);
+            SHOWN.store(usize::from(shows_timestamp), Ordering::SeqCst);
+        }
+        unsafe extern "C" fn program(
+            _argument: *const core::ffi::c_void,
+            _context: *mut core::ffi::c_void,
+        ) {
+        }
+        unsafe fn note(_context: *mut core::ffi::c_void, sample: &SampleRef<'_>) {
+            SHOWN.store(usize::from(sample.timestamp.is_some()), Ordering::SeqCst);
+        }
+        let mut sample = SampleRef::new("demo/stamp", b"p", SampleKind::Put, Reliability::Reliable);
+        sample.timestamp = Some((7, &[1u8, 2][..]));
+        let at = core::ptr::from_ref(&sample) as usize;
+
+        // SAFETY: `marshal` reads only the sample it is handed and calls nothing; nothing dropped.
+        let c =
+            unsafe { SubscriberSink::c(marshal, Some(program), core::ptr::null_mut(), None, None) };
+        // SAFETY: `note` reads only the sample it is handed, from any thread; nothing is dropped.
+        let raw = unsafe { SubscriberSink::raw(note, core::ptr::null_mut(), None) };
+        let shared = SubscriberSink::shared(|sample: &dyn SampleView| {
+            SHOWN.store(
+                usize::from(sample.timestamp_parts().is_some()),
+                Ordering::SeqCst,
+            );
+        });
+        for shows in [false, true] {
+            c.call_ref(&sample, shows);
+            assert_eq!(HANDED.load(Ordering::SeqCst), at, "the sample as it lies");
+            assert_eq!(
+                SHOWN.load(Ordering::SeqCst),
+                usize::from(shows),
+                "the C choice"
+            );
+            for rust in [&raw, &shared] {
+                SHOWN.store(2, Ordering::SeqCst);
+                rust.call_ref(&sample, shows);
+                assert_eq!(
+                    SHOWN.load(Ordering::SeqCst),
+                    usize::from(shows),
+                    "a Rust one"
+                );
+            }
+        }
+        assert!(
+            sample.timestamp.is_some(),
+            "the session's sample keeps its own"
         );
     }
 
@@ -1758,7 +1868,7 @@ mod tests {
         // SAFETY: both functions read only what they are handed, from any thread.
         let sink = unsafe { SubscriberSink::raw(note, context, Some(dropped)) };
         let sample = SampleRef::new("demo/raw", b"", SampleKind::Put, Reliability::Reliable);
-        sink.call_ref(&sample);
+        sink.call_ref(&sample, true);
         assert_eq!(
             CALLED.load(Ordering::SeqCst),
             0x7a,
