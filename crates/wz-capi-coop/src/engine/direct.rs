@@ -513,21 +513,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.drive_link(core, slot, LinkInput::Open, now_us)?;
         }
         while !self.link_is_up() {
-            let Some(mut wait) = self.link_wait(slot) else {
-                return Err(OpenError::NoEndpoint);
-            };
-            wait.wait(self.rooms.waits(), sleep_ms);
-            let Some(turn) = self.life_turn(slot, wait) else {
-                return Err(OpenError::NoEndpoint);
-            };
-            #[cfg(feature = "liveliness")]
-            if turn.retracts {
-                self.hand_lost_tokens();
-            }
+            let turn = self.link_turn(slot).ok_or(OpenError::NoEndpoint)?;
             if let Some(last) = turn.ended {
                 return Err(last);
             }
-            self.pump_turn(slot, &turn);
         }
         Ok(())
     }
@@ -565,23 +554,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// [`Self::read_direct`] with the face held.
     fn read_held(&self, slot: &mut DirectSlot<L, C>) -> Result<(), SessionClosed> {
-        let mut wait = self.link_wait(slot).ok_or(SessionClosed)?;
-        #[cfg(test)]
-        self.takes.wait(&wait);
-        wait.wait(self.rooms.waits(), sleep_ms);
-        let turn = self.life_turn(slot, wait).ok_or(SessionClosed)?;
-        // A lost link's tokens go before anything a link brings after the loss, and with a loss
-        // that ended the session too.
-        #[cfg(feature = "liveliness")]
-        if turn.retracts {
-            self.hand_lost_tokens();
-        }
+        let turn = self.link_turn(slot).ok_or(SessionClosed)?;
+        self.deliver();
         if turn.ended.is_some() {
-            self.deliver();
             return Err(SessionClosed);
         }
-        self.pump_turn(slot, &turn);
-        self.deliver();
         if let Some(started_ms) = turn.jobs_due_ms {
             self.run_due_tickers(started_ms);
         }
@@ -590,6 +567,29 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         } else {
             Ok(())
         }
+    }
+
+    /// One turn of the one link, the open's and each read's: the wait for the link's input or the
+    /// next deadline, a look at the link's life, and a step of the pump unless the look ended the
+    /// session. `None` once the session closed. Out of line: the open and the read step the link
+    /// through one body.
+    #[inline(never)]
+    fn link_turn(&self, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
+        let mut wait = self.link_wait(slot)?;
+        #[cfg(test)]
+        self.takes.wait(&wait);
+        wait.wait(self.rooms.waits(), sleep_ms);
+        let turn = self.life_turn(slot, wait)?;
+        // A lost link's tokens go before anything a link brings after the loss, and with a loss
+        // that ended the session too.
+        #[cfg(feature = "liveliness")]
+        if turn.retracts {
+            self.hand_lost_tokens();
+        }
+        if turn.ended.is_none() {
+            self.pump_turn(slot, &turn);
+        }
+        Some(turn)
     }
 
     /// What a read waits for, worked out under the session's lock: the link's input, or the
@@ -718,7 +718,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// Tell the link's life `input` at `now_us` and carry out its effects, in the order the life
     /// names them, until it asks for nothing more. `Err` with why the last endpoint came to no
-    /// link when the life ends the session.
+    /// link when the life ends the session. Out of line: the open's first input and each look at
+    /// the life carry the effects out through one body.
+    #[inline(never)]
     fn drive_link(
         &self,
         core: &mut Core<L, C>,
@@ -733,12 +735,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             let was = face.life.phase();
             let effects = face.life.input(input, now_us);
-            if effects.let_go() {
-                slot.dial = None;
-                slot.opened = None;
-                slot.drop_pump();
-                core.transport.links.put_link(0, Link::Idle);
-            }
+            // A close is told to the life by the slot alone, which lets go of what it holds
+            // itself (`DirectSlot::let_go`): no input told here asks for that.
+            debug_assert!(!effects.let_go(), "a close told to the life past the slot");
             // A dial the life gave up on before the network answered it is its endpoint's refusal
             // for want of an answer in time, as a build whose links are tasks names it.
             if effects.dial().is_some() || effects.backs_off() || effects.ends_session() {
@@ -789,8 +788,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if effects.bring_up() {
                 core.bring_up(0, now_us);
             }
+            // The dial under way, if any, was taken above.
             if effects.ends_session() {
-                slot.dial = None;
                 return Err(slot.last.take().unwrap_or(OpenError::NoEndpoint));
             }
             input = if effects.begin_handshake() {

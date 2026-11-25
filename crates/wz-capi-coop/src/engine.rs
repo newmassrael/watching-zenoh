@@ -2260,8 +2260,9 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     #[cfg(feature = "group")]
     group_reads: usize,
     /// How often a pass of the session's tasks read the clock to wake its timers
-    /// ([`Self::run_tasks`]), which the tests count.
-    #[cfg(test)]
+    /// ([`Self::run_tasks`]), which the tests count. Kept where the tests that read it build
+    /// (`std`): a build whose read steps its one link itself makes no pass to read it otherwise.
+    #[cfg(all(test, feature = "std"))]
     task_clock_reads: core::cell::Cell<usize>,
     /// The periodic jobs the program started on the session ([`wz_capi_port::Tickers::start_ticker`]).
     #[cfg(feature = "ticker")]
@@ -4372,6 +4373,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.session.report_face_row(FaceEventKind::Down, row);
             });
         }
+        // The one link a read steps itself has its chains in the Router beside it, which the read
+        // ends itself (`direct`): the transport holds none to end.
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         self.transport.end_peer_chains(at);
         // What a replaying listener was told of the face is read while its link is held.
         #[cfg(feature = "connectivity")]
@@ -4989,10 +4993,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// own is made here, so a link's receive finds its Router lent whenever its task runs; a pass
     /// a group's wait makes lends nothing, and a link's receive takes no input in it.
     /// The pass wakes the timers due by the clock, read now ([`Self::run_tasks_at`]).
-    /// Out of line: nine places step the session's tasks.
+    /// Out of line: nine places step the session's tasks. A build whose read steps its one link
+    /// itself runs no task, and has no pass to make (`direct`).
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[inline(never)]
     fn run_tasks(&mut self) {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "std"))]
         self.task_clock_reads.set(self.task_clock_reads.get() + 1);
         let now_us = self.clock.now_us();
         self.run_tasks_at(Some(now_us));
@@ -5016,21 +5022,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         });
     }
 
-    /// [`Self::run_tasks`] where the read steps the one link itself: no link's session is a
-    /// task, so a pass lends nothing (`direct`).
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-    #[inline(never)]
-    fn run_tasks_at(&mut self, due_at: Option<u64>) {
-        self.local.run_ready(due_at);
-    }
-
     /// End every face's link, whatever it is doing, telling an established peer so. The dial
     /// role's face stays, with no link and no redial; the others go.
     fn end_links(&mut self) {
         #[cfg(test)]
         self.links_let_go.set(self.links_let_go.get() + 1);
         // A dial under way is let go of: its connection is not made. The ports are let go of
-        // first, so no connection is taken while the faces are ended.
+        // first, so no connection is taken while the faces are ended. The one link a read steps
+        // itself holds its dial beside it, let go of with it, and no port (`direct`).
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         self.transport.links.end_dials_and_ports();
         // Each group's session is asked to stop, and its next step, taken here, tells the group it
         // leaves and lets the group's link go; its tables go with the other faces' below.
@@ -5042,6 +5042,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.transport.links.end_faces(|face| face.replay.discard());
         self.rooms.forget_all();
         self.session.registry.remove_accepted_faces();
+        // Each link's task sees its end. The one link a read steps itself is no task: its session
+        // goes with the face that holds it (`direct`).
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         self.run_tasks();
     }
 }
@@ -5441,7 +5444,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             links_let_go: core::cell::Cell::new(0),
             #[cfg(feature = "group")]
             group_reads: 0,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "std"))]
             task_clock_reads: core::cell::Cell::new(0),
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
