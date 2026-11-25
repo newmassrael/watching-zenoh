@@ -1221,23 +1221,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Some(f(core, tx))
     }
 
-    /// `f` on the one link's wire (`LinkTx`), taken inside the link's place as
-    /// [`Self::live_on_link`] takes it, for a publish, which takes the session's lock its own way
-    /// inside it (one that may be dropped tries it). `f` is handed no wire where the place holds
-    /// no link, or inside a send through the seat. `Some` once `f` ran, which it always does.
-    // Over `f` itself, not `dyn`: a publish's path is the one a message takes each time.
+    /// `f` on the one link's wire (`LinkTx`), held as [`Self::hold_on_link`] holds the place,
+    /// for a publish, which takes the session's lock its own way inside it (one that may be
+    /// dropped tries it). `f` is handed no wire where the place holds no link, or inside a send
+    /// through the seat. `Some` once `f` ran, which it always does.
+    // Inlined whole: a publish's path is the one a message takes each time.
     #[inline(always)]
     pub(super) fn on_link<U>(&self, f: impl FnOnce(LinkTx<'_, C>) -> U) -> Option<U> {
-        let mut f = Some(f);
-        let carried = OnThisThread(&mut f);
-        let sent = self.direct.site.send(move |tx| {
-            let f = carried.get();
-            OnThisThread(f.take().map(|f| f(tx.as_ref())))
-        });
-        if let Some(answer) = sent.and_then(OnThisThread::get) {
-            return Some(answer);
-        }
-        f.map(|f| f(None))
+        // SAFETY: as in `Self::hold_on_link`: `f` reaches the send part only as `LinkTx`.
+        let mut send = unsafe { self.direct.site.hold_send() };
+        let tx = send
+            .as_mut()
+            .and_then(|send| send.tx())
+            .and_then(|tx| tx.as_ref());
+        Some(f(tx))
     }
 
     /// Let go of the one link's session at the close, unless a read steps it now: that read lets
