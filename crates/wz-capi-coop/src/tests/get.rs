@@ -323,6 +323,57 @@ fn a_cancelled_get_ends_without_a_step() {
     assert_eq!(token.active(), 0);
 }
 
+/// A get cancelled before its deadline bounds a read's wait no longer, with no step between: the
+/// index of the gets' deadlines reads the table its earliest key names when a read asks, so the
+/// end it was not told of is read then. The CONTROL is the wait while the sooner get is open,
+/// which its deadline bounds. Turned red by a wait read off a bound that an end does not raise
+/// (the read wakes at a deadline no get holds), or by a root answered without its table read.
+#[test]
+fn a_get_cancelled_before_its_deadline_bounds_the_wait_no_longer() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let mut later = remote_get();
+    later.timeout_ms = 4_000;
+    let (issued, later_leg) = ask(&engine, "demo/g/later", &later, None, None, None);
+    assert_eq!(issued, Ok(1));
+    let token = CancellationToken::new().expect("a token place is free");
+    let fan = register_fan(&token)
+        .expect("the test's heap")
+        .expect("a fresh token registers");
+    let mut sooner = remote_get();
+    sooner.timeout_ms = 200;
+    let (issued, leg) = ask(
+        &engine,
+        "demo/g/sooner",
+        &sooner,
+        Some(&fan),
+        Some(fan.clone()),
+        None,
+    );
+    drop(fan);
+    assert_eq!(issued, Ok(1));
+    let wait = engine.get_wait_ms().expect("the legs bound a read's wait");
+    assert!(
+        wait <= 201,
+        "CONTROL: the sooner get bounds the wait: {wait} ms"
+    );
+    token.cancel();
+    assert!(
+        leg.lock().unwrap().ended,
+        "cancel returns once the leg is over"
+    );
+    let left = engine
+        .get_wait_ms()
+        .expect("the later get still bounds a read's wait");
+    assert!(
+        left > 1_000 && left <= 4_001,
+        "the cancelled get's deadline still bounds the wait: {left} ms"
+    );
+    assert!(!later_leg.lock().unwrap().ended, "the later get is open");
+    assert_eq!(token.active(), 0);
+}
+
 /// A raw leg's call: the tests of a get's cost read no reply.
 pub(super) unsafe fn ignore_reply(_context: *mut core::ffi::c_void, _reply: &dyn ReplyView) {}
 
