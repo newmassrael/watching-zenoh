@@ -257,6 +257,10 @@ struct Seen {
     declares: usize,
     /// The id of each subscriber the router was declared, in the order the declarations arrived.
     subscribers: Vec<u64>,
+    /// The id of each subscriber the router was told went, in the order the retractions arrived
+    /// (the direct read's tests read it).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    undeclared_subscribers: Vec<u64>,
     interests: usize,
     /// The Interest each subscriber declaration that answers one names, in the order they arrived.
     #[cfg(feature = "interest-answer")]
@@ -562,11 +566,19 @@ fn run_router(
                     match m {
                         NetworkMessage::Declare(declare) => {
                             seen.declares += 1;
-                            if let wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
-                                subscriber,
-                            ) = &declare.body
-                            {
-                                seen.subscribers.push(subscriber.id);
+                            match &declare.body {
+                                wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+                                    subscriber,
+                                ) => seen.subscribers.push(subscriber.id),
+                                #[cfg(not(any(
+                                    feature = "threads",
+                                    feature = "listen",
+                                    feature = "group"
+                                )))]
+                                wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(
+                                    gone,
+                                ) => seen.undeclared_subscribers.push(gone.id),
+                                _ => {}
                             }
                             #[cfg(feature = "interest-answer")]
                             if let Some(interest) = declare.interest_id {
@@ -638,10 +650,19 @@ fn run_router(
                 let mut seen = counted.lock().unwrap();
                 if let Some(declare) = record.declare() {
                     seen.declares += 1;
-                    if let wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) =
-                        &declare.body
-                    {
-                        seen.subscribers.push(subscriber.id);
+                    match &declare.body {
+                        wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) => {
+                            seen.subscribers.push(subscriber.id);
+                        }
+                        #[cfg(not(any(
+                            feature = "threads",
+                            feature = "listen",
+                            feature = "group"
+                        )))]
+                        wz_codecs::lent::DeclareVariant::CodecZenohUndeclSubscriber(gone) => {
+                            seen.undeclared_subscribers.push(gone.id);
+                        }
+                        _ => {}
                     }
                     #[cfg(feature = "interest-answer")]
                     if let Some(interest) = declare.interest_id {
@@ -3705,6 +3726,10 @@ mod decl_watch;
 mod dial_in_flight;
 mod direct_receive;
 mod entity_tables;
+// The mark the session's lock makes against a wait on a face is kept in a debug build on `std`'s
+// thread-locals.
+#[cfg(all(feature = "std", not(feature = "host-sys"), debug_assertions))]
+mod face_order;
 #[cfg(all(
     feature = "listen",
     feature = "query",

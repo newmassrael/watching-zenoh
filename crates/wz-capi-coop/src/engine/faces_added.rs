@@ -73,7 +73,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn push_face(
         &mut self,
         held: HeldFace,
-        link: Link<LinkSession<C>, L::Dial, FaceEnd, LinkCount>,
+        link: Link<FaceLink<C, L>, L::Dial>,
         endpoints: usize,
     ) -> bool {
         let times = self.link_times();
