@@ -90,25 +90,34 @@ impl Stated {
 pub(crate) fn state_over(text: Option<&str>, stated: &mut Stated) -> Result<(), ZResult> {
     // Read as bytes: the separators are ASCII, and a byte's search is a plain loop where a
     // `char`'s pulls in the string searcher. No value states nothing, as an empty one does.
-    for item in text
-        .unwrap_or_default()
-        .as_bytes()
-        .split(|byte| *byte == b',')
-        .map(trimmed)
-        .filter(|item| !item.is_empty())
-    {
-        let equals = item
-            .iter()
-            .position(|byte| *byte == b'=')
-            .ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        let (name, count) = item.split_at(equals);
-        let count = count.get(1..).unwrap_or_default();
+    // Walked by hand rather than through a splitting iterator, whose end states each reached the
+    // trim apart.
+    let mut rest = Some(text.unwrap_or_default().as_bytes());
+    while let Some(text) = rest {
+        let (item, after) = match split_at_first(text, b',') {
+            Some((item, after)) => (item, Some(after)),
+            None => (text, None),
+        };
+        rest = after;
+        let item = trimmed(item);
+        if item.is_empty() {
+            continue;
+        }
+        let (name, count) = split_at_first(item, b'=').ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
         let count = count_of(trimmed(count)).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
         if !stated.select(trimmed(name), count) {
             return Err(Z_ERR_CONFIG_INVALID_VALUE);
         }
     }
     Ok(())
+}
+
+/// `bytes` before and after the first `separator`, which neither holds; `None` where `bytes`
+/// holds none.
+fn split_at_first(bytes: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
+    let at = bytes.iter().position(|byte| *byte == separator)?;
+    let (before, after) = bytes.split_at(at);
+    Some((before, after.get(1..).unwrap_or_default()))
 }
 
 /// `bytes` without the ASCII whitespace at either end. Out of line: an item, its name and its
@@ -163,7 +172,7 @@ fn count_of(digits: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_of, names, position_named, state_over, trimmed, Stated};
+    use super::{count_of, names, position_named, split_at_first, state_over, trimmed, Stated};
     use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
     use wz_session_core::limit_binding::Quota;
     use wz_session_core::limits::SessionLimits;
@@ -382,6 +391,50 @@ mod tests {
         assert_eq!(trimmed(b"2 \t"), b"2");
         assert_eq!(trimmed(b" \t "), b"");
         assert_eq!(trimmed(b""), b"");
+    }
+
+    /// A text is cut at the first separator alone, which neither side keeps, and a text without
+    /// one is not cut. Turned red by a cut at the last separator, or one that keeps it.
+    #[test]
+    fn a_text_is_cut_at_its_first_separator() {
+        assert_eq!(
+            split_at_first(b"A=1=2", b'='),
+            Some((&b"A"[..], &b"1=2"[..]))
+        );
+        assert_eq!(split_at_first(b",", b','), Some((&b""[..], &b""[..])));
+        assert_eq!(split_at_first(b"A1", b'='), None);
+        assert_eq!(split_at_first(b"", b','), None);
+    }
+
+    /// Each item is stated whatever empty items lie before, between or after it, the last one
+    /// with no separator after it as well. Turned red by a walk that stops at an empty item, or
+    /// drops the item after the last separator.
+    #[test]
+    fn items_among_empty_ones_state_what_they_state_alone() {
+        let opening = opening();
+        let fewer = |most: Option<usize>| most.and_then(|count| count.checked_sub(1));
+        let (Some(publishers), Some(subscriptions)) = (
+            fewer(opening.limits.max_publishers().most()),
+            fewer(opening.limits.max_subscriptions().most()),
+        ) else {
+            return;
+        };
+        let alone = alloc::format!("MAX_PUBLISHERS={publishers},MAX_SUBSCRIPTIONS={subscriptions}");
+        let Ok(stated) = state(Some(alone.as_str())) else {
+            return;
+        };
+        assert_ne!(
+            stated, opening,
+            "CONTROL: the two items state counts of their own"
+        );
+        let among =
+            alloc::format!(" ,MAX_PUBLISHERS={publishers},, \t,MAX_SUBSCRIPTIONS={subscriptions}");
+        assert_eq!(state(Some(among.as_str())), Ok(stated));
+        let refused = alloc::format!(",,MAX_PUBLISHERS={publishers},NO_SUCH_LIMIT=1");
+        assert_eq!(
+            state(Some(refused.as_str())),
+            Err(Z_ERR_CONFIG_INVALID_VALUE)
+        );
     }
 
     /// A text that states nothing, and no text, leave the statement as it is. Turned red by a
