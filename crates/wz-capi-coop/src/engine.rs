@@ -1421,6 +1421,18 @@ pub(crate) enum Holder {
 /// timer, the drive), which lets go once its step is done. Only the holder of the session sends,
 /// so one mark is in force at a time; a send ends with the mark it found, so a publish is marked
 /// as one between its sends.
+///
+/// The mark has one writer at a time: every mark is made and let go under the session's lock
+/// (`CoreLock`), and the holder puts back what it found before it lets go of the lock. So the
+/// mark is read and then stored, with no read-modify-write: what the load reads is this thread's
+/// own last store or the previous holder's, which the lock's acquire orders before it, and no
+/// other thread stores between the two. Its one reader, a droppable publish whose try of the lock
+/// just failed (`CoopEngine::holder`), acts on the value alone and reads what it then needs (the
+/// table of rooms, the session) under those values' own locks. A sequentially consistent order
+/// would matter only if that reader's choice rested on the order of this mark against another
+/// atomic, which it does not, and no ordering makes the store seen sooner: a reader that reads a
+/// stale mark does what it did before. A release store and an acquire load are enough, and on a
+/// host each is a plain move where the swap and the store were each a locked exchange.
 struct SendingOn<'a> {
     mark: &'a AtomicU64,
     was: u64,
@@ -1428,14 +1440,15 @@ struct SendingOn<'a> {
 
 impl<'a> SendingOn<'a> {
     fn enter(mark: &'a AtomicU64, place: u64) -> Self {
-        let was = mark.swap(place, Ordering::SeqCst);
+        let was = mark.load(Ordering::Relaxed);
+        mark.store(place, Ordering::Release);
         Self { mark, was }
     }
 }
 
 impl Drop for SendingOn<'_> {
     fn drop(&mut self) {
-        self.mark.store(self.was, Ordering::SeqCst);
+        self.mark.store(self.was, Ordering::Release);
     }
 }
 
@@ -5166,7 +5179,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Who holds the session now, as its holder marked itself ([`SendingOn`]).
     fn holder(&self) -> Holder {
-        match self.sending_on.load(Ordering::SeqCst) {
+        // Acquire, as the marks are released ([`SendingOn`] says why that is enough).
+        match self.sending_on.load(Ordering::Acquire) {
             NOT_SENDING => Holder::Step,
             PUBLISHING => Holder::Publish,
             WAITING => Holder::Waiting,
@@ -9180,5 +9194,39 @@ mod hand_back_tests {
         let back = HandBack::new();
         back.handed_back();
         assert_eq!(*lock(&back.handed), 0);
+    }
+}
+
+#[cfg(test)]
+mod sending_on_tests {
+    //! The mark of who holds the session, as a publish and each of its sends make and let go of it.
+    use super::{SendingOn, NOT_SENDING, PUBLISHING};
+    use core::sync::atomic::Ordering;
+    use portable_atomic::AtomicU64;
+
+    /// A send inside a publish marks its face and puts the publish's mark back as it ends, and the
+    /// publish puts back the mark it found: no send leaves its mark behind.
+    ///
+    /// # Control
+    ///
+    /// Keeping the new place as the mark to put back in `SendingOn::enter` reds the assertion
+    /// made once the send has ended.
+    #[test]
+    fn a_send_puts_back_the_mark_it_found() {
+        let mark = AtomicU64::new(NOT_SENDING);
+        {
+            let _publishing = SendingOn::enter(&mark, PUBLISHING);
+            assert_eq!(mark.load(Ordering::Relaxed), PUBLISHING);
+            {
+                let _sending = SendingOn::enter(&mark, 3);
+                assert_eq!(mark.load(Ordering::Relaxed), 3);
+            }
+            assert_eq!(
+                mark.load(Ordering::Relaxed),
+                PUBLISHING,
+                "the send has ended"
+            );
+        }
+        assert_eq!(mark.load(Ordering::Relaxed), NOT_SENDING);
     }
 }
