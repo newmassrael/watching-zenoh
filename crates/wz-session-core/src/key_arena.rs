@@ -148,6 +148,11 @@ struct KeyStore {
     /// The longest key the arena keeps: the session's `MAX_KEYEXPR_BYTES` its creator lent the
     /// arena with ([`Arena::lend_keys`]), held in no byte where the build fixes the bound.
     longest: crate::limits::MaxKeyexprBytesHeld,
+    /// The directory of where the rows the session's peers write lie, once the session lent them
+    /// ([`KeySpace::keep_peer_rows`]): what a table of a face, which holds this arena, reaches its
+    /// rows through, so it holds no pointer of its own to them.
+    #[cfg(feature = "peer-row-pools")]
+    peer_rows: Cell<Option<NonNull<crate::peer_tables::PeerSpaces>>>,
 }
 
 impl KeyStore {
@@ -374,6 +379,8 @@ impl KeySpace {
                 #[cfg(debug_assertions)]
                 held: AtomicBool::new(false),
                 longest,
+                #[cfg(feature = "peer-row-pools")]
+                peer_rows: Cell::new(None),
             });
         }
         Self { store }
@@ -523,6 +530,29 @@ impl KeySpace {
     pub fn owner_lock_released(&self) {
         #[cfg(debug_assertions)]
         self.store().held.store(false, Ordering::Relaxed);
+    }
+
+    /// Name `rows`, the session's directory of where its peers' rows lie, from now on: what
+    /// [`Self::peer_rows`] reads for every table that holds this arena.
+    ///
+    /// # Safety
+    /// `rows` points at a directory written in the same arena's memory as this key arena, alive and
+    /// not written again for as long as any copy of this space lives.
+    #[cfg(feature = "peer-row-pools")]
+    pub(crate) unsafe fn keep_peer_rows(&self, rows: NonNull<crate::peer_tables::PeerSpaces>) {
+        self.store().peer_rows.set(Some(rows));
+    }
+
+    /// `read` of the session's directory of where its peers' rows lie, if the session lent them.
+    #[cfg(feature = "peer-row-pools")]
+    pub(crate) fn peer_rows<R>(
+        &self,
+        read: impl FnOnce(&crate::peer_tables::PeerSpaces) -> R,
+    ) -> Option<R> {
+        let rows = self.store().peer_rows.get()?;
+        // SAFETY: `keep_peer_rows`'s contract: the directory lives as long as this space and is not
+        // written again, so a shared reference to it for the call is sound.
+        Some(read(unsafe { rows.as_ref() }))
     }
 
     /// What the arena holds now.

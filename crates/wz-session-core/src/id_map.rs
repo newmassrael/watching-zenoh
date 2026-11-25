@@ -114,6 +114,101 @@ pub trait IdMap<V> {
     }
 }
 
+/// What a table of values by a peer's ids answers to a reader: the part of [`IdMap`] that writes
+/// nothing, which a table lent its owner's space only to read answers too ([`LentIdsRef`]). Every
+/// [`IdMap`] answers it by a shared reference.
+pub trait IdRead<V> {
+    /// The value bound to `id`, if any.
+    fn find(&self, id: u64) -> Option<&V>;
+
+    /// How many ids are bound.
+    fn count(&self) -> usize;
+
+    /// Every binding, in no order a caller may rely on.
+    fn entries<'a>(&'a self) -> impl Iterator<Item = (u64, &'a V)>
+    where
+        V: 'a;
+
+    /// How many NEW ids were refused since the table was made ([`IdMap::refusals`]).
+    fn refusals(&self) -> u32;
+
+    /// Whether any id is bound.
+    fn is_bound(&self) -> bool {
+        self.count() != 0
+    }
+}
+
+impl<V, T: IdMap<V> + ?Sized> IdRead<V> for &T {
+    fn find(&self, id: u64) -> Option<&V> {
+        T::find(self, id)
+    }
+
+    fn count(&self) -> usize {
+        T::count(self)
+    }
+
+    fn entries<'a>(&'a self) -> impl Iterator<Item = (u64, &'a V)>
+    where
+        V: 'a,
+    {
+        T::entries(self)
+    }
+
+    fn refusals(&self) -> u32 {
+        T::refusals(self)
+    }
+}
+
+impl<V, T: IdMap<V> + ?Sized> IdMap<V> for &mut T {
+    fn find(&self, id: u64) -> Option<&V> {
+        T::find(self, id)
+    }
+
+    fn find_mut(&mut self, id: u64) -> Option<&mut V> {
+        T::find_mut(self, id)
+    }
+
+    fn bind(&mut self, id: u64, value: V) -> Result<Option<V>, CapacityFull<V>> {
+        T::bind(self, id, value)
+    }
+
+    fn bind_within<F: FnOnce(usize) -> bool>(
+        &mut self,
+        id: u64,
+        value: V,
+        admits: F,
+    ) -> Result<Option<V>, CapacityFull<V>> {
+        T::bind_within(self, id, value, admits)
+    }
+
+    fn unbind(&mut self, id: u64) -> Option<V> {
+        T::unbind(self, id)
+    }
+
+    fn reset(&mut self) {
+        T::reset(self);
+    }
+
+    fn count(&self) -> usize {
+        T::count(self)
+    }
+
+    fn entries<'a>(&'a self) -> impl Iterator<Item = (u64, &'a V)>
+    where
+        V: 'a,
+    {
+        T::entries(self)
+    }
+
+    fn refusals(&self) -> u32 {
+        T::refusals(self)
+    }
+
+    fn count_refused(&mut self) {
+        T::count_refused(self);
+    }
+}
+
 /// `N` rows of `(id, value)` in an inline array: the fixed backing of
 /// [`IdMap`]. Nothing here ever touches a heap.
 pub struct FixedIdMap<V, const N: usize> {
@@ -233,10 +328,18 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
 /// does. A NEW id is refused, handed back and counted, as a full fixed table refuses it, when the
 /// table holds `N` ids, its span or its pool has no row left (which the pool counts too); a held
 /// id is replaced in place and needs no row. Made by `Default` it holds no rows and refuses every
-/// new id until it is handed some ([`Self::keep_rows_in`]). Its refusals are counted in the head
-/// of its rows, so the table is a pointer and three counters wherever it lies.
+/// new id until it is attached to some ([`Self::attach`]).
+///
+/// The table is a head and no pointer: its first row and its count, two `u16`s, and the count of
+/// what it refused, the `u32` [`FixedIdMap`] keeps, so it takes no more than the room
+/// [`FixedIdMap`] keeps beside its rows on any target (8 bytes, i386 System V's room, the least).
+/// Its owner holds the space its rows lie in once and lends it for each operation
+/// ([`Self::lend`]): the lent table is what answers [`IdMap`]. Dropped, it gives nothing back;
+/// its owner gives its rows back first ([`IdMap::reset`] on the lent table).
 pub struct PooledIdMap<V, const N: usize> {
     rows: crate::row_pool::PooledRows<crate::row_pool::Keyed<V>, N>,
+    /// How many NEW ids were refused, as [`FixedIdMap`]'s count.
+    refused: u32,
     /// The most ids the table has held: zero-sized unless the build keeps the mark
     /// (`pool-monitor`).
     high: crate::pool_gauge::HighWater,
@@ -247,14 +350,15 @@ impl<V, const N: usize> PooledIdMap<V, N> {
     pub const fn new() -> Self {
         Self {
             rows: crate::row_pool::PooledRows::new(),
+            refused: 0,
             high: crate::pool_gauge::HighWater::new(),
         }
     }
 
-    /// Bind the ids that come from here on in rows of `space`, the session's. A table that holds
-    /// rows of another space forgets them first; the refusals it counted are kept.
-    pub fn keep_rows_in(&mut self, space: crate::row_pool::RowSpace<crate::row_pool::Keyed<V>>) {
-        self.rows.keep_rows_in(space);
+    /// Bind the ids that come from here on in rows of `space`, its owner's. A table already
+    /// taking rows of a space of the same form keeps them; the refusals it counted are kept.
+    pub fn attach(&mut self, space: &crate::row_pool::RowSpace<crate::row_pool::Keyed<V>>) {
+        self.rows.attach(space);
     }
 
     /// The declared capacity `N`: the most ids the table holds at once, whatever its rows have.
@@ -262,15 +366,65 @@ impl<V, const N: usize> PooledIdMap<V, N> {
         N
     }
 
+    /// How many ids are bound: read off the head, with no space.
+    pub fn count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// How many NEW ids were refused since the table was made: read off the head, with no space.
+    pub fn refusals(&self) -> u32 {
+        self.refused
+    }
+
+    /// Count a binding refused before it reached the table, as [`IdMap::count_refused`] does.
+    pub fn count_refused(&mut self) {
+        self.refused = self.refused.saturating_add(1);
+    }
+
     /// The ids the table holds, as a table of their own whose rows stay where they lie in the
-    /// pool, and this one left holding none and binding ids in rows of the same pool. `None`,
-    /// taking nothing, for a table whose rows lie in a span of its own
-    /// ([`PooledRows::split_off`](crate::row_pool::PooledRows::split_off)).
+    /// pool, and this one left holding none and binding ids in rows of the same pool, its refusals
+    /// kept. `None`, taking nothing, for a table whose rows lie in a span of its own
+    /// ([`PooledRows::split_off`](crate::row_pool::PooledRows::split_off)). Needs no space.
     pub fn split_off(&mut self) -> Option<Self> {
         self.rows.split_off().map(|rows| Self {
             rows,
+            refused: 0,
             high: crate::pool_gauge::HighWater::new(),
         })
+    }
+
+    /// The table with its rows, to bind and unbind: `space` lent to it for as long as the borrow.
+    ///
+    /// # Safety
+    /// `space` is the space this table was attached to ([`Self::attach`]): its owner's, which
+    /// lends each of its tables the one space it attached it to.
+    #[inline]
+    pub unsafe fn lend<'a>(
+        &'a mut self,
+        space: &crate::row_pool::RowSpace<crate::row_pool::Keyed<V>>,
+    ) -> LentIds<'a, V, N> {
+        LentIds {
+            // SAFETY: the caller's contract.
+            rows: unsafe { self.rows.lend(space) },
+            refused: &mut self.refused,
+            high: &mut self.high,
+        }
+    }
+
+    /// The table with its rows, to read: `space` lent to it for as long as the borrow.
+    ///
+    /// # Safety
+    /// As [`Self::lend`]'s.
+    #[inline]
+    pub unsafe fn lend_ref<'a>(
+        &'a self,
+        space: &crate::row_pool::RowSpace<crate::row_pool::Keyed<V>>,
+    ) -> LentIdsRef<'a, V, N> {
+        LentIdsRef {
+            // SAFETY: the caller's contract.
+            rows: unsafe { self.rows.lend_ref(space) },
+            refused: self.refused,
+        }
     }
 }
 
@@ -287,12 +441,142 @@ impl<V, const N: usize> crate::pool_gauge::PoolGauge for PooledIdMap<V, N> {
             capacity: crate::pool_gauge::count(N),
             in_use: crate::pool_gauge::count(self.rows.len()),
             high_water: self.high.get(),
-            refused: u64::from(self.rows.refusals()),
+            refused: u64::from(self.refused),
         }
     }
 }
 
-impl<V, const N: usize> IdMap<V> for PooledIdMap<V, N> {
+/// A table of values by a peer's ids as its owner holds it ([`Storage::Ids`]), lent the owner's
+/// handle `H` (the policy's [`Storage::Keys`]) for each operation: the table itself on the
+/// policies that keep their own rows, which need no handle, and on the lent one a [`PooledIdMap`]
+/// lent the space the handle names for its slot. What answers [`IdMap`] and [`IdRead`] is the
+/// lent table.
+pub trait PeerIds<V, H>: Default {
+    /// The table lent the handle, to bind and unbind.
+    type Mut<'a>: IdMap<V>
+    where
+        Self: 'a,
+        H: 'a,
+        V: 'a;
+    /// The table lent the handle, to read.
+    type Ref<'a>: IdRead<V>
+    where
+        Self: 'a,
+        H: 'a,
+        V: 'a;
+
+    /// The table lent `keys` for its slot `slot`, to bind and unbind.
+    ///
+    /// # Safety
+    /// `keys` is the handle of the owner that holds this table, and `slot` the one it attached the
+    /// table's rows to: the owner lends each of its tables the one space it attached it to.
+    unsafe fn lend<'a>(
+        &'a mut self,
+        keys: &'a H,
+        slot: crate::peer_tables::PeerSlot,
+    ) -> Self::Mut<'a>;
+
+    /// The table lent `keys` for its slot `slot`, to read.
+    ///
+    /// # Safety
+    /// As [`Self::lend`]'s.
+    unsafe fn lend_ref<'a>(
+        &'a self,
+        keys: &'a H,
+        slot: crate::peer_tables::PeerSlot,
+    ) -> Self::Ref<'a>;
+}
+
+impl<V, const N: usize, H> PeerIds<V, H> for FixedIdMap<V, N> {
+    type Mut<'a>
+        = &'a mut Self
+    where
+        Self: 'a,
+        H: 'a,
+        V: 'a;
+    type Ref<'a>
+        = &'a Self
+    where
+        Self: 'a,
+        H: 'a,
+        V: 'a;
+
+    unsafe fn lend<'a>(&'a mut self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a mut Self {
+        self
+    }
+
+    unsafe fn lend_ref<'a>(&'a self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a Self {
+        self
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<V, H> PeerIds<V, H> for GrowableIdMap<V> {
+    type Mut<'a>
+        = &'a mut Self
+    where
+        Self: 'a,
+        H: 'a,
+        V: 'a;
+    type Ref<'a>
+        = &'a Self
+    where
+        Self: 'a,
+        H: 'a,
+        V: 'a;
+
+    unsafe fn lend<'a>(&'a mut self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a mut Self {
+        self
+    }
+
+    unsafe fn lend_ref<'a>(&'a self, _: &'a H, _: crate::peer_tables::PeerSlot) -> &'a Self {
+        self
+    }
+}
+
+impl<V, const N: usize> PeerIds<V, crate::key_arena::LentKeys> for PooledIdMap<V, N> {
+    type Mut<'a>
+        = LentIds<'a, V, N>
+    where
+        Self: 'a,
+        V: 'a;
+    type Ref<'a>
+        = LentIdsRef<'a, V, N>
+    where
+        Self: 'a,
+        V: 'a;
+
+    unsafe fn lend<'a>(
+        &'a mut self,
+        keys: &'a crate::key_arena::LentKeys,
+        slot: crate::peer_tables::PeerSlot,
+    ) -> LentIds<'a, V, N> {
+        let space = crate::peer_tables::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
+        // SAFETY: the caller's contract: the space the owner's handle names for the slot is the one
+        // this table was attached to.
+        unsafe { PooledIdMap::lend(self, &space) }
+    }
+
+    unsafe fn lend_ref<'a>(
+        &'a self,
+        keys: &'a crate::key_arena::LentKeys,
+        slot: crate::peer_tables::PeerSlot,
+    ) -> LentIdsRef<'a, V, N> {
+        let space = crate::peer_tables::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
+        // SAFETY: as `lend`'s.
+        unsafe { PooledIdMap::lend_ref(self, &space) }
+    }
+}
+
+/// A [`PooledIdMap`] lent its owner's space, to bind and unbind ([`PooledIdMap::lend`]): the lent
+/// backing of [`IdMap`].
+pub struct LentIds<'a, V, const N: usize> {
+    rows: crate::row_pool::LentRows<'a, crate::row_pool::Keyed<V>, N>,
+    refused: &'a mut u32,
+    high: &'a mut crate::pool_gauge::HighWater,
+}
+
+impl<V, const N: usize> IdMap<V> for LentIds<'_, V, N> {
     fn find(&self, id: u64) -> Option<&V> {
         self.rows.get_id(id)
     }
@@ -311,20 +595,22 @@ impl<V, const N: usize> IdMap<V> for PooledIdMap<V, N> {
         value: V,
         admits: F,
     ) -> Result<Option<V>, CapacityFull<V>> {
-        if let Some(held) = self.find_mut(id) {
+        if let Some(held) = self.rows.get_id_mut(id) {
             return Ok(Some(core::mem::replace(held, value)));
         }
         if !admits(self.rows.len().saturating_add(1)) {
-            self.rows.count_refused();
+            self.count_refused();
             return Err(CapacityFull(value));
         }
-        // A refused push is counted by the rows it was refused by.
         match self.rows.push((id, value)) {
             Ok(()) => {
                 self.high.note(self.rows.len());
                 Ok(None)
             }
-            Err(CapacityFull((_, value))) => Err(CapacityFull(value)),
+            Err(CapacityFull((_, value))) => {
+                self.count_refused();
+                Err(CapacityFull(value))
+            }
         }
     }
 
@@ -340,19 +626,54 @@ impl<V, const N: usize> IdMap<V> for PooledIdMap<V, N> {
         self.rows.len()
     }
 
-    fn entries<'a>(&'a self) -> impl Iterator<Item = (u64, &'a V)>
+    fn entries<'b>(&'b self) -> impl Iterator<Item = (u64, &'b V)>
     where
-        V: 'a,
+        V: 'b,
     {
         self.rows.iter()
     }
 
     fn refusals(&self) -> u32 {
-        self.rows.refusals()
+        *self.refused
     }
 
     fn count_refused(&mut self) {
-        self.rows.count_refused();
+        *self.refused = self.refused.saturating_add(1);
+    }
+}
+
+/// A [`PooledIdMap`] lent its owner's space, to read ([`PooledIdMap::lend_ref`]).
+pub struct LentIdsRef<'a, V, const N: usize> {
+    rows: crate::row_pool::LentRowsRef<'a, crate::row_pool::Keyed<V>, N>,
+    refused: u32,
+}
+
+impl<V, const N: usize> Clone for LentIdsRef<'_, V, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V, const N: usize> Copy for LentIdsRef<'_, V, N> {}
+
+impl<V, const N: usize> IdRead<V> for LentIdsRef<'_, V, N> {
+    fn find(&self, id: u64) -> Option<&V> {
+        self.rows.get_id(id)
+    }
+
+    fn count(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn entries<'b>(&'b self) -> impl Iterator<Item = (u64, &'b V)>
+    where
+        V: 'b,
+    {
+        self.rows.iter()
+    }
+
+    fn refusals(&self) -> u32 {
+        self.refused
     }
 }
 
@@ -687,52 +1008,75 @@ mod tests {
         assert_eq!(pool.counts().used, 0, "the row went back");
     }
 
+    /// `table` attached to `space` and lent it: the one place these tests pair a table with its
+    /// space.
+    fn lent_ids<'a, V, const N: usize>(
+        table: &'a mut PooledIdMap<V, N>,
+        space: &crate::row_pool::RowSpace<crate::row_pool::Keyed<V>>,
+    ) -> LentIds<'a, V, N> {
+        table.attach(space);
+        // SAFETY: the table was just attached to `space`, and each test lends every table the one
+        // space it attached it to.
+        unsafe { table.lend(space) }
+    }
+
     /// A lent table refuses a NEW id as a fixed one of its capacity does, and as one whose pool
     /// has no row left: handed back and counted, by the table and by the pool, what it held kept.
     #[test]
     fn a_pooled_table_refuses_past_its_bound_and_past_its_pool() {
         let pool = pool_of::<crate::row_pool::Keyed<u32>>(3);
-        let mut table: PooledIdMap<u32, 2> = PooledIdMap::new();
-        table.keep_rows_in(pool.space());
-        assert!(table.bind(1, 10).is_ok() && table.bind(2, 20).is_ok());
-        assert_eq!(
-            (table.bind(3, 30).err().map(|c| c.0), table.refusals()),
-            (Some(30), 1),
-            "the table's own bound"
-        );
+        let space = pool.space();
+        let (mut table, mut other): (PooledIdMap<u32, 2>, PooledIdMap<u32, 2>) =
+            (PooledIdMap::new(), PooledIdMap::new());
+        {
+            let mut table = lent_ids(&mut table, &space);
+            assert!(table.bind(1, 10).is_ok() && table.bind(2, 20).is_ok());
+            assert_eq!(
+                (table.bind(3, 30).err().map(|c| c.0), table.refusals()),
+                (Some(30), 1),
+                "the table's own bound"
+            );
+        }
         assert_eq!(pool.counts().refused, 0, "the pool had a row left");
-        let mut other: PooledIdMap<u32, 2> = PooledIdMap::new();
-        other.keep_rows_in(pool.space());
-        assert!(other.bind(7, 70).is_ok(), "the pool's last row");
-        assert_eq!(
-            (
-                other.bind(8, 80).err().map(|c| c.0),
-                other.refusals(),
-                pool.counts().refused
-            ),
-            (Some(80), 1, 1),
-            "(value handed back, the table's count, the pool's count)"
-        );
-        assert_eq!(
-            other.bind(7, 71).ok(),
-            Some(Some(70)),
-            "a held id needs no row"
-        );
-        assert_eq!(table.find(2), Some(&20));
-        assert_eq!(table.unbind(1), Some(10));
-        assert!(other.bind(8, 80).is_ok(), "the row table gave back");
-        assert_eq!(
-            other.entries().collect::<std::vec::Vec<_>>(),
-            [(7, &71), (8, &80)],
-            "in the order bound"
-        );
-        table.reset();
-        other.reset();
+        {
+            let mut other = lent_ids(&mut other, &space);
+            assert!(other.bind(7, 70).is_ok(), "the pool's last row");
+            assert_eq!(
+                (
+                    other.bind(8, 80).err().map(|c| c.0),
+                    other.refusals(),
+                    pool.counts().refused
+                ),
+                (Some(80), 1, 1),
+                "(value handed back, the table's count, the pool's count)"
+            );
+            assert_eq!(
+                other.bind(7, 71).ok(),
+                Some(Some(70)),
+                "a held id needs no row"
+            );
+        }
+        {
+            let mut table = lent_ids(&mut table, &space);
+            assert_eq!(table.find(2), Some(&20));
+            assert_eq!(table.unbind(1), Some(10));
+        }
+        {
+            let mut other = lent_ids(&mut other, &space);
+            assert!(other.bind(8, 80).is_ok(), "the row table gave back");
+            assert_eq!(
+                other.entries().collect::<std::vec::Vec<_>>(),
+                [(7, &71), (8, &80)],
+                "in the order bound"
+            );
+            other.reset();
+        }
+        lent_ids(&mut table, &space).reset();
         assert_eq!(pool.counts().used, 0, "a reset gives back every row");
         assert_eq!(
             (table.refusals(), other.refusals()),
             (1, 1),
-            "and keeps the counts"
+            "and keeps the counts, read off the heads"
         );
     }
 
@@ -742,36 +1086,58 @@ mod tests {
     #[test]
     fn a_split_off_table_keeps_its_rows_in_the_pool() {
         let pool = pool_of::<crate::row_pool::Keyed<u32>>(3);
+        let space = pool.space();
         let mut table: PooledIdMap<u32, 3> = PooledIdMap::new();
-        table.keep_rows_in(pool.space());
-        assert!(table.bind(2, 20).is_ok() && table.bind(1, 10).is_ok());
+        {
+            let mut table = lent_ids(&mut table, &space);
+            assert!(table.bind(2, 20).is_ok() && table.bind(1, 10).is_ok());
+        }
         let mut owed = table.split_off().expect("a pooled table is split");
-        assert_eq!(
-            owed.entries().collect::<std::vec::Vec<_>>(),
-            [(2, &20), (1, &10)],
-            "in the order bound"
-        );
+        {
+            let mut owed = lent_ids(&mut owed, &space);
+            assert_eq!(
+                owed.entries().collect::<std::vec::Vec<_>>(),
+                [(2, &20), (1, &10)],
+                "in the order bound"
+            );
+            assert_eq!(owed.unbind(1), Some(10));
+        }
         assert_eq!(table.count(), 0, "the table it came from holds none");
-        assert_eq!(pool.counts().used, 2, "the rows stay in the pool");
-        assert!(table.bind(5, 50).is_ok(), "and it binds in the same pool");
-        assert_eq!(pool.counts().used, 3);
-        assert_eq!(owed.unbind(1), Some(10));
-        owed.reset();
-        table.reset();
+        assert_eq!(pool.counts().used, 1, "the rows stay in the pool");
+        assert!(
+            lent_ids(&mut table, &space).bind(5, 50).is_ok(),
+            "and it binds in the same pool"
+        );
+        assert_eq!(pool.counts().used, 2);
+        lent_ids(&mut owed, &space).reset();
+        lent_ids(&mut table, &space).reset();
         assert_eq!(pool.counts().used, 0, "each gives back its own rows");
+        let own_space = space_of::<crate::row_pool::Keyed<u32>>(3, true);
         let mut own: PooledIdMap<u32, 3> = PooledIdMap::new();
-        own.keep_rows_in(space_of(3, true));
-        assert!(own.bind(1, 10).is_ok());
+        assert!(lent_ids(&mut own, &own_space).bind(1, 10).is_ok());
         assert!(own.split_off().is_none(), "a span of its own is not split");
-        assert_eq!(own.find(1), Some(&10), "and keeps what it holds");
+        assert_eq!(
+            lent_ids(&mut own, &own_space).find(1),
+            Some(&10),
+            "and keeps what it holds"
+        );
     }
 
-    /// A lent table made by `Default` holds no pool and refuses every new id, counted.
+    /// A lent table made by `Default` holds no space and refuses every new id, counted, whatever
+    /// space it is lent.
     #[test]
     fn a_pooled_table_handed_no_pool_refuses_and_counts() {
+        let pool = pool_of::<crate::row_pool::Keyed<u32>>(2);
         let mut table: PooledIdMap<u32, 4> = PooledIdMap::default();
-        assert!(table.bind(1, 10).is_err());
-        assert_eq!((table.count(), table.refusals()), (0, 1));
+        for space in [crate::row_pool::RowSpace::none(), pool.space()] {
+            // SAFETY: a table attached to no space holds no row in any; it is lent one to be
+            // refused.
+            assert!(unsafe { table.lend(&space) }.bind(1, 10).is_err());
+        }
+        assert_eq!(
+            (table.count(), table.refusals(), pool.counts().used),
+            (0, 2, 0)
+        );
     }
 
     /// The lent backing refuses under a bound as the fixed one does, in a shared pool and in a
@@ -779,29 +1145,44 @@ mod tests {
     #[test]
     fn a_bound_refuses_a_new_id_on_the_lent_backing() {
         for own in [false, true] {
-            a_bound_refuses_a_new_id_as_a_full_table_does_in(|| {
-                let mut table: PooledIdMap<u32, 4> = PooledIdMap::new();
-                table.keep_rows_in(space_of(4, own));
-                table
-            });
+            let space = space_of::<crate::row_pool::Keyed<u32>>(4, own);
+            let mut table: PooledIdMap<u32, 4> = PooledIdMap::new();
+            {
+                let lent = lent_ids(&mut table, &space);
+                a_bound_refuses_a_new_id_as_a_full_table_does_in(move || lent);
+            }
         }
     }
 
-    /// A lent table in a span of its own takes no more than the inline table of the same rows:
-    /// the rows are the inline table's `(id, value)`, and the head that points at them is the
-    /// room the inline table's length and count take.
+    /// A lent table and its rows in a span of its own take no more than the inline table of the
+    /// same rows, on every target: the rows are the inline table's `(id, value)`, byte for byte,
+    /// and the head is two `u16`s and the `u32` count of refusals the inline table keeps, 8 bytes,
+    /// which is the least room the inline table keeps beside its rows (a length and that count,
+    /// on i386 System V, where a `u64` aligns to 4). The head holds no pointer: its owner holds the
+    /// space once.
     #[cfg(not(feature = "pool-monitor"))]
     #[test]
     fn a_lent_table_of_its_own_span_is_no_larger_than_the_inline_table() {
         use crate::key_arena::KeyRef;
         use crate::row_pool::{Keyed, RowSpace};
+        use core::mem::size_of;
         const N: usize = 16;
-        let lent = core::mem::size_of::<PooledIdMap<KeyRef, N>>()
+        assert_eq!(
+            size_of::<PooledIdMap<KeyRef, N>>(),
+            size_of::<(u16, u16, u32)>(),
+            "the head is two counters and the count of refusals"
+        );
+        assert_eq!(
+            RowSpace::<Keyed<KeyRef>>::own_bytes(N),
+            Some(N * size_of::<(u64, KeyRef)>()),
+            "the rows are the inline table's, byte for byte"
+        );
+        let lent = size_of::<PooledIdMap<KeyRef, N>>()
             + RowSpace::<Keyed<KeyRef>>::own_bytes(N).expect("fits");
         assert!(
-            lent <= core::mem::size_of::<FixedIdMap<KeyRef, N>>(),
+            lent <= size_of::<FixedIdMap<KeyRef, N>>(),
             "{lent} against {}",
-            core::mem::size_of::<FixedIdMap<KeyRef, N>>()
+            size_of::<FixedIdMap<KeyRef, N>>()
         );
     }
 

@@ -3652,6 +3652,32 @@ impl InterestRows {
     pub fn counts(&self) -> Option<crate::row_pool::RowCounts> {
         self.0.counts()
     }
+
+    /// Where the interests' rows lie, kept by the session's directory of its peers' rows.
+    pub(crate) fn space(&self) -> InterestSpace {
+        InterestSpace(self.0.space())
+    }
+}
+
+/// Where the interests' rows of a session lie ([`InterestRows::space`]), as the session's directory
+/// of its peers' rows keeps it (`crate::peer_tables::PeerSpaces`).
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "peer-row-pools"
+))]
+pub(crate) struct InterestSpace(crate::row_pool::RowSpace<InterestKind>);
+
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "peer-row-pools"
+))]
+impl InterestSpace {
+    /// The space as one of kind `K`'s rows, none where `K` is not the interests' kind.
+    pub(crate) fn as_kind<K: crate::row_pool::RowKind>(&self) -> crate::row_pool::RowSpace<K> {
+        self.0.as_kind()
+    }
 }
 
 #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
