@@ -77,12 +77,12 @@ impl TransportTimers {
     ///
     /// The application layer's wake is not raised here: a loop raises it before it reads its
     /// input (`SessionLinkActions::take_app_wake_due`), so a stream of input cannot hold it off.
-    pub fn fire_due<R: SessionRuntime, T: TimeSource>(
+    pub fn fire_due<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         engine: &mut SessionEngine<R, T>,
         actions: &SessionLinkActions<R, T>,
         now_ms: u64,
-        on_event: &mut dyn EventSink,
+        on_event: &mut F,
     ) {
         // In Established the handshake tracker disarms and the lease's deadline applies: the later
         // of the session's establishment and its last input, plus the adopted window. The check
