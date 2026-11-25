@@ -21,6 +21,7 @@
 use super::*;
 
 use core::mem::MaybeUninit;
+use core::ptr::addr_of_mut;
 use core::sync::atomic::AtomicBool;
 
 use wz_runtime_coop::faces::{Dial, LinkEnd, DIAL_LOOK_MS};
@@ -382,26 +383,40 @@ pub(super) struct DirectFace<L: SessionLinks + 'static, C: ClockSource + 'static
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
-    /// The face of a session whose Router is `router`, lent through `lend`, with no link yet.
-    pub(super) fn new(
+    /// The face of a session whose Router is `router`, lent through `lend`, with no link yet,
+    /// made in `at` with its lock.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The face is not moved from `at` until it is dropped there.
+    pub(super) unsafe fn init_at(
+        at: NonNull<Self>,
         router: SessionReassembly,
         lend: RouterLend<SessionReassembly, RouterPlace>,
-    ) -> Self {
-        Self {
-            slot: <CoopForm as LockForm>::new(Confined(DirectSlot {
-                router,
-                lend,
-                life: MaybeUninit::uninit(),
-                life_made: false,
-                dial: None,
-                opened: None,
-                last: None,
-                pump: MaybeUninit::uninit(),
-                records: None,
-                life_due_us: u64::MAX,
-                pump_due_us: u64::MAX,
-            })),
-            end: EndFlags::default(),
+    ) {
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            <CoopForm as LockForm>::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at).slot)),
+                |slot| {
+                    slot.write(Confined(DirectSlot {
+                        router,
+                        lend,
+                        life: MaybeUninit::uninit(),
+                        life_made: false,
+                        dial: None,
+                        opened: None,
+                        last: None,
+                        pump: MaybeUninit::uninit(),
+                        records: None,
+                        life_due_us: u64::MAX,
+                        pump_due_us: u64::MAX,
+                    }))
+                },
+            );
+            addr_of_mut!((*at).end).write(EndFlags::default());
         }
     }
 

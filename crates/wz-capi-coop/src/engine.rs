@@ -33,7 +33,7 @@ use alloc::sync::Arc;
 use core::any::Any;
 use core::num::NonZeroU32;
 use core::ops::{Deref, DerefMut};
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
@@ -751,7 +751,7 @@ struct SessionLent {
     /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
     #[cfg(feature = "advanced-cache")]
     cache: Option<CacheSpan>,
-    /// The places of the faces' rooms, a row for each set of face tables (`LinkRooms::new`).
+    /// The places of the faces' rooms, a row for each set of face tables (`LinkRooms::init_at`).
     room_places: RoomPlaces,
     /// The places the session lends its registry and its Router in for a step, in the arena.
     steps: StepPlaces,
@@ -1429,10 +1429,20 @@ struct CoreLock<L: SessionLinks + 'static, C: ClockSource + 'static>(
 );
 
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
-    /// `core` behind the lock, its key arena guarded by it from now on.
-    fn new(core: Core<L, C>) -> Self {
+    /// `core` behind the lock, made in `at` with the state written in the lock's own place, its
+    /// key arena guarded by it from now on.
+    ///
+    /// # Safety
+    /// As for [`LockForm::init_at`], of a `Self`.
+    unsafe fn init_at(at: NonNull<Self>, core: Core<L, C>) {
         core.session.keys.guard_by_owner_lock();
-        Self(<CoopForm as LockForm>::new(Confined(core)))
+        // SAFETY: the caller's contract, for the one field.
+        unsafe {
+            <CoopForm as LockForm>::init_at(
+                NonNull::new_unchecked(core::ptr::addr_of_mut!((*at.as_ptr()).0)),
+                |state| state.write(Confined(core)),
+            );
+        }
     }
 
     fn lock(&self) -> CoreGuard<'_, L, C> {
@@ -1632,12 +1642,22 @@ impl Drop for SendingOn<'_> {
 
 impl<W: LinkWaits> LinkRooms<W> {
     /// The rooms of a session over a stack whose waits are `waits`, a place for each row of
-    /// `places`, each free: none grows after.
-    pub(crate) fn new(waits: W, mut places: RoomPlaces) -> Self {
+    /// `places`, each free, made in `at` with their lock: none grows after.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The rooms are not moved from `at` until they are dropped there.
+    pub(crate) unsafe fn init_at(at: NonNull<Self>, waits: W, mut places: RoomPlaces) {
         while places.push(None).is_ok() {}
-        Self {
-            waits,
-            rooms: Mutex::new(RoomTable { places, mark: 0 }),
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).waits).write(waits);
+            os::mutex_in(
+                NonNull::new_unchecked(core::ptr::addr_of_mut!((*at).rooms)),
+                |rooms| rooms.write(RoomTable { places, mark: 0 }),
+            );
         }
     }
 
@@ -4984,11 +5004,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let mut entropy = SessionEntropy::try_new(entropy)
                 .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
-            let rooms = lent
-                .arena
-                .arena_mut()
-                .place(LinkRooms::new(links.waits(), lent.room_places))
-                .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+            let (waits, places) = (links.waits(), lent.room_places);
+            // SAFETY: the arena hands a place aligned for the rooms and valid for writes of
+            // them, where they stay.
+            let rooms = unsafe {
+                lent.arena
+                    .arena_mut()
+                    .place_with(|at| LinkRooms::init_at(NonNull::new_unchecked(at), waits, places))
+            }
+            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
             Ok((wire, entropy, rooms))
         })?;
         links.lend_buffers(lent.transport.links);
@@ -5250,7 +5274,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
         #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-        let direct = direct::DirectFace::new(router, core.transport.lend.clone());
+        let direct_lend = core.transport.lend.clone();
         let make = |this: NonNull<Self>| {
             let reachable: NonNull<dyn wz_capi_port::reach::Reachable> = this;
             // SAFETY: the engine is taken out of its row at its close and first in its drop,
@@ -5267,57 +5291,125 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 // on.
                 unsafe { samples.answer_queries_with(answering) };
             }
-            Self {
+            let at = this.as_ptr();
+            // SAFETY: `at` is the engine's place, valid for writes of a `Self` that stays there
+            // (`Shared::placed_with`), so each field is too; each field is written once, below,
+            // and the locks are made where they stay.
+            unsafe {
                 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-                direct,
-                core: CoreLock::new(core),
-                rooms,
-                wait_before_drop_us,
-                held_drop,
-                sending_on: AtomicU64::new(NOT_SENDING),
+                direct::DirectFace::init_at(
+                    NonNull::new_unchecked(addr_of_mut!((*at).direct)),
+                    router,
+                    direct_lend,
+                );
+                CoreLock::init_at(NonNull::new_unchecked(addr_of_mut!((*at).core)), core);
+                addr_of_mut!((*at).rooms).write(rooms);
+                addr_of_mut!((*at).wait_before_drop_us).write(wait_before_drop_us);
+                addr_of_mut!((*at).held_drop).write(held_drop);
+                addr_of_mut!((*at).sending_on).write(AtomicU64::new(NOT_SENDING));
                 #[cfg(any(feature = "listen", feature = "group"))]
-                handed: Mutex::new(handed),
+                addr_of_mut!((*at).handed).write(Mutex::new(handed));
                 #[cfg(any(feature = "listen", feature = "group"))]
-                owed: AtomicBool::new(false),
+                addr_of_mut!((*at).owed).write(AtomicBool::new(false));
                 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-                input_held: AtomicBool::new(false),
+                addr_of_mut!((*at).input_held).write(AtomicBool::new(false));
                 #[cfg(feature = "threads")]
-                hand_back: HandBack::new(),
+                addr_of_mut!((*at).hand_back).write(HandBack::new());
                 #[cfg(any(feature = "listen", feature = "group"))]
-                handed_limits,
+                addr_of_mut!((*at).handed_limits).write(handed_limits);
                 #[cfg(feature = "transport-stats")]
-                unsent_drops: AtomicU64::new(0),
-                samples,
-                matching_owed: AtomicBool::new(false),
+                addr_of_mut!((*at).unsent_drops).write(AtomicU64::new(0));
+                addr_of_mut!((*at).samples).write(samples);
+                addr_of_mut!((*at).matching_owed).write(AtomicBool::new(false));
                 #[cfg(feature = "queryable")]
-                plane,
+                addr_of_mut!((*at).plane).write(plane);
                 #[cfg(feature = "query")]
-                gets,
+                addr_of_mut!((*at).gets).write(gets);
                 #[cfg(feature = "connectivity")]
-                faces,
+                addr_of_mut!((*at).faces).write(faces);
                 #[cfg(any(
                     feature = "remote-declaration-watch",
                     feature = "declarations-synced-event"
                 ))]
-                decl_watches,
-                zid: wire,
-                closed: AtomicBool::new(false),
+                addr_of_mut!((*at).decl_watches).write(decl_watches);
+                addr_of_mut!((*at).zid).write(wire);
+                addr_of_mut!((*at).closed).write(AtomicBool::new(false));
                 #[cfg(any(feature = "query", feature = "ticker"))]
-                next_local: AtomicU64::new(1),
+                addr_of_mut!((*at).next_local).write(AtomicU64::new(1));
                 #[cfg(feature = "threads")]
-                reader: Mutex::new(None),
+                os::mutex_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).reader)),
+                    |reader| reader.write(None),
+                );
                 #[cfg(feature = "threads")]
-                reader_run: core::sync::atomic::AtomicUsize::new(0),
-                deliveries: Deliveries::new(),
-                arena_bytes,
-                handle_place,
-                lodgings,
+                addr_of_mut!((*at).reader_run).write(core::sync::atomic::AtomicUsize::new(0));
+                addr_of_mut!((*at).deliveries).write(Deliveries::new());
+                addr_of_mut!((*at).arena_bytes).write(arena_bytes);
+                addr_of_mut!((*at).handle_place).write(handle_place);
+                addr_of_mut!((*at).lodgings).write(lodgings);
                 #[cfg(feature = "advanced-cache")]
-                cache: Mutex::new(cache),
+                os::mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).cache)), |held| {
+                    held.write(cache)
+                });
                 #[cfg(test)]
-                takes: Takes::default(),
-                reach,
+                addr_of_mut!((*at).takes).write(Takes::default());
+                addr_of_mut!((*at).reach).write(reach);
             }
+        };
+        // Each field of the engine is written above, one statement each: a field added to the
+        // engine and not there fails this pattern.
+        let _every_field_is_written = |engine: &Self| {
+            let Self {
+                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+                    direct: _,
+                core: _,
+                rooms: _,
+                wait_before_drop_us: _,
+                held_drop: _,
+                sending_on: _,
+                #[cfg(any(feature = "listen", feature = "group"))]
+                    handed: _,
+                #[cfg(any(feature = "listen", feature = "group"))]
+                    owed: _,
+                #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+                    input_held: _,
+                #[cfg(feature = "threads")]
+                    hand_back: _,
+                #[cfg(any(feature = "listen", feature = "group"))]
+                    handed_limits: _,
+                #[cfg(feature = "transport-stats")]
+                    unsent_drops: _,
+                samples: _,
+                matching_owed: _,
+                #[cfg(feature = "queryable")]
+                    plane: _,
+                #[cfg(feature = "query")]
+                    gets: _,
+                #[cfg(feature = "connectivity")]
+                    faces: _,
+                #[cfg(any(
+                    feature = "remote-declaration-watch",
+                    feature = "declarations-synced-event"
+                ))]
+                    decl_watches: _,
+                zid: _,
+                closed: _,
+                #[cfg(any(feature = "query", feature = "ticker"))]
+                    next_local: _,
+                #[cfg(feature = "threads")]
+                    reader: _,
+                #[cfg(feature = "threads")]
+                    reader_run: _,
+                deliveries: _,
+                arena_bytes: _,
+                handle_place: _,
+                lodgings: _,
+                #[cfg(feature = "advanced-cache")]
+                    cache: _,
+                #[cfg(test)]
+                    takes: _,
+                reach: _,
+            } = engine;
         };
         // SAFETY: the place was lent to the engine alone, aligned as asserted above and as large as
         // `Shared::<Self>::layout`, in the arena `place.memory` keeps; the engine is read through

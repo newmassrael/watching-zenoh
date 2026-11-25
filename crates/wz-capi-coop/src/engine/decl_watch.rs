@@ -30,7 +30,8 @@ use alloc::sync::Arc;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-use wz_capi_port::os::Mutex;
+use core::ptr::{addr_of_mut, NonNull};
+use wz_capi_port::os::{self, Mutex};
 use wz_capi_port::Refusal as Declined;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 use wz_session_core::bounded::{LendRefused, Storage};
@@ -133,11 +134,19 @@ struct Cell {
 }
 
 impl Cell {
-    /// The cell of a row that holds no watch.
+    /// The cell of a row that holds no watch, its lock made where it stays.
     fn empty() -> Arc<Self> {
-        Arc::new(Self {
-            slot: Mutex::new(Slot::default()),
-        })
+        let mut cell = Arc::<Self>::new_uninit();
+        let place = Arc::get_mut(&mut cell).expect("a new cell has no other holder");
+        // SAFETY: the cell's place is this count's alone, valid for writes of a cell, and stays
+        // where it is until the cell is dropped there.
+        unsafe {
+            os::mutex_in(
+                NonNull::new_unchecked(addr_of_mut!((*place.as_mut_ptr()).slot)),
+                |slot| slot.write(Slot::default()),
+            );
+            cell.assume_init()
+        }
     }
 }
 
@@ -495,12 +504,19 @@ impl DeclWatches {
 
     /// No watch, and room for `watches` of them, at most the build's, their events held in `round`.
     fn holding(watches: usize, round: &PlacedRef<Round>) -> Self {
-        Self {
-            shared: Arc::new(Shared {
-                table: Mutex::new(Table::holding(watches)),
-                round: *round,
-            }),
-        }
+        let mut shared = Arc::<Shared>::new_uninit();
+        let place = Arc::get_mut(&mut shared).expect("a new table has no other holder");
+        let at = place.as_mut_ptr();
+        // SAFETY: the place is this count's alone, valid for writes of the shared table, and
+        // stays where it is until it is dropped there; each field is written once.
+        let shared = unsafe {
+            os::mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).table)), |table| {
+                table.write(Table::holding(watches))
+            });
+            addr_of_mut!((*at).round).write(*round);
+            shared.assume_init()
+        };
+        Self { shared }
     }
 
     /// A watch of `plane` told through `sink` from now on, owed first what the peers hold now

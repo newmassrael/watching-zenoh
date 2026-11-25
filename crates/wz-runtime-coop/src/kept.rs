@@ -157,24 +157,31 @@ impl<T> Shared<T> {
         Self { at }
     }
 
-    /// [`Self::placed`], the value made by `make` from the place it is written at, as a value
-    /// that names itself is made.
+    /// [`Self::placed`], the value written by `make` in the place it is handed, where it stays:
+    /// as a value that names itself is made, and one that holds a lock made where it stays, never
+    /// in a frame on its way.
     ///
     /// # Safety
-    /// As [`Self::placed`]'s; nothing is read through the place `make` is handed until this
-    /// returns, as it holds no value before.
+    /// As [`Self::placed`]'s; `make` writes a whole `T` at the place it is handed, and nothing
+    /// is read through that place until this returns, as it holds no value before.
     pub unsafe fn placed_with(
         at: NonNull<u8>,
         memory: NonNull<Kept>,
-        make: impl FnOnce(NonNull<T>) -> T,
+        make: impl FnOnce(NonNull<T>),
     ) -> Self {
         let held = at.cast::<Held<T>>().as_ptr();
         // SAFETY: the caller's: `at` is valid for a `Held<T>`, so the place of its value lies
         // inside it and is not null; no reference to the unwritten value is made.
         let value_at = unsafe { NonNull::new_unchecked(ptr::addr_of_mut!((*held).value)) };
-        let value = make(value_at);
-        // SAFETY: the caller's.
-        unsafe { Self::placed(at, value, memory) }
+        make(value_at);
+        // SAFETY: the caller's: the count is live, and `at` is free for the rest of a
+        // `Held<T>`, whose value `make` wrote.
+        unsafe {
+            memory.as_ref().retain();
+            ptr::addr_of_mut!((*held).kept).write(Kept::new(Self::last_placed));
+            ptr::addr_of_mut!((*held).memory).write(Some(memory));
+        }
+        Self { at: at.cast() }
     }
 
     /// The count this value is held by: what a holder that keeps only a pointer to it retains and
@@ -429,7 +436,7 @@ mod tests {
         let made = unsafe {
             Shared::placed_with(NonNull::from(&mut room).cast(), memory, |at| {
                 handed.set(Some(at));
-                Counted(&drops)
+                at.as_ptr().write(Counted(&drops));
             })
         };
         assert_eq!(
