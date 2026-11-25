@@ -767,6 +767,31 @@ pub enum MulticastTxReply<'a> {
     )
 ))]
 impl MulticastTxReply<'_> {
+    /// What the network counters take of the reply once it is pushed, as [`MulticastTxTally::of`]
+    /// reads its owned item: its own band and its class.
+    pub fn tally(self) -> MulticastTxTally {
+        #[cfg(feature = "transport-stats")]
+        {
+            match self {
+                #[cfg(feature = "codec-response")]
+                Self::Response(response) => MulticastTxTally::new(
+                    crate::declare_ext_qos::read_response_qos(response).priority(),
+                    crate::network_message::response_stats_class(response, |_| None),
+                ),
+                #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+                Self::DeclareReply(declare) => MulticastTxTally::new(
+                    crate::declare_ext_qos::read_declare_qos(declare).priority(),
+                    crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+                ),
+            }
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            let _ = self;
+            MulticastTxTally::new(Priority::DEFAULT, crate::stats::NetworkStatsClass::unread())
+        }
+    }
+
     /// The reply as the owned item a backing that keeps owned replies queues, copied.
     pub fn to_item(self) -> MulticastTxItem {
         match self {
@@ -1068,7 +1093,7 @@ pub fn multicast_tx_request<R>(
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| writer.encode(sink);
     let size = encoded_size(&body)?;
     #[cfg(feature = "transport-stats")]
-    let class = crate::network_message::get_stats_class(writer.parts(), |_| None);
+    let class = crate::network_message::get_stats_class(writer, |_| None);
     #[cfg(not(feature = "transport-stats"))]
     let class = crate::stats::NetworkStatsClass::unread();
     Some(f(&MulticastTxEncoded {
@@ -1208,13 +1233,18 @@ pub fn multicast_tx_publication<R>(
         crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
     };
     let size = encoded_size(&body).ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+    // The attachment is counted as far as the build writes it.
+    #[cfg(all(feature = "transport-stats", feature = "pubsub-attachment"))]
+    let attachment = meta.attachment.map_or(0, <[u8]>::len);
+    #[cfg(all(feature = "transport-stats", not(feature = "pubsub-attachment")))]
+    let attachment = 0;
     #[cfg(feature = "transport-stats")]
     let class = crate::network_message::publication_stats_class(
         mapping_id,
         suffix,
         kind,
         value.len(),
-        meta.attachment.map_or(0, <[u8]>::len),
+        attachment,
         |_| None,
     );
     #[cfg(not(feature = "transport-stats"))]
@@ -2488,6 +2518,25 @@ impl MulticastTxTally {
         #[cfg(not(feature = "transport-stats"))]
         {
             let _ = (priority, class);
+            Self {}
+        }
+    }
+
+    /// The tally of the reply `parts` describes, written from them with no owned `Response`, as
+    /// [`Self::of`] reads the owned one the same parts build: on the reply's own band, by its
+    /// class.
+    #[cfg(feature = "codec-response")]
+    pub fn of_reply_parts(parts: &crate::reply_stage::ReplyParts<'_>) -> Self {
+        #[cfg(feature = "transport-stats")]
+        {
+            Self::new(
+                parts.qos.priority(),
+                crate::network_message::reply_parts_stats_class(parts),
+            )
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            let _ = parts;
             Self {}
         }
     }
@@ -4518,19 +4567,35 @@ mod group_publications_written_from_parts {
             compared += 2;
         }
         assert_eq!(compared, 12);
-        // The cells themselves, so that a rule both readings got wrong alike is caught too.
+        // The cells themselves, so that a rule both readings got wrong alike is caught too: the
+        // attachment counts where the build writes it.
+        let attachment = if cfg!(feature = "pubsub-attachment") {
+            3
+        } else {
+            0
+        };
         assert_eq!(
             lent_tally(0, Some("@/group"), SampleKind::Put, &attached),
             (
                 Priority::DataHigh,
-                NetworkStatsClass::net(MessageLabel::Put, StatMessage::Put, StatSpace::Admin, 8)
+                NetworkStatsClass::net(
+                    MessageLabel::Put,
+                    StatMessage::Put,
+                    StatSpace::Admin,
+                    "value".len() + attachment
+                )
             )
         );
         assert_eq!(
             lent_tally(7, Some("/x"), SampleKind::Del, &attached),
             (
                 Priority::DataHigh,
-                NetworkStatsClass::net(MessageLabel::Del, StatMessage::Del, StatSpace::User, 3)
+                NetworkStatsClass::net(
+                    MessageLabel::Del,
+                    StatMessage::Del,
+                    StatSpace::User,
+                    attachment
+                )
             )
         );
     }
@@ -4620,7 +4685,18 @@ mod lent_get_tallies {
             }
         }
         assert_eq!(compared, 3 * 3 * 2 * 2);
-        // The cell itself, so that a rule both readings got wrong alike is caught too.
+        // The cell itself, so that a rule both readings got wrong alike is caught too: the value
+        // and the attachment count where the build writes them.
+        let value = if cfg!(feature = "query-value") {
+            "payload".len()
+        } else {
+            0
+        };
+        let attachment = if cfg!(feature = "query-attachment") {
+            "attached".len()
+        } else {
+            0
+        };
         let admin = GetParts {
             rid: 7,
             key: WireKey::literal("@/demo").expect("a literal"),
@@ -4638,9 +4714,131 @@ mod lent_get_tallies {
                     MessageLabel::Query,
                     StatMessage::Query,
                     StatSpace::Admin,
-                    "payload".len() + "attached".len()
+                    value + attachment
                 )
             )
+        );
+    }
+}
+
+/// A reply a group's dispatch stages is counted as its owned record is, whichever form it is
+/// handed in.
+#[cfg(all(test, feature = "transport-stats", feature = "codec-response"))]
+mod reply_tallies {
+    use super::*;
+    use crate::qos::CongestionControl;
+    use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+    use crate::sample::QosLevel;
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage, StatSpace};
+
+    /// The band and the class a tally holds.
+    fn read(tally: &MulticastTxTally) -> (Priority, NetworkStatsClass) {
+        (tally.priority(), *tally.class())
+    }
+
+    /// What the owned `Response` the parts build is counted as, queued as the item a backing
+    /// that keeps owned replies queues.
+    fn owned(parts: &ReplyParts<'_>) -> (Priority, NetworkStatsClass) {
+        let response = crate::query::QueryReply::from_parts(parts)
+            .into_response()
+            .expect("the owned reply");
+        read(&MulticastTxTally::of(&MulticastTxItem::Response {
+            response: Box::new(response),
+        }))
+    }
+
+    /// A reply's parts: of `body` with `attachment`, stamped with `keyexpr`, on the band
+    /// `DataHigh`.
+    fn parts<'a>(
+        keyexpr: &'a str,
+        body: PartsBody<'a>,
+        attachment: Option<&'a [u8]>,
+    ) -> ReplyParts<'a> {
+        ReplyParts::new(
+            9,
+            keyexpr,
+            Some((&[1, 2, 3, 4], 5)),
+            QosLevel::from_parts(Priority::DataHigh, CongestionControl::Block, false),
+            PartsKind::Reply {
+                body,
+                encoding: None,
+                timestamp: None,
+                attachment,
+                source_info: None,
+            },
+        )
+    }
+
+    /// A reply written from its parts is counted as the owned `Response` the same parts build: a
+    /// Put by its payload and attachment, a Del by its attachment, each in its key's space and on
+    /// its own band; and a reply handed as its owned record is counted as the item it copies to.
+    /// Turned red by a lent reply counted by other bytes, in another space or on another band than
+    /// the owned one, or a lent record whose tally is not its item's.
+    #[test]
+    fn a_reply_written_from_its_parts_is_counted_as_its_owned_response() {
+        let mut compared = 0usize;
+        for keyexpr in ["demo/a", "@/a"] {
+            for body in [PartsBody::Put(b"answer"), PartsBody::Del] {
+                for attachment in [None, Some(&b"att"[..])] {
+                    let parts = parts(keyexpr, body, attachment);
+                    let expected = owned(&parts);
+                    assert_eq!(
+                        read(&MulticastTxTally::of_reply_parts(&parts)),
+                        expected,
+                        "{keyexpr}"
+                    );
+                    let response = crate::query::QueryReply::from_parts(&parts)
+                        .into_response()
+                        .expect("the owned reply");
+                    let lent = MulticastTxReply::Response(&response);
+                    assert_eq!(
+                        read(&lent.tally()),
+                        read(&MulticastTxTally::of(&lent.to_item()))
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 2 * 2 * 2);
+        // The cell itself, so that a rule both readings got wrong alike is caught too.
+        let attachment = if cfg!(feature = "pubsub-attachment") {
+            3
+        } else {
+            0
+        };
+        assert_eq!(
+            read(&MulticastTxTally::of_reply_parts(&parts(
+                "@/a",
+                PartsBody::Put(b"answer"),
+                Some(&b"att"[..])
+            ))),
+            (
+                Priority::DataHigh,
+                NetworkStatsClass::net(
+                    MessageLabel::Reply,
+                    StatMessage::Reply,
+                    StatSpace::Admin,
+                    "answer".len() + attachment
+                )
+            )
+        );
+    }
+
+    /// The answer to a member's interest, handed as its owned record, is counted as the item it
+    /// copies to: a control message of the declare kind. Turned red by a lent record whose tally
+    /// is not its item's.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_declare_reply_handed_as_its_record_is_counted_as_its_item() {
+        let declare = crate::declare_build::build_declare_final_reply(7);
+        let lent = MulticastTxReply::DeclareReply(&declare);
+        assert_eq!(
+            read(&lent.tally()),
+            read(&MulticastTxTally::of(&lent.to_item()))
+        );
+        assert_eq!(
+            *lent.tally().class(),
+            NetworkStatsClass::control(MessageLabel::Declare)
         );
     }
 }

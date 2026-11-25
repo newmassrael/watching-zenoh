@@ -3216,25 +3216,69 @@ where
 
 /// [`request_stats_class`] for a get a sender writes from its parts, with no owned `Request` to
 /// read: the class the owned `Request` of the same parts is given
-/// ([`crate::query_parts::GetParts::owned_request`]), its payload the value the query carries
-/// and its attachment.
+/// ([`crate::query_parts::GetParts::owned_request`]), its payload what the writer writes of the
+/// query's value and its attachment.
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
 pub fn get_stats_class<F>(
-    parts: &crate::query_parts::GetParts<'_>,
+    writer: &crate::lent_request::RequestWriter<'_>,
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
     F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
     use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
-    let query = &parts.query;
-    let value = query.value.as_ref().map_or(0, |(_, payload)| payload.len());
+    let key = writer.parts().key;
     NetworkStatsClass::net(
         MessageLabel::Query,
         StatMessage::Query,
-        stats_space_of_key(parts.key.id(), parts.key.suffix(), &resolve_alias),
-        value.saturating_add(query.attachment.len()),
+        stats_space_of_key(key.id(), key.suffix(), &resolve_alias),
+        writer.payload_len(),
     )
+}
+
+/// [`response_stats_class`] for a reply a sender writes from its parts, with no owned `Response` to
+/// read: a reply by its payload and the attachment the build writes, a Del by its attachment
+/// alone, an Err by its payload, each in the space of the literal key the reply is stamped with. A
+/// buffer of shared memory is written as its bytes, and is counted so.
+#[cfg(all(feature = "transport-stats", feature = "codec-response"))]
+pub fn reply_parts_stats_class(
+    parts: &crate::reply_stage::ReplyParts<'_>,
+) -> crate::stats::NetworkStatsClass {
+    use crate::reply_stage::{PartsBody, PartsKind};
+    use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage, StatSpace};
+    let space = StatSpace::of_keyexpr(parts.keyexpr);
+    match &parts.kind {
+        PartsKind::Reply {
+            body, attachment, ..
+        } => {
+            #[cfg(feature = "pubsub-attachment")]
+            let attachment = attachment.map_or(0, <[u8]>::len);
+            #[cfg(not(feature = "pubsub-attachment"))]
+            let attachment = {
+                let _ = attachment;
+                0
+            };
+            let payload = match body {
+                PartsBody::Put(bytes) => bytes.len(),
+                PartsBody::Del => 0,
+                #[cfg(feature = "transport-shm")]
+                PartsBody::Shared(handle) => handle.bytes().len(),
+            };
+            NetworkStatsClass::net(
+                MessageLabel::Reply,
+                StatMessage::Reply,
+                space,
+                payload.saturating_add(attachment),
+            )
+        }
+        #[cfg(feature = "query-reply-err")]
+        PartsKind::Err { payload, .. } => NetworkStatsClass::net(
+            MessageLabel::ReplyErr,
+            StatMessage::Reply,
+            space,
+            payload.len(),
+        ),
+    }
 }
 
 /// Fold a classified body into a class, selecting the `shm` medium when the

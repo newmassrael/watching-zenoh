@@ -57,7 +57,7 @@ use wz_session_core::multicast_tx::{
     multicast_tx_bytes, multicast_tx_encode_into, multicast_tx_encoded_conduit,
     multicast_tx_item_body, multicast_tx_push_encoded, multicast_tx_push_meta,
     multicast_tx_push_staged, MulticastBatch, MulticastTxDatagram, MulticastTxEncoded,
-    MulticastTxItem, MulticastTxLanes, MulticastTxMeta, MulticastTxQueue,
+    MulticastTxItem, MulticastTxLanes, MulticastTxMeta, MulticastTxQueue, MulticastTxTally,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::sn::{self, MulticastTxConduits};
@@ -651,13 +651,22 @@ impl GroupTxStage {
                 outcome
             }
         };
+        self.count_entered(outcome, &message.tally);
+        outcome
+    }
+
+    /// Count a message whose push answered `outcome` into the counters attached (`attach_stats`),
+    /// one network message of `tally`'s class, when it entered the stage: put on its lane, or
+    /// kept while the conduits are held.
+    fn count_entered(&self, outcome: PushOutcome, tally: &MulticastTxTally) {
         #[cfg(feature = "transport-stats")]
         if let (PushOutcome::Pushed, Some(stats)) =
-            (outcome, inner.writer.borrow().stats.as_deref())
+            (outcome, self.inner.writer.borrow().stats.as_deref())
         {
-            stats.network_message_sent(&message.tally);
+            stats.network_message_sent(tally);
         }
-        outcome
+        #[cfg(not(feature = "transport-stats"))]
+        let _ = (outcome, tally);
     }
 
     /// Put `item`, a reply, on the stage without waiting, whatever its lane holds, counted on the
@@ -666,13 +675,21 @@ impl GroupTxStage {
     pub(super) fn admit_reply(&self, item: MulticastTxItem) {
         let meta = MulticastTxMeta::of_item(&item, &self.inner.params);
         let size = multicast_tx_bytes(&item);
-        multicast_tx_item_body(&item, |body| self.admit_reply_body(meta, size, body));
+        let tally = MulticastTxTally::of(&item);
+        multicast_tx_item_body(&item, |body| self.admit_reply_body(meta, size, body, tally));
     }
 
     /// [`Self::admit_reply`] of a reply framed as `meta` says, whose body `body` encodes in at
     /// most `size` bytes: framed at once, or kept encoded ([`Staged`]) while another push holds
-    /// the conduits.
-    fn admit_reply_body(&self, meta: MulticastTxMeta, size: usize, body: &BodyEncoder<'_>) {
+    /// the conduits. A reply that enters the stage is counted by `tally`, as the session's own
+    /// messages are; one dropped for want of a slot or of room is not.
+    fn admit_reply_body(
+        &self,
+        meta: MulticastTxMeta,
+        size: usize,
+        body: &BodyEncoder<'_>,
+        tally: MulticastTxTally,
+    ) {
         let inner = &*self.inner;
         // A lane's storage holds the replies the limit lets the stage hold; one its storage has no
         // room for is past that limit, and is refused by it.
@@ -691,22 +708,25 @@ impl GroupTxStage {
             return;
         }
         inner.replies.set(inner.replies.get().saturating_add(1));
-        let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
-            let _ = self.stage(meta, size, body, true);
-            return;
+        let outcome = match inner.conduits.try_borrow_mut() {
+            Err(_) => self.stage(meta, size, body, true),
+            Ok(mut conduits) => {
+                let params = &inner.params;
+                let outcome = self.push_on(
+                    &mut conduits,
+                    meta.conduit(),
+                    None,
+                    true,
+                    |minted, queue, window| {
+                        multicast_tx_push_meta(meta, size, body, minted, params, queue, window)
+                    },
+                );
+                drop(conduits);
+                self.push_deferred();
+                outcome
+            }
         };
-        let params = &inner.params;
-        let _ = self.push_on(
-            &mut conduits,
-            meta.conduit(),
-            None,
-            true,
-            |minted, queue, window| {
-                multicast_tx_push_meta(meta, size, body, minted, params, queue, window)
-            },
-        );
-        drop(conduits);
-        self.push_deferred();
+        self.count_entered(outcome, &tally);
     }
 
     /// Keep a message pushed while another push holds the conduits, framed once they are let go
@@ -1030,7 +1050,8 @@ impl MulticastReplyEnqueue for GroupTxStage {
     #[cfg(any(feature = "codec-response", feature = "liveliness-token"))]
     fn enqueue_reply(&self, reply: wz_session_core::multicast_tx::MulticastTxReply<'_>) {
         let meta = reply.meta(&self.inner.params);
-        reply.with_body(|body| self.admit_reply_body(meta, reply.bytes(), body));
+        let tally = reply.tally();
+        reply.with_body(|body| self.admit_reply_body(meta, reply.bytes(), body, tally));
     }
 
     // Written from the reply's parts into the lane or the staged storage, as a link's writer
@@ -1045,9 +1066,12 @@ impl MulticastReplyEnqueue for GroupTxStage {
             return;
         };
         let meta = MulticastTxMeta::of_reply(parts.qos, &self.inner.params);
-        self.admit_reply_body(meta, size, &|sink: &mut wz_session_core::tx_buf::TxSink<
-            '_,
-        >| writer.encode_tx(sink));
+        self.admit_reply_body(
+            meta,
+            size,
+            &|sink: &mut wz_session_core::tx_buf::TxSink<'_>| writer.encode_tx(sink),
+            MulticastTxTally::of_reply_parts(&parts),
+        );
     }
 
     // Written from the borrowed reply into the lane or the staged storage, as the session with no
@@ -1065,6 +1089,7 @@ impl MulticastReplyEnqueue for GroupTxStage {
                     MulticastTxMeta::of_encoded(message, params),
                     message.size,
                     message.body,
+                    message.tally,
                 );
             },
         );
@@ -1896,6 +1921,74 @@ mod tests {
         assert_eq!(taken(&wire), ["join", "first", "second", "join", "third"]);
         assert!(matches_the_wire(), "each datagram once, as it left");
         assert_eq!(stats.report().tx.t_msgs, 5);
+    }
+
+    /// A reply the group's dispatch stages is counted as it enters the stage, as the session's own
+    /// messages are: kept while the conduits are held, or put on its lane, once; the reply past the
+    /// reply limit is not. Turned red by a reply counted before it holds a slot, a kept one counted
+    /// again when it is framed, or none counted.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn a_reply_that_enters_the_stage_is_counted_and_one_past_the_limit_is_not() {
+        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+        use wz_session_core::stats::{StatMedium, TransportStats};
+        let stage = GroupTxStage::new(&one_batch_lanes());
+        let stats = Rc::new(TransportStats::default());
+        stage.attach_stats(Rc::clone(&stats));
+        let counted = || stats.report().tx.n_msgs_on(StatMedium::Net);
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            stage.enqueue(put("kept"));
+        }
+        assert_eq!(counted(), 1, "kept while the conduits are held");
+        stage.push_deferred();
+        assert_eq!(counted(), 1, "framed once let go, and not counted again");
+
+        for _ in 1..MAX_MULTICAST_REPLIES {
+            stage.enqueue(fill());
+        }
+        assert_eq!(stage.dropped(), 0);
+        assert_eq!(
+            counted(),
+            MAX_MULTICAST_REPLIES,
+            "each reply that holds a slot"
+        );
+        stage.enqueue(put("dropped"));
+        assert_eq!(stage.dropped(), 1, "the reply past the limit");
+        assert_eq!(counted(), MAX_MULTICAST_REPLIES, "is not counted");
+    }
+
+    /// A reply written from its parts is counted as it enters the stage by its class: a reply of
+    /// its payload, in its key's space. Turned red by a reply written from its parts that is not
+    /// counted, or is counted as another kind.
+    #[cfg(all(feature = "transport-stats", feature = "codec-response"))]
+    #[test]
+    fn a_reply_written_from_its_parts_is_counted_by_its_class() {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::reply_stage::{PartsBody, PartsKind, ReplyParts};
+        use wz_session_core::sample::QosLevel;
+        use wz_session_core::stats::{StatMedium, StatMessage, StatSpace, TransportStats};
+        let stage = GroupTxStage::new(&params());
+        let stats = Rc::new(TransportStats::default());
+        stage.attach_stats(Rc::clone(&stats));
+        stage.enqueue_reply_parts(ReplyParts::new(
+            9,
+            "demo/a",
+            None,
+            QosLevel::from_parts(Priority::DEFAULT, CongestionControl::Block, false),
+            PartsKind::Reply {
+                body: PartsBody::Put(b"answer"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        ));
+        assert!(stage.take().is_some(), "CONTROL: the reply is on its lane");
+        let sent = stats.report().tx;
+        assert_eq!(sent.n_msgs_on(StatMedium::Net), 1);
+        let replies = sent.payload_of(StatMessage::Reply, StatSpace::User);
+        assert_eq!((replies.msgs, replies.pl_bytes), (1, "answer".len()));
     }
 
     /// Each message of the session the stage takes is counted into the counters its holder
