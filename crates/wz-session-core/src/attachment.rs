@@ -163,16 +163,14 @@ pub fn decode_attachment_ext_shared(
 ) -> Option<crate::link::RxBytes> {
     #[cfg(feature = "rx-shared-bytes")]
     {
-        for ext in extensions {
-            if crate::ext_header::ext_eid(ext.header) != attachment_eid(ext_id) {
-                continue;
-            }
-            // The same entry `decode_attachment_ext` reads: a plain ZBuf body.
-            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
-                return Some(z.value.as_rx_bytes().clone());
-            }
+        // The same entry `decode_attachment_ext` reads, the last of the
+        // attachment's identity, so the shared answer and the borrowed one
+        // never name two different entries of a chain that repeats it.
+        let ext = crate::ext_view::last_by_eid(extensions, attachment_eid(ext_id))?;
+        match &ext.body {
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => Some(z.value.as_rx_bytes().clone()),
+            _ => None,
         }
-        None
     }
     #[cfg(not(feature = "rx-shared-bytes"))]
     {
@@ -329,6 +327,37 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A chain that repeats a carrier's attachment is read by its last entry, by the shared
+    /// reader as by the borrowed one, as upstream's body decoders assign each entry they meet
+    /// (`commons/zenoh-codec/src/zenoh/put.rs` @ `*ext_attachment = Some(a);`,
+    /// `commons/zenoh-codec/src/zenoh/del.rs` @ `ext_attachment = Some(a);`); the other
+    /// carrier's attachment after them is not read. Turned red by a reader that keeps the first
+    /// entry of the identity.
+    #[test]
+    fn a_repeated_attachment_is_read_by_its_last_entry_shared_and_borrowed() {
+        for (carrier_id, other_id) in [
+            (ATTACHMENT_EXT_ID_PUSH, ATTACHMENT_EXT_ID_DEL),
+            (ATTACHMENT_EXT_ID_DEL, ATTACHMENT_EXT_ID_PUSH),
+        ] {
+            let chain = [
+                encode_attachment_ext::<Wire>(carrier_id, b"first").unwrap(),
+                encode_attachment_ext::<Wire>(carrier_id, b"last").unwrap(),
+                encode_attachment_ext::<Wire>(other_id, b"other").unwrap(),
+            ];
+            assert_eq!(
+                decode_attachment_ext(&chain, carrier_id),
+                Some(&b"last"[..]),
+                "borrowed, carrier {carrier_id:#04x}"
+            );
+            let shared = decode_attachment_ext_shared(&chain, carrier_id);
+            assert_eq!(
+                shared.as_ref().map(crate::link::RxBytes::as_slice),
+                Some(&b"last"[..]),
+                "shared, carrier {carrier_id:#04x}"
+            );
         }
     }
 
