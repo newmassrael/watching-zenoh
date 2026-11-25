@@ -23,6 +23,10 @@
 //! the key and the parameters and hands the key to each reply, so a keep takes no memory of the
 //! session but the row and copies nothing onto the heap.
 //!
+//! A session whose read steps its one link itself holds nothing of a peer's query it reads where
+//! the frame lies: the read hands it to each queryable it reaches, one call at a time with the
+//! session let go of, before the next record (`queries`).
+//!
 //! The session's own get is the exception to the round (`local-queryable`): the queryables it
 //! matched are noted by the plane and the get hands each of them its own view ([`OwnGet`]) once
 //! the session's lock is let go, inside the call. Nothing of the query is copied: a queryable
@@ -63,7 +67,8 @@ use wz_session_core::sample::QosLevel;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::sample::{EncodingHint, SourceInfo};
 
-use crate::round::{CoopCalls, Latch};
+use crate::calls::CoopCalls;
+use crate::form::Latch;
 
 use super::{key_on_link, CoopEngine};
 
@@ -177,7 +182,7 @@ pub(crate) struct QueryableCall {
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
 // no one writes after the declaration (its id) and what is made for every thread that may make a
-// call (`crate::round::CoopForm`): its latch, and its callback, which is `Send + Sync` and called
+// call (`crate::form::CoopForm`): its latch, and its callback, which is `Send + Sync` and called
 // through a shared borrow. The row lies in the session's arena, which
 // the tables never move a row in, until its last call ended.
 unsafe impl Send for QueryableCall {}
@@ -556,7 +561,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", wz_round))]
 mod round_tests {
     //! A link's query held in the session's round of deliveries: handed to the queryable it reached
     //! with its parts read where they lie, its call ended by the round.

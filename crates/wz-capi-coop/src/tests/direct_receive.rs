@@ -25,8 +25,9 @@ use crate::{CoopConfig, EngineHold};
 const COUNT: u8 = 3;
 
 /// A peer's reply is handed to the get it answers by the read itself, with the session free and
-/// nothing of it held in the round. Turned red by a reply offered to the round (the read counts
-/// none) or handed out while the read holds the session.
+/// nothing of it held in the round. The get consolidates nothing, so the reply is handed as it
+/// comes and not with what its leg held to its end. Turned red by a reply offered to the round
+/// (the read counts none) or handed out while the read holds the session.
 #[cfg(all(
     feature = "query",
     not(any(feature = "threads", feature = "listen", feature = "group"))
@@ -39,12 +40,15 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     super::get::settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
-    let seen: Arc<Mutex<Vec<(bool, Vec<u8>)>>> = Arc::default();
+    // Whether each reply's callback found the session free, and the reply's payload.
+    type Seen = Arc<Mutex<Vec<(bool, Vec<u8>)>>>;
+    let seen: Seen = Arc::default();
     let mut session = Some(EngineHold::downgrade(&engine));
     let issued = engine.get_on_wire(
         "demo/g/a",
         &WireKey::literal(),
-        &super::get::remote_get(),
+        &super::get::remote_get()
+            .with_consolidation(wz_session_core::query_mode::ConsolidationMode::None),
         None,
         &mut || {
             let seen = seen.clone();
@@ -74,6 +78,71 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
         engine.replies_handed_by_the_read(),
         1,
         "the reply was held in the round"
+    );
+}
+
+/// A peer's query is handed to each queryable it reaches by the read itself, one call at a time in
+/// the table's order with the session free, nothing of it held in the round, and its Final follows
+/// the replies. Turned red by a query offered to the round (the read counts none), handed while the
+/// read holds the session, or a Final sent before a reply.
+#[cfg(all(
+    feature = "queryable",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_query_is_handed_to_its_queryables_by_the_read_with_the_session_free() {
+    use wz_capi_port::QueryableSink;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let seen: Arc<Mutex<Vec<(u8, bool)>>> = Arc::default();
+    // Two keys, so neither declaration stands for the other.
+    for (which, key) in [(1u8, "demo/h/**"), (2, "demo/h/a")] {
+        let seen = seen.clone();
+        let session = EngineHold::downgrade(&engine);
+        engine
+            .declare_queryable_on_wire(
+                key,
+                WireKey::literal(),
+                false,
+                Locality::Remote,
+                None,
+                QueryableSink::shared(move |query, out, _holder| {
+                    let free = session
+                        .upgrade()
+                        .is_some_and(|engine| engine.session_is_free());
+                    seen.lock().unwrap().push((which, free));
+                    out.reply_keyed(query.keyexpr(), b"r")
+                        .expect("a reply on the query's own key");
+                }),
+            )
+            .expect("the engine has queryables in this build");
+    }
+    until(&engine, "the router to see the queryables", || {
+        router.seen(|s| s.declares) >= 2
+    });
+    assert_eq!(
+        engine.queries_handed_by_the_read(),
+        0,
+        "CONTROL: nothing is handed before the query"
+    );
+    router.send(Command::Query(3, "demo/h/a"));
+    until(&engine, "the replies and the final", || {
+        router.seen(|s| s.answers.len()) >= 3
+    });
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, true), (2, true)],
+        "each queryable in its order, the session free"
+    );
+    assert_eq!(
+        router.seen(|s| s.answers.clone()),
+        vec!["reply", "reply", "final"]
+    );
+    assert_eq!(
+        engine.queries_handed_by_the_read(),
+        2,
+        "the query was held in the round"
     );
 }
 

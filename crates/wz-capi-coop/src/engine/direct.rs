@@ -91,16 +91,11 @@ impl LinkEnd for DirectEnd {
 pub(crate) struct FaceRecords<C: ClockSource + 'static> {
     pub(super) face: HeldFace,
     pub(super) actions: LinkHandle<C>,
-    /// The link the records are read from, which keeps where the datagram it lends lies.
-    pub(super) link: CellRc<LinkGate<C>, LinkCount>,
     #[cfg(feature = "queryable")]
     pub(super) plane: PlacedRef<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
     #[cfg(feature = "queryable")]
     pub(super) generation: u64,
-    /// The session's round of deliveries, told where a rejoined message lies while its records
-    /// are dispatched.
-    pub(super) lane: PlacedRef<Round>,
     /// Whether Pushes were dispatched whose drains are still owed ([`EventSink::end_records`]).
     pub(super) after_pushes: bool,
 }
@@ -108,33 +103,11 @@ pub(crate) struct FaceRecords<C: ClockSource + 'static> {
 impl<C: ClockSource + 'static> FaceRecords<C> {
     /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the planes
     /// `planes` names of the face's tables in `registry`, the held session's, and send what it
-    /// staged. The round is told where the link lends the datagram for the length of the dispatch
-    /// alone: the walks that hand a Push's sample out (`pinned`) read it in the event itself, so a
-    /// record the planes offer the round is the one the link tells it of.
-    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
-        // SAFETY: `registry` is borrowed from the held session, so the session's lock is held.
-        unsafe { self.link.lend_to(&self.lane) };
-        self.dispatch_records(registry, event, planes);
-        // SAFETY: as above.
-        unsafe { self.lane.set_lending(None) };
-    }
-
-    /// [`Self::dispatch`], the round told already.
+    /// staged.
     #[cfg(feature = "queryable")]
-    fn dispatch_records(
-        &self,
-        registry: &mut Registry,
-        event: IterationEvent<'_, '_>,
-        planes: Planes,
-    ) {
+    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
         let face = self.face;
         let actions = &*self.actions;
-        let (plane, generation) = (&self.plane, self.generation);
-        // The queries this frame carries arrive on this face's link.
-        plane.set_arriving(generation);
-        // A query by an id of the shared dictionary is kept, so its replies mirror its key form.
-        #[cfg(feature = "shared-key-ids")]
-        actions.note_requests(&event);
         // What the declaration watches are told of this frame is this link's peer's.
         #[cfg(any(
             feature = "remote-declaration-watch",
@@ -143,21 +116,44 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
         registry.hear_decl_link(|| actions.peer_session_zid());
         registry.dispatch_event_to(face, event, planes);
         registry.flush_pending_replies(face, actions);
-        for (rid, qos) in registry.take_pending_final_rids(face) {
-            if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
-                actions.send_response_final(rid, qos);
-            }
+        self.owe_finals(registry);
+    }
+
+    /// Owe the `Final`s the dispatch of the face's records staged
+    /// (`Registry::take_pending_final_rids`), each as `Self::owe_final` owes it.
+    #[cfg(feature = "queryable")]
+    pub(super) fn owe_finals(&self, registry: &mut Registry) {
+        for (rid, qos) in registry.take_pending_final_rids(self.face) {
+            self.owe_final(rid, qos);
         }
     }
 
-    /// [`Self::dispatch`], the round told already.
+    /// The query `rid` of the face's link owes its `Final`, of `qos`: sent now when nothing
+    /// holds it, and otherwise once the last callback or kept query holding it lets go.
+    #[cfg(feature = "queryable")]
+    pub(super) fn owe_final(&self, rid: wz_session_core::wire_id::RequestId, qos: QosLevel) {
+        if self
+            .plane
+            .with_holds(|holds| holds.owe(self.generation, rid, qos))
+        {
+            self.actions.send_response_final(rid, qos);
+        }
+    }
+
+    /// Keep the key form of each query `event` carries by an id of the shared dictionary, so a
+    /// reply on its key mirrors it.
+    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    pub(super) fn note_requests(&self, event: &IterationEvent<'_, '_>) {
+        self.actions.note_requests(event);
+    }
+
+    /// A build without the shared key ids keeps no key form of a query.
+    #[cfg(all(feature = "queryable", not(feature = "shared-key-ids")))]
+    pub(super) fn note_requests(&self, _event: &IterationEvent<'_, '_>) {}
+
+    /// See the build with queryables: one without has no query to owe a Final.
     #[cfg(not(feature = "queryable"))]
-    fn dispatch_records(
-        &self,
-        registry: &mut Registry,
-        event: IterationEvent<'_, '_>,
-        planes: Planes,
-    ) {
+    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
         let actions = &*self.actions;
         // What the declaration watches are told of this frame is this link's peer's.
         #[cfg(any(
@@ -221,27 +217,31 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EventSink for Dir
             IterationEvent::InPlace(ref record) if record.response().is_some() => {
                 self.engine.hand_lent_reply(self.records.face, record);
             }
-            // An alive token answering a pending liveliness get is handed to it as a reply is;
-            // any other declaration of an interest is dispatched as every record is.
-            #[cfg(feature = "liveliness-get")]
-            IterationEvent::InPlace(ref record)
-                if record
-                    .declare()
-                    .is_some_and(|declare| declare.interest_id.is_some()) =>
-            {
-                if let Some(mut held) = self.engine.hand_lent_token(self.records.face, record) {
-                    self.records
-                        .dispatch(&mut held.0.session.registry, event, Planes::All);
-                }
+            // Handed to each queryable it reaches with the session let go of (`queries`), none of it
+            // into the round, a Request the lent form does not represent by its owned projection.
+            #[cfg(feature = "queryable")]
+            IterationEvent::InPlace(ref record) if record.request().is_some() => {
+                self.engine.hand_lent_query(self.records, record, &event);
+            }
+            // A peer's token is handed to each liveliness subscriber it reaches with the session
+            // let go of (`tokens`), an alive token answering a pending liveliness get to that get
+            // as a reply is; the rest of a declaration is dispatched as every record is.
+            #[cfg(feature = "liveliness")]
+            IterationEvent::InPlace(ref record) if record.declare().is_some() => {
+                self.engine.hand_lent_declare(self.records, record, event);
             }
             // The subscribers' side of each record first, a Push's sample handed out one row at a
             // time, then the other planes', as the dispatch of the whole frame orders them.
             IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                 messages, reliable, ..
             }) => {
+                // A query by an id of the shared dictionary is kept before any queryable is handed
+                // it, so its replies mirror its key form.
+                #[cfg(feature = "queryable")]
+                self.records.note_requests(&event);
                 if let Some(messages) = wz_session_core::driver_loop::owned_records(messages) {
                     self.engine
-                        .hand_copied_records(self.records.face, messages, *reliable);
+                        .hand_copied_records(self.records, messages, *reliable);
                 }
                 let Some(mut held) = self.engine.live() else {
                     return;
@@ -291,17 +291,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EventSink for Dir
         false
     }
 
-    fn lend_rejoined(&mut self, message: &wz_session_core::byte_cells::KeptBytes) {
-        let _held = self.engine.core.lock();
-        // SAFETY: the session's lock is held, taken above for the lend.
-        unsafe { self.records.lane.lend_rejoined(message) };
-    }
-
-    fn end_rejoined(&mut self, message: wz_session_core::byte_cells::KeptBytes) {
-        let _held = self.engine.core.lock();
-        // SAFETY: as `lend_rejoined`.
-        unsafe { self.records.lane.end_rejoined(message) };
-    }
+    // No record reads a rejoined message past its walk: the message is let go of as each walk
+    // over it ends, as the sink's default does.
 }
 
 /// The one link's session and what its life's effects are carried out with, behind the face's
@@ -483,6 +474,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
 
 /// What a look at the link's life came to, under the session's lock.
 struct LinkTurn {
+    /// Whether a link lost at the look left tokens its peer declared to retract
+    /// (`CoopEngine::hand_lost_tokens`).
+    #[cfg(feature = "liveliness")]
+    retracts: bool,
     /// The look's reading of the session's clock, in microseconds.
     now_us: u64,
     /// The same instant on the epoch the link's session measures on.
@@ -525,6 +520,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let Some(turn) = self.life_turn(slot, wait) else {
                 return Err(OpenError::NoEndpoint);
             };
+            #[cfg(feature = "liveliness")]
+            if turn.retracts {
+                self.hand_lost_tokens();
+            }
             if let Some(last) = turn.ended {
                 return Err(last);
             }
@@ -571,6 +570,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
         let turn = self.life_turn(slot, wait).ok_or(SessionClosed)?;
+        // A lost link's tokens go before anything a link brings after the loss, and with a loss
+        // that ended the session too.
+        #[cfg(feature = "liveliness")]
+        if turn.retracts {
+            self.hand_lost_tokens();
+        }
         if turn.ended.is_some() {
             self.deliver();
             return Err(SessionClosed);
@@ -606,11 +611,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let mut held = self.live()?;
         let core = &mut held.0;
         core.transport.links.waited(wait);
-        // What a lost link's peer is still owed comes before anything the link brings now.
-        #[cfg(feature = "liveliness")]
-        if self.samples.owes() {
-            core.retract_owed();
-        }
         let now_us = core.now_us();
         let now_ms = core.session_time.ms_at(now_us);
         let input = slot.next_input(core, &self.direct.end);
@@ -658,15 +658,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             core.link_due_us = slot.life_due_us.min(slot.pump_due_us);
             core.settle_ledger();
         }
-        // What the records of a round a delivery handed out still hold (the counts of the key
-        // arena, the rejoined buffer kept for them) is let go of before the link is read, as a
-        // gate of a build whose links are tasks lets it go before each receive: a key the peer
-        // undeclared goes back with no record after it, and the chain a fragment read now starts
-        // finds its buffer free.
-        // SAFETY: the session's lock is held (`held`), and no borrow of the round's table.
-        unsafe { self.samples.settle() };
         let jobs_due_ms = core.jobs_due_at(now_us);
         Some(LinkTurn {
+            #[cfg(feature = "liveliness")]
+            retracts: core.session.registry.retracting(),
             now_us,
             now_ms,
             jobs_due_ms,
@@ -809,6 +804,40 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // may take a while to refuse a dial, and a wait to dial again counted from before the
             // dial would be over by then, so that each read would dial again at once.
             now_us = core.now_us();
+        }
+    }
+
+    /// Hand the liveliness subscribers the declaration `record` of the face `records` reads, lent
+    /// where its frame lies (`event`): its token, when it is one, bound or unbound under the
+    /// session's lock and handed to each row it reaches once the lock is let go of, one call at a
+    /// time (`tokens`), and the rest of it dispatched to every plane but the token's. An alive
+    /// token answering a pending liveliness get is that get's alone, handed to it as a reply is.
+    /// A closed session hands nothing.
+    #[cfg(feature = "liveliness")]
+    fn hand_lent_declare(
+        &self,
+        records: &FaceRecords<C>,
+        record: &wz_session_core::driver_loop::InPlaceRecord<'_, '_>,
+        event: IterationEvent<'_, '_>,
+    ) {
+        let face = records.face;
+        #[cfg(feature = "liveliness-get")]
+        let held = self.hand_lent_token(face, record);
+        #[cfg(not(feature = "liveliness-get"))]
+        let held = self.live();
+        let Some(mut held) = held else {
+            return;
+        };
+        let mut news = wz_session_core::declare::liveliness_subscriber::TokenNews::default();
+        let told = held
+            .0
+            .session
+            .registry
+            .take_lent_token(face, record, &mut news);
+        records.dispatch(&mut held.0.session.registry, event, Planes::All);
+        drop(held);
+        if told {
+            self.hand_token_row_by_row(&news, false);
         }
     }
 

@@ -1967,6 +1967,36 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
     }
 
+    /// The subscribers' side of `event` but its samples, for a caller that hands each Push's
+    /// sample out itself, one subscriber at a time (`Self::lend_in_place`, `Self::take_record`): an
+    /// owned frame's records that are no Push are taken as [`Self::take_control_record`] takes
+    /// them, and a record lent where its frame lies as the lent dispatch takes its control side. A
+    /// Push is left to the caller, so no delivery context is read.
+    // Out of line, for the stack, as `Self::dispatch_iteration_event` is.
+    #[inline(never)]
+    #[cfg(feature = "storage-profile")]
+    pub fn take_control_of_event<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        event: IterationEvent<'_, '_>,
+    ) {
+        match event {
+            #[cfg(feature = "alloc")]
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    for message in messages {
+                        self.take_control_record(subs, message);
+                    }
+                }
+            }
+            #[cfg(feature = "rx-lent-control")]
+            IterationEvent::InPlace(record) => self.dispatch_in_place_control(subs, &record),
+            _ => {}
+        }
+        // Read by the arms that exist; with none compiled in it is not.
+        let _ = &subs;
+    }
+
     /// The control records this registry owns, lent where
     /// their frame lies: a `Declare`'s `DeclKexpr` / `UndeclKexpr` bind and unbind
     /// the peer's keyexpr aliases, and a subscriber `Interest` is answered from this
@@ -2040,26 +2070,44 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ) {
         #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
         let reliability = _reliability;
+        // R227 — wire-arrived Push carries `is_remote = true` so
+        // the locality filter selects `allows_remote()`. The
+        // self-publish loopback path (see
+        // [`local_publish`](LocalSubscribers::local_publish)) enters
+        // `fire_to_subscribers`
+        // directly with `is_remote = false`.
+        //
+        // R311h — the `NetworkMessage::Push` variant is elided when
+        // `codec-push` is off. R311dx-pre — the dispatch arm here is
+        // gated one level finer, on `any(pubsub-put, pubsub-delete)`:
+        // projecting a Push into a Sample needs at least one body op
+        // (Put/Del), so a `codec-push`-only build can parse a Push
+        // frame but has no body op to interpret it. The arm is then
+        // absent and the Push falls through to the control side, which
+        // drops it, mirroring the `PushOwnedVariant::Default` silent-drop. The
+        // loopback path ([`local_publish`](LocalSubscribers::local_publish)) stays
+        // unguarded — it does not depend on the wire codec gate.
+        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+        if let NetworkMessage::Push(push) = message {
+            self.dispatch_push(subs, cx, push, reliability, true, 0);
+            return;
+        }
+        self.take_control_record(subs, message);
+        // `cx` is read by the Push's arm alone, which a build with no body op lacks.
+        let _ = &cx;
+    }
+
+    /// The subscribers' side of `message`, an owned record that is no Push, as [`Self::dispatch`]
+    /// takes it: a `Declare`'s alias is bound or unbound, and a subscriber `Interest` is answered
+    /// from this session's own subscriptions. A record of any other kind is another plane's. No
+    /// sample is handed out, so no delivery context is read.
+    #[cfg(feature = "alloc")]
+    pub fn take_control_record<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        message: &NetworkMessage,
+    ) {
         match message {
-            // R227 — wire-arrived Push carries `is_remote = true` so
-            // the locality filter selects `allows_remote()`. The
-            // self-publish loopback path (see
-            // [`local_publish`](LocalSubscribers::local_publish)) enters
-            // `fire_to_subscribers`
-            // directly with `is_remote = false`.
-            //
-            // R311h — the `NetworkMessage::Push` variant is elided when
-            // `codec-push` is off. R311dx-pre — the dispatch arm here is
-            // gated one level finer, on `any(pubsub-put, pubsub-delete)`:
-            // projecting a Push into a Sample needs at least one body op
-            // (Put/Del), so a `codec-push`-only build can parse a Push
-            // frame but has no body op to interpret it. The arm is then
-            // absent and the Push falls through to `_ => {}` (drop),
-            // mirroring the `PushOwnedVariant::Default` silent-drop. The
-            // loopback path ([`local_publish`](LocalSubscribers::local_publish)) stays
-            // unguarded — it does not depend on the wire codec gate.
-            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-            NetworkMessage::Push(push) => self.dispatch_push(subs, cx, push, reliability, true, 0),
             #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body, subs.own_space()),
             // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
@@ -2074,31 +2122,30 @@ impl<Q: Storage> SubscriberPeer<Q> {
             }
             _ => {}
         }
-        // `subs` and `cx` are read by the arms that exist; with none compiled in they are
-        // not, and the signature is the same in every subset.
-        let _ = (&subs, &cx);
+        // `subs` is read by the arms that exist; with none compiled in it is not, and the
+        // signature is the same in every subset.
+        let _ = &subs;
     }
 
     /// The subscribers' side of `message`, one owned record of a frame, for a delivery that hands
     /// each sample out itself, one subscriber at a time: a Push is projected into the sample its
     /// subscribers are handed (`project_push`; `None` for one nobody is handed), and any other
-    /// record is taken as [`Self::dispatch`] takes it, which hands nothing out.
+    /// record is taken as [`Self::take_control_record`] takes it, which hands nothing out and
+    /// reads no delivery context.
     #[cfg(feature = "alloc")]
-    pub fn take_record<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
+    pub fn take_record<L: LocalSubscribers>(
         &mut self,
         subs: &mut L,
-        cx: &mut X,
         message: &NetworkMessage,
-        reliability: Reliability,
+        _reliability: Reliability,
     ) -> Option<crate::sample::Sample> {
-        match message {
-            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-            NetworkMessage::Push(push) => self.project_push(&*subs, push, reliability, true, 0),
-            other => {
-                self.dispatch(subs, cx, other, reliability);
-                None
-            }
+        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+        if let NetworkMessage::Push(push) = message {
+            let reliability = _reliability;
+            return self.project_push(&*subs, push, reliability, true, 0);
         }
+        self.take_control_record(subs, message);
+        None
     }
 
     /// A peer's subscriber Interest, in a build that answers none (`interest-answer` off): no row
@@ -5262,14 +5309,14 @@ mod tests {
         ));
         {
             let SubscriberRegistry { table, peer } = &mut registry;
-            let taken = peer.take_record(table, &mut (), &push, Reliability::Reliable);
+            let taken = peer.take_record(table, &push, Reliability::Reliable);
             assert_eq!(
                 taken.map(|sample| sample.keyexpr),
                 Some("topic/a".to_string()),
                 "the Push's sample, its key resolved"
             );
             assert!(
-                peer.take_record(table, &mut (), &unknown, Reliability::Reliable)
+                peer.take_record(table, &unknown, Reliability::Reliable)
                     .is_none(),
                 "a key that does not resolve projects nothing"
             );

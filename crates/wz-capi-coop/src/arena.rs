@@ -168,11 +168,14 @@ use crate::engine::REGISTRY_LEND_BYTES;
 use crate::engine::ROOM_PLACE_BYTES;
 #[cfg(feature = "runtime-plan")]
 use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
+#[cfg(all(wz_round, feature = "runtime-plan"))]
+use crate::form::CoopForm;
 use crate::form::SessionLock;
 use crate::lodging::{LodgingRows, LodgingSpan};
 use crate::open_source::EndpointList;
-#[cfg(feature = "runtime-plan")]
-use crate::round::{CoopForm, CALLBACK_BYTES};
+#[cfg(all(wz_round, feature = "runtime-plan"))]
+use crate::round::CALLBACK_BYTES;
+#[cfg(wz_round)]
 use crate::round::{RoundRowCounts, RECORD_BYTES};
 use crate::CoopConfig;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
@@ -490,8 +493,12 @@ const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 /// itself, where the open places them in the arena (`runtime-plan`); a region holds them otherwise:
 /// the round keeps no area, since every record is read where it lies, and a round of one thread
 /// keeps its records in itself.
+#[cfg(wz_round)]
 const LANE_ROWS: usize =
     ((RECORD_BYTES != 0) as usize + 3) * cfg!(feature = "runtime-plan") as usize;
+/// A build that puts nothing in the round (`wz_round`) places none, nor any of its tables.
+#[cfg(not(wz_round))]
+const LANE_ROWS: usize = 0;
 /// The places the session lends its Router and, where its links run as tasks, its registry in for
 /// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
 const STEP_LEND_ROWS: usize = cfg!(feature = "runtime-plan") as usize
@@ -1384,7 +1391,9 @@ impl TransportRows {
 /// its faces' peers write and are owed, and the key arena every keyed row keeps its key in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionRows {
-    /// The rows of the round's tables.
+    /// The rows of the round's tables, none in a build that puts nothing in the round
+    /// (`wz_round`).
+    #[cfg(wz_round)]
     round: RoundRowCounts,
     /// The rows of the engine's record of the session's declarations.
     entities: EntityRows,
@@ -1409,6 +1418,7 @@ pub struct SessionRows {
 impl SessionRows {
     /// The rows of no session: a vacant plan's.
     const NONE: Self = Self {
+        #[cfg(wz_round)]
         round: RoundRowCounts {
             records: 0,
             callbacks: 0,
@@ -1754,23 +1764,26 @@ impl ArenaPlan {
             );
             self.transport.tx_slots = least(tx_slots, links);
         }
-        self.session.round = RoundRowCounts {
-            records: self.lent(
-                ArenaLimit::DeliveryLaneEvents,
-                limits.delivery_lane_events(),
-                caps::DELIVERY_LANE_EVENTS,
-            ),
-            callbacks: self.lent(
-                ArenaLimit::DeliveryLaneCallbacks,
-                limits.delivery_lane_callbacks(),
-                caps::DELIVERY_LANE_CALLBACKS,
-            ),
-            longest_key: self.lent(
-                ArenaLimit::MaxKeyexprBytes,
-                limits.max_keyexpr_bytes(),
-                caps::MAX_KEYEXPR_BYTES,
-            ),
-        };
+        #[cfg(wz_round)]
+        {
+            self.session.round = RoundRowCounts {
+                records: self.lent(
+                    ArenaLimit::DeliveryLaneEvents,
+                    limits.delivery_lane_events(),
+                    caps::DELIVERY_LANE_EVENTS,
+                ),
+                callbacks: self.lent(
+                    ArenaLimit::DeliveryLaneCallbacks,
+                    limits.delivery_lane_callbacks(),
+                    caps::DELIVERY_LANE_CALLBACKS,
+                ),
+                longest_key: self.lent(
+                    ArenaLimit::MaxKeyexprBytes,
+                    limits.max_keyexpr_bytes(),
+                    caps::MAX_KEYEXPR_BYTES,
+                ),
+            };
+        }
         self.session.key_bytes = self.lent(
             ArenaLimit::KeyArenaBytes,
             Quota::at_most(limits.key_arena_bytes()),
@@ -1860,37 +1873,36 @@ impl ArenaPlan {
         }
         // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
         // lends them, as a round of one thread keeps them in itself and is lent no byte of them.
-        // Where the build fixes the session's shape the tables and the round lie in the session's
-        // region instead (`StatePlaces::round`).
-        #[cfg(feature = "runtime-plan")]
-        if RECORD_BYTES != 0 {
+        // A build that puts nothing in the round (`wz_round`) lays out none of them, and where the
+        // build fixes the session's shape the tables and the round lie in the session's region
+        // instead (`StatePlaces::round`).
+        #[cfg(all(wz_round, feature = "runtime-plan"))]
+        {
+            if RECORD_BYTES != 0 {
+                self.put(
+                    ArenaPart::DeliveryRecords,
+                    self.session.round.records,
+                    RECORD_BYTES,
+                );
+            }
             self.put(
-                ArenaPart::DeliveryRecords,
-                self.session.round.records,
-                RECORD_BYTES,
+                ArenaPart::DeliveryCallbacks,
+                self.session.round.callbacks,
+                CALLBACK_BYTES,
+            );
+            self.put(
+                ArenaPart::DeliveryKeys,
+                1,
+                self.session.round.key_bytes::<CoopForm>(),
+            );
+            // The round itself, placed beside its tables (`Round::placed_over`): its one owner
+            // and the handles of it that count nothing.
+            self.put(
+                ArenaPart::DeliveryRound,
+                1,
+                core::mem::size_of::<crate::round::Round>(),
             );
         }
-        #[cfg(feature = "runtime-plan")]
-        self.put(
-            ArenaPart::DeliveryCallbacks,
-            self.session.round.callbacks,
-            CALLBACK_BYTES,
-        );
-        #[cfg(feature = "runtime-plan")]
-        self.put(
-            ArenaPart::DeliveryKeys,
-            1,
-            self.session.round.key_bytes::<CoopForm>(),
-        );
-        // The round itself, placed beside its tables (`Round::placed_over`): its one owner and
-        // the handles of it that count nothing. Where the build fixes the session's shape the round
-        // and the step places below lie in the session's region instead (`StatePlaces`).
-        #[cfg(feature = "runtime-plan")]
-        self.put(
-            ArenaPart::DeliveryRound,
-            1,
-            core::mem::size_of::<crate::round::Round>(),
-        );
         // The places the session lends its registry and its Router in for a step, a place each
         // (`crate::engine::StepPlaces`); a read that steps its one link itself dispatches under the
         // session's lock and lends no registry.
@@ -2210,6 +2222,7 @@ impl ArenaPlan {
     }
 
     /// How many rows each table of the session's round of deliveries is lent.
+    #[cfg(wz_round)]
     pub fn round(&self) -> RoundRowCounts {
         self.session.round
     }

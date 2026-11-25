@@ -1,77 +1,44 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The engine's round of deliveries ([`wz_session_core::round`]): the calls its records owe and
-//! the kinds of record it keeps, as the engine's build names them (`CoopCalls`), the room one
-//! record a session is handed can take of it, and the gates that hold each link back while the
-//! round has not that room (decision Q4), or, where the read hands each record out as it is read,
-//! that tell the round where the datagram a link lends lies.
+//! The engine's round of deliveries ([`wz_session_core::round`]), of the calls and kinds of record
+//! the engine's build names (`crate::calls`): the room one record a session is handed can take of
+//! it, and the gates that hold each link back while the round has not that room (decision Q4).
 
-#[cfg(any(feature = "listen", feature = "group", not(feature = "threads")))]
+#[cfg(any(feature = "listen", feature = "group"))]
 use core::cell::Cell;
 
+// What a link is gated through: the round's gate.
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
-#[cfg(any(
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness"
-))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::limit_binding::Quota;
-#[cfg(any(
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness"
-))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
 #[cfg(test)]
 use wz_session_core::placed::Placed;
 #[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::placed::PlacedRef;
-use wz_session_core::plane_lock::LockFamily;
-use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
-use wz_session_core::sink::SampleRef;
 
-#[cfg(feature = "query")]
-use crate::engine::LegId;
-#[cfg(feature = "liveliness")]
-use crate::engine::LivelinessCall;
-#[cfg(feature = "queryable")]
-use crate::engine::QueryableCall;
+#[cfg(feature = "local-subscriber")]
 use crate::engine::SubscriberCall;
-#[cfg(any(
-    feature = "remote-declaration-watch",
-    feature = "declarations-synced-event"
-))]
-use crate::engine::WatchCall;
-#[cfg(feature = "query")]
-use wz_capi_port::ReplyCallback;
-#[cfg(feature = "liveliness")]
-use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
-#[cfg(feature = "queryable")]
+#[cfg(all(
+    feature = "queryable",
+    any(test, feature = "threads", feature = "listen", feature = "group")
+))]
 pub(crate) use wz_session_core::round::AnswersQueries;
 #[cfg(feature = "query")]
 pub(crate) use wz_session_core::round::LegHolders;
-#[cfg(any(
-    test,
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness"
-))]
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) use wz_session_core::round::ReadRoom;
 pub(crate) use wz_session_core::round::RoundRows;
 pub use wz_session_core::round::{RoundCounts, RoundRowCounts};
 
+use crate::calls::CoopCalls;
+
 /// The engine's round of deliveries.
 pub(crate) type Round = wz_session_core::round::Round<CoopCalls>;
-
-/// How the engine's calls stand to its threads, and the latch its rows count calls on: the
-/// engine's form ([`crate::form`]).
-pub(crate) use crate::form::{CoopForm, Latch};
 
 /// The bytes of one record of the engine's round.
 pub(crate) const RECORD_BYTES: usize = RoundRows::<CoopCalls>::RECORD_BYTES;
@@ -152,188 +119,12 @@ fn session_watches(limits: &SessionLimits) -> usize {
 /// over it counts as the build's, which the open refuses. What a record of a token owes a callback
 /// to at most, and so what the round's callbacks are asked for ([`read_room`]) and a retraction
 /// asks of them.
-#[cfg(any(
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness"
-))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) fn session_liveliness<const LIVE: usize>(limits: &SessionLimits) -> usize {
     limits
         .max_liveliness_subscriptions()
         .lent_under(Quota::at_most(LIVE))
         .unwrap_or(LIVE)
-}
-
-/// The calls the engine's round owes and the kinds of record it keeps: each kind of row the
-/// engine's build keeps none of has the call [`Infallible`](core::convert::Infallible) and a
-/// record kind of no size.
-pub(crate) enum CoopCalls {}
-
-impl RoundCalls for CoopCalls {
-    type Subscriber = SubscriberCall;
-    #[cfg(feature = "liveliness")]
-    type Liveliness = LivelinessCall;
-    #[cfg(not(feature = "liveliness"))]
-    type Liveliness = core::convert::Infallible;
-    #[cfg(feature = "queryable")]
-    type Queryable = QueryableCall;
-    #[cfg(not(feature = "queryable"))]
-    type Queryable = core::convert::Infallible;
-    #[cfg(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    ))]
-    type Watch = WatchCall;
-    #[cfg(not(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    )))]
-    type Watch = core::convert::Infallible;
-    #[cfg(feature = "query")]
-    type Leg = LegId;
-    #[cfg(not(feature = "query"))]
-    type Leg = core::convert::Infallible;
-    #[cfg(feature = "query")]
-    type ReplyCallback = ReplyCallback;
-    #[cfg(not(feature = "query"))]
-    type ReplyCallback = core::convert::Infallible;
-    #[cfg(feature = "liveliness")]
-    type Tokens = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "liveliness"))]
-    type Tokens = wz_session_core::session_tables::Absent;
-    #[cfg(feature = "query")]
-    type Replies = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "query"))]
-    type Replies = wz_session_core::session_tables::Absent;
-    #[cfg(feature = "queryable")]
-    type Queries = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "queryable"))]
-    type Queries = wz_session_core::session_tables::Absent;
-    #[cfg(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    ))]
-    type Watches = wz_session_core::session_tables::Present;
-    #[cfg(not(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    )))]
-    type Watches = wz_session_core::session_tables::Absent;
-    #[cfg(feature = "local-subscriber")]
-    type Capture = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "local-subscriber"))]
-    type Capture = wz_session_core::session_tables::Absent;
-    #[cfg(feature = "group")]
-    type Group = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "group"))]
-    type Group = wz_session_core::session_tables::Absent;
-    type Locks = CoopSyncLocks;
-    #[cfg(all(test, feature = "std"))]
-    type Tally = Handed;
-    #[cfg(not(all(test, feature = "std")))]
-    type Tally = ();
-    type Form = CoopForm;
-}
-
-impl PlaneCalls for CoopCalls {
-    #[cfg(feature = "local-queryable")]
-    type LocalAnswers = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "local-queryable"))]
-    type LocalAnswers = wz_session_core::session_tables::Absent;
-    // The read that hands each record out as it is read hands a peer's reply to its get itself
-    // (`engine::replies`).
-    #[cfg(any(
-        feature = "local-queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
-    type Captures = wz_session_core::session_tables::Present;
-    #[cfg(not(any(
-        feature = "local-queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    )))]
-    type Captures = wz_session_core::session_tables::Absent;
-    type Queues = crate::engine::CoopLocks;
-}
-
-/// The port's lock, as the lock the round keeps what answers its queries under.
-pub(crate) enum CoopSyncLocks {}
-
-impl LockFamily for CoopSyncLocks {
-    type Lock<T> = wz_capi_port::sync::Lock<T>;
-
-    unsafe fn init_at<T>(
-        place: core::ptr::NonNull<Self::Lock<T>>,
-        make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
-    ) {
-        // SAFETY: the caller's contract is the lock's.
-        unsafe { wz_capi_port::sync::Lock::init_at(place, make) }
-    }
-
-    fn with<T, R>(lock: &Self::Lock<T>, f: impl FnOnce(&mut T) -> R) -> R {
-        lock.with(f)
-    }
-}
-
-impl RoundCall for SubscriberCall {
-    fn end(self) -> bool {
-        SubscriberCall::end(self)
-    }
-}
-
-impl SampleCall for SubscriberCall {
-    fn hand(&self, sample: &SampleRef<'_>) {
-        SubscriberCall::hand(self, sample);
-    }
-}
-
-#[cfg(feature = "liveliness")]
-impl RoundCall for LivelinessCall {
-    fn end(self) -> bool {
-        LivelinessCall::end(self)
-    }
-}
-
-#[cfg(feature = "liveliness")]
-impl wz_session_core::round::TokenCall for LivelinessCall {
-    fn same_row(&self, other: &Self) -> bool {
-        LivelinessCall::same_row(self, other)
-    }
-
-    fn hand(&self, sample: LivelinessSample<'_>) {
-        LivelinessCall::hand(self, sample);
-    }
-}
-
-#[cfg(feature = "queryable")]
-impl RoundCall for QueryableCall {
-    fn end(self) -> bool {
-        QueryableCall::end(self)
-    }
-}
-
-#[cfg(any(
-    feature = "remote-declaration-watch",
-    feature = "declarations-synced-event"
-))]
-impl RoundCall for WatchCall {
-    fn end(self) -> bool {
-        WatchCall::end(self)
-    }
-}
-
-#[cfg(any(
-    feature = "remote-declaration-watch",
-    feature = "declarations-synced-event"
-))]
-impl wz_session_core::round::WatchCall for WatchCall {
-    fn same_row(&self, other: &Self) -> bool {
-        WatchCall::same_row(self, other)
-    }
-
-    fn hand(&self, event: wz_session_core::round::DeclEvent<'_>) {
-        WatchCall::hand(self, event);
-    }
 }
 
 /// The rounds the engine's round handed out, the samples in them, and of those the ones read
@@ -392,7 +183,7 @@ pub(crate) fn leaked_placed(events: usize) -> &'static mut Placed<Round> {
     // Each table and the round on a span of its own, rounded up to the next start of one.
     let bytes = events * RECORD_BYTES
         + counts.callbacks * CALLBACK_BYTES
-        + counts.key_bytes::<CoopForm>()
+        + counts.key_bytes::<crate::form::CoopForm>()
         + core::mem::size_of::<Round>()
         + 4 * ARENA_ALIGN;
     let arena: &'static mut SessionArena = alloc::boxed::Box::leak(alloc::boxed::Box::new(
@@ -675,115 +466,6 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
     }
 
     // The gate holds back input only: what the session sends goes out while the round is full.
-    fn room_wait(&self) -> Option<WaitOn> {
-        self.pump.room_wait()
-    }
-}
-
-/// The link of a session whose read hands each record out as it is read (`engine::direct`): no
-/// gate holds it back, as each record's callbacks have returned before the next record is read.
-/// The round reads a record's parts only where a link it was told of lends them, and keeps no area
-/// to copy them into, so the link keeps where the datagram it lends lies for as long as it lends
-/// it, and the read tells the round under the session's lock as it dispatches each record of it
-/// ([`Self::lend_to`]): the link's receive runs with nothing of the session held.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-pub(crate) struct LendingLink<P> {
-    pump: P,
-    /// The first byte and the length of the datagram the link lends now: set for the length of
-    /// the `f` of its receive alone, and only for a link that leaves the bytes where they lie until
-    /// it is next asked to receive.
-    lent: Cell<Option<(*const u8, usize)>>,
-}
-
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-impl<P> LendingLink<P> {
-    /// `pump`, lending nothing yet.
-    pub(crate) fn new(pump: P) -> Self {
-        Self {
-            pump,
-            lent: Cell::new(None),
-        }
-    }
-
-    /// Tell `round` where the datagram the link lends now lies, or that it lends none.
-    ///
-    /// # Safety
-    /// The caller holds the session's lock.
-    pub(crate) unsafe fn lend_to(&self, round: &Round) {
-        let lent = self.lent.get().map(|(at, len)| {
-            // SAFETY: `lent` names a datagram only inside the `f` of the link's receive, while
-            // the link lends the bytes where they lie (`Self::recv_with`).
-            unsafe { core::slice::from_raw_parts(at, len) }
-        });
-        // SAFETY: the caller's contract.
-        unsafe { round.set_lending(lent) };
-    }
-}
-
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-impl<P: SessionDatagramLink> SessionDatagramLink for LendingLink<P> {
-    fn service(&self) {
-        self.pump.service()
-    }
-
-    fn service_within(&self, max_wait_ms: u64) {
-        self.pump.service_within(max_wait_ms)
-    }
-
-    fn uses_wake_budget(&self) -> bool {
-        self.pump.uses_wake_budget()
-    }
-
-    fn try_recv(&self) -> Option<RxFrame> {
-        self.pump.try_recv()
-    }
-
-    /// The datagram is lent to the session's read; a link that leaves it where it lies until it
-    /// is next asked to receive keeps where it lies while it is lent, so a record of it may be
-    /// read there.
-    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
-        if !self.pump.lends_until_next_receive() {
-            return self.pump.recv_with(f);
-        }
-        self.pump.recv_with(&mut |datagram: &[u8]| {
-            self.lent.set(Some((datagram.as_ptr(), datagram.len())));
-            f(datagram);
-            self.lent.set(None);
-        })
-    }
-
-    fn lost(&self) -> Option<LostCause> {
-        self.pump.lost()
-    }
-
-    fn holds_input(&self) -> bool {
-        self.pump.holds_input()
-    }
-
-    fn owes_write(&self) -> bool {
-        self.pump.owes_write()
-    }
-
-    fn takes_input(&self) -> bool {
-        self.pump.takes_input()
-    }
-
-    fn keeps_input(&self) -> bool {
-        self.pump.keeps_input()
-    }
-
-    fn keep(&self) {
-        self.pump.keep()
-    }
-
-    fn lends_until_next_receive(&self) -> bool {
-        self.pump.lends_until_next_receive()
-    }
-
-    fn input_wait(&self) -> Option<WaitOn> {
-        self.pump.input_wait()
-    }
-
     fn room_wait(&self) -> Option<WaitOn> {
         self.pump.room_wait()
     }

@@ -115,6 +115,10 @@ compile_error!(
 mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
+// The calls the engine's rows are made through, as the round, the queries' plane and the gets'
+// plane name them: only a build that keeps one of them names them.
+#[cfg(any(wz_round, feature = "query", feature = "queryable"))]
+mod calls;
 mod engine;
 // The places a session's arena lends for values lodged by counts, given back from any thread.
 mod lodging;
@@ -157,6 +161,8 @@ pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.
 pub mod open_source;
 // What the session hands its callbacks after its lock: one table a round, read where the records lie.
+// A build that puts nothing in it (`wz_round`, the crate's build script) has none.
+#[cfg(wz_round)]
 pub mod round;
 #[cfg(feature = "scout")]
 pub mod scout;

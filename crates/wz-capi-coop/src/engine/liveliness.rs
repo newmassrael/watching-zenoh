@@ -31,9 +31,9 @@ use wz_session_core::row_callback::RowCallback;
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
 
+use crate::form::Latch;
 #[allow(unused_imports)]
 use crate::prelude::*;
-use crate::round::Latch;
 
 #[cfg(feature = "group")]
 use super::transport::TellGroups;

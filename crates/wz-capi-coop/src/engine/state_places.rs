@@ -18,6 +18,7 @@ use wz_session_core::caps;
 use wz_session_core::placed::Placed;
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::{HeldReplies, HeldReplyPlaces};
+#[cfg(wz_round)]
 use wz_session_core::round::RoundRowPlaces;
 use wz_session_core::step_lend::LendCell;
 
@@ -39,7 +40,10 @@ use super::{EndedLegs, LegRows};
 use super::{RoomPlace, RoomPlaces, SessionReassembly, StepPlaces};
 #[cfg(any(feature = "query", feature = "queryable"))]
 use crate::arena::SessionRows;
-use crate::round::{CoopCalls, Round, RoundRowCounts, RoundRows};
+#[cfg(wz_round)]
+use crate::calls::CoopCalls;
+#[cfg(wz_round)]
+use crate::round::{Round, RoundRowCounts, RoundRows};
 #[cfg(feature = "query")]
 use wz_session_core::bounded::Lent;
 
@@ -81,9 +85,12 @@ pub(crate) struct StatePlaces {
     registry_lend: MaybeUninit<LendCell<Registry>>,
     /// Where the reassembly Router is lent to the links' receives.
     router_lend: MaybeUninit<LendCell<SessionReassembly>>,
+    /// The session's round of deliveries, none in a build that puts nothing in it (`wz_round`).
+    #[cfg(wz_round)]
     round: MaybeUninit<Round>,
     /// The rows of the round's tables, which the round reads where they lie: the build's bound of
     /// each, as the round's form keeps them.
+    #[cfg(wz_round)]
     round_rows: RoundRowPlaces<CoopCalls>,
     #[cfg(feature = "query")]
     gets: MaybeUninit<GetPlane>,
@@ -156,6 +163,7 @@ impl StatePlaces {
     ///
     /// # Safety
     /// As [`Self::steps`], for the round's field and its rows' field.
+    #[cfg(wz_round)]
     pub(super) unsafe fn round(at: NonNull<Self>, counts: RoundRowCounts) -> Placed<Round> {
         let at = at.as_ptr();
         // SAFETY: the caller's contract; the rows' field holds no value and is reached by the

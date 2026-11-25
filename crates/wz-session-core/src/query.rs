@@ -2749,6 +2749,10 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 mod in_place;
 
+/// A peer's query handed to the queryables it reaches one at a time, each with no lock held.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+pub mod pinned;
+
 impl<C> QueryableRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C`, of this build's
     /// storage profile. Queryable ids start at 1 so 0 stays available as a

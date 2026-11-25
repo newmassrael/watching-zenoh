@@ -6,24 +6,32 @@
 //!
 //! The application layer's observers of what a peer declares are installed once for each kind of
 //! entity some watch is of. While a link's frame is dispatched, under the session's lock, they hold
-//! each event in the session's round of deliveries as a record of its own, with a call of each
-//! watch it reaches, named as the events of the link's peer ([`DeclWatches::hear_link`]); a
-//! group's dispatch names no link, and its events are held for no one, as the port says. The key
-//! of a declaration lies where the round reads it, in the block of the session's key arena the
+//! each event for the watches it reaches, named as the events of the link's peer
+//! ([`DeclWatches::hear_link`]); a group's dispatch names no link, and its events are held for no
+//! one, as the port says.
+//!
+//! Where the links are read by a task or a listener, an event is held in the session's round of
+//! deliveries as a record of its own, with a call of each watch it reaches. The key of a
+//! declaration lies where the round reads it, in the block of the session's key arena the
 //! declaration's row keeps, of which the record holds a count. The round hands the event to the
-//! watch's sink with every other record, in order, outside the lock (decision D8).
+//! watch's sink with every other record, in order, outside the lock (decision D8). Where the read
+//! steps its one link itself and hands each record out as it is read, the event is copied, its key
+//! with it, into a room of the watches' own, and the delivery that follows the record hands it to
+//! each watch it reaches a row at a time: the row is pinned under the lock and its sink called
+//! after it (`DeclWatches::next_call`).
 //!
 //! A watch's row lies in a table fixed when the session opens, a row for each watch its
-//! `MAX_DECL_WATCHES` admits, its sink in a cell the calls the round owes hold a count of, so the
-//! row is not taken by another watch while a call of the last one is owed. An event the round has
-//! no room for is counted for each watch it would reach and told as the loss of that many ahead of
-//! the watch's next event ([`DeclWatchEvent::Lost`]). A watch is told what the peers hold when it
-//! is declared, as records of the same round: at once when the round takes them all, or else as
-//! soon as a delivery has emptied it ([`DeclWatches::owes`]), so a watch declared from inside a
-//! callback, while the round is handed out, is told them by the next round. Until then it is told
-//! no live event, which its catch-up, read off the peers' tables as they stand then, holds. A round
-//! of one thread holds the records of one message, so it is told its catch-up a declaration a
-//! round, the links read no further until it is whole.
+//! `MAX_DECL_WATCHES` admits, its sink in a cell each call owed it holds a count of, so the row is
+//! not taken by another watch while a call of the last one is owed. An event with no room is
+//! counted for each watch it would reach and told as the loss of that many ahead of the watch's
+//! next event ([`DeclWatchEvent::Lost`]). A watch is told what the peers hold when it is declared,
+//! and no live event until then, which its catch-up, read off the peers' tables as they stand then,
+//! holds. A round of threads takes the catch-up whole once it has the room
+//! ([`DeclWatches::owes`]), so a watch declared from inside a callback, while the round is handed
+//! out, is told it by the next round; a round of one thread holds the records of one message, so
+//! it is told its catch-up a declaration a round, the links read no further until it is whole. A
+//! read that steps its one link itself walks the catch-up a declaration at a time once the room is
+//! handed out, before the link is read again.
 
 use alloc::sync::Arc;
 
@@ -41,19 +49,45 @@ use wz_session_core::declare::MatchingReport;
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::placed::PlacedRef;
-use wz_session_core::round::{DeclEvent, DeclEventKind, Owing};
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+use wz_session_core::round::Owing;
+use wz_session_core::round::{DeclEvent, DeclEventKind};
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::row_callback::ThreadForm;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 use super::lock;
 use super::registry::FaceTables;
-use crate::round::{CoopForm, Round};
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+use crate::form::CoopForm;
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+use crate::round::Round;
 
 /// Whether a watch is told its catch-up in parts: a round of one thread is handed out after each
 /// message and holds the records of one alone, so it takes a catch-up a declaration a round.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 const IN_PARTS: bool = !<CoopForm as ThreadForm>::OTHER_THREADS;
+
+/// The watch events the dispatch of one message makes at most: the one declaration or retraction
+/// a `Declare` applies, which its table tells its observers once, and the end of the peer's
+/// initial declarations, told after the dispatch of the message that ends them.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+const MESSAGE_EVENTS: usize = 2;
+
+/// How many events the room holds until the delivery after the dispatch hands them out: those of
+/// one message, so the dispatch of a lent record, which is one message, never finds it full.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+const HEARD_EVENTS: usize = MESSAGE_EVENTS;
+
+// A declaration or a retraction and the end of the initial declarations: one of each a message.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+const _: () = assert!(
+    matches!(1usize.checked_add(1), Some(made) if made <= HEARD_EVENTS),
+    "the room holds every event one message makes"
+);
 
 /// Whether this build hears what a peer declares of `plane`: subscribers in every build, whose
 /// declarations the engine reads for its publishers' write filters, queryables with a querier or a
@@ -96,6 +130,7 @@ fn port_event(event: DeclEvent<'_>) -> DeclWatchEvent<'_> {
 }
 
 /// The loss of `count` events, which names no declaration and no peer.
+#[cfg(any(test, any(feature = "threads", feature = "listen", feature = "group")))]
 fn lost(count: u64) -> DeclEvent<'static> {
     DeclEvent {
         kind: DeclEventKind::Lost,
@@ -150,9 +185,10 @@ impl Cell {
     }
 }
 
-/// A call of a watch's sink a record of the round owes ([`wz_session_core::round::WatchCall`]): a
-/// count of the cell of the watch's row, which keeps the row from another watch until the call
-/// ends. Made under the session's lock as an event reaches the watch, made with no lock held.
+/// A call of a watch's sink, which a record of the round owes where the links are read by a task
+/// or a listener: a count of the cell of the watch's row, which keeps the row from another watch
+/// until the call ends. Begun under the session's lock as an event reaches the watch, made with no
+/// lock held.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct WatchCall {
     cell: Arc<Cell>,
@@ -167,6 +203,7 @@ impl WatchCall {
     }
 
     /// Whether `other` is a call of the same watch.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     pub(crate) fn same_row(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.cell, &other.cell)
     }
@@ -286,6 +323,10 @@ struct Table {
     next_id: DeclWatchId,
     /// The link being dispatched, while one is; none while a group's frame is.
     hearing: Option<Hearing>,
+    /// What the dispatch of the last record held for the watches, until the delivery after it
+    /// hands it out.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    room: Room,
 }
 
 impl Table {
@@ -300,6 +341,8 @@ impl Table {
             observers: PlaneObservers::default(),
             next_id: 0,
             hearing: None,
+            #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+            room: Room::empty(),
         }
     }
 
@@ -309,9 +352,11 @@ impl Table {
     }
 }
 
-/// What the observers and the engine reach: the table, and the round the events are held in.
+/// What the observers and the engine reach: the table, and the round the events are held in where
+/// the links are read by a task or a listener.
 struct Shared {
     table: Mutex<Table>,
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     round: PlacedRef<Round>,
 }
 
@@ -361,6 +406,7 @@ fn held_of(
 }
 
 /// How many declarations of `plane` the peer of `tables` holds now.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 fn held(plane: DeclPlane, tables: &FaceTables) -> usize {
     let mut count: usize = 0;
     held_of(plane, tables, |_, _, _| count = count.saturating_add(1));
@@ -372,6 +418,7 @@ fn held(plane: DeclPlane, tables: &FaceTables) -> usize {
 ///
 /// # Safety
 /// The caller holds the session's lock.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 unsafe fn tell_lost(round: &Round, watch: &mut Watch, cell: &Arc<Cell>) {
     if watch.lost == 0 {
         return;
@@ -388,6 +435,7 @@ unsafe fn tell_lost(round: &Round, watch: &mut Watch, cell: &Arc<Cell>) {
 ///
 /// # Safety
 /// The caller holds the session's lock.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 unsafe fn tell_held<'f, I>(
     round: &Round,
     watch: &mut Watch,
@@ -425,6 +473,7 @@ where
 
 /// Tell `round` whether a watch of `table` is still owed its catch-up, in a round that takes it in
 /// parts ([`IN_PARTS`]): while one is, no link is read, so nothing a link brings overtakes it.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 fn owe_catch_up(round: &Round, table: &Table) {
     if IN_PARTS {
         round.owe(
@@ -440,6 +489,7 @@ fn owe_catch_up(round: &Round, table: &Table) {
 ///
 /// # Safety
 /// The caller holds the session's lock.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 unsafe fn offer(
     round: &Round,
     table: &mut Table,
@@ -469,6 +519,7 @@ unsafe fn offer(
 ///
 /// # Safety
 /// The caller holds the session's lock: the observers are told as a frame is dispatched.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 unsafe fn heard(
     shared: &Shared,
     kind: DeclEventKind,
@@ -491,9 +542,212 @@ unsafe fn heard(
     unsafe { offer(&shared.round, &mut table, event, plane, held) };
 }
 
+/// One event as a watch is handed it, its key copied out of what the session holds, so it is
+/// handed with no lock held.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[derive(Clone)]
+pub(super) struct Told {
+    kind: DeclEventKind,
+    id: u64,
+    peer: Option<SessionZid>,
+    key: [u8; caps::MAX_KEYEXPR_BYTES],
+    len: usize,
+}
+
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+impl Default for Told {
+    /// No event yet: where a delivery copies each event it hands.
+    fn default() -> Self {
+        Self {
+            kind: DeclEventKind::Lost,
+            id: 0,
+            peer: None,
+            key: [0; caps::MAX_KEYEXPR_BYTES],
+            len: 0,
+        }
+    }
+}
+
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+impl Told {
+    /// `kind` of the declaration `id` on `keyexpr`, from `peer`: whether its key fits, as
+    /// every key the session holds does. One that does not leaves the event as it was.
+    fn set(
+        &mut self,
+        kind: DeclEventKind,
+        id: u64,
+        keyexpr: &str,
+        peer: Option<SessionZid>,
+    ) -> bool {
+        let bytes = keyexpr.as_bytes();
+        let Some(key) = self.key.get_mut(..bytes.len()) else {
+            return false;
+        };
+        key.copy_from_slice(bytes);
+        self.kind = kind;
+        self.id = id;
+        self.peer = peer;
+        self.len = bytes.len();
+        true
+    }
+
+    /// The loss of `count` events, which names no declaration and no peer.
+    fn set_lost(&mut self, count: u64) {
+        self.kind = DeclEventKind::Lost;
+        self.id = count;
+        self.peer = None;
+        self.len = 0;
+    }
+
+    /// The event, borrowed for the call.
+    pub(super) fn event(&self) -> DeclEvent<'_> {
+        DeclEvent {
+            kind: self.kind,
+            id: self.id,
+            // Copied whole from a `&str`, so it reads back whole.
+            keyexpr: self
+                .key
+                .get(..self.len)
+                .and_then(|bytes| core::str::from_utf8(bytes).ok())
+                .unwrap_or_default(),
+            peer: self.peer.as_deref(),
+        }
+    }
+}
+
+/// An event the dispatch held for the watches of `plane`.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+struct Heard {
+    plane: DeclPlane,
+    told: Told,
+}
+
+/// The events the dispatch of one record held, in the order it held them, and the row the first
+/// is handed to next.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+struct Room {
+    heard: [Heard; HEARD_EVENTS],
+    len: usize,
+    row: usize,
+}
+
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+impl Room {
+    /// A room that holds no event.
+    fn empty() -> Self {
+        Self {
+            heard: core::array::from_fn(|_| Heard {
+                plane: DeclPlane::Subscribers,
+                told: Told::default(),
+            }),
+            len: 0,
+            row: 0,
+        }
+    }
+
+    /// Hold `kind` of `plane`, the declaration `id` on `keyexpr` from `peer`, after what the
+    /// room holds: whether it took it, which it does not when full or for a key past its bytes.
+    fn hold(
+        &mut self,
+        plane: DeclPlane,
+        kind: DeclEventKind,
+        id: u64,
+        keyexpr: &str,
+        peer: Option<SessionZid>,
+    ) -> bool {
+        let Some(slot) = self.heard.get_mut(self.len) else {
+            return false;
+        };
+        if !slot.told.set(kind, id, keyexpr, peer) {
+            return false;
+        }
+        slot.plane = plane;
+        self.len = self.len.saturating_add(1);
+        true
+    }
+
+    /// The event handed out now, while the room holds one.
+    fn first(&self) -> Option<&Heard> {
+        self.heard.get(..self.len)?.first()
+    }
+
+    /// The first event was handed to every row it reaches: the next is handed from the first row.
+    fn handed(&mut self) {
+        if let Some(held) = self.heard.get_mut(..self.len) {
+            held.rotate_left(1);
+        }
+        self.len = self.len.saturating_sub(1);
+        self.row = 0;
+    }
+
+    /// Let go of every event the room holds.
+    fn clear(&mut self) {
+        self.len = 0;
+        self.row = 0;
+    }
+}
+
+/// Copy into `told`, as its face's peer's, the declaration of `plane` at `at` in the order the
+/// peers of `faces` hand theirs: whether its key fits, `None` past the last one.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+fn nth_held<'f, I>(
+    plane: DeclPlane,
+    faces: &impl Fn() -> I,
+    at: usize,
+    told: &mut Told,
+) -> Option<bool>
+where
+    I: Iterator<Item = (&'f FaceTables, Option<SessionZid>)>,
+{
+    let mut seen: usize = 0;
+    let mut found = None;
+    for (tables, peer) in faces() {
+        held_of(plane, tables, |id, keyexpr, _| {
+            if found.is_none() && seen == at {
+                found = Some(told.set(DeclEventKind::Declared, id, keyexpr, peer));
+            }
+            seen = seen.saturating_add(1);
+        });
+        if found.is_some() {
+            break;
+        }
+    }
+    found
+}
+
+/// Hold `kind` of `plane`, the declaration `id` on `keyexpr`, as an event of the link being
+/// dispatched for the delivery after the record to hand to the watches it reaches; a group's is
+/// held for no one. One the room has no place for is counted as lost for each watch it reaches.
+/// A watch still owed its catch-up is reached by none.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+fn heard(shared: &Shared, kind: DeclEventKind, plane: DeclPlane, id: u64, keyexpr: &str) {
+    let mut table = lock(&shared.table);
+    let Some(Hearing { peer }) = table.hearing else {
+        return;
+    };
+    let reached = |watch: &Watch| !watch.catching_up && reaches(kind, plane, watch.plane);
+    let Table { rows, room, .. } = &mut *table;
+    if !rows
+        .iter()
+        .filter_map(|row| row.watch.as_ref())
+        .any(reached)
+    {
+        return;
+    }
+    if room.hold(plane, kind, id, keyexpr, peer) {
+        return;
+    }
+    for watch in rows.iter_mut().filter_map(|row| row.watch.as_mut()) {
+        if reached(watch) {
+            watch.lost = watch.lost.saturating_add(1);
+        }
+    }
+}
+
 impl DeclWatches {
     /// No watch, and room for as many watches as the session's `MAX_DECL_WATCHES` admits under the
     /// build's, their events held in `round`, the session's round of deliveries.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     pub(super) fn under(
         limits: &SessionLimits,
         round: &PlacedRef<Round>,
@@ -503,6 +757,7 @@ impl DeclWatches {
     }
 
     /// No watch, and room for `watches` of them, at most the build's, their events held in `round`.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     fn holding(watches: usize, round: &PlacedRef<Round>) -> Self {
         let mut shared = Arc::<Shared>::new_uninit();
         let place = Arc::get_mut(&mut shared).expect("a new table has no other holder");
@@ -519,8 +774,26 @@ impl DeclWatches {
         Self { shared }
     }
 
+    /// No watch, and room for as many watches as the session's `MAX_DECL_WATCHES` admits under the
+    /// build's.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn under(limits: &SessionLimits) -> Result<Self, LendRefused> {
+        let watches = rows_under(limits.max_decl_watches(), caps::MAX_DECL_WATCHES)?;
+        Ok(Self::holding(watches))
+    }
+
+    /// No watch, and room for `watches` of them, at most the build's.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    fn holding(watches: usize) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                table: Mutex::new(Table::holding(watches)),
+            }),
+        }
+    }
+
     /// A watch of `plane` told through `sink` from now on, owed first what the peers hold now
-    /// ([`Self::tell_owed`]): its id. The observers of `plane` are installed in `app` with the
+    /// ([`Self::owes`]): its id. The observers of `plane` are installed in `app` with the
     /// first watch of that kind. Refused, with `sink` handed back for the caller to let go of with
     /// no lock held, by [`Declined::TableFull`] when the session holds as many watches as its limit
     /// admits (a row a call of an undeclared watch is still owed on counts as held) or the
@@ -579,11 +852,88 @@ impl DeclWatches {
     }
 
     /// Whether a watch is owed what the round had no room for when it came: its catch-up, or the
-    /// events it lost. What a delivery asks once it has emptied the round ([`Self::tell_owed`]).
+    /// events it lost; and, where the read hands each record out as it is read, what the dispatch
+    /// of the last record held. What a delivery asks once it has emptied the round.
     pub(super) fn owes(&self) -> bool {
-        lock(&self.shared.table)
+        let table = lock(&self.shared.table);
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        if table.room.len != 0 {
+            return true;
+        }
+        // Read into a value before the guard goes: the walk's iterator borrows the table, and a
+        // tail expression's temporaries outlive the guard.
+        let owed = table
             .watches()
-            .any(|watch| watch.catching_up || watch.lost != 0)
+            .any(|watch| watch.catching_up || watch.lost != 0);
+        drop(table);
+        owed
+    }
+
+    /// The next call a watch is owed, its event copied into `told` for the caller to hand with no
+    /// lock held: first what the dispatch of the last record held, to each watch it reaches in the
+    /// order the rows lie; then the losses, which came after all of it, as the room took no event
+    /// once it was full and a key the session holds never passes its bytes; then, to each watch
+    /// still owed its catch-up, the next declaration of its kind the peers of `faces` hold, in the
+    /// order their tables hand them, each named as its face's peer. `None` once nothing is owed.
+    ///
+    /// The room is handed out before any catch-up goes on, and a watch owed one is reached by none
+    /// of it: what the room holds is in the tables the catch-up reads already. The read reads no
+    /// record until nothing is owed, so the tables a catch-up is read off a declaration at a time
+    /// hold still between its calls.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn next_call<'f, I>(
+        &self,
+        faces: impl Fn() -> I,
+        told: &mut Told,
+    ) -> Option<WatchCall>
+    where
+        I: Iterator<Item = (&'f FaceTables, Option<SessionZid>)>,
+    {
+        let mut table = lock(&self.shared.table);
+        let Table { rows, room, .. } = &mut *table;
+        while let Some(heard) = room.first() {
+            let (kind, plane) = (heard.told.kind, heard.plane);
+            let reached = rows
+                .iter()
+                .enumerate()
+                .skip(room.row)
+                .find(|(_, row)| {
+                    row.watch.as_ref().is_some_and(|watch| {
+                        !watch.catching_up && reaches(kind, plane, watch.plane)
+                    })
+                })
+                .map(|(at, row)| (at, &row.cell));
+            let Some((at, cell)) = reached else {
+                room.handed();
+                continue;
+            };
+            told.clone_from(&heard.told);
+            room.row = at.saturating_add(1);
+            return Some(WatchCall::begun(cell));
+        }
+        for Row { watch, cell } in rows.iter_mut() {
+            if let Some(watch) = watch.as_mut().filter(|watch| watch.lost != 0) {
+                told.set_lost(watch.lost);
+                watch.lost = 0;
+                return Some(WatchCall::begun(cell));
+            }
+        }
+        for Row { watch, cell } in rows.iter_mut() {
+            let Some(watch) = watch.as_mut().filter(|watch| watch.catching_up) else {
+                continue;
+            };
+            while let Some(fits) = nth_held(watch.plane, &faces, watch.told, told) {
+                watch.told = watch.told.saturating_add(1);
+                if fits {
+                    return Some(WatchCall::begun(cell));
+                }
+                // Told as a loss by the next call.
+                watch.lost = watch.lost.saturating_add(1);
+            }
+            watch.catching_up = false;
+            watch.told = 0;
+        }
+        None
     }
 
     /// Hold in the round what the watches are owed and it now has room for: to each watch still
@@ -598,6 +948,7 @@ impl DeclWatches {
     ///
     /// # Safety
     /// The caller holds the session's lock.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     pub(super) unsafe fn tell_owed<'f, I>(&self, faces: impl Fn() -> I)
     where
         I: Iterator<Item = (&'f FaceTables, Option<SessionZid>)>,
@@ -686,6 +1037,7 @@ impl DeclWatches {
                 uninstall(app, observers);
             }
         }
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         owe_catch_up(&self.shared.round, &table);
         drop(table);
         Some(sink)
@@ -698,6 +1050,8 @@ impl DeclWatches {
     pub(super) fn close(&self) -> impl Iterator<Item = DeclWatchSink> {
         let mut table = lock(&self.shared.table);
         table.hearing = None;
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        table.room.clear();
         let sinks: [Option<DeclWatchSink>; caps::MAX_DECL_WATCHES] = core::array::from_fn(|at| {
             let row = table.rows.get_mut(at)?;
             row.watch.take()?;
@@ -705,6 +1059,7 @@ impl DeclWatches {
             slot.gone = true;
             slot.sink.take()
         });
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         owe_catch_up(&self.shared.round, &table);
         drop(table);
         sinks.into_iter().flatten()
@@ -730,7 +1085,10 @@ impl DeclWatches {
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    #[cfg(feature = "declarations-synced-event")]
+    #[cfg(all(
+        feature = "declarations-synced-event",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(super) unsafe fn heard_synced(&self) {
         // SAFETY: the caller's contract.
         unsafe {
@@ -744,10 +1102,26 @@ impl DeclWatches {
             )
         };
     }
+
+    /// The face whose frame was just dispatched told that its peer ended its initial
+    /// declarations.
+    #[cfg(all(
+        feature = "declarations-synced-event",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn heard_synced(&self) {
+        heard(
+            &self.shared,
+            DeclEventKind::Synced,
+            DeclPlane::Subscribers,
+            0,
+            "",
+        );
+    }
 }
 
 /// The observer the application layer tells what a peer declares and retracts of one plane, which
-/// holds it in the round for the watches: the plane and the watches, held in the row of the
+/// holds it for the watches: the plane and the watches, held in the row of the
 /// observer list it is installed in, so installing a pair of them for a watch allocates nothing.
 pub(super) struct WatchObserver {
     plane: DeclPlane,
@@ -763,6 +1137,15 @@ const _: () = assert!(
 
 impl DeclSink for WatchObserver {
     fn on_declared(&mut self, decl: &dyn DeclView) {
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        heard(
+            &self.shared,
+            DeclEventKind::Declared,
+            self.plane,
+            decl.id(),
+            decl.keyexpr(),
+        );
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         // SAFETY: the application layer tells its observers as a frame is dispatched, under the
         // session's lock.
         unsafe {
@@ -780,6 +1163,9 @@ impl DeclSink for WatchObserver {
 
 impl UndeclSink for WatchObserver {
     fn on_undeclared(&mut self, id: u64) {
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        heard(&self.shared, DeclEventKind::Undeclared, self.plane, id, "");
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         // SAFETY: as `on_declared`.
         unsafe {
             heard(
@@ -910,7 +1296,11 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "query", feature = "queryable"))]
     use crate::arena::{AllocatorMemory, SessionArena};
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(any(
+        feature = "query",
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
     use wz_session_core::decl_sink::BorrowedDecl;
     #[cfg(any(feature = "query", feature = "queryable"))]
     use wz_session_core::slot_observer::ObserverRows;
@@ -924,7 +1314,11 @@ mod tests {
     /// observers are the watches' own ([`WatchObserver`]), as the registry's are.
     type SlotObserver = SlotObserverOf<CoopSinks>;
 
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(any(
+        feature = "query",
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
     const PEER: [u8; 4] = [0xc3; 4];
 
     /// A sink that records each event it is told, as the port's event prints.
@@ -943,9 +1337,48 @@ mod tests {
     }
 
     /// As many watches as the build holds, their events held in a round of `events` records.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     fn over(events: usize) -> (DeclWatches, PlacedRef<Round>) {
         let round = crate::round::leaked(events);
         (DeclWatches::holding(caps::MAX_DECL_WATCHES, &round), round)
+    }
+
+    /// No watch, and room for `rows` of them, at most the build's.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    fn watches_of(rows: usize) -> DeclWatches {
+        DeclWatches::holding(rows, &crate::round::leaked(2))
+    }
+
+    /// No watch, and room for `rows` of them, at most the build's.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    fn watches_of(rows: usize) -> DeclWatches {
+        DeclWatches::holding(rows)
+    }
+
+    /// The watches the session's `limits` admit.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    fn under(limits: &SessionLimits) -> Result<DeclWatches, LendRefused> {
+        DeclWatches::under(limits, &crate::round::leaked(1))
+    }
+
+    /// The watches the session's `limits` admit.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    fn under(limits: &SessionLimits) -> Result<DeclWatches, LendRefused> {
+        DeclWatches::under(limits)
+    }
+
+    /// Hand out every call the watches are owed now, as the delivery after a record does: how
+    /// many calls were made.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    fn hand_all(watches: &DeclWatches) -> usize {
+        let mut told = Told::default();
+        let mut calls: usize = 0;
+        while let Some(call) = watches.next_call(no_faces, &mut told) {
+            call.hand(told.event());
+            call.end();
+            calls = calls.saturating_add(1);
+        }
+        calls
     }
 
     /// No face: a session whose link is not up yet.
@@ -968,12 +1401,18 @@ mod tests {
             Ok(id) => id,
             Err((refused, _)) => panic!("a table with room refused the watch: {refused:?}"),
         };
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         // SAFETY: the test is the session's one thread, as a holder of its lock is.
-        unsafe { watches.tell_owed(no_faces) };
+        unsafe {
+            watches.tell_owed(no_faces)
+        };
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        hand_all(watches);
         id
     }
 
     /// Seal the round and hand it out: whether it held anything.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     fn hand(round: &Round) -> bool {
         // SAFETY: the test is the session's one thread, as a holder of its lock is.
         unsafe { round.seal() };
@@ -981,7 +1420,11 @@ mod tests {
     }
 
     /// The declaration `id` of `plane` on `keyexpr`, told as an observer is told it.
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(any(
+        feature = "query",
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
     fn declared(watches: &DeclWatches, plane: DeclPlane, id: u64, keyexpr: &str) {
         observer(plane, &watches.shared).on_declared(&BorrowedDecl {
             id,
@@ -999,6 +1442,7 @@ mod tests {
     /// kind, named as the link's peer where the build names peers; one a group's frame told is
     /// held for no one.
     #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[test]
     fn a_links_event_reaches_the_watches_of_its_kind_and_a_groups_none() {
         let (watches, round) = over(4);
@@ -1037,6 +1481,7 @@ mod tests {
 
     /// A link's frame reads no peer while no watch is declared, and what it tells is held for no
     /// one.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[test]
     fn a_frame_no_watch_hears_reads_no_peer_and_holds_nothing() {
         let (watches, round) = over(2);
@@ -1048,6 +1493,7 @@ mod tests {
     }
 
     /// One event a frame told takes one record of the round, which every watch it reaches joins.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[test]
     fn one_record_holds_an_event_for_every_watch_it_reaches() {
         let (watches, round) = over(2);
@@ -1072,6 +1518,7 @@ mod tests {
 
     /// An event the round has no room for is told as a loss ahead of the watch's next event, and a
     /// loss no event follows is told by the next round that has room for it.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[test]
     fn an_event_with_no_room_is_told_as_a_loss_by_the_next_round() {
         let (watches, round) = over(2);
@@ -1124,6 +1571,7 @@ mod tests {
     /// A watch declared while the round is handed out (from inside a callback) is declared, owed
     /// its catch-up, which the next round that has room for it holds; until then it is told no live
     /// event, which the catch-up, read off the peers' tables then, holds.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[test]
     fn a_watch_declared_while_the_round_is_handed_out_is_caught_up_by_the_next() {
         let (watches, round) = over(4);
@@ -1167,6 +1615,7 @@ mod tests {
 
     /// An undeclared watch is handed nothing the round still holds for it, the observers of its
     /// kind leave with the last watch of that kind, and a second undeclare finds none.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[test]
     fn an_undeclared_watch_is_handed_nothing_and_takes_its_observers_with_it() {
         let (watches, round) = over(2);
@@ -1218,7 +1667,7 @@ mod tests {
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");
-        let (watches, _round) = over(2);
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
         let (sink, _log) = recording();
         let id = added(&watches, &mut app, DeclPlane::Queryables, sink);
         assert_eq!(app.remote_queryables.on_decl_len(), 1);
@@ -1230,6 +1679,7 @@ mod tests {
     }
 
     /// A close hands back every sink, and the round hands nothing it still held to them.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[test]
     fn a_close_gives_back_every_sink_and_hands_nothing_more() {
         let (watches, round) = over(2);
@@ -1256,7 +1706,7 @@ mod tests {
     /// sink, and the call lets go of the sink as it returns, since the watch went.
     #[test]
     fn a_watch_undeclared_during_its_call_leaves_its_sink_with_the_caller() {
-        let (watches, _round) = over(2);
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
         let mut app = SlotObserver::new();
         let (sink, log) = recording();
         let id = added(&watches, &mut app, DeclPlane::Subscribers, sink);
@@ -1319,6 +1769,7 @@ mod tests {
 
     /// A row a call of its undeclared watch is still owed on is not taken by another watch until
     /// the round has made the call.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[test]
     fn a_row_is_not_taken_while_a_call_of_its_last_watch_is_owed() {
         let round = crate::round::leaked(2);
@@ -1370,7 +1821,7 @@ mod tests {
     #[cfg(not(any(feature = "query", feature = "queryable")))]
     #[test]
     fn a_build_without_the_queryables_plane_refuses_their_observers() {
-        let (watches, _round) = over(2);
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
         let mut app = SlotObserver::new();
         let (sink, log) = recording();
         assert!(matches!(
@@ -1392,8 +1843,7 @@ mod tests {
     /// nothing installed for it, and the row an undeclared watch leaves takes the next one.
     #[test]
     fn a_watch_past_the_sessions_limit_is_refused_until_a_row_comes_back() {
-        let round = crate::round::leaked(1);
-        let watches = DeclWatches::holding(1, &round);
+        let watches = watches_of(1);
         let mut app = SlotObserver::new();
         let (first, _first_log) = recording();
         let id = added(&watches, &mut app, DeclPlane::Subscribers, first);
@@ -1428,7 +1878,7 @@ mod tests {
     /// reds the assertions.
     #[test]
     fn a_watch_past_the_last_id_is_refused_and_installs_nothing() {
-        let (watches, _round) = over(2);
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
         let mut app = SlotObserver::new();
         lock(&watches.shared.table).next_id = DeclWatchId::MAX;
         let (sink, log) = recording();
@@ -1458,20 +1908,202 @@ mod tests {
     /// The session's limit sets the rows a table admits, under the build's.
     #[test]
     fn the_sessions_limit_sets_the_rows_under_the_builds() {
-        let round = crate::round::leaked(1);
         let mut limits = SessionLimits::defaults();
         limits
             .select_max_decl_watches(Quota::at_most(1))
             .expect("one watch is within every build's domain");
-        let lowered = DeclWatches::under(&limits, &round).expect("limits under the build's");
+        let lowered = under(&limits).expect("limits under the build's");
         assert_eq!(lock(&lowered.shared.table).most, 1);
         let defaults = SessionLimits::defaults();
-        let built = DeclWatches::under(&defaults, &round).expect("the build's own");
+        let built = under(&defaults).expect("the build's own");
         let within =
             |value: Quota, ceiling: usize| value.most().map_or(ceiling, |most| most.min(ceiling));
         assert_eq!(
             lock(&built.shared.table).most,
             within(defaults.max_decl_watches(), caps::MAX_DECL_WATCHES)
         );
+    }
+
+    /// An event a link's frame told is copied for the delivery after the record, which hands it to
+    /// each watch it reaches once the session is let go of, named as the link's peer where the
+    /// build names peers; one a group's frame told is held for no one.
+    ///
+    /// # Control
+    ///
+    /// The key the observer was told is let go of before the delivery: a room that kept a borrow
+    /// of it, and not a copy, would not hand `demo/s`.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[test]
+    fn a_links_event_is_copied_and_handed_to_each_watch_it_reaches_after_the_record() {
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
+        let mut app = SlotObserver::new();
+        let (first, first_log) = recording();
+        let (second, second_log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, first);
+        added(&watches, &mut app, DeclPlane::Subscribers, second);
+        assert!(!watches.owes(), "caught up on no face");
+
+        watches.hear_link(|| SessionZid::new(&PEER).ok());
+        let key = String::from("demo/s");
+        declared(&watches, DeclPlane::Subscribers, 4, &key);
+        watches.heard_all();
+        drop(key);
+        assert!(watches.owes(), "held for the delivery after the record");
+        assert_eq!(hand_all(&watches), 2, "one call for each watch");
+        let expected_peer = if cfg!(feature = "remote-declaration-watch") {
+            Some(&PEER[..])
+        } else {
+            None
+        };
+        let told = [printed(DeclWatchEvent::Declared {
+            id: 4,
+            keyexpr: "demo/s",
+            peer: expected_peer,
+        })];
+        assert_eq!(*lock(&first_log), told);
+        assert_eq!(*lock(&second_log), told);
+        assert!(!watches.owes());
+
+        declared(&watches, DeclPlane::Subscribers, 5, "demo/g");
+        assert!(!watches.owes(), "a group's event is held for no one");
+        assert_eq!(hand_all(&watches), 0);
+    }
+
+    /// A link's frame reads no peer while no watch is declared, and what it tells is held for no
+    /// one.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[test]
+    fn a_frame_no_watch_hears_reads_no_peer_and_holds_nothing_for_the_read() {
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
+        watches.hear_link(|| panic!("no watch, so no peer is read"));
+        undeclared(&watches, 1);
+        watches.heard_all();
+        assert!(!watches.owes());
+        assert_eq!(hand_all(&watches), 0);
+    }
+
+    /// An event past the room is counted as lost for each watch it reaches, and the loss is told
+    /// after the events the room took, ahead of anything the next record brings.
+    ///
+    /// # Control
+    ///
+    /// A room that took one event more than `HEARD_EVENTS`, or a loss told ahead of the events it
+    /// came after, changes the order the log holds.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[test]
+    fn an_event_past_the_room_is_told_as_a_loss_after_what_it_took() {
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
+        let mut app = SlotObserver::new();
+        let (sink, log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, sink);
+        let undeclared_as = |id| printed(DeclWatchEvent::Undeclared { id, peer: None });
+        let past = u64::try_from(HEARD_EVENTS.saturating_add(1)).expect("a small count");
+        watches.hear_link(|| None);
+        for id in 1..=past {
+            undeclared(&watches, id);
+        }
+        watches.heard_all();
+        assert_eq!(hand_all(&watches), HEARD_EVENTS.saturating_add(1));
+        watches.hear_link(|| None);
+        undeclared(&watches, 99);
+        watches.heard_all();
+        assert_eq!(hand_all(&watches), 1);
+        let mut expected: Vec<String> = (1..past).map(undeclared_as).collect();
+        expected.push(printed(DeclWatchEvent::Lost { count: 1 }));
+        expected.push(undeclared_as(99));
+        assert_eq!(*lock(&log), expected);
+        assert!(!watches.owes());
+    }
+
+    /// A key past the bytes the room copies is counted as lost, not cut.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[test]
+    fn a_key_past_the_rooms_bytes_is_told_as_a_loss() {
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
+        let mut app = SlotObserver::new();
+        let (sink, log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, sink);
+        watches.hear_link(|| None);
+        let long = "k".repeat(caps::MAX_KEYEXPR_BYTES.saturating_add(1));
+        declared(&watches, DeclPlane::Subscribers, 1, &long);
+        watches.heard_all();
+        assert_eq!(hand_all(&watches), 1);
+        assert_eq!(*lock(&log), [printed(DeclWatchEvent::Lost { count: 1 })]);
+    }
+
+    /// A watch declared while the room is handed out (from inside a call) is told none of what it
+    /// holds, which the catch-up it is owed reads off the peers' tables, and the next record's
+    /// events once it is caught up.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[test]
+    fn a_watch_declared_while_the_room_is_handed_out_is_told_none_of_it() {
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
+        let mut app = SlotObserver::new();
+        let (first, first_log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, first);
+        watches.hear_link(|| None);
+        undeclared(&watches, 1);
+        undeclared(&watches, 2);
+        watches.heard_all();
+        let mut told = Told::default();
+        let call = watches
+            .next_call(no_faces, &mut told)
+            .expect("the first event");
+        call.hand(told.event());
+        let (late, late_log) = recording();
+        assert!(
+            watches.add(&mut app, DeclPlane::Subscribers, late).is_ok(),
+            "a room handed out refuses no watch"
+        );
+        call.end();
+        assert_eq!(
+            hand_all(&watches),
+            1,
+            "the second event, to the first watch"
+        );
+        assert!(!watches.owes(), "the late watch is caught up on no face");
+
+        watches.hear_link(|| None);
+        undeclared(&watches, 3);
+        watches.heard_all();
+        assert_eq!(hand_all(&watches), 2);
+        let undeclared_as = |id| printed(DeclWatchEvent::Undeclared { id, peer: None });
+        assert_eq!(
+            *lock(&first_log),
+            [undeclared_as(1), undeclared_as(2), undeclared_as(3)]
+        );
+        assert_eq!(
+            *lock(&late_log),
+            [undeclared_as(3)],
+            "told no live event before its catch-up"
+        );
+    }
+
+    /// A watch undeclared before the delivery is handed nothing the room holds for it, and a close
+    /// lets go of what the room holds.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[test]
+    fn an_undeclared_watch_and_a_close_are_handed_nothing_of_the_room() {
+        let watches = watches_of(caps::MAX_DECL_WATCHES);
+        let mut app = SlotObserver::new();
+        let (sink, log) = recording();
+        let id = added(&watches, &mut app, DeclPlane::Subscribers, sink);
+        watches.hear_link(|| None);
+        undeclared(&watches, 9);
+        watches.heard_all();
+        assert!(matches!(watches.undeclare(&mut app, id), Some(Some(_))));
+        assert_eq!(hand_all(&watches), 0);
+        assert!(lock(&log).is_empty());
+        assert_eq!(Arc::strong_count(&log), 1, "the sink was let go of");
+        assert!(!watches.owes());
+
+        let (sink, log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, sink);
+        watches.hear_link(|| None);
+        undeclared(&watches, 3);
+        assert_eq!(watches.close().count(), 1);
+        assert!(!watches.owes(), "the close let go of what the room held");
+        assert_eq!(hand_all(&watches), 0);
+        assert!(lock(&log).is_empty());
     }
 }

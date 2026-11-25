@@ -246,5 +246,6 @@ fn the_states_own_values_lie_in_its_region_and_not_in_its_arena() {
     ] {
         assert!(plan.rows().all(|row| row.part() != part), "{part}");
     }
+    #[cfg(wz_round)]
     assert!(core::mem::size_of::<StateRegion>() >= core::mem::size_of::<crate::round::Round>());
 }

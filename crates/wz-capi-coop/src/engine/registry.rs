@@ -82,7 +82,7 @@ use wz_session_core::slot_observer::ObserverRows;
 use wz_session_core::slot_observer::OtherPeers;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf, TakenAhead};
 
 #[cfg(feature = "query")]
 use super::{LegHold, LegSink};
@@ -153,8 +153,9 @@ pub(super) struct FaceTables {
     pub(super) peer: Peer,
     pub(super) gets: Gets,
     /// The face's link was lost and the tokens its peer declared are still to be retracted to the
-    /// liveliness subscribers: they stay in `peer` until the round of deliveries has taken each
-    /// `Delete` (`Registry::retract_owed`), or until the face goes, when they are kept apart
+    /// liveliness subscribers: they stay in `peer` until each `Delete` is taken, by the round of
+    /// deliveries (`Registry::retract_owed`) or by a read that hands each itself
+    /// (`Registry::take_lost_token`), or until the face goes, when they are kept apart
     /// from the set and the set is given back (`Registry::owe_tokens_of`).
     #[cfg(feature = "liveliness")]
     retracting: bool,
@@ -487,6 +488,43 @@ type BuildHolders = held::OneHolder;
 /// The application layer of one session, as the build holds its faces.
 pub(super) type Registry = RegistryOf<BuildHolders>;
 
+/// What the read takes of a face's records itself, ahead of the face's dispatch, in a build whose
+/// read steps its one link itself: every query of the link, handed to the queryables (`queries`)
+/// with queryables, and every peer token, handed to the liveliness subscribers (`tokens`) with
+/// liveliness. A build without leaves them to their planes, which hand them through the round.
+const READ_TAKES: TakenAhead = TakenAhead {
+    queries: cfg!(all(
+        feature = "queryable",
+        not(any(
+            feature = "threads",
+            feature = "listen",
+            feature = "group"
+        ))
+    )),
+    tokens: cfg!(all(
+        feature = "liveliness",
+        not(any(
+            feature = "threads",
+            feature = "listen",
+            feature = "group"
+        ))
+    )),
+    declares: false,
+};
+
+/// What the read takes of a copied frame's records itself, ahead of the frame's other planes
+/// (`Planes::BesideSubscribers`): what it takes of a lent record, and, with the declaration
+/// watches, every Declare, dispatched one message at a time (`RegistryOf::dispatch_declare_message`)
+/// so the watches' room is handed out before the next message fills it.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+const COPIED_TAKES: TakenAhead = TakenAhead {
+    declares: cfg!(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )),
+    ..READ_TAKES
+};
+
 /// The planes of the application layer a dispatch of a face's event reaches.
 #[derive(Clone, Copy)]
 pub(super) enum Planes {
@@ -540,7 +578,7 @@ pub(super) struct RegistryOf<H: Holders> {
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
     /// The program's watches of what the peers declare, which the application layer's observers
-    /// hold events in the round for while a link's frame is dispatched (`decl_watch`).
+    /// hold events for while a link's frame is dispatched (`decl_watch`).
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -609,7 +647,10 @@ impl<H: Holders> SessionFaces for RegistryOf<H> {
         }
     }
 
-    #[cfg(feature = "liveliness")]
+    #[cfg(all(
+        feature = "liveliness",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
         RegistryOf::retract_owed(self, room)
     }
@@ -672,12 +713,25 @@ impl<H: Holders> RegistryOf<H> {
         // after the faces' takes the bytes the plan counts for them wherever it lends them.
         #[cfg(feature = "local-queryable")]
         let local = Gets::lent(arena, keys, gets.rows, limits)?;
-        // The watches hold what the peers declare in the round the application's deliveries go to.
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
+        // The watches hold what the peers declare in the round the application's deliveries go to,
+        // where the links are read by a task or a listener; a read that steps its one link itself
+        // hands it after each record from a room of the watches' own.
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "threads", feature = "listen", feature = "group")
         ))]
         let decl_watches = DeclWatches::under(limits, &delivery.round)?;
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            not(any(feature = "threads", feature = "listen", feature = "group"))
+        ))]
+        let decl_watches = DeclWatches::under(limits)?;
         Ok(Self {
             app: ManuallyDrop::new(app),
             delivery,
@@ -1098,9 +1152,27 @@ impl<H: Holders> RegistryOf<H> {
         }) = self.split(self.place(face))
         {
             match planes {
-                Planes::All => {
-                    app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others)
-                }
+                #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+                Planes::All => app.dispatch_event_among(
+                    delivery,
+                    &mut set.peer,
+                    &mut set.gets,
+                    event,
+                    &others,
+                    READ_TAKES,
+                ),
+                // The read that hands each record out as it is read hands every sample out
+                // itself, one subscriber at a time (`pinned`), so the planes hand none to the
+                // round.
+                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+                Planes::All => app.dispatch_event_but_samples(
+                    delivery,
+                    &mut set.peer,
+                    &mut set.gets,
+                    event,
+                    &others,
+                    READ_TAKES,
+                ),
                 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
                 Planes::BesideSubscribers => app.dispatch_event_beside_subscribers(
                     delivery,
@@ -1108,13 +1180,19 @@ impl<H: Holders> RegistryOf<H> {
                     &mut set.gets,
                     event,
                     &others,
+                    COPIED_TAKES,
                 ),
             }
         }
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(face) {
+            #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
             // SAFETY: a face's frame is dispatched under the session's lock.
-            unsafe { self.decl_watches.heard_synced() };
+            unsafe {
+                self.decl_watches.heard_synced()
+            };
+            #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+            self.decl_watches.heard_synced();
         }
         // What the observers are told after this frame is a group's until a link's frame says
         // otherwise, so a group's members are never told as a link's peer.
@@ -1185,6 +1263,43 @@ impl<H: Holders> RegistryOf<H> {
         peer: impl FnOnce() -> Option<wz_session_core::session_zid::SessionZid>,
     ) {
         self.decl_watches.hear_link(peer);
+    }
+
+    /// Tell the declaration watches what the one `Declare` `message` of a copied frame of face
+    /// `face` declares, as that face's peer `peer` reads (`DeclWatches::hear_link`), and that its
+    /// peer ended its initial declarations if the message ends them: the frame's own dispatch
+    /// leaves its Declares to this (`COPIED_TAKES`). A face the session no longer holds tells
+    /// nothing.
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn dispatch_declare_message(
+        &mut self,
+        face: HeldFace,
+        message: &wz_session_core::network_message::NetworkMessage,
+        peer: impl FnOnce() -> Option<wz_session_core::session_zid::SessionZid>,
+    ) {
+        #[cfg(feature = "declarations-synced-event")]
+        let was_final = self.declarations_final(face);
+        self.decl_watches.hear_link(peer);
+        if let Some(Split {
+            app,
+            face: set,
+            others,
+            ..
+        }) = self.split(self.place(face))
+        {
+            app.dispatch_declare_message(&mut set.peer, &set.gets, message, &others);
+        }
+        #[cfg(feature = "declarations-synced-event")]
+        if !was_final && self.declarations_final(face) {
+            self.decl_watches.heard_synced();
+        }
+        self.decl_watches.heard_all();
     }
 
     /// Stage for the peer of face `id` what the application did to its subscriptions since the
@@ -1300,15 +1415,10 @@ impl<H: Holders> RegistryOf<H> {
         message: &wz_session_core::network_message::NetworkMessage,
         reliability: wz_session_core::sample::Reliability,
     ) -> Option<wz_session_core::sample::Sample> {
-        let Split {
-            app,
-            delivery,
-            face,
-            ..
-        } = self.split(self.place(face))?;
+        let Split { app, face, .. } = self.split(self.place(face))?;
         face.peer
             .subscribers
-            .take_record(&mut app.tables, delivery, message, reliability)
+            .take_record(&mut app.tables, message, reliability)
     }
 
     /// Read the key of `put`, the next plain `Put` of the frame `keys` reads, against the aliases
@@ -1476,6 +1586,59 @@ impl<H: Holders> RegistryOf<H> {
             .claim_token_view(declare, spaces, room)
     }
 
+    /// The query the Request `record` of face `face` lends, read for a walk that hands it to each
+    /// queryable it reaches with the session let go of (`queries`), its key borrowed where it lies
+    /// or composed into `room` (`QueryPeer::pin_request_in_place`): it borrows the face's peer,
+    /// as long as the session is held. `None`, with what the Request owes staged in the
+    /// face's Finals, for one no queryable is handed, and for a face the session no longer holds;
+    /// refused for a Request the lent form does not represent, which the caller dispatches.
+    #[cfg(all(
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn pin_lent_query<'q, 'r: 'q, 'f: 'r>(
+        &'q mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'r, 'f>,
+        room: &'q mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+    ) -> Result<
+        Option<wz_session_core::query::pinned::PinnedQuery<'q>>,
+        wz_session_core::driver_loop::OwedToProjection,
+    > {
+        let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) else {
+            return Ok(None);
+        };
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.peer
+            .queries
+            .pin_request_in_place(record, spaces, room, &mut face.peer.finals)
+    }
+
+    /// The query of `request`, a Request of face `face` the copying receive decoded or the owned
+    /// projection of one the lent form does not represent, read for a walk that hands it to each
+    /// queryable it reaches with the session let go of (`queries`), what the Request does not
+    /// hold kept in `room` (`QueryPeer::pin_request`): it borrows the face's peer, as long as
+    /// the session is held. `None`, with what the Request owes staged in the face's Finals, for
+    /// one no queryable is handed, and for a face the session no longer holds.
+    #[cfg(all(
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn pin_owned_query<'q>(
+        &'q mut self,
+        face: HeldFace,
+        request: &'q wz_session_core::wire::RequestOwned,
+        room: &'q mut wz_session_core::query::pinned::QueryRoom,
+    ) -> Option<wz_session_core::query::pinned::PinnedQuery<'q>> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.peer
+            .queries
+            .pin_request(request, spaces, room, &mut face.peer.finals)
+    }
+
     /// Hand the alive token at `keyexpr` to the pending liveliness get `interest_id` of face
     /// `face` (`Self::claim_token`), as the face's dispatch hands it. A face the session no longer
     /// holds hands it to none.
@@ -1588,7 +1751,8 @@ impl<H: Holders> RegistryOf<H> {
 
     /// The link of face `id` was lost: every token its peer declared is gone, and the liveliness
     /// subscribers are to be told each is. The face's set owes them the retractions until
-    /// `Self::retract_owed` has handed every one, or the face goes and they are owed apart.
+    /// `Self::retract_owed` or `Self::take_lost_token` has handed every one, or the face goes and
+    /// they are owed apart.
     #[cfg(feature = "liveliness")]
     pub(super) fn lose_tokens(&mut self, id: FaceId) {
         if let Some(face) = self.held_mut(id) {
@@ -1600,7 +1764,10 @@ impl<H: Holders> RegistryOf<H> {
     /// its `Delete` can be taken now: those of the faces held first, then those of the faces that
     /// went, in the order they went, each face's in ascending id. Whether none is owed any more.
     /// The tokens left wait where they are, in order.
-    #[cfg(feature = "liveliness")]
+    #[cfg(all(
+        feature = "liveliness",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(super) fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
         self.writing();
         let Self {
@@ -1630,6 +1797,111 @@ impl<H: Holders> RegistryOf<H> {
             owed.remove(0);
         }
         true
+    }
+
+    /// Whether the face whose link was lost still owes the liveliness subscribers a token's
+    /// retraction (`Self::take_lost_token`).
+    #[cfg(all(
+        feature = "liveliness",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn retracting(&self) -> bool {
+        self.sets.iter().any(|set| set.retracting)
+    }
+
+    /// The next token the face whose link was lost owes the liveliness subscribers, its row
+    /// unbound and its `Delete` written into `news`, in ascending id, for a read that hands it to
+    /// them one row at a time with the session let go of: whether there was one. A face left
+    /// owing none retracts no more.
+    #[cfg(all(
+        feature = "liveliness",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn take_lost_token(
+        &mut self,
+        news: &mut wz_session_core::declare::liveliness_subscriber::TokenNews,
+    ) -> bool {
+        let mut taken = false;
+        for set in self.sets.iter_mut().filter(|set| set.retracting) {
+            taken = set.peer.tokens.take_lost(news);
+            if taken {
+                break;
+            }
+            set.retracting = false;
+        }
+        if taken {
+            self.writing();
+        }
+        taken
+    }
+
+    /// The peer token the Declare `record` of face `face` lends, bound or unbound in the face's
+    /// peer table under the session's lock, with what the liveliness subscribers are to be told of
+    /// it written into `news` (`PeerTokens::take_token_view`), for a read that hands it to them
+    /// one row at a time with the session let go of; the face's dispatch then leaves the token
+    /// alone (`READ_TAKES`). Whether there is any: none for a record that is no token, one a
+    /// pending liveliness get claims, and a face the session no longer holds.
+    #[cfg(all(
+        feature = "liveliness",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn take_lent_token(
+        &mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'_, '_>,
+        news: &mut wz_session_core::declare::liveliness_subscriber::TokenNews,
+    ) -> bool {
+        let Some(declare) = record.declare() else {
+            return false;
+        };
+        let Some(Split { app, face, .. }) = self.split(self.place(face)) else {
+            return false;
+        };
+        #[cfg(feature = "liveliness-get")]
+        if declare
+            .interest_id
+            .is_some_and(|id| face.gets.liveliness_gets.has_pending(id))
+        {
+            return false;
+        }
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face
+            .peer
+            .subscribers
+            .mapping_spaces_over(own)
+            .from_sender(record.sender());
+        face.peer
+            .tokens
+            .take_token_view(&declare.body, spaces, declare.interest_id.is_some(), news)
+    }
+
+    /// [`Self::take_lent_token`] for `declare`, a record of a frame of face `face` the copying
+    /// receive decoded.
+    #[cfg(all(
+        feature = "liveliness",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn take_owned_token(
+        &mut self,
+        face: HeldFace,
+        declare: &wz_session_core::transport_profile::owned::DeclareOwned,
+        news: &mut wz_session_core::declare::liveliness_subscriber::TokenNews,
+    ) -> bool {
+        let Some(Split { app, face, .. }) = self.split(self.place(face)) else {
+            return false;
+        };
+        #[cfg(feature = "liveliness-get")]
+        if declare
+            .interest_id
+            .is_some_and(|id| face.gets.liveliness_gets.has_pending(id))
+        {
+            return false;
+        }
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.peer
+            .tokens
+            .take_token(&declare.body, spaces, declare.interest_id.is_some(), news)
     }
 
     /// Keep apart what the set at `at` still owes the liveliness subscribers as its face goes:
@@ -1906,16 +2178,14 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
-        let round = crate::round::leaked(4);
-        #[cfg(not(feature = "queryable"))]
-        let delivery = RoundDelivery::new(round);
-        #[cfg(feature = "queryable")]
-        let delivery = RoundDelivery::new(
-            round,
-            wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
+        let delivery = RoundDelivery {
+            #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+            round: crate::round::leaked(4),
+            #[cfg(feature = "queryable")]
+            plane: wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
                 super::super::query::leaked_plane(1),
             )),
-        );
+        };
         let registry = RegistryOf::<H>::new(
             &SessionLimits::defaults(),
             arena.arena_mut(),

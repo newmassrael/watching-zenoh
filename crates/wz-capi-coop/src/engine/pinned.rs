@@ -25,6 +25,11 @@ use super::*;
 use wz_session_core::driver_loop::{InPlaceRecord, OwedToProjection};
 use wz_session_core::sample::Sample;
 use wz_session_core::session_tables::PinnedFanOut;
+#[cfg(feature = "liveliness")]
+use {
+    wz_session_core::declare::liveliness_subscriber::TokenNews,
+    wz_session_core::session_tables::PinnedTokenFan,
+};
 
 use super::registry::PeerRoom;
 
@@ -75,25 +80,46 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let _ = reached;
     }
 
-    /// Take the subscribers' side of `messages`, the records of a frame of face `face` the copying
-    /// receive decoded, one record at a time in their order: each Push's sample is handed to each
-    /// subscriber its key reaches, one call at a time with the session let go of, each Response's
-    /// reply, and each alive token answering a pending liveliness get, is handed to the get it
-    /// answers in the same way (`replies`), and any other record is
-    /// taken under the lock as the frame's dispatch takes it. What the frame's other planes take
-    /// follows (`Planes::BesideSubscribers`). A session closed meanwhile takes no
-    /// record after the one whose callback closed it.
+    /// Take the subscribers' side of `messages`, the records of a frame of the face `records`
+    /// reads that the copying receive decoded, one record at a time in their order: each Push's
+    /// sample is handed to each subscriber its key reaches, one call at a time with the session
+    /// let go of, each Response's reply, and each alive token answering a pending liveliness get,
+    /// is handed to the get it answers in the same way (`replies`), each Request's query to each
+    /// queryable it reaches (`queries`), and any other record is taken under the lock as the
+    /// frame's dispatch takes it. What the frame's other planes take follows
+    /// (`Planes::BesideSubscribers`). A session closed meanwhile takes no record after the one
+    /// whose callback closed it.
     pub(super) fn hand_copied_records(
         &self,
-        face: HeldFace,
+        records: &super::direct::FaceRecords<C>,
         messages: &[wz_session_core::network_message::NetworkMessage],
         reliable: bool,
     ) {
+        let face = records.face;
         let reliability = wz_session_core::sample::Reliability::from_reliable_bool(reliable);
         for message in messages {
             let Some(mut held) = self.live() else {
                 return;
             };
+            // A Declare is told to the declaration watches by itself, and what it told is handed
+            // out before the next message fills their room (`COPIED_TAKES`); the frame's other
+            // planes take the rest of it below.
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            if let wz_session_core::network_message::NetworkMessage::Declare(_) = message {
+                held.0
+                    .session
+                    .registry
+                    .dispatch_declare_message(face, message, || records.actions.peer_session_zid());
+                drop(held);
+                self.deliver();
+                let Some(again) = self.live() else {
+                    return;
+                };
+                held = again;
+            }
             // A peer's reply is the get's it answers, handed to its callback as a lent one is
             // (`replies`); the subscribers' side has nothing to take of it.
             #[cfg(feature = "query")]
@@ -101,6 +127,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 if let Some(reply) = held.0.session.registry.take_reply(face, response) {
                     self.hand_reply(held, face, &reply);
                 }
+                continue;
+            }
+            // A peer's query is handed to the queryables it reaches as a lent one is (`queries`),
+            // and owes its Final after; the queries' plane takes none of the frame's.
+            #[cfg(feature = "queryable")]
+            if let wz_session_core::network_message::NetworkMessage::Request(request) = message {
+                self.hand_owned_query(held, records, request);
                 continue;
             }
             // An alive token answering a pending liveliness get is that get's alone, handed to
@@ -116,6 +149,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 {
                     let key = wz_session_core::wireexpr_resolve::KeyexprOut::as_str(&room);
                     self.hand_token(held, face, interest_id, key);
+                    continue;
+                }
+            }
+            // A peer's token is handed to the liveliness subscribers it reaches as a lent one is
+            // (`tokens`); the tokens' plane keeps only the marks that end their histories.
+            #[cfg(feature = "liveliness")]
+            if let wz_session_core::network_message::NetworkMessage::Declare(declare) = message {
+                let mut news = TokenNews::default();
+                if held
+                    .0
+                    .session
+                    .registry
+                    .take_owned_token(face, declare, &mut news)
+                {
+                    drop(held);
+                    self.hand_token_row_by_row(&news, false);
                     continue;
                 }
             }
@@ -196,6 +245,53 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let sample = opts.loopback_sample(keyexpr, payload);
         let mut fan = PinnedFanOut::local(keyexpr);
         Ok(self.hand_row_by_row(held, &SampleRef::of(&sample), &mut fan))
+    }
+
+    /// Hand the tokens a lost link's peer declared to the liveliness subscribers, a token at a
+    /// time in ascending id, each taken under the session's lock and handed to each row it reaches
+    /// once the lock is let go of (`Self::hand_token_row_by_row`). A session the loss ended is
+    /// owed them too: they are taken whether it is open or closed.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn hand_lost_tokens(&self) {
+        let mut news = TokenNews::default();
+        while self
+            .core
+            .lock()
+            .0
+            .session
+            .registry
+            .take_lost_token(&mut news)
+        {
+            self.hand_token_row_by_row(&news, true);
+        }
+    }
+
+    /// Hand the peer token `news` tells of to each liveliness subscriber it reaches, one call at
+    /// a time with the session let go of, as a Push's sample is handed (`Self::hand_row_by_row`):
+    /// each row is pinned under the session's lock, from the place after the last, so a callback
+    /// finds the session free and a row undeclared by an earlier call is passed. A closed session
+    /// pins no row, unless `past_close`: the retractions of a link whose loss ended the session.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn hand_token_row_by_row(&self, news: &TokenNews, past_close: bool) {
+        let sample = news.sample();
+        let mut fan = PinnedTokenFan::new(sample.keyexpr, news.historical());
+        // A read a callback makes reads nothing, so no record is handed out inside another's call.
+        self.deliveries.within(|_| loop {
+            let next = if past_close {
+                let guard = self.core.lock();
+                tables(&guard.0.session.registry).pin_next_liveliness_subscriber(&mut fan)
+            } else {
+                self.live().and_then(|held| {
+                    tables(&held.0.session.registry).pin_next_liveliness_subscriber(&mut fan)
+                })
+            };
+            let Some(call) = next else {
+                break;
+            };
+            let call = LivelinessCall::new(call);
+            call.hand(sample);
+            self.end_liveliness_call(call);
+        });
     }
 
     /// Hand `sample` to each subscriber `fan` reaches, the first pinned under `held`, one call at

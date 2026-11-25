@@ -291,6 +291,7 @@ where
     G: ReplySink,
     // The node's rows deliver themselves: the dispatch hands them no context.
     K: ObserverSinks<Delivery = ()> + 'static,
+    K::Subscriber: wz_session_core::sink::SampleSink,
     D: BoxedLinkDriver + ?Sized + 'static,
 {
     fn on_event(&mut self, event: IterationEvent<'_, '_>) {
@@ -510,6 +511,7 @@ where
     R: ReplySink + 'static,
     G: ReplySink + 'static,
     K: ObserverSinks<Delivery = ()> + 'static,
+    K::Subscriber: wz_session_core::sink::SampleSink,
     D: BoxedLinkDriver + ?Sized + 'static,
 {
     let mut dispatch = SlotDispatch::new(observer, handle, requesters);

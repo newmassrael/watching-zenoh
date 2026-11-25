@@ -501,6 +501,7 @@ impl<C, K, D, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: usize> Se
 where
     C: ClockSource + Default + 'static,
     K: ObserverSinks<Delivery = ()> + 'static,
+    K::Subscriber: wz_session_core::sink::SampleSink,
     D: BoxedLinkDriver + ?Sized + 'static,
 {
     fn on_event(&mut self, event: wz_session_core::driver_loop::IterationEvent<'_, '_>) {

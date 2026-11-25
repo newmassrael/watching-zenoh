@@ -1364,3 +1364,21 @@ fn a_source_that_owes_no_more_leaves_the_links_held_while_another_owes() {
     round.owe(Owing::CatchUp, false);
     assert!(!round.owes(), "CONTROL: none owes");
 }
+
+/// The row releases an engine keeps where nothing is put in the round read as the round's do: a
+/// mark is taken once and cleared, and each drop under way is counted until its count is given
+/// back. Turned red by a mark that survives its taking, or a drop count that settles early.
+#[test]
+fn the_row_releases_take_a_mark_once_and_count_each_drop() {
+    let releases = RowReleases::new();
+    assert!(!releases.take_marked(), "CONTROL: no row waits");
+    releases.mark();
+    assert!(releases.take_marked());
+    assert!(!releases.take_marked(), "taking the mark clears it");
+    assert!(releases.settled(), "CONTROL: no drop under way");
+    let (one, two) = (releases.releasing(), releases.releasing());
+    drop(one);
+    assert!(!releases.settled(), "the other drop is still under way");
+    drop(two);
+    assert!(releases.settled());
+}

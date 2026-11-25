@@ -53,29 +53,33 @@ use crate::arena::{
     EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
+use crate::form::{CoopForm, Latch};
 use crate::form::{
     LinkCount, LockForm, SessionLock, SharedCount, StateGuard, StateLock, UnderCoreLock,
 };
 use crate::lodging::LodgingPlaces;
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-use crate::round::LendingLink;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
-#[cfg(feature = "runtime-plan")]
+#[cfg(all(wz_round, feature = "runtime-plan"))]
 use crate::round::RoundRows;
-use crate::round::{CoopForm, Latch, Round, RoundCounts};
+#[cfg(wz_round)]
+use crate::round::{Round, RoundCounts};
 use crate::RowPolicy;
 use wz_runtime_coop::kept::Shared;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::bounded::Arena;
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
-#[cfg(feature = "liveliness")]
+#[cfg(all(
+    feature = "liveliness",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_hold::HeldReplies;
+use wz_session_core::round::RowReleases;
 use wz_session_core::row_callback::{RowCallback, ThreadForm};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::session_state::LocalRequests;
@@ -179,7 +183,17 @@ use wz_session_core::session_init_params::{
 use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
-use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleRef, SampleView};
+#[cfg(any(
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    feature = "liveliness",
+    feature = "queryable"
+))]
+use wz_session_core::sink::RowAccess;
+use wz_session_core::sink::SampleRef;
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+use wz_session_core::sink::{FanOut, SampleDelivery, SampleView};
 use wz_session_core::sn::sn_resolution_admitted;
 use wz_session_core::step_lend::LendCell;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -240,6 +254,12 @@ mod pinned;
     not(any(feature = "threads", feature = "listen", feature = "group"))
 ))]
 mod replies;
+// The delivery of a peer's query such a read makes, one queryable at a time (`queries`).
+#[cfg(all(
+    feature = "queryable",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+mod queries;
 
 mod registry;
 #[cfg(not(feature = "runtime-plan"))]
@@ -294,9 +314,12 @@ use wz_session_core::replay_pacing::ReplayPacing;
     feature = "declarations-synced-event"
 ))]
 mod decl_watch;
-#[cfg(any(
-    feature = "remote-declaration-watch",
-    feature = "declarations-synced-event"
+#[cfg(all(
+    any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ),
+    any(feature = "threads", feature = "listen", feature = "group")
 ))]
 pub(crate) use decl_watch::WatchCall;
 #[cfg(any(
@@ -354,13 +377,14 @@ use {
 
 #[cfg(feature = "query")]
 mod get;
+#[cfg(all(feature = "query", wz_round))]
+use crate::round::LegHolders;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]). A build that asks no
 /// query keeps no such table (`registry::Gets`), so it names no leg.
 #[cfg(feature = "query")]
 pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
 #[cfg(feature = "query")]
 use {
-    crate::round::LegHolders,
     get::{EndedLegs, GetKind, GetPlane, LegRows},
     wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey},
     wz_capi_port::ReplyCallback,
@@ -768,7 +792,9 @@ struct SessionLent {
     /// The places the session lends its registry and its Router in for a step, in the arena.
     steps: StepPlaces,
     /// The session's round of deliveries, which lies in the arena: after the registry, which
-    /// holds a handle of it, and before the arena.
+    /// holds a handle of it, and before the arena. A build that puts nothing in the round
+    /// (`wz_round`) places none.
+    #[cfg(wz_round)]
     samples: Placed<Round>,
     /// The span the session's runtime is placed in, and the count of the arena it is kept by.
     runtime: RuntimePlace,
@@ -959,7 +985,7 @@ fn lend_session(
         policy,
         SessionChains::over(&transport.reassembly, LENT_CHAINS),
     );
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(all(wz_round, feature = "runtime-plan"))]
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
     // The rows the gets that consolidate hold their replies in, lent beside the round's.
@@ -984,23 +1010,27 @@ fn lend_session(
     let gets = unsafe { StatePlaces::gets(region_places, ended, held_replies, legs) };
     // The round lies beside its tables, owned by the session's state and reached by handles that
     // count nothing.
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(all(wz_round, feature = "runtime-plan"))]
     let mut samples =
         Round::placed_over(arena.arena_mut(), round_rows).map_err(ArenaRefused::Lend)?;
     // SAFETY: as above, for the round's field and the field of its tables' rows.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(all(wz_round, not(feature = "runtime-plan")))]
     let mut samples = unsafe { StatePlaces::round(region_places, plan.round()) };
     // No handle of the round is taken yet: it reads the keys a peer's aliases keep in the
     // session's key arena where they lie.
-    let round = samples.get_mut();
-    round.reads_keys_in(keys);
-    #[cfg(feature = "query")]
+    #[cfg(wz_round)]
     {
-        let legs: NonNull<dyn LegHolders<crate::round::CoopCalls>> = NonNull::from(&*gets);
-        // SAFETY: the round reaches the legs until the engine's drop lets it go
-        // (`Round::let_go`), before the plane's owner, the session's state, is dropped; until
-        // then the plane is held where it was placed, by this value and then by the state.
-        unsafe { round.calls_legs_of(legs) };
+        let round = samples.get_mut();
+        round.reads_keys_in(keys);
+        #[cfg(feature = "query")]
+        {
+            let legs: NonNull<dyn LegHolders<crate::calls::CoopCalls>> = NonNull::from(&*gets);
+            // SAFETY: the round reaches the legs until the engine's drop lets it go
+            // (`Round::let_go`), before the plane's owner, the session's state, is dropped;
+            // until then the plane is held where it was placed, by this value and then by the
+            // state.
+            unsafe { round.calls_legs_of(legs) };
+        }
     }
     #[cfg(feature = "runtime-plan")]
     let steps = StepPlaces::placed_in(arena.arena_mut()).map_err(ArenaRefused::Lend)?;
@@ -1025,14 +1055,19 @@ fn lend_session(
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
     // owner changes the round no more.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     let lane = unsafe { samples.share() };
     // SAFETY: the delivery is held by the registry, dropped before the plane wherever both are
     // held: here, where the registry is made after it, and in `SessionLent` and the session's
     // state, which hold the plane in a field after the registry's.
     #[cfg(feature = "queryable")]
-    let delivery = RoundDelivery::new(lane, unsafe { plane.share() });
-    #[cfg(not(feature = "queryable"))]
-    let delivery = RoundDelivery::new(lane);
+    let asked = unsafe { plane.share() };
+    let delivery = RoundDelivery {
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        round: lane,
+        #[cfg(feature = "queryable")]
+        plane: asked,
+    };
     // The application's tables, lent from the rows the plan counts for them: the session's
     // one table set among them, which holds its subscribers and its queryables.
     #[cfg(feature = "runtime-plan")]
@@ -1081,6 +1116,7 @@ fn lend_session(
         transport,
         room_places,
         steps,
+        #[cfg(wz_round)]
         samples,
         router,
         keys,
@@ -1257,8 +1293,15 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     /// callbacks, in the order they arrived, in the session's round of deliveries
     /// (`crate::round`). A change of a matching status takes no record's room: it is owed in the
     /// listener's row (`SessionTables::take_owed_matching`). A handle of the round the session's
-    /// state owns, used last in the engine's drop, before `core` is dropped.
+    /// state owns, used last in the engine's drop, before `core` is dropped. None in a build that
+    /// puts nothing in the round (`wz_round`).
+    #[cfg(wz_round)]
     samples: PlacedRef<Round>,
+    /// What a walk's end of a call leaves the session to let go of, where nothing is put in the
+    /// round: each walk ends its own calls (`pinned`, `queries`) and lets their rows go itself, so
+    /// no row is marked and only the drops under way are counted.
+    #[cfg(not(wz_round))]
+    releases: RowReleases,
     /// Whether a read of the matching listeners found a change since a walk of their rows last
     /// found none owed, written under the session's lock: a delivery that reads it clear takes no
     /// lock to look for one.
@@ -1353,8 +1396,9 @@ pub(crate) struct Takes {
     pub(crate) plans: core::sync::atomic::AtomicUsize,
     /// The keys the session's tables named for a plain put through a write filter.
     pub(crate) namings: core::sync::atomic::AtomicUsize,
-    /// The walks of the tables for rows whose last call ended, made only when a call said one
-    /// may wait.
+    /// The walks of the tables for rows whose last call ended, made only when a call the round
+    /// ended said one may wait.
+    #[cfg(wz_round)]
     pub(crate) walks: core::sync::atomic::AtomicUsize,
     /// The takes of input by the pump of the one link the read steps itself that read a unit
     /// (`direct`).
@@ -1373,6 +1417,13 @@ pub(crate) struct Takes {
         not(any(feature = "threads", feature = "listen", feature = "group"))
     ))]
     pub(crate) pinned_replies: core::sync::atomic::AtomicUsize,
+    /// The peers' queries the read handed to a queryable itself (`queries`), one for each
+    /// queryable a query reached.
+    #[cfg(all(
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) pinned_queries: core::sync::atomic::AtomicUsize,
     /// The holds of key expression declarations the session handed out (declared or retained)
     /// less those given back, counted whether the session is open or closed: a hold given back to
     /// a closed session is still one given back, and one never given back stays counted.
@@ -2052,11 +2103,13 @@ impl StepPlaces {
 
 /// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it. As it
 /// lets go, the round of deliveries it wrote is sealed (`Round::seal`), so what the session wrote
-/// under its lock is handed out by the delivery that follows.
+/// under its lock is handed out by the delivery that follows; a build that puts nothing in the
+/// round (`wz_round`) seals none.
 struct LiveCore<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// Let go in the hold's own drop, after the seal, so that no caller holds a copy of the lock's
     /// release beside the call to it.
     core: core::mem::ManuallyDrop<CoreGuard<'a, L, C>>,
+    #[cfg(wz_round)]
     lane: &'a Round,
 }
 
@@ -2079,8 +2132,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, L, 
     // round sealed and the lock let go in this one body.
     #[inline(never)]
     fn drop(&mut self) {
+        #[cfg(wz_round)]
         // SAFETY: the session's lock is held: `core` is let go below, after the seal.
-        unsafe { self.lane.seal() };
+        unsafe {
+            self.lane.seal()
+        };
         // SAFETY: this is the hold's drop, so `core` is let go once and nothing reads it after.
         unsafe { core::mem::ManuallyDrop::drop(&mut self.core) };
     }
@@ -2272,7 +2328,11 @@ impl SessionParts for CoopSession {
     type Gets = ();
     /// Asked by every link's gate before it reads a record (`crate::round::RoundGate`): owned
     /// here, in the session's arena, and reached by the gates through handles of it.
+    #[cfg(wz_round)]
     type Lane = Placed<Round>;
+    /// A build that puts nothing in the round (`wz_round`) places none, and its gates ask none.
+    #[cfg(not(wz_round))]
+    type Lane = ();
     #[cfg(feature = "shared-key-ids")]
     type KeyIds = Option<SharedKeyIds>;
     #[cfg(not(feature = "shared-key-ids"))]
@@ -2644,26 +2704,21 @@ impl SubscriberCall {
 /// lock held; a query, the queryables' plane, which holds a call begun on a queryable's row until
 /// the query is handed to its callback. The registry holds it and hands it to each dispatch, so no
 /// row keeps a reference to either.
+/// The round is held only where a plane tells it through the delivery: where the read runs beside
+/// the program's calls, a subscriber's sample, a token, a query and a declaration watch's event.
+/// The read that hands each record out as it is read hands each of them out itself, so its delivery
+/// holds the queryables' plane alone, for the session's own get, or nothing.
 pub(crate) struct RoundDelivery {
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     round: PlacedRef<Round>,
     #[cfg(feature = "queryable")]
     plane: PlacedRef<QueryPlane>,
 }
 
-impl RoundDelivery {
-    /// Deliveries into `round`.
-    #[cfg(not(feature = "queryable"))]
-    fn new(round: PlacedRef<Round>) -> Self {
-        Self { round }
-    }
-
-    /// Deliveries into `round`, and queries into `plane`, which only the engine reaches.
-    #[cfg(feature = "queryable")]
-    fn new(round: PlacedRef<Round>, plane: PlacedRef<QueryPlane>) -> Self {
-        Self { round, plane }
-    }
-}
-
+// The read that hands each record out as it is read hands every sample out itself, one subscriber
+// at a time (`pinned`): only a build whose read runs beside the program's calls offers the round
+// a sample.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
     fn deliver(
         &mut self,
@@ -2699,7 +2754,10 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
 
 // The delivery traits are the rows': each names the context its row is told through, here the
 // session's round of deliveries and its query plane.
-#[cfg(feature = "liveliness")]
+#[cfg(all(
+    feature = "liveliness",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 impl
     wz_session_core::declare::liveliness_subscriber::LivelinessDelivered<
         RoundDelivery,
@@ -2736,6 +2794,28 @@ impl
     }
 }
 
+/// A read that steps its one link itself hands each peer token to the liveliness subscribers it
+/// reaches itself, one row at a time with the session let go of (`TakenAhead::tokens`), so no
+/// plane tells a row a token: the observer's sinks name a delivery all the same.
+#[cfg(all(
+    feature = "liveliness",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+impl
+    wz_session_core::declare::liveliness_subscriber::LivelinessDelivered<
+        RoundDelivery,
+        LivelinessSubscriberHandle,
+    > for LivelinessRow
+{
+    fn tell(
+        _cx: &mut RoundDelivery,
+        _id: LivelinessSubscriberHandle,
+        _row: RowAccess<'_, LivelinessRow>,
+        _sample: LivelinessSample<'_>,
+    ) {
+    }
+}
+
 #[cfg(feature = "queryable")]
 impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for QueryableRow {
     fn ask(
@@ -2750,10 +2830,17 @@ impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for 
         // go out through a responder of the plane's own.
         // SAFETY: the session's tables are dispatched under the session's lock, which only `Core`
         // holds, as the plane's arrival asks.
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         unsafe {
             cx.plane
                 .arrive(&cx.round, || QueryableCall::begin(row.row()), query)
         };
+        // A read that steps its one link itself hands each query of the link to the queryables
+        // (`queries`), so only the session's own get is asked here, which hands the calls its
+        // queryables begin its own view.
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        cx.plane
+            .arrive_own(|| QueryableCall::begin(row.row()), query);
     }
 }
 
@@ -3001,10 +3088,23 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The port's mutex, as the lock the session core's planes keep their state under and the queues
-/// the deliveries drain sit behind: the query plane's (every build, `PlaneCalls::Queues`), the
-/// faces' watchers (`connectivity`) and the gets' queues (`query`).
+/// the deliveries drain sit behind: the planes' of the engine's calls (`PlaneCalls::Queues`, every
+/// build that names them, `crate::calls`), the faces' watchers (`connectivity`) and the gets'
+/// queues (`query`).
+#[cfg(any(
+    wz_round,
+    feature = "query",
+    feature = "queryable",
+    feature = "connectivity"
+))]
 pub(crate) enum CoopLocks {}
 
+#[cfg(any(
+    wz_round,
+    feature = "query",
+    feature = "queryable",
+    feature = "connectivity"
+))]
 impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     type Lock<T> = Mutex<T>;
 
@@ -3279,7 +3379,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 /// The gates a link's pump runs behind on this engine, for a session on the clock `C`, which the
 /// session places in the link's cell of its table (`TransportState::gate_cells`): the round's, and with
 /// `listen` the admission's under it, which carries the clock; where the read hands each record
-/// out as it is read, the link alone, which tells the round where the datagram it lends lies.
+/// out as it is read, the link alone.
 trait LinkGates {
     /// The gates.
     type Gate;
@@ -3292,10 +3392,10 @@ impl<C: ClockSource + 'static> LinkGates for C {
     #[cfg(all(not(feature = "listen"), any(feature = "threads", feature = "group")))]
     type Gate = RoundGate<CellRc<dyn SessionDatagramLink, LinkCount>>;
     // The read steps the one link itself and hands each record out as it is read, so nothing
-    // holds the link back from its session; the read tells the round where the datagram it lends
-    // lies, which the round reads each record's parts in (`direct`).
+    // holds the link back from its session, and it keeps no round to tell where the datagram it
+    // lends lies (`direct`): the link is the pump.
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-    type Gate = LendingLink<CellRc<dyn SessionDatagramLink, LinkCount>>;
+    type Gate = CellRc<dyn SessionDatagramLink, LinkCount>;
 }
 
 /// The gates of a link of a session on the clock `C` ([`LinkGates`]).
@@ -3610,15 +3710,15 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let _ = key_form;
     }
 
+    // Each record is handed out as it is read, so nothing holds the link back: the link is the
+    // pump.
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     fn gate(
         &self,
         pump: CellRc<dyn SessionDatagramLink, LinkCount>,
         _actions: &LinkHandle<C>,
     ) -> LinkGate<C> {
-        // Each record is handed out as it is read, so nothing holds the link back; where the
-        // datagram it lends lies is kept for the read to tell the round.
-        LendingLink::new(pump)
+        pump
     }
 
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -3691,8 +3791,6 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let dispatch = direct::FaceRecords {
             // The registry holds the face before its link is made (`Registry::add_face`).
             face: self.session.registry.held(face),
-            // What the read tells the round of the datagram a record of it lies in.
-            link: gate.clone(),
             actions: actions.clone(),
             // SAFETY: the records are held beside the link's session in the engine's face, which
             // lets them go before the session's state, which owns the plane.
@@ -3700,11 +3798,11 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
             plane: unsafe { self.session.plane.share() },
             #[cfg(feature = "queryable")]
             generation,
-            // SAFETY: as the plane's: the engine's face lets the records go before the state,
-            // whose round's owner changes it no more.
-            lane: unsafe { self.session.lane.share() },
             after_pushes: false,
         };
+        // The read keeps no handle on the link beside its pump's.
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        let _ = gate;
         // The wire keeps a handle on the gates to admit the link through them, and to tell them
         // what each wait found in the link's stack.
         #[cfg(all(feature = "threads", not(any(feature = "listen", feature = "group"))))]
@@ -4673,14 +4771,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[inline(never)]
     fn lose_link(&mut self, id: FaceId) {
         self.session.lose_face(id);
-        #[cfg(feature = "liveliness")]
+        // A read that steps its one link itself hands the tokens owed after it lets go of the
+        // session (`tokens`).
+        #[cfg(all(
+            feature = "liveliness",
+            any(feature = "threads", feature = "listen", feature = "group")
+        ))]
         self.retract_owed();
     }
 
     /// Retract the tokens the peers of lost links declared, as many as the round of deliveries
     /// takes now (`SessionState::retract_owed`). Each `Delete` is a record of a token for every
     /// liveliness subscriber the session's limits admit.
-    #[cfg(feature = "liveliness")]
+    #[cfg(all(
+        feature = "liveliness",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     fn retract_owed(&mut self) {
         // A token's record owes a callback to each liveliness subscriber the session admits.
         let callbacks = crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
@@ -4697,9 +4803,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Hold in the round what the declaration watches are owed and it has room for now
     /// (`DeclWatches::tell_owed`): each new watch's catch-up from the peers of the links up now,
     /// each declaration named as its link's peer, and the events a watch lost.
-    #[cfg(any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        any(feature = "threads", feature = "listen", feature = "group")
     ))]
     fn tell_decl_watches_owed(&self) {
         let registry = &self.session.registry;
@@ -4713,6 +4822,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         };
         // SAFETY: `Core` is reached under the session's lock alone, the round writer's lock.
         unsafe { registry.decl_watches.tell_owed(faces) };
+    }
+
+    /// The next call a declaration watch is owed (`DeclWatches::next_call`), its event copied
+    /// into `told`: what the dispatch of the last record held, the events a watch lost, then each
+    /// new watch's catch-up from the peers of the links up now, each declaration named as its
+    /// link's peer.
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn next_decl_watch_call(&self, told: &mut decl_watch::Told) -> Option<decl_watch::WatchCall> {
+        let registry = &self.session.registry;
+        let links = &self.transport.links;
+        let faces = move || {
+            links.faces().filter_map(move |face| {
+                let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
+                    return None;
+                };
+                let peer = decl_watch::named(|| wire.actions.peer_session_zid());
+                Some((registry.tables_of(face.id)?, peer))
+            })
+        };
+        registry.decl_watches.next_call(faces, told)
     }
 
     /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
@@ -5275,7 +5410,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 gets: lent.gets,
                 #[cfg(not(feature = "query"))]
                 gets: (),
+                #[cfg(wz_round)]
                 lane: lent.samples,
+                #[cfg(not(wz_round))]
+                lane: (),
             },
             // SAFETY: the handle is held by `registry_lend` and the dispatch of the links and
             // groups, in the transport and the tasks, all dropped before the place's owner,
@@ -5352,6 +5490,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // SAFETY: the engine holds the handle beside the `Core` it owns and uses it last in its
         // own drop, before its fields, `core` among them, are dropped; the round's owner changes it
         // no more.
+        #[cfg(wz_round)]
         let samples = unsafe { core.session.lane.share() };
         let wire = core.transport.wire_zid;
         // SAFETY: the engine holds the handles beside the `Core` that owns the planes and reads
@@ -5385,10 +5524,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // back.
             let reach = unsafe { row.fill(this) };
             // The round hands the queries it holds to their queryables through the engine,
-            // which sends what they answer.
-            #[cfg(feature = "queryable")]
+            // which sends what they answer. A read that steps its one link itself holds no query
+            // in the round (`queries`).
+            #[cfg(all(
+                feature = "queryable",
+                any(feature = "threads", feature = "listen", feature = "group")
+            ))]
             {
-                let answering: NonNull<dyn crate::round::AnswersQueries<crate::round::CoopCalls>> =
+                let answering: NonNull<dyn crate::round::AnswersQueries<crate::calls::CoopCalls>> =
                     this;
                 // SAFETY: the engine owns the round and tells it to answer no more first in
                 // its drop, before the round is let go of; the place is the engine's from here
@@ -5423,7 +5566,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 addr_of_mut!((*at).handed_limits).write(handed_limits);
                 #[cfg(feature = "transport-stats")]
                 addr_of_mut!((*at).unsent_drops).write(AtomicU64::new(0));
+                #[cfg(wz_round)]
                 addr_of_mut!((*at).samples).write(samples);
+                #[cfg(not(wz_round))]
+                addr_of_mut!((*at).releases).write(RowReleases::new());
                 addr_of_mut!((*at).matching_owed).write(AtomicBool::new(false));
                 #[cfg(feature = "queryable")]
                 addr_of_mut!((*at).plane).write(plane);
@@ -5483,7 +5629,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     handed_limits: _,
                 #[cfg(feature = "transport-stats")]
                     unsent_drops: _,
-                samples: _,
+                #[cfg(wz_round)]
+                    samples: _,
+                #[cfg(not(wz_round))]
+                    releases: _,
                 matching_owed: _,
                 #[cfg(feature = "queryable")]
                     plane: _,
@@ -5584,14 +5733,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         any(feature = "queryable", feature = "query", feature = "connectivity")
     ))]
     pub(crate) fn plane_places(&self) -> alloc::vec::Vec<*const u8> {
-        let mut places = alloc::vec::Vec::new();
-        #[cfg(feature = "queryable")]
-        places.push(core::ptr::from_ref::<QueryPlane>(&self.plane).cast::<u8>());
-        #[cfg(feature = "query")]
-        places.push(core::ptr::from_ref::<GetPlane>(&self.gets).cast::<u8>());
-        #[cfg(feature = "connectivity")]
-        places.push(core::ptr::from_ref::<FacePlane>(&self.faces).cast::<u8>());
-        places
+        [
+            #[cfg(feature = "queryable")]
+            core::ptr::from_ref::<QueryPlane>(&self.plane).cast::<u8>(),
+            #[cfg(feature = "query")]
+            core::ptr::from_ref::<GetPlane>(&self.gets).cast::<u8>(),
+            #[cfg(feature = "connectivity")]
+            core::ptr::from_ref::<FacePlane>(&self.faces).cast::<u8>(),
+        ]
+        .to_vec()
     }
 
     /// How many cells of the session's table of links' halves hold a link's halves now: `None`
@@ -5655,6 +5805,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// What the session's round of deliveries did not hand a callback, by why (`crate::round`).
+    #[cfg(wz_round)]
     pub fn round_counts(&self) -> RoundCounts {
         self.samples.counts()
     }
@@ -5910,7 +6061,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let pinned = self.takes.pinned_samples.load(Ordering::Relaxed);
         #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         let pinned = 0;
-        self.samples.tally().samples() + pinned
+        #[cfg(wz_round)]
+        let round = self.samples.tally().samples();
+        #[cfg(not(wz_round))]
+        let round = 0;
+        round + pinned
     }
 
     /// Of the samples [`Self::samples_handed`] counts, how many were handed where their datagram
@@ -5921,7 +6076,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let pinned = self.takes.pinned_lent.load(Ordering::Relaxed);
         #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         let pinned = 0;
-        self.samples.tally().lent() + pinned
+        #[cfg(wz_round)]
+        let round = self.samples.tally().lent();
+        #[cfg(not(wz_round))]
+        let round = 0;
+        round + pinned
     }
 
     /// How many peers' replies the read handed to the get each answers itself, with nothing of
@@ -5934,6 +6093,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ))]
     pub(crate) fn replies_handed_by_the_read(&self) -> usize {
         self.takes.pinned_replies.load(Ordering::Relaxed)
+    }
+
+    /// How many calls of the session's queryables the read made itself for the peers' queries, one
+    /// for each queryable a query reached, with nothing of them held in the round (`queries`).
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) fn queries_handed_by_the_read(&self) -> usize {
+        self.takes.pinned_queries.load(Ordering::Relaxed)
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open
@@ -5989,6 +6160,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         Some(LiveCore {
             core: core::mem::ManuallyDrop::new(guard),
+            #[cfg(wz_round)]
             lane: &self.samples,
         })
     }
@@ -6031,6 +6203,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
                 return ToPublish::Live(LiveCore {
                     core: core::mem::ManuallyDrop::new(guard),
+                    #[cfg(wz_round)]
                     lane: &self.samples,
                 });
             }
@@ -6181,14 +6354,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             handed = true;
         }
         // The subscribers undeclared while a call of theirs ran, whose last call has ended now.
+        #[cfg(wz_round)]
         self.let_go_of_released();
         // What the declaration watches are owed and the round had no room for when it came (the
         // catch-up of a watch declared while a round was handed out, the events a watch lost),
         // held now the round is handed out, each round sealed as the session is let go of and
         // handed out in turn.
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "threads", feature = "listen", feature = "group")
         ))]
         while self.decl_watches.owes() {
             let Some(core) = self.live() else {
@@ -6200,9 +6377,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 break;
             }
         }
+        // What a read that steps its one link itself held for the declaration watches as it
+        // dispatched the record, and the catch-up a watch is owed, a call at a time; what their
+        // sinks queue is handed out after them.
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            not(any(feature = "threads", feature = "listen", feature = "group"))
+        ))]
+        if self.hand_decl_watches() {
+            handed = true;
+            while self.hand_out() {}
+        }
         // The tokens of a lost link the round had no room for, retracted now the round is handed
         // out, each round sealed as the session is let go of and handed out in turn.
-        #[cfg(feature = "liveliness")]
+        #[cfg(all(
+            feature = "liveliness",
+            any(feature = "threads", feature = "listen", feature = "group")
+        ))]
         while self.samples.owes() {
             let Some(mut core) = self.live() else {
                 break;
@@ -6218,7 +6412,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // closure's `drop(context)`). A round another delivery still hands out may hold a reply
         // of one of them: that delivery tells the ends once it is through.
         #[cfg(feature = "query")]
-        while self.gets.ends_pending() && self.samples.is_idle() {
+        while self.gets.ends_pending() && self.round_owes_no_reply() {
             let Some(ended) = self.gets.take_end() else {
                 break;
             };
@@ -6230,6 +6424,36 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
+        }
+        handed
+    }
+
+    /// Hand each declaration watch what it is owed (`DeclWatches::next_call`), a call at a time:
+    /// the row pinned under the session's lock and its sink called with no lock held, so a sink may
+    /// reach back into the session. Whether any was handed.
+    #[cfg(all(
+        any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ),
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn hand_decl_watches(&self) -> bool {
+        let mut told = decl_watch::Told::default();
+        let mut handed = false;
+        while self.decl_watches.owes() {
+            let call = {
+                let Some(core) = self.live() else {
+                    break;
+                };
+                core.0.next_decl_watch_call(&mut told)
+            };
+            let Some(call) = call else {
+                break;
+            };
+            call.hand(told.event());
+            call.end();
+            handed = true;
         }
         handed
     }
@@ -6260,8 +6484,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// and the queries each say without their locks whether they hold anything, so a pass that
     /// finds nothing, which every delivery's last pass is, takes none of their locks.
     fn hand_out(&self) -> bool {
-        // The round the session wrote under its lock, in the order it was written.
+        // The round the session wrote under its lock, in the order it was written. A build that
+        // puts nothing in the round hands none out (`wz_round`, the crate's build script).
+        #[cfg(wz_round)]
         let mut handed = self.samples.deliver();
+        #[cfg(not(wz_round))]
+        let mut handed = false;
         // A face that came up or went down, a row at a time, told to each watcher as it stands
         // now, each taken out of its lock alone, so a sink that undeclares a watcher does not
         // wait on it.
@@ -6973,12 +7201,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// Let go of each row whose last call ended after it was undeclared, when a call said one may
-    /// wait ([`Round::take_marked`]): a walk of each table whose calls the round ends takes them out
-    /// one at a time under the session's lock (`SessionTables::release_drained_subscriber` and its
-    /// kin) and drops each after it, so a C program's `drop` never runs under the lock.
+    /// Let go of each row whose last call ended after it was undeclared, when a call the round
+    /// ended said one may wait ([`RowReleases::take_marked`]): a walk of each table whose calls the
+    /// round ends takes them out one at a time under the session's lock
+    /// (`SessionTables::release_drained_subscriber` and its kin) and drops each after it, so a C
+    /// program's `drop` never runs under the lock. A build that puts nothing in the round marks
+    /// no row: each walk lets go of the rows whose calls it ended itself.
+    #[cfg(wz_round)]
     fn let_go_of_released(&self) {
-        if !self.samples.take_marked() {
+        if !self.releases().take_marked() {
             return;
         }
         #[cfg(test)]
@@ -7002,6 +7233,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         });
     }
 
+    /// What the ends of the calls of the session's rows leave it to let go of: the round's, which
+    /// ends the calls it holds.
+    #[cfg(wz_round)]
+    fn releases(&self) -> &RowReleases {
+        self.samples.releases()
+    }
+
+    /// What the ends of the calls of the session's rows leave it to let go of: the engine's own,
+    /// where nothing is put in the round.
+    #[cfg(not(wz_round))]
+    fn releases(&self) -> &RowReleases {
+        &self.releases
+    }
+
     /// Walk one table with `take`, which takes out the next row at or after its cursor whose last
     /// call ended: each row is taken under the session's lock, its drop counted as under way from
     /// there, and dropped after the lock.
@@ -7011,7 +7256,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let taken = {
                 let mut guard = self.core.lock();
                 let tables = tables_mut(&mut guard.0.session.registry);
-                take(tables, &mut cursor).map(|row| (row, self.samples.releasing()))
+                take(tables, &mut cursor).map(|row| (row, self.releases().releasing()))
             };
             let Some((row, releasing)) = taken else {
                 break;
@@ -7030,7 +7275,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn wait_for_release(&self, handle: SubscriberHandle) {
         self.wait_until_let_go(
             |tables| tables.subscribers().holds_slot(handle),
-            || self.samples.released_settled(),
+            || self.releases().settled(),
         );
     }
 
@@ -7040,7 +7285,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn wait_for_liveliness_release(&self, handle: LivelinessSubscriberHandle) {
         self.wait_until_let_go(
             |tables| tables.liveliness_subscribers().holds_slot(handle),
-            || self.samples.released_settled(),
+            || self.releases().settled(),
         );
     }
 
@@ -7050,7 +7295,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn wait_for_queryable_release(&self, handle: QueryableHandle) {
         self.wait_until_let_go(
             |tables| tables.queryables().holds_slot(handle),
-            || self.samples.released_settled(),
+            || self.releases().settled(),
         );
     }
 
@@ -7172,6 +7417,33 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
+    /// Where a leg's sink hands a reply no thread captured (`get::Uncaptured`): the session's
+    /// round of deliveries.
+    #[cfg(all(feature = "query", wz_round))]
+    fn uncaptured(&self) -> get::Uncaptured {
+        self.samples
+    }
+
+    /// Where a leg's sink hands a reply no thread captured (`get::Uncaptured`): nowhere, as the
+    /// read captures each reply it hands a get.
+    #[cfg(all(feature = "query", not(wz_round)))]
+    fn uncaptured(&self) -> get::Uncaptured {
+        wz_session_core::get_plane::EveryReplyCaptured
+    }
+
+    /// Whether no delivery is handing out a round that may still hold a reply of a leg that
+    /// ended, so the leg's end may follow it.
+    #[cfg(all(feature = "query", wz_round))]
+    fn round_owes_no_reply(&self) -> bool {
+        self.samples.is_idle()
+    }
+
+    /// See the build that keeps a round: one that keeps none holds no reply in one.
+    #[cfg(all(feature = "query", not(wz_round)))]
+    fn round_owes_no_reply(&self) -> bool {
+        true
+    }
+
     /// Hold one leg of a get pending under `entry`: the leg's callback minted in a row of the
     /// plane's, and its sink registered with the deadline and the accepted key the get states.
     /// Out of line where a get issues more than one kind of leg (to groups, or to the session
@@ -7208,9 +7480,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         // SAFETY: the sink goes into a table of pending gets, which the session
         // reaches under its lock alone, and is handed its replies there; the table is the
-        // registry's, dropped before the owners of the round and of the plane, the session
-        // state's fields after the registry's.
-        let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.samples) };
+        // registry's, dropped before the owners of the plane and of the round where the build
+        // keeps one, the session state's fields after the registry's.
+        let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
         let sink = ConsolidatingSink::with_hold(
             ask.opts.resolved_consolidation(),
             leg_sink,
@@ -7387,8 +7659,34 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             });
         }
         // A row whose last call this was, its subscriber undeclared from inside its history, is
-        // let go of by the delivery the declaration ends with.
+        // let go of as the call ends.
+        self.end_liveliness_call(call);
+    }
+
+    /// End `call`, made of a liveliness subscriber's row: a row whose last call it was is marked
+    /// for the walk the round's delivery ends with.
+    #[cfg(all(
+        feature = "liveliness",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
+    fn end_liveliness_call(&self, call: LivelinessCall) {
         self.samples.end_liveliness_call(call);
+    }
+
+    /// End `call`, made of a liveliness subscriber's row: a row whose last call it was is let go
+    /// of here, with no lock held, as a Push's walk lets a subscriber's go (`pinned`).
+    #[cfg(all(
+        feature = "liveliness",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn end_liveliness_call(&self, call: LivelinessCall) {
+        if call.end() {
+            self.let_go_of_drained(|tables, cursor| {
+                tables
+                    .release_drained_liveliness_subscriber(cursor)
+                    .map(|row| row.into_callback())
+            });
+        }
     }
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session
@@ -7685,8 +7983,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // the Final is owed as one that matched none.
         let query = opts.loopback_query().ok();
         // The session's queryables only begin a call and hold the query's Final
-        // (`QueryPlane::arrive`), so none stages a reply here: the stage they are handed has no
-        // room.
+        // (`QueryPlane::arrive`, `QueryPlane::arrive_own`), so none stages a reply here: the
+        // stage they are handed has no room.
         let mut staged = ReplyStage::<RowPolicy>::default();
         let registry = &mut core.session.registry;
         if let Some(query) = &query {
@@ -7717,12 +8015,40 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.deliveries.within(|_| {
             for call in asked {
                 self.run_queryable(&call, get, query::LOCAL_QUERY);
-                self.samples.end_query_call(call);
+                self.end_own_call(call);
             }
         });
-        // A row whose last call one of these was, its queryable undeclared meanwhile, is let go
-        // of by the delivery's walk, its drop perhaps the program's own, with no lock held.
+        // What they answered is handed out with no lock held, and, in a build of threads, a row
+        // whose last call one of these was, its queryable undeclared meanwhile, is let go of by
+        // the delivery's walk, its drop perhaps the program's own.
         self.deliver();
+    }
+
+    /// End `call`, which the session's own get made of one of its queryables: a row whose last
+    /// call it was is marked for the round's walk to let go of after the delivery.
+    #[cfg(all(
+        feature = "local-queryable",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
+    fn end_own_call(&self, call: QueryableCall) {
+        self.samples.end_query_call(call);
+    }
+
+    /// End `call`, which the session's own get made of one of its queryables: a row whose last
+    /// call it was is let go of here, with no lock held, as a link's query's walk lets it go
+    /// (`queries`).
+    #[cfg(all(
+        feature = "local-queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn end_own_call(&self, call: QueryableCall) {
+        if call.end() {
+            self.let_go_of_drained(|tables, cursor| {
+                tables
+                    .release_drained_queryable(cursor)
+                    .map(|row| row.into_callback())
+            });
+        }
     }
 
     /// Whether write filter `id` holds what it filters back: a filter is created suppressing,
@@ -8172,7 +8498,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     /// The watch is told first what each link's peer holds now, then what the links' dispatch
     /// holds for it from here on (`decl_watch`): at once when the round takes the catch-up, or by
     /// the next round when it is handed out now, as it is to a watch declared from inside a
-    /// callback. A refused sink is let go of with no lock held.
+    /// callback; where the read steps its one link itself, by this call, or by the delivery a
+    /// callback that declares it runs in. A refused sink is let go of with no lock held.
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -8200,7 +8527,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 return Err(refused);
             }
         };
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         core.tell_decl_watches_owed();
+        // The catch-up is handed now, before the link is read again; a declare from inside a
+        // callback has it handed by the delivery the callback runs in, as the call returns.
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        {
+            drop(guard);
+            self.deliver();
+        }
         Ok(id)
     }
 
@@ -9234,9 +9569,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             };
             // SAFETY: the sink goes into a table of pending gets, which the session
             // reaches under its lock alone, and is handed its replies there; the table is the
-            // registry's, dropped before the owners of the round and of the plane, the session
-            // state's fields after the registry's.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.samples) };
+            // registry's, dropped before the owners of the plane and of the round where the build
+            // keeps one, the session state's fields after the registry's.
+            let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.
             let registered = core
@@ -9722,7 +10057,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // A round sealed and handed out by no delivery is emptied unhanded, its calls ended: no
         // callback of the session is called after its close. The rows whose last call that was
         // go first, then every row the close emptied.
+        #[cfg(wz_round)]
         self.samples.discard();
+        #[cfg(wz_round)]
         self.let_go_of_released();
         self.let_go_of_rows();
     }
@@ -10082,9 +10419,12 @@ impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind> ComposedLinks
     type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J, N>;
 }
 
-#[cfg(feature = "queryable")]
+#[cfg(all(
+    feature = "queryable",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static>
-    crate::round::AnswersQueries<crate::round::CoopCalls> for CoopEngine<L, C>
+    crate::round::AnswersQueries<crate::calls::CoopCalls> for CoopEngine<L, C>
 {
     fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64) {
         self.run_queryable(call, query, generation);
@@ -10101,7 +10441,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngi
         self.direct.let_go_owned();
         // The round names this engine to answer its queries: no longer, before anything of the
         // engine goes (`Round::answer_queries_with`).
-        #[cfg(feature = "queryable")]
+        #[cfg(all(
+            feature = "queryable",
+            any(feature = "threads", feature = "listen", feature = "group")
+        ))]
         self.samples.answer_no_queries();
         // The last handle is gone, so no read task holds one: it has stopped, or is about to
         // drop the handle it held. A session never closed is closed now; a closed one has no
@@ -10114,8 +10457,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngi
         // The round's tables lie in the session's arena, which the state's drop gives back: they
         // are let go of first, with the callbacks their records owe, each call ended before the
         // row it reads is dropped with the tables.
+        #[cfg(wz_round)]
         // SAFETY: the last handle is gone, so no delivery runs or starts.
-        unsafe { self.samples.let_go() };
+        unsafe {
+            self.samples.let_go()
+        };
         // The legs' rows and ends lie in the arena too. A session never closed still holds the
         // entries of its pending gets: they go first, each saying its end, and the plane lets go
         // of the ends and the rows after, the callbacks still held among them.

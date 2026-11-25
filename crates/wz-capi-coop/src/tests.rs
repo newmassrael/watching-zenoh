@@ -104,17 +104,40 @@ enum Command {
     DeclareSubscriber(wz_session_core::wire_id::EntityId, &'static str),
     /// Declare queryable `.0` on the key, complete as `.2` says. Declared only: it answers
     /// nothing, which is all a test of what matches needs. Only the builds whose tests watch or
-    /// match a peer's queryables send it.
+    /// match a peer's queryables send it: a key's matching listener, the faces' table of a listener
+    /// with local queryables, a declaration watch of the queryables.
     #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        feature = "key-matching-listener"
+        feature = "key-matching-listener",
+        all(
+            feature = "listen",
+            feature = "query",
+            feature = "queryable",
+            feature = "local-queryable"
+        ),
+        all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "query", feature = "queryable")
+        )
     ))]
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
     #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        feature = "key-matching-listener"
+        feature = "key-matching-listener",
+        all(
+            feature = "listen",
+            feature = "query",
+            feature = "queryable",
+            feature = "local-queryable"
+        ),
+        all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "query", feature = "queryable")
+        )
     ))]
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
@@ -147,6 +170,13 @@ enum Command {
         &'static [u8],
         &'static [u8],
     ),
+    /// Declare each subscriber `.0` names, id and key, in one batch window, so that one frame
+    /// carries them all.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    DeclareSubscriberBatch(&'static [(wz_session_core::wire_id::EntityId, &'static str)]),
     /// Send the final of the initial declarations, as a peer does once it has declared what it
     /// held when the link came up.
     #[cfg(any(
@@ -689,9 +719,20 @@ fn run_router(
                 );
             }
             #[cfg(any(
-                feature = "query",
-                feature = "queryable",
-                feature = "key-matching-listener"
+                feature = "key-matching-listener",
+                all(
+                    feature = "listen",
+                    feature = "query",
+                    feature = "queryable",
+                    feature = "local-queryable"
+                ),
+                all(
+                    any(
+                        feature = "remote-declaration-watch",
+                        feature = "declarations-synced-event"
+                    ),
+                    any(feature = "query", feature = "queryable")
+                )
             ))]
             Ok(Command::DeclareQueryable(id, key, complete)) => {
                 let _ = actions.send_declare_queryable(
@@ -701,9 +742,20 @@ fn run_router(
                 );
             }
             #[cfg(any(
-                feature = "query",
-                feature = "queryable",
-                feature = "key-matching-listener"
+                feature = "key-matching-listener",
+                all(
+                    feature = "listen",
+                    feature = "query",
+                    feature = "queryable",
+                    feature = "local-queryable"
+                ),
+                all(
+                    any(
+                        feature = "remote-declaration-watch",
+                        feature = "declarations-synced-event"
+                    ),
+                    any(feature = "query", feature = "queryable")
+                )
             ))]
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
@@ -743,6 +795,20 @@ fn run_router(
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
+            }
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            Ok(Command::DeclareSubscriberBatch(declared)) => {
+                let _ = actions.batch_start();
+                for &(id, key) in declared {
+                    let _ = actions.send_declare_subscriber(
+                        id,
+                        wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                    );
+                }
+                let _ = actions.batch_stop();
             }
             Ok(Command::PushBatch(key, count)) => {
                 let _ = actions.batch_start();
@@ -1609,7 +1675,7 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
     until(&engine, "the push and the retraction after it", || {
         !seen.lock().unwrap().is_empty() && engine.write_filter_active(filter)
     });
-    let threads = <crate::round::CoopForm as ThreadForm>::OTHER_THREADS;
+    let threads = <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
     assert_eq!(
         *seen.lock().unwrap(),
         [threads],
@@ -2253,7 +2319,10 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
 /// counts: any queryable on the key, or only a complete one when the plane requires it, as
 /// zenoh-pico's listener is that filter's callback. The CONTROL is a subscriber on the key, which
 /// the router declares first and which opens a subscriber filter while neither listener hears it.
-#[cfg(any(feature = "query", feature = "queryable"))]
+#[cfg(all(
+    any(feature = "query", feature = "queryable"),
+    feature = "key-matching-listener"
+))]
 #[test]
 fn a_queryable_matching_listener_counts_what_its_filter_counts() {
     let router = Router::start(CatchAll::None);
@@ -3698,6 +3767,7 @@ mod redial_wait;
 #[cfg(not(feature = "runtime-plan"))]
 mod region;
 mod replay;
+#[cfg(wz_round)]
 mod round;
 // The cells a link's task takes: a build whose read steps its one link itself runs none.
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -3717,3 +3787,18 @@ mod ticker;
 mod timestamps;
 #[cfg(feature = "listen")]
 mod tx_pool;
+
+/// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's
+/// build script): a build whose read runs beside the program's calls. The read that hands each
+/// record out as it is read queues none, a get's reply included. A build that keeps none compiles
+/// no `crate::round`, so this is read here, where every build reads it. A feature added to one
+/// list and not the other turns this red.
+#[test]
+fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
+    let queues = cfg!(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group"
+    ));
+    assert_eq!(cfg!(wz_round), queues);
+}

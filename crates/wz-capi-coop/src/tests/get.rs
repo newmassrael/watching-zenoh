@@ -162,11 +162,50 @@ fn a_latest_get_hands_each_key_it_held_after_its_final() {
         .collect();
     keys.sort_unstable();
     assert_eq!(keys, ["demo/m/a", "demo/m/b", "demo/m/b/c/deeper"]);
+    // A build whose read hands each reply to its get itself keeps no round to refuse one a place.
+    #[cfg(wz_round)]
     assert_eq!(
         engine.round_counts().held_over,
         0,
         "no reply was refused a place"
     );
+}
+
+/// A get that consolidates nothing hands its replies to its callback in the order its peer sent
+/// them, each once, and ends once, after the last: three replies on three keys. Read without a
+/// round of deliveries where the read hands each reply to its get itself, and through one
+/// elsewhere. Turned red by a reply handed out of its order, lost or handed twice, or by anything
+/// handed after the end.
+#[test]
+fn a_gets_replies_come_in_their_order_and_its_end_after_them_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(
+        &router,
+        &engine,
+        Command::AnswerOnKeys("demo/o/**", &["demo/o/1", "demo/o/2", "demo/o/3"], b"v"),
+    );
+    let opts =
+        remote_get().with_consolidation(wz_session_core::query_mode::ConsolidationMode::None);
+    let (issued, leg) = ask(&engine, "demo/o/**", &opts, None, None, None);
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
+    until(&engine, "the leg to end", || leg.lock().unwrap().ended);
+    let in_order = vec![
+        (ReplyKind::Put, "demo/o/1".to_owned(), b"v".to_vec()),
+        (ReplyKind::Put, "demo/o/2".to_owned(), b"v".to_vec()),
+        (ReplyKind::Put, "demo/o/3".to_owned(), b"v".to_vec()),
+    ];
+    assert_eq!(leg.lock().unwrap().replies, in_order);
+    // Reads past the end hand the ended leg nothing more: no second end's timeout, no reply.
+    for _ in 0..8 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        leg.lock().unwrap().replies,
+        in_order,
+        "nothing after the end"
+    );
+    assert_eq!(router.seen(|s| s.queries), 1);
 }
 
 /// A get nobody answers ends at its deadline with zenoh's timeout reply, swept by the step that
