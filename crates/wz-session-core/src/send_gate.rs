@@ -35,8 +35,12 @@ impl SendGate {
         Self(AtomicBool::new(open))
     }
 
-    /// Let data sends through.
-    pub fn open(&self) {
+    /// Let data sends through. Crate-private: a gate is opened only by the doors that settle the
+    /// send limits first (`SessionLinkActions::enter_established`, `open_without_handshake`), so
+    /// an open gate always has its limits in place. Compiled where those doors are, and for the
+    /// gate's own tests.
+    #[cfg(any(test, all(feature = "storage-profile", feature = "session-unicast")))]
+    pub(crate) fn open(&self) {
         self.0.store(true, Ordering::Release);
     }
 
