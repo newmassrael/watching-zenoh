@@ -978,6 +978,37 @@ fn a_subscriber_is_named_by_its_engines_session_zid() {
     assert_eq!(declared.id().zid(), &ZID[..]);
 }
 
+/// A subscriber whose shared part the heap has no room for is refused as that, and the callback it
+/// was handed is let go of with the refusal. Turned red by a declaration that answers the heap's
+/// refusal by ending the program, or that keeps the callback past it.
+#[test]
+fn a_subscriber_the_heap_has_no_room_for_is_refused() {
+    let script = Script::new(1);
+    let engine = engine(&script);
+    let held = Arc::new(());
+    let in_callback = Arc::clone(&held);
+    let shared = core::alloc::Layout::new::<
+        core::mem::MaybeUninit<Lodging<super::Shared<Arc<dyn SessionEngine>>>>,
+    >();
+    let refused = crate::test_alloc::refusing(shared, || {
+        EngineSubscriber::declare(
+            &engine,
+            "demo/data",
+            AdvancedSubscriberOptions::new(),
+            move |_| assert!(Arc::strong_count(&in_callback) > 0),
+        )
+    });
+    assert_eq!(refused.err(), Some(HostError::NoRoom));
+    assert_eq!(Arc::strong_count(&held), 1, "the callback was let go of");
+    let declared = EngineSubscriber::declare(
+        &engine,
+        "demo/data",
+        AdvancedSubscriberOptions::new(),
+        |_| {},
+    );
+    assert!(declared.is_ok(), "CONTROL: a heap with room declares it");
+}
+
 // ---------------------------------------------------------------------------------------------
 // What asking a get and subscribing take of the heap. The crate's other lib tests run beside these
 // on libtest's other threads and allocate as they please; the count is of the thread a test runs
@@ -1022,7 +1053,7 @@ fn shared_on_key(
         }
     };
     // SAFETY: `make` makes the whole shared part in the place it is handed.
-    unsafe { Strong::boxed_in(make) }
+    unsafe { Strong::try_boxed_in(make) }.expect("the test's heap")
 }
 
 /// A get's slot, its fan's registration, its legs, a reply keyed outside the subscription and

@@ -79,7 +79,7 @@ use super::state::{
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex, MutexGuard};
 
-use wz_capi_port::lodge::{Lodging, Strong, WeakRef};
+use wz_capi_port::lodge::{Lodging, NoPlace, Strong, WeakRef};
 
 /// Why declaring an advanced subscriber on an engine failed.
 #[derive(Debug, PartialEq, Eq)]
@@ -100,6 +100,9 @@ pub enum HostError {
     },
     /// The engine refused a declaration the subscriber is made of, for this cause.
     Declined(Refusal),
+    /// The heap had no room for what the subscriber's callbacks and jobs share, so nothing was
+    /// declared.
+    NoRoom,
 }
 
 impl HostError {
@@ -123,6 +126,7 @@ impl core::fmt::Display for HostError {
                 f.write_str("the session has handed out every 32-bit declaration id")
             }
             Self::HistoryBoundZero { knob } => write!(f, "history {knob} must not be zero"),
+            Self::NoRoom => f.write_str("the heap has no room for an advanced subscriber"),
             Self::Declined(refused) => {
                 write!(f, "the engine refused an advanced subscriber: {refused}")
             }
@@ -698,8 +702,9 @@ impl<E: EngineHolder> EngineSubscriber<E> {
             // SAFETY: the place is the box's, valid for one `Shared`, holding none, never moved.
             unsafe { write_shared_part(place, engine, base_keyexpr, &options, on_sample, misses) }
         };
-        // SAFETY: `make` makes the whole shared part in the place it is handed.
-        let shared = unsafe { Strong::boxed_in(make) };
+        // SAFETY: `make` makes the whole shared part in the place it is handed. Refused, `make` is
+        // dropped uncalled, and the callbacks with it.
+        let shared = unsafe { Strong::try_boxed_in(make) }.map_err(|NoPlace| HostError::NoRoom)?;
         Self::declare_over(engine, shared, options)
     }
 

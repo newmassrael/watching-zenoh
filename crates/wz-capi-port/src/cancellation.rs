@@ -59,7 +59,6 @@
 //! `std`'s on a host, the host's own calls' in a host library without `std`,
 //! an MCU kernel's in an image. The fan only takes a lock ([`crate::sync::Lock`]).
 
-use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ptr::{addr_of_mut, NonNull};
 
@@ -68,7 +67,7 @@ use core::ptr::{addr_of_mut, NonNull};
     all(not(feature = "std"), not(feature = "os-sys"))
 ))]
 use crate::lodge::StaticPlaces;
-use crate::lodge::{NoPlace, Strong};
+use crate::lodge::{Lent, NoPlace, Strong};
 use crate::os::{Condvar, Mutex, MutexGuard};
 use crate::reach::ReachEngine;
 use crate::sync::Lock;
@@ -509,14 +508,16 @@ impl Drop for CancellableFan {
     }
 }
 
-/// A fan of its own allocation registered on `token`, for a caller that shares the fan among the
-/// legs it issues. `None` when the token has already started cancelling: the caller then fails
-/// the get without issuing it.
-pub fn register_fan(token: &Strong<CancellationToken>) -> Option<Arc<CancellableFan>> {
-    let fan = Arc::new(CancellableFan::new());
-    // SAFETY: the fan is its allocation's own, which does not move until it is dropped, and no
+/// A fan in a box of its own registered on `token`, counted for a caller that shares the fan
+/// among the legs it issues. `Ok(None)` when the token has already started cancelling: the caller
+/// then fails the get without issuing it. [`NoPlace`] when the heap has no room for the fan.
+pub fn register_fan(
+    token: &Strong<CancellationToken>,
+) -> Result<Option<Strong<CancellableFan>>, NoPlace> {
+    let fan = Strong::new_at(Lent::try_boxed()?, CancellableFan::new());
+    // SAFETY: the fan lies in its box, which does not move until its last count drops it, and no
     // engine has it yet.
-    unsafe { fan.register(TokenRef::shared(token.clone())) }.then_some(fan)
+    Ok(unsafe { fan.register(TokenRef::shared(token.clone())) }.then_some(fan))
 }
 
 /// How many tokens a kernel's build holds at once, read off the build's limits: a token is held to
@@ -617,7 +618,9 @@ mod tests {
     fn a_registered_fan_is_cancelled_through_its_engine_and_waited_for() {
         let token = CancellationToken::new().expect("a token place is free");
         let engine = engine();
-        let fan = register_fan(&token).expect("a fresh token registers");
+        let fan = register_fan(&token)
+            .expect("the test's heap")
+            .expect("a fresh token registers");
         assert!(fan.attach(canceller_of(engine)));
         assert_eq!(token.active(), 1);
         let key = fan.key();
@@ -641,7 +644,10 @@ mod tests {
         assert_eq!(engine.taken(), vec![(key, "cancel")]);
         assert!(token.is_cancelled());
         assert_eq!(token.active(), 0);
-        assert!(register_fan(&token).is_none(), "cancel has started");
+        assert!(
+            register_fan(&token).expect("the test's heap").is_none(),
+            "cancel has started"
+        );
     }
 
     /// A fan cancelled before its engine attached refuses the attachment, and a fan dropped

@@ -2462,7 +2462,7 @@ mod tests {
             unsafe { MissRooms::write_in(place) }
         };
         // SAFETY: `make` makes the whole set in the place it is handed.
-        let set: MissSlot = unsafe { Strong::boxed_in(make) };
+        let set: MissSlot = unsafe { Strong::try_boxed_in(make) }.expect("the test's heap");
         let slot = crate::object_slot::Slot::<AdvSubPlace>::take_entity(
             &engine,
             crate::object_slot::Kind::AdvancedSubscriber,

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken};
+use wz_capi_port::lodge::Strong;
 use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
@@ -40,7 +41,7 @@ fn ask(
     keyexpr: &str,
     timeout_ms: u32,
     fan: Option<&CancellableFan>,
-    registration: Option<Arc<CancellableFan>>,
+    registration: Option<Strong<CancellableFan>>,
 ) -> (Result<usize, Refusal>, Arc<Mutex<Leg>>) {
     let leg = Arc::new(Mutex::new(Leg::default()));
     let seen = leg.clone();
@@ -204,7 +205,9 @@ fn a_cancelled_snapshot_ends_without_a_step() {
         router.seen(|s| s.settled)
     });
     let token = CancellationToken::new().expect("a token place is free");
-    let fan = register_fan(&token).expect("a fresh token registers");
+    let fan = register_fan(&token)
+        .expect("the test's heap")
+        .expect("a fresh token registers");
     let (issued, leg) = ask(&engine, "demo/snap/a", 0, Some(&fan), Some(fan.clone()));
     drop(fan);
     assert_eq!(issued, Ok(1));

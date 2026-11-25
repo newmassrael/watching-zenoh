@@ -54,6 +54,22 @@ pub struct Lent<T> {
 }
 
 impl<T> Lent<T> {
+    /// A place in a box of its own, given back to the heap with the last count of what is lodged
+    /// there, or at once when dropped unused; [`NoPlace`] when the heap refuses the box. What a
+    /// holder with no place of its own to lend hands a maker.
+    pub fn try_boxed() -> Result<Self, NoPlace> {
+        // Laid out as `Box::new(Lodging::vacant())` lays it out, so `free_box` gives it back.
+        let layout = core::alloc::Layout::new::<MaybeUninit<Lodging<T>>>();
+        // SAFETY: a lodging has bytes: its counts.
+        let place = NonNull::new(unsafe { alloc::alloc::alloc(layout) })
+            .ok_or(NoPlace)?
+            .cast::<MaybeUninit<Lodging<T>>>();
+        // SAFETY: the block is this place's alone, of a lodging's layout from the global
+        // allocator, valid for writes of one and holding none; `free_box` gives it back once,
+        // with a value lodged there or none.
+        Ok(unsafe { Self::new(place, free_box::<T>, place.as_ptr().cast::<c_void>()) })
+    }
+
     /// The place at `place`, which `give_back(context)` gives back once.
     ///
     /// # Safety
@@ -169,45 +185,28 @@ unsafe impl<T: Send + Sync> Send for WeakRef<T> {}
 unsafe impl<T: Send + Sync> Sync for WeakRef<T> {}
 
 impl<T> Strong<T> {
-    /// `value` in a box of its own, given back to the heap with the last count of it.
-    pub fn boxed(value: T) -> Self {
-        let write = |at: NonNull<T>| {
-            // SAFETY: the place `boxed_in` hands is valid for writes of a `T` and holds none.
-            unsafe { at.as_ptr().write(value) }
-        };
-        // SAFETY: `write` leaves `value` in the place it is handed.
-        unsafe { Self::boxed_in(write) }
-    }
-
-    /// The value `make` writes in a box of its own, where it stays, as [`Self::boxed`] holds one:
-    /// what a value holding a lock is made in, its locks made there
-    /// ([`crate::os::mutex_in`]).
+    /// The value `make` writes in a box of its own ([`Lent::try_boxed`]), where it stays: what a
+    /// value holding a lock is made in, its locks made there ([`crate::os::mutex_in`]). [`NoPlace`]
+    /// when the heap refuses the box, with `make` not called.
     ///
     /// # Safety
     /// `make` leaves a valid `T` in the place it is handed, which is valid for writes of one,
     /// aligned for it and holds none.
-    pub unsafe fn boxed_in(make: impl FnOnce(NonNull<T>)) -> Self {
-        let place = NonNull::from(Box::leak(Box::new(Lodging::<T>::vacant())));
-        // SAFETY: the box is this value's alone and is given back by `free_box`, once; `make` is
-        // the caller's.
-        unsafe { Self::lodge_in(place, make, free_box::<T>, place.as_ptr().cast::<c_void>()) }
+    pub unsafe fn try_boxed_in(make: impl FnOnce(NonNull<T>)) -> Result<Self, NoPlace> {
+        let lent = Lent::try_boxed()?;
+        // SAFETY: the caller's.
+        Ok(unsafe { Self::lodge_at(lent, make) })
     }
 
-    /// The value `make` writes in a box of its own, as [`Self::boxed_in`] makes one, or [`NoPlace`]
-    /// when the heap refuses the box, with `make` not called.
-    ///
-    /// # Safety
-    /// As [`Self::boxed_in`].
-    pub unsafe fn try_boxed_in(make: impl FnOnce(NonNull<T>)) -> Result<Self, NoPlace> {
-        // Laid out as `Box::new(Lodging::vacant())` lays it out, so `free_box` gives it back.
-        let layout = core::alloc::Layout::new::<MaybeUninit<Lodging<T>>>();
-        // SAFETY: a lodging has bytes: its counts.
-        let place = NonNull::new(unsafe { alloc::alloc::alloc(layout) })
-            .ok_or(NoPlace)?
-            .cast::<MaybeUninit<Lodging<T>>>();
-        // SAFETY: the block is this value's alone, of a lodging's layout from the global
-        // allocator, and is given back by `free_box`, once; `make` is the caller's.
-        Ok(unsafe { Self::lodge_in(place, make, free_box::<T>, place.as_ptr().cast::<c_void>()) })
+    /// `value` in the place `lent` names, given back with the last count of the value and of
+    /// its place. Safe where [`Self::lodge_at`] is not: the whole value is written at once.
+    pub fn new_at(lent: Lent<T>, value: T) -> Self {
+        let write = |at: NonNull<T>| {
+            // SAFETY: the place `lodge_at` hands is valid for writes of a `T` and holds none.
+            unsafe { at.as_ptr().write(value) }
+        };
+        // SAFETY: `write` leaves `value` whole in the place it is handed.
+        unsafe { Self::lodge_at(lent, write) }
     }
 
     /// The value `make` writes in the place `lent` names, where it stays: the place a session's
@@ -507,7 +506,7 @@ impl Drop for LodgedCount {
 ///
 /// # Safety
 /// `raw` names a lodging of a `T` of which the caller holds a count.
-unsafe fn retain_raw<T>(raw: *const c_void) {
+pub(crate) unsafe fn retain_raw<T>(raw: *const c_void) {
     // SAFETY: the caller's count holds the lodging; Relaxed, as `Strong::clone`'s.
     unsafe { &*raw.cast::<Lodging<T>>() }
         .strong
@@ -518,15 +517,15 @@ unsafe fn retain_raw<T>(raw: *const c_void) {
 ///
 /// # Safety
 /// `raw` is a count of a `T`'s lodging that the caller gives up, once.
-unsafe fn release_raw<T>(raw: *mut c_void) {
+pub(crate) unsafe fn release_raw<T>(raw: *mut c_void) {
     // SAFETY: the caller's.
     drop(unsafe { Strong::<T>::from_raw(raw) });
 }
 
-/// Give back a box [`Strong::boxed_in`] or [`Strong::try_boxed_in`] made.
+/// Give back a box [`Lent::try_boxed`] made.
 ///
 /// # Safety
-/// `context` is that box, whose value was dropped, given back once.
+/// `context` is that box, whose value was dropped or never written, given back once.
 unsafe fn free_box<T>(context: *mut c_void) {
     // SAFETY: the caller's; a vacant lodging drops nothing of the value.
     drop(unsafe { Box::from_raw(context.cast::<MaybeUninit<Lodging<T>>>()) });
@@ -722,7 +721,7 @@ mod tests {
     /// to the count unchecked overflows it, which reds the refusal and the count after it.
     #[test]
     fn an_upgrade_past_the_most_counts_is_refused() {
-        let count = Strong::boxed(7u32);
+        let count = Strong::new_at(Lent::try_boxed().expect("the test's heap"), 7u32);
         let weak = Strong::downgrade(&count);
         let upgraded = weak.upgrade().expect("CONTROL: the value is held");
         assert_eq!(Strong::strong_count(&count), 2, "the upgrade is a count");

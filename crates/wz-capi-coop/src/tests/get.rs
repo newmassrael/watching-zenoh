@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, TokenRef};
+use wz_capi_port::lodge::Strong;
 use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::query_options::QueryOptions;
@@ -62,7 +63,7 @@ pub(super) fn ask(
     keyexpr: &str,
     opts: &QueryOptions,
     fan: Option<&CancellableFan>,
-    registration: Option<Arc<CancellableFan>>,
+    registration: Option<Strong<CancellableFan>>,
     step: Option<EngineHold<Engine>>,
 ) -> (Result<usize, Refusal>, Arc<Mutex<Leg>>) {
     let leg = Arc::new(Mutex::new(Leg::default()));
@@ -205,7 +206,9 @@ fn a_cancelled_get_ends_without_a_step() {
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
     let token = CancellationToken::new().expect("a token place is free");
-    let fan = register_fan(&token).expect("a fresh token registers");
+    let fan = register_fan(&token)
+        .expect("the test's heap")
+        .expect("a fresh token registers");
     let (issued, leg) = ask(
         &engine,
         "demo/g/a",

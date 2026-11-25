@@ -403,7 +403,7 @@ mod tests {
     ///
     /// # Control
     ///
-    /// Lodging the anchor in a box of its own (`Strong::boxed`) counts one allocation; a
+    /// Lodging the anchor in a box of its own (`Strong::try_boxed_in`) counts one allocation; a
     /// `vacate` that does not mark the room vacant reds the second assertion.
     #[test]
     fn an_anchor_lies_in_its_room_and_takes_no_memory() {
