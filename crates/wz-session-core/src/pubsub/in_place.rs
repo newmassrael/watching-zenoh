@@ -82,6 +82,36 @@ enum Fallback {
     Instrumented,
 }
 
+/// What a Push the in-place receive path lent comes to before anyone is handed it
+/// ([`SubscriberPeer::lend_in_place`]).
+pub enum LentPush<'s> {
+    /// The sample to hand to each subscriber its key reaches from a peer.
+    Sample(SampleRef<'s>),
+    /// Nothing to hand anyone: a record that is not a Push, a body or a key the delivery drops,
+    /// or the session's own sample echoed back.
+    Nothing,
+    /// A Push the lent form does not represent (a sliced payload, a key past the room it is
+    /// composed in, a timestamp stack): the owned projection delivers it.
+    Owned,
+}
+
+/// What a lent Push's sample borrows beside the frame and the peer's table: the buffer a key is
+/// composed in where the policy composes in the delivering call's frame, and the source info read
+/// off the body. Held by whoever hands the sample out, for as long as it does.
+pub struct LentRoom<Q: Storage> {
+    frame: <Q::Compose as ComposeRoom>::Frame,
+    source_info: Option<SourceInfo>,
+}
+
+impl<Q: Storage> Default for LentRoom<Q> {
+    fn default() -> Self {
+        Self {
+            frame: Default::default(),
+            source_info: None,
+        }
+    }
+}
+
 /// The body of `push` as a lent sample delivers it, `Ok(None)` for a body the
 /// owned path drops too (an unknown body tag, or a kind this build does not
 /// deliver), and the fallback for a Put whose payload is sliced.
@@ -209,10 +239,35 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
     }
 
+    /// Lend a Push the in-place receive path read: the sample its subscribers are handed, over the
+    /// frame, this side's table and `room`, for a caller that walks the subscribers itself, one
+    /// row at a time (`SessionTables::pin_next_subscriber`). `subs` are the subscriptions the
+    /// sample is delivered to, read for our own id space alone. What the sample borrows of this
+    /// side (the peer's literal, the room a key is composed in) is written only by the reading of
+    /// this peer's records, so it holds for as long as the caller reads no other.
+    ///
+    /// A Push the lent form does not represent is [`LentPush::Owned`]: the caller delivers it
+    /// through `dispatch_iteration_event`, which counts it and takes the owned projection.
+    pub fn lend_in_place<'s, 'a: 's, L: LocalSubscribers>(
+        &'s mut self,
+        subs: &L,
+        record: &InPlaceRecord<'a, '_>,
+        room: &'s mut LentRoom<Q>,
+    ) -> LentPush<'s> {
+        // A lent Request or Response is the queryables' or the pending gets'.
+        let Some(push) = record.push() else {
+            return LentPush::Nothing;
+        };
+        let reliability = Reliability::from_reliable_bool(record.reliable());
+        match self.lend_sample(subs, push, reliability, record.sender(), room) {
+            Ok(Some(sample)) => LentPush::Sample(sample),
+            Ok(None) => LentPush::Nothing,
+            Err(_) => LentPush::Owned,
+        }
+    }
+
     /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
-    /// fits, short of a timestamp or encoding hint a subscriber asks for. A keyexpr that has to
-    /// be composed is composed in the side's room ([`Storage::Compose`]): on the lent policy the
-    /// row lent at open, which refuses one past it.
+    /// fits, short of a timestamp or encoding hint a subscriber asks for.
     fn deliver_lent<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
         subs: &mut L,
@@ -221,8 +276,44 @@ impl<Q: Storage> SubscriberPeer<Q> {
         reliability: Reliability,
         sender: u64,
     ) -> Result<(), Fallback> {
-        let Some(body) = lent_body(push)? else {
+        let class = self.class;
+        let mut room = LentRoom::default();
+        let Some(sample) = self.lend_sample(&*subs, push, reliability, sender, &mut room)? else {
             return Ok(());
+        };
+        // Through the key gate and, for a key of a closed set, the selection: the one delivery of
+        // a message from a peer, as the copying receive takes it. The rows it reaches are handed
+        // it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
+        subs.deliver_from_peer(
+            sample.keyexpr,
+            class,
+            PeerDelivery {
+                no_allocation: true,
+                ..PeerDelivery::default()
+            },
+            |id, row| {
+                cx.deliver_ref(id, row, &sample, turn);
+                turn = FanOut::later();
+            },
+        );
+        Ok(())
+    }
+
+    /// The sample of `push`, over the frame, this side's table and `room`; `None` for a Push
+    /// the owned path drops too, or the session's own sample echoed back. A keyexpr that has to be
+    /// composed is composed in the side's room ([`Storage::Compose`]): on the lent policy the row
+    /// lent at open, which refuses one past it; elsewhere `room`'s buffer.
+    fn lend_sample<'s, L: LocalSubscribers>(
+        &'s mut self,
+        subs: &L,
+        push: &'s PushView<'_>,
+        reliability: Reliability,
+        sender: u64,
+        room: &'s mut LentRoom<Q>,
+    ) -> Result<Option<SampleRef<'s>>, Fallback> {
+        let Some(body) = lent_body(push)? else {
+            return Ok(None);
         };
         // The Push's own chain is walked where it lies, once for each field that reads it.
         // A message the nodes record on is delivered with a stack of its own to add to.
@@ -235,30 +326,27 @@ impl<Q: Storage> SubscriberPeer<Q> {
         {
             return Err(Fallback::Instrumented);
         }
-        // The keyexpr may be the peer table's own literal, so the table stays
-        // borrowed through the delivery; the subscriptions are another value
-        // (`subs`). A composed keyexpr lies in the side's room, a field apart from the
-        // table, or in `frame` where the policy composes in this call's frame.
+        // The keyexpr may be the peer table's own literal, so the table stays borrowed through
+        // the delivery; the subscriptions are another value (`subs`). A composed keyexpr lies in
+        // the side's room, a field apart from the table, or in `room` where the policy composes
+        // in the delivering call's frame.
         let SubscriberPeer {
-            naming,
-            compose,
-            class,
-            ..
+            naming, compose, ..
         } = self;
-        let mut frame = Default::default();
+        let LentRoom { frame, source_info } = room;
         // Our own space is the table set the sample is delivered to: an `M=0` key is copied out
         // of it into the room before the delivery writes it.
         let (keyexpr, held) = match resolve_wireexpr_viewed_held_over(
             &push.keyexpr.body,
             naming.spaces().from_sender(sender),
             subs.own_space(),
-            ComposeRoom::buffer(compose, &mut frame),
+            ComposeRoom::buffer(compose, frame),
         ) {
             Ok(Some(resolved)) => resolved,
             // The empty keyexpr, or an id the space does not hold: dropped, as
             // the owned path drops it. A sliced Put never reaches here, so
             // there are no shared-memory slices to settle.
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(None),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
         };
         #[cfg(feature = "pubsub-qos")]
@@ -266,6 +354,8 @@ impl<Q: Storage> SubscriberPeer<Q> {
             crate::sample::extract_qos_in(crate::ext_view::walked(push.extensions.as_ref()));
         #[cfg(not(feature = "pubsub-qos"))]
         let qos: Option<QosLevel> = None;
+        *source_info = body.source_info;
+        let source_info: &'s Option<SourceInfo> = source_info;
         // Every field a range of the frame or a value read off it, valid for the delivery call. The
         // hints own heap fields (a schema's bytes), so they are built only when a subscriber asks
         // for them. The attachment and the payload are the link's, lent for the call: a subscriber
@@ -285,7 +375,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 )
             }),
             timestamp: body.timestamp.map(|ts| (ts.time, ts.zid.into_inner())),
-            source_info: body.source_info.as_ref(),
+            source_info: source_info.as_ref(),
             // A message is read in place only off a link, so it was routed to this node.
             #[cfg(feature = "pubsub-ts-stack")]
             routed: true,
@@ -302,26 +392,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         ) {
             let prefix = info.zid_prefix();
             if !prefix.is_empty() && prefix == own {
-                return Ok(());
+                return Ok(None);
             }
         }
-        // Through the key gate and, for a key of a closed set, the selection: the one delivery of
-        // a message from a peer, as the copying receive takes it. The rows it reaches are handed
-        // it in one fan-out, each told its turn.
-        let mut turn = FanOut::begin();
-        subs.deliver_from_peer(
-            sample.keyexpr,
-            *class,
-            PeerDelivery {
-                no_allocation: true,
-                ..PeerDelivery::default()
-            },
-            |id, row| {
-                cx.deliver_ref(id, row, &sample, turn);
-                turn = FanOut::later();
-            },
-        );
-        Ok(())
+        Ok(Some(sample))
     }
 
     /// The fallback: the owned projection of `push`, delivered by the path the
@@ -1068,5 +1142,44 @@ mod tests {
         };
         let (lent, owned, _) = both_ways(&push, "demo/a", own);
         assert_eq!((lent.len(), owned.len()), (0, 0));
+    }
+
+    /// A Push lent to a caller that walks the subscribers itself is the sample the fan-out would
+    /// hand: an `M=0` key composed whole in the row lent at open. A key past that row is owed to
+    /// the owned projection, and the lend counts nothing: the dispatch that takes the projection
+    /// counts it once. Turned red by a lend that answers a key the delivery refuses, or by one that
+    /// counts the fallback it hands back.
+    #[test]
+    fn a_lent_push_is_the_sample_the_fan_out_hands_and_a_key_past_the_row_is_owed() {
+        let wire = own_space_wire();
+        let push = own_space_push(&wire);
+        let record = InPlaceRecord::push_of_frame(&push, false, 7, crate::qos::Priority::DEFAULT);
+        let (mut registry, _) = recording("**");
+        let (table, _) = registry.split_mut();
+
+        let mut side = lent_side("mine/", true);
+        let mut room = LentRoom::default();
+        let key = match side.lend_in_place(&*table, &record, &mut room) {
+            LentPush::Sample(sample) => sample.keyexpr.to_string(),
+            LentPush::Nothing => panic!("a Push the side resolves lent nothing"),
+            LentPush::Owned => panic!("a key that fits the row was owed to the projection"),
+        };
+        assert_eq!(key, "mine/x");
+
+        let literal = alloc::format!("{}/", "a".repeat(crate::caps::MAX_KEYEXPR_BYTES - 1));
+        let mut past = lent_side(&literal, true);
+        let mut room = LentRoom::default();
+        assert!(
+            matches!(
+                past.lend_in_place(&*table, &record, &mut room),
+                LentPush::Owned
+            ),
+            "a key past the row was lent"
+        );
+        assert_eq!(
+            past.in_place_fallbacks(),
+            InPlaceFallbacks::default(),
+            "the lend counted the fallback it handed back"
+        );
     }
 }

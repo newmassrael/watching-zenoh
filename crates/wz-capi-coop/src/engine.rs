@@ -221,6 +221,9 @@ use ledger::{Ledger, Seen};
 // steps the one link's session itself (`direct`).
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 mod direct;
+// The delivery of a lent Push such a read makes, one subscriber at a time (`pinned`).
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+mod pinned;
 
 mod registry;
 pub(crate) use registry::FACE_SET_BYTES;
@@ -1190,6 +1193,12 @@ pub(crate) struct Takes {
     /// (`direct`).
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     pub(crate) pump_reads: core::sync::atomic::AtomicUsize,
+    /// The calls of subscribers a lent Push was handed one row at a time (`pinned`).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(crate) pinned: core::sync::atomic::AtomicUsize,
+    /// The lent Pushes handed out one row at a time (`pinned`).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(crate) pinned_records: core::sync::atomic::AtomicUsize,
     /// The holds of key expression declarations the session handed out (declared or retained)
     /// less those given back, counted whether the session is open or closed: a hold given back to
     /// a closed session is still one given back, and one never given back stays counted.
@@ -5432,14 +5441,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn rounds_handed(&self) -> usize {
-        self.samples.tally().rounds()
+        // A lent Push handed out one row at a time is a record handed on as a round is.
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        let pinned = self.takes.pinned_records.load(Ordering::Relaxed);
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        let pinned = 0;
+        self.samples.tally().rounds() + pinned
     }
 
     /// How many samples the rounds handed to their callbacks where their datagram lies since the
     /// open: what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn samples_lent(&self) -> usize {
-        self.samples.tally().lent()
+        // A sample handed one row at a time is handed where its datagram lies too.
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        let pinned = self.takes.pinned.load(Ordering::Relaxed);
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        let pinned = 0;
+        self.samples.tally().lent() + pinned
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open

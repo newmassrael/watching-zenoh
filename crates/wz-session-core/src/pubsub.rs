@@ -693,6 +693,11 @@ pub struct SubInterestRefusals {
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 mod in_place;
+#[cfg(all(
+    feature = "storage-profile",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+pub use in_place::{LentPush, LentRoom};
 
 /// R3040 (transport-shm) -- the priority band a received Push was sent at: the
 /// shared [`priority_band`](crate::put_payload::priority_band) over the push's own

@@ -273,6 +273,94 @@ fn a_close_from_a_callback_ends_the_read_and_lets_the_link_go_once() {
     );
 }
 
+/// A callback that closes its session reads the key it was handed until it returns: the key, named
+/// by an id the router declared, is the literal the session's table of the router's ids keeps,
+/// which the close leaves where it lies until the read that stepped the link has returned. No
+/// callback runs after the close. Turned red by a close that lets the router's ids go while the
+/// callback that closed holds a key read off them.
+#[test]
+fn a_callback_that_closes_its_session_reads_its_key_until_it_returns() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let keys: Arc<Mutex<Vec<String>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/named", WireKey::literal(), Locality::Any, None, {
+            let keys = keys.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    SessionDrive::close(&*engine);
+                }
+                keys.lock().unwrap().push(sample.keyexpr().to_string());
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::DeclarePushKeepAlivePush(
+        12,
+        "demo/named",
+        b"first",
+        b"second",
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while keys.lock().unwrap().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the sample"
+        );
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        *keys.lock().unwrap(),
+        ["demo/named"],
+        "the key read after the close, or a callback after it"
+    );
+}
+
+/// A read from a callback that the session's own put runs reads nothing and takes nothing of the
+/// session: a record it read would be handed to a callback inside another. The CONTROL is the
+/// put, which reaches the subscriber. Turned red by a read that steps the link from inside a
+/// delivery other than a read's.
+#[cfg(all(
+    feature = "local-subscriber",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let reads: Arc<Mutex<Vec<(bool, usize)>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    engine
+        .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
+            let reads = reads.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    let before = engine.takes.core.load(Ordering::SeqCst);
+                    let open = SessionDrive::read(&*engine, false).is_ok();
+                    let took = engine.takes.core.load(Ordering::SeqCst) - before;
+                    reads.lock().unwrap().push((open, took));
+                }
+            })
+        })
+        .expect("the session declares the subscriber");
+    let own = PublishOptions::put().with_locality(Locality::SessionLocal);
+    assert_eq!(
+        engine.publish_on_wire_all("demo/own", &WireKey::literal(), b"v", &own),
+        Ok(1),
+        "CONTROL: the put reached the subscriber"
+    );
+    assert_eq!(
+        *reads.lock().unwrap(),
+        [(true, 0)],
+        "the read from the callback took the session, or answered it closed"
+    );
+}
+
 /// A session whose lease is short, read without a pause while the router streams samples at it
 /// for several of its leases: the read sends the keep-alive the router's lease of it needs on
 /// time, so the session is still the router's peer at the end and its last sample arrives. Turned

@@ -39,6 +39,8 @@ use super::decl_watch::WatchObserver;
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+use wz_session_core::driver_loop::InPlaceRecord;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 #[cfg(feature = "multicast-declarations")]
@@ -47,6 +49,8 @@ use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::MaxPeerKeyexprAliasesHeld;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+use wz_session_core::pubsub::LentPush;
 #[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
@@ -113,6 +117,11 @@ pub(super) type Gets = NoRequesters;
 /// What a face's peer writes and is owed. The rows are lent from the session's arena at its open,
 /// one set for each face the session may hold at once (`crate::arena::FacePeers`).
 pub(super) type Peer = PeerTables<Lent>;
+
+/// What a lent Push's sample borrows beside the frame and the face's peer, held by the walk that
+/// hands it out (`pinned`).
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+pub(super) type PeerRoom = wz_session_core::pubsub::LentRoom<Lent>;
 
 /// What the session holds for one face: what its peer wrote and what the session asked of it.
 ///
@@ -660,7 +669,7 @@ impl<H: Holders> RegistryOf<H> {
     /// One more lent Push handed to the subscribers' plane alone, the face lookups since
     /// `written` its own.
     #[cfg(all(test, feature = "std"))]
-    fn counted_push(&mut self, written: u64) {
+    pub(super) fn counted_push(&mut self, written: u64) {
         let lookups =
             usize::try_from(self.faces_written.wrapping_sub(written)).unwrap_or(usize::MAX);
         self.pushes.0 += 1;
@@ -1107,6 +1116,38 @@ impl<H: Holders> RegistryOf<H> {
         }
         #[cfg(all(test, feature = "std"))]
         self.counted_push(written);
+    }
+
+    /// A Push of face `face` lent where its frame lies, read into the sample its subscribers are
+    /// handed, over the frame, the face's peer and `room` (`SubscriberPeer::lend_in_place`), for
+    /// a walk that hands it to one subscriber at a time with the session let go of (`pinned`).
+    /// A face the session no longer holds lends nothing.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn lend_push<'s, 'a: 's>(
+        &'s mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'a, '_>,
+        room: &'s mut PeerRoom,
+    ) -> LentPush<'s> {
+        match self.split(self.place(face)) {
+            Some(Split { app, face, .. }) => {
+                face.peer
+                    .subscribers
+                    .lend_in_place(&app.tables, record, room)
+            }
+            None => LentPush::Nothing,
+        }
+    }
+
+    /// How often a face's set was looked up to be written since the open: what a lent Push's
+    /// count of its lookups starts from ([`Self::counted_push`]).
+    #[cfg(all(
+        test,
+        feature = "std",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn lookups(&self) -> u64 {
+        self.faces_written
     }
 
     /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),

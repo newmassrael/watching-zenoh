@@ -174,6 +174,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
         if !push {
             self.end_records();
         }
+        if push {
+            // Handed to its subscribers one at a time (`pinned`); one the lent form does not
+            // represent is dispatched into the round below, which takes its owned projection.
+            let handed = match &event {
+                IterationEvent::InPlace(record) => {
+                    self.engine.hand_lent_push(self.records.face, record)
+                }
+                _ => false,
+            };
+            if handed {
+                self.records.after_pushes = true;
+                self.engine.deliver();
+                return;
+            }
+        }
         {
             let Some(mut held) = self.engine.live() else {
                 return;
@@ -466,10 +481,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The read of a session whose read steps its one link itself: the wait for the link's input
     /// or the next deadline, a look at the link's life and the session's bookkeeping when they are
     /// owed, then the pump stepped with nothing of the session held, each record handed out as it
-    /// is read. A read from a callback of a record reads nothing: the read under way holds the
-    /// link.
+    /// is read. A read from a callback reads nothing: the read under way holds the link, and any
+    /// other delivery marks the thread as delivering.
     pub(super) fn read_direct(&self) -> Result<(), SessionClosed> {
-        let Some(mut held) = <CoopForm as LockForm>::try_lock(&self.direct.slot) else {
+        // A callback reads nothing either while a delivery other than a read's runs it (a put to
+        // the session's own subscribers): a record read here would be handed to a callback inside
+        // another.
+        let held = if self.deliveries.delivers_here() {
+            None
+        } else {
+            <CoopForm as LockForm>::try_lock(&self.direct.slot)
+        };
+        let Some(mut held) = held else {
             return if self.closed.load(Ordering::Acquire) {
                 Err(SessionClosed)
             } else {
