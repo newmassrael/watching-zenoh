@@ -101,8 +101,9 @@ pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
 pub const JOIN_QOS_EXT_EID: u8 =
     crate::ext_header::ext_identity(0x1, true, crate::ext_header::EXT_ENC_ZBUF);
 
-/// The next SNs a JOIN QoS extension states, one pair per priority, read off the
-/// extension's ZBuf BODY (the bytes behind its header and length).
+/// The next SNs a JOIN QoS extension states, one `[reliable, best_effort]` pair per priority
+/// as the wire carries them, read off the extension's ZBuf BODY (the bytes behind its header
+/// and length).
 ///
 /// Upstream writes `Priority::NUM` pairs of VLE `(reliable, best_effort)` in
 /// priority order (`commons/zenoh-codec/src/transport/join.rs` @
@@ -114,14 +115,12 @@ pub const JOIN_QOS_EXT_EID: u8 =
 /// One reader for the multicast participant, which finds the body in the
 /// datagram (`crate::multicast_join::decode_join_qos`), and for the passive
 /// observer, which finds it in the decoded extension chain.
-pub fn qos_next_sns(
-    body: &[u8],
-) -> Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]> {
+pub fn qos_next_sns(body: &[u8]) -> Option<[[u64; 2]; crate::qos::Priority::NUM]> {
     let mut inner = SceCursor::new(body);
-    let mut pairs = [crate::sn::MulticastRxPair::default(); crate::qos::Priority::NUM];
-    for p in pairs.iter_mut() {
-        p.reliable = crate::sn::from_wire(inner.read_vle_u64().ok()?);
-        p.best_effort = crate::sn::from_wire(inner.read_vle_u64().ok()?);
+    let mut pairs = [[0u64; 2]; crate::qos::Priority::NUM];
+    for [reliable, best_effort] in pairs.iter_mut() {
+        *reliable = inner.read_vle_u64().ok()?;
+        *best_effort = inner.read_vle_u64().ok()?;
     }
     Some(pairs)
 }

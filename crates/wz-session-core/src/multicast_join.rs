@@ -374,7 +374,13 @@ pub fn decode_join_qos(
         crate::ext_view::walked(join.extensions.as_ref()),
         crate::join_decode::JOIN_QOS_EXT_EID,
     )?;
-    crate::join_decode::qos_next_sns(qos.plain_zbuf()?)
+    let sns = crate::join_decode::qos_next_sns(qos.plain_zbuf()?)?;
+    Some(
+        sns.map(|[reliable, best_effort]| crate::sn::MulticastRxPair {
+            reliable: crate::sn::from_wire(reliable),
+            best_effort: crate::sn::from_wire(best_effort),
+        }),
+    )
 }
 
 /// The JOIN `dgram` holds with its extension chain taken away, written back by its

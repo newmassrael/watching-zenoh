@@ -174,7 +174,7 @@ fn every_frame_of_a_stock_multicast_group_is_judged_on_its_joins_ring() {
     for flow in &flows {
         assert_eq!(
             flow.sn_mask,
-            Some(wz_session_core::sn::mask_from_res(2)),
+            Some(wz_session_core::sn::wire::mask_from_res(2)),
             "an S-clear JOIN states the default ring"
         );
         for sn in flow.verdicts_after_join() {
