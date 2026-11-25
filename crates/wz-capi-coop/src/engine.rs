@@ -74,6 +74,7 @@ use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
+use wz_session_core::round::RowReleases;
 use wz_session_core::row_callback::{RowCallback, ThreadForm};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::session_state::LocalRequests;
@@ -1127,6 +1128,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// listener's row (`SessionTables::take_owed_matching`). A handle of the round the session's
     /// state owns, used last in the engine's drop, before `core` is dropped.
     samples: PlacedRef<Round>,
+    /// What a walk's end of a call leaves the session to let go of, where nothing is put in the
+    /// round: each walk ends its own calls (`pinned`, `queries`) and lets their rows go itself, so
+    /// no row is marked and only the drops under way are counted.
+    #[cfg(not(wz_round))]
+    releases: RowReleases,
     /// Whether a read of the matching listeners found a change since a walk of their rows last
     /// found none owed, written under the session's lock: a delivery that reads it clear takes no
     /// lock to look for one.
@@ -1212,8 +1218,9 @@ pub(crate) struct Takes {
     pub(crate) polls: core::sync::atomic::AtomicUsize,
     /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
     pub(crate) face_marks: core::sync::atomic::AtomicUsize,
-    /// The walks of the tables for rows whose last call ended, made only when a call said one
-    /// may wait.
+    /// The walks of the tables for rows whose last call ended, made only when a call the round
+    /// ended said one may wait.
+    #[cfg(wz_round)]
     pub(crate) walks: core::sync::atomic::AtomicUsize,
     /// The takes of input by the pump of the one link the read steps itself that read a unit
     /// (`direct`).
@@ -5150,6 +5157,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(feature = "transport-stats")]
                 unsent_drops: AtomicU64::new(0),
                 samples,
+                #[cfg(not(wz_round))]
+                releases: RowReleases::new(),
                 matching_owed: AtomicBool::new(false),
                 #[cfg(feature = "queryable")]
                 plane,
@@ -5837,6 +5846,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             handed = true;
         }
         // The subscribers undeclared while a call of theirs ran, whose last call has ended now.
+        #[cfg(wz_round)]
         self.let_go_of_released();
         // What the declaration watches are owed and the round had no room for when it came (the
         // catch-up of a watch declared while a round was handed out, the events a watch lost),
@@ -6574,12 +6584,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// Let go of each row whose last call ended after it was undeclared, when a call said one may
-    /// wait ([`Round::take_marked`]): a walk of each table whose calls the round ends takes them out
-    /// one at a time under the session's lock (`SessionTables::release_drained_subscriber` and its
-    /// kin) and drops each after it, so a C program's `drop` never runs under the lock.
+    /// Let go of each row whose last call ended after it was undeclared, when a call the round
+    /// ended said one may wait ([`RowReleases::take_marked`]): a walk of each table whose calls the
+    /// round ends takes them out one at a time under the session's lock
+    /// (`SessionTables::release_drained_subscriber` and its kin) and drops each after it, so a C
+    /// program's `drop` never runs under the lock. A build that puts nothing in the round marks
+    /// no row: each walk lets go of the rows whose calls it ended itself.
+    #[cfg(wz_round)]
     fn let_go_of_released(&self) {
-        if !self.samples.take_marked() {
+        if !self.releases().take_marked() {
             return;
         }
         #[cfg(test)]
@@ -6603,6 +6616,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         });
     }
 
+    /// What the ends of the calls of the session's rows leave it to let go of: the round's, which
+    /// ends the calls it holds.
+    #[cfg(wz_round)]
+    fn releases(&self) -> &RowReleases {
+        self.samples.releases()
+    }
+
+    /// What the ends of the calls of the session's rows leave it to let go of: the engine's own,
+    /// where nothing is put in the round.
+    #[cfg(not(wz_round))]
+    fn releases(&self) -> &RowReleases {
+        &self.releases
+    }
+
     /// Walk one table with `take`, which takes out the next row at or after its cursor whose last
     /// call ended: each row is taken under the session's lock, its drop counted as under way from
     /// there, and dropped after the lock.
@@ -6612,7 +6639,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let taken = {
                 let mut guard = self.core.lock();
                 let tables = tables_mut(&mut guard.0.session.registry);
-                take(tables, &mut cursor).map(|row| (row, self.samples.releasing()))
+                take(tables, &mut cursor).map(|row| (row, self.releases().releasing()))
             };
             let Some((row, releasing)) = taken else {
                 break;
@@ -6631,7 +6658,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn wait_for_release(&self, handle: SubscriberHandle) {
         self.wait_until_let_go(
             |tables| tables.subscribers().holds_slot(handle),
-            || self.samples.released_settled(),
+            || self.releases().settled(),
         );
     }
 
@@ -6641,7 +6668,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn wait_for_liveliness_release(&self, handle: LivelinessSubscriberHandle) {
         self.wait_until_let_go(
             |tables| tables.liveliness_subscribers().holds_slot(handle),
-            || self.samples.released_settled(),
+            || self.releases().settled(),
         );
     }
 
@@ -6651,7 +6678,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn wait_for_queryable_release(&self, handle: QueryableHandle) {
         self.wait_until_let_go(
             |tables| tables.queryables().holds_slot(handle),
-            || self.samples.released_settled(),
+            || self.releases().settled(),
         );
     }
 
@@ -9251,6 +9278,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // callback of the session is called after its close. The rows whose last call that was
         // go first, then every row the close emptied.
         self.samples.discard();
+        #[cfg(wz_round)]
         self.let_go_of_released();
         self.let_go_of_rows();
     }

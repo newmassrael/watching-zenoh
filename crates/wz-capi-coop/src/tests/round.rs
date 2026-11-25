@@ -755,11 +755,11 @@ fn a_round_let_go_of_ends_the_calls_its_records_owe() {
     assert!(!first.retire(), "CONTROL: the waiting record owes a call");
     unsafe { round.let_go() };
     assert!(
-        round.take_marked(),
+        round.releases().take_marked(),
         "the undeclared row's last call ended with the round's tables"
     );
     assert!(first.drained(), "and its latch is the mark a walk reads");
-    assert!(!round.take_marked(), "asking clears the mark");
+    assert!(!round.releases().take_marked(), "asking clears the mark");
     assert!(second.retire(), "the declared row's call ended too");
     assert!(!round.deliver(), "nothing is left to hand");
     assert!(seen.lock().unwrap().is_empty(), "and nothing was handed");
@@ -814,15 +814,18 @@ fn a_row_undeclared_while_its_call_waits_is_handed_nothing_and_let_go_after() {
     unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(!gone.retire(), "a call of it waits");
-    assert!(!round.take_marked(), "not before the call ends");
+    assert!(!round.releases().take_marked(), "not before the call ends");
     assert!(!gone.drained());
     assert!(round.deliver());
     let tags: Vec<u8> = seen.lock().unwrap().iter().map(|(t, _, _)| *t).collect();
     assert_eq!(tags, [2], "CONTROL: the declared row alone is handed it");
-    assert!(round.take_marked(), "the delivery ended its last call");
+    assert!(
+        round.releases().take_marked(),
+        "the delivery ended its last call"
+    );
     assert!(gone.drained());
     assert!(!kept.drained(), "the declared row is no walk's to take");
-    assert!(!round.take_marked());
+    assert!(!round.releases().take_marked());
 }
 
 /// A row the session took out of its tables is a drop under way until what the round handed for
@@ -831,16 +834,16 @@ fn a_row_undeclared_while_its_call_waits_is_handed_nothing_and_let_go_after() {
 #[test]
 fn a_rows_drop_is_under_way_until_its_count_is_given_back() {
     let round = round(4);
-    assert!(round.released_settled(), "CONTROL: no drop under way");
-    let (one, two) = (round.releasing(), round.releasing());
-    assert!(!round.released_settled());
+    assert!(round.releases().settled(), "CONTROL: no drop under way");
+    let (one, two) = (round.releases().releasing(), round.releases().releasing());
+    assert!(!round.releases().settled());
     drop(one);
     assert!(
-        !round.released_settled(),
+        !round.releases().settled(),
         "the other drop is still under way"
     );
     drop(two);
-    assert!(round.released_settled());
+    assert!(round.releases().settled());
 }
 
 /// A call the round refuses (sealed, or no room) is ended at once, so the row it was begun on is
@@ -861,7 +864,7 @@ fn a_refused_call_is_ended_at_once() {
     unsafe { round.offer_sample(refused.call(), &filled(4, 2), true) };
     assert_eq!(round.counts().dropped, 1);
     assert!(refused.retire(), "the refused call ended");
-    assert!(!round.take_marked(), "and let nothing wait");
+    assert!(!round.releases().take_marked(), "and let nothing wait");
     assert!(!held.retire(), "CONTROL: the held call still runs");
 }
 
@@ -1078,7 +1081,7 @@ fn a_captured_offer_hands_out_the_call_and_holds_nothing() {
         round.end_call(call);
     }
     assert!(third.retire() && first.retire(), "every call ended");
-    assert!(!round.take_marked(), "and no row waits");
+    assert!(!round.releases().take_marked(), "and no row waits");
     unsafe { round.seal() };
     assert!(!round.deliver(), "nothing was held");
     let held = noting(4, &seen);
