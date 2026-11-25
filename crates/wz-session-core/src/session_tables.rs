@@ -74,8 +74,8 @@ use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
 use crate::named_key::{NamedKey, Prefix};
 use crate::pubsub::{
-    admit_from_peer, any_local_match, fire_into_memoized, past_matcher_depth, row_reaches,
-    scan_subscribers, Admission, MatchMemo, RowRef, SubscriberRows,
+    admit_from_peer, any_local_match, fire_into_marked, fire_into_memoized, past_matcher_depth,
+    row_reaches, scan_subscribers, Admission, MatchMemo, RowRef, SubscriberRows,
 };
 #[cfg(feature = "storage-profile")]
 use crate::query::any_local_queryable;
@@ -1723,7 +1723,8 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     /// first.
     next_expr: ExprId,
     next_request: RequestId,
-    /// Moves after every subscriber declared or undeclared ([`crate::pubsub::LocalSubscribers::epoch`]).
+    /// Moves after every subscriber declared or undeclared, and when the key gate is replaced
+    /// ([`crate::pubsub::LocalSubscribers::epoch`]).
     subscriber_epoch: u64,
     /// Which subscribers the keys delivered lately reached, valid at one `subscriber_epoch`: the
     /// subscriber table's receive match cache, over these rows' places.
@@ -2151,6 +2152,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// no entity of the image's, so a key of the set reaches the rows its pattern meets.
     pub fn set_key_gate(&mut self, gate: KeyGate<'static>) {
         self.key_gate = gate;
+        // An answer a peer's side keeps for a key holds what the gate it replaces admitted.
+        self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
     }
 
     /// How many messages from a peer the key gate dropped, by reason: all zero for an open gate.
@@ -4232,6 +4235,24 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
             key,
             true,
             how.repeats_previous,
+            deliver,
+        )
+    }
+
+    fn deliver_from_peer_marked<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
+        &mut self,
+        key: &str,
+        class: Option<ClassId>,
+        mark: &mut crate::match_set::MatchEntry,
+        deliver: D,
+    ) -> usize {
+        let key_gate = &mut self.key_gate;
+        fire_into_marked(
+            &mut self.subscribers,
+            mark,
+            self.subscriber_epoch,
+            key,
+            || !matches!(admit_from_peer(key_gate, key, class), Admission::Refused),
             deliver,
         )
     }

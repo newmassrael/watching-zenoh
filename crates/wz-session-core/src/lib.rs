@@ -392,6 +392,10 @@ pub mod registry_error;
 // R311gh).
 pub mod sink;
 
+// The subscribers a peer's key reached, kept while the subscriptions stand: the receive path's
+// answer for a key it has matched before, read with no pattern matched.
+pub mod match_set;
+
 #[cfg(feature = "alloc")]
 mod once_built;
 
