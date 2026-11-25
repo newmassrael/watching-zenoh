@@ -232,7 +232,8 @@ fn seconds_text(age: Duration) -> wz_session_core::text_out::FixedText<{ U64_DIG
     if fraction != 0 {
         // A nonzero fraction ends in a nonzero digit after at most eight of these.
         let mut places: usize = 9;
-        while fraction.is_multiple_of(10) {
+        // `%`: `u32::is_multiple_of` is newer than the workspace's `rust-version`.
+        while fraction % 10 == 0 {
             fraction /= 10;
             places = places.saturating_sub(1);
         }
