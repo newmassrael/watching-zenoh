@@ -131,6 +131,13 @@ pub(crate) fn try_boxed_bytes(bytes: &[u8]) -> Result<Box<[u8]>, NoRoom> {
 /// let go of when the heap refuses the room: a push with no path that ends the program.
 pub(crate) fn try_push<T>(items: &mut Vec<T>, value: T) -> Result<(), NoRoom> {
     items.try_reserve(1).map_err(|_| NoRoom)?;
+    push_within(items, value)
+}
+
+/// `value` put after the last of `items` in the room already reserved, or [`NoRoom`] with `items`
+/// as they were and `value` let go of when none is left: for a caller that reserved the room of
+/// every item it puts, whose pushes then carry no growth of their own.
+pub(crate) fn push_within<T>(items: &mut Vec<T>, value: T) -> Result<(), NoRoom> {
     let len = items.len();
     items
         .spare_capacity_mut()
@@ -366,6 +373,9 @@ impl Block {
 }
 
 impl Drop for Block {
+    // Out of line: every holder's drop and every refused copy's unwinding lets a block go, and the
+    // body inlined at each of them is several times the call.
+    #[inline(never)]
     fn drop(&mut self) {
         if self.head().refs.fetch_sub(1, Ordering::Release) != 1 {
             return;
@@ -552,7 +562,7 @@ impl ByteBuf {
     /// # Safety
     /// For a `like` that is not empty, `block` is one and the `like.len` bytes at `start` lie in
     /// its own room and are written.
-    pub(crate) unsafe fn part_of(
+    unsafe fn part_of(
         block: Option<&Block>,
         start: *const u8,
         like: &ByteBuf,
@@ -574,6 +584,26 @@ impl ByteBuf {
     /// rather than copy: not a lent one, whose bytes are its lender's, nor an empty one.
     pub(crate) fn holds_block(&self) -> bool {
         self.block.is_some()
+    }
+
+    /// This payload as a value kept past its callback holds it: a share of the block it holds, or
+    /// for a lent one the part of `block` at `start` that the one copy of what was lent wrote its
+    /// bytes to ([`Self::part_of`]). Out of line: a kept sample keeps its payload and its
+    /// attachment through it, and each inlined copy carried a part's share and segment ends.
+    ///
+    /// # Safety
+    /// For a payload that holds no block, as [`Self::part_of`] with this payload as `like`.
+    #[inline(never)]
+    pub(crate) unsafe fn kept_in(
+        &self,
+        block: Option<&Block>,
+        start: *const u8,
+    ) -> Result<Self, NoRoom> {
+        if self.holds_block() {
+            self.try_clone()
+        } else {
+            Self::part_of(block, start, self)
+        }
     }
 
     /// The payload's bytes.
@@ -709,7 +739,7 @@ impl ByteBuf {
             .try_reserve(other.bounds.len().saturating_add(2))
             .map_err(|_| NoRoom)?;
         if self.bounds.is_empty() && self.len != 0 {
-            try_push(&mut self.bounds, self.len)?;
+            push_within(&mut self.bounds, self.len)?;
         }
         // The other payload's segment ends, walked in one loop: a payload that keeps none is one
         // segment of its whole length, or none when it is empty, as `Self::segment` reads it. Read
@@ -734,12 +764,13 @@ impl ByteBuf {
         Ok(())
     }
 
-    /// Write `segment` after the payload's bytes and end a segment there. Out of line: it is
-    /// written once per segment of an appended payload.
+    /// Write `segment` after the payload's bytes and end a segment there, in the room of the end
+    /// [`Self::append_segments`] reserved. Out of line: it is written once per segment of an
+    /// appended payload.
     #[inline(never)]
     fn put_segment(&mut self, segment: &[u8]) -> Result<(), NoRoom> {
         self.put_after(segment);
-        try_push(&mut self.bounds, self.len)
+        push_within(&mut self.bounds, self.len)
     }
 
     /// Append raw bytes to the CURRENT segment (pico
@@ -2566,6 +2597,25 @@ mod block_tests {
         assert_eq!(*writer.bounds, [1]);
         assert_eq!(writer.segment(0), Some(&b"x"[..]));
         assert_eq!(writer.segment(1), None);
+    }
+
+    /// A push within the room reserved puts the value while there is room and refuses it, the items
+    /// as they were, once there is none, where a growing push would have taken more. Turned red by a
+    /// `push_within` that grows the items.
+    #[test]
+    fn a_push_within_the_room_reserved_never_grows() {
+        let mut items: Vec<u8> = Vec::new();
+        assert_eq!(push_within(&mut items, 1), Err(NoRoom));
+        assert!(items.is_empty());
+        items.try_reserve_exact(2).expect("the test's heap");
+        let room = items.capacity();
+        for value in 0..room {
+            assert_eq!(push_within(&mut items, value as u8), Ok(()));
+        }
+        assert_eq!(push_within(&mut items, 0), Err(NoRoom));
+        assert_eq!(items.len(), room);
+        assert_eq!(items.capacity(), room);
+        assert_eq!(items.first(), Some(&0));
     }
 
     /// A block whose holders are past half the address space is not shared again: the share is
