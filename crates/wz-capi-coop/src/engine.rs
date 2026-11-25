@@ -2004,8 +2004,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     #[cfg(feature = "group")]
     group_reads: usize,
     /// How often a pass of the session's tasks read the clock to wake its timers
-    /// ([`Self::run_tasks`]), which the tests count.
-    #[cfg(test)]
+    /// ([`Self::run_tasks`]), which the tests count. Kept where the tests that read it build
+    /// (`std`): a build whose read steps its one link itself makes no pass to read it otherwise.
+    #[cfg(all(test, feature = "std"))]
     task_clock_reads: core::cell::Cell<usize>,
     /// The periodic jobs the program started on the session ([`wz_capi_port::Tickers::start_ticker`]).
     #[cfg(feature = "ticker")]
@@ -4618,7 +4619,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[inline(never)]
     fn run_tasks(&mut self) {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "std"))]
         self.task_clock_reads.set(self.task_clock_reads.get() + 1);
         let now_us = self.clock.now_us();
         self.run_tasks_at(Some(now_us));
@@ -5047,7 +5048,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             links_let_go: core::cell::Cell::new(0),
             #[cfg(feature = "group")]
             group_reads: 0,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "std"))]
             task_clock_reads: core::cell::Cell::new(0),
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
