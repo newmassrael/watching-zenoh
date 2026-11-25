@@ -58,7 +58,7 @@ impl Stated {
                 return admitted;
             }
         }
-        let at = position_named(&mut SESSION_LIMITS.iter().map(LimitEntry::id), name);
+        let at = position_named(session_limit_id, name);
         let Some(entry) = at.and_then(|at| SESSION_LIMITS.get(at)) else {
             return false;
         };
@@ -110,19 +110,27 @@ fn names(id: &str, name: &[u8]) -> bool {
     id.as_bytes() == name
 }
 
-/// Where among `ids` lies the id `name` spells ([`names`]), or `None`. One loop every table a
-/// statement's name is found in shares, each row reached through its iterator's `next`: a short
-/// table known when compiled, walked where it is named, is unrolled into a comparison of its own
-/// for each row.
+/// The id of the session limit at `at` among [`SESSION_LIMITS`], or `None` past the last.
+fn session_limit_id(at: usize) -> Option<&'static str> {
+    SESSION_LIMITS.get(at).map(LimitEntry::id)
+}
+
+/// The first place, counted from `0`, whose id `id_at` answers is the one `name` spells
+/// ([`names`]), or `None` when `id_at` answers none before its first `None`. One loop every
+/// table a statement's name is found in shares, each id read through the table's own function: a
+/// short table known when compiled, walked where it is named, is unrolled into a comparison of its
+/// own for each row, and a table handed as an iterator object brings every method of its iterator.
 #[inline(never)]
 pub(crate) fn position_named(
-    ids: &mut dyn Iterator<Item = &'static str>,
+    id_at: fn(usize) -> Option<&'static str>,
     name: &[u8],
 ) -> Option<usize> {
-    for (at, id) in ids.enumerate() {
+    let mut at = 0;
+    while let Some(id) = id_at(at) {
         if names(id, name) {
             return Some(at);
         }
+        at += 1;
     }
     None
 }
@@ -223,29 +231,30 @@ mod tests {
     /// looked at, or a place counted from one.
     #[test]
     fn a_name_is_found_at_its_ids_place() {
-        let ids = [
+        const IDS: [&str; 4] = [
             "HELD_SAMPLES",
             "MAX_PUBLISHERS",
             "MAX_PUBLISHERS",
             "HELD_REPLIES",
         ];
-        assert_eq!(
-            position_named(&mut ids.into_iter(), b"HELD_SAMPLES"),
-            Some(0)
-        );
-        assert_eq!(
-            position_named(&mut ids.into_iter(), b"MAX_PUBLISHERS"),
-            Some(1)
-        );
-        assert_eq!(
-            position_named(&mut ids.into_iter(), b"HELD_REPLIES"),
-            Some(3)
-        );
-        assert_eq!(position_named(&mut ids.into_iter(), b"HELD_REPLIE"), None);
-        assert_eq!(
-            position_named(&mut core::iter::empty(), b"HELD_REPLIES"),
-            None
-        );
+        let listed = |at: usize| IDS.get(at).copied();
+        assert_eq!(position_named(listed, b"HELD_SAMPLES"), Some(0));
+        assert_eq!(position_named(listed, b"MAX_PUBLISHERS"), Some(1));
+        assert_eq!(position_named(listed, b"HELD_REPLIES"), Some(3));
+        assert_eq!(position_named(listed, b"HELD_REPLIE"), None);
+        assert_eq!(position_named(|_| None, b"HELD_REPLIES"), None);
+    }
+
+    /// The session limits' ids are read in their table's order and end with it. Turned red by a
+    /// reading that skips a row or reads past the last.
+    #[test]
+    fn the_session_limits_ids_are_read_in_order() {
+        use super::session_limit_id;
+        use wz_session_core::limits::SESSION_LIMITS;
+        for (at, entry) in SESSION_LIMITS.iter().enumerate() {
+            assert_eq!(session_limit_id(at), Some(entry.id()));
+        }
+        assert_eq!(session_limit_id(SESSION_LIMITS.len()), None);
     }
 
     /// A name spells an id when its bytes are the id's, and no prefix of the id, no longer name

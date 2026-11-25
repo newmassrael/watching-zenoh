@@ -350,8 +350,7 @@ impl Held {
     /// Set the count of the limit `name` spells to `count`: `None` when `name` spells none of
     /// these, `Some(false)` with nothing set for a count past the build's value of it.
     pub(crate) fn select(&mut self, name: &[u8], count: usize) -> Option<bool> {
-        let at =
-            crate::config_limits::position_named(&mut HELD_ROWS.iter().map(|row| row.id), name)?;
+        let at = crate::config_limits::position_named(held_id, name)?;
         let (row, held) = HELD_ROWS.get(at).zip(self.0.get_mut(at))?;
         if count > row.build {
             return Some(false);
@@ -359,6 +358,11 @@ impl Held {
         *held = count;
         Some(true)
     }
+}
+
+/// The id of the held value at `at` among [`HELD_ROWS`], or `None` past the last.
+fn held_id(at: usize) -> Option<&'static str> {
+    HELD_ROWS.get(at).map(|row| row.id)
 }
 
 /// The stages the pools are reserved in, each by the door that first needs it: a program's first
