@@ -1095,18 +1095,18 @@ pub trait FacePlaces<F> {
 /// walk over the faces ends at the last face and passes over no free place past it: a session
 /// that keeps places for many faces and holds one or two walks one or two at each step.
 pub struct ManyFaces<F> {
-    faces: Vec<FacePlace<F>>,
+    faces: Vec<TablePlace<F>>,
     places: usize,
 }
 
 /// A place of [`ManyFaces`]: a face or none, in storage the face is built in where it lies, so
 /// a face whose largest part is built in place ([`VacantPlace::fill`]) is moved by nothing.
-struct FacePlace<F> {
+struct TablePlace<F> {
     held: bool,
     face: MaybeUninit<F>,
 }
 
-impl<F> FacePlace<F> {
+impl<F> TablePlace<F> {
     /// A place no face holds.
     fn free() -> Self {
         Self {
@@ -1151,7 +1151,7 @@ impl<F> FacePlace<F> {
     }
 }
 
-impl<F> Drop for FacePlace<F> {
+impl<F> Drop for TablePlace<F> {
     fn drop(&mut self) {
         self.clear();
     }
@@ -1192,7 +1192,7 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
     fn with_dial(dial: F, places: usize) -> Self {
         let places = places.max(1);
         let mut faces = Vec::with_capacity(places);
-        faces.push(FacePlace::holding(dial));
+        faces.push(TablePlace::holding(dial));
         Self { faces, places }
     }
 
@@ -1212,14 +1212,14 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
     where
         F: 'a,
     {
-        self.faces.iter().filter_map(FacePlace::get)
+        self.faces.iter().filter_map(TablePlace::get)
     }
 
     fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut F>
     where
         F: 'a,
     {
-        self.faces.iter_mut().filter_map(FacePlace::get_mut)
+        self.faces.iter_mut().filter_map(TablePlace::get_mut)
     }
 
     fn placed<'a>(&'a self) -> impl Iterator<Item = (usize, &'a F)>
@@ -1251,7 +1251,7 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
         // face that goes.
         if at >= self.faces.len() {
             self.faces
-                .resize_with(at.saturating_add(1), FacePlace::free);
+                .resize_with(at.saturating_add(1), TablePlace::free);
         }
         let place = self.faces.get_mut(at)?;
         if place.held {
