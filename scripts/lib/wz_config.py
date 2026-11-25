@@ -1436,7 +1436,7 @@ LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
               "storage", "scope", "binding_heap", "binding_fixed", "read", "wire",
               "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream",
-              "pico_preset", "pico_open"}
+              "pico_preset", "pico_open", "open_count"}
 # Where the machines of a limit's scope read it (deploy/wz-config.toml, "Limits"): from the
 # snapshot their creator hands them, or still from the build's value. A statement of a limit read
 # from the build would be taken and never read, so a reader of a document refuses it by name.
@@ -1465,6 +1465,11 @@ LIMIT_PRESET_SWITCH = "WZ_LIMITS_ZENOH_PICO"
 # up to it, never past it. The open is laid out from the value it opens under, so a session a
 # program does not size reserves only what those programs need.
 LIMIT_OPEN_KEYS = {"value", "reason"}
+# `open_count = true` marks a bound that counts what a session's open reserves memory for (an
+# entity table, the faces, the pending gets): its domain is every count up to the build's value in
+# every build, a build that keeps only its defaults included, so the build's value is the bound a
+# config is held to and not the one value a session takes. Any other limit (a batch size, a
+# protocol's value) keeps the build's value alone where the build keeps only its defaults.
 LIMIT_PRESET_ORIGINAL = "zenoh-pico"
 # A key of zenoh's configuration as a path of its members, `transport/link/tx/lease`.
 UPSTREAM_KEY_RE = re.compile(r"[a-z0-9_]+(?:/[a-z0-9_]+)*")
@@ -1568,6 +1573,19 @@ def validate_limit_opens(data: dict) -> list[str]:
         reason = opened.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             out.append(f"{where}: its open value states no reason")
+        if lim.get("open_count") is not True:
+            out.append(f"{where}: it states an open value but no `open_count = true`, so a build "
+                       f"that keeps only its defaults would leave the open value out")
+    for lim in data["limit"]:
+        if "open_count" not in lim:
+            continue
+        where = f"limit `{lim.get('id', '?')}`"
+        if lim["open_count"] is not True:
+            out.append(f"{where}: `open_count` is `true` or absent")
+        elif lim.get("kind") != "bound":
+            out.append(f"{where}: only a bound counts what an open reserves (`open_count`)")
+        elif lim.get("storage") == "capacity":
+            out.append(f"{where}: a capacity is fixed by the build, so no open counts it")
     return out
 
 
@@ -3014,7 +3032,11 @@ def limit_spec_rust(lim: dict) -> list[str]:
             f"    const DRIVEN: Option<Driven> = {driven};",
             f"    const READ_FROM_SNAPSHOT: bool = {read};"]
     out += rust_assoc_const("CAPACITY", "Option<usize>", limit_capacity_rust(lim))
-    if bound and "most" in lim:
+    if bound and lim.get("open_count") is True and "most" in lim:
+        domain = f"LimitDomain::of_count_within(Self::CAPACITY, {lim['most']}, Self::DEFAULT)"
+    elif bound and lim.get("open_count") is True:
+        domain = "LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT)"
+    elif bound and "most" in lim:
         domain = (f"LimitDomain::of_bound_within(Self::CAPACITY, {lim['most']}, Self::DEFAULT, "
                   "DEFAULTS_ONLY)")
     elif bound:
@@ -6157,7 +6179,8 @@ def cmd_selftest() -> int:
     expect("a pico preset without a reason is refused",
            any("no reason" in p for p in preset_problems({"value": 2})))
     def open_problems(opened: object, **lim: object) -> list[str]:
-        return validate_limit_opens({"limit": [{**sample["limit"][0], **lim, "pico_open": opened}]})
+        return validate_limit_opens({"limit": [{**sample["limit"][0], "open_count": True, **lim,
+                                                "pico_open": opened}]})
 
     expect("an open value that is a power of two at most the default, with a reason, is held",
            open_problems({"value": 2, "reason": "two programs"}) == [])
@@ -6170,6 +6193,18 @@ def cmd_selftest() -> int:
            any("not a power of two" in p for p in open_problems({"value": 3, "reason": "r"})))
     expect("an open value without a reason is refused",
            any("no reason" in p for p in open_problems({"value": 2})))
+    expect("an open value of a limit that is no open count is refused",
+           any("no `open_count = true`" in p
+               for p in validate_limit_opens({"limit": [{**sample["limit"][0],
+                                                         "pico_open": {"value": 2, "reason": "r"}}]})))
+    expect("an open count that is not a bound is refused",
+           any("only a bound" in p for p in open_problems({"value": 2, "reason": "r"},
+                                                           kind="parameter")))
+    counted = decl_of({**sample, "limit": [{**sample["limit"][0], "open_count": True}]})
+    expect("an open count's domain is every count up to the build's value, in every build",
+           "LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT)"
+           in emit_rust_limit_snapshots(counted)
+           and "of_count(" not in emit_rust_limit_snapshots(decl_of(sample)))
     expect("an open value of a runtime's limit is refused",
            any("no limit of a session" in p
                for p in open_problems({"value": 2, "reason": "r"}, scope="runtime")))
