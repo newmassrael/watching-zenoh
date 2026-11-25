@@ -90,7 +90,8 @@ enum Command {
     /// Push `.1` samples on the key in one batch window, so that one frame carries them all; the
     /// payload of each is its index.
     PushBatch(&'static str, u8),
-    /// Push `.1` samples on the key, each in a frame of its own; the payload of each is its index.
+    /// Push `.1` samples on the key, each in a frame of its own, flushed before the next is
+    /// staged; the payload of each is its index.
     PushFrames(&'static str, u8),
     /// [`Command::Push`] stamped with a time by the router.
     PushStamped(&'static str, &'static [u8]),
@@ -649,9 +650,14 @@ fn run_router(
                 let _ = actions.batch_stop();
             }
             Ok(Command::PushFrames(key, count)) => {
+                // A window flushed after each push, so no writer of the router's link joins two
+                // pushes in one frame.
+                let _ = actions.batch_start();
                 for index in 0..count {
                     let _ = actions.send_push_literal(key, &[index], true);
+                    let _ = actions.batch_flush();
                 }
+                let _ = actions.batch_stop();
             }
             Ok(Command::PushStamped(key, value)) => {
                 let stamp = router_stamp(zid);
@@ -1486,10 +1492,19 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     router.send(Command::PushFrames("demo/frames", FRAMES));
     // Nothing steps the session meanwhile, so every frame lies in its socket before the read.
     std::thread::sleep(Duration::from_millis(300));
+    #[cfg(feature = "transport-stats")]
+    let frames = engine.transport_stats().rx.t_msgs;
     let polls = engine.link_polls();
     #[cfg(any(feature = "listen", feature = "group"))]
     let handed = engine.takes.handed.load(Ordering::SeqCst);
     let _ = SessionDrive::read(&*engine, false);
+    // The premise: the samples came as frames of their own, which a build of threads reads a
+    // step each. A transport message besides them (a KeepAlive) only adds to the count.
+    #[cfg(feature = "transport-stats")]
+    assert!(
+        engine.transport_stats().rx.t_msgs - frames >= usize::from(FRAMES),
+        "the router wrote each sample in a frame of its own"
+    );
     let sent: Vec<Vec<u8>> = (0..FRAMES).map(|index| vec![index]).collect();
     assert_eq!(
         *got.lock().unwrap(),
