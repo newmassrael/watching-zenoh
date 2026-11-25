@@ -583,19 +583,25 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         }
     }
 
-    /// What is owed, the debt word left owing nothing: by one swap where another thread may owe
-    /// as it is read, and where no other thread reaches the site's values ([`LockKind::WAITS`]
-    /// false, the kind's own contract) by a read, then a write only of a word that owes, so a
-    /// lend that finds nothing owed writes nothing and takes no read-modify-write.
+    /// What is owed, the debt word left owing nothing: a read, and only for a word that owes a
+    /// swap, or where no other thread reaches the site's values ([`LockKind::WAITS`] false, the
+    /// kind's own contract) a write, so a lend that finds nothing owed writes nothing and takes
+    /// no read-modify-write.
+    // The read may miss a debt another thread owes as it is made: that debt came after this pay,
+    // as one owed between the pay and the let go does, and the holder's look as it lets go
+    // (`Self::pay_after`) is what pays either, its fence ordering it against the debtor's try
+    // whatever this read saw. A debt the read sees is taken by the swap whole, with any bit owed
+    // after the read.
     #[inline(always)]
     fn take_owed(&self) -> u32 {
+        let owed = self.owed.load(Ordering::Relaxed);
+        if owed == 0 {
+            return 0;
+        }
         if K::WAITS {
             return self.owed.swap(0, Ordering::SeqCst);
         }
-        let owed = self.owed.load(Ordering::Relaxed);
-        if owed != 0 {
-            self.owed.store(0, Ordering::Relaxed);
-        }
+        self.owed.store(0, Ordering::Relaxed);
         owed
     }
 
