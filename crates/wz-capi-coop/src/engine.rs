@@ -1819,6 +1819,7 @@ type RegistryLend = StepLend<Registry, PlacedRef<LendCell<Registry>>>;
 type RouterPlace = PlacedRef<LendCell<SessionReassembly>>;
 
 /// The bytes of the place the session lends its registry in ([`RegistryLend`]).
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) const REGISTRY_LEND_BYTES: usize = core::mem::size_of::<LendCell<Registry>>();
 
 /// The bytes of the place the session lends its reassembly Router in ([`RouterPlace`]).
@@ -3134,19 +3135,25 @@ impl RuntimeTables {
     /// The tables of a session `config` opens, its task cells together at most the build's
     /// `MAX_TASKS`: the groups' first, as a session that cannot join a group it was told to does
     /// not open, then the links', so a face past them is refused as one past `max_faces` is.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig<impl EndpointList>) -> Self {
         let groups = config.groups.len().min(caps::MAX_TASKS);
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-        let (links, task_bytes) = (
-            usize::from(crate::arena::dials(config))
-                .saturating_add(config.max_faces)
-                .min(caps::MAX_TASKS.saturating_sub(groups)),
-            link_task_bytes::<C>(),
-        );
-        // The one link a read steps itself runs as no task, and its session lies in the engine
-        // (`direct`): no cell is reserved for it.
-        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-        let (links, task_bytes) = (0, 0);
+        let links = usize::from(crate::arena::dials(config))
+            .saturating_add(config.max_faces)
+            .min(caps::MAX_TASKS.saturating_sub(groups));
+        Self::holding(groups, links, link_task_bytes::<C>())
+    }
+
+    /// The tables of a session `config` opens whose one link a read steps itself: that link runs
+    /// as no task, and its session lies in the engine (`direct`), so no cell is reserved for it
+    /// and the clock's type sizes nothing here.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(crate) fn of(config: &CoopConfig<impl EndpointList>) -> Self {
+        Self::holding(config.groups.len().min(caps::MAX_TASKS), 0, 0)
+    }
+
+    /// The tables of `groups` groups' cells and `links` links' cells of `task_bytes` each.
+    fn holding(groups: usize, links: usize, task_bytes: usize) -> Self {
         Self {
             rows: RuntimeRows {
                 tasks: links,
@@ -3223,7 +3230,14 @@ struct LinkMaking<'a> {
     /// Where the registry is lent to each link's dispatch (`Core::registry_lend`).
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     registry_lend: &'a RegistryLend,
-    /// The limits the session was opened with.
+    /// The limits the session was opened with: what a link's gate and its shared key ids are
+    /// sized by.
+    #[cfg(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group",
+        feature = "shared-key-ids"
+    ))]
     limits: &'a SessionLimits,
 }
 
@@ -4721,7 +4735,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // whose rows are all held opens no more, and reserves nothing for it.
         let row = ReachEngine::claim().ok_or(OpenError::NoEngineRow)?;
         // The runtime's tables are placed in the arena, so its plan holds their span.
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         let tables = RuntimeTables::of::<C>(&config);
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        let tables = RuntimeTables::of(&config);
         let runtime_bytes = tables
             .placed_bytes::<C>()
             .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?;

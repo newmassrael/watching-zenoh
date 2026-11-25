@@ -20,7 +20,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// A value behind the flag of a build of one thread.
-pub(super) struct OneThreadLock<T> {
+pub(crate) struct OneThreadLock<T> {
     held: AtomicBool,
     value: UnsafeCell<T>,
 }
@@ -86,7 +86,7 @@ impl<T> OneThreadLock<T> {
 }
 
 /// A hold of a [`OneThreadLock`], let go as it drops.
-pub(super) struct OneThreadGuard<'a, T> {
+pub(crate) struct OneThreadGuard<'a, T> {
     lock: &'a OneThreadLock<T>,
 }
 

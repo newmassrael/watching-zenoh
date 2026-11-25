@@ -449,7 +449,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             self.drive_link(core, slot, LinkInput::Open, now_us)?;
         }
         while !slot.is_up() {
-            let Some(wait) = self.link_wait(slot) else {
+            let Some(mut wait) = self.link_wait(slot) else {
                 return Err(OpenError::NoEndpoint);
             };
             wait.wait(self.rooms.waits(), sleep_ms);
@@ -497,7 +497,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// [`Self::read_direct`] with the face held.
     fn read_held(&self, slot: &mut DirectSlot<L, C>) -> Result<(), SessionClosed> {
-        let wait = self.link_wait(slot).ok_or(SessionClosed)?;
+        let mut wait = self.link_wait(slot).ok_or(SessionClosed)?;
         #[cfg(test)]
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
@@ -738,6 +738,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let params = core.link_params()?;
         let mut calls = LinkMaking {
             session: &mut core.session,
+            #[cfg(feature = "shared-key-ids")]
             limits: resolve_limits(&core.config),
         };
         let placed = core

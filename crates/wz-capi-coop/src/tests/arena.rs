@@ -764,13 +764,21 @@ fn the_plan_lays_out_no_delivery_lane() {
 }
 
 /// The plan lays out one place for each step lend the open places in the arena
-/// (`crate::engine::StepPlaces`): the registry's and the reassembly Router's, a cell each. Turned
-/// red by a plan that leaves either out, whose open would place it past what the arena has.
+/// (`crate::engine::StepPlaces`): the registry's and the reassembly Router's, a cell each, and no
+/// registry's where the read steps its one link itself and dispatches under the session's lock.
+/// Turned red by a plan that leaves a lend out, whose open would place it past what the arena has,
+/// or that reserves one the open never places, which lending every row would leave empty.
 #[test]
 fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    assert!(
+        built.rows().all(|row| row.part() != "registry lend"),
+        "a read that steps its one link lends no registry"
+    );
     for (part, bytes) in [
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         ("registry lend", crate::engine::REGISTRY_LEND_BYTES),
         ("router lend", crate::engine::ROUTER_LEND_BYTES),
     ] {
