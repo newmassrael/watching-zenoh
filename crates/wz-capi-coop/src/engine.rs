@@ -4303,7 +4303,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 admission: Arc::new(LinkRegistry::<CoopRuntime<C>>::with_order(
                     &wire,
                     policy.link_tie_order(),
-                    lent.links,
+                    wz_session_core::limit_binding::Quota::at_most(lent.links),
                 )),
                 wire_zid: wire,
                 gate_cells: lent.transport.cells.gate,

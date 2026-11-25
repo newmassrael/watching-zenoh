@@ -2286,6 +2286,107 @@ async fn a_replayed_open_ack_after_established_is_not_admitted() {
     );
 }
 
+// ── A node's link admission: a link it holds the node by another link for is
+//    refused MAX_LINKS, and a link it has no room for closes INVALID.
+//
+// Upstream tells a peer whose link a node refuses for another link to the same
+// node MAX_LINKS, and closes a transport past its `max_sessions` with INVALID
+// (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`). The two tests
+// are one discriminator: the same InitAck is refused by the same dial, once by an
+// admission with room for the link and once by one with none, so the reason can
+// only be the room's.
+
+/// An admission that refuses every link at its zid; `room` says whether it had a row for the
+/// link when the link was opened.
+struct RefusesAtTheZid {
+    room: bool,
+}
+
+impl wz_session_core::link_admission::LinkAdmission for RefusesAtTheZid {
+    fn open(&self, _dialled: bool) -> u64 {
+        1
+    }
+    fn reserve(&self, _token: u64, _remote_zid: &[u8]) -> bool {
+        false
+    }
+    fn confirm(&self, _token: u64) -> bool {
+        false
+    }
+    fn release(&self, _token: u64) {}
+    fn has_row(&self, _token: u64) -> bool {
+        self.room
+    }
+}
+
+/// The outcome, the reason byte on the wire and whether an OpenSyn went out, for a dial whose
+/// node's admission is `admission` and whose InitAck it refuses.
+async fn dial_refused_at_the_init_ack(
+    admission: RefusesAtTheZid,
+) -> (DriverLoopOutcome, S, u8, bool) {
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    actions.install_link_admission(Arc::new(admission), true);
+    drive_to_sent_init_syn(&mut engine);
+    let wire = craft_initack_wire(&[0xC0, 0x01]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    (
+        outcome,
+        engine.get_current_state(),
+        sole_close_reason_byte(&recorder),
+        sent_an_open(&recorder),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_link_the_node_holds_the_peer_by_another_for_is_refused_max_links() {
+    use wz_runtime_tokio::session_glue::CloseReason;
+
+    let (outcome, state, reason, opened) =
+        dial_refused_at_the_init_ack(RefusesAtTheZid { room: true }).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::LinkRefused),
+        "a link refused for another link to the node is LinkRefused; got {outcome:?}"
+    );
+    assert_eq!(
+        state,
+        S::SentInitSyn,
+        "the refusal leaves the FSM where it was"
+    );
+    assert_eq!(
+        reason,
+        CloseReason::MaxLinks as u8,
+        "the peer reads MAX_LINKS: the node holds it by another link"
+    );
+    assert!(!opened, "no OpenSyn follows a refused InitAck");
+}
+
+/// Turned red by a refusal for want of room that reads as a second link: the peer is then told
+/// MAX_LINKS, which says the node holds it already, and the dialler takes its connect as held
+/// and dials again for ever, as a router whose link table was smaller than its
+/// `max_sessions` stalled every peer past the table (Layer E7s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_link_the_node_has_no_room_for_closes_invalid_before_the_open() {
+    use wz_runtime_tokio::session_glue::CloseReason;
+
+    let (outcome, state, reason, opened) =
+        dial_refused_at_the_init_ack(RefusesAtTheZid { room: false }).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::LinkNoRoom),
+        "a link the node has no room for is LinkNoRoom; got {outcome:?}"
+    );
+    assert_eq!(
+        state,
+        S::Closing,
+        "the open fails: the FSM takes framing.error"
+    );
+    assert_eq!(
+        reason,
+        CloseReason::Invalid as u8,
+        "the peer reads INVALID, upstream's reason for a node past max_sessions"
+    );
+    assert!(!opened, "no OpenSyn follows a refused InitAck");
+}
+
 // ── Decision D4: a dial made for a node closes at the InitAck of another.
 //
 // Upstream compares the expected zid with the InitAck's once every

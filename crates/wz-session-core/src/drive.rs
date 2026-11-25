@@ -1455,6 +1455,10 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // loser after both ends have admitted it. After the checks that name the peer,
     // for the zid they have established, and before the event: a refusal leaves
     // the FSM where it was, the link closed with `MaxLinks`, and the open ends.
+    // A link the node had no room for is not a second link: it closes as upstream
+    // closes a transport past `max_sessions`, INVALID (`framing.error`)
+    // (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`), and the open
+    // fails, so neither end reads a full node as one that holds the other.
     #[cfg(all(
         feature = "alloc",
         target_has_atomic = "ptr",
@@ -1491,6 +1495,10 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             _ => true,
         };
         if !admitted {
+            if !actions.link_has_row() {
+                *to_engine = Some(crate::session_fsm_unicast::SessionFsmUnicastEvent::FramingError);
+                return DriverLoopOutcome::LinkNoRoom;
+            }
             actions.refuse_link();
             return DriverLoopOutcome::LinkRefused;
         }
