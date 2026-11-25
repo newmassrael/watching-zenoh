@@ -1011,8 +1011,8 @@ impl KeyHold {
     /// # Safety
     /// `head` is the head of the row this hold was taken in, and stays at its address while the
     /// row stands and the session's tables do: the engine's table keeps its rows in place (a
-    /// region, what it was lent, or a growable table held in place at the open,
-    /// [`SessionTables::hold_keyexpr_rows_in_place`](wz_session_core::session_tables::SessionTables::hold_keyexpr_rows_in_place)).
+    /// region, what it was lent, or the growable policy's chunks,
+    /// [`Chunked`](wz_session_core::slot_map::Chunked)).
     pub unsafe fn placed_at(mut self, head: &wz_session_core::session_tables::KeyexprHead) -> Self {
         if self.row.is_some() {
             self.head = head as *const wz_session_core::session_tables::KeyexprHead as usize;

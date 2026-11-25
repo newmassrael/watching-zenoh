@@ -2155,28 +2155,28 @@ mod tests {
         );
     }
 
-    /// The session keeps its declarations' rows where they were put up to the build's bound and
-    /// refuses one past it, as a session of a fixed table does: a key holding the first row by
-    /// its address finds it there after the table is full. Turned red by a table whose rows grow
-    /// past the bound (the declaration past it taken, or the first row moved).
+    /// The session keeps its declarations' rows where they were put however many come after
+    /// them, past the build's bound, as zenoh-c bounds a session's declarations by nothing but its
+    /// heap: a key holding the first row by its address finds it there. Turned red by a table that
+    /// moves its rows to grow (the first row's address changes) or one held to the build's bound (a
+    /// declaration past it refused).
     #[test]
-    fn declarations_to_the_sessions_bound_leave_the_first_row_where_it_was() {
+    fn declarations_past_the_builds_bound_leave_the_first_row_where_it_was() {
         let shared = session();
         let first = shared
             .acquire_keyexpr("demo/kd/0".to_owned())
             .expect("room for a declaration");
         let at = first.row_address();
         assert_ne!(at, 0, "the session names where the row lies");
-        let mut holds = Vec::new();
-        while let Some(hold) = shared.acquire_keyexpr(alloc::format!("demo/kd/{}", holds.len() + 1))
-        {
-            holds.push(hold);
-        }
-        assert_eq!(
-            shared.keyexpr_declarations().len(),
-            wz_session_core::caps::MAX_DECLARED_KEYEXPRS,
-            "the table is refused past the build's bound"
-        );
+        let past = wz_session_core::caps::MAX_DECLARED_KEYEXPRS + 1;
+        let holds: Vec<_> = (1..=past)
+            .map(|n| {
+                shared
+                    .acquire_keyexpr(alloc::format!("demo/kd/{n}"))
+                    .expect("no bound but the heap's")
+            })
+            .collect();
+        assert_eq!(shared.keyexpr_declarations().len(), past + 1);
         let again = shared
             .acquire_keyexpr("demo/kd/0".to_owned())
             .expect("a declaration held once more");

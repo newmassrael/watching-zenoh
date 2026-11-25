@@ -3451,28 +3451,24 @@ fn a_rows_count_is_taken_at_its_address_by_its_id_and_its_last_hold_by_the_table
     assert!(tables.keyexprs().is_empty());
 }
 
-/// Rows of a growable table held in place stay where they were put as the table fills to the
-/// build's bound, and a declaration past it is refused: a holder that reaches a row by its address
-/// does not read where the row was. Turned red by a `hold_in_place` that reserves nothing (the
-/// first row moves as the table grows) or a table not held to the bound (the declaration past it
-/// is taken).
+/// Rows of a growable table stay where they were put however many declarations come after them,
+/// past the build's bound: the table grows by chunks that are only ever added, with no bound but
+/// the allocator's. Turned red by a column that moves its rows to grow (the first row's address
+/// changes) or one held to the build's bound (a declaration past it refused).
 #[cfg(feature = "alloc")]
 #[test]
-fn growable_rows_held_in_place_stay_put_to_the_bound_and_refuse_past_it() {
+fn growable_rows_stay_where_they_were_put_past_the_builds_bound() {
     type Growable = SessionTables<Calls, crate::bounded::Heap>;
     let mut tables = Growable::new();
-    assert!(tables.hold_keyexpr_rows_in_place());
     let first = tables.declare_keyexpr("k/0").unwrap();
     let at = |tables: &Growable| -> *const KeyexprHead {
         tables.keyexprs().get(first.handle).unwrap().head()
     };
     let before = at(&tables);
-    for n in 1..caps::MAX_DECLARED_KEYEXPRS {
+    let past = caps::MAX_DECLARED_KEYEXPRS + 2 * crate::slot_map::CHUNK_ROWS;
+    for n in 1..=past {
         tables.declare_keyexpr(&std::format!("k/{n}")).unwrap();
     }
+    assert_eq!(tables.keyexprs().len(), past + 1, "no declaration refused");
     assert_eq!(at(&tables), before, "the first row is where it was put");
-    assert_eq!(
-        tables.declare_keyexpr("k/past").unwrap_err(),
-        RegisterError::TableFull
-    );
 }

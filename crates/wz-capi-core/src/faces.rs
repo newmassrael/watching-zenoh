@@ -2380,8 +2380,7 @@ impl Inner {
 pub enum PlaneRefused {
     /// The host had no entropy for the plane's cookie signing key.
     EntropyUnavailable,
-    /// The runtime had no room for the plane's action bundle, or for the rows of its key
-    /// expression declarations.
+    /// The runtime had no room for the plane's action bundle.
     HeapRefused,
 }
 
@@ -2999,7 +2998,7 @@ impl SharedSession {
         // `field_reassign_with_default` refuses the latter, and gate 6 is where
         // it surfaced — `cargo check` and `cargo test` both passed, because
         // neither runs clippy.
-        let mut inner = Inner {
+        let inner = Inner {
             local_face: Some(FaceEntry {
                 session: local.clone(),
                 subs: BTreeMap::new(),
@@ -3029,12 +3028,6 @@ impl SharedSession {
             // Both upstreams number a session's first entity 1, as the table set does.
             ..Default::default()
         };
-        // A key the program holds reaches its declaration's row by address, so the rows are kept
-        // where they are put: room for the build's bound made now, and a declaration past it
-        // refused, as a session of a fixed table refuses it.
-        if !inner.tables.hold_keyexpr_rows_in_place() {
-            return Err(PlaneRefused::HeapRefused);
-        }
         Ok(Self {
             zid: zid_bytes,
             session_zid: zid,
@@ -5259,8 +5252,8 @@ impl SharedSession {
         self.announce_keyexpr_locked(&guard, declared.id, &keyexpr, declared.new);
         let hold = KeyHold::taken(declared.id, declared.handle);
         Some(match guard.tables.keyexprs().get(declared.handle) {
-            // SAFETY: the table of declarations was held in place at the open
-            // (`Self::new_with_resources`), so its rows stay where they are while the session does.
+            // SAFETY: the growable table keeps its rows in chunks that are only ever added
+            // (`Chunked`), so a row stays where it was put while it stands.
             Some(row) => unsafe { hold.placed_at(row.head()) },
             None => hold,
         })

@@ -132,6 +132,12 @@ pub trait Storage: 'static {
     /// The element sequence of a [`BoundedVec<T, N, Self>`].
     type Seq<T, const N: usize>: SeqBacking<T>;
 
+    /// The column a [`SlotMap`](crate::slot_map::SlotMap) of this policy keeps its rows in, in
+    /// which a row stays where it was put while it stands: the policy's own sequence where it
+    /// never moves an element to make room, and on the growable policy chunks that are only ever
+    /// added ([`Chunked`](crate::slot_map::Chunked)).
+    type Rows<T, const N: usize>: crate::slot_map::RowColumn<T>;
+
     /// The UTF-8 text of a [`BoundedString<N, Self>`].
     type Text<const N: usize>: TextBacking;
 
@@ -440,14 +446,6 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
     /// How many more pushes are guaranteed to succeed.
     fn free_slots(&self) -> usize;
 
-    /// Make room now for `rows` elements in all, so that no push up to them moves an element:
-    /// `false` when the policy's allocator has no room for them. A sequence that never moves an
-    /// element it holds to make room for a push answers `true`, the provided answer.
-    fn hold_in_place(&mut self, rows: usize) -> bool {
-        let _ = rows;
-        true
-    }
-
     /// Append `value`, or hand it back when the policy's capacity is full.
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>>;
 
@@ -589,6 +587,7 @@ impl Storage for Heap {
     const LENT_AT_OPEN: bool = false;
     type Scratch = Heap;
     type Seq<T, const N: usize> = Vec<T>;
+    type Rows<T, const N: usize> = crate::slot_map::Chunked<T>;
     type Text<const N: usize> = String;
     type Key = String;
     type Keys = InlineKeys;
@@ -612,6 +611,7 @@ impl Storage for Static {
     const LENT_AT_OPEN: bool = false;
     type Scratch = Static;
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
+    type Rows<T, const N: usize> = BoundedVec<T, N, Static>;
     type Text<const N: usize> = heapless::String<N>;
     type Key = heapless::String<{ crate::caps::MAX_KEYEXPR_BYTES }>;
     type Keys = InlineKeys;
@@ -648,6 +648,7 @@ impl Storage for Lent {
     const LENT_AT_OPEN: bool = true;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
+    type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
     // A working text (a key being canonized) is on the stack; what a row keeps is its `Key`.
     type Text<const N: usize> = heapless::String<N>;
     type Key = crate::key_arena::KeyRef;
@@ -686,6 +687,7 @@ impl Storage for Region {
     const LENT_AT_OPEN: bool = true;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
+    type Rows<T, const N: usize> = BoundedVec<T, N, Region>;
     type Text<const N: usize> = heapless::String<N>;
     type Key = crate::key_arena::KeyRef;
     type Keys = crate::key_arena::LentKeys;
@@ -731,10 +733,6 @@ impl<T> SeqBacking<T> for Vec<T> {
 
     fn free_slots(&self) -> usize {
         usize::MAX
-    }
-
-    fn hold_in_place(&mut self, rows: usize) -> bool {
-        Vec::try_reserve_exact(self, rows.saturating_sub(self.len())).is_ok()
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -1111,13 +1109,6 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
     /// staging half of it.
     pub fn free_slots(&self) -> usize {
         self.inner.free_slots()
-    }
-
-    /// Make room now for `rows` elements in all, so that no push up to them moves an element
-    /// another holds by its address: `false` when the policy's allocator has no room for them.
-    /// Only [`Heap`] moves its elements to make room; the others answer `true`.
-    pub fn hold_in_place(&mut self, rows: usize) -> bool {
-        self.inner.hold_in_place(rows)
     }
 
     /// Append `value`. On [`Heap`] this always returns `Ok(())`. On [`Static`]

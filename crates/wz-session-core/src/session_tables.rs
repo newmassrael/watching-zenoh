@@ -623,9 +623,9 @@ impl<Key: KeyBacking> KeyexprRow<Key> {
 
 /// The part of a key expression declaration's row a holder reaches by the row's address, with no
 /// lock of the session: the declaration's id, the length of its key, its count of holders and the
-/// tables the row lies in. The address stays the row's while the row stands, on every policy whose
-/// table keeps its rows in place: one placed in a region or lent at the open, and a growable one
-/// held in place ([`SessionTables::hold_keyexpr_rows_in_place`]).
+/// tables the row lies in. The address stays the row's while the row stands on every policy:
+/// a table placed in a region or lent at the open keeps its rows where they are, and a growable
+/// one keeps them in chunks that are only ever added ([`Chunked`](crate::slot_map::Chunked)).
 ///
 /// The count is the declaration's one count: the table's own declarations and entities take and
 /// give back holds of it under the session's lock, and a holder that keeps the row's address takes
@@ -1991,17 +1991,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.keyexprs
             .get(handle)
             .is_some_and(|row| row.head.retain(row.id()).is_ok())
-    }
-
-    /// Keep the rows of the key expression declarations where they are put, up to the build's
-    /// `MAX_DECLARED_KEYEXPRS`, refusing a declaration past them
-    /// ([`SlotMap::hold_rows_in_place`]): a holder reaches its declaration's row by its address
-    /// ([`KeyexprHead`]). Asked of a policy whose table grows, at the session's open, before any
-    /// declaration; `false`, changing nothing, when the allocator has no room for the rows. A
-    /// policy that places its rows in a region or in what it was lent keeps them in place as it is.
-    pub fn hold_keyexpr_rows_in_place(&mut self) -> bool {
-        self.keyexprs
-            .hold_rows_in_place(caps::MAX_DECLARED_KEYEXPRS)
     }
 
     /// Whether `head` is of a row of these tables: the address its row names as its tables'

@@ -454,6 +454,183 @@ impl Core {
     }
 }
 
+/// The column a [`SlotMap`] keeps its rows in ([`Storage::Rows`]): read and changed by a row's
+/// place, grown by one row at its end, and walked in place order. A row stays where it was put
+/// while it stands, so a holder may reach it by its address.
+pub trait RowColumn<T> {
+    /// The rows, in place order.
+    type Iter<'a>: Iterator<Item = &'a T>
+    where
+        Self: 'a,
+        T: 'a;
+
+    /// The rows, in place order, to change.
+    type IterMut<'a>: Iterator<Item = &'a mut T>
+    where
+        Self: 'a,
+        T: 'a;
+
+    /// A column of no rows.
+    fn empty() -> Self;
+
+    /// The row at `at`.
+    fn get(&self, at: usize) -> Option<&T>;
+
+    /// The row at `at`, to change.
+    fn get_mut(&mut self, at: usize) -> Option<&mut T>;
+
+    /// Whether a row may still be put after the last one.
+    fn has_room(&self) -> bool;
+
+    /// Room for one more row after the last, made now where the column makes its room as it
+    /// grows: `false` when there is none, and a push would be refused.
+    fn room_for_one(&mut self) -> bool;
+
+    /// Put `value` after the last row; refused, handing it back, where no room was made for it
+    /// ([`Self::room_for_one`]).
+    fn push(&mut self, value: T) -> Result<(), CapacityFull<T>>;
+
+    /// The rows, in place order.
+    fn iter(&self) -> Self::Iter<'_>;
+
+    /// The rows, in place order, to change.
+    fn iter_mut(&mut self) -> Self::IterMut<'_>;
+}
+
+// A sequence of a policy that never moves an element to make room: a fixed buffer, or what it was
+// lent.
+impl<T, const N: usize, P: Storage> RowColumn<T> for BoundedVec<T, N, P> {
+    type Iter<'a>
+        = core::slice::Iter<'a, T>
+    where
+        Self: 'a,
+        T: 'a;
+
+    type IterMut<'a>
+        = core::slice::IterMut<'a, T>
+    where
+        Self: 'a,
+        T: 'a;
+
+    fn empty() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, at: usize) -> Option<&T> {
+        <[T]>::get(self, at)
+    }
+
+    fn get_mut(&mut self, at: usize) -> Option<&mut T> {
+        <[T]>::get_mut(self, at)
+    }
+
+    fn has_room(&self) -> bool {
+        self.free_slots() != 0
+    }
+
+    fn room_for_one(&mut self) -> bool {
+        self.free_slots() != 0
+    }
+
+    fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
+        BoundedVec::push(self, value)
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        <[T]>::iter(self)
+    }
+
+    fn iter_mut(&mut self) -> Self::IterMut<'_> {
+        <[T]>::iter_mut(self)
+    }
+}
+
+/// How many rows a chunk of a [`Chunked`] column holds.
+#[cfg(feature = "alloc")]
+pub const CHUNK_ROWS: usize = 32;
+
+/// The rows of a table of the growable policy, kept in chunks of [`CHUNK_ROWS`] that are only ever
+/// added: a chunk once made is neither moved nor grown, so a row stays where it was put however
+/// many rows come after it, and the column has no bound but the allocator's. A holder that keeps a
+/// row's address (a key's declaration, [`KeyexprHead`](crate::session_tables::KeyexprHead)) reads
+/// it there for as long as the row stands, as it does on a policy of a fixed table.
+#[cfg(feature = "alloc")]
+pub struct Chunked<T> {
+    /// Each made with room for `CHUNK_ROWS` rows and filled to no more, so a push into it does not
+    /// move it; growing this list moves the chunks' handles and none of their rows.
+    chunks: alloc::vec::Vec<alloc::vec::Vec<T>>,
+}
+
+#[cfg(feature = "alloc")]
+impl<T> RowColumn<T> for Chunked<T> {
+    type Iter<'a>
+        = core::iter::Flatten<core::slice::Iter<'a, alloc::vec::Vec<T>>>
+    where
+        Self: 'a,
+        T: 'a;
+
+    type IterMut<'a>
+        = core::iter::Flatten<core::slice::IterMut<'a, alloc::vec::Vec<T>>>
+    where
+        Self: 'a,
+        T: 'a;
+
+    fn empty() -> Self {
+        Self {
+            chunks: alloc::vec::Vec::new(),
+        }
+    }
+
+    fn get(&self, at: usize) -> Option<&T> {
+        self.chunks.get(at / CHUNK_ROWS)?.get(at % CHUNK_ROWS)
+    }
+
+    fn get_mut(&mut self, at: usize) -> Option<&mut T> {
+        self.chunks
+            .get_mut(at / CHUNK_ROWS)?
+            .get_mut(at % CHUNK_ROWS)
+    }
+
+    fn has_room(&self) -> bool {
+        true
+    }
+
+    fn room_for_one(&mut self) -> bool {
+        if self
+            .chunks
+            .last()
+            .is_some_and(|chunk| chunk.len() < CHUNK_ROWS)
+        {
+            return true;
+        }
+        let mut chunk = alloc::vec::Vec::new();
+        if chunk.try_reserve_exact(CHUNK_ROWS).is_err() || self.chunks.try_reserve(1).is_err() {
+            return false;
+        }
+        self.chunks.push(chunk);
+        true
+    }
+
+    fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
+        match self.chunks.last_mut() {
+            // Filled to no more than the room it was made with, so the chunk does not move.
+            Some(chunk) if chunk.len() < CHUNK_ROWS => {
+                chunk.push(value);
+                Ok(())
+            }
+            _ => Err(CapacityFull(value)),
+        }
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        self.chunks.iter().flatten()
+    }
+
+    fn iter_mut(&mut self) -> Self::IterMut<'_> {
+        self.chunks.iter_mut().flatten()
+    }
+}
+
 /// A live row of a [`SlotMap`], found by its handle once ([`SlotMap::entry`]): what is done with
 /// it through here is done to the slot that one look found.
 pub struct Entry<'a, K, T, const N: usize, P: Storage> {
@@ -493,7 +670,7 @@ impl<K, T, const N: usize, P: Storage> Entry<'_, K, T, N, P> {
 /// keeps a table. See the module.
 pub struct SlotMap<K, T, const N: usize, P: Storage = Profile> {
     meta: BoundedVec<Meta, N, P>,
-    rows: BoundedVec<Option<T>, N, P>,
+    rows: P::Rows<Option<T>, N>,
     core: Core,
     kind: PhantomData<fn() -> K>,
 }
@@ -505,7 +682,7 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     pub fn new() -> Self {
         Self {
             meta: BoundedVec::default(),
-            rows: BoundedVec::default(),
+            rows: <P::Rows<Option<T>, N> as RowColumn<Option<T>>>::empty(),
             core: Core::new(Self::ceiling()),
             kind: PhantomData,
         }
@@ -527,20 +704,6 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         self.core.limit_to(rows.min(Self::ceiling()));
     }
 
-    /// Keep every row the table holds where it was put: room made now for `rows` rows, under the
-    /// build's `N` where the policy enforces it, and the table held to them from here on
-    /// ([`Self::limit_to`]), so that no insert moves a row another holds by its address. `false`,
-    /// changing nothing, when the policy's allocator has no room for them. A later `limit_to` past
-    /// `rows` lets an insert move the rows again on the growable policy.
-    pub fn hold_rows_in_place(&mut self, rows: usize) -> bool {
-        let rows = rows.min(Self::ceiling());
-        if !self.rows.hold_in_place(rows) {
-            return false;
-        }
-        self.core.limit_to(rows);
-        true
-    }
-
     /// The most rows the table holds at once.
     pub fn capacity(&self) -> usize {
         usize::from(self.core.limit()).min(Self::ceiling())
@@ -559,15 +722,14 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// Whether an insert would be refused for want of a slot.
     pub fn is_full(&self) -> bool {
         self.core.held >= self.core.limit()
-            || (self.core.free == NIL
-                && (self.meta.free_slots() == 0 || self.rows.free_slots() == 0))
+            || (self.core.free == NIL && (self.meta.free_slots() == 0 || !self.rows.has_room()))
     }
 
     /// Keep `value` in a free slot: its handle, or `value` back when the table is full.
     pub fn insert(&mut self, value: T) -> Result<Handle<K>, CapacityFull<T>> {
         // The slot is found first and the row written once, whichever way it was found: a row
         // written in each way would be written twice in every caller of every row type.
-        let room = self.meta.free_slots() != 0 && self.rows.free_slots() != 0;
+        let room = self.meta.free_slots() != 0 && self.rows.room_for_one();
         let Some(taken) = self.core.take_slot(&mut self.meta, room) else {
             return Err(CapacityFull(value));
         };
