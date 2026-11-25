@@ -169,23 +169,17 @@ struct Cell {
 }
 
 impl Cell {
-    /// The cell of a row that holds no watch, its lock made where it stays. A new count is the
-    /// only one, so its place is always this count's; were it not, the cell is made and moved in
-    /// whole, its lock unused until then, rather than the open stopping.
+    /// The cell of a row that holds no watch, its lock made where it stays.
     fn empty() -> Arc<Self> {
-        let mut cell = Arc::<Self>::new_uninit();
-        let Some(place) = Arc::get_mut(&mut cell) else {
-            return Arc::new(Self {
-                slot: Mutex::new(Slot::default()),
-            });
-        };
-        // SAFETY: the cell's place is this count's alone, valid for writes of a cell, and stays
-        // where it is until the cell is dropped there.
+        let cell = Arc::<Self>::new_uninit();
+        let at = Arc::as_ptr(&cell).cast_mut().cast::<Self>();
+        // SAFETY: the count was just made and is the only one, so nothing else reaches the cell's
+        // place, which is valid for writes of a cell and stays where it is until the cell is
+        // dropped there; the slot is its one field, written once here.
         unsafe {
-            os::mutex_in(
-                NonNull::new_unchecked(addr_of_mut!((*place.as_mut_ptr()).slot)),
-                |slot| slot.write(Slot::default()),
-            );
+            os::mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).slot)), |slot| {
+                slot.write(Slot::default())
+            });
             cell.assume_init()
         }
     }
@@ -765,20 +759,11 @@ impl DeclWatches {
     /// No watch, and room for `watches` of them, at most the build's, their events held in `round`.
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     fn holding(watches: usize, round: &PlacedRef<Round>) -> Self {
-        let mut shared = Arc::<Shared>::new_uninit();
-        // A new count is the only one; were it not, the table is made and moved in whole, as
-        // `Cell::empty` makes a cell.
-        let Some(place) = Arc::get_mut(&mut shared) else {
-            return Self {
-                shared: Arc::new(Shared {
-                    table: Mutex::new(Table::holding(watches)),
-                    round: *round,
-                }),
-            };
-        };
-        let at = place.as_mut_ptr();
-        // SAFETY: the place is this count's alone, valid for writes of the shared table, and
-        // stays where it is until it is dropped there; each field is written once.
+        let shared = Arc::<Shared>::new_uninit();
+        let at = Arc::as_ptr(&shared).cast_mut().cast::<Shared>();
+        // SAFETY: the count was just made and is the only one, so nothing else reaches the place,
+        // which is valid for writes of the shared table and stays where it is until it is dropped
+        // there; each field is written once.
         let shared = unsafe {
             os::mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).table)), |table| {
                 table.write(Table::holding(watches))
