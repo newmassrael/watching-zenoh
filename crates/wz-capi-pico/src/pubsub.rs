@@ -1794,16 +1794,19 @@ pub(crate) unsafe fn fill_subscriber_place(
 /// its row having let go of the closure, its owner letting go of the place with the state.
 ///
 /// # Safety
-/// `state` is a live subscriber [`fill_subscriber_place`] filled, whose owner holds it.
+/// `state` is a live subscriber [`fill_subscriber_place`] filled, whose owner holds it, not
+/// settled before.
 pub(crate) unsafe fn settle_subscriber(
     state: *mut SubscriberState,
     declared: Result<DeclaredSubscriber, ZResult>,
 ) -> Result<*mut SubscriberState, ZResult> {
     match declared {
         Ok(declared) => {
-            // SAFETY: the caller's: the owner holds the state.
+            // SAFETY: the caller's: the owner holds the state, whose declaration the fill left
+            // none and nothing settled since, so the write drops nothing: an assignment would
+            // carry the drop of a declaration that cannot be there.
             unsafe {
-                (*state).declared = Some(declared);
+                core::ptr::addr_of_mut!((*state).declared).write(Some(declared));
                 (*state).bind();
             }
             Ok(state)
