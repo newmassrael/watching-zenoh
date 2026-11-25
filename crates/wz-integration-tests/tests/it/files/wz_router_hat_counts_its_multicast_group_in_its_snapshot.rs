@@ -19,10 +19,11 @@
 //! must rise by a margin that a late or a missed sample cannot make.
 //!
 //! The snapshot a GET reads is the one taken before the probe connected, so the count is the
-//! group's alone (the router hears its own beacons on `lo`, which the first run is the witness
-//! of). Measured on a build host, three runs alike: 20 alone, 39 with a second member, and 0 and 0
-//! with the router's group readers left unregistered, which is the control that the count is the
-//! group's and that this leg fails without them.
+//! group's alone. Alone, a router counts none of its own beacons: they come back on `lo` and its
+//! group link drops them before they are counted. With a second member it counts the second's
+//! beacons, about nineteen over the wait (19 in each of three runs on a build host, a count to
+//! read again with this link). With the router's group readers left unregistered both runs count
+//! 0, which is the control that the count is the group's and that this leg fails without them.
 //!
 //! Both ends are wz, so this file links no foreign implementation and carries no cross-impl
 //! marker.
