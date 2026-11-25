@@ -2019,8 +2019,11 @@ fn a_listener_from_a_filter_counts_what_the_filter_counts() {
 /// A build without a querier or a queryable holds no table of the queryables a peer declares, so a
 /// matching listener and a write filter on that plane are refused (a listener with
 /// `Refusal::NotBuilt`, a filter with none) and the listener's sink goes with the refusal. The CONTROL is a listener on the
-/// subscribers' plane, which every build holds.
-#[cfg(not(any(feature = "query", feature = "queryable")))]
+/// subscribers' plane, which every build that keeps listeners on a key holds.
+#[cfg(all(
+    not(any(feature = "query", feature = "queryable")),
+    feature = "key-matching-listener"
+))]
 #[test]
 fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
     let router = Router::start(CatchAll::None);
@@ -2175,6 +2178,7 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
 /// is declared, as zenoh-pico tells a listener added to a filter that is open. The watch reports
 /// the match as it registers; a second report of it would take the first back, and the listener
 /// would never hear that it matches. The CONTROL is the write filter, open before the listener.
+#[cfg(feature = "key-matching-listener")]
 #[test]
 fn a_listener_declared_on_a_match_is_told_once() {
     let router = Router::start(CatchAll::None);

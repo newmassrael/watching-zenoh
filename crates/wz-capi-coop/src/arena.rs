@@ -148,9 +148,11 @@ use crate::engine::LegHold;
 use crate::engine::LegSink;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+use crate::engine::REGISTRY_LEND_BYTES;
 #[cfg(feature = "runtime-plan")]
 use crate::engine::{CoopTables, FACE_SET_BYTES};
-use crate::engine::{REGISTRY_LEND_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES};
+use crate::engine::{ROOM_PLACE_BYTES, ROUTER_LEND_BYTES};
 use crate::open_source::EndpointList;
 use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -1769,7 +1771,9 @@ impl ArenaPlan {
             core::mem::size_of::<crate::round::Round>(),
         );
         // The places the session lends its registry and its Router in for a step, a place each
-        // (`crate::engine::StepPlaces`).
+        // (`crate::engine::StepPlaces`); a read that steps its one link itself dispatches under the
+        // session's lock and lends no registry.
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
         self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).

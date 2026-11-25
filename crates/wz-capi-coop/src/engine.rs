@@ -54,6 +54,8 @@ use crate::arena::{
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::form::{LockForm, StateGuard, StateLock};
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+use crate::round::LendingLink;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundRows};
@@ -1863,6 +1865,7 @@ type RegistryLend = StepLend<Registry, PlacedRef<LendCell<Registry>>>;
 type RouterPlace = PlacedRef<LendCell<SessionReassembly>>;
 
 /// The bytes of the place the session lends its registry in ([`RegistryLend`]).
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) const REGISTRY_LEND_BYTES: usize = core::mem::size_of::<LendCell<Registry>>();
 
 /// The bytes of the place the session lends its reassembly Router in ([`RouterPlace`]).
@@ -3003,7 +3006,8 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 
 /// The gates a link's pump runs behind on this engine, for a session on the clock `C`, which the
 /// session places in the link's cell of its table (`TransportState::gate_cells`): the round's, and with
-/// `listen` the admission's under it, which carries the clock.
+/// `listen` the admission's under it, which carries the clock; where the read hands each record
+/// out as it is read, the link alone, which tells the round where the datagram it lends lies.
 trait LinkGates {
     /// The gates.
     type Gate;
@@ -3014,10 +3018,11 @@ impl<C: ClockSource + 'static> LinkGates for C {
     type Gate = RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink>, C, SessionLock>>;
     #[cfg(all(not(feature = "listen"), any(feature = "threads", feature = "group")))]
     type Gate = RoundGate<CellRc<dyn SessionDatagramLink>>;
-    // The read steps the one link itself and hands each record out as it is read, so no gate
-    // stands between the link and its session (`direct`).
+    // The read steps the one link itself and hands each record out as it is read, so nothing
+    // holds the link back from its session; the read tells the round where the datagram it lends
+    // lies, which the round reads each record's parts in (`direct`).
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-    type Gate = CellRc<dyn SessionDatagramLink>;
+    type Gate = LendingLink<CellRc<dyn SessionDatagramLink>>;
 }
 
 /// The gates of a link of a session on the clock `C` ([`LinkGates`]).
@@ -3184,19 +3189,25 @@ impl RuntimeTables {
     /// The tables of a session `config` opens, its task cells together at most the build's
     /// `MAX_TASKS`: the groups' first, as a session that cannot join a group it was told to does
     /// not open, then the links', so a face past them is refused as one past `max_faces` is.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig<impl EndpointList>) -> Self {
         let groups = config.groups.len().min(caps::MAX_TASKS);
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-        let (links, task_bytes) = (
-            usize::from(crate::arena::dials(config))
-                .saturating_add(config.max_faces)
-                .min(caps::MAX_TASKS.saturating_sub(groups)),
-            link_task_bytes::<C>(),
-        );
-        // The one link a read steps itself runs as no task, and its session lies in the engine
-        // (`direct`): no cell is reserved for it.
-        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-        let (links, task_bytes) = (0, 0);
+        let links = usize::from(crate::arena::dials(config))
+            .saturating_add(config.max_faces)
+            .min(caps::MAX_TASKS.saturating_sub(groups));
+        Self::holding(groups, links, link_task_bytes::<C>())
+    }
+
+    /// The tables of a session `config` opens whose one link a read steps itself: that link runs
+    /// as no task, and its session lies in the engine (`direct`), so no cell is reserved for it
+    /// and the clock's type sizes nothing here.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(crate) fn of(config: &CoopConfig<impl EndpointList>) -> Self {
+        Self::holding(config.groups.len().min(caps::MAX_TASKS), 0, 0)
+    }
+
+    /// The tables of `groups` groups' cells and `links` links' cells of `task_bytes` each.
+    fn holding(groups: usize, links: usize, task_bytes: usize) -> Self {
         Self {
             rows: RuntimeRows {
                 tasks: links,
@@ -3273,7 +3284,14 @@ struct LinkMaking<'a> {
     /// Where the registry is lent to each link's dispatch (`Core::registry_lend`).
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     registry_lend: &'a RegistryLend,
-    /// The limits the session was opened with.
+    /// The limits the session was opened with: what a link's gate and its shared key ids are
+    /// sized by.
+    #[cfg(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group",
+        feature = "shared-key-ids"
+    ))]
     limits: &'a SessionLimits,
 }
 
@@ -3319,8 +3337,9 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
 
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, _actions: &LinkHandle<C>) -> LinkGate<C> {
-        // Each record is handed out as it is read, so the link is read with no gate before it.
-        pump
+        // Each record is handed out as it is read, so nothing holds the link back; where the
+        // datagram it lends lies is kept for the read to tell the round.
+        LendingLink::new(pump)
     }
 
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -3389,6 +3408,8 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let dispatch = direct::FaceRecords {
             // The registry holds the face before its link is made (`Registry::add_face`).
             face: self.session.registry.held(face),
+            // What the read tells the round of the datagram a record of it lies in.
+            link: gate.clone(),
             actions: actions.clone(),
             // SAFETY: the records are held beside the link's session in the engine's face, which
             // lets them go before the session's state, which owns the plane.
@@ -3403,7 +3424,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         };
         // The wire keeps a handle on the gates to admit the link through them, and to tell them
         // what each wait found in the link's stack.
-        #[cfg(not(any(feature = "listen", feature = "group")))]
+        #[cfg(all(feature = "threads", not(any(feature = "listen", feature = "group"))))]
         let _ = gate;
         (
             dispatch,
@@ -4771,7 +4792,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // whose rows are all held opens no more, and reserves nothing for it.
         let row = ReachEngine::claim().ok_or(OpenError::NoEngineRow)?;
         // The runtime's tables are placed in the arena, so its plan holds their span.
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         let tables = RuntimeTables::of::<C>(&config);
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        let tables = RuntimeTables::of(&config);
         let runtime_bytes = tables
             .placed_bytes::<C>()
             .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?;

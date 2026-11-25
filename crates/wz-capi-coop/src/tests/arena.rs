@@ -223,6 +223,20 @@ fn host_plan(config: &CoopConfig) -> Result<ArenaPlan, ArenaRefused> {
     held_plan(config, &crate::arena::HeldPlaces::NONE)
 }
 
+/// The runtime tables a session `config` opens, as the engine's form sizes them: a form whose
+/// links run as tasks sizes their cells by the clock's task, the one-link read reserves none.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+fn runtime_tables(config: &CoopConfig) -> crate::engine::RuntimeTables {
+    crate::engine::RuntimeTables::of::<PosixClock>(config)
+}
+
+/// The runtime tables a session `config` opens, as the engine's form sizes them: a form whose
+/// links run as tasks sizes their cells by the clock's task, the one-link read reserves none.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+fn runtime_tables(config: &CoopConfig) -> crate::engine::RuntimeTables {
+    crate::engine::RuntimeTables::of(config)
+}
+
 /// `host_plan` with the ABI's places `held` laid out after every other row.
 fn held_plan(
     config: &CoopConfig,
@@ -231,7 +245,7 @@ fn held_plan(
     let mut plan = ArenaPlan::vacant();
     plan.count(config, &config.limits)?;
     let links = PosixLinks::new(super::LOOPBACK, PosixTcpDial);
-    let runtime = crate::engine::RuntimeTables::of::<PosixClock>(config)
+    let runtime = runtime_tables(config)
         .placed_bytes::<PosixClock>()
         .ok_or(ArenaRefused::TooLarge)?;
     crate::engine::lay_out_open(
@@ -764,13 +778,21 @@ fn the_plan_lays_out_no_delivery_lane() {
 }
 
 /// The plan lays out one place for each step lend the open places in the arena
-/// (`crate::engine::StepPlaces`): the registry's and the reassembly Router's, a cell each. Turned
-/// red by a plan that leaves either out, whose open would place it past what the arena has.
+/// (`crate::engine::StepPlaces`): the registry's and the reassembly Router's, a cell each, and no
+/// registry's where the read steps its one link itself and dispatches under the session's lock.
+/// Turned red by a plan that leaves a lend out, whose open would place it past what the arena has,
+/// or that reserves one the open never places, which lending every row would leave empty.
 #[test]
 fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    assert!(
+        built.rows().all(|row| row.part() != "registry lend"),
+        "a read that steps its one link lends no registry"
+    );
     for (part, bytes) in [
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         ("registry lend", crate::engine::REGISTRY_LEND_BYTES),
         ("router lend", crate::engine::ROUTER_LEND_BYTES),
     ] {
