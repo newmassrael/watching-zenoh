@@ -53,7 +53,7 @@
 //! no emit.
 
 use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned};
-use sce_forge_runtime::codec::{CodecError, SceString};
+use sce_forge_runtime::codec::CodecError;
 
 /// `init::ext::RegionName`'s id in the establishment (Init / Open) ext space.
 pub const REGION_NAME_EXT_ID: u8 = crate::ext_header::establishment_ext_id::REGION_NAME;
@@ -89,8 +89,10 @@ pub enum RegionNameError {
 /// already been through upstream's rule and no caller can stage an entry the
 /// peer would refuse.
 ///
-/// ⚠ The carrier is the language's [`SceString`], hard-bounded on every
-/// profile and holding its bytes inline, and not a plain `String`, because `wz-session-core` builds `no_std`. The first draft used
+/// ⚠ The carrier is a text of [`MAX_REGION_NAME_LEN`] bytes held inline, and
+/// not the language's `SceString`, whose bytes are a `String` of the heap on
+/// the alloc profile: a name is copied without taking memory on every profile.
+/// Nor is it a plain `String`, because `wz-session-core` builds `no_std`. The first draft used
 /// `alloc::string::String` and compiled fine at default features while
 /// BREAKING `--no-default-features` outright — a whole-crate compile error that
 /// the default lane is structurally unable to see. What caught it was the
@@ -100,12 +102,9 @@ pub enum RegionNameError {
 ///
 /// The capacity is [`MAX_REGION_NAME_LEN`] exactly, which upstream's own
 /// ceiling makes safe: a name this type can hold is one `validate` admits.
-/// ⚠ `Eq` is NOT derived: the no-alloc profile's `InlineStr` does not implement
-/// it, and deriving it here would be a second way this type compiles at default
-/// features and not at `--no-default-features`. `PartialEq` is all any caller
-/// here needs.
+/// `PartialEq` is all any caller here needs.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RegionName(SceString<MAX_REGION_NAME_LEN>);
+pub struct RegionName(heapless::String<MAX_REGION_NAME_LEN>);
 
 impl RegionName {
     /// Upstream's `RegionName::validate`, in its order: empty first, then
@@ -122,9 +121,9 @@ impl RegionName {
         // own capacity check below can only fire on a name this function has
         // already admitted — it cannot. Mapped to `TooLong` rather than
         // unwrapped so a future capacity change is a refusal and not a panic.
-        SceString::<MAX_REGION_NAME_LEN>::from_text(s)
-            .map(Self)
-            .map_err(|_| RegionNameError::TooLong)
+        let mut name = heapless::String::new();
+        crate::bounded::push_text(&mut name, s).map_err(|_| RegionNameError::TooLong)?;
+        Ok(Self(name))
     }
 
     /// The name as upstream's `as_str` gives it.
@@ -253,6 +252,17 @@ mod tests {
             "zextzbuf!(0x8, FALSE) -- with M set a peer that does not know \
              regions would have to refuse the handshake",
         );
+    }
+
+    /// A name is held in the bytes of the value itself, so copying one takes no memory of the
+    /// heap. Turned red by a carrier that keeps its bytes elsewhere (a `String`, three words).
+    #[test]
+    fn a_region_name_holds_its_bytes_inline() {
+        assert!(core::mem::size_of::<RegionName>() >= MAX_REGION_NAME_LEN);
+        let longest = "abcdefghijklmnopqrstuvwxyz012345";
+        assert_eq!(longest.len(), MAX_REGION_NAME_LEN);
+        let name = RegionName::new(longest).expect("a name at the limit");
+        assert_eq!(name.as_str(), longest);
     }
 
     /// wz's own emit projected back through wz's own reader — the
