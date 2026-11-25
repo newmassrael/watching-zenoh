@@ -1050,6 +1050,42 @@ impl KeyHold {
     }
 }
 
+/// An entity's key as its engine keeps it ([`SessionEngine::subscriber_keyexpr`]): the text, where
+/// the engine's record of the entity holds it, and the row of the declaration of the entity's own
+/// key, `None` when the record holds none. What an ABI lends a program asking for the entity's
+/// key, so the key it reads and the declaration it names are the session's, not a copy.
+///
+/// The text is named by its start and length because it is lent past the engine's lock: the
+/// record keeps it at one address until the entity is retracted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyView {
+    /// The first byte of the key's text.
+    pub start: *const u8,
+    /// The length of the key's text, in bytes.
+    pub len: usize,
+    /// The row of the declaration of the entity's own key.
+    pub row: Option<wz_session_core::session_tables::KeyexprHandle>,
+}
+
+impl KeyView {
+    /// `key`, named whole: no declaration of it is held.
+    pub fn literal(key: &str) -> Self {
+        Self::declared(key, None)
+    }
+
+    /// `key`, with the row of the declaration of the entity's own key.
+    pub fn declared(
+        key: &str,
+        row: Option<wz_session_core::session_tables::KeyexprHandle>,
+    ) -> Self {
+        Self {
+            start: key.as_ptr(),
+            len: key.len(),
+            row,
+        }
+    }
+}
+
 /// What a key kept alive besides its name on the wire, taken out of the key that kept it
 /// ([`WireKey::into_anchor`]): an object of the ABI's that retracts a declaration when its last
 /// holder lets it go, or nothing. Dropping it lets the object go, which may reach the session, so
@@ -1712,6 +1748,15 @@ mod tests {
                     Ok(())
                 }
             }
+        }
+
+        // The double counts holds and keeps no tables, so no row declares a key.
+        fn declared_prefix(
+            &self,
+            _row: wz_session_core::session_tables::KeyexprHandle,
+            _key: &str,
+        ) -> Option<(wz_session_core::wire_id::ExprId, usize)> {
+            None
         }
     }
 

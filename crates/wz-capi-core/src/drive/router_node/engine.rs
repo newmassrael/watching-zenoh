@@ -97,6 +97,14 @@ enum Held {
     Liveliness(u64, SinkRelease),
 }
 
+/// A subscription of the program's: what the node holds for it, and the key it was declared on,
+/// which the program is lent back ([`SessionEngine::subscriber_keyexpr`]). The key is a buffer of
+/// its own, so it stays where it is when the map moves the entry.
+struct Subscribed {
+    held: Held,
+    key: Box<str>,
+}
+
 /// What the node keeps to be an engine: the clock, the ids, the subscriptions and the periodic
 /// jobs it holds for the program.
 pub(super) struct EngineState {
@@ -108,7 +116,7 @@ pub(super) struct EngineState {
     /// filters and its periodic jobs. A space of their own, so they are not refused when the
     /// entity ids are spent.
     next_local_id: AtomicU64,
-    subscriptions: Mutex<HashMap<SubId, Held>>,
+    subscriptions: Mutex<HashMap<SubId, Subscribed>>,
     /// The program's queryables, each by the id the node's data plane holds it under. That id is
     /// the data plane's key for its own face's declaration, which no peer reads; the program is
     /// given an entity id, as every other declaration of its session.
@@ -193,6 +201,15 @@ impl wz_capi_port::KeyHolds for RouterState {
         _row: wz_session_core::session_tables::KeyexprHandle,
     ) -> Result<(), wz_capi_port::HoldRefused> {
         Err(wz_capi_port::HoldRefused::Gone)
+    }
+
+    // No row is the node's: every key is named whole.
+    fn declared_prefix(
+        &self,
+        _row: wz_session_core::session_tables::KeyexprHandle,
+        _key: &str,
+    ) -> Option<(wz_session_core::wire_id::ExprId, usize)> {
+        None
     }
 }
 
@@ -350,7 +367,13 @@ impl SessionEngine for RouterState {
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, Held::Plain(host, release));
+            .insert(
+                id,
+                Subscribed {
+                    held: Held::Plain(host, release),
+                    key: keyexpr.into(),
+                },
+            );
         Ok(id)
     }
 
@@ -362,7 +385,8 @@ impl SessionEngine for RouterState {
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id);
+            .remove(&id)
+            .map(|subscribed| subscribed.held);
         match held {
             Some(Held::Plain(host, release)) => {
                 self.forwarder.unhost_subscriber(host);
@@ -374,6 +398,17 @@ impl SessionEngine for RouterState {
             }
             None => {}
         }
+    }
+
+    // A node names every key whole and declares none, so the key is lent as a literal, the text
+    // the node keeps for the subscription.
+    fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
+        self.engine
+            .subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|subscribed| wz_capi_port::KeyView::literal(&subscribed.key))
     }
 
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
@@ -627,7 +662,13 @@ impl SessionEngine for RouterState {
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, Held::Liveliness(face, release));
+            .insert(
+                id,
+                Subscribed {
+                    held: Held::Liveliness(face, release),
+                    key: keyexpr.into(),
+                },
+            );
         Ok(id)
     }
 

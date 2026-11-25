@@ -86,7 +86,7 @@ use wz_capi_port::os::{self, Mutex, MutexGuard};
 use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, EngineDeliveries, FanoutError, FilterId, FilterPlane,
-    FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId,
+    FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, KeyView, MatchId,
     MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive,
     SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
@@ -7089,6 +7089,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::
             Err(HoldRefused::Gone)
         }
     }
+
+    #[inline(never)]
+    fn declared_prefix(&self, row: KeyexprHandle, key: &str) -> Option<(ExprId, usize)> {
+        let core = self.live()?;
+        tables(&core.0.session.registry).declared_prefix(row, key)
+    }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Tickers
@@ -7456,6 +7462,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "local-subscriber")]
         self.deliver();
         Ok(id)
+    }
+
+    // The text is the row's own, which does not move while the row stands.
+    #[inline(never)]
+    fn subscriber_keyexpr(&self, id: SubId) -> Option<KeyView> {
+        let core = self.live()?;
+        let tables = tables(&core.0.session.registry);
+        if let Some((_, row)) = tables.subscribers().iter().find(|(_, row)| row.id() == id) {
+            return Some(KeyView::declared(row.key().as_str(), row.key().named()));
+        }
+        #[cfg(feature = "liveliness")]
+        if let Some((_, row)) = tables
+            .liveliness_subscribers()
+            .iter()
+            .find(|(_, row)| row.id() == id)
+        {
+            return Some(KeyView::declared(row.key().as_str(), row.key().named()));
+        }
+        None
     }
 
     #[inline(never)]

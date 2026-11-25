@@ -155,6 +155,15 @@ impl wz_capi_port::KeyHolds for Script {
     ) -> Result<(), wz_capi_port::HoldRefused> {
         Err(wz_capi_port::HoldRefused::Gone)
     }
+
+    // The script declares no key, so no row is its.
+    fn declared_prefix(
+        &self,
+        _row: wz_session_core::session_tables::KeyexprHandle,
+        _key: &str,
+    ) -> Option<(wz_session_core::wire_id::ExprId, usize)> {
+        None
+    }
 }
 
 impl wz_capi_port::Tickers for Script {
@@ -267,6 +276,14 @@ impl SessionEngine for Script {
                     .map(|s| s.1.clone())
             });
         self.event(format!("retract {}", known.unwrap_or_default()));
+    }
+    fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
+        self.subscriptions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.0 == id)
+            .map(|s| wz_capi_port::KeyView::literal(&s.1))
     }
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         Err(Refusal::NotBuilt)

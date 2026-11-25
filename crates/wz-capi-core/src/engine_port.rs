@@ -174,6 +174,14 @@ impl wz_capi_port::KeyHolds for SharedSession {
     ) -> Result<(), wz_capi_port::HoldRefused> {
         SharedSession::retain_keyexpr(self, row)
     }
+
+    fn declared_prefix(
+        &self,
+        row: wz_session_core::session_tables::KeyexprHandle,
+        key: &str,
+    ) -> Option<(wz_session_core::wire_id::ExprId, usize)> {
+        SharedSession::declared_prefix(self, row, key)
+    }
 }
 
 impl wz_capi_port::Tickers for SharedSession {
@@ -370,6 +378,10 @@ impl SessionEngine for SharedSession {
 
     fn undeclare_subscriber(&self, id: SubId) {
         SharedSession::undeclare_subscriber(self, id)
+    }
+
+    fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
+        SharedSession::subscriber_keyexpr(self, id)
     }
 
     fn acquire_keyexpr(&self, keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {

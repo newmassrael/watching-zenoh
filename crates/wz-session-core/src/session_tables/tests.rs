@@ -3242,3 +3242,37 @@ fn a_write_filter_row_answers_as_its_handle_does() {
     assert_eq!(tables.write_filter_open(filter, &peers), Some(true));
     assert_eq!(peers.asked.get(), 2);
 }
+
+/// A row read by its handle names the first bytes of a key it declares, and nothing once it went
+/// or for a key it does not start; an entity's row lends the declaration of its own key.
+///
+/// # Control
+///
+/// Reading the row without checking the key starts with it reds the second assertion; a row that
+/// answers after it went reds the third; an entity row lending the declaration its key is named
+/// by in place of its own reds the last.
+#[test]
+fn a_rows_declaration_names_the_keys_it_starts_and_an_entity_lends_its_own() {
+    let mut tables = Tables::new();
+    let announced = tables.declare_keyexpr("demo/").unwrap();
+    let own = tables.declare_keyexpr("demo/x").unwrap();
+    assert_eq!(
+        tables.declared_prefix(announced.handle, "demo/x/**"),
+        Some((announced.id, "demo/".len()))
+    );
+    assert_eq!(tables.declared_prefix(announced.handle, "other/x"), None);
+    let form = KeyForm {
+        prefix: Some(announced.handle),
+        own: Some(own.handle),
+        retraction: Retraction::ById,
+    };
+    let sub = tables
+        .declare_subscriber("demo/x/**", Locality::Any, form, 1)
+        .unwrap();
+    let row = tables.subscribers().get(sub.handle).unwrap().key();
+    assert_eq!(row.as_str(), "demo/x/**");
+    assert_eq!(row.named(), Some(own.handle));
+    let gone = tables.declare_keyexpr("gone/").unwrap();
+    assert_eq!(tables.undeclare_keyexpr(gone.handle), Some(gone.id));
+    assert_eq!(tables.declared_prefix(gone.handle, "gone/x"), None);
+}

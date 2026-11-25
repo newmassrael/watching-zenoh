@@ -541,6 +541,12 @@ impl<Key: KeyBacking> EntityKey<Key> {
 }
 
 impl<Key> EntityKey<Key> {
+    /// The declaration of the entity's own key the row holds, `None` when it holds none: what a
+    /// program asking for the entity's key is lent beside the key's text.
+    pub fn named(&self) -> Option<KeyexprHandle> {
+        self.named
+    }
+
     /// The declarations the row holds, each once: the one the key is named by, and the one of the
     /// entity's own key when that is another.
     pub fn holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>) {
@@ -1814,6 +1820,18 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                     .is_some_and(|kept| kept.id == declared.id)
             })
             .or_else(|| self.keyexpr_by_id(declared.id))
+    }
+
+    /// The declaration in row `row` when it declares the first bytes of `key`: its id and how many
+    /// bytes of `key` it covers. `None` for a row that went and for one that declares another key,
+    /// so a holder that names a row of another session's tables, or one whose generation moved on,
+    /// names `key` whole. Wire names concatenate, so a row whose key is a prefix of `key` names
+    /// `key` with its id and the rest, whoever holds it.
+    pub fn declared_prefix(&self, row: KeyexprHandle, key: &str) -> Option<(ExprId, usize)> {
+        let kept = self.keyexprs.get(row)?;
+        let declared = kept.key();
+        key.starts_with(declared)
+            .then_some((kept.id(), declared.len()))
     }
 
     /// The declaration the wire names by `id`: a search of the declarations, which a holder that

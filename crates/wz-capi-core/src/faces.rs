@@ -5264,6 +5264,35 @@ impl SharedSession {
         }
     }
 
+    /// The declaration in row `row` when it declares the first bytes of `key`: its id and how
+    /// many bytes of `key` it covers ([`SessionTables::declared_prefix`]).
+    pub fn declared_prefix(&self, row: KeyexprHandle, key: &str) -> Option<(ExprId, usize)> {
+        self.lock().tables.declared_prefix(row, key)
+    }
+
+    /// The key subscription `id` was declared on, a liveliness subscription's too, as its SSOT
+    /// entry keeps it, with the row of the declaration of its own key. The text is the entry's
+    /// heap buffer, which stays where it is when the entries move and goes with the entry.
+    pub fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
+        let guard = self.lock();
+        let (key, wire) = guard
+            .subs
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| (&entry.keyexpr, &entry.wire))
+            .or_else(|| {
+                guard
+                    .live_subs
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| (&entry.keyexpr, &entry.wire))
+            })?;
+        let row = guard
+            .tables
+            .keyexpr_at(KeyexprRef::by_id(wire.own_declaration()));
+        Some(wz_capi_port::KeyView::declared(key, row))
+    }
+
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
     /// — the SSOT every new face is replayed from. In the order of their rows: a
     /// row a retracted declaration left is taken by the next one, so this is the

@@ -44,8 +44,8 @@ use crate::peers::PeerIdentity;
 use crate::told::{ToldKey, ToldLedger, ToldPlane};
 use crate::{
     BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HoldRefused, KeyHold,
-    LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink, Refusal,
-    ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    KeyView, LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink,
+    Refusal, ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -77,6 +77,18 @@ pub trait KeyHolds: Send + Sync {
     /// or the session is closed ([`HoldRefused::Gone`]). Every engine states it: one that held a
     /// declaration and did not count this would retract it before its last holder let go.
     fn retain_keyexpr(&self, row: KeyexprHandle) -> Result<(), HoldRefused>;
+
+    /// The declaration in row `row` when it declares the first bytes of `key`: its id and how many
+    /// bytes of `key` it covers, read in the session's tables
+    /// ([`SessionTables::declared_prefix`](wz_session_core::session_tables::SessionTables::declared_prefix)).
+    /// `None` for a row that went, one that declares another key, or a closed session: the key is
+    /// then named whole. The one reading of a lent key's declaration, which names its row and no
+    /// session, so a row another session's holder named is judged by what this session declares.
+    fn declared_prefix(
+        &self,
+        row: KeyexprHandle,
+        key: &str,
+    ) -> Option<(wz_session_core::wire_id::ExprId, usize)>;
 }
 
 /// The periodic jobs a session runs ([`crate::Ticker`]). Apart from [`SessionEngine`] for the
@@ -427,6 +439,13 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// another session it waits. The engine keeps this, so every ABI over it means the same.
     /// Retracting one already retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
+
+    /// The key subscriber `id` was declared on, a liveliness subscriber's too, as the engine keeps
+    /// it: its text where the engine's record of the subscription holds it, and the row of the
+    /// declaration of the subscription's own key when the record holds one. Valid until the
+    /// subscriber is retracted, the record holding both until then; `None` for an id that names no
+    /// subscriber. Every engine states it, as each keeps its subscriptions its own way.
+    fn subscriber_keyexpr(&self, id: SubId) -> Option<KeyView>;
 
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
     /// names its mapping id and its row. Refused when the session has no id left to give
