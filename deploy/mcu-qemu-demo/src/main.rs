@@ -248,8 +248,14 @@ fn check_stack(tag: &str) {
 fn run(link: LwipLink) -> ! {
     hprintln!("R311bi: lwIP UDP loopback e2e demo starting");
 
-    let runtime = CoopRuntime::try_new(SystickClockRef)
-        .expect("the heap has room for the runtime");
+    let Some(runtime) = CoopRuntime::try_new(SystickClockRef) else {
+        hprintln!("R311bi FAIL: no heap for the runtime");
+        debug::exit(debug::EXIT_FAILURE);
+        // Off QEMU the exit returns; the demo stops here.
+        loop {
+            cortex_m::asm::wfi();
+        }
+    };
     let time = CoopTime::new(&runtime);
 
     let sock: LwipUdpSocket =
