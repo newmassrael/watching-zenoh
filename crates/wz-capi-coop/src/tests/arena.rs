@@ -621,6 +621,80 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     );
 }
 
+/// A session that listens on `tcp/` alone binds no udp port, so it is lent no datagram slot and
+/// keeps no peer row of a port, as one that listens on nothing; a `udp/` endpoint beside it lends
+/// the slots. Each row is printed, so a run with `--nocapture` shows the bytes the tcp listener
+/// does not reserve. Turned red by slots planned from the count of listeners rather than of the
+/// `udp/` ones.
+#[cfg(feature = "listen")]
+#[test]
+fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
+    let config = |listen: &[&str]| CoopConfig {
+        listen: listen.iter().map(|text| (*text).to_owned()).collect(),
+        max_faces: 2,
+        ..client_config()
+    };
+    let tcp = ArenaPlan::of(&config(&["tcp/127.0.0.1:0"]), &SessionLimits::defaults())
+        .expect("lays an arena out");
+    let both = ArenaPlan::of(
+        &config(&["tcp/127.0.0.1:0", "udp/127.0.0.1:0"]),
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    for part in [
+        "link port datagram flags",
+        "link port datagram slots",
+        "udp port peers",
+        "udp port queue",
+    ] {
+        std::println!(
+            "{part}: tcp alone {:?} B, beside a udp port {:?} B",
+            row(&tcp, part).bytes(),
+            row(&both, part).bytes()
+        );
+    }
+    std::println!(
+        "reserved: tcp alone {:?} B, beside a udp port {:?} B",
+        tcp.reserved_bytes(),
+        both.reserved_bytes()
+    );
+    assert_eq!(row(&tcp, "link port datagram slots").count, 0);
+    assert_eq!(row(&tcp, "link port datagram flags").count, 0);
+    assert_eq!(
+        Some(row(&tcp, "udp port peers").entry_bytes),
+        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(0),
+        "a session with no udp port keeps no peer row of one"
+    );
+    assert_eq!(
+        row(&both, "link port datagram slots").count,
+        caps::UDP_PORT_SLOTS
+    );
+    let (Some(tcp_bytes), Some(both_bytes)) = (tcp.reserved_bytes(), both.reserved_bytes()) else {
+        panic!("both plans have a size");
+    };
+    assert!(
+        tcp_bytes < both_bytes,
+        "{tcp_bytes} B is not under {both_bytes} B"
+    );
+}
+
+/// A list of endpoints counts its `udp/` ones, in the host's form and in a source's alike.
+/// Turned red by a count that reads another scheme as udp, or a source's count that drops one.
+#[test]
+fn a_list_of_endpoints_counts_its_udp_ones() {
+    use crate::open_source::{Counted, EndpointList};
+
+    let texts = ["tcp/127.0.0.1:7447", "udp/127.0.0.1:7447", "udp/[::1]:7447"];
+    let host = texts
+        .iter()
+        .map(|text| (*text).to_owned())
+        .collect::<std::vec::Vec<_>>();
+    assert_eq!((host.count(), host.udp()), (3, 2));
+    let counted = Counted::of(texts);
+    assert_eq!((counted.count(), counted.udp()), (3, 2));
+    assert_eq!(Counted::of(None::<&str>), Counted::default());
+}
+
 /// A session that joins groups is lent a receive buffer for each group it may join, of the largest
 /// batch a group it names sends, under the build's multicast batch, with the links' tables: the
 /// stack claims one when a group is joined. Turned red by a buffer for each group asked past the

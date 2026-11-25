@@ -2115,15 +2115,17 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let groups: Vec<wz_capi_port::group::GroupJoin> = Vec::new();
     // The unicast endpoints: none beside a group, and otherwise the one the config states or
     // those the scout found to dial, and the one it states to listen on.
-    let unicast_listens = usize::from(listen.is_some() && !joins_a_group);
-    let unicast_dials = if joins_a_group {
-        0
+    let listen_list = wz_capi_coop::open_source::Counted::of(listen.filter(|_| !joins_a_group));
+    let dial_list = if joins_a_group {
+        wz_capi_coop::open_source::Counted::default()
     } else {
-        request
-            .scouted
-            .len()
-            .saturating_add(usize::from(stated.is_some()))
+        wz_capi_coop::open_source::Counted::of(
+            stated
+                .into_iter()
+                .chain(request.scouted.iter().map(String::as_str)),
+        )
     };
+    let (unicast_listens, unicast_dials) = (listen_list.count, dial_list.count);
     let (config, scouted) = (request.config, request.scouted);
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
@@ -2186,7 +2188,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // frame, which the open's handshake runs under, holds the maker and what it reads, and never
     // the config.
     let make_config = || wz_capi_coop::CoopConfig {
-        endpoints: wz_capi_coop::open_source::Counted(unicast_dials),
+        endpoints: dial_list,
         whatami: dial_whatami,
         zid,
         // The numbers of pico's value build switches, as the open's snapshot holds them: the
@@ -2212,7 +2214,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         // The bounds of an accept are the session's limits: the faces it holds besides its dial
         // (`MAX_FACES`) and the handshakes under way (`MAX_ACCEPT_PENDING`), at the pico preset
         // pico's own, ten peers and one handshake at a time.
-        listen: wz_capi_coop::open_source::Counted(unicast_listens),
+        listen: listen_list,
         accept_pending,
         max_faces,
         // The group the listen endpoint names, when it names one.

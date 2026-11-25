@@ -48,9 +48,10 @@
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
 //!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
-//! - with `listen`, for a session that listens, the slots its udp ports read their datagrams into
-//!   and hold them in until the links of their peers take them (`UDP_PORT_SLOTS`, under the
-//!   build's), each a link's batch long, which the ports share, lent with the links' tables;
+//! - with `listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports read
+//!   their datagrams into and hold them in until the links of their peers take them
+//!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
+//!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
 //!   each reliability a peer has a chain open in, and one for the rejoined message the round
@@ -1845,7 +1846,7 @@ impl ArenaPlan {
         // The slots the udp ports of a session that listens read their datagrams into and hold
         // them in until the links of their peers take them, lent with the links' tables
         // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
-        // session that listens on nothing holds none.
+        // session that listens on no `udp/` endpoint binds no port and holds none.
         #[cfg(feature = "listen")]
         {
             let slots = self.lent(
@@ -1853,7 +1854,7 @@ impl ArenaPlan {
                 Quota::at_most(limits.udp_port_slots()),
                 caps::UDP_PORT_SLOTS,
             );
-            let listens = shape.listens > 0;
+            let listens = shape.udp_listens > 0;
             let slots = if listens { slots } else { 0 };
             self.transport.port_rx = (slots, link_bytes);
             self.put_table(
@@ -3114,6 +3115,11 @@ pub struct PlanShape {
     pub dials: usize,
     /// The endpoints it listens on (at most `MAX_ADMIN_LOCATORS`).
     pub listens: usize,
+    /// How many of those are `udp/` ones, each a udp port the stack binds, which read into the
+    /// datagram slots the arena lends (`UDP_PORT_SLOTS`): a session that listens on `tcp/` alone
+    /// binds no port and is lent none.
+    #[cfg(feature = "listen")]
+    pub udp_listens: usize,
     /// The multicast groups it joins.
     pub groups: usize,
     /// The faces it admits besides the dial role's ([`CoopConfig::max_faces`]).
@@ -3137,6 +3143,8 @@ impl PlanShape {
         Self {
             dials: config.endpoints.count(),
             listens: config.listen.count(),
+            #[cfg(feature = "listen")]
+            udp_listens: config.listen.udp(),
             groups: config.groups.len(),
             max_faces: config.max_faces,
             accept_pending: config.accept_pending,
@@ -3160,6 +3168,8 @@ impl PlanShape {
         Self {
             dials,
             listens: 0,
+            #[cfg(feature = "listen")]
+            udp_listens: 0,
             groups: 0,
             max_faces: 0,
             accept_pending: 0,
