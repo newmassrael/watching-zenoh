@@ -3281,11 +3281,11 @@ mod tests {
     #[cfg(feature = "storage-profile")]
     #[test]
     fn an_inline_room_composes_in_its_own_row() {
-        use crate::wireexpr_resolve::{ComposeInline, ComposeRoom, KeyexprOut};
+        use crate::wireexpr_resolve::{ComposeInline, ComposeRoom};
         let mut room = zeroed::<ComposeInline>();
-        let buffer = room.buffer(&mut ());
-        assert_eq!(buffer.as_str(), "");
-        assert!(buffer.push_str("demo/key").is_ok());
-        assert_eq!(buffer.as_str(), "demo/key");
+        // The trait ties the buffer to the frame's borrow, so each use takes it again.
+        assert_eq!(room.buffer(&mut ()).as_str(), "");
+        assert!(room.buffer(&mut ()).push_str("demo/key").is_ok());
+        assert_eq!(room.buffer(&mut ()).as_str(), "demo/key");
     }
 }
