@@ -725,8 +725,8 @@ transport-link-ws|"
     # above; the dictionary of key ids and the group of the program's transport here.
     "wz-capi-coop|hook|-default,std,listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::one_thread::shared_key_ids::"
     "wz-capi-coop|hook|-default,std,app-transport,group|tests::one_thread::group::"
-    # The host's group in the same form compiles here; its test needs a multicast route and is
-    # ignored, as the row of `threads` below runs it.
+    # The host's group in the same form: the joiner's tests run here; the engine's, which needs a
+    # multicast route as its twin of `threads` does, Layer M runs with `--ignored` in this form.
     "wz-capi-coop|hook|-default,std,group-host|host_group::"
     # The default build less `key-matching-listener`, as the pico C ABI builds the engine: a matching
     # listener declared on a key is refused as not built, its sink let go of, while one on an
