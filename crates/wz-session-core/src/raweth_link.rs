@@ -546,13 +546,15 @@ impl RethLocator {
     /// widest header its mapping makes, so a group frames its batches to what every entry's frame
     /// holds.
     pub fn frame_budget(&self) -> u16 {
-        let header = if self.routes.iter().any(|route| route.vlan.is_some()) {
-            ETH_VLAN_HEADER_LEN
+        // A frame less its header is under 1514, so each budget is a `u16`, and both are worked
+        // out when the crate is built.
+        const UNTAGGED: u16 = (MAX_ETH_FRAME_SIZE - ETH_HEADER_LEN) as u16;
+        const TAGGED: u16 = (MAX_ETH_FRAME_SIZE - ETH_VLAN_HEADER_LEN) as u16;
+        if self.routes.iter().any(|route| route.vlan.is_some()) {
+            TAGGED
         } else {
-            ETH_HEADER_LEN
-        };
-        // A frame less its header is under 1514.
-        (MAX_ETH_FRAME_SIZE - header) as u16
+            UNTAGGED
+        }
     }
 
     /// The datagram `frame` carries and the member it came from, as a group of this link reads

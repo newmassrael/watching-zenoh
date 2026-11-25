@@ -804,7 +804,8 @@ def selftest() -> int:
                  '    ("get", Round::Get, Part::Calling),\n];\n')
     assert declared(base, test_text) == [], declared(base, test_text)
     missing = declared(base, test_text.replace('    ("get", Round::Get, Part::Calling),\n', ""))
-    assert any("measures no such family" in f for f in missing), missing
+    assert any("family get has a row" in f and "measures such a family" in f for f in missing), \
+        missing
     extra = declared(base, test_text.replace("];", '    ("e2e", Round::E2e, Part::All),\n];'))
     assert any("has no row" in f for f in extra), extra
     assert any("declares no family" in f for f in declared(base, "nothing here")), "no family read"

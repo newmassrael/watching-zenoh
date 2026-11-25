@@ -236,11 +236,13 @@ fn held_plan(
         .ok_or(ArenaRefused::TooLarge)?;
     crate::engine::lay_out_open(
         &mut plan,
-        crate::engine::link_cells::<PosixClock>(&links),
-        crate::engine::link_rooms_bytes(&links),
-        held,
-        runtime,
-        wz_runtime_coop::kept::Shared::<Engine>::layout().size(),
+        &crate::engine::OpenHolds {
+            cells: crate::engine::link_cells::<PosixClock>(&links),
+            rooms: crate::engine::link_rooms_bytes(&links),
+            held,
+            runtime,
+            engine: wz_runtime_coop::kept::Shared::<Engine>::layout().size(),
+        },
     )?;
     Ok(plan)
 }
