@@ -15,6 +15,7 @@ use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::EventSink;
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
+use wz_session_core::group_locator::GroupLocatorError;
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::policy::KeyWireForm;
 use wz_session_core::response_sink::ResponseSink;
@@ -97,9 +98,10 @@ pub enum Refusal {
     /// The endpoint's text is longer than a row of the session's endpoints, `MAX_LOCATOR_LEN`
     /// bytes.
     TextTooLong,
-    /// The group's endpoint is longer than the row a member's link is reported in,
-    /// `MAX_GROUP_ENDPOINT_LEN` bytes.
-    GroupEndpointTooLong,
+    /// The group's endpoint names no group a session joins, read before any stack is asked: it is
+    /// longer than the row a member's link is reported in (`MAX_GROUP_ENDPOINT_LEN` bytes), is no
+    /// multicast group, or states a key no group is joined with.
+    GroupEndpoint(GroupLocatorError),
 }
 
 impl From<HandshakeEnd> for Refusal {
@@ -132,9 +134,7 @@ impl core::fmt::Display for EndpointRefusal {
                 f.write_str("the session holds as many faces as max_faces admits")
             }
             Refusal::TextTooLong => f.write_str("the endpoint is longer than MAX_LOCATOR_LEN"),
-            Refusal::GroupEndpointTooLong => {
-                f.write_str("the group endpoint is longer than MAX_GROUP_ENDPOINT_LEN")
-            }
+            Refusal::GroupEndpoint(why) => write!(f, "{why}"),
         }
     }
 }

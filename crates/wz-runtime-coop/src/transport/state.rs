@@ -19,11 +19,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use wz_session_core::byte_cells::LentByteCells;
-#[cfg(feature = "group")]
-use wz_session_core::caps;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "connectivity")]
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
+#[cfg(feature = "group")]
+use wz_session_core::group_locator::parse_group_locator;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::LinkAdmission;
 #[cfg(feature = "queryable")]
@@ -464,22 +464,21 @@ impl<T: TransportFaces> TransportState<T> {
             .map_err(TransportRefusal::NoTask)
     }
 
-    /// Open the link of the group `endpoint` names (`group`). A member's link is reported by the
-    /// endpoint the group was joined by, in a row of `MAX_GROUP_ENDPOINT_LEN` bytes: a longer one
-    /// is refused before the group is joined, so no row of this engine is held on the heap.
+    /// Open the link of the group `endpoint` names (`group`), read here once for every stack
+    /// (`parse_group_locator`). A member's link is reported by the endpoint the group was joined
+    /// by, in a row of `MAX_GROUP_ENDPOINT_LEN` bytes: the reading refuses a longer one before the
+    /// group is joined, so no row of this engine is held on the heap.
     #[cfg(feature = "group")]
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, TransportRefusal> {
-        if endpoint.len() > caps::MAX_GROUP_ENDPOINT_LEN {
-            return Err(TransportRefusal::Group(EndpointRefusal::new(
-                endpoint,
-                Refusal::GroupEndpointTooLong,
-            )));
-        }
-        self.links.links().open_group(endpoint).map_err(|why| {
-            TransportRefusal::Group(EndpointRefusal::new(endpoint, Refusal::Link(why)))
-        })
+        let refused = |why| TransportRefusal::Group(EndpointRefusal::new(endpoint, why));
+        let group =
+            parse_group_locator(endpoint).map_err(|why| refused(Refusal::GroupEndpoint(why)))?;
+        self.links
+            .links()
+            .open_group(endpoint, &group)
+            .map_err(|why| refused(Refusal::Link(why)))
     }
 
     /// Hold the group the session joined as the face whose id was the next (`group`).

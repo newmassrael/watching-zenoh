@@ -17,11 +17,9 @@
 //! group drive loop runs on: a datagram is taken when one is queued and never waited for, since
 //! the wait is the engine's, which steps its groups at their tick.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
-use core::str::FromStr;
 
 use wz_runtime_coop::group_transport::{GroupInterface, GroupRx, GroupSend, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, UDP_RX_CAPACITY};
@@ -55,11 +53,11 @@ pub struct SocketConfig<'a> {
     pub iface: Option<&'a str>,
     /// `#ttl=<n>`: the hop limit. `None` leaves the system's, which is 1: one subnet.
     pub ttl: Option<u32>,
-    /// `#join=<group>` values, joined beside the locator's own group.
-    pub extra_joins: &'a [String],
-    /// `#bind=<host:port>`: the local address of the SENDING socket. The joined socket binds the
-    /// wildcard of its family, or it would not receive the group.
-    pub bind: Option<&'a str>,
+    /// `#join=<group>` groups, joined beside the locator's own group, each of its family.
+    pub extra_joins: &'a [IpAddr],
+    /// `#bind=<address:port>`: the local address of the SENDING socket, of the group's family. The
+    /// joined socket binds the wildcard of its family, or it would not receive the group.
+    pub bind: Option<SocketAddr>,
     /// The `multicast-loopback` policy.
     pub loopback: Loopback,
     /// The `multicast-link-requires-iface` policy: a multicast LINK whose locator resolved to no
@@ -102,9 +100,9 @@ pub enum PlanError {
     /// `#iface=` is an IPv6 address that this many interfaces hold, where exactly one names an
     /// interface.
     IfaceHolders(usize),
-    /// A `#join=` value is not a group of the locator group's family.
+    /// A `#join=` group is of the other family than the locator group's.
     Join,
-    /// `#bind=` is not a literal address of the group's family.
+    /// `#bind=` is an address of the other family than the group's.
     Bind,
     /// `#ttl=` is above the largest hop limit a datagram can carry.
     Ttl(u32),
@@ -212,14 +210,30 @@ enum Plan {
     },
 }
 
-/// Every `#join=` value as a group of the locator group's family, or the refusal of the first that
-/// is not one, before any membership is installed: a receiver joined to some of what it was told
-/// looks configured and is not.
-fn parsed_joins<A: FromStr>(joins: &[String]) -> Result<Vec<A>, PlanError> {
+/// Every `#join=` group as an address of the locator group's family (`of_family`), or the refusal
+/// of the first of the other family, before any membership is installed: a receiver joined to some
+/// of what it was told looks configured and is not.
+fn joins_of<A>(joins: &[IpAddr], of_family: fn(IpAddr) -> Option<A>) -> Result<Vec<A>, PlanError> {
     joins
         .iter()
-        .map(|group| group.parse::<A>().map_err(|_| PlanError::Join))
+        .map(|join| of_family(*join).ok_or(PlanError::Join))
         .collect()
+}
+
+/// `address` when it is an IPv4 one.
+fn v4_of(address: IpAddr) -> Option<Ipv4Addr> {
+    match address {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(_) => None,
+    }
+}
+
+/// `address` when it is an IPv6 one.
+fn v6_of(address: IpAddr) -> Option<Ipv6Addr> {
+    match address {
+        IpAddr::V6(v6) => Some(v6),
+        IpAddr::V4(_) => None,
+    }
 }
 
 /// The warning of an `#iface=` this host cannot resolve: the socket is left on the system's
@@ -316,7 +330,7 @@ impl Plan {
                     None => None,
                 },
                 joins: match joins {
-                    JoinsRead::Yes => parsed_joins(cfg.extra_joins)?,
+                    JoinsRead::Yes => joins_of(cfg.extra_joins, v4_of)?,
                     JoinsRead::No => Vec::new(),
                 },
             },
@@ -327,7 +341,7 @@ impl Plan {
                     None => None,
                 },
                 joins: match joins {
-                    JoinsRead::Yes => parsed_joins(cfg.extra_joins)?,
+                    JoinsRead::Yes => joins_of(cfg.extra_joins, v6_of)?,
                     JoinsRead::No => Vec::new(),
                 },
             },
@@ -407,19 +421,18 @@ impl Plan {
         }
     }
 
-    /// The local address the SENDING socket binds: `#bind=` when given, parsed as a literal and
-    /// never looked up, and refused when it is of the other family than the group's; else the
+    /// The local address the SENDING socket binds: `#bind=` when given, refused when it is of the
+    /// other family than the group's; else the
     /// family's wildcard on a port the system picks. Either is then filled when it is unspecified
     /// ([`Self::fill_unspecified`]), as upstream fills the local address of its link.
     fn egress_local_addr(
         &self,
-        bind: Option<&str>,
+        bind: Option<SocketAddr>,
         iface: Option<&str>,
     ) -> Result<SocketAddr, PlanError> {
-        let Some(bind) = bind else {
+        let Some(local) = bind else {
             return Ok(self.fill_unspecified(self.wildcard(0), iface));
         };
-        let local: SocketAddr = bind.parse().map_err(|_| PlanError::Bind)?;
         if local.is_ipv4() != self.group().is_ipv4() {
             return Err(PlanError::Bind);
         }
@@ -873,7 +886,6 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
 mod tests {
     use super::*;
     use crate::net::{PosixNetError, PosixUdpSocket};
-    use alloc::borrow::ToOwned;
     use core::ffi::c_int;
     // The tests open concrete sockets, whose datagram methods are the trait's; the code above
     // reaches them through the `MulticastSocket` bound alone.
@@ -963,7 +975,7 @@ mod tests {
     /// not read the list at all.
     #[test]
     fn the_keys_resolve_against_the_groups_family() {
-        let joins = ["239.1.2.3".to_owned()];
+        let joins = [IpAddr::V4(Ipv4Addr::new(239, 1, 2, 3))];
         let cfg = SocketConfig {
             iface: Some("127.0.0.1"),
             extra_joins: &joins,
@@ -989,7 +1001,7 @@ mod tests {
             Plan::resolve(IpAddr::V4(GROUP), &v6_iface, JoinsRead::No),
             Err(PlanError::IfaceFamily)
         );
-        let bad_joins = ["ff02::1".to_owned()];
+        let bad_joins = [IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1))];
         let other_family = SocketConfig {
             extra_joins: &bad_joins,
             ..SocketConfig::default()
@@ -1060,22 +1072,17 @@ mod tests {
         );
     }
 
-    /// `#bind=` is a literal address of the group's family, and a specified one is bound as it is;
+    /// `#bind=` is an address of the group's family, and a specified one is bound as it is;
     /// with none, a pinned IPv4 plan binds its interface's address on a port the system picks.
     #[test]
     fn the_send_address_is_bind_or_the_pinned_interfaces() {
         let plan = v4_plan(Some(Ipv4Addr::LOCALHOST));
         assert_eq!(
-            plan.egress_local_addr(Some("127.0.0.1:7000"), None),
+            plan.egress_local_addr(Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 7000))), None),
             Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, 7000)))
         );
         assert_eq!(
-            plan.egress_local_addr(Some("localhost:7000"), None),
-            Err(PlanError::Bind),
-            "a name is not looked up"
-        );
-        assert_eq!(
-            plan.egress_local_addr(Some("[::1]:7000"), None),
+            plan.egress_local_addr(Some(SocketAddr::from((Ipv6Addr::LOCALHOST, 7000))), None),
             Err(PlanError::Bind),
             "the other family is refused"
         );
@@ -1170,7 +1177,7 @@ mod tests {
     #[test]
     fn a_link_sender_leaves_by_the_address_it_binds() {
         let cfg = SocketConfig {
-            bind: Some("127.0.0.1:0"),
+            bind: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
             ..SocketConfig::default()
         };
         let sender = bind_sender::<PosixUdpSocket>(IpAddr::V4(GROUP), 7446, &cfg, true)
@@ -1206,7 +1213,7 @@ mod tests {
             Err(MulticastError::Plan(PlanError::NoInterfaceChosen))
         ));
         assert!(bind_sender::<PosixUdpSocket>(IpAddr::V4(GROUP), 7446, &requires, false).is_ok());
-        let joins = ["not a group".to_owned()];
+        let joins = [IpAddr::V6(Ipv6Addr::LOCALHOST)];
         let bad = SocketConfig {
             extra_joins: &joins,
             ..SocketConfig::default()
