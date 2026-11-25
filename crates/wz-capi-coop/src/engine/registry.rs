@@ -503,7 +503,7 @@ pub(super) struct RegistryOf<H: Holders> {
     /// How often a run of Pushes was drained before a later record of its own frame
     /// ([`Self::count_drain_within_frame`]): what tells a test that a Push and the record after
     /// it came in one frame.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "queryable"))]
     drains_within_frames: usize,
 }
 
@@ -633,7 +633,7 @@ impl<H: Holders> RegistryOf<H> {
             set_reads: core::cell::Cell::new(0),
             #[cfg(all(test, feature = "std"))]
             pushes: (0, 0, 0),
-            #[cfg(all(test, feature = "std"))]
+            #[cfg(all(test, feature = "std", feature = "queryable"))]
             drains_within_frames: 0,
         })
     }
@@ -671,13 +671,13 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// One more run of Pushes drained before a later record of its own frame.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "queryable"))]
     pub(super) fn count_drain_within_frame(&mut self) {
         self.drains_within_frames += 1;
     }
 
     /// How often a run of Pushes was drained before a later record of its own frame.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "queryable"))]
     pub(super) fn drains_within_frames(&self) -> usize {
         self.drains_within_frames
     }

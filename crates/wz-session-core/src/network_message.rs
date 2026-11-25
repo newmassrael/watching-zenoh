@@ -1836,7 +1836,7 @@ fn walk_records<'f>(
                     return Err(stop);
                 }
             }
-            if !known {
+            if decoded == Decoded::Unknown {
                 break;
             }
         }
