@@ -80,17 +80,21 @@ impl Stated {
 #[inline(never)]
 pub(crate) fn state_over(text: &str, stated: &mut Stated) -> Result<(), ZResult> {
     let mut next = *stated;
+    // Read as bytes: the separators are ASCII, and a byte's search is a plain loop where a
+    // `char`'s pulls in the string searcher.
     for item in text
-        .split(',')
-        .map(str::trim_ascii)
+        .as_bytes()
+        .split(|byte| *byte == b',')
+        .map(<[u8]>::trim_ascii)
         .filter(|item| !item.is_empty())
     {
-        let (name, count) = item.split_once('=').ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        let count = count
-            .trim_ascii()
-            .parse::<usize>()
-            .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
-        if !next.select(name.trim_ascii(), count) {
+        let mut halves = item.splitn(2, |byte| *byte == b'=');
+        let (Some(name), Some(count)) = (halves.next(), halves.next()) else {
+            return Err(Z_ERR_CONFIG_INVALID_VALUE);
+        };
+        let name = crate::abi::text_of(name.trim_ascii()).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
+        let count = count_of(count.trim_ascii()).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
+        if !next.select(name, count) {
             return Err(Z_ERR_CONFIG_INVALID_VALUE);
         }
     }
@@ -98,9 +102,22 @@ pub(crate) fn state_over(text: &str, stated: &mut Stated) -> Result<(), ZResult>
     Ok(())
 }
 
+/// The count `digits` spell in decimal, read as `usize`'s `FromStr` reads one: an optional `+`
+/// and one digit or more, none past `usize::MAX`; `None` for anything else.
+fn count_of(digits: &[u8]) -> Option<usize> {
+    let digits = digits.strip_prefix(b"+").unwrap_or(digits);
+    if digits.is_empty() {
+        return None;
+    }
+    digits.iter().try_fold(0usize, |count, digit| {
+        let value = digit.checked_sub(b'0').filter(|value| *value < 10)?;
+        count.checked_mul(10)?.checked_add(usize::from(value))
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{state_over, Stated};
+    use super::{count_of, state_over, Stated};
     use crate::result::Z_ERR_CONFIG_INVALID_VALUE;
     use wz_session_core::limit_binding::Quota;
     use wz_session_core::limits::SessionLimits;
@@ -176,6 +193,39 @@ mod tests {
             );
             assert_eq!(stated, opening, "{text}");
         }
+    }
+
+    /// A count is read as `usize`'s `FromStr` reads it: a sign of `+` and digits are a count, up
+    /// to `usize::MAX`, and no digit, a sign alone, a minus, a space inside or a count past the
+    /// largest is none. Turned red by a reading that admits what `FromStr` refuses, or the other
+    /// way round.
+    #[test]
+    fn a_count_is_read_as_a_usize_is_parsed() {
+        let largest = alloc::format!("{}", usize::MAX);
+        let past = alloc::format!("{}0", usize::MAX);
+        for text in [
+            "0",
+            "7",
+            "+7",
+            "0042",
+            "",
+            "+",
+            "-1",
+            "1x",
+            " 1",
+            "1 ",
+            "++1",
+            largest.as_str(),
+            past.as_str(),
+        ] {
+            assert_eq!(
+                count_of(text.as_bytes()),
+                text.parse::<usize>().ok(),
+                "{text:?}"
+            );
+        }
+        assert_eq!(count_of(largest.as_bytes()), Some(usize::MAX));
+        assert_eq!(count_of(past.as_bytes()), None);
     }
 
     /// A text that states nothing leaves the statement as it is.
