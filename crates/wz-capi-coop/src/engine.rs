@@ -2208,9 +2208,9 @@ unsafe impl<T> Send for Confined<T> {}
 struct OnThisThread<T>(T);
 
 // SAFETY: a carrier is moved only into a closure run by a lend of a link's parts
-// (`FaceHeld::lend`, and `FaceSite::send`, which runs it through this thread's seat or such a
-// lend) or of its session (`LendsSession::try_session`, the send of `send_on` among them), each of
-// which runs its closure on the calling thread and returns before it returns: what is carried in
+// (`FaceHeld::lend`) or of its session (`LendsSession::try_session`, the send of `send_on` among
+// them), each of which runs its closure on the calling thread and returns before it returns: what
+// is carried in
 // or out never reaches another thread. A handle on a cell of the link made in such a lend is kept
 // in the parts, as the parts' contract asks (`direct::DirectParts`), and what is carried in keeps
 // none of the session's handles it is lent: what leaves a lend in a carrier is the session's own
@@ -3008,7 +3008,7 @@ fn found_held<U>(lent: &Lend<U>) {
     #[cfg(not(wz_round))]
     debug_assert!(
         !matches!(lent, Lend::Held),
-        "a send on the read's own link found it held with no seat"
+        "a send on a face's link found it held"
     );
     #[cfg(wz_round)]
     let _ = lent;

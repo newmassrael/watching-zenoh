@@ -577,10 +577,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> SendParts for DirectParts
     fn tx(&mut self) -> &mut Option<Wire<C>> {
         &mut self.wire
     }
-
-    fn wire_of(tx: &Option<Wire<C>>) -> Option<&Wire<C>> {
-        tx.as_ref()
-    }
 }
 
 /// The one link's life, its receive part and what its effects are carried out with, behind the

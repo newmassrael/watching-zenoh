@@ -133,15 +133,6 @@ pub trait LockKind: 'static {
     /// A face's place asks it before a lend that waits ([`FacePlace::lend`]).
     const WAITS: bool = true;
 
-    /// The calling thread's number as this kind tells threads apart, never 0: a face's place keeps
-    /// the send part a read seated by it, so that a send of the same thread finds that part and no
-    /// other thread does ([`FacePlace::send`]). A kind whose values are reached from one thread at
-    /// a time by its own contract reads every thread as one.
-    #[inline]
-    fn current_thread() -> usize {
-        1
-    }
-
     /// How the handles on the parts of one link of a session of this kind are counted (its pump,
     /// its actions, its sink): each such handle is held by its face alone, so they are counted for
     /// one task even where several threads drive the session's faces, whose parts then move
@@ -262,13 +253,6 @@ impl LockKind for Shared {
     /// On a host each value has its lock and another thread may hold it; under a critical
     /// section no other context runs while this one does, so there is never a holder to find and
     /// `f` always runs.
-    // A host's lock is taken from any thread, each told apart by the host's number for it.
-    #[cfg(feature = "host-lock")]
-    #[inline]
-    fn current_thread() -> usize {
-        wz_host_sync::current_thread()
-    }
-
     #[inline]
     fn try_with<T: Send + 'static, U>(
         mutex: &Self::Mutex<T>,
@@ -407,11 +391,6 @@ impl LockKind for ManyThreads {
     #[inline]
     fn with<T: Send + 'static, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
         mutex.with(f)
-    }
-
-    #[inline]
-    fn current_thread() -> usize {
-        wz_host_sync::current_thread()
     }
 
     #[inline]
@@ -601,12 +580,6 @@ pub struct FacePlace<K: LockKind, X: Send + 'static> {
     /// so the one holder a try can meet is a lend of the calling thread, which the kind's own try
     /// does not see. A lock's try finds its holder itself, and its kind marks nothing here.
     lent: core::sync::atomic::AtomicBool,
-    /// The thread whose read seated the send part of the value it holds lent ([`Seat`]), 0 for
-    /// none: written by that thread alone, while it holds the value.
-    seat_thread: core::sync::atomic::AtomicUsize,
-    /// That send part, null while none is seated or while a send uses it. Read and written by the
-    /// thread named in `seat_thread` alone.
-    seat_tx: core::sync::atomic::AtomicPtr<()>,
 }
 
 /// What a lend of a [`FacePlace`] that does not wait came to ([`FacePlace::try_lend`]).
@@ -635,8 +608,6 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
         Self {
             place: K::wrap(None),
             lent: core::sync::atomic::AtomicBool::new(false),
-            seat_thread: core::sync::atomic::AtomicUsize::new(0),
-            seat_tx: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 
@@ -803,288 +774,6 @@ impl<K: LockKind, X: Send + 'static> wz_session_core::transport_place::Transport
     #[inline]
     fn lend<U>(&mut self, f: impl FnOnce(&mut X) -> U) -> Option<U> {
         FacePlace::lend(self, f)
-    }
-}
-
-/// The values a face's place holds, as a send sees them: the part a send writes (the actions'
-/// send path and the link's sink), apart from the part the records a read hands out borrow.
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-pub trait FaceTx: Send + 'static {
-    /// The part a send writes.
-    type Tx;
-
-    /// The part a send writes of these values.
-    fn tx(&mut self) -> &mut Self::Tx;
-}
-
-/// What a lend of a face's place hands its holder to seat the send part of the values with
-/// ([`FacePlace::lend_seating`]): made only inside that lend, on the thread that holds it.
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-pub struct Seat<'a, K: LockKind, X: FaceTx> {
-    place: &'a FacePlace<K, X>,
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<K: LockKind, X: FaceTx> Seat<'_, K, X> {
-    /// Run `f` with `tx`, the send part of the values the lend holds, seated: a send this thread
-    /// makes on the face while `f` runs (a callback of a record the read hands out) writes `tx`
-    /// at once, with no lend and no copy, while the records `f` hands out keep borrowing the
-    /// other part of the values. A send of another thread lends the face as ever. Seats nest: the
-    /// one `f` found stands again once `f` returns or unwinds.
-    pub fn seat<U>(&self, tx: &mut X::Tx, f: impl FnOnce() -> U) -> U {
-        self.place.seat_of::<X::Tx>().seat(tx, f)
-    }
-}
-
-/// A seat of a face's place for a send part of type `T`, apart from the values the place holds:
-/// what a place whose values reach their send part only through a lend of their own
-/// (`crate::faces::FaceSite`) hands the holder of its lend, to seat that part with once it
-/// reaches it. It names only the place's seat, so it moves into such a lend whatever the place's
-/// lock kind is.
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-pub struct SeatOf<'a, K: LockKind, T> {
-    thread: &'a core::sync::atomic::AtomicUsize,
-    tx: &'a core::sync::atomic::AtomicPtr<()>,
-    of: PhantomData<fn() -> (K, T)>,
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<K: LockKind, T> Clone for SeatOf<'_, K, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<K: LockKind, T> Copy for SeatOf<'_, K, T> {}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<K: LockKind, T> SeatOf<'_, K, T> {
-    /// [`Seat::seat`] for a send part of type `T`.
-    pub fn seat<U>(&self, tx: &mut T, f: impl FnOnce() -> U) -> U {
-        let _seated = Seated::enter(
-            self.thread,
-            self.tx,
-            K::current_thread(),
-            core::ptr::from_mut(tx).cast(),
-        );
-        f()
-    }
-}
-
-/// A seat that stands from its making to its drop, on return and on unwind alike: the seat it
-/// replaced stands again after it.
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-struct Seated<'a> {
-    thread: &'a core::sync::atomic::AtomicUsize,
-    tx: &'a core::sync::atomic::AtomicPtr<()>,
-    was_thread: usize,
-    was_tx: *mut (),
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<'a> Seated<'a> {
-    /// Seat `tx` for `thread` in a place's seat, `seat_thread` and `seat_tx`.
-    fn enter(
-        seat_thread: &'a core::sync::atomic::AtomicUsize,
-        seat_tx: &'a core::sync::atomic::AtomicPtr<()>,
-        thread: usize,
-        tx: *mut (),
-    ) -> Self {
-        use core::sync::atomic::Ordering;
-        let was_thread = seat_thread.load(Ordering::Acquire);
-        let was_tx = seat_tx.load(Ordering::Acquire);
-        seat_tx.store(tx, Ordering::Release);
-        seat_thread.store(thread, Ordering::Release);
-        Self {
-            thread: seat_thread,
-            tx: seat_tx,
-            was_thread,
-            was_tx,
-        }
-    }
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl Drop for Seated<'_> {
-    fn drop(&mut self) {
-        use core::sync::atomic::Ordering;
-        self.thread.store(self.was_thread, Ordering::Release);
-        self.tx.store(self.was_tx, Ordering::Release);
-    }
-}
-
-/// The send part, of type `T`, a send of the calling thread took from the seat it stands in,
-/// given back to the seat when the send is done, on return and on unwind alike.
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-pub(crate) struct SeatTaken<'a, T> {
-    tx: &'a core::sync::atomic::AtomicPtr<()>,
-    taken: *mut (),
-    of: PhantomData<*mut T>,
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<T> SeatTaken<'_, T> {
-    /// The send part the seat held.
-    pub(crate) fn tx(&mut self) -> &mut T {
-        // SAFETY: the pointer was stored by `Seat::seat` from a `&mut T`, the send part of the
-        // values the thread holding the place's lend split them into, borrowed for the length of
-        // that call; the seat is cleared before the call returns or unwinds (`Seated`), and it is
-        // read only by that thread (`seat_thread`), inside that call. The call's own borrow is
-        // not used while its `f` runs: it was moved into the call, and `f` reaches the values
-        // only through the other part, the one the records borrow, a field apart from the send
-        // part, so the two borrows alias nothing. The seat is emptied while this one lives
-        // (`FacePlace::at_seat`), so no second borrow is derived from it, and the pointer never
-        // leaves the thread that stored it.
-        unsafe { &mut *self.taken.cast::<T>() }
-    }
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<T> Drop for SeatTaken<'_, T> {
-    fn drop(&mut self) {
-        self.tx
-            .store(self.taken, core::sync::atomic::Ordering::Release);
-    }
-}
-
-/// What a seat of the calling thread holds for a send.
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-pub(crate) enum AtSeat<'a, T> {
-    /// No seat of this thread stands in the place.
-    None,
-    /// This thread's seat stands, and a send of this thread uses it now: a send inside a send.
-    InUse,
-    /// This thread's seat, taken for the send until the guard drops.
-    Taken(SeatTaken<'a, T>),
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<K: LockKind, X: FaceTx> FacePlace<K, X> {
-    /// [`Self::lend`], with a [`Seat`] the holder seats the send part of the values in while it
-    /// hands out what it read.
-    pub fn lend_seating<U>(&self, f: impl FnOnce(&mut X, &Seat<'_, K, X>) -> U) -> Option<U> {
-        let seat = Seat { place: self };
-        self.lend(|values| f(values, &seat))
-    }
-
-    /// Send on the face: through the send part this thread seated (a send from a callback of a
-    /// record the face's read hands out), else by a lend that waits ([`Self::lend`]). `None`,
-    /// with `f` not run, while the place holds no values, or for a send inside a send through
-    /// the seat, which a debug build fails.
-    pub fn send<U>(&self, f: impl FnOnce(&mut X::Tx) -> U) -> Option<U> {
-        match self.at_seat() {
-            AtSeat::Taken(mut taken) => Some(f(taken.tx())),
-            AtSeat::InUse => None,
-            AtSeat::None => self.lend(|values| f(values.tx())),
-        }
-    }
-
-    /// [`Self::send`] that does not wait: through this thread's seat, else by
-    /// [`Self::try_lend`]. A send inside a send through the seat finds the face held.
-    pub fn try_send<U>(&self, f: impl FnOnce(&mut X::Tx) -> U) -> Lend<U> {
-        match self.at_seat() {
-            AtSeat::Taken(mut taken) => Lend::Lent(f(taken.tx())),
-            AtSeat::InUse => Lend::Held,
-            AtSeat::None => self.try_lend(|values| f(values.tx())),
-        }
-    }
-
-    /// The seat this thread stands in, taken for a send.
-    fn at_seat(&self) -> AtSeat<'_, X::Tx> {
-        // SAFETY: a place whose values are `FaceTx` is seated through `Seat::seat` alone, over
-        // their send part, and `seat_of` is not called for it with another type.
-        unsafe { self.at_seat_of::<X::Tx>() }
-    }
-}
-
-#[cfg(all(
-    feature = "session-unicast",
-    any(feature = "alloc", feature = "session-slot")
-))]
-impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
-    /// The place's seat, for a send part of type `T` ([`SeatOf`]).
-    pub(crate) fn seat_of<T>(&self) -> SeatOf<'_, K, T> {
-        SeatOf {
-            thread: &self.seat_thread,
-            tx: &self.seat_tx,
-            of: PhantomData,
-        }
-    }
-
-    /// The seat this thread stands in, taken for a send of a send part of type `T`.
-    ///
-    /// # Safety
-    ///
-    /// Every seat of this place is made with `T`: through [`Self::seat_of`] for `T` alone, or,
-    /// for values that are [`FaceTx`], through [`Seat::seat`] with `T` their send part.
-    pub(crate) unsafe fn at_seat_of<T>(&self) -> AtSeat<'_, T> {
-        use core::sync::atomic::Ordering;
-        // Another thread never reads its own number here unless it wrote it, so a seat is found
-        // by the thread that stands in it alone.
-        if self.seat_thread.load(Ordering::Acquire) != K::current_thread() {
-            return AtSeat::None;
-        }
-        let taken = self.seat_tx.load(Ordering::Acquire);
-        debug_assert!(
-            !taken.is_null(),
-            "a send on a face inside a send on it through its seat"
-        );
-        if taken.is_null() {
-            return AtSeat::InUse;
-        }
-        // Emptied while the send uses it, so that a send inside it derives no second borrow.
-        self.seat_tx.store(core::ptr::null_mut(), Ordering::Release);
-        AtSeat::Taken(SeatTaken {
-            tx: &self.seat_tx,
-            taken,
-            of: PhantomData,
-        })
     }
 }
 
@@ -1380,7 +1069,7 @@ mod many_threads_tests {
 ))]
 mod face_place_tests {
     use super::tests::TestOwner;
-    use super::{Confined, FacePlace, FaceTx, Lend};
+    use super::{Confined, FacePlace, Lend};
     use wz_session_core::transport_place::TransportPlace;
 
     type Place = FacePlace<Confined<TestOwner>, u32>;
@@ -1547,142 +1236,5 @@ mod face_place_tests {
             go_tx.send(()).ok();
         });
         assert_eq!(place.try_lend(|transport| *transport), Lend::Lent(3));
-    }
-
-    /// A test face's values: a part the records borrow, and the part a send writes.
-    struct Parts {
-        rx: u32,
-        tx: u32,
-    }
-
-    impl FaceTx for Parts {
-        type Tx = u32;
-
-        fn tx(&mut self) -> &mut u32 {
-            &mut self.tx
-        }
-    }
-
-    type SeatedPlace = FacePlace<Confined<TestOwner>, Parts>;
-
-    fn seated_place(rx: u32) -> SeatedPlace {
-        let place = SeatedPlace::empty();
-        place.hold(Parts { rx, tx: 0 });
-        place
-    }
-
-    /// A send made while the read seats the send part, as a callback of a record makes it, writes
-    /// that part with no lend, beside the records' part the read still borrows; once the seat is
-    /// gone a send lends the values, which kept what the seated sends wrote. Turned red by a send
-    /// that lends a face whose read seated its part (a second lend of the values on the thread
-    /// that holds them).
-    #[test]
-    fn a_send_inside_a_seat_writes_the_seated_part_and_one_after_it_lends() {
-        let place = seated_place(7);
-        let read = place.lend_seating(|parts, seat| {
-            let Parts { rx, tx } = parts;
-            seat.seat(tx, || {
-                assert_eq!(
-                    place.send(|tx| {
-                        *tx += 1;
-                        *tx
-                    }),
-                    Some(1)
-                );
-                assert_eq!(
-                    place.try_send(|tx| {
-                        *tx += 1;
-                        *tx
-                    }),
-                    Lend::Lent(2)
-                );
-                *rx
-            })
-        });
-        assert_eq!(read, Some(7));
-        assert_eq!(place.send(|tx| *tx), Some(2));
-        assert_eq!(place.try_send(|tx| *tx), Lend::Lent(2));
-    }
-
-    /// Seats of two faces nest: a send on either face inside the inner one writes that face's
-    /// seated part, the outer seat stands again once the inner one is gone, and a seat that
-    /// unwound is not found after. Turned red by a seat that does not give back the one it
-    /// replaced, or one an unwind leaves standing.
-    #[test]
-    fn seats_nest_and_each_stands_again_after_the_one_inside_it() {
-        extern crate std;
-        use core::sync::atomic::Ordering;
-        let outer = seated_place(1);
-        let inner = seated_place(2);
-        outer.lend_seating(|outer_parts, outer_seat| {
-            outer_seat.seat(&mut outer_parts.tx, || {
-                inner.lend_seating(|inner_parts, inner_seat| {
-                    inner_seat.seat(&mut inner_parts.tx, || {
-                        outer.send(|tx| *tx += 10);
-                        inner.send(|tx| *tx += 20);
-                    });
-                });
-                outer.send(|tx| *tx += 1);
-            });
-        });
-        assert_eq!(outer.send(|tx| *tx), Some(11));
-        assert_eq!(inner.send(|tx| *tx), Some(20));
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            outer.lend_seating(|parts, seat| seat.seat(&mut parts.tx, || panic!("in a callback")))
-        }));
-        assert!(unwound.is_err());
-        assert_eq!(
-            outer.seat_thread.load(Ordering::Acquire),
-            0,
-            "an unwound seat is not found"
-        );
-        assert!(outer.seat_tx.load(Ordering::Acquire).is_null());
-    }
-
-    /// A send inside a send through the seat fails a debug build, and the seat stands for the
-    /// sends after it. Turned red by a seat a send leaves in place while it writes the part, from
-    /// which a second borrow of it would be made.
-    #[cfg(debug_assertions)]
-    #[test]
-    fn a_send_inside_a_send_through_the_seat_fails_a_debug_build() {
-        extern crate std;
-        let place = seated_place(0);
-        place.lend_seating(|parts, seat| {
-            seat.seat(&mut parts.tx, || {
-                let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    place.send(|_| place.send(|_| ()))
-                }));
-                assert!(nested.is_err());
-                assert_eq!(place.send(|tx| *tx), Some(0), "the seat stands again");
-            });
-        });
-    }
-
-    /// A seat is found by the thread whose read made it alone: another thread's send lends the
-    /// face, which the seating read holds. Turned red by a seat another thread's send writes
-    /// through, a part the read's thread holds.
-    #[cfg(feature = "host-lock")]
-    #[test]
-    fn a_seat_is_found_by_its_own_thread_alone() {
-        extern crate std;
-        let place = FacePlace::<super::Shared, Parts>::empty();
-        place.hold(Parts { rx: 0, tx: 0 });
-        let (seated_tx, seated_rx) = std::sync::mpsc::channel();
-        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-        let shared = &place;
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                shared.lend_seating(|parts, seat| {
-                    seat.seat(&mut parts.tx, || {
-                        seated_tx.send(()).ok();
-                        go_rx.recv().ok();
-                    });
-                });
-            });
-            seated_rx.recv().ok();
-            assert_eq!(place.try_send(|tx| *tx), Lend::Held);
-            go_tx.send(()).ok();
-        });
-        assert_eq!(place.send(|tx| *tx), Some(0));
     }
 }
