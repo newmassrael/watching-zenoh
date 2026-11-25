@@ -719,6 +719,15 @@ transport-link-ws|"
     # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
     # round with the links held, which the watch's tests prove only where they run in it.
     "wz-capi-coop|hook|-default,std,liveliness,query,queryable,remote-declaration-watch|"
+    # The features that hold more than one link, face or session, in the same form: each session
+    # is opened, called and read on a thread of its own (`tests::one_thread::OwnThread`). The
+    # `listen` ones (a listener, one face, the outbound pool, a dial under way) run in the row
+    # above; the dictionary of key ids and the group of the program's transport here.
+    "wz-capi-coop|hook|-default,std,listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::one_thread::shared_key_ids::"
+    "wz-capi-coop|hook|-default,std,app-transport,group|tests::one_thread::group::"
+    # The host's group in the same form compiles here; its test needs a multicast route and is
+    # ignored, as the row of `threads` below runs it.
+    "wz-capi-coop|hook|-default,std,group-host|host_group::"
     # The default build less `key-matching-listener`, as the pico C ABI builds the engine: a matching
     # listener declared on a key is refused as not built, its sink let go of, while one on an
     # entity's filter is taken. No other row builds without it, so this one runs the refusal.

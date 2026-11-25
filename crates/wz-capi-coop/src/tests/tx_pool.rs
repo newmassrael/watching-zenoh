@@ -7,11 +7,14 @@
 //! with nothing of the session held, woken by the slow link's room and not by a clock, and is
 //! sent, not lost, once the slow stream takes the rest.
 
+#[cfg(feature = "threads")]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{SessionDrive, SessionEngine, SubscriberSink, WireKey};
+#[cfg(feature = "threads")]
+use wz_capi_port::SessionDrive;
+use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -20,7 +23,11 @@ use wz_session_core::session_init_params::TxQueueConf;
 use wz_session_core::sink::SampleView;
 use wz_session_core::WhatAmI;
 
-use super::{client_config, config_zid, open_with, Engine};
+#[cfg(not(feature = "threads"))]
+use super::one_thread::OwnThread;
+#[cfg(feature = "threads")]
+use super::Engine;
+use super::{client_config, config_zid, open_with};
 use crate::CoopConfig;
 
 /// What one droppable publish that fills the slow stream carries: many frames, so that a few of
@@ -51,6 +58,7 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 /// A session stepped by its read task.
+#[cfg(feature = "threads")]
 fn stepped(config: CoopConfig) -> Arc<Engine> {
     let engine = open_with(config);
     SessionDrive::start_read_task(&*engine).expect("the read task starts");
@@ -64,6 +72,7 @@ fn stepped(config: CoopConfig) -> Arc<Engine> {
 /// blocking one waits for the slot without holding the session (the session answers meanwhile),
 /// and once the slow peer reads again it is sent: the good peer hears it, and never the dropped
 /// one.
+#[cfg(feature = "threads")]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_does_not() {
@@ -218,4 +227,148 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     SessionDrive::close(&*slow);
     SessionDrive::close(&*good);
     SessionDrive::close(&*publisher);
+}
+
+/// The same pool in the form of one thread, each session opened, called and read on a thread of its
+/// own ([`OwnThread`]): the slow peer's thread is held in a call, so its session reads nothing,
+/// and its stream is filled until its link holds the one slot for a frame it has not finished.
+/// Then a droppable publish is dropped at once; once the slow peer reads again and the
+/// publisher's reads finish the frame, a blocking publish is sent, and the good peer hears it and
+/// never the dropped one.
+#[cfg(not(feature = "threads"))]
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn a_droppable_publish_of_one_thread_is_dropped_while_a_slow_link_holds_the_slot() {
+    let mut limits = SessionLimits::defaults();
+    if limits.select_tx_pool_slots(1).is_err() {
+        // A build that keeps the build's value alone has no pool of one slot to try.
+        return;
+    }
+    let publisher = OwnThread::open(move || {
+        open_with(CoopConfig {
+            whatami: WhatAmI::Peer,
+            zid: config_zid(0xa1),
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            limits,
+            tx_queue: TxQueueConf {
+                wait_before_drop_us: DROP_WAIT_US,
+                wait_before_close_us: 30_000_000,
+                ..client_config().tx_queue
+            },
+            ..client_config()
+        })
+    });
+    let endpoint = publisher.call(|engine| engine.listening().pop().expect("one port is bound"));
+    let peer = |id: u8| {
+        let endpoint = endpoint.clone();
+        OwnThread::open(move || {
+            open_with(CoopConfig {
+                endpoints: vec![endpoint],
+                zid: config_zid(id),
+                ..client_config()
+            })
+        })
+    };
+
+    let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let good = peer(0xc1);
+    let into = heard.clone();
+    good.call(move |engine| {
+        engine
+            .declare_subscriber_on_wire(
+                "demo/pool/**",
+                WireKey::literal(),
+                Locality::Any,
+                None,
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    if sample.payload().len() < PAYLOAD {
+                        into.lock().unwrap().push(sample.payload().to_vec());
+                    }
+                }),
+            )
+            .expect("the good peer declares its subscriber");
+    });
+    let faces_up = || publisher.call(|engine| engine.faces_up());
+    eventually("the good peer's face", || faces_up() == 1);
+    let slow = peer(0xc2);
+    eventually("the slow peer's face", || faces_up() == 2);
+    let (resume, held) = std::sync::mpsc::channel::<()>();
+    let paused = slow.hand(move |_| {
+        let _ = held.recv();
+    });
+
+    // Filled as the twin of `threads` fills it, on the publisher's own thread.
+    let filled = publisher.call(|engine| {
+        let payload = vec![0x5a; PAYLOAD];
+        let mut owing_since: Option<Instant> = None;
+        for _ in 0..FILL_AT_MOST {
+            let _ = engine.publish_on_wire_all(
+                "demo/pool/fill",
+                &WireKey::literal(),
+                &payload,
+                &publish(CongestionControl::Drop),
+            );
+            if engine.links_owing() == 0 {
+                owing_since = None;
+                continue;
+            }
+            let since = *owing_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= STILL {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        owing_since.is_some_and(|since| since.elapsed() >= STILL)
+    });
+    assert!(
+        filled,
+        "the slow peer's link never held a frame its stream had not finished for {STILL:?}"
+    );
+
+    let dropped_in = publisher.call(|engine| {
+        let started = Instant::now();
+        let _ = engine.publish_on_wire_all(
+            "demo/pool/dropped",
+            &WireKey::literal(),
+            b"dropped",
+            &publish(CongestionControl::Drop),
+        );
+        started.elapsed()
+    });
+    assert!(
+        dropped_in < Duration::from_secs(1),
+        "a droppable publish waited {dropped_in:?} for a slot"
+    );
+
+    resume
+        .send(())
+        .expect("the slow peer's thread waits to read again");
+    paused.recv().expect("the slow peer's thread reads again");
+    eventually("the slow link to finish its frame", || {
+        publisher.call(|engine| engine.links_owing()) == 0
+    });
+    let sent = publisher.call(|engine| {
+        engine.publish_on_wire_all(
+            "demo/pool/kept",
+            &WireKey::literal(),
+            b"kept",
+            &publish(CongestionControl::Block),
+        )
+    });
+    assert_eq!(sent, Ok(0), "the blocking publish is sent");
+    eventually("the good peer to hear the blocking publish", || {
+        heard
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|payload| payload == b"kept")
+    });
+    assert!(
+        !heard
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|payload| payload == b"dropped"),
+        "the droppable publish was dropped on the good face"
+    );
 }

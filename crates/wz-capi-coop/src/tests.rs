@@ -3265,8 +3265,6 @@ mod arena;
 mod closure_drops;
 mod congestion;
 mod decl_watch;
-// The read task's dial, stepped on a thread of its own.
-#[cfg(feature = "threads")]
 mod dial_in_flight;
 mod entity_tables;
 #[cfg(all(
@@ -3283,8 +3281,10 @@ mod get;
 // Each member is stepped by its read task.
 #[cfg(all(feature = "group", feature = "app-transport", feature = "threads"))]
 mod group;
+#[cfg(all(feature = "group", feature = "app-transport"))]
+mod group_stack;
 mod held_keys;
-#[cfg(all(feature = "group-host", feature = "threads"))]
+#[cfg(feature = "group-host")]
 mod host_group;
 mod in_place;
 mod link_sets;
@@ -3309,6 +3309,16 @@ mod local_query;
     feature = "threads"
 ))]
 mod one_face;
+// Every session of these is opened, called and read on a thread of its own (`OwnThread`).
+#[cfg(all(
+    not(feature = "threads"),
+    any(
+        feature = "listen",
+        feature = "group-host",
+        all(feature = "group", feature = "app-transport")
+    )
+))]
+mod one_thread;
 mod plain_put;
 mod program_clock;
 #[cfg(feature = "queryable")]
@@ -3331,5 +3341,5 @@ mod snapshot;
 #[cfg(feature = "ticker")]
 mod ticker;
 mod timestamps;
-#[cfg(all(feature = "listen", feature = "threads"))]
+#[cfg(feature = "listen")]
 mod tx_pool;
