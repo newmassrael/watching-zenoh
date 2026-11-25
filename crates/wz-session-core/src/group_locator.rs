@@ -250,12 +250,12 @@ mod tests {
     }
 
     /// Every key is read into its field, a repeated `join` as often as it is written and any
-    /// other key from its first value.
+    /// other key from its first value. The keys are spread over two endpoints, each within
+    /// `MAX_GROUP_ENDPOINT_LEN`.
     #[test]
     fn every_key_is_read_into_its_field() {
         let group = udp(
-            "udp/239.1.2.3:7447?rel=0#iface=eth0;ttl=8;join=239.1.2.4;join=;join=239.1.2.5;\
-             bind=10.0.0.1:0;dscp=0x10;ttl=9",
+            "udp/239.1.2.3:7447?rel=0#iface=eth0;ttl=8;join=239.1.2.4;join=;join=239.1.2.5;ttl=9",
         );
         assert_eq!(
             group.group(),
@@ -270,11 +270,16 @@ mod tests {
             ]
         );
         assert_eq!(group.ttl(), Some(8));
+        assert_eq!((group.bind(), group.dscp()), (None, None));
+
+        let bound = udp("udp/239.1.2.3:7447#bind=10.0.0.1:0;dscp=0x10;bind=10.0.0.2:0;dscp=0x20");
         assert_eq!(
-            group.bind(),
+            bound.bind(),
             Some(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 0)))
         );
-        assert_eq!(group.dscp(), Some(0x10));
+        assert_eq!(bound.dscp(), Some(0x10));
+        assert_eq!((bound.iface(), bound.ttl()), (None, None));
+        assert!(bound.joins().is_empty());
 
         let v6 = udp("udp/[ff05::7a:7703]:0#join=ff02::1;iface=");
         assert_eq!(v6.group().port(), 0);

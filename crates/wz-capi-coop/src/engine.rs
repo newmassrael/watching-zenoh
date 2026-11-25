@@ -6470,6 +6470,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         tables_mut(&mut self.core.lock().0.session.registry).entity_ids_from(next);
     }
 
+    /// Mint key expression ids from `next` on: how a test reaches the wrap of the id space
+    /// without spending it.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn expr_ids_from(&self, next: ExprId) {
+        tables_mut(&mut self.core.lock().0.session.registry).expr_ids_from(next);
+    }
+
     /// Start the read task on the thread `spawn` makes; idempotent. A system that gives no thread
     /// is answered (`NoThread`), and the task is left not running, so a later start tries again:
     /// zenoh-pico's start answers its task creation's error the same way, and a panic here would
