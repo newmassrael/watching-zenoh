@@ -2325,7 +2325,7 @@ pub unsafe extern "C" fn z_session_take(dst: *mut z_owned_session_t, src: *mut z
 }
 
 /// Drop an owned session (pico `z_session_drop`): closes (if not already) and
-/// frees the [`SessionState`].
+/// frees the `SessionState`.
 #[no_mangle]
 pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
     let _ = guarded(|| {

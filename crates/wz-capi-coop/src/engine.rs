@@ -117,7 +117,7 @@ use wz_runtime_coop::transport::{
 };
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
-#[cfg(any(test, feature = "advanced-cache"))]
+#[cfg(any(all(test, feature = "std"), feature = "advanced-cache"))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};

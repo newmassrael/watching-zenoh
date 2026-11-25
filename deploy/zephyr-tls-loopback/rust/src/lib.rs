@@ -117,6 +117,14 @@ struct SteppingSocket {
 impl StreamSocket for SteppingSocket {
     type Error = ZephyrNetError;
 
+    type Link<
+        B: wz_runtime_coop::link_storage::RxStore + 'static,
+        X: wz_runtime_coop::link_storage::TxStore + 'static,
+    >
+        = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
+    where
+        Self: 'static;
+
     fn local(&self) -> SocketAddr {
         self.inner.local()
     }
@@ -125,8 +133,9 @@ impl StreamSocket for SteppingSocket {
         self.inner.peer()
     }
 
-    fn send_parts(&self, parts: &[&[u8]]) -> Result<(), ZephyrNetError> {
-        self.inner.send_parts(parts)
+    // The inner socket blocks, so its write returns once the stack has taken every byte.
+    fn write(&self, bytes: &[u8]) -> Result<usize, ZephyrNetError> {
+        self.inner.write(bytes)
     }
 
     fn wait_readable(&self, timeout_ms: c_int) {
@@ -234,7 +243,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         log(c"wz: FAIL - a plain connection to the listener was not taken");
         return 1;
     };
-    if junk.send_parts(&[&[0xde; 64]]).is_err() {
+    if junk.write_all(&[0xde; 64]).is_err() {
         log(c"wz: FAIL - the plain connection could not send");
         return 1;
     }
@@ -304,7 +313,7 @@ pub extern "C" fn wz_app_main() -> i32 {
     }
 
     // 3. The stream carries a message each way.
-    if client.send_parts(&[b"ping"]).is_err() {
+    if client.write_all(b"ping").is_err() {
         log(c"wz: FAIL - the dial could not send");
         return 1;
     }
@@ -313,7 +322,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         log(c"wz: FAIL - the listener did not read what the dial sent");
         return 1;
     }
-    if served.send_parts(&[b"pong"]).is_err() {
+    if served.write_all(b"pong").is_err() {
         log(c"wz: FAIL - the listener could not send");
         return 1;
     }

@@ -6,7 +6,7 @@
 //!
 //! Binds wz's already-active `session-matching` atom
 //! (`Publisher::get_matching_status` / `Publisher::declare_matching_listener`)
-//! through [`wz_capi_core::faces::SharedSession::declare_matching_listener`],
+//! through the engine's `declare_matching_listener`,
 //! which is where the cross-face aggregation lives. No new protocol: the
 //! verdict is read off the remote-subscriber declarations wz already tracks.
 //!
