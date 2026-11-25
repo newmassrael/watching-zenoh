@@ -706,10 +706,11 @@ macro_rules! encoding_constants {
     ($(($fname:ident, $id:expr)),* $(,)?) => {
         // The tables are built in the order the entries are listed, so the listing is the ids'.
         const _: () = {
-            let ids: [usize; ENCODING_ID_TO_STR.len()] = [$($id),*];
+            let mut rest: &[usize] = &[$($id),*];
             let mut at = 0;
-            while at < ids.len() {
-                assert!(ids[at] == at, "each well-known encoding is listed at its id");
+            while let [id, tail @ ..] = rest {
+                assert!(*id == at, "each well-known encoding is listed at its id");
+                rest = tail;
                 at += 1;
             }
         };
@@ -1246,9 +1247,9 @@ mod tests {
     /// from the constant of its id.
     #[test]
     fn each_constant_sits_at_the_index_of_its_id() {
-        for (id, view) in VIEWS.iter().enumerate() {
+        for (id, (view, state)) in VIEWS.iter().zip(STATES.iter()).enumerate() {
             assert!(
-                core::ptr::eq(view.0.handle.cast::<EncodingState>(), &STATES[id]),
+                core::ptr::eq(view.0.handle.cast::<EncodingState>(), state),
                 "the view at an id is the view of the state at that id"
             );
             // SAFETY: a `'static` view this module minted.
@@ -1269,7 +1270,7 @@ mod tests {
         let lookalike = unsafe { EncodingState::lent(4 << 1, None) };
         assert!(!is_constant(&lookalike));
         assert!(is_constant(&STATES[4]));
-        assert!(is_constant(&STATES[STATES.len() - 1]));
+        assert!(is_constant(STATES.last().expect("a table of constants")));
         let read = constant_of(lookalike.view()).expect("a constant of the id");
         assert!(core::ptr::eq(read, &STATES[4]));
     }
