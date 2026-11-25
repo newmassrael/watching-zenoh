@@ -192,6 +192,64 @@ fn every_kind_of_entity_holds_its_prefix_declaration_alike() {
     assert_eq!(holds(&tables), alone, "each kind let its hold go");
 }
 
+/// Each kind's declaration answers its key as the row it was put in keeps it: the row's own text,
+/// at the row's address, lent with the declaration of the entity's own key where the form states
+/// one, else with the one the key is named by.
+///
+/// # Control
+///
+/// A key named by no declaration is lent with none; a declaration that read its key off anything
+/// but the row it was put in reds the address line.
+#[test]
+fn every_kind_of_entity_answers_its_key_as_its_row_keeps_it() {
+    let mut tables = Tables::new();
+    let prefix = tables.declare_keyexpr("demo").unwrap();
+    let own = tables.declare_keyexpr("demo/s").unwrap();
+    let form = KeyForm {
+        prefix: Some(prefix.handle),
+        own: None,
+        retraction: Retraction::ById,
+    };
+    let sub = tables
+        .declare_subscriber("demo/s", Locality::Any, form.owning(Some(own.handle)), 1)
+        .unwrap();
+    let row = tables.subscribers().get(sub.handle).unwrap().key().as_str();
+    // SAFETY: the subscriber's row stands.
+    let text = unsafe { sub.key.text() };
+    assert_eq!(
+        (text, text.as_ptr()),
+        (row, row.as_ptr()),
+        "the row's own text, where the row keeps it"
+    );
+    assert_eq!(
+        sub.key.held,
+        Some(own.handle),
+        "lent with the entity's own key's declaration"
+    );
+    let qbl = tables
+        .declare_queryable("demo/q", Locality::Any, true, form, 2)
+        .unwrap();
+    assert_eq!(
+        qbl.key.held,
+        Some(prefix.handle),
+        "lent with the declaration the key is named by"
+    );
+    let token = tables.declare_token("demo/t", form).unwrap();
+    assert_eq!(token.key.held, Some(prefix.handle));
+    let live = tables
+        .declare_liveliness_subscriber("demo/l", true, form, 3)
+        .unwrap();
+    // SAFETY: the liveliness subscriber's row stands.
+    assert_eq!(unsafe { live.key.text() }, "demo/l");
+    let bare = tables
+        .declare_subscriber("other", Locality::Any, KeyForm::default(), 4)
+        .unwrap();
+    assert_eq!(
+        bare.key.held, None,
+        "CONTROL: a key named by no declaration is lent with none"
+    );
+}
+
 #[test]
 fn every_kind_of_entity_takes_its_id_from_one_space() {
     let mut tables = Tables::new();

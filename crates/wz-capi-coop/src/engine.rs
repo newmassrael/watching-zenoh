@@ -87,7 +87,7 @@ use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
     kind, DeclaredRow, DeclaredTable, InterestHandle, InterestKind, InterestName, InterestRow,
     KeyexprHandle, KeyexprRef, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks,
-    SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
+    RowKey, SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 #[cfg(feature = "runtime-plan")]
@@ -8300,11 +8300,16 @@ fn placed_hold(tables: &CoopTables, id: ExprId, handle: KeyexprHandle) -> KeyHol
     }
 }
 
-/// An entity's key `text`, as its row in `tables` keeps it, lent with `held`, the declaration the
+/// An entity's key, as its row in `tables` keeps it ([`RowKey`]), lent with the declaration the
 /// row holds that the key is lent with: that of the entity's own key, or else the one the key is
-/// named by.
-fn lent_key(tables: &CoopTables, text: &str, held: Option<KeyexprHandle>) -> KeyView {
-    match held.and_then(|handle| Some((handle, tables.keyexprs().get(handle)?))) {
+/// named by. The caller holds the session, and the row `key` was read off stands.
+fn lent_key(tables: &CoopTables, key: RowKey) -> KeyView {
+    // SAFETY: the caller's: the row stands, so its text is where it was read.
+    let text = unsafe { key.text() };
+    match key
+        .held
+        .and_then(|handle| Some((handle, tables.keyexprs().get(handle)?)))
+    {
         // SAFETY: the session's rows lie in its region, or in the span lent at its open
         // (`RowPolicy`), neither of which moves while the session's state stands; and the entity's
         // row holds the declaration until the entity is retracted.
@@ -8724,18 +8729,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             declared.id, id,
             "the tables number a row as they said they would"
         );
-        // The text is the row's own, which does not move while the row stands. The tables made
-        // the row above; were it gone, the answer names no key, and the door binds no loan.
-        let lent = {
-            let tables = tables(&core.session.registry);
-            tables
-                .subscribers()
-                .get(declared.handle)
-                .map_or(KeyView::ABSENT, |row| {
-                    let key = row.key();
-                    lent_key(tables, key.as_str(), key.named().or(key.prefix()))
-                })
-        };
+        // The key as the tables read it off the row they put it in: its text is the row's own,
+        // which does not move while the row stands.
+        let lent = lent_key(tables(&core.session.registry), declared.key);
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce(DeclaredRow::of(declared.handle));
         // So is each group.
@@ -9100,7 +9096,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             .write_filters()
             .get(watching.handle)
             .map_or(KeyView::ABSENT, |row| {
-                lent_key(tables, row.key(), row.own())
+                lent_key(tables, RowKey::of(row.key(), row.own()))
             });
         Ok(Declared { id, key })
     }
@@ -9294,18 +9290,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             declared.id, id,
             "the tables number a row as they said they would"
         );
-        // The text is the row's own, which does not move while the row stands. The tables made
-        // the row above; were it gone, the answer names no key, and the door binds no loan.
-        let lent = {
-            let tables = tables(&core.session.registry);
-            tables
-                .queryables()
-                .get(declared.handle)
-                .map_or(KeyView::ABSENT, |row| {
-                    let key = row.key();
-                    lent_key(tables, key.as_str(), key.named().or(key.prefix()))
-                })
-        };
+        // The key as the tables read it off the row they put it in: its text is the row's own,
+        // which does not move while the row stands.
+        let lent = lent_key(tables(&core.session.registry), declared.key);
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce(DeclaredRow::of(declared.handle));
         // So is each group.
@@ -9982,10 +9969,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             tables
                 .liveliness_subscribers()
                 .get(declared.handle)
-                .map(|row| {
-                    let key = row.key();
-                    lent_key(tables, key.as_str(), key.named().or(key.prefix()))
-                })
+                .map(|row| lent_key(tables, row.key().lent()))
         };
         if lent.is_some() {
             // Each link is asked from the row, as it stands now.

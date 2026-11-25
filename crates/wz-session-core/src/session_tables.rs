@@ -584,6 +584,14 @@ impl<Key: KeyBacking> EntityKey<Key> {
     }
 }
 
+impl<Key: KeyBacking> EntityKey<Key> {
+    /// The key as the row keeps it ([`RowKey`]), lent with the declaration of the entity's own
+    /// key when the row holds one, else the one the key is named by.
+    pub fn lent(&self) -> RowKey {
+        RowKey::of(self.key.as_str(), self.named.or(self.prefix))
+    }
+}
+
 impl<Key> EntityKey<Key> {
     /// The declaration of the entity's own key the row holds, `None` when it holds none: what a
     /// program asking for the entity's key is lent beside the key's text.
@@ -1549,6 +1557,41 @@ pub struct Declared<K> {
     pub handle: Handle<K>,
     /// Its entity id.
     pub id: EntityId,
+    /// Its key as the row keeps it, read where the row was put.
+    pub key: RowKey,
+}
+
+/// An entity's key as its row keeps it: where its text lies, and the declaration the row holds
+/// that the key is lent with, the one of the entity's own key or else the one the key is named by.
+/// Read off the row where it is put (`Declared::key`), so a declaration lends its key with no
+/// second look at the row. The text stays where it is while the row stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowKey {
+    start: *const u8,
+    len: usize,
+    /// The declaration the key is lent with, `None` for none.
+    pub held: Option<KeyexprHandle>,
+}
+
+impl RowKey {
+    /// `text`, as a row keeps it, lent with `held`.
+    pub fn of(text: &str, held: Option<KeyexprHandle>) -> Self {
+        Self {
+            start: text.as_ptr(),
+            len: text.len(),
+            held,
+        }
+    }
+
+    /// The key's text.
+    ///
+    /// # Safety
+    /// The row this was read off stands, so its text is where it was read.
+    pub unsafe fn text<'a>(&self) -> &'a str {
+        // SAFETY: the caller's: the row stands, and keeps at `start` the `len` bytes of the
+        // `str` this was made of.
+        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(self.start, self.len)) }
+    }
 }
 
 /// A key expression declared, or found declared already and held once more.
@@ -1763,9 +1806,11 @@ trait Entity {
     fn retire(&self) -> bool;
     /// Whether the row, retired, has no call left running ([`RowCallback::drained`]).
     fn drained(&self) -> bool;
+    /// The key as the row keeps it, lent with its declaration ([`EntityKey::lent`]).
+    fn row_key(&self) -> RowKey;
 }
 
-impl<Key, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
+impl<Key: KeyBacking, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
@@ -1778,9 +1823,12 @@ impl<Key, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
     fn drained(&self) -> bool {
         self.callback.drained()
     }
+    fn row_key(&self) -> RowKey {
+        self.key.lent()
+    }
 }
 
-impl<Key, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
+impl<Key: KeyBacking, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
@@ -1793,9 +1841,12 @@ impl<Key, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
     fn drained(&self) -> bool {
         self.callback.drained()
     }
+    fn row_key(&self) -> RowKey {
+        self.key.lent()
+    }
 }
 
-impl<Key> Entity for TokenRow<Key> {
+impl<Key: KeyBacking> Entity for TokenRow<Key> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
@@ -1808,9 +1859,12 @@ impl<Key> Entity for TokenRow<Key> {
     fn drained(&self) -> bool {
         true
     }
+    fn row_key(&self) -> RowKey {
+        self.key.lent()
+    }
 }
 
-impl<Key, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
+impl<Key: KeyBacking, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
@@ -1822,6 +1876,9 @@ impl<Key, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     }
     fn drained(&self) -> bool {
         self.callback.drained()
+    }
+    fn row_key(&self) -> RowKey {
+        self.key.lent()
     }
 }
 
@@ -1990,7 +2047,7 @@ impl<P: Storage> Declaring<'_, P> {
     // Out of line: the declaration of each kind measured smaller with the row built and placed
     // apart from the caller that hands it its parts.
     #[inline(never)]
-    fn declare<K, R, C, const N: usize>(
+    fn declare<K, R: Entity, C, const N: usize>(
         mut self,
         table: &mut SlotMap<K, R, N, P>,
         text: &str,
@@ -2007,13 +2064,14 @@ impl<P: Storage> Declaring<'_, P> {
         let (prefix, named) = key.holds();
         // The row is built only in the slot it is kept in: a table that refuses it after all hands
         // its parts back whole, the key let go of here and the callback with the refusal.
-        match table.insert_with((id, key, callback), |(id, key, callback)| {
+        match table.insert_with_row((id, key, callback), |(id, key, callback)| {
             make(id, key, callback)
         }) {
-            Ok(handle) => {
+            Ok((handle, row)) => {
+                let key = row.row_key();
                 self.hold(prefix);
                 self.hold(named);
-                Ok(Declared { handle, id })
+                Ok(Declared { handle, id, key })
             }
             Err((_, _, callback)) => Err(Refused {
                 why: RegisterError::TableFull,

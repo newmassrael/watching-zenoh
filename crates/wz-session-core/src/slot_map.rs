@@ -735,6 +735,16 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// `make` not called, when the table is full. A caller whose row holds what the refusal hands
     /// back builds it only once a slot was found, and so has no row to take apart on a refusal.
     pub fn insert_with<A>(&mut self, parts: A, make: impl FnOnce(A) -> T) -> Result<Handle<K>, A> {
+        self.insert_with_row(parts, make).map(|(handle, _)| handle)
+    }
+
+    /// [`Self::insert_with`], handing back the row as it was kept beside its handle, for a caller
+    /// that reads it next with no second look at the handle.
+    pub fn insert_with_row<A>(
+        &mut self,
+        parts: A,
+        make: impl FnOnce(A) -> T,
+    ) -> Result<(Handle<K>, &T), A> {
         // The slot is found first and the row written once, whichever way it was found: a row
         // written in each way would be written twice in every caller of every row type.
         let room = self.meta.free_slots() != 0 && self.rows.room_for_one();
@@ -751,10 +761,7 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             Handle::at(taken.at, taken.generation),
             self.rows.get_mut(taken.at),
         ) {
-            (Some(handle), Some(row)) => {
-                *row = Some(make(parts));
-                Ok(handle)
-            }
+            (Some(handle), Some(row)) => Ok((handle, &*row.insert(make(parts)))),
             // A place under `MAX_SLOTS` names a handle and the two columns are the same length,
             // so this is not reached; the slot goes back, free, and the parts with the refusal.
             _ => {
