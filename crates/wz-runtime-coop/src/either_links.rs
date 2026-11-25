@@ -18,7 +18,7 @@ use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{LostCause, RxFrame};
 
 use crate::group_transport::GroupTransport;
-use crate::link_cells::CellRc;
+use crate::link_cells::{CellRc, CountKind};
 use crate::link_storage::LinkTables;
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
@@ -59,13 +59,13 @@ pub enum EitherWaits<V, W> {
 }
 
 /// A listener of [`EitherLinks`]: the chosen stack's, each link it yields marked as that stack's.
-enum EitherListener<P, Q> {
-    Left(Box<dyn LinkListener<P>>),
-    Right(Box<dyn LinkListener<Q>>),
+enum EitherListener<P, Q, N: CountKind> {
+    Left(Box<dyn LinkListener<P, N>>),
+    Right(Box<dyn LinkListener<Q, N>>),
 }
 
 /// `opened`, a link of the first stack.
-fn left_link<P, Q>(opened: OpenedLink<P>) -> OpenedLink<EitherPump<P, Q>> {
+fn left_link<P, Q, N: CountKind>(opened: OpenedLink<P, N>) -> OpenedLink<EitherPump<P, Q>, N> {
     OpenedLink {
         sink: opened.sink,
         pump: EitherPump::Left(opened.pump),
@@ -73,7 +73,7 @@ fn left_link<P, Q>(opened: OpenedLink<P>) -> OpenedLink<EitherPump<P, Q>> {
 }
 
 /// `opened`, a link of the second stack.
-fn right_link<P, Q>(opened: OpenedLink<Q>) -> OpenedLink<EitherPump<P, Q>> {
+fn right_link<P, Q, N: CountKind>(opened: OpenedLink<Q, N>) -> OpenedLink<EitherPump<P, Q>, N> {
     OpenedLink {
         sink: opened.sink,
         pump: EitherPump::Right(opened.pump),
@@ -158,10 +158,10 @@ impl<P: SessionDatagramLink, Q: SessionDatagramLink> SessionDatagramLink for Eit
     }
 }
 
-impl<P, Q, D: PendingDial<P>, E: PendingDial<Q>> PendingDial<EitherPump<P, Q>>
-    for EitherDial<D, E>
+impl<P, Q, N: CountKind, D: PendingDial<P, N>, E: PendingDial<Q, N>>
+    PendingDial<EitherPump<P, Q>, N> for EitherDial<D, E>
 {
-    fn poll(&mut self) -> Option<Result<OpenedLink<EitherPump<P, Q>>, LinkOpenError>> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<EitherPump<P, Q>, N>, LinkOpenError>> {
         match self {
             Self::Left(dial) => dial.poll().map(|made| made.map(left_link)),
             Self::Right(dial) => dial.poll().map(|made| made.map(right_link)),
@@ -170,10 +170,10 @@ impl<P, Q, D: PendingDial<P>, E: PendingDial<Q>> PendingDial<EitherPump<P, Q>>
 }
 
 /// A link made at once is a dial of the stack that made it.
-impl<P, Q, D: From<OpenedLink<P>>, E: From<OpenedLink<Q>>> From<OpenedLink<EitherPump<P, Q>>>
-    for EitherDial<D, E>
+impl<P, Q, N: CountKind, D: From<OpenedLink<P, N>>, E: From<OpenedLink<Q, N>>>
+    From<OpenedLink<EitherPump<P, Q>, N>> for EitherDial<D, E>
 {
-    fn from(opened: OpenedLink<EitherPump<P, Q>>) -> Self {
+    fn from(opened: OpenedLink<EitherPump<P, Q>, N>) -> Self {
         let OpenedLink { sink, pump } = opened;
         match pump {
             EitherPump::Left(pump) => Self::Left(D::from(OpenedLink { sink, pump })),
@@ -200,12 +200,12 @@ impl<V: LinkWaits, W: LinkWaits> LinkWaits for EitherWaits<V, W> {
     }
 }
 
-impl<P, Q> LinkListener<EitherPump<P, Q>> for EitherListener<P, Q> {
+impl<P, Q, N: CountKind> LinkListener<EitherPump<P, Q>, N> for EitherListener<P, Q, N> {
     fn local(&self) -> Locator {
         on_side!(EitherListener, self, listener => listener.local())
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<EitherPump<P, Q>>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<EitherPump<P, Q>, N>>, LinkOpenError> {
         match self {
             Self::Left(listener) => listener.accept().map(|taken| taken.map(left_link)),
             Self::Right(listener) => listener.accept().map(|taken| taken.map(right_link)),
@@ -221,7 +221,8 @@ impl<P, Q> LinkListener<EitherPump<P, Q>> for EitherListener<P, Q> {
     }
 }
 
-impl<A: SessionLinks, B: SessionLinks> SessionLinks for EitherLinks<A, B> {
+/// Either side serves the sessions whose handles are counted as `N` counts them, when both do.
+impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for EitherLinks<A, B> {
     type Pump = EitherPump<A::Pump, B::Pump>;
 
     type Dial = EitherDial<A::Dial, B::Dial>;
@@ -239,14 +240,14 @@ impl<A: SessionLinks, B: SessionLinks> SessionLinks for EitherLinks<A, B> {
         }
     }
 
-    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump, N>, LinkOpenError> {
         match self {
             Self::Left(links) => links.open_acceptor(port).map(left_link),
             Self::Right(links) => links.open_acceptor(port).map(right_link),
         }
     }
 
-    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump, N>, LinkOpenError> {
         match self {
             Self::Left(links) => links.open_initiator(to).map(left_link),
             Self::Right(links) => links.open_initiator(to).map(right_link),
@@ -261,7 +262,7 @@ impl<A: SessionLinks, B: SessionLinks> SessionLinks for EitherLinks<A, B> {
         on_side!(EitherLinks, self, links => links.link_cell_bytes())
     }
 
-    fn lend_cells(&mut self, cells: LentByteCells) {
+    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
         on_side!(EitherLinks, self, links => links.lend_cells(cells))
     }
 
@@ -280,7 +281,7 @@ impl<A: SessionLinks, B: SessionLinks> SessionLinks for EitherLinks<A, B> {
     fn open_listener(
         &self,
         at: Locator,
-    ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
+    ) -> Result<Box<dyn LinkListener<Self::Pump, N>>, LinkOpenError> {
         let listener = match self {
             Self::Left(links) => EitherListener::Left(links.open_listener(at)?),
             Self::Right(links) => EitherListener::Right(links.open_listener(at)?),
@@ -298,7 +299,7 @@ impl<A: SessionLinks, B: SessionLinks> SessionLinks for EitherLinks<A, B> {
 
     // Each side shares its pump as its own stack does, so a stack whose pump is already a shared
     // handle hands that handle back and its link stays behind one pointer.
-    fn share_pump(pump: Self::Pump) -> CellRc<dyn SessionDatagramLink> {
+    fn share_pump(pump: Self::Pump) -> CellRc<dyn SessionDatagramLink, N> {
         match pump {
             EitherPump::Left(pump) => A::share_pump(pump),
             EitherPump::Right(pump) => B::share_pump(pump),

@@ -31,7 +31,7 @@ use wz_session_core::group_locator::GroupLocator;
 
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::{heap_link, HeapLink};
-use crate::link_cells::CellRc;
+use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer, TxStore};
 use crate::session_drive::{
     LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
@@ -282,30 +282,50 @@ type PipeDriver<F> = StreamDriver<PipeStream<F>, RxBuffer, TxBuffer>;
 /// What every unixpipe link of a [`UnixpipeLinks`] is given besides its FIFOs: the session's
 /// tables and cells when it lent them, the slots its frames are encoded into, and whether its
 /// owner waits.
-#[derive(Clone, Copy, Default)]
-struct PipeShape {
+struct PipeShape<N: CountKind> {
     lent: Option<LinkTables>,
-    cells: Option<LentByteCells>,
+    cells: Option<LentByteCells<N::Flag>>,
     owner_waits: bool,
     tx_slots: usize,
     tx_capacity: usize,
 }
 
-impl PipeShape {
+// Not derived: a derive would ask `N: Clone` and `N: Default` of a kind of count.
+impl<N: CountKind> Clone for PipeShape<N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<N: CountKind> Copy for PipeShape<N> {}
+
+impl<N: CountKind> Default for PipeShape<N> {
+    fn default() -> Self {
+        Self {
+            lent: None,
+            cells: None,
+            owner_waits: false,
+            tx_slots: 0,
+            tx_capacity: 0,
+        }
+    }
+}
+
+impl<N: CountKind> PipeShape<N> {
     /// The stream link over `pipe`, its handshake made: buffers claimed as every link's of the
     /// stack are, refused when the rows of the build do not name both its FIFOs, made in a cell
     /// when the stack was lent some.
     fn link<F: Fifo + 'static>(
         &self,
         pipe: PipeStream<F>,
-    ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         let (rx, tx) = heap_link_buffers(
             self.lent.as_ref(),
             STREAM_RX_CAPACITY,
             self.tx_slots,
             self.tx_capacity,
         )?;
-        heap_link(self.cells.as_ref(), stream_ends_fit(&pipe))?.open(|place| {
+        heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.open(|place| {
             let link = place.write(link_over(pipe, rx, tx));
             if self.owner_waits {
                 link.wait_by_owner();
@@ -328,9 +348,9 @@ enum DialStep<F> {
 
 /// A `unixpipe/` dial under way ([`SessionLinks::begin_initiator`]): the pair reserved, and
 /// each step of the handshake taken when it can be.
-pub struct UnixpipeDial<O: FifoOpen> {
+pub struct UnixpipeDial<O: FifoOpen, N: CountKind = OneTask> {
     opener: O,
-    shape: PipeShape,
+    shape: PipeShape<N>,
     base: UnixpipeLocator,
     suffix: u32,
     request: Option<O::Fifo>,
@@ -338,7 +358,7 @@ pub struct UnixpipeDial<O: FifoOpen> {
     step: Option<DialStep<O::Fifo>>,
 }
 
-impl<O: FifoOpen> UnixpipeDial<O>
+impl<O: FifoOpen, N: CountKind> UnixpipeDial<O, N>
 where
     O::Fifo: 'static,
 {
@@ -347,7 +367,7 @@ where
     /// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `async fn connect_to(endpoint: EndPoint)`).
     /// No listener is [`LinkOpenError::Refused`]; no free pair in [`DEDICATE_TRIES`] draws is
     /// [`LinkOpenError::Exhausted`].
-    fn begin(opener: O, shape: PipeShape, at: UnixpipeLocator) -> Result<Self, LinkOpenError> {
+    fn begin(opener: O, shape: PipeShape<N>, at: UnixpipeLocator) -> Result<Self, LinkOpenError> {
         let base = at.path.as_str();
         let mode = at.file_mask.unwrap_or(UNIXPIPE_DEFAULT_FILE_MASK);
         let request = opener.request(&request_path(base))?;
@@ -365,7 +385,7 @@ where
 
     /// One step of the handshake: the link once both confirmed, a refusal once a FIFO failed or
     /// the listener confirmed another pair, `None` while it waits for the peer or for room.
-    fn step_once(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+    fn step_once(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         loop {
             let (next, advanced) = match self.step.take()? {
                 DialStep::Inviting => match send_invitation(self.request.as_ref()?, self.suffix) {
@@ -413,7 +433,7 @@ where
     /// The dial, waited out: asked again each time the downlink has something to read, until the
     /// listener confirms or [`OPEN_WAIT_US`] has passed on the opener's clock, which refuses it as
     /// an open worth trying later.
-    fn wait(mut self) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn wait(mut self) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         let deadline = self.opener.now_us().saturating_add(OPEN_WAIT_US);
         loop {
             if let Some(made) = self.step_once() {
@@ -432,11 +452,11 @@ where
     }
 }
 
-impl<O: FifoOpen> PendingDial<HeapLink> for UnixpipeDial<O>
+impl<O: FifoOpen, N: CountKind> PendingDial<HeapLink<N>, N> for UnixpipeDial<O, N>
 where
     O::Fifo: 'static,
 {
-    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         self.step_once()
     }
 }
@@ -476,16 +496,16 @@ struct Answering<F> {
 /// one listener holds a path, and takes the invitations written there one at a time, each into a
 /// link of its own (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @
 /// `async fn handle_incoming_connections(`).
-struct UnixpipeListener<O: FifoOpen> {
+struct UnixpipeListener<O: FifoOpen, N: CountKind> {
     opener: O,
     at: UnixpipeLocator,
-    shape: PipeShape,
+    shape: PipeShape<N>,
     request: O::Fifo,
     invitation: RefCell<Reading>,
     answering: RefCell<Option<Answering<O::Fifo>>>,
 }
 
-impl<O: FifoOpen> UnixpipeListener<O>
+impl<O: FifoOpen, N: CountKind> UnixpipeListener<O, N>
 where
     O::Fifo: 'static,
 {
@@ -514,7 +534,7 @@ where
     /// while it has not; one it confirmed with another suffix, or did not confirm in time, or
     /// whose FIFO failed, is dropped, its FIFOs with it. A link the session's tables have no
     /// buffers or cell left for is [`LinkOpenError::Exhausted`], and its FIFOs are let go.
-    fn step_answer(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
+    fn step_answer(&self) -> Result<Option<OpenedLink<HeapLink<N>, N>>, LinkOpenError> {
         let mut slot = self.answering.borrow_mut();
         let Some(answering) = slot.as_mut() else {
             return Ok(None);
@@ -553,7 +573,7 @@ where
     }
 }
 
-impl<O: FifoOpen> LinkListener<HeapLink> for UnixpipeListener<O>
+impl<O: FifoOpen, N: CountKind> LinkListener<HeapLink<N>, N> for UnixpipeListener<O, N>
 where
     O::Fifo: 'static,
 {
@@ -561,7 +581,7 @@ where
         Locator::Unixpipe(self.at)
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink<N>, N>>, LinkOpenError> {
         loop {
             if self.answering.borrow().is_some() {
                 return self.step_answer();
@@ -593,18 +613,19 @@ where
 /// A dial of [`UnixpipeLinks`]: the stack's, or a unixpipe one.
 // Held by value in its face's link, as `ip_stack::IpDial` is: a link being made is not boxed.
 #[allow(clippy::large_enum_variant)]
-pub enum UnixpipeLinksDial<D, O: FifoOpen> {
+pub enum UnixpipeLinksDial<D, O: FifoOpen, N: CountKind = OneTask> {
     /// A dial of the stack the unixpipe links stand beside.
     Links(D),
     /// A `unixpipe/` dial.
-    Unixpipe(UnixpipeDial<O>),
+    Unixpipe(UnixpipeDial<O, N>),
 }
 
-impl<D: PendingDial<HeapLink>, O: FifoOpen> PendingDial<HeapLink> for UnixpipeLinksDial<D, O>
+impl<D: PendingDial<HeapLink<N>, N>, O: FifoOpen, N: CountKind> PendingDial<HeapLink<N>, N>
+    for UnixpipeLinksDial<D, O, N>
 where
     O::Fifo: 'static,
 {
-    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         match self {
             Self::Links(dial) => dial.poll(),
             Self::Unixpipe(dial) => dial.poll(),
@@ -613,10 +634,10 @@ where
 }
 
 /// A link made at once is the stack's: a unixpipe link is made by its handshake.
-impl<D: From<OpenedLink<HeapLink>>, O: FifoOpen> From<OpenedLink<HeapLink>>
-    for UnixpipeLinksDial<D, O>
+impl<D: From<OpenedLink<HeapLink<N>, N>>, O: FifoOpen, N: CountKind>
+    From<OpenedLink<HeapLink<N>, N>> for UnixpipeLinksDial<D, O, N>
 {
-    fn from(opened: OpenedLink<HeapLink>) -> Self {
+    fn from(opened: OpenedLink<HeapLink<N>, N>) -> Self {
         Self::Links(D::from(opened))
     }
 }
@@ -624,11 +645,12 @@ impl<D: From<OpenedLink<HeapLink>>, O: FifoOpen> From<OpenedLink<HeapLink>>
 /// The links of the stack `S` and unixpipe links beside them, over the FIFOs `O` opens: a
 /// `unixpipe/` locator is dialled and listened on here, any other is the stack's. Unixpipe links
 /// take their buffers and cells from what the session lends the stack, and are placed and waited
-/// on as the stack's links of the heap profile are ([`HeapLink`]).
-pub struct UnixpipeLinks<S, O> {
+/// on as the stack's links of the heap profile are ([`HeapLink`]). `N` is how the sessions they
+/// serve count the handles on a link, as `S`'s sessions do.
+pub struct UnixpipeLinks<S, O, N: CountKind = OneTask> {
     links: S,
     opener: O,
-    shape: PipeShape,
+    shape: PipeShape<N>,
 }
 
 impl<S, O: FifoOpen> UnixpipeLinks<S, O> {
@@ -638,6 +660,29 @@ impl<S, O: FifoOpen> UnixpipeLinks<S, O> {
             links,
             opener,
             shape: PipeShape::default(),
+        }
+    }
+}
+
+impl<S, O: FifoOpen, N: CountKind> UnixpipeLinks<S, O, N> {
+    /// The same links, for sessions that count the handles on a link as `M` does, over `links`,
+    /// the stack's links counted so: asked before a session is opened over them, which is when it
+    /// lends them its cells.
+    pub fn counted_by<M: CountKind, T>(self, links: T) -> UnixpipeLinks<T, O, M> {
+        debug_assert!(
+            self.shape.cells.is_none(),
+            "cells are lent after the links are made"
+        );
+        UnixpipeLinks {
+            links,
+            opener: self.opener,
+            shape: PipeShape {
+                lent: self.shape.lent,
+                cells: None,
+                owner_waits: self.shape.owner_waits,
+                tx_slots: self.shape.tx_slots,
+                tx_capacity: self.shape.tx_capacity,
+            },
         }
     }
 
@@ -658,15 +703,15 @@ impl<S, O: FifoOpen> UnixpipeLinks<S, O> {
     }
 }
 
-impl<S, O> SessionLinks for UnixpipeLinks<S, O>
+impl<S, O, N: CountKind> SessionLinks<N> for UnixpipeLinks<S, O, N>
 where
-    S: SessionLinks<Pump = HeapLink>,
+    S: SessionLinks<N, Pump = HeapLink<N>>,
     O: FifoOpen + Clone + 'static,
     O::Fifo: 'static,
 {
-    type Pump = HeapLink;
+    type Pump = HeapLink<N>;
 
-    type Dial = UnixpipeLinksDial<S::Dial, O>;
+    type Dial = UnixpipeLinksDial<S::Dial, O, N>;
 
     const IPV6: bool = S::IPV6;
 
@@ -676,13 +721,13 @@ where
         self.links.waits()
     }
 
-    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         self.links.open_acceptor(port)
     }
 
     // A unixpipe link is made by its handshake, which waits for the listener: a caller that opens
     // and does not ask again is held until the listener confirms, as a waiting open is.
-    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         match to.as_unixpipe() {
             Some(at) => UnixpipeDial::begin(self.opener.clone(), self.shape, at)?.wait(),
             None => self.links.open_initiator(to),
@@ -702,7 +747,7 @@ where
         }
     }
 
-    fn lend_cells(&mut self, cells: LentByteCells) {
+    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
         self.shape.cells = Some(cells);
         self.links.lend_cells(cells);
     }
@@ -720,7 +765,10 @@ where
         }
     }
 
-    fn open_listener(&self, at: Locator) -> Result<Box<dyn LinkListener<HeapLink>>, LinkOpenError> {
+    fn open_listener(
+        &self,
+        at: Locator,
+    ) -> Result<Box<dyn LinkListener<HeapLink<N>, N>>, LinkOpenError> {
         let Some(at) = at.as_unixpipe() else {
             return self.links.open_listener(at);
         };
@@ -744,7 +792,7 @@ where
         self.links.open_group(endpoint, group)
     }
 
-    fn share_pump(pump: HeapLink) -> CellRc<dyn SessionDatagramLink> {
+    fn share_pump(pump: HeapLink<N>) -> CellRc<dyn SessionDatagramLink, N> {
         S::share_pump(pump)
     }
 }

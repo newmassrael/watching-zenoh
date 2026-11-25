@@ -46,7 +46,7 @@ use wz_session_core::serial_link::{
 use super::{SerialDevice, SerialOpen};
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::HeapLink;
-use crate::link_cells::CellRc;
+use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::link_storage::{
     heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer, TxLender, TxStore,
 };
@@ -560,7 +560,9 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
 }
 
 /// `link`, its handshake made, as the session shell holds a link.
-fn opened<D: SerialDevice + 'static>(link: CellRc<SerialDriver<D>>) -> OpenedLink<HeapLink> {
+fn opened<D: SerialDevice + 'static, N: CountKind>(
+    link: CellRc<SerialDriver<D>, N>,
+) -> OpenedLink<HeapLink<N>, N> {
     OpenedLink {
         sink: link.clone().into_sink(),
         pump: link.into_link(),
@@ -570,16 +572,36 @@ fn opened<D: SerialDevice + 'static>(link: CellRc<SerialDriver<D>>) -> OpenedLin
 /// What every serial link of a [`SerialLinks`] is given besides its line: the session's tables
 /// and cells when it lent them, the slots its frames are encoded into, and whether its owner
 /// waits.
-#[derive(Clone, Copy, Default)]
-struct SerialShape {
+struct SerialShape<N: CountKind> {
     lent: Option<LinkTables>,
-    cells: Option<LentByteCells>,
+    cells: Option<LentByteCells<N::Flag>>,
     owner_waits: bool,
     tx_slots: usize,
     tx_capacity: usize,
 }
 
-impl SerialShape {
+// Not derived: a derive would ask `N: Clone` and `N: Default` of a kind of count.
+impl<N: CountKind> Clone for SerialShape<N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<N: CountKind> Copy for SerialShape<N> {}
+
+impl<N: CountKind> Default for SerialShape<N> {
+    fn default() -> Self {
+        Self {
+            lent: None,
+            cells: None,
+            owner_waits: false,
+            tx_slots: 0,
+            tx_capacity: 0,
+        }
+    }
+}
+
+impl<N: CountKind> SerialShape<N> {
     /// The link over `line`, which `at` named, made in a cell before its handshake: its receive
     /// buffer holds the largest frame, and its buffers and cell are claimed as every link's of the
     /// stack are, [`LinkOpenError::Exhausted`] when the session's have none left.
@@ -587,7 +609,7 @@ impl SerialShape {
         &self,
         line: Rc<D>,
         at: SerialLocator,
-    ) -> Result<CellRc<SerialDriver<D>>, LinkOpenError> {
+    ) -> Result<CellRc<SerialDriver<D>, N>, LinkOpenError> {
         let (rx, tx) = heap_link_buffers(
             self.lent.as_ref(),
             SERIAL_MAX_COBS_BUF,
@@ -595,7 +617,7 @@ impl SerialShape {
             self.tx_capacity,
         )?;
         let owner_waits = self.owner_waits;
-        CellRc::claim(self.cells.as_ref())
+        CellRc::<_, N>::claim_of(self.cells.as_ref())
             .ok_or(LinkOpenError::Exhausted)?
             .made(|place| {
                 let link = place.write(SerialDriver::over(line, at, rx, tx));
@@ -610,30 +632,30 @@ impl SerialShape {
 
 /// A `serial/` dial under way ([`SessionLinks::begin_initiator`]): its line open, its `INIT`
 /// written, and the peer's answer asked for at each poll, timed on the opener's clock.
-pub struct SerialDial<O: SerialOpen> {
-    link: Option<CellRc<SerialDriver<O::Device>>>,
+pub struct SerialDial<O: SerialOpen, N: CountKind = OneTask> {
+    link: Option<CellRc<SerialDriver<O::Device>, N>>,
     opener: O,
 }
 
-impl<O: SerialOpen> PendingDial<HeapLink> for SerialDial<O>
+impl<O: SerialOpen, N: CountKind> PendingDial<HeapLink<N>, N> for SerialDial<O, N>
 where
     O::Device: 'static,
 {
-    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         let answer = self.link.as_ref()?.dial_step(self.opener.now_us())?;
         let link = self.link.take()?;
         Some(answer.map(|()| opened(link)))
     }
 }
 
-impl<O: SerialOpen> SerialDial<O>
+impl<O: SerialOpen, N: CountKind> SerialDial<O, N>
 where
     O::Device: 'static,
 {
     /// The dial, waited out: asked again each time the line has something to read or the
     /// `INIT` is due again, until the peer answers or [`OPEN_WAIT_US`] has passed on the
     /// opener's clock, which refuses it as an open worth trying later.
-    fn wait(mut self) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn wait(mut self) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         let deadline = self.opener.now_us().saturating_add(OPEN_WAIT_US);
         loop {
             if let Some(made) = self.poll() {
@@ -653,18 +675,19 @@ where
 }
 
 /// A dial of [`SerialLinks`]: the stack's, or a serial one.
-pub enum SerialLinksDial<D, O: SerialOpen> {
+pub enum SerialLinksDial<D, O: SerialOpen, N: CountKind = OneTask> {
     /// A dial of the stack the serial links stand beside.
     Links(D),
     /// A `serial/` dial.
-    Serial(SerialDial<O>),
+    Serial(SerialDial<O, N>),
 }
 
-impl<D: PendingDial<HeapLink>, O: SerialOpen> PendingDial<HeapLink> for SerialLinksDial<D, O>
+impl<D: PendingDial<HeapLink<N>, N>, O: SerialOpen, N: CountKind> PendingDial<HeapLink<N>, N>
+    for SerialLinksDial<D, O, N>
 where
     O::Device: 'static,
 {
-    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         match self {
             Self::Links(dial) => dial.poll(),
             Self::Serial(dial) => dial.poll(),
@@ -673,10 +696,10 @@ where
 }
 
 /// A link made at once is the stack's: a serial link is made by its handshake.
-impl<D: From<OpenedLink<HeapLink>>, O: SerialOpen> From<OpenedLink<HeapLink>>
-    for SerialLinksDial<D, O>
+impl<D: From<OpenedLink<HeapLink<N>, N>>, O: SerialOpen, N: CountKind>
+    From<OpenedLink<HeapLink<N>, N>> for SerialLinksDial<D, O, N>
 {
-    fn from(opened: OpenedLink<HeapLink>) -> Self {
+    fn from(opened: OpenedLink<HeapLink<N>, N>) -> Self {
         Self::Links(D::from(opened))
     }
 }
@@ -688,18 +711,18 @@ impl<D: From<OpenedLink<HeapLink>>, O: SerialOpen> From<OpenedLink<HeapLink>>
 /// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `while is_connected.load(Ordering::Acquire) {`).
 /// A link made waits on the line for the peer's `INIT` (`waiting`) and is handed over once it
 /// is answered.
-struct SerialListener<O: SerialOpen> {
+struct SerialListener<O: SerialOpen, N: CountKind> {
     opener: O,
     at: SerialLocator,
-    shape: SerialShape,
-    waiting: RefCell<Option<CellRc<SerialDriver<O::Device>>>>,
+    shape: SerialShape<N>,
+    waiting: RefCell<Option<CellRc<SerialDriver<O::Device>, N>>>,
     /// The line, kept between links when the locator does not release it on close.
     retained: RefCell<Option<Rc<O::Device>>>,
     /// The line of the link made last, which is live while that link holds it.
     last: RefCell<Weak<O::Device>>,
 }
 
-impl<O: SerialOpen> LinkListener<HeapLink> for SerialListener<O>
+impl<O: SerialOpen, N: CountKind> LinkListener<HeapLink<N>, N> for SerialListener<O, N>
 where
     O::Device: 'static,
 {
@@ -707,7 +730,7 @@ where
         Locator::Serial(self.at)
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink<N>, N>>, LinkOpenError> {
         if self.waiting.borrow().is_none() {
             // The listener's own hold on a line it keeps is not a link.
             let kept = self.retained.borrow().is_some();
@@ -753,11 +776,12 @@ where
 /// The links of the stack `S` and serial links beside them, over the lines `O` opens: a
 /// `serial/` locator is dialled and listened on here, any other is the stack's. Serial links take
 /// their buffers and cells from what the session lends the stack, and are placed and waited on as
-/// the stack's links of the heap profile are ([`HeapLink`]).
-pub struct SerialLinks<S, O> {
+/// the stack's links of the heap profile are ([`HeapLink`]). `N` is how the sessions they serve
+/// count the handles on a link, as `S`'s sessions do.
+pub struct SerialLinks<S, O, N: CountKind = OneTask> {
     links: S,
     opener: O,
-    shape: SerialShape,
+    shape: SerialShape<N>,
 }
 
 impl<S, O: SerialOpen> SerialLinks<S, O> {
@@ -767,6 +791,29 @@ impl<S, O: SerialOpen> SerialLinks<S, O> {
             links,
             opener,
             shape: SerialShape::default(),
+        }
+    }
+}
+
+impl<S, O: SerialOpen, N: CountKind> SerialLinks<S, O, N> {
+    /// The same links, for sessions that count the handles on a link as `M` does, over `links`,
+    /// the stack's links counted so: asked before a session is opened over them, which is when it
+    /// lends them its cells.
+    pub fn counted_by<M: CountKind, T>(self, links: T) -> SerialLinks<T, O, M> {
+        debug_assert!(
+            self.shape.cells.is_none(),
+            "cells are lent after the links are made"
+        );
+        SerialLinks {
+            links,
+            opener: self.opener,
+            shape: SerialShape {
+                lent: self.shape.lent,
+                cells: None,
+                owner_waits: self.shape.owner_waits,
+                tx_slots: self.shape.tx_slots,
+                tx_capacity: self.shape.tx_capacity,
+            },
         }
     }
 
@@ -780,7 +827,7 @@ impl<S, O: SerialOpen> SerialLinks<S, O> {
     /// A dial of the line `at` names: the line opened and what it holds thrown away before the
     /// `INIT`, as upstream clears its port before it connects; the link is made then, so the
     /// peer's answer is read into its buffer.
-    fn dial_serial(&self, at: SerialLocator) -> Result<SerialDial<O>, LinkOpenError>
+    fn dial_serial(&self, at: SerialLocator) -> Result<SerialDial<O, N>, LinkOpenError>
     where
         O: Clone,
         O::Device: 'static,
@@ -807,15 +854,15 @@ impl<S, O: SerialOpen> SerialLinks<S, O> {
     }
 }
 
-impl<S, O> SessionLinks for SerialLinks<S, O>
+impl<S, O, N: CountKind> SessionLinks<N> for SerialLinks<S, O, N>
 where
-    S: SessionLinks<Pump = HeapLink>,
+    S: SessionLinks<N, Pump = HeapLink<N>>,
     O: SerialOpen + Clone + 'static,
     O::Device: 'static,
 {
-    type Pump = HeapLink;
+    type Pump = HeapLink<N>;
 
-    type Dial = SerialLinksDial<S::Dial, O>;
+    type Dial = SerialLinksDial<S::Dial, O, N>;
 
     const IPV6: bool = S::IPV6;
 
@@ -825,14 +872,14 @@ where
         self.links.waits()
     }
 
-    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         self.links.open_acceptor(port)
     }
 
     // A serial link is made by its handshake, which waits for the peer: a caller that opens and
     // does not ask again (a node's dialer over an endpoint its config names) is held until the
     // peer answers, as a waiting open is (`SerialDial::wait`).
-    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         match to.as_serial() {
             Some(at) => self.dial_serial(at)?.wait(),
             None => self.links.open_initiator(to),
@@ -852,7 +899,7 @@ where
         }
     }
 
-    fn lend_cells(&mut self, cells: LentByteCells) {
+    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
         self.shape.cells = Some(cells);
         self.links.lend_cells(cells);
     }
@@ -869,7 +916,10 @@ where
         }
     }
 
-    fn open_listener(&self, at: Locator) -> Result<Box<dyn LinkListener<HeapLink>>, LinkOpenError> {
+    fn open_listener(
+        &self,
+        at: Locator,
+    ) -> Result<Box<dyn LinkListener<HeapLink<N>, N>>, LinkOpenError> {
         let Some(at) = at.as_serial() else {
             return self.links.open_listener(at);
         };
@@ -891,7 +941,7 @@ where
         self.links.open_group(endpoint, group)
     }
 
-    fn share_pump(pump: HeapLink) -> CellRc<dyn SessionDatagramLink> {
+    fn share_pump(pump: HeapLink<N>) -> CellRc<dyn SessionDatagramLink, N> {
         S::share_pump(pump)
     }
 }
