@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Unicast link life - the one link of a session that holds one face.
+
+  A session that dials its endpoints and takes no face beside the one it dials (no listening
+  port, no group) has one link, and this machine is its life: dialled endpoint by endpoint,
+  its handshake run, up, lost and dialled again, or given up. The host is
+  `wz_session_core::link_life::UnicastLink`, a value with no I/O: it is handed an input and the
+  time, raises the one event that input comes to, and returns the duties the machine asked for.
+  The I/O (the dial, the handshake's task, the pump of an established link) is its owner's,
+  which performs each duty and reports what came of it as the next input.
+
+  The states:
+    Idle        - not opened yet.
+    Dialing     - an endpoint is being dialled; the dial is given up at a deadline the host
+                  holds, and a dial that made a link has its handshake begun here.
+    Handshaking - the link's handshake runs, given up at the deadline its dial was given.
+    Up          - established: the session's sends go through the link.
+    Backoff     - no endpoint answered after the link had been up once; every endpoint is
+                  dialled again when the wait the host armed is over.
+    Closed      - the session is closed, or ended because the link is gone and none is dialled
+                  again.
+
+  Division of labour with the host (as in peer_connection.scxml):
+    - Classification is the host's. Which endpoint is next, whether one is left, whether the
+      session dials again, and whether a deadline passed are numbers the host holds, so it
+      raises the one event that names the outcome. No transition has a cond.
+    - Every effect is a no-arg `<sce:action effect="duty">` call that records a duty the host
+      performs right after the event, so the generated `UnicastLinkPolicy<A>` carries no script
+      engine and compiles no_std.
+
+  Host duties (the generated `UnicastLinkActions` trait):
+    dial_endpoint   - Dialing.onentry: dial the endpoint the host names.
+    begin_handshake - a dial made a link: begin its handshake.
+    bring_up        - Up.onentry: the handshake completed; the link carries the session.
+    end_handshake   - leaving Handshaking for a handshake that is over: end its task.
+    lose_link       - leaving Up for a link that ended: what its peer declared goes with it.
+    arm_backoff     - Backoff.onentry: wait to dial every endpoint again.
+    end_session     - the link is gone and none is dialled again: the session ends.
+    let_go          - a close: let go of the dial under way or of the link.
+
+  Events raised by the host:
+    link.open           - the session opens: dial the first endpoint.
+    dial.made           - the dial made a link.
+    handshake.begun     - the link's handshake is under way.
+    dial.next           - the dial, or the handshake it should have begun, failed for its
+                          endpoint: dial the next one.
+    dial.exhausted      - no endpoint is left, and the session dials again later.
+    dial.ended          - no endpoint is left, and the session dials none again.
+    handshake.done      - the handshake completed.
+    handshake.next      - the handshake ended or ran out of time: dial the next endpoint.
+    handshake.exhausted - the same with no endpoint left, and the session dials again later.
+    handshake.ended     - the same with no endpoint left, and the session dials none again.
+    link.lost           - the established link ended, and the session dials again at once.
+    link.ended          - the established link ended, and the session dials none again.
+    backoff.over        - the wait is over.
+    link.close          - the session closes.
+-->
+<!--
+  Queue depth: the host raises one event at a time and no transition raises or sends another, so
+  each queue holds one event at most (`sce:capacity`, as peer_connection.scxml says why).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       sce:capacity="2"
+       name="unicast_link"
+       version="1.0"
+       initial="Idle">
+
+  <state id="Idle">
+    <transition event="link.open" target="Dialing"/>
+    <!-- A session with no endpoint to dial is refused at its open. -->
+    <transition event="dial.ended" target="Closed">
+      <sce:action name="end_session" effect="duty"/>
+    </transition>
+    <transition event="link.close" target="Closed"/>
+  </state>
+
+  <state id="Dialing">
+    <onentry>
+      <sce:action name="dial_endpoint" effect="duty"/>
+    </onentry>
+    <!-- Targetless: the dial stays where it is while its link's handshake is begun. -->
+    <transition event="dial.made">
+      <sce:action name="begin_handshake" effect="duty"/>
+    </transition>
+    <transition event="handshake.begun" target="Handshaking"/>
+    <!-- An external self-transition: entering Dialing again dials the next endpoint. -->
+    <transition event="dial.next" target="Dialing"/>
+    <transition event="dial.exhausted" target="Backoff"/>
+    <transition event="dial.ended" target="Closed">
+      <sce:action name="end_session" effect="duty"/>
+    </transition>
+    <transition event="link.close" target="Closed">
+      <sce:action name="let_go" effect="duty"/>
+    </transition>
+  </state>
+
+  <state id="Handshaking">
+    <transition event="handshake.done" target="Up"/>
+    <transition event="handshake.next" target="Dialing">
+      <sce:action name="end_handshake" effect="duty"/>
+    </transition>
+    <transition event="handshake.exhausted" target="Backoff">
+      <sce:action name="end_handshake" effect="duty"/>
+    </transition>
+    <transition event="handshake.ended" target="Closed">
+      <sce:action name="end_handshake" effect="duty"/>
+      <sce:action name="end_session" effect="duty"/>
+    </transition>
+    <transition event="link.close" target="Closed">
+      <sce:action name="let_go" effect="duty"/>
+    </transition>
+  </state>
+
+  <state id="Up">
+    <onentry>
+      <sce:action name="bring_up" effect="duty"/>
+    </onentry>
+    <transition event="link.lost" target="Dialing">
+      <sce:action name="lose_link" effect="duty"/>
+    </transition>
+    <transition event="link.ended" target="Closed">
+      <sce:action name="lose_link" effect="duty"/>
+      <sce:action name="end_session" effect="duty"/>
+    </transition>
+    <transition event="link.close" target="Closed">
+      <sce:action name="let_go" effect="duty"/>
+    </transition>
+  </state>
+
+  <state id="Backoff">
+    <onentry>
+      <sce:action name="arm_backoff" effect="duty"/>
+    </onentry>
+    <transition event="backoff.over" target="Dialing"/>
+    <transition event="link.close" target="Closed"/>
+  </state>
+
+  <final id="Closed"/>
+
+</scxml>
