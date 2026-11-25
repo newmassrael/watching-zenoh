@@ -10,9 +10,7 @@
 //! host that runs several programs in one process states their share itself, through the pools'
 //! door: this harness declares that it runs as many programs at once as libtest runs tests at
 //! once, and reserves that many programs' share before `main`, so before any test makes an object.
-//! A build without the door cannot state it, and its tests are held to one program's share.
-
-#![cfg(feature = "object-pool")]
+//! The target requires the door for that (`Cargo.toml`).
 
 use wz_capi_pico::object_pool::{
     wz_ext_object_pool_bytes, wz_ext_object_pool_counts_t, wz_ext_object_pool_reserve,
@@ -20,33 +18,19 @@ use wz_capi_pico::object_pool::{
 use wz_capi_pico::Z_OK;
 use wz_session_core::caps;
 
-/// How many tests libtest runs at once, read where libtest reads it: `--test-threads` on the
-/// command line, else `RUST_TEST_THREADS`, else the threads the host runs in parallel; one at
-/// least. This is the harness's declaration of how many programs share the process.
+/// How many programs this executable runs at once, which is the harness's declaration of how
+/// many share the process: the larger of `RUST_TEST_THREADS` and the threads the host runs in
+/// parallel, libtest's own count when its command line names none; one at least. Read before
+/// `main`, where the loader's order of constructors does not promise that the standard library
+/// has read the command line, so a `--test-threads` past this runs more programs than are
+/// reserved for, and a test past the share is refused as out of memory.
 fn programs() -> usize {
-    let mut args = std::env::args();
-    let mut stated = None;
-    while let Some(arg) = args.next() {
-        if let Some(count) = arg.strip_prefix("--test-threads=") {
-            stated = count.parse::<usize>().ok();
-        } else if arg == "--test-threads" {
-            stated = args.next().and_then(|count| count.parse::<usize>().ok());
-        }
-    }
-    stated
-        .or_else(|| {
-            std::env::var("RUST_TEST_THREADS")
-                .ok()?
-                .parse::<usize>()
-                .ok()
-        })
-        .filter(|count| *count > 0)
-        .or_else(|| {
-            std::thread::available_parallelism()
-                .ok()
-                .map(std::num::NonZeroUsize::get)
-        })
-        .unwrap_or(1)
+    let stated = std::env::var("RUST_TEST_THREADS")
+        .ok()
+        .and_then(|count| count.parse::<usize>().ok())
+        .unwrap_or(0);
+    let host = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    stated.max(host).max(1)
 }
 
 /// The counts of `programs` programs, each holding what the build reserves for one: its
@@ -94,9 +78,7 @@ extern "C" fn reserve_the_programs_share() {
     }
 }
 
-// Run by the loader before `main`, as the platform's C runtime runs its constructors. On glibc
-// the standard library reads its arguments from an earlier entry of the same table, so
-// `std::env::args` holds them here.
+// Run by the loader before `main`, as the platform's C runtime runs its constructors.
 #[used]
 #[cfg_attr(
     any(target_os = "linux", target_os = "android", target_os = "freebsd"),
