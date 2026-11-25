@@ -88,13 +88,20 @@
 // On Windows (_WIN32) the same source is built with MSVC against either library by
 // scripts/host-bench/windows/perf_matrix.ps1, which runs the matrix there. What differs is only what the
 // host gives: the clocks are QueryPerformanceCounter (one clock every process of the host reads alike, as
-// CLOCK_MONOTONIC is on Linux) and GetProcessTimes, the options are read by a getopt of this file's own, a
-// role is asked to stop by the named event Local\perf_probe_stop_<pid> where Linux's runner sends SIGTERM,
-// and the program's last line is
+// CLOCK_MONOTONIC is on Linux) and GetProcessTimes, the options are read by a getopt of this file's own, and
+// a role is asked to stop by the named event Local\perf_probe_stop_<pid> where Linux's runner sends SIGTERM.
+// -T, the program transport, is Linux's alone.
 //
-//   perf_probe usage peak_rss_kib=<the peak working set of the process>
+// On both, a role that ran prints as its last line
 //
-// since a Windows parent reads no rusage of a child. -T, the program transport, is Linux's alone.
+//   perf_probe usage peak_rss_kib=<the peak resident set of this program>
+//
+// the peak working set on Windows, whose parent reads no rusage of a child, and VmHWM of /proc/self/status
+// on Linux. The runner reads that line and not the maxrss of the reaped child: Linux keeps the resident set
+// of the memory a process had before its exec as a floor of that maxrss, and a child of a Python runner
+// is a copy of the runner until it executes this program, so the reaped figure is at least the runner's.
+// VmHWM belongs to the memory exec made new. Linux prints no line when /proc gives no figure, so the
+// runner reads none rather than a zero.
 //
 // Exit status: 0 when the role ran, 1 when the session or an entity could not be made, 2 for a usage error or
 // an option the build does not have.
@@ -236,8 +243,6 @@ static int watch_for_stop(void) {
     return 0;
 }
 
-// The peak working set of the process, the last line it prints: Linux's runner reads the peak resident set
-// of a reaped child from getrusage, and a Windows parent has no such reading.
 static void print_usage(void) {
     PROCESS_MEMORY_COUNTERS counters;
     memset(&counters, 0, sizeof counters);
@@ -273,6 +278,21 @@ static void sleep_ms(unsigned ms) {
     struct timespec nap = {(time_t)(ms / 1000U), (long)(ms % 1000U) * 1000000L};
     while (nanosleep(&nap, &nap) != 0 && errno == EINTR && !terminated) {
     }
+}
+
+static void print_usage(void) {
+    FILE *status = fopen("/proc/self/status", "r");
+    if (status == NULL) return;
+    char line[256];
+    unsigned long long kib = 0;
+    int found = 0;
+    while (!found && fgets(line, sizeof line, status) != NULL) {
+        found = sscanf(line, "VmHWM: %llu kB", &kib) == 1;
+    }
+    fclose(status);
+    if (!found) return;
+    printf("perf_probe usage peak_rss_kib=%llu\n", kib);
+    fflush(stdout);
 }
 
 #endif
@@ -1256,9 +1276,7 @@ int main(int argc, char **argv) {
 #ifdef PERF_PROGRAM_TRANSPORT
     if (o.transport_name != NULL) wz_ext_transport_drop(wz_ext_transport_move(&pt.transport));
 #endif
-#ifdef _WIN32
     print_usage();
-#endif
     return rc;
 }
 

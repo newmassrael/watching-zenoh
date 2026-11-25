@@ -190,7 +190,7 @@ reference, to be answered by a run that holds one, not a figure of this matrix.
 | `cpu_ns_per_msg_sub` | thr | sub's process CPU over the window, per sample delivered | lower |
 | `cpu_ns_per_msg` | thr | the two above, summed: the CPU a delivered message cost both sides | lower |
 | `cpu_user_s_*`, `cpu_sys_s_*` | both | each process's whole user and system CPU (`getrusage` of the reaped child), client and server | lower |
-| `rss_kib_client`, `rss_kib_server`, `rss_kib` | both | each process's peak resident set, and their sum | lower |
+| `rss_kib_client`, `rss_kib_server`, `rss_kib` | both | each process's peak resident set, as the program prints it as its last line (VmHWM of `/proc/self/status`), and their sum; the maxrss of the reaped child is not read, since Linux keeps the resident set a process had before its exec as a floor of it, and a child of the runner is a copy of the runner until that exec | lower |
 
 The process CPU of a figure per round trip or per message is read by the process itself
 (`CLOCK_PROCESS_CPUTIME_ID`, all its threads) at the edges of its own span, so time a process spent
@@ -481,7 +481,7 @@ tree.
 | pinning | `taskset` | started suspended, `SetProcessAffinityMask`, resumed |
 | clocks | `CLOCK_MONOTONIC`, `CLOCK_PROCESS_CPUTIME_ID` | `QueryPerformanceCounter`, `GetProcessTimes` |
 | stopping a side | `SIGTERM` | the named event `Local\perf_probe_stop_<pid>` the program waits on |
-| a process's CPU and peak memory | `getrusage` of the reaped child | `GetProcessTimes` of the ended process; the peak working set the program prints as its last line |
+| a process's CPU and peak memory | `getrusage` of the reaped child; the peak resident set (VmHWM) the program prints as its last line | `GetProcessTimes` of the ended process; the peak working set the program prints as its last line |
 | validity | `/proc/stat`: user, nice, system, steal | per-CPU times (`NtQuerySystemInformation`): kernel less idle, interrupts and DPCs, plus user |
 | transports | tcp, udp, multicast on `lo`, the program transport | tcp, udp, multicast on the adapter of the default route; the program transport is not built (its stream in the probe is an AF_UNIX socket in Linux's abstract namespace) and `record.not_measured` says so |
 | arm X | when the environment names it | not run |
