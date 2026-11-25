@@ -495,6 +495,68 @@ fn a_plane_whose_read_hands_each_record_captures_a_peers_reply() {
     assert_eq!(seen.drops(), 1);
 }
 
+/// A sink that keeps no round ([`EveryReplyCaptured`]) hands each reply it is handed under a
+/// capture to the capturing thread, one capture each, and holds no handle of a round: no round is
+/// made here at all. Its drop is the leg's one end. Turned red by a sink of that form that holds a
+/// round's handle again, or that hands a captured reply anywhere but to its capture.
+#[test]
+fn a_sink_that_keeps_no_round_hands_each_reply_to_its_capture() {
+    assert!(
+        core::mem::size_of::<LegSink<Stepped, EveryReplyCaptured>>()
+            < core::mem::size_of::<LegSink<Stepped>>(),
+        "the sink holds no handle of a round"
+    );
+    let plane = plane::<Stepped>(2, 1);
+    let seen = Arc::new(Seen::default());
+    let row = plane
+        .open_leg(&mut || Counted(seen.clone()), true)
+        .expect("a row");
+    // SAFETY: the test hands the sink its replies alone, as the holder of the session's lock
+    // does, and the sink, made after the plane, is dropped before it.
+    let mut sink = unsafe { LegSink::new(3, row, plane.share(), EveryReplyCaptured) };
+    for handed in 1..=2 {
+        plane.capture();
+        sink.on_reply(&REPLY);
+        assert_eq!(plane.captured(), Some(row), "reply {handed} is captured");
+        plane.call(row, &REPLY);
+        assert_eq!(
+            seen.calls(),
+            handed,
+            "each reply is handed once, in its turn"
+        );
+        assert!(plane.release(row).is_none(), "the capture's count");
+    }
+    drop(sink);
+    let end = plane.take_end().expect("the sink's drop is the leg's end");
+    assert!(plane.take_end().is_none(), "one end");
+    drop(plane.release(end.row()));
+    assert_eq!(seen.drops(), 1);
+}
+
+/// A reply handed to a sink that keeps no round outside a capture is the defect of an engine that
+/// promised to capture each: nothing is called, nothing is captured, and a debug build stops there.
+/// The CONTROL is the sink's leg, whose row is still held.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    should_panic(expected = "a reply reached a leg's sink outside a capture")
+)]
+fn a_reply_outside_a_capture_reaches_no_round_and_is_a_defect() {
+    let plane = plane::<Stepped>(2, 1);
+    let seen = Arc::new(Seen::default());
+    let row = plane
+        .open_leg(&mut || Counted(seen.clone()), true)
+        .expect("a row");
+    // SAFETY: as above.
+    let mut sink = unsafe { LegSink::new(3, row, plane.share(), EveryReplyCaptured) };
+    sink.on_reply(&REPLY);
+    assert_eq!(plane.captured(), None, "no capture was asked");
+    assert_eq!(seen.calls(), 0, "nothing is called");
+    assert!(plane.hold(row), "CONTROL: the leg's row is held");
+    assert!(plane.release(row).is_none());
+    drop(sink);
+}
+
 /// A sink's drop is its leg's end, with the timeout it was told of; while the sink lives no end
 /// waits, and the end holds the entry's count of the row past the sink.
 #[test]
