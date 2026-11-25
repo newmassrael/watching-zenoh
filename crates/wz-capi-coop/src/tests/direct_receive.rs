@@ -702,13 +702,13 @@ fn a_frame_of_n_records_is_read_in_one_take() {
 }
 
 /// A callback that undeclares its own subscriber from inside the read's step tells the router the
-/// retraction once: the session's record of the link reaches the link's wire through the seat the
-/// read stands in, with no try of the place the read holds. Turned red by a send inside the step
-/// that tries the place (it finds it held: a debug build fails, a release build owes it and sends
-/// no retraction), or by a retraction told twice.
+/// retraction once: the session's record of the link holds the link's send place, which the step
+/// does not hold. Turned red by a step that holds the send place (the retraction's hold finds it
+/// held: a debug build fails, a release build owes it and sends no retraction), or by a retraction
+/// told twice.
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 #[test]
-fn an_undeclaration_inside_the_reads_step_is_told_once_through_its_seat() {
+fn an_undeclaration_inside_the_reads_step_is_told_once() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
@@ -747,13 +747,12 @@ fn an_undeclaration_inside_the_reads_step_is_told_once_through_its_seat() {
 }
 
 /// A redeclare a callback asks for from inside the read's step tells the router the subscriber
-/// again: the replay's lap reaches the link's wire through the seat the read stands in, with no
-/// try of the place the read holds, and nothing is left owed for a later read. Turned red by a lap
-/// handed no wire inside the step (`CoopEngine::live_on_link`), which tells nothing, or by a
-/// redeclare that counts no face.
+/// again: the replay's lap holds the link's send place, which the step does not hold, and nothing
+/// is left owed for a later read. Turned red by a lap handed no wire inside the step
+/// (`CoopEngine::live_on_link`), which tells nothing, or by a redeclare that counts no face.
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 #[test]
-fn a_redeclare_inside_the_reads_step_is_told_through_its_seat() {
+fn a_redeclare_inside_the_reads_step_is_told() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let session = EngineHold::downgrade(&engine);
@@ -789,5 +788,41 @@ fn a_redeclare_inside_the_reads_step_is_told_through_its_seat() {
         router.seen(|s| s.subscribers.last().copied()),
         declared.last().copied(),
         "the replay told the same subscriber again"
+    );
+}
+
+/// A callback of a record the read's step hands out finds the link's send place free: the step
+/// holds the link's receive part alone, so a send made there, or by another thread meanwhile,
+/// waits for no step and no callback. Turned red by a step that holds the send place while it
+/// hands records out (`CoopEngine::pump_turn` lending the place): the try finds it held.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[test]
+fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let session = EngineHold::downgrade(&engine);
+    let found: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let found = found.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    found.lock().unwrap().push(engine.send_place_is_free());
+                }
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::PushBatch("demo/in", COUNT));
+    until(&engine, "a sample handed out", || {
+        !found.lock().unwrap().is_empty()
+    });
+    let found = found.lock().unwrap().clone();
+    assert!(
+        found.iter().all(|free| *free),
+        "every callback found the send place free: {found:?}"
     );
 }
