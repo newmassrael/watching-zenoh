@@ -218,31 +218,57 @@ pub fn parts_to_bytes_in(
     schema: Option<&[u8]>,
     dialect: EncodingDialect,
 ) -> alloc::vec::Vec<u8> {
-    let id = (packed_id >> 1) as usize;
     let mut out = alloc::vec::Vec::new();
+    let rendered: Result<(), core::convert::Infallible> =
+        render_parts(packed_id, schema, dialect, |part| {
+            out.extend_from_slice(part);
+            Ok(())
+        });
+    let Ok(()) = rendered;
+    out
+}
+
+/// [`parts_to_bytes`], or `None` when the heap has no room for the rendering: what a door answers
+/// with its out-of-memory code, where [`parts_to_bytes`] would end the program.
+pub fn try_parts_to_bytes(packed_id: u32, schema: Option<&[u8]>) -> Option<alloc::vec::Vec<u8>> {
+    let mut out = alloc::vec::Vec::new();
+    render_parts(packed_id, schema, EncodingDialect::Pico, |part| {
+        crate::bounded::push_heap_bytes(&mut out, part)
+    })
+    .ok()?;
+    Some(out)
+}
+
+/// The rendering of an encoding's parts in `dialect`, handed to `put` a part at a time, in order;
+/// the first refusal of `put` ends it.
+fn render_parts<E>(
+    packed_id: u32,
+    schema: Option<&[u8]>,
+    dialect: EncodingDialect,
+    mut put: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    let id = (packed_id >> 1) as usize;
     let unknown = dialect == EncodingDialect::ZenohC && id == usize::from(ENCODING_ID_UNKNOWN);
     if !unknown {
         if let Some(prefix) = ENCODING_ID_TO_STR.get(id) {
-            out.extend_from_slice(prefix.as_bytes());
+            put(prefix.as_bytes())?;
         }
     }
     if let Some(schema) = schema {
         if !schema.is_empty() {
             if !unknown {
                 let mut sep = [0u8; 4];
-                out.extend_from_slice(SCHEMA_SEPARATOR.encode_utf8(&mut sep).as_bytes());
+                put(SCHEMA_SEPARATOR.encode_utf8(&mut sep).as_bytes())?;
             }
             match dialect {
-                EncodingDialect::Pico => out.extend_from_slice(schema),
-                EncodingDialect::ZenohC => out.extend_from_slice(
-                    core::str::from_utf8(schema)
-                        .unwrap_or(NON_UTF8_SCHEMA)
-                        .as_bytes(),
-                ),
+                EncodingDialect::Pico => put(schema)?,
+                EncodingDialect::ZenohC => put(core::str::from_utf8(schema)
+                    .unwrap_or(NON_UTF8_SCHEMA)
+                    .as_bytes())?,
             }
         }
     }
-    out
+    Ok(())
 }
 
 #[cfg(test)]
@@ -388,6 +414,11 @@ mod tests {
                     "{packed_id} {schema:?}"
                 );
             }
+            assert_eq!(
+                try_parts_to_bytes(packed_id, schema),
+                Some(parts_to_bytes(packed_id, schema)),
+                "the fallible rendering is the same, {packed_id} {schema:?}"
+            );
         }
         assert_eq!(
             parts_to_bytes((4 << 1) | 1, Some(&b"utf8"[..])),

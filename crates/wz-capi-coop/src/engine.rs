@@ -4606,7 +4606,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // lie in the row the plan laid out for them, a handle at each place a face may hold, the
         // dial role's and each group's among them.
         let (wire, entropy, rooms) = written.and_then(|()| {
-            let mut entropy = SessionEntropy::new(entropy);
+            // A heap with no room for the source's cell is memory the open cannot be given.
+            let mut entropy = SessionEntropy::try_new(entropy)
+                .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
             let rooms = lent
                 .arena
