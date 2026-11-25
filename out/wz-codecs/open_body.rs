@@ -4,7 +4,7 @@
 // Runtime: none
 // Do not edit — regenerate from the source SCXML file.
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceReader, SceSink};
 // RFC §synth-5-B: `VecSink` and the heap-backed `encode_to_vec` facade
 // are gated on the `alloc` feature (see
 // `backends/rust/forge-runtime/src/codec.rs`). MCU / `no_std` consumers see
@@ -98,10 +98,10 @@ impl<S: OpenBodyStorage> OpenBodyIn<S> {
         Self::default()
     }
 
-    /// Decode the next frame from `cursor`. On success the cursor
-    /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
-    /// is left untouched so the caller can resume after appending more
-    /// bytes (RFC §synth-5-B L494-519).
+    /// Decode the next frame from `cursor`. On success the cursor advances
+    /// past the consumed bytes; on a refusal it does not move, so a caller that
+    /// receives `NeedMoreBytes` reads the frame again from the same place once
+    /// more bytes have arrived (RFC §synth-5-B L494-519, docs/adr/0128).
     pub fn decode<'f>(cursor: &mut SceCursor<'f>, a: u8) -> Result<Self, CodecError> where S: OpenBodyFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out, a)?;
@@ -125,54 +125,71 @@ impl<S: OpenBodyStorage> OpenBodyIn<S> {
     /// `_out` holds the fields decoded so far and is not to be read; each of
     /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self, a: u8) -> Result<(), CodecError> where S: OpenBodyFrom<'f> {
-        // A field past what the profile holds is read on and not held; the
-        // frame says so once it is read whole (docs/adr/0077 §7).
-        let mut _over = false;
+        cursor.read_frame(|cursor| Self::read_into(cursor, _out, a))
+    }
+
+    /// Read the frame through `cursor`, the frame's reader, into `_out`: every
+    /// read total, each refusal recorded in the reader and the first of them
+    /// the frame's verdict, which the reader says once the frame is read
+    /// (docs/adr/0128). A codec that embeds or dispatches to this one reads it
+    /// through its own reader, so one frame has one verdict, and through this
+    /// one function, out of line where the set reads it from two sites or more
+    /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
+    pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, a: u8) where S: OpenBodyFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
         // declaration; consumption is a per-codec design choice.
         let _ = a;
-        // Streaming cursor decode (SSOT selection: `needs_streaming`).
+        // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
         // handles every codec where it is not — present-if-gated fields
         // (runtime presence), VLE / repeat / TLV-chain / embed fields
         // (runtime width), string fields (UTF-8 decode), and a fixed field
         // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the cursor and
-        // advances past exactly what it consumed. Per-field `is_repeat` /
+        // length). Each field reads its own bytes from the reader and
+        // consumes exactly what it read. Per-field `is_repeat` /
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let lease = cursor.read_vle_u64()?;
-        let initial_sn = cursor.read_vle_u64()?;
+        let lease = cursor.read_vle_u64();
+        let initial_sn = cursor.read_vle_u64();
         let cookie_len = if (a & 0x01u8) == 0 {
-            let _v = cursor.read_vle_u64()?;
+            let _v = cursor.read_vle_u64();
             Some(_v)
         } else {
             None
         };
-        let cookie = if (a & 0x01u8) == 0 {
-            let _len = cookie_len.unwrap();
-            let _n = usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes)?;
-            let raw = cursor.peek_slice(_n)?;
-            let _v = raw;
-            cursor.advance(_n)?;
-            Some(_v)
+        let cookie = if let Some(_len) = cookie_len {
+            let _n = cursor.settle(usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes));
+            Some(cursor.take_slice(_n))
         } else {
             None
         };
-        let cookie = cookie.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose()?;
-        let cookie = ::sce_forge_runtime::codec::note_held(cookie.map(|_v| _v.store::<S, OpenBodyCookieField>()).transpose(), &mut _over)?;
+        let cookie = cursor.settle(cookie.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose());
+        let cookie = cursor.hold(cookie.map(|_v| _v.store::<S, OpenBodyCookieField>()).transpose());
         _out.lease = lease;
         _out.initial_sn = initial_sn;
         _out.cookie_len = cookie_len;
         _out.cookie = cookie;
-        if _over {
-            return Err(CodecError::CapacityExceeded);
-        }
-        Ok(())
+
+    }
+
+    /// [`Self::read_into`] of a value of its own: a list's entry, which the
+    /// list then holds.
+    pub fn read<'f>(cursor: &mut SceReader<'f>, a: u8) -> Self where S: OpenBodyFrom<'f> {
+        let mut _out = Self::default();
+        Self::read_into(cursor, &mut _out, a);
+        _out
+    }
+
+    /// [`Self::read`], under the name every view reads with a chain hook
+    /// (docs/adr/0130): `OpenBody` is its own view and holds no chain,
+    /// so `_hook` is shown nothing.
+    #[inline(always)]
+    pub fn read_with<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, a: u8, _hook: &mut H) -> Self where S: OpenBodyFrom<'f> {
+        Self::read(cursor, a)
     }
 
 
@@ -363,8 +380,9 @@ pub struct OpenBodyWalk;
 impl ::sce_forge_runtime::codec::ListWalk<1> for OpenBodyWalk {
     type Entry<'b> = OpenBodyView<'b>;
 
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 1]) -> Result<Self::Entry<'b>, CodecError> {
-        OpenBodyView::decode(_c, _a[0])
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 1], _h: &mut H) -> Self::Entry<'b> {
+        OpenBodyView::read_with(_r, _a[0], _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {  }
