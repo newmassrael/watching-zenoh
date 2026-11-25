@@ -85,6 +85,24 @@ excluded="wz-ap-demo"
 # it (`abi/`), so its minimal profile is the same engine named that way.
 profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot wz-mcu-multicast-e2e:fixed-memory wz-runtime-posix:session-slot wz-capi-pico:os-host wz-capi-pico-lib:abi/os-host"
 
+# The cargo profile an artifact crate is graded with, `<crate>:<profile>`, beside its tier: the one
+# it ships with, with the configuration named after it (`.cargo/<profile>.toml`) and the host's own
+# target, as that configuration asks. `wz-capi-pico-lib` is a library without `std`, which does
+# not unwind: a profile that unwinds refuses its panic handler, so its reduced combination is
+# graded as it is built (crates/wz-capi-pico-lib/Cargo.toml).
+ship_profile="wz-capi-pico-lib:capi-nostd"
+
+# The cargo profile of $1, or nothing when the crate is graded with the default one.
+ship_profile_of() {
+    local entry
+    for entry in $ship_profile; do
+        if [[ "${entry%%:*}" == "$1" ]]; then
+            echo "${entry#*:}"
+            return
+        fi
+    done
+}
+
 # The minimal profile feature of $1, or nothing when the crate is not in tier 4.
 profile_of() {
     local entry
@@ -158,6 +176,7 @@ trap 'rm -rf "$logs"' EXIT
 
 fail=0
 checked=0
+host_triple=""
 for pkg in "${members[@]}"; do
     [[ -n "$pkg" ]] || continue
     if [[ " $excluded " == *" $pkg "* ]]; then
@@ -173,6 +192,20 @@ for pkg in "${members[@]}"; do
     else
         mode="all-targets"
         args=(clippy -p "$pkg" --no-default-features --all-targets --quiet)
+    fi
+    cargo_profile="$(ship_profile_of "$pkg")"
+    if [[ -n "$cargo_profile" ]]; then
+        if [[ -z "$host_triple" ]]; then
+            host_triple="$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')"
+        fi
+        if [[ -z "$host_triple" ]]; then
+            echo "  reduced-features FAIL: rustc named no host target, which $pkg's" \
+                 "profile $cargo_profile is built for"
+            fail=1
+            continue
+        fi
+        mode="$mode, cargo profile $cargo_profile"
+        args+=(--profile "$cargo_profile" --config ".cargo/$cargo_profile.toml" --target "$host_triple")
     fi
     checked=$((checked + 1))
     if ! cargo "${args[@]}" -- -D warnings >"$logs/$pkg.log" 2>&1; then
@@ -193,7 +226,7 @@ done
 # of them. Same rule the literal-key gate and the C1bz budget already follow.
 if [[ $# -eq 0 ]]; then
     profile_names=""
-    for entry in $profile_min; do
+    for entry in $profile_min $ship_profile; do
         profile_names="$profile_names ${entry%%:*}"
     done
     for named in $lib_only $excluded $profile_names; do
