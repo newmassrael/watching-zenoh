@@ -998,18 +998,18 @@ fn lend_session(
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
-    let holds = query::FinalHolds::over(held_finals, refused_finals);
+    let final_holds = query::FinalHolds::over(held_finals, refused_finals);
     // SAFETY: as for the gets' plane above.
     #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     let plane = unsafe {
         arena
             .arena_mut()
-            .place_with(|at| QueryPlane::init_at(NonNull::new_unchecked(at), holds))
+            .place_with(|at| QueryPlane::init_at(NonNull::new_unchecked(at), final_holds))
     }
     .map_err(ArenaRefused::Lend)?;
     // SAFETY: as above, for the queryables' field.
     #[cfg(all(feature = "queryable", not(feature = "runtime-plan")))]
-    let plane = unsafe { StatePlaces::queries(region_places, holds) };
+    let plane = unsafe { StatePlaces::queries(region_places, final_holds) };
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
     // owner changes the round no more.
