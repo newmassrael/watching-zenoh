@@ -377,6 +377,9 @@ transport-link-ws|"
     # sockets, a sample across two pty pairs this process pumps into each other, and a pin pair,
     # which names no tty of a host, refused at the dial. Nothing leaves the host.
     "wz-capi-pico|hook|transport-link-serial|files::serial_link_roundtrip::"
+    # The `ws/` link on the cooperative engine, the default one: WebSocket links over the host's
+    # TCP beside its sockets, a sample across a loopback ws listener. Nothing leaves the host.
+    "wz-capi-pico|hook|transport-link-ws,peer|files::ws_link_roundtrip::"
     # The `unixpipe/` link on the cooperative engine, the default one: the host's named FIFOs
     # beside its sockets, a listen that holds its request FIFO, and a sample across the pair a
     # dial reserved and the listener confirmed. Nothing leaves the host.
@@ -826,6 +829,9 @@ transport-link-ws|"
     # The host's ttys as serial lines (`serial`): a pseudo-terminal set as zenoh-pico sets a tty,
     # bytes both ways without a blocking read, the queues discarded, and each refusal's kind.
     "wz-runtime-posix|hook|serial|"
+    # The host's TCP as the cooperative engine's WebSocket links (`ws`): a dial and a listener
+    # upgrade one loopback connection and carry a batch.
+    "wz-runtime-posix|hook|ws|ws::"
     # The host's named FIFOs (`unixpipe`): one listener holding a request FIFO and a dial finding
     # it, a dedicated read end reading its peer and the end of the stream, the suffix drawn.
     "wz-runtime-posix|hook|unixpipe|"

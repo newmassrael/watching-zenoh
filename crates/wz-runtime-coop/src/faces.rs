@@ -439,11 +439,10 @@ pub enum HandshakeEnd {
     NoAnswerInTime,
 }
 
-/// A port the session listens on, the wait for a connection on it, and the row of the endpoint
-/// its links are stated for, when the session states one.
+/// A port the session listens on, and the row of the endpoint its links are stated for, when the
+/// session states one.
 struct Listening<P> {
     listener: Box<dyn LinkListener<P>>,
-    input: Option<WaitOn>,
     endpoint: Option<usize>,
 }
 
@@ -847,12 +846,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// texts when the session states one.
     pub fn listen(&mut self, at: Locator, endpoint: Option<usize>) -> Result<(), LinkOpenError> {
         let listener = self.links.open_listener(at)?;
-        let input = listener.input_wait();
-        self.listeners.push(Listening {
-            listener,
-            input,
-            endpoint,
-        });
+        self.listeners.push(Listening { listener, endpoint });
         Ok(())
     }
 
@@ -1128,8 +1122,10 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             return IdleWait::None;
         }
         let mut look_again = false;
+        // Asked at each wait: a listener whose own work is under way (a WebSocket handshake) or
+        // that takes no connection now gives no wait on its port until that changes.
         for listening in &self.listeners {
-            match listening.input {
+            match listening.listener.input_wait() {
                 Some(on) => waits.push(LinkWait::input(on)),
                 None => look_again = true,
             }
@@ -1317,6 +1313,33 @@ mod tests {
 
         fn open_initiator(&self, _to: Locator) -> Result<OpenedLink<Rc<Quiet>>, LinkOpenError> {
             Err(LinkOpenError::Unsupported)
+        }
+
+        fn open_listener(
+            &self,
+            _at: Locator,
+        ) -> Result<Box<dyn LinkListener<Rc<Quiet>>>, LinkOpenError> {
+            Ok(Box::new(Busy(Cell::new(0))))
+        }
+    }
+
+    /// A port that gives a wait the first time it is asked and none after, as one whose own work
+    /// came under way: how often it was asked.
+    struct Busy(Cell<u32>);
+
+    impl LinkListener<Rc<Quiet>> for Busy {
+        fn local(&self) -> Locator {
+            Locator::tcp(core::net::SocketAddr::from(([0, 0, 0, 0], 7447)))
+        }
+
+        fn accept(&self) -> Result<Option<OpenedLink<Rc<Quiet>>>, LinkOpenError> {
+            Ok(None)
+        }
+
+        fn input_wait(&self) -> Option<WaitOn> {
+            let asked = self.0.get();
+            self.0.set(asked + 1);
+            (asked == 0).then_some(WaitOn::Socket(7))
         }
     }
 
@@ -1836,6 +1859,32 @@ mod tests {
             Ok(0),
             "a text of a row's length fits"
         );
+    }
+
+    /// A read asks each port for its wait when it waits, not once when the port opened: a port
+    /// that gives none now is looked at again after a bounded sleep. Turned red by a wait read
+    /// once at the listen and kept.
+    #[test]
+    fn a_read_asks_each_port_for_its_wait_at_each_wait() {
+        let mut faces = supervisor(Link::Waiting { at_us: u64::MAX }, 1);
+        faces
+            .listen(
+                Locator::tcp(core::net::SocketAddr::from(([0, 0, 0, 0], 7447))),
+                None,
+            )
+            .expect("a port");
+        match faces.idle_wait(10, &mut || 0u64, [], None) {
+            IdleWait::Input { on, ms } => {
+                assert_eq!(on, [LinkWait::input(WaitOn::Socket(7))]);
+                assert_eq!(ms, 10);
+                faces.waited(IdleWait::Input { on, ms });
+            }
+            _ => panic!("the port's wait"),
+        }
+        assert!(matches!(
+            faces.idle_wait(10, &mut || 0u64, [], None),
+            IdleWait::Sleep(1)
+        ));
     }
 
     #[test]

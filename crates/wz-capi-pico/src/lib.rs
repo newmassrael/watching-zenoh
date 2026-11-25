@@ -272,20 +272,18 @@ compile_error!(
      named FIFO in src/coop_host.rs: drop the feature from this library, or give that file the \
      target's FIFOs"
 );
+// The cooperative engine's WebSocket links run over the host's TCP (`wz-runtime-posix`'s `ws`,
+// on a POSIX host and on Windows); a Zephyr image has no opener in `src/coop_host.rs` yet and is
+// refused by name rather than by the missing opener.
 #[cfg(all(
     feature = "transport-link-ws",
-    any(
-        feature = "engine-coop",
-        feature = "os-posix",
-        feature = "os-windows",
-        feature = "os-zephyr"
-    )
+    feature = "os-zephyr",
+    not(any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"))
 ))]
 compile_error!(
-    "wz-capi-pico: `transport-link-ws` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
-     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
-     cooperative feature"
+    "wz-capi-pico: `transport-link-ws` on the cooperative engine opens WebSocket links over the \
+     host's TCP, and a Zephyr image has no WebSocket link in src/coop_host.rs: drop the feature \
+     from this library, or give that file the target's opener"
 );
 #[cfg(all(
     feature = "engine-tokio",
@@ -301,8 +299,7 @@ compile_error!(
         feature = "rx-busy-poll",
         feature = "serial-drive-own-thread",
         feature = "transport-link-quic",
-        feature = "transport-link-tls",
-        feature = "transport-link-ws"
+        feature = "transport-link-tls"
     ))
 ))]
 compile_error!(

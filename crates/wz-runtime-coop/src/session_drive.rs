@@ -1154,7 +1154,8 @@ pub trait LinkListener<P> {
 
     /// What a thread other than the one that accepts waits on for a connection
     /// ([`LinkWaits::wait`]); `None` when the stack gives none, and then the node looks for one
-    /// at a pace of its own.
+    /// at a pace of its own. Asked at each wait, so a listener whose answer changes (one with
+    /// work of its own under way, or no room for another connection) is waited on as it is now.
     fn input_wait(&self) -> Option<WaitOn> {
         None
     }

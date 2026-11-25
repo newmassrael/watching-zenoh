@@ -741,9 +741,11 @@ transport-link-tls = ["engine-tokio", "dep:wz-tls-pem", "wz-capi-core/transport-
 tls-mbedtls =["engine-coop", "dep:wz-tls-pem", "wz-capi-coop/tls-mbedtls"]
 # The `ws/` link, dial and accept: zenoh-pico's `Z_FEATURE_LINK_WS` (default 0; upstream builds
 # it only for emscripten, while this ABI runs on a host runtime). With it a `ws/` endpoint under
-# `Z_CONFIG_CONNECT_KEY` or `Z_CONFIG_LISTEN_KEY` dials or binds; without it the scheme still
-# parses and the dial or bind fails the open with the runtime's typed `Unsupported`.
-transport-link-ws = ["engine-tokio", "wz-capi-core/transport-link-ws"]
+# `Z_CONFIG_CONNECT_KEY` or `Z_CONFIG_LISTEN_KEY` dials or binds. It selects no engine: the tokio
+# engine's WebSocket link, or on the cooperative one WebSocket links over the host's TCP
+# (`wz-runtime-posix`'s `ws`, POSIX and Windows hosts) beside its sockets (`src/coop_host.rs`). Without it a
+# `ws/` endpoint is a scheme no link of the build opens, and the open fails.
+transport-link-ws = ["wz-capi-core?/transport-link-ws", "wz-runtime-posix?/ws"]
 # The `serial/<device>#baudrate=<n>` link, dial and accept: zenoh-pico's
 # `Z_FEATURE_LINK_SERIAL` (default 0). The listener serves one peer at a time, as one line
 # carries one; the dial runs the serial-link handshake before the session's. It selects no
