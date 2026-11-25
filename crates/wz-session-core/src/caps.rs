@@ -264,6 +264,11 @@ pub const MAX_DECLARED_KEYEXPRS: usize = generated::MAX_DECLARED_KEYEXPRS;
 /// sessions, reserved at the library's first object when the program reserved none.
 pub const HELD_SESSIONS: usize = generated::HELD_SESSIONS;
 
+/// How many threads may be inside the program's callbacks at once in a C ABI library without
+/// `std` and with threads: the entries of the table that marks each one, which has no
+/// thread-local storage to do it. A callback a thread past it would run is not run, and counted.
+pub const CALLBACK_THREADS: usize = generated::CALLBACK_THREADS;
+
 /// The owned samples a program holds through the C ABI at once: the slots of the process's pool of
 /// samples, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_SAMPLES: usize = generated::HELD_SAMPLES;

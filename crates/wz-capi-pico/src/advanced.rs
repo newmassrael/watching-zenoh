@@ -1580,7 +1580,9 @@ fn fire_miss(slot: &MissRooms, miss: &Miss) {
             return;
         };
         let ctx = closure.context.0;
-        let _in_callback = crate::ffi::InCallback::enter();
+        let Some(_in_callback) = crate::ffi::InCallback::enter() else {
+            return;
+        };
         // A panic unwinding out of the C callback across this `extern "C"`
         // boundary is UB and would tear down the drive thread.
         let _ = crate::ffi::catch(|| unsafe {
@@ -2876,7 +2878,7 @@ mod tests {
         rooms.each(|listener| {
             called.push(listener.context.0);
             // As `fire_miss` marks the thread while it calls the program.
-            let _in_callback = crate::ffi::InCallback::enter();
+            let _in_callback = crate::ffi::InCallback::enter().expect("a thread is marked");
             rooms.remove(second, false);
             rooms.remove(first, false);
             assert_eq!(

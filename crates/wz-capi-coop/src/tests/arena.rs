@@ -1519,11 +1519,14 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
         plan.reserved_bytes(),
         "the links' rows and the others take the whole arena and no more"
     );
-    let held: Vec<_> = (0..3)
+    let claimed: Vec<_> = (0..held)
         .map(|_| tables.claim().expect("a link's buffers"))
         .collect();
-    assert!(tables.claim().is_none(), "a fourth link has none");
-    drop(held);
+    assert!(
+        tables.claim().is_none(),
+        "a link past the config's has none"
+    );
+    drop(claimed);
     assert_eq!(tables.in_use(), 0);
 }
 
@@ -1872,6 +1875,14 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
             held += 1;
         }
     }
+    // A matching listener declared on a key judges through a filter of its own in the one table,
+    // in a build that keeps such listeners.
+    let key_listeners = if cfg!(feature = "key-matching-listener") {
+        preset("MAX_MATCHING_LISTENERS")
+    } else {
+        0
+    };
+    let filters = preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + key_listeners;
     // The session's table set is one row of the arena; the rows of each of its tables are the
     // plan's own count of them, each table counted here as a row of its own limit was before the
     // set took it.
@@ -1882,11 +1893,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
             preset("MAX_DECLARED_KEYEXPRS"),
             "keyexpr table",
         ),
-        (
-            tables.write_filters(),
-            preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS"),
-            "write filter table",
-        ),
+        (tables.write_filters(), filters, "write filter table"),
         (
             tables.matching_listeners,
             preset("MAX_MATCHING_LISTENERS"),
@@ -1898,14 +1905,6 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     }
     assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
     let entities = plan.entities();
-    // A matching listener declared on a key judges through a filter of its own, in a build that
-    // keeps such listeners.
-    let key_listeners = if cfg!(feature = "key-matching-listener") {
-        preset("MAX_MATCHING_LISTENERS")
-    } else {
-        0
-    };
-    let filters = preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + key_listeners;
     assert_eq!(entities.filters(), Some(filters));
     assert_eq!(entities.interests(), Some(filters), "one Interest a filter");
     assert_eq!(
@@ -2698,8 +2697,13 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
 #[test]
 fn a_plan_laid_out_when_the_build_is_compiled_is_the_one_an_open_lays_out() {
     use crate::arena::PlanShape;
+    // A build that takes no face beside its dial role's lays none out, whatever the limit.
     const CLIENT: PlanShape = PlanShape {
-        max_faces: caps::MAX_FACES,
+        max_faces: if crate::arena::TAKES_FACES {
+            caps::MAX_FACES
+        } else {
+            0
+        },
         accept_pending: caps::MAX_ACCEPT_PENDING,
         ..PlanShape::dial_only(0, 1024)
     };

@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use wz_capi_port::group::GroupDeclarations;
 use wz_capi_port::{
     BatchStep, FilterPlane, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey,
 };
@@ -22,11 +21,8 @@ use wz_session_core::app_link_table::{
 };
 use wz_session_core::app_transport::{AppPort, AppTransport, SessionTransport};
 use wz_session_core::locality::Locality;
-use wz_session_core::multicast_params::GroupJoinRule;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
-use wz_session_core::wire_const::T_MID_JOIN;
-use wz_session_core::WhatAmI;
 
 use super::client_config;
 use super::group_stack::{

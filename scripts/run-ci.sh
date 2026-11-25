@@ -13346,6 +13346,11 @@ _c1p32_pico_profile_tests() {
 # each family's allocations a round to its row of deploy/no_heap_ratchet.json. A rise fails, a fall
 # prints the row to commit, a family at 0 is locked there, and a row not filled yet reads
 # NOT-MEASURED, which fails the lane as a rise does: a ratchet with no number holds nothing.
+# A family is locked only when its whole run, warm-ups included, kept no block it took (`grown`): a
+# table that grows once at its first use after open allocates in a warm-up and in no counted round.
+# The library without `std` is measured too (`nostd-` families), by the C program
+# crates/wz-capi-pico/tests/c/pico_no_heap_after_open.c: the release library's form, whose
+# allocations a Rust test cannot see.
 #
 # The build measured is the release library's: the cargo arguments and the limits of the profile
 # the Windows package is built from (configs/profiles/host-peer-ext.conf), resolved as the packager
@@ -13383,7 +13388,17 @@ layer_c1nh_no_heap_after_open() {
     _runci_leg measure -- _runci_guarded_test "C1nh no heap after open" 1 \
         env "${limit_env[@]}" cargo test -p wz-capi-pico "${args[@]}" \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1
-    _runci_leg no_heap_ratchet_gate --after no_heap_ratchet_gate.selftest,measure -- python3 scripts/lib/no_heap_ratchet_gate.py --check "$reading" --profile "$profile"
+    # The library without `std` brings its own allocator and panic handler, so no Rust test links
+    # it: a C program built against it in its single-threaded arm counts what each of its two
+    # processes allocates from the open on, in a reading of its own, which the gate reads with the
+    # test's. The program stands in front of glibc's allocator, so the leg is a Linux one.
+    local nostd_reading="$WZ_ARTIFACTS/target/no-heap/reading-nostd.txt"
+    rm -f "$nostd_reading"
+    _runci_leg measure_nostd -- env "${limit_env[@]}" WZ_NO_HEAP_READING="$nostd_reading" \
+        WZ_PICO_ENGINE=coop WZ_PICO_FORM=nostd WZ_PICO_PROGRAM_ROLES="listen dial" \
+        bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_no_heap_after_open.c \
+        "what the pico C ABI without std allocates after open" peer
+    _runci_leg no_heap_ratchet_gate --after no_heap_ratchet_gate.selftest,measure,measure_nostd -- python3 scripts/lib/no_heap_ratchet_gate.py --check "$reading" "$nostd_reading" --profile "$profile"
     _runci_legs_close
 }
 

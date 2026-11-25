@@ -183,7 +183,9 @@ fn tell(closure: &WatchClosure, entity: u8, event: &DeclWatchEvent<'_>) {
     };
     let record = record_of(entity, event);
     let context = closure.context.0;
-    let _in_callback = InCallback::enter();
+    let Some(_in_callback) = InCallback::enter() else {
+        return;
+    };
     // SAFETY: the program's callback, called as its declaration says, with a record that outlives
     // the call.
     let _ = catch(|| unsafe { call(context, &record) });

@@ -674,7 +674,9 @@ pub(crate) fn hand_liveliness(closure: &CClosure, sample: LivelinessSample<'_>) 
     // its duration, and an unwind out of the C callback would tear down the
     // drive thread, so it is caught here.
     let ctx = closure.context.0;
-    let _in_callback = crate::ffi::InCallback::enter();
+    let Some(_in_callback) = crate::ffi::InCallback::enter() else {
+        return;
+    };
     let _ = crate::ffi::catch(|| unsafe {
         call(sample_ptr, ctx);
     });
@@ -715,7 +717,9 @@ pub(crate) fn hand_sample(closure: &CClosure, sample: &SampleRef<'_>) {
     // down the drive thread, so it is caught here — the drive loop survives
     // a misbehaving callback.
     let ctx = closure.context.0;
-    let _in_callback = crate::ffi::InCallback::enter();
+    let Some(_in_callback) = crate::ffi::InCallback::enter() else {
+        return;
+    };
     let _ = crate::ffi::catch(|| unsafe {
         call(sample_ptr, ctx);
     });
