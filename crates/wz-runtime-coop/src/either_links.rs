@@ -235,6 +235,14 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     // stack may open to an IPv6 end, and the chosen stack refuses a family it does not carry.
     const IPV6: bool = A::IPV6 || B::IPV6;
 
+    // A name is resolved by the chosen stack, so either may answer it; the chosen one that has no
+    // resolver answers none.
+    const RESOLVES: bool = A::RESOLVES || B::RESOLVES;
+
+    fn resolve(&self, host: &str, port: u16, found: &mut [core::net::SocketAddr]) -> usize {
+        on_side!(EitherLinks, self, links => links.resolve(host, port, found))
+    }
+
     type Waits = EitherWaits<A::Waits, B::Waits>;
 
     fn waits(&self) -> Self::Waits {

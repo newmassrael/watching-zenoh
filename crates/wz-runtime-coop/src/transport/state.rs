@@ -55,7 +55,7 @@ use crate::group_transport::GroupTransport;
 use crate::link_cells::{CellRc, CountKind, OneTask};
 #[cfg(feature = "listen")]
 use crate::locator_text::parse_listen_locator;
-use crate::locator_text::parse_locator;
+use crate::locator_text::{read_dial_target, DialRefused, DialTarget, NamedHost};
 use crate::reassembly_rx::SessionReassembly;
 use crate::session_drive::{
     place_session_with_router, spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink,
@@ -165,6 +165,17 @@ impl TransportRouter for SessionReassembly {
 impl TransportRouter for () {
     fn abort_peer_chains(&mut self, _zid: &[u8]) {}
 }
+
+/// How many of the addresses a host name resolves to a dial of it tries
+/// (`TransportState::begin_named_dial`): held in the frame that begins the dial, so no table of
+/// the session's is sized by it.
+const RESOLVED_ADDRESSES: usize = 4;
+
+/// What a place for a resolved address holds until the resolver writes it; never dialled.
+const UNRESOLVED: core::net::SocketAddr = core::net::SocketAddr::V4(core::net::SocketAddrV4::new(
+    core::net::Ipv4Addr::UNSPECIFIED,
+    0,
+));
 
 /// A dial under way over the network of `T`.
 type DialOf<T> = <<T as TransportFaces>::Links as SessionLinks<CountOf<T>>>::Dial;
@@ -413,23 +424,58 @@ impl<T: TransportFaces> TransportState<T> {
     }
 
     /// Begin a dial of `endpoint`, which the network answers later
-    /// (`SessionLinks::begin_initiator`). [`TransportRefusal::Unreachable`] when the endpoint
-    /// does not parse or the network refuses the dial at once. Out of line: the dial role and a
-    /// face added by the program each begin a dial.
+    /// (`SessionLinks::begin_initiator`): of the address it names, or of a host it names at the
+    /// addresses the network resolves it to (`Self::begin_named_dial`).
+    /// [`TransportRefusal::Unreachable`] when the endpoint does not parse, names a host the
+    /// network cannot resolve, or the network refuses the dial at once. Out of line: the dial role
+    /// and a face added by the program each begin a dial.
     #[inline(never)]
     pub fn begin_dial(&self, endpoint: &str) -> Result<DialOf<T>, TransportRefusal> {
-        // Either refusal is the endpoint's, made in one place: the text and the cause are written
+        // Each refusal is the endpoint's, made in one place: the text and the cause are written
         // into the answer once, whichever step refused.
-        let why = match parse_locator(endpoint) {
-            Ok(to) => match self.links.begin_dial(to) {
+        let why = match read_dial_target(endpoint) {
+            Ok(DialTarget::At(to)) => match self.links.begin_dial(to) {
                 Ok(dial) => return Ok(dial),
                 Err(refused) => Refusal::Link(refused),
+            },
+            Ok(DialTarget::Named(name)) => match self.begin_named_dial(&name) {
+                Ok(dial) => return Ok(dial),
+                Err(refused) => refused,
             },
             Err(refused) => Refusal::Locator(refused),
         };
         Err(TransportRefusal::Unreachable(EndpointRefusal::new(
             endpoint, why,
         )))
+    }
+
+    /// Begin a dial of the host `name` at the addresses the network resolves it to, in the order
+    /// its resolver answers them, until the network begins one: an address the network refuses at
+    /// once (a family it does not carry, a connection refused before the call returns) passes the
+    /// dial to the next, as zenoh-pico's open passes a refused connect to the next address
+    /// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `it = it->ai_next`). The
+    /// first [`RESOLVED_ADDRESSES`] answers are tried. A network without a resolver refuses the
+    /// name before any is asked ([`DialRefused::NoResolver`]); a name it resolves to no address
+    /// is refused as a link the other end did not take, which a dial retries; when every address
+    /// was refused at once, the last refusal is the dial's.
+    ///
+    /// The resolver is asked here and nowhere else, as a dial begins: it may block for as long as
+    /// the network's name service takes, which no step of a link's way waits on.
+    #[inline(never)]
+    fn begin_named_dial(&self, name: &NamedHost<'_>) -> Result<DialOf<T>, Refusal> {
+        if !<T::Links as SessionLinks<CountOf<T>>>::RESOLVES {
+            return Err(Refusal::Locator(DialRefused::NoResolver));
+        }
+        let mut found = [UNRESOLVED; RESOLVED_ADDRESSES];
+        let count = self.links.resolve(name.host(), name.port(), &mut found);
+        let mut refused = LinkOpenError::Refused;
+        for at in found.iter().take(count) {
+            match self.links.begin_dial(name.locator(*at)) {
+                Ok(dial) => return Ok(dial),
+                Err(why) => refused = why,
+            }
+        }
+        Err(Refusal::Link(refused))
     }
 
     /// The text of the endpoint a dial reaches: the session's, by its row, or the one the dial

@@ -3480,8 +3480,9 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
 }
 
 /// A dial refused before any link is made names its endpoint and its cause: a text that names no
-/// address the build reads is refused by the locator, a protocol the links do not carry by the
-/// links. Turned red by a refusal that names the other cause or loses the endpoint.
+/// address the build reads, and no host either, is refused by the locator, a protocol the links do
+/// not carry by the links. Turned red by a refusal that names the other cause or loses the
+/// endpoint.
 #[test]
 fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
     use crate::{EndpointRefusal, OpenError, Refusal};
@@ -3490,7 +3491,7 @@ fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
 
     for (endpoint, why) in [
         (
-            "tcp/localhost:7447",
+            "tcp/127.0.0.256:7447",
             Refusal::Locator(DialRefused::BadAddress),
         ),
         (

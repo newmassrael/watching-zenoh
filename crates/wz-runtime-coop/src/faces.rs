@@ -1126,6 +1126,12 @@ impl<
         self.links.begin_initiator(to)
     }
 
+    /// The addresses the network resolves `host` to, each at `port`, written to the front of
+    /// `found`: how many (`SessionLinks::resolve`).
+    pub fn resolve(&self, host: &str, port: u16, found: &mut [core::net::SocketAddr]) -> usize {
+        self.links.resolve(host, port, found)
+    }
+
     /// Listen on `at`, whose links are stated for the endpoint in row `endpoint` of the session's
     /// texts when the session states one.
     #[cfg(feature = "listen")]

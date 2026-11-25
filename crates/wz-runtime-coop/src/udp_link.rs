@@ -196,6 +196,22 @@ pub trait DatagramSocket: Sized {
         let _ = error;
         false
     }
+
+    /// Whether the platform answers a host name with the addresses it stands for
+    /// ([`Self::resolve`]). A constant, so that the dial of a name over a platform without a
+    /// resolver is refused where the endpoint is read, and an image over one carries no resolver.
+    const RESOLVES: bool = false;
+
+    /// The addresses `host` stands for on the platform's network, each at `port`, written to the
+    /// front of `found` in the order the platform's resolver answers them, each once: how many.
+    /// `0` when the resolver answers none or fails, and on a platform without one
+    /// ([`Self::RESOLVES`]). `host` is a name as `crate::locator_text::read_dial_target` reads
+    /// one, at most `crate::locator_text::HOST_NAME_MAX` bytes. It blocks for as long as the
+    /// resolver takes, so a link's dial asks it as it begins and nothing on a link's way does.
+    fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
+        let _ = (host, port, found);
+        0
+    }
 }
 
 /// A failed [`DatagramSocket::bind`] as the stack's refusal to open the link: permanent for an
@@ -285,6 +301,13 @@ impl<U: DatagramSocket> DatagramSocket for NoDatagramOf<U> {
     // No address is ever opened, so a refused bind is never one to try again.
     fn refuses_address(_error: &()) -> bool {
         true
+    }
+
+    // The platform resolves a name for the stack's other links, as its waits wait on them.
+    const RESOLVES: bool = U::RESOLVES;
+
+    fn resolve(host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
+        U::resolve(host, port, found)
     }
 
     fn local(&self) -> SocketAddr {

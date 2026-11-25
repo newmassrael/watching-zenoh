@@ -707,6 +707,14 @@ where
 
     const IPV6: bool = opens_ipv6::<U, D, L>();
 
+    // The platform whose sockets these are resolves a name for each of its links, as its waits
+    // wait on each of them.
+    const RESOLVES: bool = U::RESOLVES;
+
+    fn resolve(&self, host: &str, port: u16, found: &mut [SocketAddr]) -> usize {
+        U::resolve(host, port, found)
+    }
+
     // The waits of the platform whose sockets these are: its streams, the secure channels over
     // them and its groups name handles of the same platform as its datagram sockets do.
     type Waits = U::Waits;
