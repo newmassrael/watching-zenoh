@@ -2071,7 +2071,8 @@ def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
         return 2
     try:
         read, refused = read_case(case, env, prefixes)
-    except (subprocess.CalledProcessError, OSError, RuntimeError, elf_facts.ElfError) as e:
+    except (subprocess.CalledProcessError, OSError, RuntimeError, elf_facts.ElfError,
+            wz_config.PresetError) as e:
         print(f"  size-ledger FAIL: {case.id}: the case or its reference could not be read: {e}",
               file=sys.stderr)
         return 1

@@ -122,15 +122,22 @@ fn with_two_sessions(check: impl FnOnce(*const z_loaned_session_t, *const z_loan
     }
 }
 
+/// Each row is also printed, so a run with `--nocapture` under a build's limits is the table of
+/// what that build's open reserves, row by row, which the heap cells of the parity matrix are read
+/// against.
 #[test]
 fn the_total_is_the_sum_of_the_bounded_rows() {
     with_two_sessions(|listener, dialer| {
-        for session in [listener, dialer] {
+        for (role, session) in [("listener", listener), ("dialer", dialer)] {
             let (summary, rows) = unsafe { report(session) };
             assert!(!rows.is_empty(), "a session holds something");
             let mut sum = 0usize;
             for row in &rows {
                 let door = &row.door;
+                eprintln!(
+                    "session memory {role}: {} ({}): {} x {} = {}",
+                    row.part, row.basis, door.count, door.entry_bytes, door.total_bytes
+                );
                 if door.bounded == 1 {
                     assert_eq!(door.total_bytes, door.count * door.entry_bytes, "{row:?}");
                     sum += door.total_bytes;
@@ -138,6 +145,7 @@ fn the_total_is_the_sum_of_the_bounded_rows() {
                     assert_eq!((door.count, door.total_bytes, door.enforced), (0, 0, 0));
                 }
             }
+            eprintln!("session memory {role}: total {}", summary.total_bytes);
             assert_eq!(summary.total_bytes, sum);
             assert_eq!(
                 summary.bounded,

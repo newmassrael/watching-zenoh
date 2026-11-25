@@ -791,7 +791,8 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "zenoh-plugin-storage-manager": 4,
     # 42 -> 41: the same count cites the transport body's random generator with its
     # root and a needle.
-    "zenoh-protocol": 41,
+    # 41 -> 40: one went with the code the twelfth pico ABI integration removed.
+    "zenoh-protocol": 40,
     "zenoh-runtime": 2,
     "zenoh-util": 3,
 }
@@ -916,7 +917,9 @@ def rootless_undeclared_budget() -> int:
 # 472 -> 470, the root-less bare budget 26 -> 25 and the `dispatcher` row 47 -> 46.
 # 470 -> 466, the `zenoh-link-udp` row 11 -> 7: the multicast TTL and join keys left the
 # session core's locator for the group locator, and four root-less citations went with them.
-ROOTLESS_TOTAL_BUDGET = 466
+# 466 -> 465, the `zenoh-protocol` row 41 -> 40: one went with the code the twelfth pico
+# ABI integration removed.
+ROOTLESS_TOTAL_BUDGET = 465
 
 #: The pico axis's two legacy forms, held both ways like `LINE_BUDGET`. MEASURED
 #: when the axis landed, by reading `PICO_LINE_CITE` and the plain path pattern
@@ -944,7 +947,8 @@ PICO_BARE_BUDGET = 126
 #: 1184 -> 1183: one more went with the code the int-fix lanes removed.
 #: 1183 -> 1180: the serial locator grammar, moved into its own module, cites pico's
 #: serial parser and tty open by rooted path and needle instead of by file name and line.
-BASENAME_LINE_BUDGET = 1180
+#: 1180 -> 1170: ten went with the code the twelfth pico ABI integration removed.
+BASENAME_LINE_BUDGET = 1170
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

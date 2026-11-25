@@ -1180,7 +1180,10 @@ inline in the registry, its peer's declarations at the build's capacities (about
 
 **What the peers write, by how many faces hold them.** `PeerPools` in
 `crates/wz-session-core/src/peer_tables.rs`, the plan's rows `peer alias pool`, `peer declaration
-pools` and `peer interest pool`, one area each.
+pools` and `peer interest pool`, one area each, and `peer row directory`, the one span that names
+where each kind's rows lie, which the session's key arena points every face's tables at. The plan
+counts every span `PeerPools::lent` takes (`PeerPoolRows::arena_bytes`): a span it left out would
+leave the open's arena short at the last place it lends.
 
 - A session of many faces lends one pool of each kind, holding the fewer of its `SESSION_MAX_` limit
   and what the faces could hold at one peer's bound. A row is its item and a link of two `u16`s,

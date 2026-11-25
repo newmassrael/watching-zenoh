@@ -761,30 +761,58 @@ parity_fail_log() {
     parity_fail "$@"
 }
 
-# The cargo arguments of the wz build of an original's preset: configs/<original>_defconfig alone, resolved.
-# It runs in a command substitution, so its refusal goes to stderr and the caller exits.
+# The wz build of an original's preset, configs/<original>_defconfig alone, as the one resolver gives every build
+# (`wz_config.py --resolve-build <abi>` with no preset): the cargo arguments on its first line, then the
+# WZ_LIMIT_<NAME>=<n> and WZ_POLICY_<NAME>=<value> lines the build runs under, without which it would hold every
+# build constant at its host default and not at the value the defconfig sets. Each helper runs in a command
+# substitution, so a refusal goes to stderr and the caller exits.
+parity_preset_build() {
+    local abi
+    case "$1" in
+        zenoh-pico) abi=pico ;;
+        zenoh-c) abi=c ;;
+        zenoh) abi=core ;;
+        *) echo "pico-compare: no ABI builds the original $1" >&2; return 2 ;;
+    esac
+    python3 -I scripts/lib/wz_config.py --resolve-build "$abi" \
+        || { echo "pico-compare: NOT-MEASURED, configs/$1_defconfig did not resolve (wz_config.py --resolve-build $abi)" >&2; return 2; }
+}
+
+# The cargo arguments of that build.
 parity_preset_args() {
-    python3 -I scripts/lib/wz_config.py --original-features "$1" \
-        || { echo "pico-compare: NOT-MEASURED, configs/$1_defconfig did not resolve (wz_config.py --original-features $1)" >&2; return 2; }
+    local build
+    build="$(parity_preset_build "$1")" || return 2
+    printf '%s\n' "${build%%$'\n'*}"
+}
+
+# The limits and policies of that build, one a line; none when it sets none.
+parity_preset_env() {
+    local build
+    build="$(parity_preset_build "$1")" || return 2
+    [[ "$build" != *$'\n'* ]] || printf '%s\n' "${build#*$'\n'}"
 }
 
 # zenoh-pico: the original is upstream's DEFAULT build (no switch passed; build-zenoh-pico-cli.sh configures that arm
 # as `zenoh-pico-build-default`, and this builds its shared library), wz is wz-capi-pico built for
-# configs/zenoh-pico_defconfig. The programs are compiled against the default arm's headers.
+# configs/zenoh-pico_defconfig, under the limits and policies it sets, in the form the pico C ABI's release ships, or
+# the one PICO_CMP_STDLIB names (perf_matrix.py bench-stdlib), as the size gate builds that form (perf_matrix.py
+# preset-arm, which applies what parity_preset_env gives the other families): a C library has no
+# unwinder and no symbolizer of its own, and the library with `std` carries both. The programs are compiled
+# against the default arm's headers.
 parity_build_pico() {
-    local dir="$1" default="$WZ_ARTIFACTS/target/zenoh-pico-build-default" args lib_p example variant name
+    local dir="$1" default="$WZ_ARTIFACTS/target/zenoh-pico-build-default" stdlib built lib_p example variant name
     bash scripts/build-zenoh-pico-cli.sh >"$dir/build-pico.log" 2>&1 \
         || parity_fail "the pico arms did not configure (see $dir/build-pico.log)"
     cmake --build "$default" --target zenohpico_shared -j"$(nproc)" >>"$dir/build-pico.log" 2>&1 \
         || parity_fail "pico's default arm did not build (see $dir/build-pico.log)"
     lib_p="$(find "$default" -name 'libzenohpico.so' -print -quit)"
     [ -n "$lib_p" ] || parity_fail "no libzenohpico.so under $default"
-    args="$(parity_preset_args zenoh-pico)" || exit 2
-    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build --profile "$wz_profile" -p wz-capi-pico $args) >"$dir/build-wz.log" 2>&1 \
-        || parity_fail "wz-capi-pico did not build for the preset (see $dir/build-wz.log)"
+    stdlib="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" bench-stdlib ${PICO_CMP_STDLIB:+"$PICO_CMP_STDLIB"})" \
+        || parity_fail "the standard library of the wz preset did not resolve (bench-stdlib said why above)"
+    built="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" preset-arm --out "$dir" --original zenoh-pico \
+        --stdlib "$stdlib")" \
+        || parity_fail_log "$dir/build-wz.log" "wz-capi-pico was not built for the preset: $built"
     cp -a "$(dirname "$lib_p")"/libzenohpico.so* "$dir/lib-P/" || parity_fail "the pico library did not copy"
-    cp "$wz_lib/libwz_capi_pico.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
     for example in "${PARITY_PROGRAMS[@]}"; do
         for variant in P W; do
             name=zenohpico
@@ -801,7 +829,7 @@ parity_build_pico() {
     PARITY_SIZE_P="$(readlink -f "$dir/lib-P/libzenohpico.so")"
     PARITY_SIZE_W="$dir/lib-W/libwz_capi_pico.so"
     PARITY_NOTES="original=zenoh-pico default build (cmake, no switch), $(grep -c '^#define Z_FEATURE_[A-Z_]* 1' "$default/zenohpico/include/zenoh-pico/config.h") switches on in its config.h
-wz_cargo_args=-p wz-capi-pico $args"
+$built"
 }
 
 # zenoh-c: the original is upstream's default build from the pinned source (install-zenoh-c-arm.sh nounstable: cmake
@@ -810,7 +838,8 @@ wz_cargo_args=-p wz-capi-pico $args"
 # of the pinned source, compiled against the original's headers.
 parity_build_c() {
     local dir="$1" prefix="$WZ_ARTIFACTS/target/zenoh-c-nounstable" ref="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
-    local args drop_in example variant name
+    local args env_lines drop_in example variant name
+    local -a build_env=()
     if [ ! -f "$ref/examples/z_ping.c" ]; then
         WZ_ZENOH_C_REF="$ref" bash scripts/install-zenoh-c.sh >"$dir/build-zenoh-c-source.log" 2>&1 \
             || parity_fail "the zenoh-c source did not install (see $dir/build-zenoh-c-source.log)"
@@ -818,10 +847,12 @@ parity_build_c() {
     WZ_ZENOH_C_REF="$ref" bash scripts/install-zenoh-c-arm.sh nounstable "$prefix" >"$dir/build-zenoh-c.log" 2>&1 \
         || parity_fail "zenoh-c's default arm did not build (see $dir/build-zenoh-c.log)"
     args="$(parity_preset_args zenoh-c)" || exit 2
+    env_lines="$(parity_preset_env zenoh-c)" || exit 2
+    [ -z "$env_lines" ] || mapfile -t build_env <<<"$env_lines"
     drop_in="$(python3 -I scripts/lib/wz_config.py --drop-in-features c "$prefix/include/zenoh_configure.h" 2>&1)" \
         || drop_in="not derived: $drop_in"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build --profile "$wz_profile" -p wz-capi-c $args) >"$dir/build-wz.log" 2>&1 \
+    (cd crates && env "${build_env[@]}" cargo build --profile "$wz_profile" -p wz-capi-c $args) >"$dir/build-wz.log" 2>&1 \
         || parity_fail "wz-capi-c did not build for the preset (see $dir/build-wz.log)"
     cp -a "$prefix/lib"/libzenohc.so* "$dir/lib-P/" || parity_fail "the zenoh-c library did not copy"
     cp "$wz_lib/libwz_capi_c.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
@@ -841,6 +872,7 @@ parity_build_c() {
     PARITY_SIZE_W="$dir/lib-W/libwz_capi_c.so"
     PARITY_NOTES="original=zenoh-c nounstable arm built from $ref ($(sed -n 's/^ *channel *= *"\([^"]*\)".*/\1/p' "$ref/rust-toolchain.toml" | head -1) toolchain)
 wz_cargo_args=-p wz-capi-c $args
+wz_build_env=${build_env[*]}
 wz_drop_in_args_for_the_original_header=$drop_in"
 }
 
@@ -850,24 +882,31 @@ wz_drop_in_args_for_the_original_header=$drop_in"
 # parity_build_rust <dir> [program...]: the programs built, PARITY_PROGRAMS when none is named (`fanin` names
 # its own, which the package holds beside upstream's).
 parity_build_rust() {
-    local dir="$1" args feats arm variant pkg example programs=() wanted=()
+    local dir="$1" args env_lines feats arm variant pkg example programs=() wanted=() build_env=() arm_env=()
     shift
     wanted=("$@")
     [ "${#wanted[@]}" -gt 0 ] || wanted=("${PARITY_PROGRAMS[@]}")
     args="$(parity_preset_args zenoh)" || exit 2
+    env_lines="$(parity_preset_env zenoh)" || exit 2
+    [ -z "$env_lines" ] || mapfile -t build_env <<<"$env_lines"
     feats="$(sed -n 's/.*--features \([^ ]*\).*/\1/p' <<<"$args")"
     for example in "${wanted[@]}"; do
         programs+=(--example "$example")
     done
     for arm in stock wz; do
         variant=P
-        [ "$arm" = wz ] && variant=W
+        arm_env=()
+        if [ "$arm" = wz ]; then
+            variant=W
+            arm_env=("${build_env[@]}")
+        fi
         pkg="$(python3 -I scripts/lib/z8_upstream_suite.py examples --arm "$arm" --core-features "$feats" 2>"$dir/generate-$arm.log")" \
             || parity_fail "the $arm examples package was not generated (see $dir/generate-$arm.log)"
         # The package's directory is the last line printed (a first clone of the tree may print before it).
         pkg="${pkg##*$'\n'}"
         [ -f "$pkg/Cargo.toml" ] || parity_fail "the $arm examples package is not at '$pkg'"
-        (cd "$pkg" && cargo build --release --target-dir "$pkg/target" "${programs[@]}") >"$dir/build-rust-$arm.log" 2>&1 \
+        (cd "$pkg" && env "${arm_env[@]}" cargo build --release --target-dir "$pkg/target" "${programs[@]}") \
+            >"$dir/build-rust-$arm.log" 2>&1 \
             || parity_fail_log "$dir/build-rust-$arm.log" "the $arm examples did not build (see $dir/build-rust-$arm.log)"
         for example in "${wanted[@]}"; do
             cp "$pkg/target/release/examples/$example" "$dir/bin/${example}_$variant" \
@@ -879,7 +918,8 @@ parity_build_rust() {
     PARITY_SIZE_P="$dir/bin/z_put_P"
     PARITY_SIZE_W="$dir/bin/z_put_W"
     PARITY_NOTES="original=upstream's examples package over zenoh from the registry; size cells read z_put
-wz_cargo_args=wz-capi-core features $feats (from: $args), unified with what the family's crates select"
+wz_cargo_args=wz-capi-core features $feats (from: $args), unified with what the family's crates select
+wz_build_env=${build_env[*]}"
 }
 
 # parity <family> [boots] [sizes]

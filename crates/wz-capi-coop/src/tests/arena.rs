@@ -2186,6 +2186,86 @@ const POOL_PARTS: [&str; 3] = [
     "peer interest pool",
 ];
 
+/// The part of an arena that names where the pools' rows lie, one span whatever the faces.
+#[cfg(feature = "runtime-plan")]
+const DIRECTORY_PART: &str = "peer row directory";
+
+/// The rows a plan lays out for what the faces' peers write are the bytes lending those pools
+/// takes, the directory of where their rows lie among them, so an arena of exactly those rows lends
+/// the pools with nothing over: for a client's one face, whose tables take spans of their own, and
+/// for a listener's faces, which share pools. Turned red by a plan that leaves out a span the lend
+/// takes: the open's arena is then short by that span at the last place it lends, and the pico C
+/// ABI answers the open with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn the_pool_rows_of_a_plan_are_what_lending_the_pools_takes() {
+    let limits = pico_preset_limits();
+    pools_lent_as_planned(&one_face_client(), &limits, false);
+    #[cfg(feature = "listen")]
+    {
+        let faces = crate::arena::admitted_faces(&limits).expect("the preset is under the build");
+        let handshakes =
+            crate::arena::admitted_handshakes(&limits).expect("the preset is under the build");
+        pools_lent_as_planned(
+            &CoopConfig {
+                listen: vec!["tcp/127.0.0.1:0".to_owned()],
+                max_faces: faces,
+                accept_pending: handshakes,
+                ..client_config()
+            },
+            &limits,
+            true,
+        );
+    }
+}
+
+/// Lend the pools the plan of `config` under `limits` counts from an arena of exactly the plan's
+/// rows of them: those rows are what the pools take, the faces share them as `shared` says, and
+/// the lend fills the arena.
+#[cfg(feature = "runtime-plan")]
+fn pools_lent_as_planned(config: &CoopConfig, limits: &SessionLimits, shared: bool) {
+    use wz_session_core::peer_tables::PeerPools;
+
+    let plan = ArenaPlan::of(config, limits).expect("the preset is under the build");
+    let pools = plan.peers().pools;
+    assert_eq!(pools.shared, shared, "whether the faces share their pools");
+    assert_eq!(
+        row(&plan, DIRECTORY_PART).count,
+        1,
+        "the directory is one span"
+    );
+    let planned: usize = plan
+        .rows()
+        .filter(|row| POOL_PARTS.contains(&row.part()) || row.part() == DIRECTORY_PART)
+        .map(|row| row.span().expect("within the address space"))
+        .sum();
+    assert_eq!(
+        Some(planned),
+        PeerPools::arena_bytes(pools),
+        "the plan's rows of the pools are what lending them takes"
+    );
+    let mut keys_arena =
+        SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
+    let keys = keys_arena
+        .arena_mut()
+        .lend_keys(256, limits.max_keyexpr_bytes_held())
+        .expect("the arena holds the key arena");
+    let mut arena =
+        SessionArena::of_bytes(planned, &AllocatorMemory).expect("the host has the memory");
+    let lent = PeerPools::lent(arena.arena_mut(), keys, pools)
+        .expect("an arena of the plan's rows lends the pools");
+    assert_eq!(
+        lent.is_shared(),
+        shared,
+        "the pools lent are shared as planned"
+    );
+    assert_eq!(
+        arena.arena_mut().high_water(),
+        planned,
+        "the pools take the plan's rows and no more"
+    );
+}
+
 /// The parts of an arena held once for each link: its place among the session's links.
 #[cfg(feature = "listen")]
 const LINK_PARTS: [&str; 1] = ["link places"];
