@@ -2927,7 +2927,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     ))]
     let mut outcome: Option<DriverLoopOutcome> = None;
     let mut dispatched = false;
-    let (read, stopped) = crate::network_message::try_for_each_record_while(
+    let walked = crate::network_message::try_for_each_record_while(
         payload,
         record,
         form,
@@ -3012,7 +3012,10 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                 count_rx_record(actions, record);
             }
         },
-    )?;
+    );
+    // What the host put off for the records it was handed is owed whatever the walk answers.
+    on_event.end_records();
+    let (read, stopped) = walked?;
     if !dispatched {
         #[cfg(all(
             feature = "alloc",

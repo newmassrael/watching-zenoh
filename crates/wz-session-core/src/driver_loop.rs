@@ -831,6 +831,7 @@ mod lent_delivery {
             Ok(())
         })
         .expect("a frame a test writes is walked whole");
+        on_event.end_records();
         if !walked {
             on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
                 reliable,
@@ -1681,6 +1682,12 @@ pub trait EventSink {
         true
     }
 
+    /// The records of the frame just walked have been handed, all of them or as many as the host
+    /// took: a host that put off what follows each record of a run does it now. Called once a
+    /// frame, after its last record and before what the frame's walk answers is acted on. Defaults
+    /// to nothing.
+    fn end_records(&mut self) {}
+
     /// Whether the datagram being dispatched stays where the link holds it when its dispatch
     /// stops before its end, to be lent again whole on a later step. Defaults to `false`: what
     /// follows the first message is then parked as a copy, or, with no allocator, read at once.
@@ -1877,7 +1884,10 @@ pub(crate) fn walk_lent_payload(
         },
         #[cfg(all(feature = "transport-stats", feature = "alloc"))]
         counted,
-    )?;
+    );
+    // What the host put off for the records it was handed is owed whatever the walk answers.
+    on_event.end_records();
+    let walked = walked?;
     if !dispatched {
         #[cfg(feature = "alloc")]
         on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {

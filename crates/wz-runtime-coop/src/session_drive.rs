@@ -393,6 +393,10 @@ impl<L: SessionDatagramLink + ?Sized, F: EventSink + ?Sized> EventSink for LinkS
         self.link.takes_input()
     }
 
+    fn end_records(&mut self) {
+        self.sink.end_records()
+    }
+
     fn holds_datagram(&self) -> bool {
         self.link.keeps_input()
     }
