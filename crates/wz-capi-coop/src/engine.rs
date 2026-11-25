@@ -65,7 +65,10 @@ use wz_session_core::bounded::{
     Arena, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, TableLender,
 };
 use wz_session_core::caps;
-#[cfg(feature = "liveliness")]
+#[cfg(all(
+    feature = "liveliness",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::placed::{Placed, PlacedRef};
@@ -2440,7 +2443,10 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
 
 // The delivery traits are the rows': each names the context its row is told through, here the
 // session's round of deliveries and its query plane.
-#[cfg(feature = "liveliness")]
+#[cfg(all(
+    feature = "liveliness",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 impl
     wz_session_core::declare::liveliness_subscriber::LivelinessDelivered<
         RoundDelivery,
@@ -2474,6 +2480,28 @@ impl
             cx.round
                 .offer_liveliness(LivelinessCall::new(call), &sample, held)
         };
+    }
+}
+
+/// A read that steps its one link itself hands each peer token to the liveliness subscribers it
+/// reaches itself, one row at a time with the session let go of (`TakenAhead::tokens`), so no
+/// plane tells a row a token: the observer's sinks name a delivery all the same.
+#[cfg(all(
+    feature = "liveliness",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+impl
+    wz_session_core::declare::liveliness_subscriber::LivelinessDelivered<
+        RoundDelivery,
+        LivelinessSubscriberHandle,
+    > for LivelinessRow
+{
+    fn tell(
+        _cx: &mut RoundDelivery,
+        _id: LivelinessSubscriberHandle,
+        _row: RowAccess<'_, LivelinessRow>,
+        _sample: LivelinessSample<'_>,
+    ) {
     }
 }
 
@@ -4397,14 +4425,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[inline(never)]
     fn lose_link(&mut self, id: FaceId) {
         self.session.lose_face(id);
-        #[cfg(feature = "liveliness")]
+        // A read that steps its one link itself hands the tokens owed after it lets go of the
+        // session (`tokens`).
+        #[cfg(all(
+            feature = "liveliness",
+            any(feature = "threads", feature = "listen", feature = "group")
+        ))]
         self.retract_owed();
     }
 
     /// Retract the tokens the peers of lost links declared, as many as the round of deliveries
     /// takes now (`SessionState::retract_owed`). Each `Delete` is a record of a token for every
     /// liveliness subscriber the session's limits admit.
-    #[cfg(feature = "liveliness")]
+    #[cfg(all(
+        feature = "liveliness",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     fn retract_owed(&mut self) {
         // A token's record owes a callback to each liveliness subscriber the session admits.
         let callbacks = crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
@@ -5816,7 +5852,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // The tokens of a lost link the round had no room for, retracted now the round is handed
         // out, each round sealed as the session is let go of and handed out in turn.
-        #[cfg(feature = "liveliness")]
+        #[cfg(all(
+            feature = "liveliness",
+            any(feature = "threads", feature = "listen", feature = "group")
+        ))]
         while self.samples.owes() {
             let Some(mut core) = self.live() else {
                 break;
@@ -6942,8 +6981,34 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             });
         }
         // A row whose last call this was, its subscriber undeclared from inside its history, is
-        // let go of by the delivery the declaration ends with.
+        // let go of as the call ends.
+        self.end_liveliness_call(call);
+    }
+
+    /// End `call`, made of a liveliness subscriber's row: a row whose last call it was is marked
+    /// for the walk the round's delivery ends with.
+    #[cfg(all(
+        feature = "liveliness",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
+    fn end_liveliness_call(&self, call: LivelinessCall) {
         self.samples.end_liveliness_call(call);
+    }
+
+    /// End `call`, made of a liveliness subscriber's row: a row whose last call it was is let go
+    /// of here, with no lock held, as a Push's walk lets a subscriber's go (`pinned`).
+    #[cfg(all(
+        feature = "liveliness",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn end_liveliness_call(&self, call: LivelinessCall) {
+        if call.end() {
+            self.let_go_of_drained(|tables, cursor| {
+                tables
+                    .release_drained_liveliness_subscriber(cursor)
+                    .map(|row| row.into_callback())
+            });
+        }
     }
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session

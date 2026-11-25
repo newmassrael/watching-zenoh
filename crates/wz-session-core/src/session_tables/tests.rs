@@ -3335,3 +3335,61 @@ fn a_row_undeclared_while_a_pinned_call_runs_is_passed_and_let_go_after() {
     assert!(!tables.subscribers().holds_slot(one.handle));
     assert!(tables.subscribers().contains(three.handle));
 }
+
+/// Every liveliness subscriber `fan` pins, each call ended at once: the number each row's
+/// closure was given.
+fn tokens_pinned_in_turn(tables: &LatchedTables, fan: &mut PinnedTokenFan<'_>) -> Vec<u32> {
+    let mut seen = Vec::new();
+    while let Some(call) = tables.pin_next_liveliness_subscriber(fan) {
+        seen.push(call.call);
+        assert!(
+            !ended::<CClosure<u32>>(call),
+            "a live row's call marks nothing"
+        );
+    }
+    seen
+}
+
+/// A peer token's walk pins, one at a time in the table's order, each liveliness subscriber whose
+/// pattern meets its key, and of a historical token only the rows that asked for history; a row
+/// undeclared before the walk reaches it begins no call. The CONTROL is the live token, which
+/// reaches the row that asked no history too. Turned red by a walk that matches by another rule
+/// than the token fan's (`token_reaches`), repeats a row, or pins a row undeclared.
+#[test]
+fn a_tokens_walk_pins_each_liveliness_subscriber_it_reaches_in_turn() {
+    let mut tables = latched_tables();
+    tables
+        .declare_liveliness_subscriber("demo/**", false, KeyForm::default(), latched(1))
+        .unwrap();
+    tables
+        .declare_liveliness_subscriber("other/**", true, KeyForm::default(), latched(2))
+        .unwrap();
+    let asked = tables
+        .declare_liveliness_subscriber("demo/*", true, KeyForm::default(), latched(3))
+        .unwrap();
+    assert_eq!(
+        tokens_pinned_in_turn(&tables, &mut PinnedTokenFan::new("demo/t", false)),
+        [1, 3],
+        "CONTROL: a live token reaches every row its key meets"
+    );
+    assert_eq!(
+        tokens_pinned_in_turn(&tables, &mut PinnedTokenFan::new("demo/t", true)),
+        [3],
+        "a historical token reaches only the rows that asked for history"
+    );
+    let mut fan = PinnedTokenFan::new("demo/t", false);
+    let first = tables
+        .pin_next_liveliness_subscriber(&mut fan)
+        .expect("the first row");
+    assert_eq!(first.call, 1);
+    assert!(!ended::<CClosure<u32>>(first));
+    assert!(tables
+        .undeclare_liveliness_subscriber(asked.handle)
+        .unwrap()
+        .taken
+        .is_some());
+    assert!(
+        tables.pin_next_liveliness_subscriber(&mut fan).is_none(),
+        "a row undeclared between two pins begins no call"
+    );
+}

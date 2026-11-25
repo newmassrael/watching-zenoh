@@ -116,8 +116,8 @@ use crate::wireexpr_resolve::resolve_wireexpr_into;
     feature = "rx-lent-control"
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
-#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::wireexpr_resolve::KeyexprBuf;
+#[cfg(feature = "storage-profile")]
+use crate::wireexpr_resolve::{KeyexprBuf, KeyexprOut};
 // R311y739 — the two-space PAIR is `alloc`-only: `dispatch_messages` /
 // `dispatch_iteration_event` name it in their signatures under that gate alone,
 // while only the `Declare` arm inside them resolves and so carries `codec-declare`.
@@ -203,6 +203,122 @@ impl<Row: LivelinessSampleSink, Id> LivelinessDelivered<(), Id> for Row {
 /// `()` is no [`LivelinessSampleSink`], so this and the sinks' own never name the same pair.
 impl<X, Id> LivelinessDelivered<X, Id> for () {
     fn tell(_cx: &mut X, _id: Id, _row: RowAccess<'_, ()>, _sample: LivelinessSample<'_>) {}
+}
+
+/// One peer token's news for the session's liveliness subscribers, taken under the tables' lock by
+/// a caller that hands it to each row it reaches once the lock is let go of
+/// ([`PeerTokens::take_lost`] and its kin): the token's key copied whole, so nothing of the peer's
+/// table is borrowed past the lock.
+#[cfg(feature = "storage-profile")]
+pub struct TokenNews {
+    kind: LivelinessSampleKind,
+    token_id: u64,
+    historical: bool,
+    key: KeyexprBuf,
+}
+
+#[cfg(feature = "storage-profile")]
+impl Default for TokenNews {
+    fn default() -> Self {
+        Self {
+            kind: LivelinessSampleKind::Put,
+            token_id: 0,
+            historical: false,
+            key: KeyexprBuf::new(),
+        }
+    }
+}
+
+#[cfg(feature = "storage-profile")]
+impl TokenNews {
+    /// The sample each row the token reaches is handed.
+    pub fn sample(&self) -> LivelinessSample<'_> {
+        LivelinessSample {
+            kind: self.kind,
+            keyexpr: KeyexprOut::as_str(&self.key),
+            token_id: self.token_id,
+        }
+    }
+
+    /// Whether the token answers a CURRENT interest, which only the rows that asked for history
+    /// hear (`PeerTokens::dispatch_declare_historical`).
+    pub fn historical(&self) -> bool {
+        self.historical
+    }
+
+    /// Hold the news of the token `token_id` on `keyexpr`: whether the key fits, which a key the
+    /// peer's table held or a resolver composed in a buffer of the same bound always does.
+    fn write(
+        &mut self,
+        kind: LivelinessSampleKind,
+        keyexpr: &str,
+        token_id: u64,
+        historical: bool,
+    ) -> bool {
+        KeyexprOut::clear(&mut self.key);
+        if KeyexprOut::push_str(&mut self.key, keyexpr).is_err() {
+            return false;
+        }
+        self.kind = kind;
+        self.token_id = token_id;
+        self.historical = historical;
+        true
+    }
+}
+
+/// The marks [`PeerTokens::dispatch_iteration_event_unclaimed`] sets on the subscribers `subs`
+/// and nothing else, for a caller that took each token of `event` itself
+/// (`PeerTokens::take_token_view`, `PeerTokens::take_token`): the end of a history
+/// subscriber's replay, which a responder's `Declare(DeclFinal)` carrying its `interest_id`
+/// is, unless a pending get claims the id.
+#[cfg(feature = "storage-profile")]
+pub fn mark_histories_unclaimed<L: LocalLivelinessSubscribers>(
+    subs: &mut L,
+    event: IterationEvent<'_, '_>,
+    claimed: &dyn Fn(u64) -> bool,
+) {
+    #[cfg(all(
+        feature = "codec-declare",
+        any(feature = "alloc", feature = "rx-lent-control")
+    ))]
+    {
+        let mut mark = |interest_id: Option<u64>, ends_history: bool| {
+            if let Some(interest_id) = interest_id.filter(|id| ends_history && !claimed(*id)) {
+                subs.mark_history_complete(interest_id);
+            }
+        };
+        match event {
+            #[cfg(feature = "alloc")]
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                for message in crate::driver_loop::owned_records(messages)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let NetworkMessage::Declare(decl) = message {
+                        mark(
+                            decl.interest_id,
+                            matches!(decl.body, DeclareOwnedVariant::CodecZenohDeclFinal(_)),
+                        );
+                    }
+                }
+            }
+            #[cfg(feature = "rx-lent-control")]
+            IterationEvent::InPlace(record) => {
+                if let Some(decl) = record.declare() {
+                    mark(
+                        decl.interest_id,
+                        matches!(decl.body, DeclareVariant::CodecZenohDeclFinal(_)),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    #[cfg(not(all(
+        feature = "codec-declare",
+        any(feature = "alloc", feature = "rx-lent-control")
+    )))]
+    let _ = (subs, event, claimed);
 }
 
 /// Tell every row of `subs` a token on `keyexpr` reaches, through `cx`: how many. `held` is the
@@ -1454,6 +1570,30 @@ impl<P: Storage> PeerTokens<P> {
     ) where
         L::Sink: LivelinessDelivered<X, L::RowId>,
     {
+        let Some(id) = self.bind_declared(id, resolved) else {
+            return;
+        };
+        // The row now holds the key, which a context that keeps the sample may hold too.
+        let held = self
+            .table
+            .find(id)
+            .and_then(crate::bounded::KeyBacking::held);
+        tell_reached(
+            subs,
+            cx,
+            LivelinessSampleKind::Put,
+            resolved,
+            held,
+            id,
+            historical,
+        );
+    }
+
+    /// Bind the token a peer declared under `id` on `resolved`, whichever form carried the
+    /// declaration: the id the table holds it under, `None` for a repeat, which is silent, and for
+    /// a token refused, which is counted.
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    fn bind_declared(&mut self, id: u64, resolved: &str) -> Option<u64> {
         // R311y769 — the FIRST declaration of an id wins, and a repeat
         // is silent. zenoh wraps this whole arm in
         // `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
@@ -1475,20 +1615,20 @@ impl<P: Storage> PeerTokens<P> {
         #[cfg(feature = "alloc")]
         let id = if id == 0 {
             if self.sourced_id(resolved).is_some() {
-                return;
+                return None;
             }
             // No id left past the ones held: refused and counted as a full table refuses, and
             // not held under an id another token has.
             let Some(next) = self.next_sourced_id() else {
                 self.table.count_refused();
-                return;
+                return None;
             };
             next
         } else {
             id
         };
         if self.table.find(id).is_some() {
-            return;
+            return None;
         }
         // S9a — a token the table has no room for, or none under the quota
         // its creator stated (or whose keyexpr is longer than a row's text),
@@ -1500,14 +1640,14 @@ impl<P: Storage> PeerTokens<P> {
             Ok(text) => text,
             Err(KeyUnkept::TooLong) => {
                 self.oversize = self.oversize.saturating_add(1);
-                return;
+                return None;
             }
             // No room where the rows keep their keys: dropped and counted as a token the table
             // has no room for, and announced to no subscriber, as zenoh-pico drops one its heap
             // cannot hold.
             Err(KeyUnkept::NoRoom) => {
                 self.table.count_refused();
-                return;
+                return None;
             }
         };
         let quota = self.quota;
@@ -1516,22 +1656,9 @@ impl<P: Storage> PeerTokens<P> {
             .bind_within(id, text, |count| quota.admits(count))
             .is_err()
         {
-            return;
+            return None;
         }
-        // The row now holds the key, which a context that keeps the sample may hold too.
-        let held = self
-            .table
-            .find(id)
-            .and_then(crate::bounded::KeyBacking::held);
-        tell_reached(
-            subs,
-            cx,
-            LivelinessSampleKind::Put,
-            resolved,
-            held,
-            id,
-            historical,
-        );
+        Some(id)
     }
 
     /// What an undeclared peer token does, whichever form carried the
@@ -1558,12 +1685,34 @@ impl<P: Storage> PeerTokens<P> {
     ) where
         L::Sink: LivelinessDelivered<X, L::RowId>,
     {
-        // The row's own text, taken out of the table, or the keyexpr
-        // the retraction carries. `KeyText` is a `String` on the
-        // growable backing and a bounded buffer on the fixed one, so
-        // both arms are read as a `&str` below and neither allocates
-        // there.
+        let (id, removed) = self.unbind_undeclared(id, exts, peer_keyexpr_table);
         let mut composed = KeyexprBuf::new();
+        let Some(resolved) =
+            Self::retracted_key(removed.as_ref(), exts, peer_keyexpr_table, &mut composed)
+        else {
+            return;
+        };
+        tell_reached(
+            subs,
+            cx,
+            LivelinessSampleKind::Delete,
+            resolved,
+            removed.as_ref().and_then(crate::bounded::KeyBacking::held),
+            id,
+            historical,
+        );
+    }
+
+    /// The id a peer's retraction of `id` names and the row it unbinds, whichever form carried it
+    /// (`exts` is its extension chain, `peer_keyexpr_table` the spaces it resolves against): the
+    /// row's own text, taken out of the table, or `None` for an id the table never held.
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    fn unbind_undeclared<'k, E: crate::ext_view::ExtEntryView, PS: Storage, OS: Storage>(
+        &mut self,
+        id: u64,
+        exts: Option<&'k [E]>,
+        peer_keyexpr_table: MappingSpaces<'k, PS, OS>,
+    ) -> (u64, Option<crate::id_map::KeyText<P>>) {
         // A retraction by keyexpr (id `0`) names a token held under the id its declaration was
         // given: the one the keyexpr was found under.
         #[cfg(feature = "alloc")]
@@ -1580,9 +1729,27 @@ impl<P: Storage> PeerTokens<P> {
         } else {
             id
         };
-        let removed = self.table.unbind(id);
-        let resolved: &str = match removed.as_ref() {
-            Some(s) => s.as_ref(),
+        // Read only to find a token declared by its keyexpr, which a build without the heap
+        // holds none of.
+        #[cfg(not(feature = "alloc"))]
+        let _ = (exts, peer_keyexpr_table);
+        (id, self.table.unbind(id))
+    }
+
+    /// The keyexpr a retraction is told under: the text `removed`, the row it unbound, held, or,
+    /// for an id the table never held, the one the retraction carries (`exts` against
+    /// `peer_keyexpr_table`), composed in `composed`. `None` when it carries none either.
+    /// `KeyText` is a `String` on the growable backing and a bounded buffer on the fixed one, so
+    /// both are read as a `&str` and neither allocates here.
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    fn retracted_key<'r, E: crate::ext_view::ExtEntryView, PS: Storage, OS: Storage>(
+        removed: Option<&'r crate::id_map::KeyText<P>>,
+        exts: Option<&'r [E]>,
+        peer_keyexpr_table: MappingSpaces<'r, PS, OS>,
+        composed: &'r mut KeyexprBuf,
+    ) -> Option<&'r str> {
+        match removed {
+            Some(s) => Some(s.as_ref()),
             // R311y769 — the id is unknown, so FALL BACK to the keyexpr
             // the retraction carries itself. zenoh reaches its
             // `else if m.ext_wire_expr.wire_expr != WireExpr::empty()`
@@ -1610,24 +1777,140 @@ impl<P: Storage> PeerTokens<P> {
             // the same rule composed in a bounded buffer, because this arm
             // is what a PEER reaches with an id the table never held, and a
             // peer must not be able to make the registry build a `String`.
-            None => match crate::declare_ext_keyexpr::resolve_ext_keyexpr_in(
+            None => crate::declare_ext_keyexpr::resolve_ext_keyexpr_in(
                 exts,
                 peer_keyexpr_table,
-                &mut composed,
-            ) {
-                Ok(Some(s)) => s,
-                Ok(None) | Err(_) => return,
-            },
-        };
-        tell_reached(
-            subs,
-            cx,
-            LivelinessSampleKind::Delete,
-            resolved,
-            removed.as_ref().and_then(crate::bounded::KeyBacking::held),
-            id,
-            historical,
-        );
+                composed,
+            )
+            .ok()
+            .flatten(),
+        }
+    }
+
+    /// [`Self::dispatch_declare_view_historical`] for a caller that hands the token to the
+    /// liveliness subscribers itself, one row at a time with the tables let go of: the token is
+    /// bound or unbound as there, and what the rows are to be told of it written into `news`.
+    /// Whether there is any: none for a declaration of no token, a repeat, a refusal, and a
+    /// retraction that names no key.
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "storage-profile",
+        feature = "rx-lent-control"
+    ))]
+    pub fn take_token_view<'a, PS: Storage, OS: Storage>(
+        &mut self,
+        body: &DeclareVariant<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+        historical: bool,
+        news: &mut TokenNews,
+    ) -> bool {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        match body {
+            DeclareVariant::CodecZenohDeclToken(decl) => {
+                let mut composed = KeyexprBuf::new();
+                match resolve_wireexpr_view(&decl.keyexpr.body, peer_keyexpr_table, &mut composed) {
+                    Ok(Some(resolved)) => self.news_declared(decl.id, resolved, historical, news),
+                    Ok(None) => false,
+                    Err(_) => {
+                        self.oversize = self.oversize.saturating_add(1);
+                        false
+                    }
+                }
+            }
+            DeclareVariant::CodecZenohUndeclToken(undecl) => self.news_undeclared(
+                undecl.id,
+                crate::held_list::HeldList::entries(&undecl.extensions),
+                peer_keyexpr_table,
+                historical,
+                news,
+            ),
+            _ => false,
+        }
+    }
+
+    /// `Self::take_token_view` for a declaration the copying receive decoded.
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "storage-profile",
+        feature = "alloc"
+    ))]
+    pub fn take_token<'a, PS: Storage, OS: Storage>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+        historical: bool,
+        news: &mut TokenNews,
+    ) -> bool {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        match body {
+            DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
+                let mut composed = KeyexprBuf::new();
+                match resolve_wireexpr_into(&decl.keyexpr.body, peer_keyexpr_table, &mut composed) {
+                    Ok(Some(resolved)) => self.news_declared(decl.id, resolved, historical, news),
+                    Ok(None) => false,
+                    Err(_) => {
+                        self.oversize = self.oversize.saturating_add(1);
+                        false
+                    }
+                }
+            }
+            DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => self.news_undeclared(
+                undecl.id,
+                crate::held_list::HeldList::entries(&undecl.extensions),
+                peer_keyexpr_table,
+                historical,
+                news,
+            ),
+            _ => false,
+        }
+    }
+
+    /// Bind the token declared under `id` on `resolved` and write its `Put` into `news`:
+    /// whether it was bound.
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    fn news_declared(
+        &mut self,
+        id: u64,
+        resolved: &str,
+        historical: bool,
+        news: &mut TokenNews,
+    ) -> bool {
+        self.bind_declared(id, resolved)
+            .is_some_and(|id| news.write(LivelinessSampleKind::Put, resolved, id, historical))
+    }
+
+    /// Unbind the token a retraction of `id` names and write its `Delete` into `news`: whether
+    /// it names a key.
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    fn news_undeclared<'k, E: crate::ext_view::ExtEntryView, PS: Storage, OS: Storage>(
+        &mut self,
+        id: u64,
+        exts: Option<&'k [E]>,
+        peer_keyexpr_table: MappingSpaces<'k, PS, OS>,
+        historical: bool,
+        news: &mut TokenNews,
+    ) -> bool {
+        let (id, removed) = self.unbind_undeclared(id, exts, peer_keyexpr_table);
+        let mut composed = KeyexprBuf::new();
+        Self::retracted_key(removed.as_ref(), exts, peer_keyexpr_table, &mut composed)
+            .is_some_and(|key| news.write(LivelinessSampleKind::Delete, key, id, historical))
+    }
+
+    /// The next token of a lost link, unbound, its `Delete` written into `news`: the one of the
+    /// lowest id, as [`Self::flush_on_link_loss_while`] retracts them, for a caller that hands it
+    /// to the liveliness subscribers itself, one row at a time with the tables let go of. A link
+    /// loss is a live event, so the news is not historical. `false` once none is left.
+    #[cfg(feature = "storage-profile")]
+    pub fn take_lost(&mut self, news: &mut TokenNews) -> bool {
+        while let Some(id) = self.table.entries().map(|(id, _)| id).min() {
+            let Some(keyexpr) = self.table.unbind(id) else {
+                break;
+            };
+            if news.write(LivelinessSampleKind::Delete, keyexpr.as_ref(), id, false) {
+                return true;
+            }
+        }
+        false
     }
 
     /// [`LivelinessSubscriberTable::flush_peer_tokens_on_link_loss`] for a caller whose subscribers take a bounded
@@ -2837,6 +3120,76 @@ mod tests {
         assert_eq!(reg.flush_peer_tokens_on_link_loss(), 1);
         assert!(sink.lock().unwrap().is_empty());
         assert_eq!(reg.peer_token_count(), 0);
+    }
+
+    /// A token taken for a caller that hands it out itself is bound as the fan binds it and its
+    /// news written: a `Put` under its key, historical as its envelope says; a repeat writes
+    /// none; its retraction a `Delete` under the key the table held; a lost link's tokens one
+    /// `Delete` each, lowest id first and never historical, then none. The CONTROL is a
+    /// retraction of an id never held that names no key, which writes no news. Turned red by news
+    /// that names another key or id than the fan would tell, or a take that leaves the table as
+    /// the fan would not.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_token_taken_for_its_caller_writes_what_the_rows_are_told() {
+        let mut peer: PeerTokens = PeerTokens::default();
+        let mut news = TokenNews::default();
+        let told = |news: &TokenNews| {
+            let sample = news.sample();
+            (
+                sample.kind,
+                sample.keyexpr.to_string(),
+                sample.token_id,
+                news.historical(),
+            )
+        };
+        let declare = |id: u64, key: &str| {
+            DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(key)))
+        };
+        assert!(peer.take_token(&declare(7, "t/a"), &HashMap::new(), true, &mut news));
+        assert_eq!(
+            told(&news),
+            (LivelinessSampleKind::Put, "t/a".to_string(), 7, true)
+        );
+        assert!(
+            !peer.take_token(&declare(7, "t/other"), &HashMap::new(), false, &mut news),
+            "a repeat writes no news"
+        );
+        assert!(
+            !peer.take_token(
+                &DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(9)),
+                &HashMap::new(),
+                false,
+                &mut news
+            ),
+            "CONTROL: a retraction of an id never held, naming no key, writes none"
+        );
+        assert!(peer.take_token(
+            &DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(7)),
+            &HashMap::new(),
+            false,
+            &mut news
+        ));
+        assert_eq!(
+            told(&news),
+            (LivelinessSampleKind::Delete, "t/a".to_string(), 7, false)
+        );
+        assert_eq!(peer.count(), 0, "the retraction unbound it");
+        for (id, key) in [(4, "t/four"), (2, "t/two")] {
+            assert!(peer.take_token(&declare(id, key), &HashMap::new(), false, &mut news));
+        }
+        assert!(peer.take_lost(&mut news));
+        assert_eq!(
+            told(&news),
+            (LivelinessSampleKind::Delete, "t/two".to_string(), 2, false)
+        );
+        assert!(peer.take_lost(&mut news));
+        assert_eq!(
+            told(&news),
+            (LivelinessSampleKind::Delete, "t/four".to_string(), 4, false)
+        );
+        assert!(!peer.take_lost(&mut news), "none left");
+        assert_eq!(peer.count(), 0);
     }
 
     #[test]

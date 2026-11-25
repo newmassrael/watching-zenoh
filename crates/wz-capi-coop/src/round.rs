@@ -11,19 +11,9 @@
 use core::cell::Cell;
 
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
-#[cfg(any(
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness"
-))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::limit_binding::Quota;
-#[cfg(any(
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness"
-))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
 #[cfg(test)]
@@ -58,13 +48,7 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 pub(crate) use wz_session_core::round::AnswersQueries;
 #[cfg(feature = "query")]
 pub(crate) use wz_session_core::round::LegHolders;
-#[cfg(any(
-    test,
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness"
-))]
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) use wz_session_core::round::ReadRoom;
 pub(crate) use wz_session_core::round::RoundRows;
 pub use wz_session_core::round::{RoundCounts, RoundRowCounts};
@@ -155,12 +139,7 @@ fn session_watches(limits: &SessionLimits) -> usize {
 /// over it counts as the build's, which the open refuses. What a record of a token owes a callback
 /// to at most, and so what the round's callbacks are asked for ([`read_room`]) and a retraction
 /// asks of them.
-#[cfg(any(
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness"
-))]
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 pub(crate) fn session_liveliness<const LIVE: usize>(limits: &SessionLimits) -> usize {
     limits
         .max_liveliness_subscriptions()

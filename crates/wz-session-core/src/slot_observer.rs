@@ -400,6 +400,10 @@ pub struct TakenAhead {
     /// Every peer's query, handed to the queryables and owed its Final by the caller
     /// (`QueryPeer::pin_request`).
     pub queries: bool,
+    /// Every peer token, bound or unbound in the peer's table and handed to the liveliness
+    /// subscribers by the caller (`PeerTokens::take_token_view`): the plane keeps only the marks
+    /// that end the subscribers' histories.
+    pub tokens: bool,
 }
 
 /// [`TakenAhead`] with what the entry point itself says of the answers to the pending gets and
@@ -1478,28 +1482,38 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             #[cfg(not(feature = "liveliness-get"))]
             let claimed = |_: u64| false;
             let (own, subscribers) = self.tables.liveliness_mut();
-            let spaces = peers.subscribers.mapping_spaces_over(own);
-            match subscribers {
-                Some(subscribers) => peers.tokens.dispatch_iteration_event_unclaimed(
-                    subscribers,
-                    cx,
-                    event,
-                    spaces,
-                    &claimed,
-                ),
-                // Tables that keep no liveliness subscriber still keep the peer's tokens.
-                None => peers.tokens.dispatch_iteration_event_unclaimed(
-                    &mut crate::session_tables::AbsentTable::<
-                        <K::Tables<P> as LivelinessTables<
-                            K::LivelinessSubscriber,
-                            K::LivelinessSubscriberId,
-                        >>::LivelinessSubscribers,
-                    >::new(),
-                    cx,
-                    event,
-                    spaces,
-                    &claimed,
-                ),
+            if taken.ahead.tokens {
+                if let Some(subscribers) = subscribers {
+                    crate::declare::liveliness_subscriber::mark_histories_unclaimed(
+                        subscribers,
+                        event,
+                        &claimed,
+                    );
+                }
+            } else {
+                let spaces = peers.subscribers.mapping_spaces_over(own);
+                match subscribers {
+                    Some(subscribers) => peers.tokens.dispatch_iteration_event_unclaimed(
+                        subscribers,
+                        cx,
+                        event,
+                        spaces,
+                        &claimed,
+                    ),
+                    // Tables that keep no liveliness subscriber still keep the peer's tokens.
+                    None => peers.tokens.dispatch_iteration_event_unclaimed(
+                        &mut crate::session_tables::AbsentTable::<
+                            <K::Tables<P> as LivelinessTables<
+                                K::LivelinessSubscriber,
+                                K::LivelinessSubscriberId,
+                            >>::LivelinessSubscribers,
+                        >::new(),
+                        cx,
+                        event,
+                        spaces,
+                        &claimed,
+                    ),
+                }
             }
         }
         // The two id spaces this session resolves through, as the subscriber side
@@ -2549,7 +2563,10 @@ mod tests {
                     &mut requesters,
                     event,
                     &NoOtherPeers,
-                    TakenAhead { queries: taken },
+                    TakenAhead {
+                        queries: taken,
+                        tokens: false,
+                    },
                 )
             });
             if taken {
@@ -2596,7 +2613,10 @@ mod tests {
                     &mut requesters,
                     event,
                     &NoOtherPeers,
-                    TakenAhead { queries: taken },
+                    TakenAhead {
+                        queries: taken,
+                        tokens: false,
+                    },
                 )
             });
             if taken {
@@ -2771,6 +2791,72 @@ mod tests {
                 (told.handle, LivelinessSampleKind::Delete)
             ]
         );
+    }
+
+    /// A caller that took each peer token itself (`TakenAhead::tokens`) leaves the tokens' plane
+    /// only the mark a responder's `DeclFinal` sets: the token is neither told to a row nor bound
+    /// in the peer's table, and the history subscriber's replay is marked ended all the same. The
+    /// CONTROL is the same frame with nothing taken, which tells the token and binds it. Turned
+    /// red by a plane that takes a token its caller took, or one that drops the history's mark
+    /// with it.
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    #[test]
+    fn a_caller_that_took_the_tokens_leaves_the_plane_the_history_mark_alone() {
+        use crate::declare::liveliness_sample::LivelinessSampleKind;
+        use crate::session_tables::KeyForm;
+        for taken in [false, true] {
+            let mut observer = SlotObserverOf::<TokenSinks>::new();
+            let mut peers = PeerTables::new();
+            let mut requesters = Req::new();
+            let asked = observer
+                .tables
+                .declare_liveliness_subscriber("t/a", true, KeyForm::default(), AskedRow)
+                .expect("a table of the build's bound has room");
+            let outcome =
+                frame(vec![
+                    NetworkMessage::Declare(Box::new(fx::declare_envelope_decl_token(
+                        fx::decl_token(5, 0, Some("t/a")),
+                    ))),
+                    NetworkMessage::Declare(Box::new(
+                        fx::declare_envelope_decl_final_with_interest(u64::from(asked.id)),
+                    )),
+                ]);
+            let mut log = TokenLog::default();
+            crate::driver_loop::deliver_frame(&outcome, |event| {
+                observer.dispatch_event_among(
+                    &mut log,
+                    &mut peers,
+                    &mut requesters,
+                    event,
+                    &NoOtherPeers,
+                    TakenAhead {
+                        queries: false,
+                        tokens: taken,
+                    },
+                )
+            });
+            let ended = observer
+                .tables
+                .liveliness_subscribers()
+                .get(asked.handle)
+                .expect("the subscriber stands")
+                .history_complete();
+            assert!(ended, "the history's end is marked either way");
+            if taken {
+                assert!(
+                    log.0.is_empty(),
+                    "a token the caller took is told to no row"
+                );
+                assert_eq!(peers.tokens.count(), 0, "nor bound by the plane");
+            } else {
+                assert_eq!(
+                    log.0,
+                    vec![(asked.handle, LivelinessSampleKind::Put)],
+                    "CONTROL: the token is told"
+                );
+                assert_eq!(peers.tokens.count(), 1, "CONTROL: and bound");
+            }
+        }
     }
 
     /// The same two messages in both tests: a Push and a `DeclareSubscriber`, each

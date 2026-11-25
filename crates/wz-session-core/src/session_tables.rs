@@ -3039,6 +3039,33 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         release_drained(self.kept_liveliness_subscribers_mut()?, cursor)
     }
 
+    /// The next liveliness subscriber the peer token `fan` walks reaches, with a call begun on its
+    /// row, with the tables held: [`Self::pin_next_subscriber`] for a token, the rows matched by
+    /// the rule every token fan keeps (`token_reaches`). End each call with
+    /// [`RowCallback::end`]; when it was the last call of a row undeclared meanwhile, let the row
+    /// go with [`Self::release_drained_liveliness_subscriber`].
+    pub fn pin_next_liveliness_subscriber(
+        &self,
+        fan: &mut PinnedTokenFan<'_>,
+    ) -> Option<<F::LivelinessSubscriber as RowCallback>::Call> {
+        const {
+            assert!(row_may_lie_in::<F::LivelinessSubscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
+        }
+        let from = fan.next;
+        let (place, call) = self
+            .kept_liveliness_subscribers()?
+            .live_handles()
+            .skip_while(|(place, _, _)| *place < from)
+            .find_map(|(place, _, row)| {
+                if !token_reaches(row, fan.key, fan.historical) {
+                    return None;
+                }
+                row.callback.begin().map(|call| (place, call))
+            })?;
+        fan.next = place.saturating_add(1);
+        Some(call)
+    }
+
     /// Begin a call of the matching listener `handle` names, with the tables held: what the call is made
     /// with once they are let go, `None` when no live row is named. See [`Self::begin_subscriber`].
     pub fn begin_matching_listener(
@@ -3564,6 +3591,38 @@ pub struct PinnedFanOut<'k> {
     next: usize,
 }
 
+/// A peer token's walk of the liveliness subscribers it reaches, one row pinned at a time
+/// ([`SessionTables::pin_next_liveliness_subscriber`]): its key, whether it is historical (an
+/// answer to a CURRENT interest), and the place the next row is looked for from. Held by whoever
+/// hands the token out, beside the key, as [`PinnedFanOut`] is.
+pub struct PinnedTokenFan<'k> {
+    key: &'k str,
+    historical: bool,
+    /// The place the next row is looked for from: the one after the row pinned last.
+    next: usize,
+}
+
+impl<'k> PinnedTokenFan<'k> {
+    /// The walk of the liveliness subscribers a token on `key` reaches, from the table's first row.
+    pub fn new(key: &'k str, historical: bool) -> Self {
+        Self {
+            key,
+            historical,
+            next: 0,
+        }
+    }
+}
+
+/// Whether a peer token on `key` reaches the liveliness subscriber `row`: a row whose pattern
+/// intersects the key, and, of a historical token, only one that asked for history.
+fn token_reaches<Key: KeyBacking, Cb>(
+    row: &LivelinessSubscriberRow<Key, Cb>,
+    key: &str,
+    historical: bool,
+) -> bool {
+    (!historical || row.history) && keyexpr_intersects(text(&row.key.key), key)
+}
+
 impl<'k> PinnedFanOut<'k> {
     /// The walk of the subscribers a peer's message on `key` reaches, from the table's first row.
     pub fn new(key: &'k str) -> Self {
@@ -3762,9 +3821,8 @@ impl<Key: KeyBacking, Cb: RowCallback, P: Storage>
         historical: bool,
         mut deliver: D,
     ) -> usize {
-        let reaches = |row: &LivelinessSubscriberRow<Key, Cb>| {
-            (!historical || row.history) && keyexpr_intersects(text(&row.key.key), keyexpr)
-        };
+        let reaches =
+            |row: &LivelinessSubscriberRow<Key, Cb>| token_reaches(row, keyexpr, historical);
         let mut fired: usize = 0;
         if Cb::READS_ROW_IN_PLACE {
             for (_, handle, row) in self.live_handles() {

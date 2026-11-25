@@ -240,18 +240,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
             IterationEvent::InPlace(ref record) if record.request().is_some() => {
                 self.engine.hand_lent_query(self.records, record, &event);
             }
-            // An alive token answering a pending liveliness get is handed to it as a reply is;
-            // any other declaration of an interest is dispatched as every record is.
-            #[cfg(feature = "liveliness-get")]
-            IterationEvent::InPlace(ref record)
-                if record
-                    .declare()
-                    .is_some_and(|declare| declare.interest_id.is_some()) =>
-            {
-                if let Some(mut held) = self.engine.hand_lent_token(self.records.face, record) {
-                    self.records
-                        .dispatch(&mut held.0.session.registry, event, Planes::All);
-                }
+            // A peer's token is handed to each liveliness subscriber it reaches with the session
+            // let go of (`tokens`), an alive token answering a pending liveliness get to that get
+            // as a reply is; the rest of a declaration is dispatched as every record is.
+            #[cfg(feature = "liveliness")]
+            IterationEvent::InPlace(ref record) if record.declare().is_some() => {
+                self.engine.hand_lent_declare(self.records, record, event);
             }
             // The subscribers' side of each record first, a Push's sample handed out one row at a
             // time, then the other planes', as the dispatch of the whole frame orders them.
@@ -522,6 +516,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, 
 
 /// What a look at the link's life came to, under the session's lock.
 struct LinkTurn {
+    /// Whether a link lost at the look left tokens its peer declared to retract
+    /// (`CoopEngine::hand_lost_tokens`).
+    #[cfg(feature = "liveliness")]
+    retracts: bool,
     /// The look's reading of the session's clock, in microseconds.
     now_us: u64,
     /// The same instant on the epoch the link's session measures on.
@@ -570,6 +568,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let Some(turn) = self.life_turn(slot, wait) else {
                 return Err(OpenError::NoEndpoint);
             };
+            #[cfg(feature = "liveliness")]
+            if turn.retracts {
+                self.hand_lost_tokens();
+            }
             if let Some(last) = turn.ended {
                 return Err(last);
             }
@@ -616,6 +618,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
         let turn = self.life_turn(slot, wait).ok_or(SessionClosed)?;
+        // A lost link's tokens go before anything a link brings after the loss, and with a loss
+        // that ended the session too.
+        #[cfg(feature = "liveliness")]
+        if turn.retracts {
+            self.hand_lost_tokens();
+        }
         if turn.ended.is_some() {
             self.deliver();
             return Err(SessionClosed);
@@ -651,11 +659,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut held = self.live()?;
         let core = &mut held.0;
         core.transport.links.waited(wait);
-        // What a lost link's peer is still owed comes before anything the link brings now.
-        #[cfg(feature = "liveliness")]
-        if self.samples.owes() {
-            core.retract_owed();
-        }
         let now_us = core.now_us();
         let now_ms = core.session_time.ms_at(now_us);
         let input = slot.next_input(core, &self.direct.end);
@@ -710,6 +713,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         unsafe { self.samples.settle() };
         let jobs_due_ms = core.jobs_due_at(now_us);
         Some(LinkTurn {
+            #[cfg(feature = "liveliness")]
+            retracts: core.session.registry.retracting(),
             now_us,
             now_ms,
             jobs_due_ms,
@@ -858,6 +863,40 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // may take a while to refuse a dial, and a wait to dial again counted from before the
             // dial would be over by then, so that each read would dial again at once.
             now_us = core.now_us();
+        }
+    }
+
+    /// Hand the liveliness subscribers the declaration `record` of the face `records` reads, lent
+    /// where its frame lies (`event`): its token, when it is one, bound or unbound under the
+    /// session's lock and handed to each row it reaches once the lock is let go of, one call at a
+    /// time (`tokens`), and the rest of it dispatched to every plane but the token's. An alive
+    /// token answering a pending liveliness get is that get's alone, handed to it as a reply is.
+    /// A closed session hands nothing.
+    #[cfg(feature = "liveliness")]
+    fn hand_lent_declare(
+        &self,
+        records: &FaceRecords<C>,
+        record: &wz_session_core::driver_loop::InPlaceRecord<'_, '_>,
+        event: IterationEvent<'_, '_>,
+    ) {
+        let face = records.face;
+        #[cfg(feature = "liveliness-get")]
+        let held = self.hand_lent_token(face, record);
+        #[cfg(not(feature = "liveliness-get"))]
+        let held = self.live();
+        let Some(mut held) = held else {
+            return;
+        };
+        let mut news = wz_session_core::declare::liveliness_subscriber::TokenNews::default();
+        let told = held
+            .0
+            .session
+            .registry
+            .take_lent_token(face, record, &mut news);
+        records.dispatch(&mut held.0.session.registry, event, Planes::All);
+        drop(held);
+        if told {
+            self.hand_token_row_by_row(&news, false);
         }
     }
 

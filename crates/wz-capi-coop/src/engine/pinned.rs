@@ -25,6 +25,11 @@ use super::*;
 use wz_session_core::driver_loop::{InPlaceRecord, OwedToProjection};
 use wz_session_core::sample::Sample;
 use wz_session_core::session_tables::PinnedFanOut;
+#[cfg(feature = "liveliness")]
+use {
+    wz_session_core::declare::liveliness_subscriber::TokenNews,
+    wz_session_core::session_tables::PinnedTokenFan,
+};
 
 use super::registry::PeerRoom;
 
@@ -127,6 +132,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     continue;
                 }
             }
+            // A peer's token is handed to the liveliness subscribers it reaches as a lent one is
+            // (`tokens`); the tokens' plane keeps only the marks that end their histories.
+            #[cfg(feature = "liveliness")]
+            if let wz_session_core::network_message::NetworkMessage::Declare(declare) = message {
+                let mut news = TokenNews::default();
+                if held
+                    .0
+                    .session
+                    .registry
+                    .take_owned_token(face, declare, &mut news)
+                {
+                    drop(held);
+                    self.hand_token_row_by_row(&news, false);
+                    continue;
+                }
+            }
             let Some(owned) =
                 held.0
                     .session
@@ -202,6 +223,53 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let sample = opts.loopback_sample(keyexpr, payload);
         let mut fan = PinnedFanOut::local(keyexpr);
         Ok(self.hand_row_by_row(held, &SampleRef::of(&sample), &mut fan))
+    }
+
+    /// Hand the tokens a lost link's peer declared to the liveliness subscribers, a token at a
+    /// time in ascending id, each taken under the session's lock and handed to each row it reaches
+    /// once the lock is let go of (`Self::hand_token_row_by_row`). A session the loss ended is
+    /// owed them too: they are taken whether it is open or closed.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn hand_lost_tokens(&self) {
+        let mut news = TokenNews::default();
+        while self
+            .core
+            .lock()
+            .0
+            .session
+            .registry
+            .take_lost_token(&mut news)
+        {
+            self.hand_token_row_by_row(&news, true);
+        }
+    }
+
+    /// Hand the peer token `news` tells of to each liveliness subscriber it reaches, one call at
+    /// a time with the session let go of, as a Push's sample is handed (`Self::hand_row_by_row`):
+    /// each row is pinned under the session's lock, from the place after the last, so a callback
+    /// finds the session free and a row undeclared by an earlier call is passed. A closed session
+    /// pins no row, unless `past_close`: the retractions of a link whose loss ended the session.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn hand_token_row_by_row(&self, news: &TokenNews, past_close: bool) {
+        let sample = news.sample();
+        let mut fan = PinnedTokenFan::new(sample.keyexpr, news.historical());
+        // A read a callback makes reads nothing, so no record is handed out inside another's call.
+        self.deliveries.within(|_| loop {
+            let next = if past_close {
+                let guard = self.core.lock();
+                tables(&guard.0.session.registry).pin_next_liveliness_subscriber(&mut fan)
+            } else {
+                self.live().and_then(|held| {
+                    tables(&held.0.session.registry).pin_next_liveliness_subscriber(&mut fan)
+                })
+            };
+            let Some(call) = next else {
+                break;
+            };
+            let call = LivelinessCall::new(call);
+            call.hand(sample);
+            self.end_liveliness_call(call);
+        });
     }
 
     /// Hand `sample` to each subscriber `fan` reaches, the first pinned under `held`, one call at
