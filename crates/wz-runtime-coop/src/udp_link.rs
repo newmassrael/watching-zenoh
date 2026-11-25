@@ -64,11 +64,11 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{RxStore, TxLender, TxStore};
+#[cfg(any(test, feature = "session-slot"))]
+use crate::session_drive::Locator;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack};
-use crate::session_drive::{
-    IpLocator, LinkProto, Locator, SessionDatagramLink, LONGEST_IP_LOCATOR_LEN,
-};
+use crate::session_drive::{IpLocator, LinkProto, SessionDatagramLink, LONGEST_IP_LOCATOR_LEN};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::{LinkWaits, NoWaits, WaitOn};
 
