@@ -86,11 +86,15 @@ pub trait FaceRecord {
     /// The face's number.
     fn id(&self) -> FaceId;
 
+    /// How the session of the face's link ends ([`LinkEnd`]): a task's handle, or the end of a
+    /// link whose session the owner steps itself.
+    type End: LinkEnd;
+
     /// The face's link.
-    fn link(&self) -> &Link<Self::Session, Self::Dial>;
+    fn link(&self) -> &Link<Self::Session, Self::Dial, Self::End>;
 
     /// The face's link, to replace.
-    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Dial>;
+    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Dial, Self::End>;
 }
 
 /// How a face's owner tells that the session of a link ended, and ends it ([`Wire`]). A
@@ -1038,7 +1042,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     }
 
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
-    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial>) {
+    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial, F::End>) {
         if let Some(face) = self.face_mut(at) {
             *face.link_mut() = link;
         }
@@ -1535,6 +1539,7 @@ mod tests {
         type Session = Session;
         type Pump = Rc<Quiet>;
         type Dial = Answer;
+        type End = TaskEnd;
 
         fn id(&self) -> FaceId {
             self.id

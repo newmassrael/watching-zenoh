@@ -6,11 +6,13 @@
 //! undeclaration after the close lets go of nothing more.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
+#[cfg(feature = "key-matching-listener")]
+use std::sync::Weak;
 
-use wz_capi_port::{
-    FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubscriberSink, WireKey,
-};
+#[cfg(feature = "key-matching-listener")]
+use wz_capi_port::{FilterPlane, MatchingSink};
+use wz_capi_port::{Refusal, SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
@@ -99,6 +101,7 @@ fn a_subscribers_callback_is_dropped_once_on_close() {
 
 /// A matching listener's sink, and what tells whether it is still held: the sink holds the one
 /// strong count of the value the weak one reads.
+#[cfg(feature = "key-matching-listener")]
 fn watched_sink() -> (MatchingSink, Weak<()>) {
     let token = Arc::new(());
     let alive = Arc::downgrade(&token);
@@ -111,22 +114,27 @@ fn watched_sink() -> (MatchingSink, Weak<()>) {
 }
 
 /// The close lets go of every callback, whatever kind of declaration each was minted for: each is
-/// held by its own row, and the close empties the rows.
+/// held by its own row, and the close empties the rows. A matching listener on a key is one of
+/// them in a build that keeps such listeners (`key-matching-listener`).
 #[test]
 fn the_close_lets_go_of_every_rows_callback() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let counts = Counts::default();
     declare(&engine, "demo/drop/a", counts.subscriber_sink()).expect("declared");
-    let (sink, alive) = watched_sink();
-    assert!(engine
-        .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
-        .is_ok());
+    #[cfg(feature = "key-matching-listener")]
+    let alive = {
+        let (sink, alive) = watched_sink();
+        assert!(engine
+            .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
+            .is_ok());
+        assert!(
+            alive.upgrade().is_some(),
+            "the listener's row holds its sink"
+        );
+        alive
+    };
     assert_eq!(engine.subscriber_rows(), 1);
-    assert!(
-        alive.upgrade().is_some(),
-        "the listener's row holds its sink"
-    );
     SessionDrive::close(&*engine);
     assert_eq!(
         engine.subscriber_rows(),
@@ -134,6 +142,7 @@ fn the_close_lets_go_of_every_rows_callback() {
         "the close emptied the subscribers' rows"
     );
     assert_eq!(counts.callbacks_dropped(), 1);
+    #[cfg(feature = "key-matching-listener")]
     assert!(
         alive.upgrade().is_none(),
         "the listener's sink is let go of"
@@ -163,6 +172,7 @@ fn a_refused_subscribers_callback_is_dropped_once_with_the_refusal() {
 
 /// A matching listener's sink is let go of on its undeclaration, at the close, and with a
 /// refusal, whether its table is full or its session closed: none of them outlives its end.
+#[cfg(feature = "key-matching-listener")]
 #[test]
 fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
@@ -458,6 +468,7 @@ fn a_liveliness_subscriber_undeclared_while_a_token_owes_it_a_call_is_let_go_of_
 /// A matching listener undeclared from inside its own callback is called that once and let go of
 /// as the call returns, by the thread that made it: the row it was taken out of for the call is
 /// gone, so it is not put back.
+#[cfg(feature = "key-matching-listener")]
 #[test]
 fn a_listener_undeclared_from_its_own_callback_is_let_go_of_after_the_call() {
     let router = Router::start(CatchAll::None);
@@ -496,6 +507,7 @@ fn a_listener_undeclared_from_its_own_callback_is_let_go_of_after_the_call() {
 /// call: the hand-out that finds the first's row gone lets its callback go and goes on to the
 /// second, which is told once. Turned red by a hand-out that stops at a listener whose row went
 /// during its call, or that tells a listener a verdict twice.
+#[cfg(feature = "key-matching-listener")]
 #[test]
 fn a_listener_gone_during_its_call_leaves_the_next_one_told_once() {
     let router = Router::start(CatchAll::None);
