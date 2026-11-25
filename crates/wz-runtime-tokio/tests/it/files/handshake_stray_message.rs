@@ -47,7 +47,8 @@ fn session_under(value: HandshakeStrayMessage) -> Option<(Arc<SessionLinkActions
     let mut params = fixture_session_init_params();
     params.policy.select_handshake_stray_message(value).ok()?;
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     Some((actions, engine))
@@ -253,7 +254,8 @@ fn recording_session_under(
     params.policy.select_handshake_stray_message(value).ok()?;
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     Some((driver, actions, engine))

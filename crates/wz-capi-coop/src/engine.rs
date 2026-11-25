@@ -570,6 +570,8 @@ pub enum OpenError {
     /// session open at once, [`wz_capi_port::reach`]) holds the engine of a session open now.
     /// Nothing was reserved, bound, joined or dialled.
     NoEngineRow,
+    /// The heap had no room for a link's shared handle. Nothing of the link stays.
+    HeapRefused,
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -594,6 +596,7 @@ impl From<TransportRefusal> for OpenError {
             TransportRefusal::Unreachable(why) => OpenError::Unreachable(why),
             TransportRefusal::EntropyUnavailable => OpenError::EntropyUnavailable,
             TransportRefusal::NoTask(why) => OpenError::NoTask(why),
+            TransportRefusal::HeapRefused => OpenError::HeapRefused,
         }
     }
 }
@@ -3156,7 +3159,7 @@ impl RuntimeTables {
     /// reserves every cell for a link, and its runtime takes no memory after it is made: a config
     /// that names a group is refused by name there, so the groups' cells are none. A build that
     /// neither joins groups nor listens takes no face beside its dial role's, so its runtime hosts
-    /// that one link's task and is made for one (`CoopRuntime::reserved_for_one`), which links no
+    /// that one link's task and is made for one (`CoopRuntime::try_reserved_for_one`), which links no
     /// walk of a table of many cells.
     ///
     /// The runtime is placed in `place`, the span of the session's arena the open lent it
@@ -4738,7 +4741,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // lie in the row the plan laid out for them, a handle at each place a face may hold, the
         // dial role's and each group's among them.
         let (wire, entropy, rooms) = written.and_then(|()| {
-            let mut entropy = SessionEntropy::new(entropy);
+            // A heap with no room for the source's cell is memory the open cannot be given.
+            let mut entropy = SessionEntropy::try_new(entropy)
+                .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
             let rooms = lent
                 .arena

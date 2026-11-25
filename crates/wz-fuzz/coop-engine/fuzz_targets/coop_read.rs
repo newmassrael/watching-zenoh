@@ -107,7 +107,8 @@ impl SessionLinks for Links {
 
     fn open_initiator(&self, _to: Locator) -> Result<OpenedLink<Feed>, LinkOpenError> {
         Ok(OpenedLink {
-            sink: wz_runtime_coop::link_cells::heap_sink(Nowhere),
+            sink: wz_runtime_coop::link_cells::heap_sink(Nowhere)
+                .ok_or(LinkOpenError::Exhausted)?,
             pump: Feed(self.0.clone()),
         })
     }

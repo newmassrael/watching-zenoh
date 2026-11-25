@@ -103,13 +103,17 @@ impl PicoSessionExt {
     /// Its clock may have been refused (`UHLC_MAX_DELTA_MS` states a bound the clock does not
     /// honour): the open asks `clock_refused` and refuses such a session, which would stamp
     /// nothing in place of the clock pico always gives one. Dropping it lets go of the watch.
+    ///
+    /// `None` when the heap has no room for the session's last time given, which the open answers
+    /// as pico answers a session it cannot allocate; nothing is watched then.
     pub(crate) fn new(
         mode: WhatAmI,
         zid: &[u8],
         policy: SessionPolicy,
         limits: SessionLimits,
         #[cfg(feature = "connectivity")] engine: &EngineHold,
-    ) -> Self {
+    ) -> Option<Self> {
+        let time = crate::last_timestamp::SessionTime::try_new()?;
         // The snapshot is read by the clock and by a door a policy governs: a build with neither
         // a clock nor `query` reads none of it.
         #[cfg(not(any(feature = "query", feature = "advanced", feature = "clock-source")))]
@@ -160,10 +164,8 @@ impl PicoSessionExt {
             &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         #[cfg(any(feature = "advanced", feature = "clock-source"))]
-        let time = crate::last_timestamp::SessionTime::new().learned_by(hlc.clone());
-        #[cfg(not(any(feature = "advanced", feature = "clock-source")))]
-        let time = crate::last_timestamp::SessionTime::new();
-        Self {
+        let time = time.learned_by(hlc.clone());
+        Some(Self {
             mode,
             #[cfg(any(feature = "advanced", feature = "clock-source"))]
             hlc,
@@ -188,7 +190,7 @@ impl PicoSessionExt {
                 )
             ))]
             limits,
-        }
+        })
     }
 
     /// Why the engine would not tell the connectivity plane its faces: `None` when it watches
@@ -274,7 +276,8 @@ mod tests {
             policy,
             SessionLimits::defaults(),
             &shared.as_engine(),
-        );
+        )
+        .expect("the test's heap");
         assert_eq!(
             ext.face_watch_refused(),
             Some(wz_capi_port::Refusal::Closed)
@@ -296,10 +299,12 @@ mod tests {
                 SessionLimits::defaults(),
                 &shared.as_engine(),
             )
+            .expect("the test's heap")
         }
         #[cfg(not(feature = "connectivity"))]
         {
             PicoSessionExt::new(WhatAmI::Peer, &ZID, policy, SessionLimits::defaults())
+                .expect("the test's heap")
         }
     }
 

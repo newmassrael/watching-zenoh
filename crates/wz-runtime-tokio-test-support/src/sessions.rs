@@ -29,7 +29,7 @@ pub fn established_session_actions(
     driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
 ) -> Arc<SessionLinkActions> {
-    let actions = new_session_actions(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new()).expect("the heap has room");
     actions.enter_established();
     actions
 }
@@ -626,7 +626,8 @@ pub async fn establish_capability_pair_between(
             outbound,
             fixture_params_with_zid(init_zid),
             TokioTime::new(),
-        );
+        )
+        .expect("the heap has room");
         if init_offer {
             apply_offer(&a);
         }
@@ -638,7 +639,8 @@ pub async fn establish_capability_pair_between(
             outbound,
             fixture_params_with_zid(resp_zid),
             TokioTime::new(),
-        );
+        )
+        .expect("the heap has room");
         if resp_offer {
             apply_offer(&a);
         }

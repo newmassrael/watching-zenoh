@@ -156,26 +156,6 @@ config WZ_OS_THREADS
 	  task is one; an image that starts none (a single-threaded program) states 0 and holds no
 	  stack for it. A thread past them is refused as out of memory.
 
-config WZ_OS_MUTEXES
-	int "The mutexes the engine holds at once"
-	depends on WZ_OS
-	default 32
-	range 1 4096
-	help
-	  The `k_mutex` of each lock the engine and its entities hold: a session's few at its open
-	  and one for each entity that keeps a lock of its own. They are blocks of a memory slab,
-	  given back when the lock is dropped; a lock past them is refused as out of memory, as a
-	  kernel heap with no room refused it.
-
-config WZ_OS_CONDVARS
-	int "The condition variables the engine holds at once"
-	depends on WZ_OS
-	default 16
-	range 1 4096
-	help
-	  The `k_condvar` a C ABI's channels and undeclares wait on, one for each that is alive.
-	  Blocks of a memory slab, as WZ_OS_MUTEXES's are.
-
 config WZ_OS_THREAD_PRIORITY
 	int "The priority of a thread the engine starts"
 	depends on WZ_OS

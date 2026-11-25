@@ -25,21 +25,27 @@
 //! object `std` boxes on its first take). A lock a panic let go is taken as it was left, as the
 //! engine always took it. The threads are `std::thread`'s with `std`.
 //!
+//! A kernel's mutex and condition variable are made in their owner's memory, where they stay
+//! (`mutex_in`, `condvar_in`, `StaticMutex`, `StaticCondvar`), so making one asks nothing of a
+//! pool or a heap and is never refused. The place of a mutex is 16 words and that of a condition
+//! variable 12, aligned to 8 bytes; an image whose kernel objects do not fit says so when it is
+//! built (the Zephyr one with `BUILD_ASSERT`).
+//!
 //! The functions an image provides without `std`:
 //!
 //! ```c
-//! void *wz_os_mutex_new(void);                 /* a new unlocked mutex, NULL when none is left */
+//! void  wz_os_mutex_init(void *place);         /* an unlocked mutex made in place; never fails */
 //! void  wz_os_mutex_lock(void *mutex);         /* waits until it is this thread's */
 //! int   wz_os_mutex_try_lock(void *mutex);     /* 0 once it is this thread's; never waits */
 //! void  wz_os_mutex_unlock(void *mutex);
-//! void  wz_os_mutex_free(void *mutex);
-//! void *wz_os_condvar_new(void);               /* NULL when none is left */
+//! void  wz_os_mutex_destroy(void *mutex);      /* ended in its place, which is the owner's */
+//! void  wz_os_condvar_init(void *place);       /* made in place; never fails */
 //! void  wz_os_condvar_wait(void *condvar, void *mutex); /* mutex held; held again on return */
 //! int   wz_os_condvar_wait_ms(void *condvar, void *mutex, uint32_t ms); /* as above, at most ms;
 //!                                                 0 when notified, otherwise the time ran out */
 //! void  wz_os_condvar_notify_one(void *condvar);
 //! void  wz_os_condvar_notify_all(void *condvar);
-//! void  wz_os_condvar_free(void *condvar);
+//! void  wz_os_condvar_destroy(void *condvar);
 //! uintptr_t wz_os_thread_current(void);        /* never 0 */
 //! int   wz_os_thread_spawn(void (*entry)(void *), void *arg, uintptr_t *id);  /* 0 on success */
 //! int   wz_os_thread_join(uintptr_t id);       /* waits for it to end, then frees it */
@@ -64,6 +70,93 @@ pub use wz_host_sync::{Condvar, Mutex, MutexGuard};
 use kernel as system;
 #[cfg(all(not(feature = "std"), feature = "os-sys"))]
 use sys as system;
+
+/// A mutex made in `place` around the value `make` writes in the place it is handed and lends
+/// back, which no stack holds on its way. Nothing is asked of a pool or a heap, so it cannot be
+/// refused: a kernel's object is made where it stays, and a host's lock is a word of its owner's.
+/// A maker that lends back anything but the place it was handed has not written it there, and is
+/// refused with a panic.
+///
+/// # Safety
+/// `place` is valid for writes of a [`Mutex<T>`] and aligned for it, and what it held is
+/// overwritten without being dropped. The mutex is not moved from `place` until it is dropped
+/// there (`drop_in_place`): a kernel's object may point at itself.
+pub unsafe fn mutex_in<T>(
+    place: core::ptr::NonNull<Mutex<T>>,
+    make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
+) {
+    #[cfg(any(feature = "std", feature = "os-sys"))]
+    {
+        // SAFETY: `place` is valid for writes of a `Mutex<T>` (the caller's contract), which a
+        // `MaybeUninit` of it has the layout of.
+        let place = unsafe { &mut *place.as_ptr().cast::<core::mem::MaybeUninit<Mutex<T>>>() };
+        Mutex::new_in(place, make);
+    }
+    #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+    {
+        // SAFETY: the caller's contract is `init_in`'s.
+        unsafe { Mutex::init_in(place, make) };
+    }
+}
+
+/// A condition variable no thread waits on, made in `place`, as [`mutex_in`] makes a mutex.
+///
+/// # Safety
+/// As for [`mutex_in`], of a [`Condvar`].
+pub unsafe fn condvar_in(place: core::ptr::NonNull<Condvar>) {
+    #[cfg(any(feature = "std", feature = "os-sys"))]
+    {
+        // SAFETY: `place` is valid for writes of a `Condvar` (the caller's contract).
+        unsafe { place.as_ptr().write(Condvar::new()) };
+    }
+    #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+    {
+        // SAFETY: the caller's contract is `init_in`'s.
+        unsafe { Condvar::init_in(place) };
+    }
+}
+
+/// A mutex in a `static`, made where it lies the first time it is reached ([`Self::get`]): a
+/// `static` never moves, so nothing is asked of a pool or a heap for it and it cannot be refused.
+#[cfg(any(feature = "std", feature = "os-sys"))]
+pub struct StaticMutex<T>(Mutex<T>);
+
+#[cfg(any(feature = "std", feature = "os-sys"))]
+impl<T> StaticMutex<T> {
+    /// `value`, behind the mutex.
+    pub const fn new(value: T) -> Self {
+        Self(Mutex::new(value))
+    }
+
+    /// The mutex, borrowed for the rest of the program.
+    pub fn get(&'static self) -> &'static Mutex<T> {
+        &self.0
+    }
+}
+
+/// A condition variable in a `static`, as a [`StaticMutex`] is.
+#[cfg(any(feature = "std", feature = "os-sys"))]
+pub struct StaticCondvar(Condvar);
+
+#[cfg(any(feature = "std", feature = "os-sys"))]
+impl StaticCondvar {
+    /// A condition variable no thread waits on.
+    pub const fn new() -> Self {
+        Self(Condvar::new())
+    }
+
+    /// The condition variable, borrowed for the rest of the program.
+    pub fn get(&'static self) -> &'static Condvar {
+        &self.0
+    }
+}
+
+#[cfg(any(feature = "std", feature = "os-sys"))]
+impl Default for StaticCondvar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The host's: `std`.
 #[cfg(feature = "std")]
@@ -121,22 +214,29 @@ mod kernel {
     use alloc::boxed::Box;
     use core::cell::UnsafeCell;
     use core::ffi::{c_int, c_void};
-    use core::mem::MaybeUninit;
+    use core::mem::{ManuallyDrop, MaybeUninit};
     use core::ops::{Deref, DerefMut};
     use core::ptr::{addr_of_mut, NonNull};
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    /// The words a kernel's mutex and condition variable are placed in, at an alignment of 8
+    /// bytes: what the image's `wz_os_mutex_init` and `wz_os_condvar_init` state their objects
+    /// fit (module doc).
+    const MUTEX_WORDS: usize = 16;
+    const CONDVAR_WORDS: usize = 12;
 
     extern "C" {
-        fn wz_os_mutex_new() -> *mut c_void;
+        fn wz_os_mutex_init(place: *mut c_void);
         fn wz_os_mutex_lock(mutex: *mut c_void);
         fn wz_os_mutex_try_lock(mutex: *mut c_void) -> c_int;
         fn wz_os_mutex_unlock(mutex: *mut c_void);
-        fn wz_os_mutex_free(mutex: *mut c_void);
-        fn wz_os_condvar_new() -> *mut c_void;
+        fn wz_os_mutex_destroy(mutex: *mut c_void);
+        fn wz_os_condvar_init(place: *mut c_void);
         fn wz_os_condvar_wait(condvar: *mut c_void, mutex: *mut c_void);
         fn wz_os_condvar_wait_ms(condvar: *mut c_void, mutex: *mut c_void, ms: u32) -> c_int;
         fn wz_os_condvar_notify_one(condvar: *mut c_void);
         fn wz_os_condvar_notify_all(condvar: *mut c_void);
-        fn wz_os_condvar_free(condvar: *mut c_void);
+        fn wz_os_condvar_destroy(condvar: *mut c_void);
         fn wz_os_thread_current() -> usize;
         fn wz_os_thread_spawn(
             entry: unsafe extern "C" fn(*mut c_void),
@@ -211,9 +311,26 @@ mod kernel {
         unsafe { wz_os_sleep_ms(u32::try_from(ms).unwrap_or(u32::MAX)) }
     }
 
-    /// The kernel's blocking mutex around a value.
+    /// The bytes a kernel object of `WORDS` words is placed in: the image states that its
+    /// object fits (module doc), and the place is the owner's, where the object stays.
+    #[repr(C, align(8))]
+    struct RawPlace<const WORDS: usize>(UnsafeCell<MaybeUninit<[usize; WORDS]>>);
+
+    impl<const WORDS: usize> RawPlace<WORDS> {
+        const fn uninit() -> Self {
+            Self(UnsafeCell::new(MaybeUninit::uninit()))
+        }
+
+        fn as_ptr(&self) -> *mut c_void {
+            self.0.get().cast()
+        }
+    }
+
+    /// The kernel's blocking mutex around a value, placed in its owner's memory: the kernel's
+    /// object may point at itself, so it is made where it stays ([`super::mutex_in`],
+    /// [`StaticMutex`]) and never moves after.
     pub struct Mutex<T> {
-        raw: NonNull<c_void>,
+        raw: RawPlace<MUTEX_WORDS>,
         value: UnsafeCell<T>,
     }
 
@@ -223,29 +340,24 @@ mod kernel {
     unsafe impl<T: Send> Sync for Mutex<T> {}
 
     impl<T> Mutex<T> {
-        /// `value`, behind a new mutex. A kernel with no mutex left is out of memory, which this
-        /// answers as an allocation that failed.
-        pub fn new(value: T) -> Self {
-            Self {
-                raw: Self::raw(),
-                value: UnsafeCell::new(value),
-            }
-        }
-
-        /// A new mutex written in `place` around the value `make` writes in the place it is
-        /// handed and lends back: neither the value nor the mutex is a value of its own on a
-        /// stack, where `new` takes the value by value and returns the mutex by value. A maker
-        /// that lends back anything but the place it was handed has not written it there, and is
-        /// refused with a panic. `place` is overwritten without dropping what it held.
-        pub fn new_in(
-            place: &mut MaybeUninit<Self>,
+        /// A mutex made in `place` around the value `make` writes in the place it is handed and
+        /// lends back. A maker that lends back anything but the place it was handed has not
+        /// written it there, and is refused with a panic.
+        ///
+        /// # Safety
+        /// `place` is valid for writes of a `Self` and aligned for it, and what it held is
+        /// overwritten without being dropped. The mutex is not moved from `place` until it is
+        /// dropped there.
+        pub(super) unsafe fn init_in(
+            place: NonNull<Self>,
             make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
-        ) -> &mut Self {
-            let at = place.as_mut_ptr();
-            // SAFETY: `at` is valid for writes of a `Self`, and each field is written once
-            // through a pointer to it: the value in its cell (`UnsafeCell<T>` and
-            // `MaybeUninit<T>` each have the layout of `T`) by `make`, which lent the cell back
-            // and so wrote it, then the kernel's mutex.
+        ) {
+            let at = place.as_ptr();
+            // SAFETY: `at` is valid for writes of a `Self` (the caller's contract), and each
+            // field is written once through a pointer to it: the value in its cell
+            // (`UnsafeCell<T>` and `MaybeUninit<T>` each have the layout of `T`) by `make`,
+            // which lent the cell back and so wrote it, then the kernel's mutex, in the place it
+            // stays.
             unsafe {
                 let cell = &mut *addr_of_mut!((*at).value).cast::<MaybeUninit<T>>();
                 let field: *const T = cell.as_ptr();
@@ -254,23 +366,13 @@ mod kernel {
                     core::ptr::eq(made, field),
                     "the value is written in the place it was handed"
                 );
-                addr_of_mut!((*at).raw).write(Self::raw());
-                &mut *at
+                wz_os_mutex_init(addr_of_mut!((*at).raw).cast());
             }
-        }
-
-        /// A new kernel mutex. A kernel with no mutex left is out of memory, which this answers
-        /// as an allocation that failed.
-        fn raw() -> NonNull<c_void> {
-            // SAFETY: the image's contract (module doc).
-            NonNull::new(unsafe { wz_os_mutex_new() }).unwrap_or_else(|| {
-                alloc::alloc::handle_alloc_error(core::alloc::Layout::new::<T>())
-            })
         }
 
         /// Wait until the mutex is this thread's.
         pub fn lock(&self) -> MutexGuard<'_, T> {
-            // SAFETY: `raw` is this mutex's, alive until it drops.
+            // SAFETY: `raw` is this mutex's, made in place and alive until it drops.
             unsafe { wz_os_mutex_lock(self.raw.as_ptr()) };
             MutexGuard { mutex: self }
         }
@@ -295,14 +397,58 @@ mod kernel {
 
     impl<T> Drop for Mutex<T> {
         fn drop(&mut self) {
-            // SAFETY: no guard outlives the mutex, so it is unlocked, and it is freed once.
-            unsafe { wz_os_mutex_free(self.raw.as_ptr()) }
+            // SAFETY: no guard outlives the mutex, so it is unlocked, and it is ended once, in
+            // the place it was made.
+            unsafe { wz_os_mutex_destroy(self.raw.as_ptr()) }
         }
     }
 
-    impl<T: Default> Default for Mutex<T> {
-        fn default() -> Self {
-            Self::new(T::default())
+    /// A mutex in a `static`, made in place the first time it is reached: a `static` does not
+    /// move, so its kernel object can be made there, and making it needs nothing that can run
+    /// out. Reached only through a borrow for the rest of the program ([`Self::get`]).
+    pub struct StaticMutex<T> {
+        made: AtomicBool,
+        inner: ManuallyDrop<Mutex<T>>,
+    }
+
+    impl<T> StaticMutex<T> {
+        /// `value`, behind a mutex not made yet.
+        pub const fn new(value: T) -> Self {
+            Self {
+                made: AtomicBool::new(false),
+                inner: ManuallyDrop::new(Mutex {
+                    raw: RawPlace::uninit(),
+                    value: UnsafeCell::new(value),
+                }),
+            }
+        }
+
+        /// The mutex, made in place by the first caller.
+        pub fn get(&'static self) -> &'static Mutex<T> {
+            if !self.made.load(Ordering::Acquire) {
+                critical_section::with(|_| {
+                    if !self.made.load(Ordering::Relaxed) {
+                        // SAFETY: `self` is borrowed for the rest of the program, so the place
+                        // never moves, and the critical section makes this caller the one that
+                        // makes the mutex there, once.
+                        unsafe { wz_os_mutex_init(self.inner.raw.as_ptr()) };
+                        self.made.store(true, Ordering::Release);
+                    }
+                });
+            }
+            &self.inner
+        }
+    }
+
+    impl<T> Drop for StaticMutex<T> {
+        fn drop(&mut self) {
+            if *self.made.get_mut() {
+                // SAFETY: the mutex was made, and it is dropped once, here.
+                unsafe { ManuallyDrop::drop(&mut self.inner) }
+            } else {
+                // SAFETY: no kernel object was made, so only the value is dropped, once.
+                unsafe { core::ptr::drop_in_place(self.inner.value.get()) }
+            }
         }
     }
 
@@ -333,9 +479,10 @@ mod kernel {
         }
     }
 
-    /// The kernel's condition variable, waited on with a [`Mutex`]'s guard.
+    /// The kernel's condition variable, waited on with a [`Mutex`]'s guard, placed as a
+    /// [`Mutex`] is ([`super::condvar_in`], [`StaticCondvar`]).
     pub struct Condvar {
-        raw: NonNull<c_void>,
+        raw: RawPlace<CONDVAR_WORDS>,
     }
 
     // SAFETY: the kernel's condition variable may be waited on and notified from any thread; it
@@ -344,14 +491,14 @@ mod kernel {
     unsafe impl Sync for Condvar {}
 
     impl Condvar {
-        /// A condition variable no thread waits on. A kernel with none left is out of memory, as
-        /// for a [`Mutex`].
-        pub fn new() -> Self {
-            // SAFETY: the image's contract (module doc).
-            let raw = NonNull::new(unsafe { wz_os_condvar_new() }).unwrap_or_else(|| {
-                alloc::alloc::handle_alloc_error(core::alloc::Layout::new::<Self>())
-            });
-            Self { raw }
+        /// A condition variable no thread waits on, made in `place`.
+        ///
+        /// # Safety
+        /// As for [`Mutex::init_in`].
+        pub(super) unsafe fn init_in(place: NonNull<Self>) {
+            // SAFETY: `place` is valid for writes of a `Self` and stays (the caller's
+            // contract); the kernel writes its object there.
+            unsafe { wz_os_condvar_init(addr_of_mut!((*place.as_ptr()).raw).cast()) }
         }
 
         /// Release the guard's mutex, sleep until notified, and take the mutex again. A wake may
@@ -391,16 +538,59 @@ mod kernel {
         }
     }
 
-    impl Default for Condvar {
+    impl Drop for Condvar {
+        fn drop(&mut self) {
+            // SAFETY: a thread waiting on it borrows it, so none waits once it drops; ended once,
+            // in the place it was made.
+            unsafe { wz_os_condvar_destroy(self.raw.as_ptr()) }
+        }
+    }
+
+    /// A condition variable in a `static`, made in place the first time it is reached, as a
+    /// [`StaticMutex`] is.
+    pub struct StaticCondvar {
+        made: AtomicBool,
+        inner: ManuallyDrop<Condvar>,
+    }
+
+    impl StaticCondvar {
+        /// A condition variable not made yet.
+        pub const fn new() -> Self {
+            Self {
+                made: AtomicBool::new(false),
+                inner: ManuallyDrop::new(Condvar {
+                    raw: RawPlace::uninit(),
+                }),
+            }
+        }
+
+        /// The condition variable, made in place by the first caller.
+        pub fn get(&'static self) -> &'static Condvar {
+            if !self.made.load(Ordering::Acquire) {
+                critical_section::with(|_| {
+                    if !self.made.load(Ordering::Relaxed) {
+                        // SAFETY: as for `StaticMutex::get`.
+                        unsafe { wz_os_condvar_init(self.inner.raw.as_ptr()) };
+                        self.made.store(true, Ordering::Release);
+                    }
+                });
+            }
+            &self.inner
+        }
+    }
+
+    impl Default for StaticCondvar {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl Drop for Condvar {
+    impl Drop for StaticCondvar {
         fn drop(&mut self) {
-            // SAFETY: a thread waiting on it borrows it, so none waits once it drops; freed once.
-            unsafe { wz_os_condvar_free(self.raw.as_ptr()) }
+            if *self.made.get_mut() {
+                // SAFETY: the condition variable was made, and it is dropped once, here.
+                unsafe { ManuallyDrop::drop(&mut self.inner) }
+            }
         }
     }
 }
@@ -673,6 +863,46 @@ mod tests {
         let elsewhere: &'static mut u32 = std::boxed::Box::leak(std::boxed::Box::new(1));
         let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
         Mutex::new_in(&mut place, |_| elsewhere);
+    }
+
+    /// A mutex and a condition variable made in their places hold what their maker wrote and are
+    /// waited on and notified as ones made by value, and are dropped in their places.
+    #[test]
+    fn a_mutex_and_a_condition_variable_made_in_place_work_as_made_by_value() {
+        let mut mutex = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
+        let mut condvar = core::mem::MaybeUninit::<Condvar>::uninit();
+        // SAFETY: both places are this frame's, unmoved until they are dropped below.
+        unsafe {
+            mutex_in(
+                core::ptr::NonNull::from(&mut mutex).cast::<Mutex<u32>>(),
+                |value| value.write(4),
+            );
+            condvar_in(core::ptr::NonNull::from(&mut condvar).cast::<Condvar>());
+        }
+        // SAFETY: both were made in place above.
+        let (made, waits) = unsafe { (mutex.assume_init_ref(), condvar.assume_init_ref()) };
+        *made.lock() += 1;
+        let (guard, _) = waits.wait_timeout_ms(made.lock(), 1);
+        assert_eq!(*guard, 5);
+        drop(guard);
+        waits.notify_all();
+        // SAFETY: each is dropped once, in its place.
+        unsafe {
+            mutex.assume_init_drop();
+            condvar.assume_init_drop();
+        }
+    }
+
+    /// A mutex and a condition variable in `static`s are reached as the same ones each time.
+    #[test]
+    fn a_static_mutex_is_the_same_mutex_each_time_it_is_reached() {
+        static COUNT: StaticMutex<u32> = StaticMutex::new(0);
+        static WAITS: StaticCondvar = StaticCondvar::new();
+        *COUNT.get().lock() += 1;
+        *COUNT.get().lock() += 1;
+        assert_eq!(*COUNT.get().lock(), 2);
+        assert!(core::ptr::eq(WAITS.get(), WAITS.get()));
+        WAITS.get().notify_one();
     }
 
     /// A lock and a condition variable made, the lock taken for the first time, tried, waited on

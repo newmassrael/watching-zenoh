@@ -278,16 +278,18 @@ fn new_links(link: Rc<LwipLink>) -> LwipLinks {
 
 /// An acceptor on `port` and an initiator dialling it.
 fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
-    let runtime = CoopRuntime::new(Frozen);
+    let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
     let links = new_links(link.clone());
 
     let opened = links.open_acceptor(port).expect("bind the acceptor");
     let acceptor = Side {
-        actions: new_session_actions(opened.sink.clone(), params(0xa1), CoopTime::new(&runtime)),
+        actions: new_session_actions(opened.sink.clone(), params(0xa1), CoopTime::new(&runtime))
+            .expect("the heap has room"),
         #[cfg(feature = "tx-lend-only")]
         sink: opened.sink,
         pump: opened.pump,
-        entropy: wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+        entropy: wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+            .expect("the heap has room"),
     };
 
     let opened = links
@@ -297,11 +299,13 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
         ))))
         .expect("open the initiator");
     let initiator = Side {
-        actions: Actions::new_generic(opened.sink.clone(), params(0xb1), CoopTime::new(&runtime)),
+        actions: Actions::new_generic(opened.sink.clone(), params(0xb1), CoopTime::new(&runtime))
+            .expect("the heap has room"),
         #[cfg(feature = "tx-lend-only")]
         sink: opened.sink,
         pump: opened.pump,
-        entropy: wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(2)),
+        entropy: wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(2))
+            .expect("the heap has room"),
     };
     (acceptor, initiator)
 }

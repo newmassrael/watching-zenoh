@@ -4518,6 +4518,23 @@ impl<'a> FaceLoop<'a> {
                     self.ml_rejected.insert(id);
                     DriveShape::Rejected
                 }
+                JoinOutcome::HeapRefused => {
+                    log::warn!(
+                        "multilink: link {} for peer {:02x?}: no heap room \
+                         for the joined binding; rejected GENERIC",
+                        id.0,
+                        peer_zid
+                    );
+                    // A link the session had no room to join is a dial that failed, as
+                    // a mismatched one is: the endpoint backs off and tries again.
+                    #[cfg(feature = "routing-peer")]
+                    if peer_dial {
+                        self.peer_dial_ended(id, crate::loop_peers::DialEnd::Failed);
+                    }
+                    self.ml_dial_endpoints.remove(&id);
+                    self.ml_rejected.insert(id);
+                    DriveShape::Rejected
+                }
             };
             return Some(join);
         }

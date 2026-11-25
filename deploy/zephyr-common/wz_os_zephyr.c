@@ -10,15 +10,15 @@
  * blocking `k_mutex`, not a critical section: a session holds it while it reads and dispatches a
  * message, and masking interrupts for that long would hold off the network driver.
  *
- * Every kernel object here comes from a pool the image sizes and none from the kernel heap: the
- * mutexes and the condition variables from memory slabs of CONFIG_WZ_OS_MUTEXES and
- * CONFIG_WZ_OS_CONDVARS blocks, a thread's record and its stack from static arrays of
- * CONFIG_WZ_OS_THREADS, as zenoh-pico places its tasks' stacks
+ * No kernel object here comes from the kernel heap. A mutex and a condition variable are made in
+ * the place the engine hands over, its owner's memory, where they stay until they are ended, so
+ * making one is never refused: the engine states the room it keeps for each (os.rs), which the
+ * asserts below hold this kernel's objects to. A thread's record and its stack come from static
+ * arrays of CONFIG_WZ_OS_THREADS, as zenoh-pico places its tasks' stacks
  * (`vendor/zenoh-pico/src/system/zephyr/system.c` @
  * `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`).
- * A pool with no free block answers as a heap with no room did: NULL, or -ENOMEM, which the
- * engine reports as an allocation that failed. A block is given back when its object is freed,
- * a thread's when it is joined.
+ * A thread past them answers -ENOMEM, which the engine reports as out of memory; a record is
+ * given back when its thread is joined.
  */
 
 #include <errno.h>
@@ -27,21 +27,20 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 
-K_MEM_SLAB_DEFINE_STATIC(wz_os_mutexes, sizeof(struct k_mutex), CONFIG_WZ_OS_MUTEXES,
-			 __alignof__(struct k_mutex));
+/* The room the engine keeps for each object, in words aligned to 8 bytes (os.rs). */
+#define WZ_OS_MUTEX_WORDS 16
+#define WZ_OS_CONDVAR_WORDS 12
 
-K_MEM_SLAB_DEFINE_STATIC(wz_os_condvars, sizeof(struct k_condvar), CONFIG_WZ_OS_CONDVARS,
-			 __alignof__(struct k_condvar));
+BUILD_ASSERT(sizeof(struct k_mutex) <= WZ_OS_MUTEX_WORDS * sizeof(uintptr_t),
+	     "a k_mutex outgrows the place the engine keeps for it");
+BUILD_ASSERT(__alignof__(struct k_mutex) <= 8, "a k_mutex is aligned past its place");
+BUILD_ASSERT(sizeof(struct k_condvar) <= WZ_OS_CONDVAR_WORDS * sizeof(uintptr_t),
+	     "a k_condvar outgrows the place the engine keeps for it");
+BUILD_ASSERT(__alignof__(struct k_condvar) <= 8, "a k_condvar is aligned past its place");
 
-void *wz_os_mutex_new(void)
+void wz_os_mutex_init(void *place)
 {
-	void *mutex;
-
-	if (k_mem_slab_alloc(&wz_os_mutexes, &mutex, K_NO_WAIT) != 0) {
-		return NULL;
-	}
-	k_mutex_init(mutex);
-	return mutex;
+	(void)k_mutex_init(place);
 }
 
 void wz_os_mutex_lock(void *mutex)
@@ -60,21 +59,16 @@ void wz_os_mutex_unlock(void *mutex)
 	(void)k_mutex_unlock(mutex);
 }
 
-void wz_os_mutex_free(void *mutex)
+/* A k_mutex holds nothing beyond its own bytes, which are the owner's. */
+void wz_os_mutex_destroy(void *mutex)
 {
-	k_mem_slab_free(&wz_os_mutexes, mutex);
+	ARG_UNUSED(mutex);
 }
 
 /* The condition variable a C ABI's channels and undeclares wait on, with a mutex above held. */
-void *wz_os_condvar_new(void)
+void wz_os_condvar_init(void *place)
 {
-	void *condvar;
-
-	if (k_mem_slab_alloc(&wz_os_condvars, &condvar, K_NO_WAIT) != 0) {
-		return NULL;
-	}
-	k_condvar_init(condvar);
-	return condvar;
+	(void)k_condvar_init(place);
 }
 
 void wz_os_condvar_wait(void *condvar, void *mutex)
@@ -98,9 +92,10 @@ void wz_os_condvar_notify_all(void *condvar)
 	(void)k_condvar_broadcast(condvar);
 }
 
-void wz_os_condvar_free(void *condvar)
+/* As for a mutex: nothing beyond its own bytes. */
+void wz_os_condvar_destroy(void *condvar)
 {
-	k_mem_slab_free(&wz_os_condvars, condvar);
+	ARG_UNUSED(condvar);
 }
 
 uintptr_t wz_os_thread_current(void)

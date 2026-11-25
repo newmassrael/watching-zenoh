@@ -20,6 +20,8 @@ use wz_runtime_coop::session_drive::{self as coop_drive, SessionDatagramLink};
 pub use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole};
 // What the drive functions below name. `run_session` is absent under
 // `session-slot` with `reassembly`, and with it every one of these.
+#[cfg(feature = "alloc")]
+use wz_runtime_coop::link_storage::{copied_receive, RxDrops};
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
@@ -56,6 +58,10 @@ pub struct LwipSessionLink<L: Deref<Target = LwipLink>> {
     /// session's pump does. Held for that drop and never read.
     #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
     _lane: Option<crate::listener::LaneGuard>,
+    /// The datagrams the copying receive let go of for want of heap room, until the loop takes
+    /// them.
+    #[cfg(feature = "alloc")]
+    rx_drops: RxDrops,
 }
 
 impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
@@ -67,6 +73,8 @@ impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
             driver,
             #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
             _lane: None,
+            #[cfg(feature = "alloc")]
+            rx_drops: RxDrops::new(),
         }
     }
 
@@ -84,6 +92,8 @@ impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
             link,
             driver,
             _lane: Some(lane),
+            #[cfg(feature = "alloc")]
+            rx_drops: RxDrops::new(),
         }
     }
 }
@@ -97,13 +107,19 @@ impl<L: Deref<Target = LwipLink>> SessionDatagramLink for LwipSessionLink<L> {
         self.link.check_timeouts();
     }
 
-    // The copying receive is the heap profile's: its frame is an owned `RxFrame`.
-    // The driver hands over its peer's datagrams only (and binds an acceptor at
-    // its first `InitSyn`), so every reply goes to the peer.
+    // The copying receive is the heap profile's: its frame is an owned `RxFrame`,
+    // copied from where the lending receive below holds the datagram, and a
+    // datagram the heap has no room for is dropped and counted. The driver hands
+    // over its peer's datagrams only (and binds an acceptor at its first
+    // `InitSyn`), so every reply goes to the peer.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        let dg = self.driver.try_recv()?;
-        Some(RxFrame::new(dg.data.as_slice().to_vec()))
+        copied_receive(self, &self.rx_drops)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn take_rx_dropped(&self) -> usize {
+        self.rx_drops.take()
     }
 
     // The datagram is lent where the session socket's receive queue holds it:
@@ -322,9 +338,10 @@ mod tests {
             let socket: SharedSessionSocket = Rc::new(RefCell::new(
                 bind_session_rx(&link, port).expect("bind session rx"),
             ));
-            let driver = CellRc::boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
+            let driver = CellRc::try_boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port))
+                .expect("the heap has room");
 
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let driver_sink = driver.clone().into_sink();
             // R311ja — `R = CoopRuntime<FrozenClock>` annotated: `new_generic`
@@ -335,13 +352,14 @@ mod tests {
                     driver_sink,
                     test_params(),
                     clock.clone(),
-                );
+                )
+                .expect("the heap has room");
 
             let outcome = run_session(
                 &runtime,
                 LwipSessionLink::new(&link, driver.clone()),
                 &actions,
-                SessionEntropy::new(Dry),
+                SessionEntropy::try_new(Dry).expect("the heap has room"),
                 &clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -367,7 +385,8 @@ mod tests {
         let socket: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, session_port).expect("bind session rx"),
         ));
-        let driver = CellRc::boxed(LwipUdpDriver::accepting(socket));
+        let driver =
+            CellRc::try_boxed(LwipUdpDriver::accepting(socket)).expect("the heap has room");
         let session_link = LwipSessionLink::new(&link, driver.clone());
         std::assert_eq!(driver.peer(), None);
 
@@ -460,8 +479,9 @@ mod tests {
             let socket: SharedSessionSocket = Rc::new(RefCell::new(
                 bind_session_rx(&link, port).expect("bind session rx"),
             ));
-            let driver = CellRc::boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
-            let runtime = CoopRuntime::new(FrozenClock);
+            let driver = CellRc::try_boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port))
+                .expect("the heap has room");
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let driver_sink = driver.clone().into_sink();
             let actions =
@@ -469,7 +489,8 @@ mod tests {
                     driver_sink,
                     test_params(),
                     clock.clone(),
-                );
+                )
+                .expect("the heap has room");
             (runtime, clock, driver, actions)
         };
 
@@ -482,7 +503,7 @@ mod tests {
                 &runtime,
                 LwipSessionLink::new(&link, driver.clone()),
                 &actions,
-                SessionEntropy::new(Dry),
+                SessionEntropy::try_new(Dry).expect("the heap has room"),
                 &clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -494,7 +515,7 @@ mod tests {
         };
 
         let (runtime, clock, driver, actions) = make_session(7453);
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         // Assertion 5's probe: an ordinary `Send` task on the shared pool,
         // spawned through the unchanged `Runtime` contract.
@@ -514,7 +535,7 @@ mod tests {
             &local,
             LwipSessionLink::new(link.clone(), driver.clone()),
             actions,
-            SessionEntropy::new(Dry),
+            SessionEntropy::try_new(Dry).expect("the heap has room"),
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -578,7 +599,8 @@ mod tests {
                 sink,
                 test_params(),
                 clock,
-            );
+            )
+            .expect("the heap has room");
         actions.enter_established();
         actions
     }
@@ -607,7 +629,7 @@ mod tests {
         let payload: &[u8] = b"joined at both ends";
 
         let push_through = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let actions = established(driver_sink, clock);
             actions
@@ -673,11 +695,12 @@ mod tests {
             ipv4_addr_loopback(),
             7490,
         ));
-        let doors = CellRc::boxed(Doors {
+        let doors = CellRc::try_boxed(Doors {
             inner: lending.clone(),
             by_slot: Default::default(),
             by_bytes: Default::default(),
-        });
+        })
+        .expect("the heap has room");
         push_through(doors.clone().into_sink());
         std::assert_eq!(
             (doors.by_slot.get(), doors.by_bytes.get()),
@@ -693,7 +716,11 @@ mod tests {
             ipv4_addr_loopback(),
             7491,
         ));
-        push_through(CellRc::boxed(NoLend(copying.clone())).into_sink());
+        push_through(
+            CellRc::try_boxed(NoLend(copying.clone()))
+                .expect("the heap has room")
+                .into_sink(),
+        );
         let copied = delivered(&copying);
 
         std::assert_eq!(lent.len(), 1, "one push is one datagram");
@@ -784,7 +811,7 @@ mod tests {
         let payloads: [&[u8]; 4] = [b"one", b"two", b"three", b"four"];
 
         let window = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
-            let runtime = CoopRuntime::new(FrozenClock);
+            let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let actions = established(driver_sink, clock);
             actions.batch_start().expect("batch_start");
@@ -813,11 +840,12 @@ mod tests {
             ipv4_addr_loopback(),
             7492,
         ));
-        let doors = CellRc::boxed(Doors {
+        let doors = CellRc::try_boxed(Doors {
             inner: lending.clone(),
             by_slot: Default::default(),
             by_bytes: Default::default(),
-        });
+        })
+        .expect("the heap has room");
         let before = tx_pool::stats().expect("installed");
         let counts = window(doors.clone().into_sink());
         let after = tx_pool::stats().expect("installed");
@@ -841,7 +869,11 @@ mod tests {
             ipv4_addr_loopback(),
             7493,
         ));
-        let control = window(CellRc::boxed(NoLend(copying.clone())).into_sink());
+        let control = window(
+            CellRc::try_boxed(NoLend(copying.clone()))
+                .expect("the heap has room")
+                .into_sink(),
+        );
         std::assert_eq!(control.heap_no_slot, 1, "CONTROL: the heap stage, counted");
         let copied = delivered(&copying);
 

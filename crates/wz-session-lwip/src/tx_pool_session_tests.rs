@@ -131,17 +131,19 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let links = test_links(Rc::new(link));
     let clock = StepClock::default();
-    let runtime = CoopRuntime::new(clock.clone());
-    let local = CoopLocalSet::new(&runtime);
+    let runtime = CoopRuntime::try_new(clock.clone()).expect("the heap has room");
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     let pool = InstalledPool::install();
 
     let OpenedLink { sink, pump } = links.open_acceptor(7561).expect("bind acceptor");
-    let acceptor = new_session_actions(sink, params(0xa1), CoopTime::new(&runtime));
+    let acceptor = new_session_actions(sink, params(0xa1), CoopTime::new(&runtime))
+        .expect("the heap has room");
     let _acceptor_task = spawn_session(
         &local,
         pump,
         acceptor.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
@@ -160,12 +162,14 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
         sink,
         params(0xb1),
         CoopTime::new(&runtime),
-    );
+    )
+    .expect("the heap has room");
     let initiator_task = spawn_session(
         &local,
         pump,
         initiator.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(0))
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),

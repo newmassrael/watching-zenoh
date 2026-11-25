@@ -581,6 +581,11 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
         self.pump.lost()
     }
 
+    // What the link dropped was dropped whatever the gate holds back: it is counted as it is.
+    fn take_rx_dropped(&self) -> usize {
+        self.pump.take_rx_dropped()
+    }
+
     fn holds_input(&self) -> bool {
         self.pump.holds_input()
     }
@@ -615,6 +620,10 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
 
     fn keep(&self) {
         self.pump.keep()
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.pump.lends_until_next_receive()
     }
 
     fn input_wait(&self) -> Option<WaitOn> {

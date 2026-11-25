@@ -291,7 +291,7 @@ fn the_pump_in_its_cell_admits_a_peer_over_the_loopback_as_a_task() {
     let group = wz_link_lwip::rx_sockets::SESSION_MULTICAST_GROUP_DEFAULT;
     let port = 7494;
     let runtime = RUNTIME.start(Frozen).expect("the runtime starts once");
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
     // The peer's JOIN is on the group before the pump exists, so the first pass reads it.
     let socket = bind_session_multicast_rx_in(link, group, port, &SOCKETS).expect("bind");

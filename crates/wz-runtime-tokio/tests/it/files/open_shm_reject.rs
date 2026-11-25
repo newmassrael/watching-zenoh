@@ -73,7 +73,8 @@ struct Answer {
 async fn shm_initiator_answers(init_ack: Vec<u8>, open_ack: Vec<u8>) -> Answer {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     actions.set_shm_offer(true);
     actions.install_shm_auth(Box::new(
         PosixShmAuthenticator::new().expect("publish an auth segment"),

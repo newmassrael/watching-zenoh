@@ -43,7 +43,8 @@ fn live_keyexpr_alias_definition_ships_namespaced() {
         driver.clone(),
         fixture_params_with_zid(0x01),
         TokioTime::new(),
-    );
+    )
+    .expect("the heap has room");
     actions.enter_established();
 
     actions.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));

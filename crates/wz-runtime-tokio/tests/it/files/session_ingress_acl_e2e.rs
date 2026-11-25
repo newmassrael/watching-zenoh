@@ -94,7 +94,8 @@ fn frame_carrying_put(keyexpr: &str) -> Vec<u8> {
     // deny assertion pass without any policy being consulted.
     let mut params = fixture_session_init_params();
     params.zid = [0x02; 4].into();
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     actions.enter_established();
     let session = TokioSession::new(
         actions,
@@ -129,7 +130,8 @@ fn frame_carrying_put(keyexpr: &str) -> Vec<u8> {
 async fn arrivals_and_hits(wire: Vec<u8>, config: Option<InterceptorConfig>) -> (usize, usize) {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions: Arc<SessionLinkActions> =
-        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+            .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     established(&mut engine);

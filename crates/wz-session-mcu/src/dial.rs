@@ -48,6 +48,7 @@
 
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::{CoopRuntime, CoopTime};
+use wz_session_core::link::HeapRefused;
 use wz_session_core::session_actions::SessionLinkActions;
 
 use crate::connect_manager::{DialFailed, DialRefused};
@@ -77,6 +78,13 @@ pub fn dial_failed(refused: LinkOpenError) -> DialFailed {
     }
 }
 
+/// What a heap with no room for a dialled session's bundle means for the dial: a session the
+/// node cannot afford now, as a socket it has none of, so a failed attempt of the outage that a
+/// later one may get past.
+pub fn bundle_refused(_: HeapRefused) -> DialFailed {
+    DialFailed::Exhausted
+}
+
 #[cfg(not(feature = "session-slot"))]
 mod heap {
     use alloc::boxed::Box;
@@ -92,7 +100,7 @@ mod heap {
     use wz_session_core::session_timeouts::SessionTimeouts;
     use wz_session_core::sn::sn_resolution_admitted;
 
-    use super::{dial_failed, parse_locator_for, DialRefused, McuActions};
+    use super::{bundle_refused, dial_failed, parse_locator_for, DialRefused, McuActions};
     use crate::connect_manager::{DialFailed, Dialer, Ended};
     use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
     use wz_session_core::locator_directory::DirectoryZid;
@@ -245,7 +253,8 @@ mod heap {
             // left to give: that is a failed attempt of this outage, not a refusal.
             let OpenedLink { sink, pump } = self.links.open_initiator(to).map_err(dial_failed)?;
             let runtime = self.local.runtime();
-            let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(runtime));
+            let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(runtime))
+                .map_err(bundle_refused)?;
             if let Some(zid) = expected_zid {
                 actions.expect_peer_zid(zid);
             }
@@ -353,6 +362,13 @@ mod parse_tests {
             DialFailed::Exhausted
         );
     }
+
+    /// A session the heap has no room for is a failed attempt the manager retries, and not a
+    /// refusal of the endpoint. Turned red by a mapping that names the endpoint refused.
+    #[test]
+    fn a_session_the_heap_has_no_room_for_is_a_failed_attempt() {
+        std::assert_eq!(bundle_refused(HeapRefused), DialFailed::Exhausted);
+    }
 }
 
 // What these tests build is the heap dialler over the in-memory network, which the
@@ -441,8 +457,8 @@ mod tests {
 
         let net = MemoryNetwork::new();
         let near = Rc::new(MemoryLinks::new(net, NODE));
-        let runtime = CoopRuntime::new(FrozenClock);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         for width in SnResolution::WIDTHS {
             let mut dialer = UdpDialer::new(
                 &local,
@@ -454,7 +470,7 @@ mod tests {
                     stated
                 },
                 quiet,
-                SessionEntropy::new(Counting(3)),
+                SessionEntropy::try_new(Counting(3)).expect("the heap has room"),
             )
             .with_max_iters(1);
             let dialled = dialer.dial("udp/10.0.0.1:7496");
@@ -480,8 +496,8 @@ mod tests {
         // The acceptor's host and the dialling node's are two hosts on one net.
         let far = Rc::new(MemoryLinks::new(net.clone(), FAR));
         let near = Rc::new(MemoryLinks::new(net.clone(), NODE));
-        let runtime = CoopRuntime::new(FrozenClock);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         // The acceptor the dial will reach.
         let OpenedLink {
@@ -495,12 +511,13 @@ mod tests {
             acceptor_sink,
             params(0xa1),
             CoopTime::new(&runtime),
-        );
+        )
+        .expect("the heap has room");
         let _acceptor = spawn_session(
             &local,
             acceptor_pump,
             acceptor_actions.clone(),
-            SessionEntropy::new(Counting(1)),
+            SessionEntropy::try_new(Counting(1)).expect("the heap has room"),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -516,7 +533,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb1),
             quiet,
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         let mut session = dialer.dial("udp/10.0.0.1:7494").expect("dialable");
         for _ in 0..64 {
@@ -571,7 +588,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xc1),
             quiet,
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         )
         .with_max_iters(8);
         let mut lost = unanswered.dial("udp/10.0.0.1:7495").expect("dialable");
@@ -605,8 +622,8 @@ mod tests {
         let net = MemoryNetwork::new();
         let far = Rc::new(MemoryLinks::new(net.clone(), FAR));
         let near = Rc::new(MemoryLinks::new(net.clone(), NODE));
-        let runtime = CoopRuntime::new(FrozenClock);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         // Three acceptors, all node 0xa1, one per dial below.
         let mut acceptors = vec![];
@@ -616,12 +633,13 @@ mod tests {
                 sink,
                 params(0xa1),
                 CoopTime::new(&runtime),
-            );
+            )
+            .expect("the heap has room");
             let task = spawn_session(
                 &local,
                 pump,
                 actions.clone(),
-                SessionEntropy::new(Counting(1)),
+                SessionEntropy::try_new(Counting(1)).expect("the heap has room"),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -639,7 +657,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb1),
             quiet,
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         std::assert!(
             verifies_nodes(&dialer),
@@ -710,15 +728,15 @@ mod tests {
                 Err(LinkOpenError::Exhausted)
             }
         }
-        let runtime = CoopRuntime::new(FrozenClock);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut dialer = UdpDialer::new(
             &local,
             Rc::new(NoLinks),
             SessionTimeouts::from_build(),
             || params(0xd1),
             quiet,
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         std::assert!(matches!(
             dialer.dial("udp/10.0.0.1:7494"),

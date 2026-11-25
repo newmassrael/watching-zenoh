@@ -199,7 +199,7 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     // R311kk — feed wz the SAME advertisement the pico oracle encodes.
     let mut params = fixture_session_init_params();
     params.batch_size = FIXTURE_BATCH_SIZE;
-    let actions = new_session_actions(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new()).expect("the heap has room");
     actions.set_ext_chain(ExtChainRole::InitAck, wz_oracle_chain());
 
     let actual = actions
@@ -227,7 +227,7 @@ fn encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes() {
     // R311kk — feed wz the SAME advertisement the pico oracle encodes.
     let mut params = fixture_session_init_params();
     params.batch_size = FIXTURE_BATCH_SIZE;
-    let actions = new_session_actions(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new()).expect("the heap has room");
     // R121f1 — `SessionLinkActions::new` now seeds the Init ext chains
     // with the wire-spec-mandatory patch entry; this test re-asserts
     // the encoder's "empty chain → no Z flag + no trailing bytes"
@@ -255,7 +255,8 @@ fn ext_chain_role_isolation() {
     // R121f1 — clear both default Init ext chains first so the
     // post-set state isolates exactly one role's override.
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     actions.set_ext_chain(ExtChainRole::InitSyn, Vec::new());
     actions.set_ext_chain(ExtChainRole::InitAck, Vec::new());
     actions.set_ext_chain(ExtChainRole::InitSyn, wz_oracle_chain());
@@ -301,7 +302,8 @@ fn ext_chain_role_isolation() {
 #[test]
 fn default_session_actions_seed_init_chains_with_patch_extension() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
 
     let init_syn = actions
         .encode_init_with_role(

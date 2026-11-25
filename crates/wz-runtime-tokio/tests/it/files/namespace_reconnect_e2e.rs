@@ -44,7 +44,8 @@ fn reconnect_replay_re_decorates_the_cached_declare() {
         driver.clone(),
         fixture_params_with_zid(0x01),
         TokioTime::new(),
-    );
+    )
+    .expect("the heap has room");
     actions.enter_established();
 
     // Install the namespace (survives reconnect — the actions bundle is reused).
@@ -94,7 +95,8 @@ fn reset_for_reopen_clears_namespace_correlation_keeps_prefix() {
         Arc::new(LifecycleRecordingDriver::default()),
         fixture_params_with_zid(0x01),
         TokioTime::new(),
-    );
+    )
+    .expect("the heap has room");
     actions.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
 
     let decl_sub = |id, ke: &str| DriverLoopOutcome::FramePayload {

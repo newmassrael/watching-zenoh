@@ -275,6 +275,18 @@ KECCAK = r"keccak::"
 # installs no logger, so it has none, as zenoh-pico built without a log level has no log call. A
 # module whose name ends in `log` (`event_log::`) is not the facade.
 LOG_FACADE = r"(?<![\w])log::"
+# The allocator's abort on a refused request: what an allocation that cannot fail answers a full
+# heap with (`Box::new`, `Vec::push`, `alloc::alloc::handle_alloc_error` called by hand), the
+# program ended where a refusing build answers the caller. One such allocation left anywhere in a
+# build links it.
+HEAP_ABORT = r"handle_alloc_error"
+# Forbidden patterns whose control build (one that must link the pattern) is not yet a case, each
+# with why: the selftest holds every other forbidden pattern to a case that requires it. A pattern
+# leaves this table in the commit that adds its control.
+CONTROL_PENDING = {
+    HEAP_ABORT: "whether a std build still links the symbol once LTO has inlined the allocator's "
+                "error path is read with nm before pico-client-coop requires it",
+}
 # The engine a pico build runs its sessions on (`engine-tokio` / `engine-coop`,
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
@@ -864,7 +876,7 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-posix,link-udp",
          1_049_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
          require_needed=(r"^libc\.so",),
@@ -2731,8 +2743,11 @@ def cmd_selftest() -> int:
     # case in the table, so a forbidden pattern that no build can match cannot stay unnoticed.
     required = {p for c in CASES for p in c.require}
     forbidden = {p for c in CASES for p in c.forbid}
-    expect("every forbidden pattern is required of a build that has the plane",
-           forbidden <= required)
+    expect("every forbidden pattern is required of a build that has the plane, or names why "
+           "its control is not yet in the table",
+           forbidden <= required | set(CONTROL_PENDING))
+    expect("a pattern whose control is in the table no longer waits for one",
+           not (set(CONTROL_PENDING) & required))
     expect("case ids are unique", len({c.id for c in CASES}) == len(CASES))
     expect("a patterned plane's own symbol matches its pattern",
            all(re.search(p, s) for p, s in (
@@ -2750,7 +2765,8 @@ def cmd_selftest() -> int:
                (CONFIG_VERDICT, "wz_capi_c_config_validate_topology_rows"),
                (CONFIG_VERDICT, "wz_capi_c_config_device_requires"),
                (LOG_FACADE, "<log::__private_api::GlobalLogger as log::Log>::log"),
-               (LOG_FACADE, "log::__private_api::log_impl"))))
+               (LOG_FACADE, "log::__private_api::log_impl"),
+               (HEAP_ABORT, "alloc::alloc::handle_alloc_error"))))
     expect("a module whose name ends in log is not the log facade",
            not any(re.search(LOG_FACADE, s) for s in (
                "wz_capi_pico::event_log::wz_ext_event_emit",

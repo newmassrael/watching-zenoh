@@ -84,7 +84,8 @@ impl BoxedLinkDriver for NoopDriver {
 macro_rules! established {
     ($actions:ident, $engine:ident) => {
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
-        let $actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+        let $actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
+            .expect("the heap has room");
         let mut $engine = new_session_engine(&$actions);
         $engine.initialize().unwrap_or_else(|never| match never {});
         $engine.process_event(E::OutboundStart);

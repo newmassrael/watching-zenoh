@@ -547,6 +547,8 @@ pub enum LinkError {
     /// socket is bound out of is taken. The pool counts it
     /// ([`static_slots::SlotPool::refusals`]); nothing is allocated instead.
     SlotsExhausted,
+    /// The heap had no room for a socket's state; nothing was bound.
+    HeapRefused,
     /// [`LwipLink::route_multicast_over_loopback`] was called in a build
     /// WITHOUT the `loopif-multicast` feature (the loopback multicast egress
     /// routing is compiled out). A typed no-op result — never a silent success —
@@ -794,7 +796,7 @@ struct Inner<const N: usize, const Q: usize> {
 
 impl<const N: usize, const Q: usize> Inner<N, Q> {
     /// A socket's state before its pcb exists (nothing queued, nothing dropped), in a
-    /// new heap box and pinned, written where it stays.
+    /// new heap box and pinned, written where it stays; `None` when the heap has no room.
     ///
     /// There is no by-value constructor: the state is the receive queue's size (24.7 KB
     /// for a session socket), and a value of that size is a local of whoever builds it.
@@ -802,7 +804,7 @@ impl<const N: usize, const Q: usize> Inner<N, Q> {
     /// task, 16 KiB, did not boot). A socket in a static cell is written by
     /// [`Self::init_in_place`] as well.
     #[cfg(not(feature = "static-link-storage"))]
-    fn boxed() -> Pin<Box<Self>> {
+    fn try_boxed() -> Option<Pin<Box<Self>>> {
         let layout = core::alloc::Layout::new::<Self>();
         // SAFETY: the layout is not zero-sized (the queue is in it); `init_in_place`
         // writes every field of the allocation, and an allocation it got from the
@@ -810,10 +812,10 @@ impl<const N: usize, const Q: usize> Inner<N, Q> {
         unsafe {
             let at = alloc::alloc::alloc(layout).cast::<Self>();
             if at.is_null() {
-                alloc::alloc::handle_alloc_error(layout);
+                return None;
             }
             Self::init_in_place(at);
-            Box::into_pin(Box::from_raw(at))
+            Some(Box::into_pin(Box::from_raw(at)))
         }
     }
 
@@ -1123,9 +1125,12 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     ///   (`MEMP_NUM_UDP_PCB` exhausted; bump the pool in lwipopts.h).
     /// - [`LinkError::BindFailed`] if `udp_bind` rejects the port
     ///   (e.g. already in use within the lwIP stack).
+    /// - [`LinkError::HeapRefused`] if the heap has no room for the socket's
+    ///   state, before any pcb is taken.
     #[cfg(not(feature = "static-link-storage"))]
     pub fn bind(link: &LwipLink, port: u16) -> Result<Self, LinkError> {
-        Self::attach(link, Inner::boxed(), port)
+        let inner = Inner::try_boxed().ok_or(LinkError::HeapRefused)?;
+        Self::attach(link, inner, port)
     }
 
     /// Round 3277 (`static-link-storage`) -- `bind` over a cell of

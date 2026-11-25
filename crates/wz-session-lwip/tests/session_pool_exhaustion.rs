@@ -213,7 +213,7 @@ impl<
         dial_pumps: &'static Pumps<DIALERS>,
     ) -> Self {
         let runtime = cell.start(Frozen).expect("the runtime starts once");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let listening = wz_link_lwip::test_bind::session_rx(link, port).expect("bind the listener");
         assert!(listener.listen(listening).is_ok(), "listens once");
         // One for each dial the scenario makes: the node's `fill`, the one more, and
@@ -224,8 +224,18 @@ impl<
         Self {
             link,
             port,
-            acceptor: SessionHost::new(CoopLocalSet::new(&runtime), sessions, pumps, link),
-            dialler: SessionHost::new(CoopLocalSet::new(&runtime), dial_sessions, dial_pumps, link),
+            acceptor: SessionHost::new(
+                CoopLocalSet::try_new(&runtime).expect("the heap has room"),
+                sessions,
+                pumps,
+                link,
+            ),
+            dialler: SessionHost::new(
+                CoopLocalSet::try_new(&runtime).expect("the heap has room"),
+                dial_sessions,
+                dial_pumps,
+                link,
+            ),
             local,
             runtime,
             listener,

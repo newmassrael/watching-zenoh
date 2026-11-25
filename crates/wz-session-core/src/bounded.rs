@@ -872,13 +872,11 @@ impl TextBacking for String {
     }
 
     fn push_str(&mut self, s: &str) -> Result<(), CapacityFull<()>> {
-        String::push_str(self, s);
-        Ok(())
+        push_heap_text(self, s)
     }
 
     fn push(&mut self, c: char) -> Result<(), CapacityFull<char>> {
-        String::push(self, c);
-        Ok(())
+        push_heap_text(self, c.encode_utf8(&mut [0u8; 4])).map_err(|_| CapacityFull(c))
     }
 
     fn clear(&mut self) {
@@ -930,6 +928,39 @@ pub fn push_bytes<const N: usize>(
         bytes.set_len(end);
     }
     Ok(())
+}
+
+/// Append `s` to `bytes` on the heap with one copy, all or nothing: refused, `bytes` is left as
+/// it was. The room is asked of the heap with `try_reserve`, so a full heap is a refusal the caller
+/// answers, where `Vec::extend_from_slice` would end the program; every heap text and byte buffer
+/// of the crate that a door appends to appends through this.
+#[cfg(feature = "alloc")]
+pub fn push_heap_bytes(bytes: &mut Vec<u8>, s: &[u8]) -> Result<(), CapacityFull<()>> {
+    bytes.try_reserve(s.len()).map_err(|_| CapacityFull(()))?;
+    let len = bytes.len();
+    // SAFETY: room for `s.len()` bytes past the length was reserved above; the bytes are written
+    // there and the length set after them, and `u8` needs no drop.
+    unsafe {
+        core::ptr::copy_nonoverlapping(s.as_ptr(), bytes.as_mut_ptr().add(len), s.len());
+        bytes.set_len(len.saturating_add(s.len()));
+    }
+    Ok(())
+}
+
+/// [`push_heap_bytes`] for a heap text: `s` appended whole, or refused with `text` as it was.
+#[cfg(feature = "alloc")]
+pub fn push_heap_text(text: &mut String, s: &str) -> Result<(), CapacityFull<()>> {
+    // SAFETY: what is appended is a whole `str`, so the text stays UTF-8, and `push_heap_bytes`
+    // writes all of it or none.
+    push_heap_bytes(unsafe { text.as_mut_vec() }, s.as_bytes())
+}
+
+/// A copy of `s` on the heap of its own, or `None` when the heap has no room for it.
+#[cfg(feature = "alloc")]
+pub fn heap_copy(s: &[u8]) -> Option<Vec<u8>> {
+    let mut copy = Vec::new();
+    push_heap_bytes(&mut copy, s).ok()?;
+    Some(copy)
 }
 
 impl<const N: usize> TextBacking for heapless::String<N> {

@@ -384,6 +384,9 @@ pub struct UdpDriver<S: DatagramSocket, B: RxStore, T: TxStore> {
     kept: Cell<Option<usize>>,
     /// Whether the session asked, while a datagram is lent, to keep it.
     keeping: Cell<bool>,
+    /// The datagrams the copying receive let go of for want of heap room, until the loop takes them.
+    #[cfg(feature = "alloc")]
+    rx_drops: crate::link_storage::RxDrops,
     /// The last receive failure, kept for the deploy to report: the loop's
     /// seam returns a frame or nothing, and a socket that fails must not
     /// read as a quiet one.
@@ -491,6 +494,8 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
             stash: Cell::new(None),
             kept: Cell::new(None),
             keeping: Cell::new(false),
+            #[cfg(feature = "alloc")]
+            rx_drops: crate::link_storage::RxDrops::new(),
             rx_error: Cell::new(None),
             idle_wait_ms: SERVICE_WAIT_MS as u32,
             armed_wait_ms: Cell::new(SERVICE_WAIT_MS),
@@ -817,7 +822,12 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
     // binding for both receives, and the buffer is idle after it as after any datagram let go of.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        crate::link_storage::copied_receive(self)
+        crate::link_storage::copied_receive(self, &self.rx_drops)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn take_rx_dropped(&self) -> usize {
+        self.rx_drops.take()
     }
 
     fn holds_input(&self) -> bool {

@@ -51,7 +51,8 @@ async fn r60_fsm_drives_real_tcp_loopback() {
     let adapter: Arc<TokioLinkDriverAdapter<TcpDriver>> =
         Arc::new(TokioLinkDriverAdapter::new(driver, handle));
 
-    let actions = new_session_actions(adapter, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(adapter, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
 
     // ─── drive Init -> LinkOpening -> SentInitSyn ──────────────
     // The session FSM is sync; run it on a blocking task so the

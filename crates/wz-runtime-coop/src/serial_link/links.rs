@@ -108,6 +108,8 @@ pub struct SerialDriver<D: SerialDevice, B: RxStore = RxBuffer, T: TxStore = TxB
     lost: Cell<Option<LostCause>>,
     /// The last failure the line reported, kept for the deploy to report.
     error: Cell<Option<D::Error>>,
+    /// The frames the copying receive let go of for want of heap room, until the loop takes them.
+    rx_drops: crate::link_storage::RxDrops,
     owner_waits: bool,
     /// When a dial writes its `INIT` again, after the peer's `RESET`.
     resend_at_us: Cell<Option<u64>>,
@@ -132,6 +134,7 @@ impl<D: SerialDevice, B: RxStore, T: TxStore> SerialDriver<D, B, T> {
             tx: TxLender::new(tx),
             lost: Cell::new(None),
             error: Cell::new(None),
+            rx_drops: crate::link_storage::RxDrops::new(),
             owner_waits: false,
             resend_at_us: Cell::new(None),
         }
@@ -515,7 +518,11 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
     }
 
     fn try_recv(&self) -> Option<RxFrame> {
-        crate::link_storage::copied_receive(self)
+        crate::link_storage::copied_receive(self, &self.rx_drops)
+    }
+
+    fn take_rx_dropped(&self) -> usize {
+        self.rx_drops.take()
     }
 
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
@@ -891,7 +898,7 @@ where
         self.links.open_group(endpoint, group)
     }
 
-    fn share_pump(pump: HeapLink) -> CellRc<dyn SessionDatagramLink> {
+    fn share_pump(pump: HeapLink) -> Option<CellRc<dyn SessionDatagramLink>> {
         S::share_pump(pump)
     }
 }

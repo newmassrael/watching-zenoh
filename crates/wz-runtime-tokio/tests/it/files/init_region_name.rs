@@ -78,7 +78,8 @@ async fn acceptor_answers(
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
     let mut params = fixture_session_init_params();
     params.region = local.map(|local| RegionName::new(local).expect("a valid fixture name"));
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);

@@ -114,7 +114,8 @@ fn fixture_params() -> SessionInitParams {
 #[test]
 fn r57_session_script_actions_produce_real_wire_bytes() {
     let driver = Arc::new(LifecycleRecordingDriver::default());
-    let actions = new_session_actions(driver.clone(), fixture_params(), TokioTime::new());
+    let actions = new_session_actions(driver.clone(), fixture_params(), TokioTime::new())
+        .expect("the heap has room");
     // R311il — engine-free: dispatch each action by calling the native
     // `SessionFsmUnicastActions` trait method on a binding over `actions`
     // (the successor of the retired Lua `dispatch_script` by-name shim).
@@ -337,7 +338,8 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
         second_driver.clone() as Arc<dyn BoxedLinkDriver + Send + Sync>,
         fixture_session_init_params(),
         TokioTime::new(),
-    );
+    )
+    .expect("the heap has room");
     let mut second_binding =
         SessionActionsBinding::<TokioRuntime, TokioTime>::new(second_actions.clone(), OsEntropy);
     second_binding.link_driver_open();

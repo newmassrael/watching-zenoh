@@ -395,10 +395,11 @@ fn run_router(
     let links = router_links(init.batch_size);
     let OpenedLink { sink, pump } = links.open_acceptor(port).expect("bind the router's end");
     let _ = ready.send(());
-    let runtime = CoopRuntime::new(PosixClock);
-    let local = CoopLocalSet::new(&runtime);
+    let runtime = CoopRuntime::try_new(PosixClock).expect("the heap has room");
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
-    let actions = new_session_actions(sink, init, CoopTime::new(&runtime));
+    let actions =
+        new_session_actions(sink, init, CoopTime::new(&runtime)).expect("the heap has room");
     let observer = std::rc::Rc::new(std::cell::RefCell::new(ApplicationLayerObserver::new()));
     if catch_all == CatchAll::Held {
         let samples = seen.clone();
@@ -463,7 +464,8 @@ fn run_router(
         &local,
         pump,
         actions.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(PosixEntropy)
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),

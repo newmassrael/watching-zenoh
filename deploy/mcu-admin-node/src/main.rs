@@ -254,13 +254,19 @@ fn run_heap() -> ! {
 
     let policy = resolve_policy();
     let limits = resolve_limits();
-    let runtime = CoopRuntime::new(SystickClockRef);
-    let local = CoopLocalSet::new(&runtime);
+    let Some(runtime) = CoopRuntime::try_new(SystickClockRef) else {
+        fail("the heap has no room for the runtime");
+    };
+    let Some(local) = CoopLocalSet::try_new(&runtime) else {
+        fail("the heap has no room for the local set");
+    };
     let zid_hex = zid_to_zenoh_hex(&ZID);
     let accept_runtime = runtime.clone();
     // The node's one source: every session it accepts or dials draws its handshake's secrets
     // from it, each through a handle on it.
-    let entropy = SessionEntropy::new(ClockSeededXorshift::seeded());
+    let Ok(entropy) = SessionEntropy::try_new(ClockSeededXorshift::seeded()) else {
+        fail("the heap has no room for the node's entropy source");
+    };
     let accept_entropy = entropy.clone();
     let node = AdminNode::new(
         &local,
@@ -276,15 +282,17 @@ fn run_heap() -> ! {
         LISTEN_PORT,
         SessionTimeouts::from_build(),
         move || params(&key, &policy, &limits),
+        // A link whose session the heap has no room for is left unaccepted.
         move |sink| {
-            (
+            Some((
                 new_session_actions(
                     sink,
                     params(&key, &policy, &limits),
                     CoopTime::new(&accept_runtime),
-                ),
+                )
+                .ok()?,
                 accept_entropy.clone(),
-            )
+            ))
         },
         entropy,
     );
