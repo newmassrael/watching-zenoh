@@ -17,6 +17,7 @@ mod one_thread_lock;
 use core::ops::DerefMut;
 
 use wz_capi_port::os::{Mutex, MutexGuard};
+use wz_runtime_coop::sync::{Confined, ConfinedOwner, LockKind};
 use wz_session_core::row_callback::{OneThread, ThreadForm, Threads};
 
 use one_thread_lock::{OneThreadGuard, OneThreadLock};
@@ -59,12 +60,19 @@ pub(crate) trait LockForm: ThreadForm {
 
     /// The value, through the only reference there is.
     fn get_mut<T>(lock: &mut Self::Lock<T>) -> &mut T;
+
+    /// How the session's runtime holds what it lends each link's session ([`SessionLock`]).
+    type SessionLock: LockKind;
 }
 
 /// Other threads may call in: the host's lock, or the kernel's.
 impl LockForm for Threads {
     type Lock<T> = Mutex<T>;
     type Guard<'a, T: 'a> = MutexGuard<'a, T>;
+    // Every path to a link's lent values holds the session's one lock, as in the one-thread form:
+    // a lock of each value of its own (`wz_runtime_coop::sync::ManyThreads`) would be taken under
+    // that lock and keep out no one, so it pays only once a send runs with the session let go of.
+    type SessionLock = Confined<UnderCoreLock>;
 
     #[inline]
     fn new<T>(value: T) -> Mutex<T> {
@@ -91,6 +99,7 @@ impl LockForm for Threads {
 impl LockForm for OneThread {
     type Lock<T> = OneThreadLock<T>;
     type Guard<'a, T: 'a> = OneThreadGuard<'a, T>;
+    type SessionLock = Confined<UnderCoreLock>;
 
     #[inline]
     fn new<T>(value: T) -> OneThreadLock<T> {
@@ -119,9 +128,31 @@ pub(crate) type StateLock<T> = <CoopForm as LockForm>::Lock<T>;
 /// A hold of a [`StateLock`].
 pub(crate) type StateGuard<'a, T> = <CoopForm as LockForm>::Guard<'a, T>;
 
+/// The owner of the values the session's runtime lends its links' sessions: the session's lock
+/// (`CoreLock`), under which alone they are reached, so they take no lock of their own
+/// ([`SessionLock`]).
+pub(crate) enum UnderCoreLock {}
+
+// SAFETY: the values a runtime of `Confined<UnderCoreLock>` lends are the state of the session's
+// links (their actions, link states and kernels), all owned by the `Core` inside a `Confined` and
+// reached by one thread at a time on the ground the engine's `Send` of `Confined` states: every
+// path to them holds the session's `CoreLock` (the links' tasks run in `Core::run_tasks`, under
+// `&mut Core`), the engine's drop reaches them with the lock's value owned (`CoreLock::dropping`),
+// and no handle of them is handed out of the lock. The session's runtime is confined to the lock
+// the same way (the open's `confine_tasks`): it and its local set are the `Core`'s, its tasks are
+// spawned and run and their handles held by the `Core` alone, and the group's pace holds the set
+// in an `Rc`.
+unsafe impl ConfinedOwner for UnderCoreLock {}
+
+/// How the session's runtime holds what it lends a link's session: the form's choice
+/// ([`LockForm::SessionLock`]), made here once for the engine.
+pub(crate) type SessionLock = <CoopForm as LockForm>::SessionLock;
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
-    use super::{CoopForm, LockForm};
+    use super::{CoopForm, LockForm, UnderCoreLock};
+    use core::marker::PhantomData;
+    use wz_runtime_coop::sync::Confined;
     use wz_session_core::row_callback::{OneThread, ThreadForm, Threads};
 
     /// A take of `F`'s lock holds the value until its guard drops: a try meanwhile finds it
@@ -159,6 +190,21 @@ mod tests {
         assert_eq!(
             <CoopForm as ThreadForm>::OTHER_THREADS,
             cfg!(feature = "threads")
+        );
+    }
+
+    /// Each form lends a link's session its values under the session's one lock, with no lock of
+    /// their own. Turned red, at build, by a form whose `SessionLock` is another kind.
+    #[test]
+    fn each_form_lends_a_links_values_under_the_session_lock() {
+        fn same<T>(_: PhantomData<T>, _: PhantomData<T>) {}
+        same(
+            PhantomData::<<Threads as LockForm>::SessionLock>,
+            PhantomData::<Confined<UnderCoreLock>>,
+        );
+        same(
+            PhantomData::<<OneThread as LockForm>::SessionLock>,
+            PhantomData::<Confined<UnderCoreLock>>,
         );
     }
 }

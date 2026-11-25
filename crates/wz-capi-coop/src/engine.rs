@@ -53,7 +53,7 @@ use crate::arena::{
     EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
-use crate::form::{LockForm, StateGuard, StateLock};
+use crate::form::{LockForm, SessionLock, StateGuard, StateLock, UnderCoreLock};
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundRows};
@@ -126,7 +126,6 @@ use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_drive::{OpenedLink, SessionDatagramLink, SessionLinks, SessionRole};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
-use wz_runtime_coop::sync::ConfinedOwner;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_runtime_coop::transport::{DialWalk, FaceStep};
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
@@ -1661,24 +1660,6 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 // (`HeldKey`, `SessionKeys`) is shared and let go of only under this lock, and read outside it
 // only for its text, which nothing writes while the key is held.
 unsafe impl<T> Send for Confined<T> {}
-
-/// The owner of the values the session's runtime lends its links' sessions: [`CoreLock`], under
-/// which alone they are reached, so they take no lock of their own ([`SessionLock`]).
-enum UnderCoreLock {}
-
-// SAFETY: the values a runtime of `Confined<UnderCoreLock>` lends are the state of the session's
-// links (their actions, link states and kernels), all owned by the `Core` inside a `Confined` and
-// reached by one thread at a time on the ground the `Send` above states: every path to them holds
-// the session's `CoreLock` (the links' tasks run in `Core::run_tasks`, under `&mut Core`), the
-// engine's drop reaches them with the lock's value owned (`CoreLock::dropping`), and no handle of
-// them is handed out of the lock. The session's runtime is confined to the lock the same way (the
-// open's `confine_tasks`): it and its local set are the `Core`'s, its tasks are spawned and run
-// and their handles held by the `Core` alone, and the group's pace holds the set in an `Rc`.
-unsafe impl ConfinedOwner for UnderCoreLock {}
-
-/// How the session's runtime holds what it lends a link's session: in no lock of its own, the
-/// session's one lock keeping each to one thread at a time.
-type SessionLock = wz_runtime_coop::sync::Confined<UnderCoreLock>;
 
 /// The runtime a link's session runs on, read under [`SessionLock`].
 type LinkRuntime<C> = CoopRuntime<C, dyn wz_session_core::link::BoxedLinkDriver, SessionLock>;
