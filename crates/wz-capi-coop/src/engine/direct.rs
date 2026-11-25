@@ -326,12 +326,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
         false
     }
 
+    // A build that puts nothing in the round has no record that reads a rejoined message past
+    // its walk: the message is let go of as each walk over it ends, as the sink's default does.
+    #[cfg(wz_round)]
     fn lend_rejoined(&mut self, message: &wz_session_core::byte_cells::KeptBytes) {
         let _held = self.engine.core.lock();
         // SAFETY: the session's lock is held, taken above for the lend.
         unsafe { self.records.lane.lend_rejoined(message) };
     }
 
+    #[cfg(wz_round)]
     fn end_rejoined(&mut self, message: wz_session_core::byte_cells::KeptBytes) {
         let _held = self.engine.core.lock();
         // SAFETY: as `lend_rejoined`.
@@ -708,9 +712,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // arena, the rejoined buffer kept for them) is let go of before the link is read, as a
         // gate of a build whose links are tasks lets it go before each receive: a key the peer
         // undeclared goes back with no record after it, and the chain a fragment read now starts
-        // finds its buffer free.
+        // finds its buffer free. A build that puts nothing in the round has nothing to let go of.
+        #[cfg(wz_round)]
         // SAFETY: the session's lock is held (`held`), and no borrow of the round's table.
-        unsafe { self.samples.settle() };
+        unsafe {
+            self.samples.settle()
+        };
         let jobs_due_ms = core.jobs_due_at(now_us);
         Some(LinkTurn {
             now_us,

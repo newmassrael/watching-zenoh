@@ -1874,11 +1874,13 @@ impl StepPlaces {
 
 /// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it. As it
 /// lets go, the round of deliveries it wrote is sealed (`Round::seal`), so what the session wrote
-/// under its lock is handed out by the delivery that follows.
+/// under its lock is handed out by the delivery that follows; a build that puts nothing in the
+/// round (`wz_round`) seals none.
 struct LiveCore<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// Let go in the hold's own drop, after the seal, so that no caller holds a copy of the lock's
     /// release beside the call to it.
     core: core::mem::ManuallyDrop<CoreGuard<'a, L, C>>,
+    #[cfg(wz_round)]
     lane: &'a Round,
 }
 
@@ -1901,8 +1903,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
     // round sealed and the lock let go in this one body.
     #[inline(never)]
     fn drop(&mut self) {
+        #[cfg(wz_round)]
         // SAFETY: the session's lock is held: `core` is let go below, after the seal.
-        unsafe { self.lane.seal() };
+        unsafe {
+            self.lane.seal()
+        };
         // SAFETY: this is the hold's drop, so `core` is let go once and nothing reads it after.
         unsafe { core::mem::ManuallyDrop::drop(&mut self.core) };
     }
@@ -5592,6 +5597,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         Some(LiveCore {
             core: core::mem::ManuallyDrop::new(guard),
+            #[cfg(wz_round)]
             lane: &self.samples,
         })
     }
@@ -5634,6 +5640,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
                 return ToPublish::Live(LiveCore {
                     core: core::mem::ManuallyDrop::new(guard),
+                    #[cfg(wz_round)]
                     lane: &self.samples,
                 });
             }
@@ -5863,8 +5870,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// and the queries each say without their locks whether they hold anything, so a pass that
     /// finds nothing, which every delivery's last pass is, takes none of their locks.
     fn hand_out(&self) -> bool {
-        // The round the session wrote under its lock, in the order it was written.
+        // The round the session wrote under its lock, in the order it was written. A build that
+        // puts nothing in the round hands none out (`wz_round`, the crate's build script).
+        #[cfg(wz_round)]
         let mut handed = self.samples.deliver();
+        #[cfg(not(wz_round))]
+        let mut handed = false;
         // A face that came up or went down, a row at a time, told to each watcher as it stands
         // now, each taken out of its lock alone, so a sink that undeclares a watcher does not
         // wait on it.
