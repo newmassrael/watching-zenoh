@@ -1017,6 +1017,8 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// Let go of the dial of the face at `at`, which is over, the face waiting from `at_us`: the
     /// endpoint it dialled, moved out of the dial, which the refusal or the link's session names.
     /// `None` for a face that held no dial, which waits all the same, and for one past the table.
+    /// Out of line: a dial that answered and one that failed are each ended here.
+    #[inline(never)]
     pub fn end_dial(&mut self, at: usize, at_us: u64) -> Option<DialEndpoint> {
         let link = self.face_mut(at)?.link_mut();
         // Only the endpoint is moved out, and the link it leaves is let go of where it lies: a

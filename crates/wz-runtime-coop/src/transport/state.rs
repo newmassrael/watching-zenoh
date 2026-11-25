@@ -683,25 +683,22 @@ impl<T: TransportFaces> TransportState<T> {
         why
     }
 
-    /// Let go of the link of the face at `at`, whose handshake failed for `why` and whose task
-    /// ended, the face waiting from `now_us`: the reason the face's next step (`then`) goes on
-    /// with, which names the endpoint dialled last when the face dials the next one.
+    /// Let go of the link of the face at `at`, whose handshake failed and whose task ended, the
+    /// face waiting from `now_us`: the endpoint dialled last when the face's next step (`then`)
+    /// dials the next one, which the reason for the failure names; `None` when it does not, and
+    /// the reason is that no endpoint answered.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn handshake_failed(
         &mut self,
         at: usize,
         then: &Next,
-        why: Refusal,
         now_us: u64,
-    ) -> TransportRefusal {
+    ) -> Option<DialEndpoint> {
         self.links.put_link(at, Link::Waiting { at_us: now_us });
         match then {
-            Next::DialFrom { from } => TransportRefusal::Unreachable(EndpointRefusal::new(
-                self.endpoints.dial_text(from.saturating_sub(1)),
-                why,
-            )),
-            _ => TransportRefusal::NoEndpoint,
+            Next::DialFrom { from } => Some(DialEndpoint::Listed(from.saturating_sub(1))),
+            _ => None,
         }
     }
 

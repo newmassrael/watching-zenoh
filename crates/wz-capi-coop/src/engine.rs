@@ -3477,6 +3477,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
+    /// Leave in `last` that `endpoint` could not be reached, for `why`: the reason a face's step
+    /// goes on with when its dial, its handshake or its link failed. Out of line and cold: each of
+    /// those arms of a face's step would otherwise build the refusal, the endpoint's text in it,
+    /// and copy it into `last` itself.
+    #[cold]
+    #[inline(never)]
+    fn refuse(&self, last: &mut OpenError, endpoint: Option<&DialEndpoint>, why: Refusal) {
+        *last = OpenError::Unreachable(EndpointRefusal::new(
+            self.transport.endpoint_text(endpoint),
+            why,
+        ));
+    }
+
     /// The dial role's face at `at`, whose dial came to no link: it waits `redial_ms` to dial
     /// every endpoint again, or the session ends, for the reason the dial left, when it redials
     /// none; the face keeps the link it held then.
@@ -3676,18 +3689,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // `return _zp_unicast_failed_result(ztu, executor);`).
             FaceEffect::Lose { then } => {
                 self.lose_face_link(at, id, now_us);
-                *last = if then == Next::EndSession {
-                    OpenError::Unreachable(EndpointRefusal::new("", Refusal::LinkLost))
+                if then == Next::EndSession {
+                    self.refuse(last, None, Refusal::LinkLost);
                 } else {
-                    OpenError::NoEndpoint
-                };
+                    *last = OpenError::NoEndpoint;
+                }
                 then
             }
             // The link's task, told to stop, ends in the pass of the tasks before its link goes.
             FaceEffect::Fail { then } => {
                 let why = self.transport.end_handshake(at);
                 self.run_tasks();
-                *last = OpenError::from(self.transport.handshake_failed(at, &then, why, now_us));
+                match self.transport.handshake_failed(at, &then, now_us) {
+                    Some(endpoint) => self.refuse(last, Some(&endpoint), why),
+                    None => *last = OpenError::NoEndpoint,
+                }
                 then
             }
             // The dial under way was asked, never waited for: its link's handshake begins once
@@ -3696,10 +3712,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             FaceEffect::Handshake { next, deadline_us } => {
                 let endpoint = self.transport.links.end_dial(at, now_us);
                 let Some(answer) = answer.take() else {
-                    *last = OpenError::Unreachable(EndpointRefusal::new(
-                        self.transport.endpoint_text(endpoint.as_ref()),
-                        Refusal::NoAnswerInTime,
-                    ));
+                    self.refuse(last, endpoint.as_ref(), Refusal::NoAnswerInTime);
                     return self.follow(at, life.after_failure(next), redial_ms, last);
                 };
                 let start = DialStart::Answer {
@@ -3722,10 +3735,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     Some(Err(refused)) => Refusal::Link(refused),
                     _ => Refusal::NoAnswerInTime,
                 };
-                *last = OpenError::Unreachable(EndpointRefusal::new(
-                    self.transport.endpoint_text(endpoint.as_ref()),
-                    why,
-                ));
+                self.refuse(last, endpoint.as_ref(), why);
                 then
             }
             // A face whose wait is over, or whose node no other face holds now (with `listen`):
