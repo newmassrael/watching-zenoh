@@ -2773,6 +2773,29 @@ value = 2
 reason = "zenoh-pico bounds its sessions by no count; each of its examples opens one, and its API tests hold two at once, the two ends of what they check (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `assert_ok(z_open(&s2, z_config_move(&c2), NULL));`). Every entity pool is sized for these sessions, so the preset holds the entities of two."
 
 [[limit]]
+id = "CALLBACK_THREADS"
+kconfig = "WZ_LIMIT_CALLBACK_THREADS"
+kind = "bound"
+driven = "local"
+default = 8
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The threads that run the program's callbacks at once in a pico C ABI
+library built without std, which marks each such thread in a table of this
+room since it has no thread-local storage: a session's read task and each
+program thread whose call delivers in place. A callback a thread past it
+would run is not run, and wz_ext_interface_run_in_callback is refused.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the threads in callbacks, and zenoh-pico keeps no record of them; eight holds the read task of each of the default four sessions and one program thread beside each."
+
+[[limit]]
 id = "HELD_SAMPLES"
 kconfig = "WZ_LIMIT_HELD_SAMPLES"
 kind = "bound"

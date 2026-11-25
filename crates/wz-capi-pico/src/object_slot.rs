@@ -981,7 +981,7 @@ mod tests {
         unsafe { count_in_entity::<_, (), _>(object, &mut closure) };
         {
             // An owner inside a callback does not wait for the closures it counts.
-            let _inside = crate::ffi::InCallback::enter();
+            let _inside = crate::ffi::InCallback::enter().expect("a thread is marked");
             // SAFETY: as above; the owner lets go of `object` once, here.
             unsafe {
                 closures_of::<_, ()>(object).wait_none();

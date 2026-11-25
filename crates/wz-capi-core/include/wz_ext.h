@@ -2727,7 +2727,10 @@ z_result_t wz_ext_interface_bytes_view(const z_loaned_bytes_t *bytes,
  * waiting, as it does from a callback the library runs itself, since the
  * wait would be for the callback that is waiting.
  *
- * Z_OK once body returned; Z_ERR_NULL for a NULL body, which runs nothing. */
+ * Z_OK once body returned; Z_ERR_NULL for a NULL body, which runs nothing;
+ * _Z_ERR_SYSTEM_OUT_OF_MEMORY, running nothing, when the library counts the
+ * threads in callbacks in a table of fixed room (a build without std) and
+ * CALLBACK_THREADS other threads are in one. */
 z_result_t wz_ext_interface_run_in_callback(void (*body)(void *context),
                                             void *context);
 
