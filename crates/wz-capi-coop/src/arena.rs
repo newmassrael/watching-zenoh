@@ -146,6 +146,7 @@ use crate::engine::{
 };
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
+use crate::form::SessionLock;
 use crate::open_source::EndpointList;
 use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -1128,13 +1129,18 @@ pub struct TransportRows {
     port_peers: usize,
 }
 
+/// The flag of a cell of the links' tables: the session's lock kind's
+/// (`wz_runtime_coop::sync::LockKind::Flag`), which the handles placed in it are counted by.
+type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
+
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
 pub(crate) struct TransportTables {
     /// The links' buffers and, where the links share pools, their places.
     pub(crate) links: LinkTables,
     /// The cells of the links' drivers, their gates and their actions, each `None` for a plan
-    /// with no such table.
-    pub(crate) cells: LinkCells<Option<LentByteCells>>,
+    /// with no such table: each cell's flag the one the session's lock kind counts a link's
+    /// handles by, so a handle let go of on any thread that may hold it gives its cell back.
+    pub(crate) cells: LinkCells<Option<LentByteCells<LinkCellFlag>>>,
     /// The reassembly buffers the links share.
     pub(crate) reassembly: LentByteCells,
     /// The rows of the endpoints' texts, none written.
@@ -1192,12 +1198,15 @@ impl TransportRows {
 
     /// The cells of the links' drivers, their gates, their actions and their halves, lent by
     /// `lend` after the links' buffers: `None` for a table the plan holds no cells for.
-    fn cells_from(&self, lend: &mut TableLender<'_>) -> LinkCells<Option<LentByteCells>> {
+    fn cells_from(
+        &self,
+        lend: &mut TableLender<'_>,
+    ) -> LinkCells<Option<LentByteCells<LinkCellFlag>>> {
         let sizes = self.cell_bytes.into_array();
         let mut cells = [None, None, None, None];
         for at in self.cells_held.places() {
             if let (Some(lent), Some(&bytes)) = (cells.get_mut(at), sizes.get(at)) {
-                *lent = Some(lend.byte_cells(bytes, self.links));
+                *lent = Some(lend.byte_cells_of::<LinkCellFlag>(bytes, self.links));
             }
         }
         LinkCells::from_array(cells)
