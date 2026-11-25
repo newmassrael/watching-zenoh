@@ -88,6 +88,8 @@ impl LinkEnd for DirectEnd {
 pub(crate) struct FaceRecords<C: ClockSource + 'static> {
     pub(super) face: HeldFace,
     pub(super) actions: LinkHandle<C>,
+    /// The link the records are read from, which keeps where the datagram it lends lies.
+    pub(super) link: CellRc<LinkGate<C>>,
     #[cfg(feature = "queryable")]
     pub(super) plane: PlacedRef<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
@@ -102,9 +104,26 @@ pub(crate) struct FaceRecords<C: ClockSource + 'static> {
 
 impl<C: ClockSource + 'static> FaceRecords<C> {
     /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the planes
-    /// `planes` names of the face's tables in `registry`, and send what it staged.
-    #[cfg(feature = "queryable")]
+    /// `planes` names of the face's tables in `registry`, the held session's, and send what it
+    /// staged. The round is told where the link lends the datagram for the length of the dispatch
+    /// alone: the walks that hand a Push's sample out (`pinned`) read it in the event itself, so a
+    /// record the planes offer the round is the one the link tells it of.
     fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
+        // SAFETY: `registry` is borrowed from the held session, so the session's lock is held.
+        unsafe { self.link.lend_to(&self.lane) };
+        self.dispatch_records(registry, event, planes);
+        // SAFETY: as above.
+        unsafe { self.lane.set_lending(None) };
+    }
+
+    /// [`Self::dispatch`], the round told already.
+    #[cfg(feature = "queryable")]
+    fn dispatch_records(
+        &self,
+        registry: &mut Registry,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+    ) {
         let face = self.face;
         let actions = &*self.actions;
         let (plane, generation) = (&self.plane, self.generation);
@@ -128,10 +147,14 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
         }
     }
 
-    /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the planes
-    /// `planes` names of the face's tables in `registry`, and send what it staged.
+    /// [`Self::dispatch`], the round told already.
     #[cfg(not(feature = "queryable"))]
-    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
+    fn dispatch_records(
+        &self,
+        registry: &mut Registry,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+    ) {
         let actions = &*self.actions;
         // What the declaration watches are told of this frame is this link's peer's.
         #[cfg(any(
@@ -617,6 +640,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core.link_due_us = slot.life_due_us.min(slot.pump_due_us);
             core.settle_ledger();
         }
+        // What the records of a round a delivery handed out still hold (the counts of the key
+        // arena, the rejoined buffer kept for them) is let go of before the link is read, as a
+        // gate of a build whose links are tasks lets it go before each receive: a key the peer
+        // undeclared goes back with no record after it, and the chain a fragment read now starts
+        // finds its buffer free.
+        // SAFETY: the session's lock is held (`held`), and no borrow of the round's table.
+        unsafe { self.samples.settle() };
         let jobs_due_ms = core.jobs_due_at(now_us);
         Some(LinkTurn {
             now_us,
