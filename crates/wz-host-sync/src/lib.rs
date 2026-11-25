@@ -4,16 +4,15 @@
 //! A host's lock, condition variable and threads over its own system calls, for a build without
 //! `std`.
 //!
-//! [`RawLock`] and [`RawCondvar`] are one word each, made in a `const` context and movable while no
-//! thread holds or waits on them: what a `static` and a value that moves both need, and what a
-//! pthread object, which must not move once it has been used, is not. A thread that has to wait for
-//! either parks on one place of the process: the system's own mutex and condition variable, which
-//! live in `static`s and never move. A release wakes the parked threads only when there are any,
-//! so a lock nobody waits for costs one atomic operation to take and one to give back.
-//!
-//! The parking place is the whole process's, so a release wakes every parked thread and each checks
-//! its own condition again. That is the price of a lock with no system object of its own; a wake
-//! that finds its lock still held parks again.
+//! [`RawLock`] and [`RawCondvar`] are one 32-bit word each, made in a `const` context and movable
+//! while no thread holds or waits on them: what a `static` and a value that moves both need, and
+//! what a pthread object, which must not move once it has been used, is not. A thread that has to
+//! wait sleeps on the word itself, through the host's wait on an address (the futex of Linux and
+//! Android, the address wait of Apple's systems and of Windows), so a release wakes a thread that
+//! waits on that word and no other. Each word also says whether a thread waits on it, so a lock
+//! nobody waits for costs one atomic operation to take and one to give back, and no call of the
+//! system. A POSIX host with no wait on an address waits on one of a few pthread pairs that the
+//! word's address picks.
 //!
 //! [`spawn_fn`] starts a thread of the system, its body moved into a record of a pool of
 //! [`THREADS`] and not into memory of the heap, and [`current_thread`] names the calling thread by
@@ -40,7 +39,7 @@ extern crate std;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use core::time::Duration;
 
 #[cfg(unix)]
@@ -53,64 +52,6 @@ mod counter;
 mod windows;
 #[cfg(windows)]
 use windows as sys;
-
-/// How many times a lock that is held is tried again before the thread parks: a lock is held for
-/// a short step far more often than for a wait, and a step ends sooner than a park and a wake.
-const SPINS: u32 = 64;
-
-/// The one place a thread of the process waits for a lock or a condition variable of this crate.
-static PARK_LOCK: sys::ParkLock = sys::ParkLock::new();
-static PARK_COND: sys::ParkCond = sys::ParkCond::new();
-/// How many threads are parked, so that a release with none to wake takes no system lock.
-static PARKED: AtomicUsize = AtomicUsize::new(0);
-
-/// Wait on the process's parking place for as long as `blocked` answers true.
-///
-/// A waker writes what `blocked` reads and then reads `PARKED`; this thread counts itself in
-/// `PARKED` and then reads what `blocked` reads, each with `SeqCst`. So either the waker sees
-/// this thread counted and wakes it (under `PARK_LOCK`, which this thread holds until its wait has
-/// begun), or this thread sees the write and does not wait: no wake is lost.
-fn park_while(blocked: impl Fn() -> bool) {
-    park_until(blocked, None);
-}
-
-/// [`park_while`], and no later than when the monotonic clock ([`monotonic_ns`]) reads
-/// `deadline_ns`, if one is given: whether `blocked` cleared (false: the deadline came first).
-fn park_until(blocked: impl Fn() -> bool, deadline_ns: Option<u64>) -> bool {
-    PARK_LOCK.lock();
-    PARKED.fetch_add(1, Ordering::SeqCst);
-    let mut cleared = true;
-    while blocked() {
-        match deadline_ns {
-            // SAFETY: this thread holds `PARK_LOCK`, which the wait releases and takes back.
-            None => unsafe { PARK_COND.wait(&PARK_LOCK) },
-            Some(deadline) => {
-                if monotonic_ns() >= deadline {
-                    cleared = false;
-                    break;
-                }
-                // SAFETY: as above.
-                unsafe { PARK_COND.wait_until(&PARK_LOCK, deadline) };
-            }
-        }
-    }
-    PARKED.fetch_sub(1, Ordering::SeqCst);
-    // SAFETY: this thread took it above.
-    unsafe { PARK_LOCK.unlock() };
-    cleared
-}
-
-/// Wake every parked thread, if one is.
-fn unpark_all() {
-    if PARKED.load(Ordering::SeqCst) != 0 {
-        PARK_LOCK.lock();
-        // SAFETY: this thread holds `PARK_LOCK`; it lets it go below.
-        unsafe {
-            PARK_COND.notify_all();
-            PARK_LOCK.unlock();
-        }
-    }
-}
 
 /// The host's wall clock: the seconds and nanoseconds since the Unix epoch, `None` for a clock set
 /// before it. `CLOCK_REALTIME` on a POSIX host, the precise system time on Windows. Set by the
@@ -125,36 +66,60 @@ pub fn monotonic_ns() -> u64 {
     sys::monotonic_ns()
 }
 
+/// [`Parker`]'s word: no wake is kept and no thread waits.
+const EMPTY: u32 = 0;
+/// [`Parker`]'s word: a wake came and no wait has taken it yet.
+const NOTIFIED: u32 = 1;
+/// [`Parker`]'s word: its thread waits, so a wake must wake it.
+const PARKED: u32 = u32::MAX;
+
 /// What a thread waits on until another wakes it: one word, made in a `const` context. A wake
 /// that comes before the wait is kept, so the wait that follows returns at once, as
-/// `std::thread::park` keeps an `unpark`.
+/// `std::thread::park` keeps an `unpark`. One thread waits on a parker, the one it is for, as on
+/// `std`'s; any thread wakes it.
 pub struct Parker {
-    woken: AtomicBool,
+    state: AtomicU32,
 }
 
 impl Parker {
     /// A parker no wake has reached.
     pub const fn new() -> Self {
         Self {
-            woken: AtomicBool::new(false),
+            state: AtomicU32::new(EMPTY),
         }
     }
 
     /// Wait until woken, and take the wake.
     pub fn park(&self) {
-        park_while(|| !self.woken.swap(false, Ordering::SeqCst));
+        self.park_until(None);
     }
 
     /// [`Self::park`] for at most `timeout_ns`: whether a wake came (false: the time ran out).
     pub fn park_timeout_ns(&self, timeout_ns: u64) -> bool {
-        let deadline = monotonic_ns().saturating_add(timeout_ns);
-        park_until(|| !self.woken.swap(false, Ordering::SeqCst), Some(deadline))
+        self.park_until(Some(monotonic_ns().saturating_add(timeout_ns)))
+    }
+
+    /// Take a kept wake, or wait for one until the monotonic clock reads `deadline_ns`, if one is
+    /// given: whether a wake was taken. The word goes from `NOTIFIED` to `EMPTY` (a kept wake) or
+    /// from `EMPTY` to `PARKED` in one step, so a wake either finds the thread marked as waiting
+    /// and wakes it, or is kept for it.
+    fn park_until(&self, deadline_ns: Option<u64>) -> bool {
+        if self.state.fetch_sub(1, Ordering::Acquire) == NOTIFIED {
+            return true;
+        }
+        while self.state.load(Ordering::Relaxed) == PARKED
+            && deadline_ns.is_none_or(|deadline| monotonic_ns() < deadline)
+        {
+            sys::wait(&self.state, PARKED, deadline_ns);
+        }
+        self.state.swap(EMPTY, Ordering::Acquire) == NOTIFIED
     }
 
     /// Wake the thread that waits, or the next wait.
     pub fn unpark(&self) {
-        self.woken.store(true, Ordering::SeqCst);
-        unpark_all();
+        if self.state.swap(NOTIFIED, Ordering::Release) == PARKED {
+            sys::wake_one(&self.state);
+        }
     }
 }
 
@@ -164,46 +129,62 @@ impl Default for Parker {
     }
 }
 
+/// [`RawLock`]'s word: no thread holds it.
+const UNLOCKED: u32 = 0;
+/// [`RawLock`]'s word: a thread holds it and none has waited for it since it was taken.
+const LOCKED: u32 = 1;
+/// [`RawLock`]'s word: a thread holds it and another may be waiting, so the release wakes one.
+const CONTENDED: u32 = 2;
+
 /// A lock of one word, not reentrant: a thread that holds it and takes it again waits for itself.
+///
+/// The three-state lock of Drepper's "Futexes Are Tricky": a thread that finds it held marks it
+/// contended and sleeps on the word, and only a release that finds the mark wakes a thread, one.
+/// A thread woken takes the lock marked contended again, since it cannot know whether another
+/// still waits: a wake too many is the price, never one too few.
 pub struct RawLock {
-    held: AtomicBool,
+    state: AtomicU32,
 }
 
 impl RawLock {
     /// A lock no thread holds.
     pub const fn new() -> Self {
         Self {
-            held: AtomicBool::new(false),
+            state: AtomicU32::new(UNLOCKED),
         }
     }
 
     /// Wait until the lock is the calling thread's.
     pub fn lock(&self) {
-        let mut spins = 0;
-        while !self.try_lock() {
-            if spins < SPINS {
-                spins += 1;
-                core::hint::spin_loop();
-            } else {
-                park_while(|| self.held.load(Ordering::SeqCst));
-            }
+        if !self.try_lock() {
+            self.lock_contended();
+        }
+    }
+
+    /// The lock was held when it was tried: mark it contended in the same step that takes it if
+    /// it is free, and otherwise sleep until the word moves from the mark.
+    #[cold]
+    fn lock_contended(&self) {
+        while self.state.swap(CONTENDED, Ordering::Acquire) != UNLOCKED {
+            sys::wait(&self.state, CONTENDED, None);
         }
     }
 
     /// Take the lock if no thread holds it, without waiting: whether it was taken.
     pub fn try_lock(&self) -> bool {
-        self.held
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        self.state
+            .compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
 
-    /// Let the lock go, and wake the threads that wait for it.
+    /// Let the lock go, and wake a thread that waits for it, if one may.
     ///
     /// # Safety
     /// The calling thread holds the lock.
     pub unsafe fn unlock(&self) {
-        self.held.store(false, Ordering::SeqCst);
-        unpark_all();
+        if self.state.swap(UNLOCKED, Ordering::Release) == CONTENDED {
+            sys::wake_one(&self.state);
+        }
     }
 }
 
@@ -213,18 +194,32 @@ impl Default for RawLock {
     }
 }
 
+/// [`RawCondvar`]'s word: the low bit says a thread waits; the rest counts notifications.
+const WAITERS: u32 = 1;
+
 /// A condition variable of one word, waited on with a [`RawLock`] held.
+///
+/// The word counts the notifications that found a thread waiting, and its low bit says whether
+/// one waits. A waiter sets the bit with the lock held and sleeps while the word reads what it
+/// left; a notification with the bit clear touches nothing, and one with the bit set moves the
+/// count, clears the bit and wakes every waiter, each of which sets the bit again if it waits
+/// again. A notifier changes the condition with the lock held before it notifies, so it reads a
+/// bit a waiter set before that waiter let the lock go.
 pub struct RawCondvar {
-    /// How many notifications there have been: a waiter waits until it moves.
-    epoch: AtomicUsize,
+    epoch: AtomicU32,
 }
 
 impl RawCondvar {
     /// A condition variable no thread waits on.
     pub const fn new() -> Self {
         Self {
-            epoch: AtomicUsize::new(0),
+            epoch: AtomicU32::new(0),
         }
+    }
+
+    /// Mark a waiter: the word as the wait leaves it, which a notification moves.
+    fn waiting(&self) -> u32 {
+        self.epoch.fetch_or(WAITERS, Ordering::Relaxed) | WAITERS
     }
 
     /// Release `lock`, wait until a notification comes after this call began, and take `lock`
@@ -234,9 +229,9 @@ impl RawCondvar {
     /// # Safety
     /// The calling thread holds `lock`.
     pub unsafe fn wait(&self, lock: &RawLock) {
-        let seen = self.epoch.load(Ordering::SeqCst);
+        let seen = self.waiting();
         lock.unlock();
-        park_while(|| self.epoch.load(Ordering::SeqCst) == seen);
+        sys::wait(&self.epoch, seen, None);
         lock.lock();
     }
 
@@ -246,18 +241,45 @@ impl RawCondvar {
     /// # Safety
     /// The calling thread holds `lock`.
     pub unsafe fn wait_until(&self, lock: &RawLock, deadline_ns: u64) -> bool {
-        raw_wait_until(self, lock, deadline_ns)
+        let seen = self.waiting();
+        lock.unlock();
+        let notified = loop {
+            if self.epoch.load(Ordering::Relaxed) != seen {
+                break true;
+            }
+            if monotonic_ns() >= deadline_ns {
+                break false;
+            }
+            sys::wait(&self.epoch, seen, Some(deadline_ns));
+        };
+        lock.lock();
+        notified
     }
 
-    /// Wake a waiting thread. Every waiter is woken, which the waiters' loops allow.
+    /// Wake a waiting thread. Every waiter is woken, which the waiters' loops allow: the word
+    /// keeps no count of its waiters, only whether there are any.
     pub fn notify_one(&self) {
         self.notify_all();
     }
 
-    /// Wake every waiting thread.
+    /// Wake every waiting thread. Nothing is called when none waits.
     pub fn notify_all(&self) {
-        self.epoch.fetch_add(1, Ordering::SeqCst);
-        unpark_all();
+        let seen = self.epoch.load(Ordering::Relaxed);
+        // A word that moved under the exchange was moved by another notification, which woke
+        // every waiter marked in it.
+        if seen & WAITERS != 0
+            && self
+                .epoch
+                .compare_exchange(
+                    seen,
+                    seen.wrapping_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            sys::wake_all(&self.epoch);
+        }
     }
 }
 
@@ -265,22 +287,6 @@ impl Default for RawCondvar {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// [`RawCondvar::wait`], and no later than when the monotonic clock reads `deadline_ns`: whether
-/// a notification came (false: the deadline came first).
-///
-/// # Safety
-/// The calling thread holds `lock`.
-unsafe fn raw_wait_until(cv: &RawCondvar, lock: &RawLock, deadline_ns: u64) -> bool {
-    let seen = cv.epoch.load(Ordering::SeqCst);
-    lock.unlock();
-    let notified = park_until(
-        || cv.epoch.load(Ordering::SeqCst) == seen,
-        Some(deadline_ns),
-    );
-    lock.lock();
-    notified
 }
 
 // The typed forms: the in-place ones, or `std`'s where those lie in their own bytes too (Linux's,
@@ -564,6 +570,7 @@ pub fn sleep_ms(ms: u64) {
 mod tests {
     use super::*;
 
+    use core::sync::atomic::AtomicUsize;
     use std::boxed::Box;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -670,6 +677,116 @@ mod tests {
             flag.lock.unlock();
         }
         setter.join().expect("the setter ran");
+    }
+
+    /// A lock taken and let go with no other thread about leaves its word unmarked, so its release
+    /// wakes nobody; a thread that waits for a held lock marks it contended, and the release that
+    /// finds the mark wakes it, and it takes the lock. Turned red by a waiter that sleeps without
+    /// the mark (the word never reads contended) or a release that does not wake on it (the waiter
+    /// never ends).
+    #[test]
+    fn a_waiter_marks_the_lock_contended_and_its_release_wakes_it() {
+        let lock = Arc::new(RawLock::new());
+        lock.lock();
+        assert_eq!(
+            lock.state.load(Ordering::SeqCst),
+            LOCKED,
+            "CONTROL: taken with no waiter"
+        );
+        // SAFETY: this thread holds it.
+        unsafe { lock.unlock() };
+        assert_eq!(lock.state.load(Ordering::SeqCst), UNLOCKED);
+
+        lock.lock();
+        let waiter = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                lock.lock();
+                // SAFETY: this thread holds it.
+                unsafe { lock.unlock() };
+            })
+        };
+        let started = Instant::now();
+        while lock.state.load(Ordering::SeqCst) != CONTENDED {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the waiter never marked the lock"
+            );
+            std::thread::yield_now();
+        }
+        // SAFETY: this thread holds it.
+        unsafe { lock.unlock() };
+        let started = Instant::now();
+        while !waiter.is_finished() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the release never woke the waiter"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        waiter.join().expect("the waiter ran");
+        assert_eq!(
+            lock.state.load(Ordering::SeqCst),
+            UNLOCKED,
+            "nothing holds it"
+        );
+    }
+
+    /// A notification with no thread waiting leaves the word as it was, and so calls nothing; a
+    /// waiter marks the word, and the notification that finds the mark moves the count, clears
+    /// the mark and ends the wait. Turned red by a notification that skips a marked word or a
+    /// waiter that sleeps unmarked (the wait runs to its five seconds and reads as not notified).
+    #[test]
+    fn a_notification_moves_the_word_only_when_a_thread_waits() {
+        let flag = Arc::new(Flag {
+            lock: RawLock::new(),
+            changed: RawCondvar::new(),
+            set: UnsafeCell::new(false),
+        });
+        flag.changed.notify_one();
+        flag.changed.notify_all();
+        assert_eq!(
+            flag.changed.epoch.load(Ordering::SeqCst),
+            0,
+            "no waiter, nothing moved"
+        );
+        let setter = {
+            let flag = flag.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                while flag.changed.epoch.load(Ordering::SeqCst) & WAITERS == 0 {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "the waiter never marked the word"
+                    );
+                    std::thread::yield_now();
+                }
+                flag.lock.lock();
+                // SAFETY: this thread holds the lock.
+                unsafe {
+                    *flag.set.get() = true;
+                    flag.lock.unlock();
+                }
+                flag.changed.notify_one();
+            })
+        };
+        let deadline = monotonic_ns() + 5_000_000_000;
+        flag.lock.lock();
+        let mut notified = true;
+        // SAFETY: this thread holds the lock around every read and the wait.
+        unsafe {
+            while notified && !*flag.set.get() {
+                notified = flag.changed.wait_until(&flag.lock, deadline);
+            }
+            flag.lock.unlock();
+        }
+        setter.join().expect("the setter ran");
+        assert!(notified, "the notification ended the wait");
+        assert_eq!(
+            flag.changed.epoch.load(Ordering::SeqCst),
+            2,
+            "moved once, the mark cleared"
+        );
     }
 
     /// A thread whose body waits a little, so a join that did not wait is seen, and writes down

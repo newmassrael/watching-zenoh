@@ -8,13 +8,13 @@
 # E4 and phase P4): no `std`, so the locks the cooperative runtime and the engine port hold across
 # threads cannot be `std::sync`'s, and the `critical-section` implementation an MCU image links
 # cannot be either, because a C library that defines one exports it beside its C ABI. This crate
-# is the one place those locks are made from the host's calls: pthreads on a POSIX host, the Win32
-# slim reader/writer lock and condition variable on Windows.
+# is the one place those locks are made from the host's calls: the futex on Linux and Android, the
+# address wait on Apple's systems and on Windows, and pthreads on another POSIX host.
 #
 # Every lock and condition variable here is one word, made in a `const` context and movable while
 # no thread holds it, so a value that is one can live in a `static` and in a value that moves; a
-# thread that must wait parks on one process-wide place, the only object that holds the system's
-# own lock. No `std`, nothing exported and nothing allocated: `spawn_fn` moves a thread's body into
+# thread that must wait sleeps on that word, and a release wakes a thread only when one waits on
+# it. No `std`, nothing exported and nothing allocated: `spawn_fn` moves a thread's body into
 # a record of a static pool of `THREADS`. Also the typed forms (`Mutex`, `Condvar`, `RwLock`,
 # `Instant`), in the shape of `std`'s: the one lock every crate of a C ABI's graph holds for a value
 # it makes while a session is open, on every host, with `std` or without.
@@ -43,13 +43,12 @@ path = "src/lib.rs"
 # taking one takes no memory, and a lock whose holder panicked reads as poisoned.
 std = []
 
-# The POSIX hosts' calls: the pthread mutex and condition variable the parking place is, the
-# threads, and `nanosleep`. No `std` feature: `libc` is the C library's own names.
+# The POSIX hosts' calls: the futex (`syscall`), the threads and `nanosleep`, and on a host with
+# no wait on an address the pthread mutex and condition variable its words sleep on. No `std` feature: `libc` is the C library's own names.
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", default-features = false }
 
-# The Windows host's: the slim reader/writer lock and condition variable, the threads and `Sleep`
-# (`System_Threading`), the handle a thread is (`Foundation`) and the attributes `CreateThread`
+# The Windows host's: the wait on an address, the threads and `Sleep` (`System_Threading`), the handle a thread is (`Foundation`) and the attributes `CreateThread`
 # is declared with (`Security`) and the performance counter the monotonic clock reads
 # (`System_Performance`), and the precise system time the wall clock reads (`System_SystemInformation`).
 # Already in this workspace's graph at this version.
