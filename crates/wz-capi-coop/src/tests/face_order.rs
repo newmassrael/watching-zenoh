@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The order of the session's lock and a face's: the session's is taken first and a face's
-//! under it, or a face's alone, never the session's inside a face's lend
-//! (`wz_runtime_coop::sync::face_lent_here`), which a debug build on a host fails at once.
+//! The order of the session's lock and a face's: a read waits for the session's lock inside its
+//! face's lend, and the session's lock is held over a face only by a try, never a wait
+//! (`wz_runtime_coop::sync::NoFaceWait`), which a debug build on a host fails at once. The one
+//! wait between the two runs from a face to the session's lock, so no cycle closes.
 
 use wz_runtime_coop::sync::{FacePlace, Lend};
 
@@ -17,41 +18,51 @@ fn face_holding(value: u32) -> FacePlace<SessionLock, u32> {
     place
 }
 
-/// The session's lock taken inside a face's lend fails, by a take that waits and by a try alike,
-/// and the face's lend that unwound leaves the lock free for a take after it. Turned red by a
-/// take that does not ask whether a face is lent on its thread (`CoreLock::not_inside_a_face`).
+/// The session's lock is taken inside a face's lend, by a take that waits and by a try alike, as
+/// a read takes it with its face held, and is free once the lends are done. Turned red by a take
+/// that refuses to run inside a face's lend.
 #[test]
-fn the_sessions_lock_is_not_taken_inside_a_faces_lend() {
+fn the_sessions_lock_is_taken_inside_a_faces_lend() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    // A place for each try: a lock kind that poisons on a panic inside it would fail the second
-    // try for its own reason.
     let place = face_holding(4);
-    let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        place.try_lend(|_| engine.peer_looks())
-    }));
-    assert!(waited.is_err(), "a take inside a face's lend fails");
-    let other = face_holding(6);
-    let tried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        other.try_lend(|_| engine.session_is_free())
-    }));
-    assert!(tried.is_err(), "a try inside a face's lend fails too");
-    assert!(
-        engine.session_is_free(),
-        "the unwound lends left the lock free"
+    let looks = engine.peer_looks();
+    assert_eq!(place.lend(|_| engine.peer_looks()), Some(looks));
+    assert_eq!(
+        place.try_lend(|_| engine.session_is_free()),
+        Lend::Lent(true)
     );
-    let _ = engine.peer_looks();
+    assert!(engine.session_is_free(), "the lends left the lock free");
 }
 
-/// A face lent while the session's lock is held, which is the order a step's send takes them in,
-/// lends it. Turned red by a check that refuses a face's lend under the session's lock.
+/// A face is tried under the session's lock, the way a step sends, and a wait on it there fails,
+/// which leaves the lock held to the step and free after it. Turned red by a check that refuses
+/// a try under the session's lock, or one that lets a wait through (`CoreGuard`'s mark).
 #[cfg(feature = "threads")]
 #[test]
-fn a_face_is_lent_under_the_sessions_lock() {
+fn a_face_is_tried_and_not_waited_on_under_the_sessions_lock() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let place = face_holding(5);
-    let mut lent = Lend::Empty;
-    engine.holding_as_a_step(|| lent = place.try_lend(|value| *value));
-    assert_eq!(lent, Lend::Lent(5));
+    let mut tried = Lend::Empty;
+    let mut waited = None;
+    engine.holding_as_a_step(|| {
+        tried = place.try_lend(|value| *value);
+        waited = Some(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| place.lend(|value| *value)))
+                .is_err(),
+        );
+    });
+    assert_eq!(tried, Lend::Lent(5));
+    assert_eq!(
+        waited,
+        Some(true),
+        "a wait on a face under the session's lock"
+    );
+    assert!(engine.session_is_free(), "the step let the lock go");
+    assert_eq!(
+        place.lend(|value| *value),
+        Some(5),
+        "a wait with no lock held"
+    );
 }

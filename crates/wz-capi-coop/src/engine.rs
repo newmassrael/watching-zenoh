@@ -1284,18 +1284,6 @@ struct Confined<T>(T);
 struct CoreLock<L: CoopLinks + 'static, C: ClockSource + 'static>(StateLock<Confined<Core<L, C>>>);
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
-    /// Fail a debug build that takes the session's lock inside a lend of a face's place: the
-    /// session's lock is taken first and a face's under it (a step's send), or a face's alone (a
-    /// publish), so a take in the other order is the one that could wait on a thread waiting on
-    /// it. A try fails the same way, so that no path holds the two in that order.
-    #[inline(always)]
-    fn not_inside_a_face() {
-        debug_assert!(
-            !wz_runtime_coop::sync::face_lent_here(),
-            "the session's lock is taken inside a lend of a face's place"
-        );
-    }
-
     /// `core` behind the lock, its key arena guarded by it from now on.
     fn new(core: Core<L, C>) -> Self {
         core.session.keys.guard_by_owner_lock();
@@ -1303,7 +1291,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     }
 
     fn lock(&self) -> CoreGuard<'_, L, C> {
-        Self::not_inside_a_face();
         // Marked before the take, so a take on the thread that holds the lock already fails a
         // debug build instead of waiting on itself.
         let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(self).cast());
@@ -1311,7 +1298,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     }
 
     fn try_lock(&self) -> Option<CoreGuard<'_, L, C>> {
-        Self::not_inside_a_face();
         let guard = <CoopForm as LockForm>::try_lock(&self.0)?;
         let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(self).cast());
         Some(CoreGuard::taken(guard, held))
@@ -1332,6 +1318,9 @@ struct CoreGuard<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     // The thread's mark of the hold, which a debug build reads: a second take of this lock on
     // this thread, or a C ABI's place given back under it, fails there instead of waiting.
     _held: wz_capi_port::sync::SessionHeld,
+    // A read waits for this lock inside its face's lend, so a face is only tried under it, never
+    // waited on: the mark fails a debug build on such a wait (`FacePlace::lend`).
+    _no_face_wait: wz_runtime_coop::sync::NoFaceWait,
 }
 
 impl<'a, L: CoopLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
@@ -1340,7 +1329,11 @@ impl<'a, L: CoopLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
         held: wz_capi_port::sync::SessionHeld,
     ) -> Self {
         guard.0.session.keys.owner_lock_taken();
-        Self { guard, _held: held }
+        Self {
+            guard,
+            _held: held,
+            _no_face_wait: wz_runtime_coop::sync::NoFaceWait::enter(),
+        }
     }
 }
 
