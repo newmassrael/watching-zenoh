@@ -757,11 +757,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Some(turn)
     }
 
-    /// What a read waits for, worked out under the session's lock: the link's input, or the
-    /// earliest of the link's deadlines and the session's. `None` once the session closed.
+    /// What a read waits for, worked out under the session's lock: nothing while the link holds
+    /// input it already took from its stack, else the link's input, or the earliest of the link's
+    /// deadlines and the session's. `None` once the session closed.
     fn link_wait(&self, slot: &DirectSlot<L, C>) -> Option<IdleWait> {
         let mut held = self.live()?;
         held.0.link_due_us = slot.life_due_us.min(slot.pump_due_us);
+        // Input the link holds is read at once, so no deadline is gathered and the clock is not
+        // read for a wait that would be none. What falls due meanwhile is served by the look at
+        // the life that follows, which reads the clock whether or not the read waited.
+        let holds = held.0.transport.holds_input();
+        #[cfg(test)]
+        let holds = holds || self.takes.input_held.load(Ordering::Relaxed);
+        if holds {
+            #[cfg(test)]
+            self.takes.held_input_reads.fetch_add(1, Ordering::Relaxed);
+            return Some(IdleWait::None);
+        }
         // Marked as a holder that holds no send, so a droppable publish that finds the session
         // held for the wait tries it again at once (`LinkRooms::for_held`).
         let _waiting = SendingOn::enter(&self.sending_on, WAITING);

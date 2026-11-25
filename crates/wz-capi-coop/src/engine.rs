@@ -1416,6 +1416,14 @@ pub(crate) struct Takes {
     /// Of the samples handed one row at a time, those read where their frame lies.
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     pub(crate) pinned_lent: core::sync::atomic::AtomicUsize,
+    /// The reads that found the one link holding input it had already taken from its stack, and
+    /// so worked out no wait (`direct`).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(crate) held_input_reads: core::sync::atomic::AtomicUsize,
+    /// Set by a test so that every read finds the one link holding input, whatever the link holds
+    /// (`direct`): a stream that never lets the read wait, made without a peer that sends one.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(crate) input_held: core::sync::atomic::AtomicBool,
     /// The peers' replies the read handed to the get each answers itself (`replies`).
     #[cfg(all(
         feature = "query",

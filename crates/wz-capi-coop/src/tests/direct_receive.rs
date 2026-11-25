@@ -578,6 +578,104 @@ fn a_stream_of_batches_still_sends_the_keep_alive_on_time() {
     });
 }
 
+/// A session whose every read finds its link holding input, so that no read waits or works out a
+/// wait, read without a pause for several of its short leases with a get nobody answers pending:
+/// the get still ends at its deadline while the reads go on, and the router's lease of the
+/// session is still kept, since the look at the life after each read serves what fell due whether
+/// or not the read waited. Each such read reads the clock once, for that look, and none for a
+/// wait. The CONTROL is the leg halfway to its deadline: still open. Turned red by a read on held
+/// input that leaves the look at the life or the pump's due work to the next read that waits
+/// (`CoopEngine::link_turn`), or that still reads the clock for its wait (`link_wait`).
+#[cfg(all(
+    feature = "query",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn reads_on_held_input_still_serve_what_falls_due() {
+    use wz_session_core::reply_sink::ReplyKind;
+
+    const LEASE_MS: u64 = 500;
+    const READS: usize = 10;
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(CoopConfig {
+        lease_ms: LEASE_MS,
+        ..config(&router)
+    });
+    let received = Arc::new(AtomicUsize::new(0));
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let received = received.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                received.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    super::get::settle(&router, &engine, Command::Silence);
+    engine.takes.input_held.store(true, Ordering::SeqCst);
+    let (clock_before, held_before) = (
+        engine.clock_reads(),
+        engine.takes.held_input_reads.load(Ordering::SeqCst),
+    );
+    for _ in 0..READS {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        engine.takes.held_input_reads.load(Ordering::SeqCst) - held_before,
+        READS,
+        "a read that found the link's input held worked out a wait"
+    );
+    assert_eq!(
+        engine.clock_reads() - clock_before,
+        READS,
+        "one reading of the clock for each look at the life, none for a wait"
+    );
+    let mut opts = super::get::remote_get();
+    opts.timeout_ms = 300;
+    let asked = Instant::now();
+    let (issued, leg) = super::get::ask(&engine, "demo/g/a", &opts, None, None, None);
+    assert_eq!(issued, Ok(1));
+    let mut ended_at = None;
+    let mut open_halfway = None;
+    while asked.elapsed() < Duration::from_millis(4 * LEASE_MS) {
+        let _ = SessionDrive::read(&*engine, false);
+        let ended = leg.lock().unwrap().ended;
+        if open_halfway.is_none() && asked.elapsed() >= Duration::from_millis(150) {
+            open_halfway = Some(!ended);
+        }
+        if ended && ended_at.is_none() {
+            ended_at = Some(asked.elapsed());
+        }
+    }
+    engine.takes.input_held.store(false, Ordering::SeqCst);
+    assert_eq!(
+        open_halfway,
+        Some(true),
+        "CONTROL: open before its deadline"
+    );
+    let ended_at = ended_at.expect("the get outlived its deadline while every read held input");
+    assert!(
+        ended_at >= Duration::from_millis(300),
+        "ended early: {ended_at:?}"
+    );
+    let replies = leg.lock().unwrap().replies.clone();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0].0, ReplyKind::Err);
+    assert_eq!(replies[0].2, b"Timeout");
+    assert!(
+        !SessionDrive::is_closed(&*engine),
+        "the router's lease of the session ran out while every read held input"
+    );
+    let before = received.load(Ordering::SeqCst);
+    router.send(Command::Push("demo/in", b"last"));
+    until(&engine, "the sample after the reads", || {
+        received.load(Ordering::SeqCst) > before
+    });
+}
+
 /// A declaration, a Push naming what it declared, a KeepAlive and a second Push naming it again,
 /// sent in one batch window: both samples reach the subscriber, in order, each resolved through the
 /// declaration that came before it. Turned red by a read that hands a Push out before the
