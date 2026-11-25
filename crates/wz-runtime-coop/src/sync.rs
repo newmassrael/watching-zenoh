@@ -451,6 +451,25 @@ impl LockKind for ManyThreads {
     }
 }
 
+/// A hold of a value of several threads is a hold of the value's own lock, let go of as it drops.
+#[cfg(all(
+    feature = "runtime",
+    feature = "host-lock",
+    target_has_atomic = "8",
+    target_has_atomic = "64"
+))]
+impl HoldKind for ManyThreads {
+    type Hold<'a, T>
+        = crate::cs::HostHold<'a, T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn hold<T: Send + 'static>(mutex: &Self::Mutex<T>) -> crate::cs::HostHold<'_, T> {
+        mutex.hold()
+    }
+}
+
 /// A value of a session reached only under the lock of the engine `O` that owns the session, and
 /// so taking no lock of its own: [`Self::with`] is the closure called on the value.
 ///
