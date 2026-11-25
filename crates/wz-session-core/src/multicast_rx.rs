@@ -507,10 +507,12 @@ where
             // node is not its own peer.
             if let Some((join, zid)) = decode_join_named(bytes) {
                 // R2848 — counted before the own-zid filter, as upstream counts
-                // what its link hands over. A host link drops what its own send
-                // socket sent before it gets here, as upstream's link does, so a
-                // JOIN of this node's zid came over a link that cannot tell its
-                // own source from a member's, and that link received it.
+                // what its link hands over. Every group link of wz's stacks (host
+                // sockets, Zephyr, lwIP, tokio) drops what its own sender sent
+                // before it gets here, as upstream's link does, so a JOIN of this
+                // node's zid is another node's that took the same zid, or one a
+                // sender whose source no address names (a wildcard bind, a
+                // program's own transport) sent, and that link received it.
                 stats.transport_message_received();
                 if join.zid != params.zid.as_slice() {
                     // zenoh asks whether its table has room for a new member before it reads
