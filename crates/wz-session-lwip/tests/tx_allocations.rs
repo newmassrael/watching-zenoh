@@ -320,6 +320,18 @@ fn bound_pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
     (acceptor, initiator)
 }
 
+/// [`bound_pair`], with the initiator established, which is where a data message leaves
+/// from: a session lets a Push, a Request or a ResponseFinal through only once its link is
+/// established, and refuses one before as `TransportUnavailable`. The initiator enters it
+/// through the door the machine's `Established` entry takes
+/// (`SessionLinkActions::enter_established`), which also settles its send limits from what
+/// it negotiated: its own batch, since it has read no InitAck.
+fn established_pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
+    let (acceptor, initiator) = bound_pair(link, port);
+    initiator.actions.enter_established();
+    (acceptor, initiator)
+}
+
 /// What every message of a test costs the heap, kept so a test reports ALL of
 /// them and not only the first that is wrong: what a message that goes through
 /// the heap costs, and what one that goes through a lent slot must, which is
@@ -537,7 +549,7 @@ fn put_of(datagram: &[u8]) -> (String, Vec<u8>, u64) {
 fn a_put_is_sent_without_the_heap_at_every_size() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let (acceptor, initiator) = bound_pair(&link, 7613);
+    let (acceptor, initiator) = established_pair(&link, 7613);
     let m = Measurement::new();
     let mut costs = Costs::default();
 
@@ -575,7 +587,7 @@ fn a_response_final_with_its_qos_is_sent_without_the_heap() {
 
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let (acceptor, initiator) = bound_pair(&link, 7616);
+    let (acceptor, initiator) = established_pair(&link, 7616);
     let m = Measurement::new();
 
     assert_ne!(QOS_DECLARE, QosLevel::DEFAULT, "a QoS that is carried");
@@ -625,7 +637,7 @@ fn a_get_with_its_qos_is_sent_without_the_heap() {
 
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let (acceptor, initiator) = bound_pair(&link, 7617);
+    let (acceptor, initiator) = established_pair(&link, 7617);
     let m = Measurement::new();
 
     assert_ne!(QOS_DECLARE, QosLevel::DEFAULT, "a QoS that is carried");
@@ -764,7 +776,7 @@ mod refusal {
     fn a_send_for_which_no_slot_is_lent_is_refused_counted_and_loses_no_slot() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
-        let (acceptor, initiator) = bound_pair(&link, 7614);
+        let (acceptor, initiator) = established_pair(&link, 7614);
         let m = Measurement::new();
         assert_eq!(initiator.actions.tx_refusals(), TxRefusalCounts::default());
 
@@ -825,7 +837,7 @@ mod refusal {
     fn a_put_past_the_budget_is_refused_as_oversize_and_gives_its_slot_back() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
-        let (acceptor, initiator) = bound_pair(&link, 7615);
+        let (acceptor, initiator) = established_pair(&link, 7615);
         let m = Measurement::new();
 
         // The batch the pair negotiates is 1024 bytes, so a payload past it is
