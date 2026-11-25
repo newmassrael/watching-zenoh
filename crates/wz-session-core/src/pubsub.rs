@@ -5195,7 +5195,7 @@ mod tests {
                 "the Push's sample, its key resolved"
             );
             assert!(
-                peer.take_record(table, &mut (), &unknown, Reliability::Reliable)
+                peer.take_record(table, &unknown, Reliability::Reliable)
                     .is_none(),
                 "a key that does not resolve projects nothing"
             );
