@@ -37,10 +37,13 @@ use wz_session_core::zid_hex::same_zid;
 
 use crate::dial::{Begun, HostWalk};
 use crate::link_cells::{CellRc, CountKind, OneTask};
+#[cfg(feature = "listen")]
+use crate::session_drive::Locator;
 use crate::session_drive::{
-    LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial, SessionDatagramLink,
-    SessionLinks, WaitOn,
+    LinkOpenError, LinkWait, LinkWaits, OpenedLink, PendingDial, SessionDatagramLink, SessionLinks,
+    WaitOn,
 };
+use crate::transport::TransportRefusal;
 use crate::CoopLocalJoinHandle;
 
 /// The number a session knows one of its faces by.
@@ -1156,11 +1159,15 @@ impl<
         freed.then_some(id)
     }
 
-    /// Begin a dial of `to`, which the network answers later.
-    /// Out of line: the stack's dial of each protocol is put together here, not in its caller.
-    #[inline(never)]
-    pub fn begin_dial(&self, to: Locator) -> Result<L::Dial, LinkOpenError> {
-        self.links.begin_initiator(to)
+    /// Begin a dial of `endpoint` over these links, which the network answers later: of the
+    /// address it names, or of the first address of the host it names that the network begins,
+    /// the rest kept for the dial to pass to ([`crate::dial`]). [`TransportRefusal::Unreachable`]
+    /// when the endpoint does not read, names a host no dial of a name reaches over these links,
+    /// or the network refuses every address at once.
+    // Always inlined: the dial's one body is `crate::dial::begin`, out of line and cold.
+    #[inline(always)]
+    pub fn begin_dial(&self, endpoint: &str) -> Result<Begun<L::Dial>, TransportRefusal> {
+        crate::dial::begin::<N, L>(endpoint, &self.links)
     }
 
     /// Listen on `at`, whose links are stated for the endpoint in row `endpoint` of the session's
@@ -1729,7 +1736,7 @@ mod tests {
     use core::sync::atomic::Ordering;
     use wz_session_core::link::RxFrame;
 
-    use crate::session_drive::LinkListener;
+    use crate::session_drive::{LinkListener, Locator};
     use crate::{ClockSource, CoopLocalSet, CoopRuntime};
 
     struct Still;
@@ -2111,9 +2118,17 @@ mod tests {
 
     /// A named host's dial begun on `hosts` (`crate::dial::begin`): its first address the
     /// network begins, and the rest; or why none began.
-    fn named_dial(hosts: &Hosts) -> Result<Dial<Answer>, crate::transport::Refusal> {
+    fn named_dial(hosts: &Hosts) -> Result<Dial<Answer>, TransportRefusal> {
         crate::dial::begin::<OneTask, Hosts>("tcp/router.example:7447", hosts)
             .map(|begun| Dial::begun(DialEndpoint::Listed(0), begun))
+    }
+
+    /// Why a dial was refused, read off the refusal of its endpoint; `None` for a dial begun.
+    fn refused<T>(dial: Result<T, TransportRefusal>) -> Option<crate::transport::Refusal> {
+        match dial {
+            Err(TransportRefusal::Unreachable(refused)) => Some(refused.why),
+            _ => None,
+        }
     }
 
     /// The loopback addresses a name stands for, IPv6 first as a resolver sorts them.
@@ -2184,11 +2199,9 @@ mod tests {
         );
 
         let hosts = Hosts::new(&[(v6, Says::RefusedAtOnce), (v4, Says::RefusedAtOnce)]);
-        assert!(
-            matches!(
-                named_dial(&hosts),
-                Err(Refusal::Link(LinkOpenError::Unsupported))
-            ),
+        assert_eq!(
+            refused(named_dial(&hosts)),
+            Some(Refusal::Link(LinkOpenError::Unsupported)),
             "no address begins"
         );
         assert_eq!(*hosts.dialled.borrow(), vec![v6, v4]);
@@ -2197,9 +2210,10 @@ mod tests {
     /// A dial of an address is the network's dial of it, with no address to pass to; a host that
     /// resolves to no address is refused as a link the other end did not take, which a later
     /// dial may find; a `tls/` host is refused by the locator before the resolver is asked, and
-    /// a host over links without a resolver too, with no dial asked of the network. Turned red by
-    /// an address dialled as a name, by a host of no address begun or refused for good, or by a
-    /// name dialled that no dial of a name reaches.
+    /// a host over links without a resolver too, through the faces' own entry, with no dial asked
+    /// of the network. Each refusal names the endpoint it refuses. Turned red by an address dialled
+    /// as a name, by a host of no address begun or refused for good, by a name dialled that no
+    /// dial of a name reaches, or by a refusal that names no endpoint (`crate::dial::begin`).
     #[test]
     fn a_dial_begins_at_an_address_or_refuses_a_name_it_cannot_reach() {
         use crate::locator_text::DialRefused;
@@ -2214,22 +2228,29 @@ mod tests {
         assert_eq!(*hosts.dialled.borrow(), vec![v4]);
 
         let nowhere = Hosts::new(&[]);
-        assert!(matches!(
-            named_dial(&nowhere),
-            Err(Refusal::Link(LinkOpenError::Refused))
-        ));
+        assert_eq!(
+            refused(named_dial(&nowhere)),
+            Some(Refusal::Link(LinkOpenError::Refused))
+        );
         assert!(nowhere.dialled.borrow().is_empty());
 
         let hosts = Hosts::new(&[(v4, Says::UnderWay)]);
-        assert!(matches!(
-            crate::dial::begin::<OneTask, Hosts>("tls/router.example:7447", &hosts),
-            Err(Refusal::Locator(DialRefused::PeerNamedByAddress))
-        ));
+        let tls = crate::dial::begin::<OneTask, Hosts>("tls/router.example:7447", &hosts);
+        let Err(TransportRefusal::Unreachable(refusal)) = tls else {
+            panic!("a tls/ host is refused");
+        };
+        assert_eq!(refusal.endpoint.as_str(), "tls/router.example:7447");
+        assert_eq!(
+            refusal.why,
+            Refusal::Locator(DialRefused::PeerNamedByAddress)
+        );
         assert!(hosts.dialled.borrow().is_empty(), "no dial of a tls/ host");
-        assert!(matches!(
-            crate::dial::begin::<OneTask, Net>("tcp/router.example:7447", &Net),
-            Err(Refusal::Locator(DialRefused::NoResolver))
-        ));
+
+        let faces = supervisor(Link::Idle, 1);
+        assert_eq!(
+            refused(faces.begin_dial("tcp/router.example:7447")),
+            Some(Refusal::Locator(DialRefused::NoResolver))
+        );
     }
 
     /// A face dialling `endpoint` with a dial that answers `answer`.

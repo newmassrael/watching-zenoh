@@ -21,7 +21,7 @@ pub(crate) fn terminated(name: &NamedHost<'_>) -> [u8; HOST_NAME_MAX + 1] {
 /// The host a dial's `text` names, for a test of what a resolver is handed.
 #[cfg(test)]
 pub(crate) fn named(text: &str) -> NamedHost<'_> {
-    match wz_runtime_coop::locator_text::read_dial_target(text) {
+    match wz_runtime_coop::locator_text::read_dial_target(text, true) {
         Ok(wz_runtime_coop::locator_text::DialTarget::Named(name)) => name,
         other => panic!("{text} names a host: {other:?}"),
     }

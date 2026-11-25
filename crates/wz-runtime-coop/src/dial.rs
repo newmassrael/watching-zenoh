@@ -7,16 +7,16 @@
 //!
 //! Dialing is cold: it runs once per link, never per message, so it is one body here for every
 //! stack, and a stack's own part of a dial is the link it begins at one address
-//! (`SessionLinks::begin_initiator`) and its resolver (`SessionLinks::resolve`). `begin` is
-//! where a dial starts; a face holds the [`Begun`] dial and passes it on with
+//! (`SessionLinks::begin_initiator`) and its resolver (`SessionLinks::resolve`). The faces begin
+//! a dial here (`LinkSupervisor::begin_dial`), hold the [`Begun`] dial and pass it on with
 //! `HostWalk::pass_on` when the network refuses the address it is under way to.
 
 use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use crate::link_cells::CountKind;
-use crate::locator_text::{read_dial_target, DialRefused, DialTarget, NamedHost, NamedLink};
+use crate::locator_text::{read_dial_target, DialTarget, NamedHost, NamedLink};
 use crate::session_drive::{LinkOpenError, LinkProto, SessionLinks};
-use crate::transport::Refusal;
+use crate::transport::{EndpointRefusal, Refusal, TransportRefusal};
 
 /// How many of the addresses a host name resolves to a dial of it tries, one at a time, in the
 /// order the resolver answered them (RFC 6724's, as `getaddrinfo` sorts them). Fixed, so a face
@@ -115,18 +115,30 @@ impl<D> Begun<D> {
 
 /// Begin a dial of `endpoint` over `links`, which the network answers later: of the address it
 /// names, or of the first address of the host it names that the network begins, the rest kept
-/// for the dial to pass to. The refusal is the locator's for a text no dial reaches
-/// ([`read_dial_target`]) and for a host no dial of a name reaches over `links`
-/// (`named_refusal`), asked before the resolver; the network's otherwise: the refusal of the
-/// last address tried, and, for a host that resolves to no address,
-/// [`LinkOpenError::Refused`], an answer of the network a later dial may not meet.
+/// for the dial to pass to. Refused as [`TransportRefusal::Unreachable`], with the endpoint and
+/// why: the locator's refusal for a text no dial over `links` reaches ([`read_dial_target`]),
+/// asked before the resolver; the network's otherwise: the refusal of the last address tried,
+/// and, for a host that resolves to no address, [`LinkOpenError::Refused`], an answer of the
+/// network a later dial may not meet. Out of line and cold: every dial of every face begins here,
+/// and each refusal is written into its answer in this one place.
 #[cold]
 #[inline(never)]
 pub(crate) fn begin<N: CountKind, L: SessionLinks<N>>(
     endpoint: &str,
     links: &L,
+) -> Result<Begun<L::Dial>, TransportRefusal> {
+    begin_on::<N, L>(endpoint, links)
+        .map_err(|why| TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, why)))
+}
+
+/// `begin`, answering why a dial was refused without the endpoint.
+// Always inlined: its one caller writes the endpoint into whichever refusal this answers.
+#[inline(always)]
+fn begin_on<N: CountKind, L: SessionLinks<N>>(
+    endpoint: &str,
+    links: &L,
 ) -> Result<Begun<L::Dial>, Refusal> {
-    let name = match read_dial_target(endpoint) {
+    let name = match read_dial_target(endpoint, L::RESOLVES) {
         Ok(DialTarget::At(to)) => {
             return links
                 .begin_initiator(to)
@@ -136,67 +148,9 @@ pub(crate) fn begin<N: CountKind, L: SessionLinks<N>>(
         Ok(DialTarget::Named(name)) => name,
         Err(refused) => return Err(Refusal::Locator(refused)),
     };
-    if let Some(refused) = named_refusal(name.link(), L::RESOLVES) {
-        return Err(Refusal::Locator(refused));
-    }
     let mut walk = HostWalk::of_host::<N, L>(&name, links);
-    match walk.pass_on::<N, L>(links, LinkOpenError::Refused) {
-        Ok(pending) => Ok(Begun { pending, walk }),
-        Err(refused) => Err(Refusal::Link(refused)),
-    }
-}
-
-/// Why no dial of a host name reaches `link` over links whose network `resolves` names or does
-/// not, or `None` for a name the resolver is asked for: a link that names its peer by the address
-/// it dials would check or name an address and never the host written
-/// ([`NamedLink::names_peer_by_address`]), and a network without a resolver has no address for
-/// any name ([`DialRefused::NoResolver`]).
-fn named_refusal(link: NamedLink, resolves: bool) -> Option<DialRefused> {
-    if link.names_peer_by_address() {
-        Some(DialRefused::PeerNamedByAddress)
-    } else {
-        (!resolves).then_some(DialRefused::NoResolver)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A `tls/` host is refused by the reason a channel verifies an address, whatever the
-    /// network resolves; a `udp/` or `tcp/` host is refused only over a network with no
-    /// resolver, and handed to the resolver otherwise. Turned red by a `tls/` host handed to the
-    /// resolver, by a name refused over a network that resolves, or by the reasons swapped.
-    #[test]
-    fn a_host_name_is_refused_before_the_resolver_only_where_no_dial_of_it_reaches() {
-        let tls = NamedLink::Ip(LinkProto::Tls);
-        assert_eq!(
-            named_refusal(tls, true),
-            Some(DialRefused::PeerNamedByAddress)
-        );
-        assert_eq!(
-            named_refusal(tls, false),
-            Some(DialRefused::PeerNamedByAddress)
-        );
-        for proto in [LinkProto::Udp, LinkProto::Tcp] {
-            let link = NamedLink::Ip(proto);
-            assert_eq!(named_refusal(link, true), None, "{proto:?}");
-            assert_eq!(
-                named_refusal(link, false),
-                Some(DialRefused::NoResolver),
-                "{proto:?}"
-            );
-        }
-    }
-
-    /// A `ws/` host is refused by the reason its request names an address, as a `tls/` one is.
-    /// Turned red by a `ws/` host handed to the resolver.
-    #[cfg(feature = "ws")]
-    #[test]
-    fn a_ws_host_name_is_refused_as_one_its_request_would_name_by_address() {
-        assert_eq!(
-            named_refusal(NamedLink::Ws, true),
-            Some(DialRefused::PeerNamedByAddress)
-        );
-    }
+    let pending = walk
+        .pass_on::<N, L>(links, LinkOpenError::Refused)
+        .map_err(Refusal::Link)?;
+    Ok(Begun { pending, walk })
 }

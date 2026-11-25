@@ -414,16 +414,14 @@ impl<T: TransportFaces> TransportState<T> {
 
     /// Begin a dial of `endpoint`, which the network answers later: of the address it names, or of
     /// a host it names at the addresses the network resolves it to, the one dial of every
-    /// endpoint (`crate::dial::begin`). [`TransportRefusal::Unreachable`] when the endpoint does
-    /// not parse, names a host no dial of a name reaches over these links, or the network refuses
-    /// the dial at once. Out of line: the dial role and a face added by the program each begin a
-    /// dial.
-    #[inline(never)]
+    /// endpoint ([`LinkSupervisor::begin_dial`]). [`TransportRefusal::Unreachable`] when the
+    /// endpoint does not parse, names a host no dial of a name reaches over these links, or the
+    /// network refuses the dial at once.
+    // Always inlined: the dial role and a face added by the program each begin a dial, in the one
+    // cold body of the faces' dial, which writes each refusal into its answer once.
+    #[inline(always)]
     pub fn begin_dial(&self, endpoint: &str) -> Result<Begun<DialOf<T>>, TransportRefusal> {
-        // Each refusal is the endpoint's, made in one place: the text and the cause are written
-        // into the answer once, whichever step refused.
-        crate::dial::begin::<CountOf<T>, T::Links>(endpoint, self.links.links())
-            .map_err(|why| TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, why)))
+        self.links.begin_dial(endpoint)
     }
 
     /// The text of the endpoint a dial reaches: the session's, by its row, or the one the dial

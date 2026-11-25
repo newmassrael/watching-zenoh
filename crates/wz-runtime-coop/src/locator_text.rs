@@ -49,12 +49,13 @@ pub enum DialRefused {
     /// the dialer before it opens a link.
     SnResolution,
     /// The endpoint names a host and the network the build dials on has no resolver to turn it
-    /// into an address (`SessionLinks::RESOLVES`). Decided by the transport before any dial.
+    /// into an address (`SessionLinks::RESOLVES`). Decided by the reader of a dial's text
+    /// ([`read_dial_target`]) before any dial.
     NoResolver,
     /// The endpoint names a host for a link that names or verifies its peer by the address it
     /// dials: a `tls/` channel checks the certificate against that address, and a `ws/` request
     /// names it as its host, so a dial of the name would check or name an address and never the
-    /// host written. Decided by the dialer before the name is resolved.
+    /// host written. Decided by the reader of a dial's text before the name is resolved.
     PeerNamedByAddress,
 }
 
@@ -152,10 +153,12 @@ impl<'a> NamedHost<'a> {
     }
 }
 
-/// Read a dial's endpoint text: the address [`parse_locator`] reads, or, where that reader finds
-/// no address, a host name and a port, `<scheme>/<host>:<port>` (zenoh-pico hands the same host
-/// to its resolver, `vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `getaddrinfo(`).
-/// Every other refusal is that reader's.
+/// Read a dial's endpoint text, for a network that `resolves` host names or not: the address
+/// [`parse_locator`] reads, or, where that reader finds no address, a host name and a port,
+/// `<scheme>/<host>:<port>` (zenoh-pico hands the same host to its resolver,
+/// `vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `getaddrinfo(`). Every other refusal
+/// is that reader's. The open's dial and the config door read a dial with this one function, so
+/// the two never judge a text apart.
 ///
 /// The network's resolver is what decides whether a name names a host, so a name is refused here
 /// only where handing it on would go wrong: past [`HOST_NAME_MAX`] bytes, which the resolver's
@@ -164,16 +167,24 @@ impl<'a> NamedHost<'a> {
 /// (RFC 3696 section 2), which a C resolver reads as a number (`127.1`, `0x7f.1`), so a text the
 /// address reader refused would reach an address after all. A label's length, its `-` and the
 /// bytes it is made of are the resolver's to judge, as zenoh-pico leaves them.
-pub fn read_dial_target(endpoint: &str) -> Result<DialTarget<'_>, DialRefused> {
+///
+/// A name read is refused before any resolver is asked where no dial of it reaches the host
+/// written: for a link that names or verifies its peer by the address it dials, whatever the
+/// network ([`DialRefused::PeerNamedByAddress`]), and over a network without a resolver
+/// ([`DialRefused::NoResolver`]).
+pub fn read_dial_target(endpoint: &str, resolves: bool) -> Result<DialTarget<'_>, DialRefused> {
     let (link, rest) = match scheme_of(endpoint) {
         Scheme::Read(read) => return read.map(DialTarget::At),
         Scheme::Ip(link, rest) => (link, rest),
     };
     match socket_addr::<true>(rest, false) {
         Ok(at) => Ok(DialTarget::At(link.locator(at))),
-        Err(DialRefused::BadAddress) => named_host(link, rest)
-            .map(DialTarget::Named)
-            .ok_or(DialRefused::BadAddress),
+        Err(DialRefused::BadAddress) => match named_host(link, rest) {
+            None => Err(DialRefused::BadAddress),
+            Some(_) if link.names_peer_by_address() => Err(DialRefused::PeerNamedByAddress),
+            Some(_) if !resolves => Err(DialRefused::NoResolver),
+            Some(name) => Ok(DialTarget::Named(name)),
+        },
         Err(refused) => Err(refused),
     }
 }
@@ -191,14 +202,29 @@ fn named_host(link: NamedLink, rest: &str) -> Option<NamedHost<'_>> {
 
 /// Whether `host` is handed to the network's resolver as a name ([`read_dial_target`]).
 fn is_host_name(host: &[u8]) -> bool {
-    let named = host.strip_suffix(b".").unwrap_or(host);
-    let last = named
-        .rsplit(|&byte| byte == b'.')
-        .next()
-        .unwrap_or_default();
-    host.len() <= HOST_NAME_MAX
-        && !host.contains(&0)
-        && last.first().is_some_and(u8::is_ascii_alphabetic)
+    if host.len() > HOST_NAME_MAX {
+        return false;
+    }
+    // One walk over the bytes, as a slice search would bring in a search body of its own: a 0
+    // byte refuses the name, and the first byte of each label is kept until the next dot, so the
+    // one kept at the end opens the last label.
+    let mut opening = None;
+    let mut at_label = true;
+    for &byte in host.strip_suffix(b".").unwrap_or(host) {
+        match byte {
+            0 => return false,
+            b'.' => {
+                at_label = true;
+                opening = None;
+            }
+            _ if at_label => {
+                at_label = false;
+                opening = Some(byte);
+            }
+            _ => {}
+        }
+    }
+    opening.is_some_and(|byte| byte.is_ascii_alphabetic())
 }
 
 /// Read `udp/<a.b.c.d>:<port>`, `tcp/[<ipv6>]:<port>`, `tls/...` into the locator it
@@ -591,27 +617,27 @@ mod tests {
     fn a_dial_reads_a_host_name_where_no_address_is_written() {
         let at = SocketAddr::from(([127, 0, 0, 1], 7447));
         std::assert_eq!(
-            read_dial_target("tcp/127.0.0.1:7447"),
+            read_dial_target("tcp/127.0.0.1:7447", true),
             Ok(DialTarget::At(Locator::tcp(at)))
         );
         for (text, host, port) in [
             ("tcp/localhost:7447", "localhost", 7447),
             ("udp/router.example:7447", "router.example", 7447),
-            ("tls/a-1.b2.example:1", "a-1.b2.example", 1),
+            ("udp/a-1.b2.example:1", "a-1.b2.example", 1),
             ("tcp/ap-demo:00080", "ap-demo", 80),
             ("tcp/router_1:7447", "router_1", 7447),
             ("tcp/router-:7447", "router-", 7447),
             ("tcp/router..example:7447", "router..example", 7447),
             ("tcp/router.example.:7447", "router.example.", 7447),
         ] {
-            let Ok(DialTarget::Named(name)) = read_dial_target(text) else {
+            let Ok(DialTarget::Named(name)) = read_dial_target(text, true) else {
                 panic!("{text} names a host");
             };
             std::assert_eq!((name.host(), name.port()), (host, port), "{text}");
-            let proto = match text.split('/').next() {
-                Some("udp") => LinkProto::Udp,
-                Some("tcp") => LinkProto::Tcp,
-                _ => LinkProto::Tls,
+            let proto = if text.starts_with("udp/") {
+                LinkProto::Udp
+            } else {
+                LinkProto::Tcp
             };
             std::assert_eq!(name.locator(at), Locator::ip(proto, at), "{text}");
         }
@@ -632,28 +658,72 @@ mod tests {
             ("tcp/localhost:7447#iface=eth0", DialRefused::Unsupported),
             ("quic/localhost:7447", DialRefused::Unsupported),
         ] {
-            std::assert_eq!(read_dial_target(text), Err(why), "{text}");
+            std::assert_eq!(read_dial_target(text, true), Err(why), "{text}");
         }
         let labels = std::vec!["a".repeat(63); 5].join(".");
         let longest = std::format!("tcp/{}:7447", &labels[..HOST_NAME_MAX]);
-        std::assert!(read_dial_target(&longest).is_ok(), "{longest}");
+        std::assert!(read_dial_target(&longest, true).is_ok(), "{longest}");
         let past = std::format!("tcp/{labels}:7447");
-        std::assert_eq!(read_dial_target(&past), Err(DialRefused::BadAddress));
+        std::assert_eq!(read_dial_target(&past, true), Err(DialRefused::BadAddress));
         let wide_label = std::format!("tcp/{}.example:7447", "a".repeat(64));
-        std::assert!(read_dial_target(&wide_label).is_ok(), "{wide_label}");
+        std::assert!(read_dial_target(&wide_label, true).is_ok(), "{wide_label}");
     }
 
-    /// A WebSocket dial reads a host name as the IP schemes do, and opens a WebSocket link at each
-    /// address. Turned red by a `ws/` name refused or opened as another link.
+    /// A host name is refused before the resolver only where no dial of it reaches the host
+    /// written: a `tls/` host whatever the network, by the reason its channel verifies an
+    /// address, and a `udp/` or `tcp/` host over a network with no resolver; over one with a
+    /// resolver it is read. A text no name is read in is the address reader's refusal first, on
+    /// every link. Turned red by a `tls/` host read as a name, by a name refused over a network
+    /// that resolves or read over one that does not, by the two reasons swapped, or by a numeric
+    /// text refused by its link's reason.
+    #[test]
+    fn a_host_name_is_refused_where_no_dial_of_it_reaches_the_host() {
+        for resolves in [true, false] {
+            std::assert_eq!(
+                read_dial_target("tls/router.example:7447", resolves),
+                Err(DialRefused::PeerNamedByAddress),
+                "resolves: {resolves}"
+            );
+            std::assert_eq!(
+                read_dial_target("tls/127.1:7447", resolves),
+                Err(DialRefused::BadAddress),
+                "resolves: {resolves}"
+            );
+            let at = SocketAddr::from(([127, 0, 0, 1], 7447));
+            std::assert_eq!(
+                read_dial_target("tls/127.0.0.1:7447", resolves),
+                Ok(DialTarget::At(Locator::ip(LinkProto::Tls, at))),
+                "an address is dialled over any network"
+            );
+        }
+        for text in ["udp/router.example:7447", "tcp/router.example:7447"] {
+            std::assert!(
+                matches!(read_dial_target(text, true), Ok(DialTarget::Named(_))),
+                "{text}"
+            );
+            std::assert_eq!(
+                read_dial_target(text, false),
+                Err(DialRefused::NoResolver),
+                "{text}"
+            );
+        }
+    }
+
+    /// A WebSocket dial reads an address as the IP schemes do, and refuses a host name by the
+    /// reason its request names the address it reached, as a `tls/` one is refused. Turned red
+    /// by a `ws/` name handed to the resolver, or a `ws/` address opened as another link.
     #[cfg(feature = "ws")]
     #[test]
-    fn a_ws_dial_reads_a_host_name() {
+    fn a_ws_dial_reads_an_address_and_refuses_a_host_name() {
         let at = SocketAddr::from(([127, 0, 0, 1], 7447));
-        let Ok(DialTarget::Named(name)) = read_dial_target("ws/localhost:7447") else {
-            panic!("a ws text names a host");
-        };
-        std::assert_eq!((name.host(), name.port()), ("localhost", 7447));
-        std::assert_eq!(name.locator(at), Locator::ws(at));
+        std::assert_eq!(
+            read_dial_target("ws/127.0.0.1:7447", true),
+            Ok(DialTarget::At(Locator::ws(at)))
+        );
+        std::assert_eq!(
+            read_dial_target("ws/localhost:7447", true),
+            Err(DialRefused::PeerNamedByAddress)
+        );
     }
 
     /// An IPv6 address is read in the brackets zenoh writes it in, with a numeric scope inside
