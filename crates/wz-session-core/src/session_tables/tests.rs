@@ -444,6 +444,22 @@ fn a_retained_key_expression_is_retracted_by_its_last_holder() {
     assert!(tables.keyexprs().is_empty());
 }
 
+/// Ids minted from the last wrap past it to 1, and skip one a row still holds. Turned red by a
+/// mint that refuses past the last id, or one that hands out an id a row holds.
+#[test]
+fn key_expression_ids_minted_from_the_last_wrap_and_skip_one_still_declared() {
+    let mut tables = Tables::new();
+    let one = tables.declare_keyexpr("a").unwrap();
+    assert_eq!(one.id, 1);
+    tables.expr_ids_from(ExprId::MAX);
+    assert_eq!(tables.declare_keyexpr("b").unwrap().id, ExprId::MAX);
+    assert_eq!(
+        tables.declare_keyexpr("c").unwrap().id,
+        2,
+        "1 is still declared"
+    );
+}
+
 #[test]
 fn a_key_expression_id_skips_one_still_declared() {
     let mut tables = Tables::new();
