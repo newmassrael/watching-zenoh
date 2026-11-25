@@ -130,7 +130,7 @@ pub(crate) fn position_named(
         if names(id, name) {
             return Some(at);
         }
-        at += 1;
+        at = at.saturating_add(1);
     }
     None
 }
