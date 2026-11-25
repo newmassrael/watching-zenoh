@@ -480,7 +480,7 @@ impl Plan {
         {
             plan = plan.with::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
             plan =
-                plan.with::<crate::pubsub::SubscriberPlace>(Kind::Subscriber, objects.subscribers);
+                plan.with::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
         }
         #[cfg(all(feature = "engine-tokio", feature = "queryable"))]
         {
@@ -492,7 +492,7 @@ impl Plan {
                 Kind::LivelinessToken,
                 objects.liveliness_tokens,
             );
-            plan = plan.with::<crate::pubsub::SubscriberPlace>(
+            plan = plan.with::<crate::pubsub::SubscriberState>(
                 Kind::LivelinessSubscriber,
                 objects.liveliness_subscribers,
             );
@@ -1836,7 +1836,7 @@ mod tests {
         row(
             "subscriber",
             Kind::Subscriber,
-            core::mem::size_of::<crate::pubsub::SubscriberPlace>(),
+            core::mem::size_of::<crate::pubsub::SubscriberState>(),
         );
         #[cfg(feature = "queryable")]
         row(
@@ -1854,7 +1854,7 @@ mod tests {
             row(
                 "liveliness_subscriber",
                 Kind::LivelinessSubscriber,
-                core::mem::size_of::<crate::pubsub::SubscriberPlace>(),
+                core::mem::size_of::<crate::pubsub::SubscriberState>(),
             );
         }
         row(

@@ -71,7 +71,7 @@ use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::prelude::*;
 use crate::pubsub::{
     z_closure_drop_callback_t, z_moved_closure_sample_t, z_owned_closure_sample_t,
-    z_owned_subscriber_t, CClosure, SubscriberKept,
+    z_owned_subscriber_t, CClosure,
 };
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
@@ -1140,6 +1140,26 @@ pub(crate) struct AdvSubState {
 /// gives the place back (`crate::object_slot::Answering`).
 pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, AdvSubKept>;
 
+/// The C sample closure an advanced subscriber's host calls where its place keeps it, and for a
+/// background subscriber a hold on its session's count, so the session's close waits for the
+/// closure as pico's does (`_z_sync_group_wait`). Let go of in that order, when the host lets go
+/// of the sample callback ([`let_go_adv_sample`]).
+pub(crate) struct SampleKept {
+    closure: CClosure,
+    // Held for its drop, which lets the session's count go after the closure; never read.
+    _session: Option<crate::ffi::HeldIn>,
+}
+
+impl SampleKept {
+    /// `closure`, kept with `session`, the hold of a background subscriber's session.
+    fn new(closure: CClosure, session: Option<crate::ffi::HeldIn>) -> Self {
+        Self {
+            closure,
+            _session: session,
+        }
+    }
+}
+
 /// What an advanced subscriber's place keeps past its state for the host: the C sample closure
 /// the host calls, with the hold on a background subscriber's session, taken out when the host
 /// lets go of it; and the part the host's callbacks, gets and jobs share, lodged here, with the
@@ -1150,7 +1170,7 @@ pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, AdvSubK
 /// the forms that name the subscriber's entities, with a keep of their own, and the rooms of the
 /// anchors those names stand on, each anchor keeping the place while it stands.
 pub(crate) struct AdvSubKept {
-    sample: SubscriberKept,
+    sample: SampleKept,
     core: SubscriberCore<EngineHold>,
     core_hold: core::mem::MaybeUninit<crate::ffi::HeldIn>,
     miss: core::mem::MaybeUninit<Lodging<MissRooms>>,
@@ -1162,7 +1182,7 @@ pub(crate) struct AdvSubKept {
 
 impl AdvSubKept {
     /// `sample` kept, with nothing lodged and no hold for it.
-    fn new(sample: SubscriberKept) -> Self {
+    fn new(sample: SampleKept) -> Self {
         Self {
             sample,
             core: SubscriberCore::vacant(),
@@ -1466,10 +1486,7 @@ unsafe fn declare_subscriber_state(
                 miss: None,
                 session: Some(session),
             },
-            AdvSubKept::new(SubscriberKept::new(
-                closure,
-                background.then(|| session.hold()),
-            )),
+            AdvSubKept::new(SampleKept::new(closure, background.then(|| session.hold()))),
         ))
         .cast::<AdvSubState>();
     // SAFETY: `state` was filled for an `AdvSubPlace` just above, and its owner holds it; the
@@ -2301,15 +2318,17 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
         ) else {
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let session = state.session.map(crate::ffi::CountIn::hold);
+        // SAFETY: the count kept in the state is its session's, read only while the session is
+        // open, as checked above.
+        let session = state
+            .session
+            .map(|count| unsafe { crate::session::session_hold_let_go(count) });
         match crate::liveliness::declare_liveliness_subscriber_in(
             &engine, slot, &detection, None, closure, history, session,
         ) {
             Ok(placed) => {
                 // No handle will undeclare it: its owner lets go of it at once, with no wait.
-                crate::object_slot::retire_entity::<crate::pubsub::SubscriberState, SubscriberKept>(
-                    placed,
-                );
+                crate::object_slot::release_entity(placed);
                 Z_OK
             }
             Err(code) => code,
@@ -2453,7 +2472,7 @@ mod tests {
             },
             // The C closure kept beside the state is counted in nothing and taken out by nothing:
             // the subscriber's callback is the Rust closure above.
-            AdvSubKept::new(SubscriberKept::new(
+            AdvSubKept::new(SampleKept::new(
                 CClosure::uncounted(std::ptr::null_mut(), None, None),
                 None,
             )),
