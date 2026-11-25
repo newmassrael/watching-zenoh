@@ -3995,7 +3995,6 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "libc",
- "log",
  "tokio",
  "windows-sys 0.61.2",
  "wz-abi-stamp",
