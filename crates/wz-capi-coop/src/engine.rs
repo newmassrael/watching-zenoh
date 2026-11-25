@@ -4610,7 +4610,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// own is made here, so a link's receive finds its Router lent whenever its task runs; a pass
     /// a group's wait makes lends nothing, and a link's receive takes no input in it.
     /// The pass wakes the timers due by the clock, read now ([`Self::run_tasks_at`]).
-    /// Out of line: nine places step the session's tasks.
+    /// Out of line: nine places step the session's tasks. A build whose read steps its one link
+    /// itself runs no task, and has no pass to make (`direct`).
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     #[inline(never)]
     fn run_tasks(&mut self) {
         #[cfg(test)]
@@ -4637,14 +4639,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         });
     }
 
-    /// [`Self::run_tasks`] where the read steps the one link itself: no link's session is a
-    /// task, so a pass lends nothing (`direct`).
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-    #[inline(never)]
-    fn run_tasks_at(&mut self, due_at: Option<u64>) {
-        self.local.run_ready(due_at);
-    }
-
     /// End every face's link, whatever it is doing, telling an established peer so. The dial
     /// role's face stays, with no link and no redial; the others go.
     fn end_links(&mut self) {
@@ -4663,6 +4657,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.transport.links.end_faces(|face| face.replay.discard());
         self.rooms.forget_all();
         self.session.registry.remove_accepted_faces();
+        // Each link's task sees its end. The one link a read steps itself is no task: its session
+        // goes with the face that holds it (`direct`).
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         self.run_tasks();
     }
 }
