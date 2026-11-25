@@ -809,23 +809,14 @@ impl DeclaredKeyexpr {
         // for is refused having sent nothing; a declaration that covers it whole finds its block
         // and shares it.
         let text = KeyText::of_session(shared, literal)?;
-        // pico `_z_keyexpr_declare_prefix`: an empty prefix declares nothing.
-        // Its multicast skip has no counterpart here — this ABI's sessions are
-        // unicast.
-        if prefix_len == 0 {
-            return Ok(Self {
-                literal: text,
-                declaration: None,
-            });
-        }
-        // A refused declaration sent nothing, and answers pico's code for its cause; the key goes
-        // back with `text`.
-        let hold = shared.acquire_keyexpr(prefix).map_err(|refused| {
-            crate::refusal::refusal_code(refused, crate::refusal::Door::Keyexpr)
-        })?;
+        // The declaration an entity's door makes, its hold kept by this key from here on; a refused
+        // one sent nothing, and the key goes back with `text`.
+        let declaration = EntityKey::up_to(shared, literal, None, prefix)?
+            .into_held()
+            .map(|(hold, prefix_len)| WireDeclaration::taken(shared, hold, prefix_len));
         Ok(Self {
             literal: text,
-            declaration: Some(WireDeclaration::taken(shared, hold, prefix_len)),
+            declaration,
         })
     }
 }
@@ -875,9 +866,9 @@ impl<'a> EntityKey<'a> {
 
     /// `literal` declared on `engine` up to `prefix`, a prefix of it. Refused, holding nothing,
     /// as [`DeclaredKeyexpr::declare`] refuses a key the session's tables cannot hold and a
-    /// declaration the session refuses. Out of line: the publisher's and the querier's, the
-    /// subscriber's, the liveliness subscriber's and token's and the queryable's declarations each
-    /// carried a copy of it.
+    /// declaration the session refuses. Out of line: the program's declarations
+    /// ([`DeclaredKeyexpr::declare`]) and the publisher's and the querier's, the subscriber's, the
+    /// liveliness subscriber's and token's and the queryable's each carried a copy of it.
     #[inline(never)]
     fn up_to(
         engine: &'a crate::session::EngineHold,
@@ -922,6 +913,13 @@ impl<'a> EntityKey<'a> {
             prefix_len,
             taken: Some(hold),
         })
+    }
+
+    /// The door's hold of the declaration and how many bytes of the key it covers, kept by the
+    /// caller from here on; `None` when the door holds none.
+    fn into_held(mut self) -> Option<(KeyHold, usize)> {
+        let prefix_len = self.prefix_len;
+        self.taken.take().map(|hold| (hold, prefix_len))
     }
 
     /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the rest of the key, the
