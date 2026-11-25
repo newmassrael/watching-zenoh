@@ -8898,29 +8898,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let declared =
             tables_mut(&mut core.session.registry).declare_keyexpr_where(keyexpr, false, usable)?;
         let id = declared.id;
-        if !declared.new {
-            #[cfg(test)]
-            self.takes.holds.fetch_add(1, Ordering::Relaxed);
-            return Ok(placed_hold(
-                tables(&core.session.registry),
-                id,
-                declared.handle,
-            ));
-        }
-        // A declaration a link refuses is not made, and the links that took it take it back; one
-        // made while a link is down, or that a replay has not reached, is sent in its turn. A link
-        // refuses one it cannot carry.
-        // Each link is told it from the row, as every declaration is.
-        let taken =
-            core.announce_or_undo(DeclaredRow::of(declared.handle), &undeclare_kexpr::<C>(id));
-        if !taken {
-            tables_mut(&mut core.session.registry).undeclare_keyexpr(declared.handle);
-            return Err(Declined::ExceedsCapacity);
-        }
-        // And each group told the session's keyexprs, as a link is.
-        #[cfg(feature = "group")]
-        for group in &core.transport.groups {
-            group.announce_keyexpr(id, keyexpr);
+        // A declaration held once more is told no one again. A new one a link refuses is not made,
+        // and the links that took it take it back; one made while a link is down, or that a replay
+        // has not reached, is sent in its turn. A link refuses one it cannot carry. Either way the
+        // hold is handed out in one place below.
+        if declared.new {
+            // Each link is told it from the row, as every declaration is.
+            let taken =
+                core.announce_or_undo(DeclaredRow::of(declared.handle), &undeclare_kexpr::<C>(id));
+            if !taken {
+                tables_mut(&mut core.session.registry).undeclare_keyexpr(declared.handle);
+                return Err(Declined::ExceedsCapacity);
+            }
+            // And each group told the session's keyexprs, as a link is.
+            #[cfg(feature = "group")]
+            for group in &core.transport.groups {
+                group.announce_keyexpr(id, keyexpr);
+            }
         }
         #[cfg(test)]
         self.takes.holds.fetch_add(1, Ordering::Relaxed);
