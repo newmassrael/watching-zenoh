@@ -965,3 +965,39 @@ fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
         "every callback found the send place free: {found:?}"
     );
 }
+
+/// A read turns every face of the session's table once, after one wait: a session open on the
+/// dial role's face alone turns that face once a read. Turned red by a read that turns the dial
+/// role's face alone, or turns a face twice (`CoopEngine::read_faces`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_turns_every_face_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let faces = engine.direct_faces();
+    assert!(faces >= 1, "the dial role's face is a face of the table");
+    let before = engine.takes.face_turns.load(Ordering::SeqCst);
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        engine.takes.face_turns.load(Ordering::SeqCst) - before,
+        faces,
+        "one turn of each face"
+    );
+}
+
+/// What a read waits for is the earliest due of the faces as their slots hold it: each turn of a
+/// face shows its due outside its slot, so a read of several faces need not hold them to wait.
+/// The session's link is up, so its pump is due at its keep-alive, never at no time. Turned red by
+/// a turn that leaves a moved due unnoted (`DirectFace::note_due` in `CoopEngine::face_turn`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_waits_for_the_due_its_faces_hold() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    for _ in 0..3 {
+        let _ = SessionDrive::read(&*engine, false);
+        let (noted, held) = engine.faces_due_noted_and_held();
+        assert_eq!(noted, held, "the due noted is the due the slots hold");
+        assert_ne!(held, u64::MAX, "a link that is up is due at its keep-alive");
+    }
+}

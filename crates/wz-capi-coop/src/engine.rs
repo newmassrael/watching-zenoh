@@ -1426,6 +1426,10 @@ pub(crate) struct Takes {
     /// so worked out no wait (`direct`).
     #[cfg(not(wz_round))]
     pub(crate) held_input_reads: core::sync::atomic::AtomicUsize,
+    /// The turns of a face a read or the open made, each a look at the face's life and a step of
+    /// its pump (`direct`).
+    #[cfg(not(wz_round))]
+    pub(crate) face_turns: core::sync::atomic::AtomicUsize,
     /// Set by a test so that every read finds the one link holding input, whatever the link holds
     /// (`direct`): a stream that never lets the read wait, made without a peer that sends one.
     #[cfg(not(wz_round))]

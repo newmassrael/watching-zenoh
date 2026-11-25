@@ -480,9 +480,17 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// Whether the life brought the link up since the read last told it the replay's first turn
     /// (`CoopEngine::turn_replay`).
     brought_up: bool,
+    /// The due the face last showed outside its slot (`DirectFace::note_due`), so that only a
+    /// change of it is written there.
+    noted_us: u64,
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
+    /// When the face is next due by its life or its pump, on the session's clock in microseconds.
+    fn due_us(&self) -> u64 {
+        self.life_due_us.min(self.pump_due_us)
+    }
+
     /// Drop the pump, when one is written, and what its steps are handed: its deadlines go with
     /// it. The wire stays, for the session's record of the link to close.
     fn drop_pump(&mut self) {
@@ -608,6 +616,10 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// (`DirectWire`).
     site: DirectSite<L, C>,
     end: EndFlags,
+    /// When the face is next due (`DirectSlot::due_us`), as its read last noted it: a read of
+    /// several faces waits for the earliest of them, and the session's bookkeeping counts it,
+    /// without holding the faces' slots.
+    due_us: AtomicU64,
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
@@ -642,11 +654,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                         life_due_us: u64::MAX,
                         pump_due_us: u64::MAX,
                         brought_up: false,
+                        noted_us: u64::MAX,
                     }))
                 },
             );
             addr_of_mut!((*at).site).write(FaceSite::empty());
             addr_of_mut!((*at).end).write(EndFlags::default());
+            addr_of_mut!((*at).due_us).write(AtomicU64::new(u64::MAX));
+        }
+    }
+
+    /// Show when the face is next due by `slot`, its read slot, held: written only when it
+    /// changed, as a step of the pump moves it with nearly every record.
+    fn note_due(&self, slot: &mut DirectSlot<L, C>) {
+        let due_us = slot.due_us();
+        if due_us != slot.noted_us {
+            slot.noted_us = due_us;
+            self.due_us.store(due_us, Ordering::Relaxed);
         }
     }
 
@@ -808,51 +832,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Ok(())
     }
 
-    /// The read of a session whose read steps its one link itself: the wait for the link's input
-    /// or the next deadline, a look at the link's life and the session's bookkeeping when they are
-    /// owed, then the pump stepped with nothing of the session held, each record handed out as it
-    /// is read. A read from a callback reads nothing: the read under way holds the link, and any
-    /// other delivery marks the thread as delivering.
+    /// The read of a session whose read steps its faces itself: one wait for the input of any
+    /// face or the earliest deadline, then each face turned in the order of the face table's rows
+    /// (`Self::read_faces`), every record handed out as it is read. A read from a callback reads
+    /// nothing: the read under way holds the faces, and any other delivery marks the thread as
+    /// delivering.
     pub(super) fn read_direct(&self) -> Result<(), SessionClosed> {
         // A callback reads nothing either while a delivery other than a read's runs it (a put to
         // the session's own subscribers): a record read here would be handed to a callback inside
         // another.
-        let held = if self.deliveries.delivers_here() {
-            None
-        } else {
-            <CoopForm as LockForm>::try_lock(&self.direct.dial.slot)
-        };
-        let Some(mut held) = held else {
-            return if self.closed.load(Ordering::Acquire) {
-                Err(SessionClosed)
-            } else {
-                Ok(())
-            };
-        };
-        let slot = &mut held.0;
-        let read = self.read_held(&self.direct.dial, slot);
-        // A close made while the read stepped the pump (a callback's) ended the link's life but
-        // left the pump, which the read held: it goes now, once no step of it is under way.
-        if self.closed.load(Ordering::Acquire) {
-            slot.let_go();
+        if self.deliveries.delivers_here() {
+            return self.read_nothing();
         }
-        read
+        self.read_faces(|| self.direct.iter())
     }
 
-    /// [`Self::read_direct`] of `face`, its read slot held as `slot`.
-    fn read_held(
-        &self,
-        face: &DirectFace<L, C>,
-        slot: &mut DirectSlot<L, C>,
-    ) -> Result<(), SessionClosed> {
-        let turn = self.link_turn(face, slot).ok_or(SessionClosed)?;
-        self.deliver();
-        if turn.ended.is_some() {
-            return Err(SessionClosed);
-        }
-        if let Some(started_ms) = turn.jobs_due_ms {
-            self.run_due_tickers(started_ms);
-        }
+    /// What a read that reads nothing answers: whether the session is closed.
+    fn read_nothing(&self) -> Result<(), SessionClosed> {
         if self.closed.load(Ordering::Acquire) {
             Err(SessionClosed)
         } else {
@@ -860,16 +856,92 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// One turn of the one link, the open's and each read's: the wait for the link's input or the
-    /// next deadline, a look at the link's life, and a step of the pump unless the look ended the
-    /// session. `None` once the session closed. Out of line: the open and the read step the link
-    /// through one body.
-    #[inline(never)]
+    /// The read of the set of faces `faces` names, each read slot taken in turn: the wait, then a
+    /// look at each face's life and a step of its pump, the session's periodic jobs once every
+    /// face was turned. A slot found held is a read under way on this thread, whose callback this
+    /// read is called from: it reads nothing, so no record is handed out inside another's call.
+    fn read_faces<'f, I>(&'f self, faces: impl Fn() -> I) -> Result<(), SessionClosed>
+    where
+        I: Iterator<Item = &'f DirectFace<L, C>>,
+    {
+        if !faces().all(|face| <CoopForm as LockForm>::try_lock(&face.slot).is_some()) {
+            return self.read_nothing();
+        }
+        // The wait is handed back to the session by the first face's look at its life, or by the
+        // read itself when no face was looked at. Each face's records are handed out with its
+        // slot still held, so a callback's read finds it held.
+        let mut wait = Some(self.wait_on_faces().ok_or(SessionClosed)?);
+        let mut read = Ok(());
+        let mut jobs_due_ms = None;
+        for face in faces() {
+            let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
+                continue;
+            };
+            let Some(turn) = self.face_turn(face, &mut held.0, wait.take()) else {
+                read = Err(SessionClosed);
+                break;
+            };
+            self.deliver();
+            if turn.ended.is_some() {
+                read = Err(SessionClosed);
+                break;
+            }
+            jobs_due_ms = turn.jobs_due_ms;
+        }
+        if let Some(wait) = wait {
+            if let Some(mut held) = self.live() {
+                held.0.transport.links.waited(wait);
+            }
+        }
+        if read.is_ok() {
+            if let Some(started_ms) = jobs_due_ms {
+                self.run_due_tickers(started_ms);
+            }
+        }
+        // A close made while a read stepped a pump (a callback's) ended the link's life but left
+        // the pump, which the read held: each goes now, once no step of it is under way.
+        if self.closed.load(Ordering::Acquire) {
+            for face in faces() {
+                if let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) {
+                    held.0.let_go();
+                }
+            }
+            return Err(SessionClosed);
+        }
+        read
+    }
+
+    /// One turn of the face `face`, its read slot held as `slot`, the open's: the wait for the
+    /// link's input or the next deadline, then the face's turn (`Self::face_turn`). `None`
+    /// once the session closed.
     fn link_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
-        let mut wait = self.link_wait(slot)?;
+        let wait = self.wait_on_faces()?;
+        self.face_turn(face, slot, Some(wait))
+    }
+
+    /// The wait for the input of any face or the earliest deadline, made with nothing of the
+    /// session held. `None` once the session closed.
+    fn wait_on_faces(&self) -> Option<IdleWait> {
+        let mut wait = self.link_wait()?;
         #[cfg(test)]
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
+        Some(wait)
+    }
+
+    /// A turn of `face`, its read slot held as `slot`, after the wait `wait` when this turn
+    /// hands it back: a look at the link's life, and a step of the pump unless the look ended the
+    /// session. `None` once the session closed. Out of line: the open and each read turn a face
+    /// through one body.
+    #[inline(never)]
+    fn face_turn(
+        &self,
+        face: &DirectFace<L, C>,
+        slot: &mut DirectSlot<L, C>,
+        wait: Option<IdleWait>,
+    ) -> Option<LinkTurn> {
+        #[cfg(test)]
+        self.takes.face_turns.fetch_add(1, Ordering::Relaxed);
         let turn = self.life_turn(face, slot, wait)?;
         #[cfg(all(test, feature = "std"))]
         if turn.brought_up {
@@ -894,15 +966,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             self.pump_turn(face, slot, &turn);
         }
+        face.note_due(slot);
         Some(turn)
     }
 
-    /// What a read waits for, worked out under the session's lock: nothing while the link holds
-    /// input it already took from its stack, else the link's input, or the earliest of the link's
+    /// When the earliest face is next due by its life or its pump, as each face's read last noted
+    /// it (`DirectFace::note_due`).
+    fn faces_due_us(&self) -> u64 {
+        self.direct
+            .iter()
+            .map(|face| face.due_us.load(Ordering::Relaxed))
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+
+    /// What a read waits for, worked out under the session's lock: nothing while a link holds
+    /// input it already took from its stack, else the links' input, or the earliest of the faces'
     /// deadlines and the session's. `None` once the session closed.
-    fn link_wait(&self, slot: &DirectSlot<L, C>) -> Option<IdleWait> {
+    fn link_wait(&self) -> Option<IdleWait> {
         let mut held = self.live()?;
-        held.0.link_due_us = slot.life_due_us.min(slot.pump_due_us);
+        held.0.link_due_us = self.faces_due_us();
         // Input the link holds is read at once, so no deadline is gathered and the clock is not
         // read for a wait that would be none. What falls due meanwhile is served by the look at
         // the life that follows, which reads the clock whether or not the read waited.
@@ -920,7 +1003,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Some(held.0.idle_wait())
     }
 
-    /// A look at the link's life after `wait`, under the session's lock: what the link brings is
+    /// A look at the link's life under the session's lock, the read's `wait` handed back first
+    /// when this look is the one to hand it back: what the link brings is
     /// told to the life and its effects carried out, with the session's bookkeeping, when the
     /// link brings something, the life or the ledger is due, or the Router holds a chain past its
     /// deadline. `None` once the session closed.
@@ -928,14 +1012,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &self,
         face: &DirectFace<L, C>,
         slot: &mut DirectSlot<L, C>,
-        wait: IdleWait,
+        wait: Option<IdleWait>,
     ) -> Option<LinkTurn> {
         let mut held = self.live()?;
         let core = &mut held.0;
         // The read's last step of the link, made with nothing of the session held, may have ended
         // its session: the face no longer stands from here on.
         core.end_closed_facts();
-        core.transport.links.waited(wait);
+        if let Some(wait) = wait {
+            core.transport.links.waited(wait);
+        }
         let now_us = core.now_us();
         let now_ms = core.session_time.ms_at(now_us);
         let input = slot.next_input(core, &face.end);
@@ -992,7 +1078,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 .face(slot.at)
                 .and_then(|face| face.life.wake_at(now_us))
                 .unwrap_or(u64::MAX);
-            core.link_due_us = slot.life_due_us.min(slot.pump_due_us);
+            face.note_due(slot);
+            core.link_due_us = self.faces_due_us();
             core.settle_ledger();
         }
         let jobs_due_ms = core.jobs_due_at(now_us);
@@ -1293,8 +1380,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !matches!(seated, Lend::Lent(())) {
             return Err(OpenError::NoEndpoint);
         }
-        // A pump not stepped yet is due at once: the read that placed it sends its first frame.
+        // A pump not stepped yet is due at once: the read that placed it sends its first frame,
+        // and the next wait, the open's too, is none.
         slot.pump_due_us = 0;
+        face.note_due(slot);
         // SAFETY: the site lies in its face, which stays where it lies for the engine's life: the
         // dial role's at the engine's fixed place, each past it in its row of the session's arena
         // (`TakenFaces`). The session's state, which holds this handle, reaches the site only while
@@ -1443,6 +1532,27 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
         }
         outcome
+    }
+
+    /// When the earliest face is next due, as the faces' reads noted it and as their slots hold
+    /// it.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn faces_due_noted_and_held(&self) -> (u64, u64) {
+        let held = self
+            .direct
+            .iter()
+            .filter_map(|face| {
+                <CoopForm as LockForm>::try_lock(&face.slot).map(|slot| slot.0.due_us())
+            })
+            .min()
+            .unwrap_or(u64::MAX);
+        (self.faces_due_us(), held)
+    }
+
+    /// The faces a read turns: every row of the session's face table.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn direct_faces(&self) -> usize {
+        self.direct.iter().count()
     }
 
     /// How many legs a publish's walk of the faces hands out (`Self::on_faces`), and how many
