@@ -1145,9 +1145,9 @@ impl KeyHold {
 }
 
 /// An entity's key as its engine keeps it ([`SessionEngine::subscriber_keyexpr`]): the text, where
-/// the engine's record of the entity holds it, and the row of the declaration of the entity's own
-/// key, `None` when the record holds none. What an ABI lends a program asking for the entity's
-/// key, so the key it reads and the declaration it names are the session's, not a copy.
+/// the engine's record of the entity holds it, and the declaration the record holds that the key
+/// begins with ([`OwnKey`]), `None` when it holds none. What an ABI lends a program asking for the
+/// entity's key, so the key it reads and the declaration it names are the session's, not a copy.
 ///
 /// The text is named by its start and length because it is lent past the engine's lock: the
 /// record keeps it at one address until the entity is retracted.
@@ -1157,25 +1157,85 @@ pub struct KeyView {
     pub start: *const u8,
     /// The length of the key's text, in bytes.
     pub len: usize,
-    /// The row of the declaration of the entity's own key.
-    pub row: Option<wz_session_core::session_tables::KeyexprHandle>,
+    /// The declaration the record holds that the key begins with.
+    pub own: Option<OwnKey>,
 }
 
 impl KeyView {
     /// `key`, named whole: no declaration of it is held.
     pub fn literal(key: &str) -> Self {
-        Self::declared(key, None)
-    }
-
-    /// `key`, with the row of the declaration of the entity's own key.
-    pub fn declared(
-        key: &str,
-        row: Option<wz_session_core::session_tables::KeyexprHandle>,
-    ) -> Self {
         Self {
             start: key.as_ptr(),
             len: key.len(),
-            row,
+            own: None,
+        }
+    }
+
+    /// `key`, with the declaration of `declared`, id `mapping`, in `row`, whose count of
+    /// holders is `count`, when `key` begins with `declared`; with none otherwise, as a key the
+    /// declaration does not begin cannot be named by it.
+    ///
+    /// # Safety
+    /// As [`KeyHold::placed_at`]: `count` is the count of the head of `row`, and stays at its
+    /// address while the row stands and the session's tables do; and the engine's record of the
+    /// entity holds the declaration until the entity is retracted.
+    pub unsafe fn holding(
+        key: &str,
+        row: wz_session_core::session_tables::KeyexprHandle,
+        declared: &str,
+        mapping: wz_session_core::wire_id::ExprId,
+        count: &wz_session_core::session_tables::KeyexprCount,
+    ) -> Self {
+        let own = key
+            .as_bytes()
+            .starts_with(declared.as_bytes())
+            .then(|| OwnKey {
+                row,
+                mapping,
+                prefix_len: declared.len(),
+                count: count as *const wz_session_core::session_tables::KeyexprCount as usize,
+            });
+        Self {
+            start: key.as_ptr(),
+            len: key.len(),
+            own,
+        }
+    }
+}
+
+/// The declaration an engine's record of an entity holds for the entity's key ([`KeyView`]): the
+/// declaration of the entity's own key, or else the one its key is named by, either of which the
+/// key begins with. What a lent key names on the wire, and what a copy of it takes its own hold
+/// of, read with no lock of the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnKey {
+    /// The row the declaration lies in.
+    pub row: wz_session_core::session_tables::KeyexprHandle,
+    /// The id the wire names the declaration by.
+    pub mapping: wz_session_core::wire_id::ExprId,
+    /// How many bytes of the key the declaration covers.
+    pub prefix_len: usize,
+    /// The address of the row's count of holders.
+    count: usize,
+}
+
+impl OwnKey {
+    /// The address of the row's count of holders
+    /// ([`KeyexprCount`](wz_session_core::session_tables::KeyexprCount)): what a lent key names
+    /// its declaration by.
+    pub fn row_address(&self) -> usize {
+        self.count
+    }
+
+    /// The record's hold of the declaration, as a holder names it: a share of it
+    /// ([`KeyHold::share`]) takes one more at the row. It is the record's hold, given back by the
+    /// record alone, so a holder that names it gives it back to no one
+    /// ([`KeyHold::outlived_its_session`]).
+    pub fn named_hold(&self) -> KeyHold {
+        KeyHold {
+            mapping_id: self.mapping,
+            row: Some(self.row),
+            head: self.count,
         }
     }
 }
@@ -1906,6 +1966,40 @@ mod tests {
         assert!(session.released.read().is_empty());
         named.release(&session);
         assert_eq!(session.released.read(), [ROW_BITS], "CONTROL: the held one");
+    }
+
+    /// The hold a record's declaration is named by is the record's: a share of it is one more of the
+    /// session's count, by its row, given back once, and naming it gives nothing back. Turned red
+    /// by a `named_hold` that names another declaration or row, or one whose letting go gives a
+    /// hold back.
+    #[test]
+    fn a_records_declaration_is_shared_by_its_row_and_its_named_hold_gives_nothing_back() {
+        let session = CountedHolds::default();
+        let own = OwnKey {
+            row: row(),
+            mapping: 4,
+            prefix_len: 5,
+            count: 0,
+        };
+        let named = own.named_hold();
+        assert_eq!(
+            (named.mapping_id(), named.row(), named.row_address()),
+            (4, Some(row()), own.row_address())
+        );
+        let shared = named.share(&session).expect("a count with room");
+        named.outlived_its_session();
+        assert_eq!(session.retained.read(), [ROW_BITS]);
+        assert!(
+            session.released.read().is_empty(),
+            "naming it gave nothing back"
+        );
+        shared.release(&session);
+        assert_eq!(session.released.read(), [ROW_BITS], "the share's, once");
+        assert_eq!(
+            KeyView::literal("demo/key").own,
+            None,
+            "CONTROL: a literal names none"
+        );
     }
 
     /// An engine's periodic jobs as a test counts them: the ids it gave and the jobs it stopped.

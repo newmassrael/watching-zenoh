@@ -7491,6 +7491,21 @@ fn placed_hold(tables: &CoopTables, id: ExprId, handle: KeyexprHandle) -> KeyHol
     }
 }
 
+/// An entity's key `text`, as its row in `tables` keeps it, lent with `held`, the declaration the
+/// row holds that the key is lent with: that of the entity's own key, or else the one the key is
+/// named by.
+fn lent_key(tables: &CoopTables, text: &str, held: Option<KeyexprHandle>) -> KeyView {
+    match held.and_then(|handle| Some((handle, tables.keyexprs().get(handle)?))) {
+        // SAFETY: the session's rows lie in its region, or in the span lent at its open
+        // (`RowPolicy`), neither of which moves while the session's state stands; and the entity's
+        // row holds the declaration until the entity is retracted.
+        Some((handle, row)) => unsafe {
+            KeyView::holding(text, handle, row.key(), row.id(), row.head().count())
+        },
+        None => KeyView::literal(text),
+    }
+}
+
 // A key's hold and a periodic job's handle name the session by these alone, so the doors that
 // reach the engine as its own type make no table of all of its operations for them.
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::KeyHolds
@@ -7916,7 +7931,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let core = self.live()?;
         let tables = tables(&core.0.session.registry);
         if let Some((_, row)) = tables.subscribers().iter().find(|(_, row)| row.id() == id) {
-            return Some(KeyView::declared(row.key().as_str(), row.key().named()));
+            let key = row.key();
+            return Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())));
         }
         #[cfg(feature = "liveliness")]
         if let Some((_, row)) = tables
@@ -7924,7 +7940,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .iter()
             .find(|(_, row)| row.id() == id)
         {
-            return Some(KeyView::declared(row.key().as_str(), row.key().named()));
+            let key = row.key();
+            return Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())));
         }
         None
     }

@@ -5299,26 +5299,36 @@ impl SharedSession {
     }
 
     /// The key subscription `id` was declared on, a liveliness subscription's too, as its SSOT
-    /// entry keeps it, with the row of the declaration of its own key. The text is the entry's
+    /// entry keeps it, with the declaration the entry holds that the key begins with. The text is the entry's
     /// heap buffer, which stays where it is when the entries move and goes with the entry.
     pub fn subscriber_keyexpr(&self, id: SubId) -> Option<wz_capi_port::KeyView> {
         let guard = self.lock();
-        let (key, wire) = guard
+        let (key, held) = guard
             .subs
             .iter()
             .find(|entry| entry.id == id)
-            .map(|entry| (&entry.keyexpr, &entry.wire))
+            .map(|entry| (&entry.keyexpr, entry.held))
             .or_else(|| {
                 guard
                     .live_subs
                     .iter()
                     .find(|entry| entry.id == id)
-                    .map(|entry| (&entry.keyexpr, &entry.wire))
+                    .map(|entry| (&entry.keyexpr, entry.held))
             })?;
-        let row = guard
-            .tables
-            .keyexpr_at(KeyexprRef::by_id(wire.own_declaration()));
-        Some(wz_capi_port::KeyView::declared(key, row))
+        // The declaration of the subscription's own key, or else the one its key is named by: the
+        // entry holds both (`declarations_named`), the own one second when it is another.
+        let lent = held[1]
+            .or(held[0])
+            .and_then(|handle| Some((handle, guard.tables.keyexprs().get(handle)?)));
+        Some(match lent {
+            // SAFETY: the growable table keeps its rows in chunks that are only ever added
+            // (`Chunked`), so a row stays where it was put while it stands; and the entry holds
+            // the declaration until the subscription is retracted.
+            Some((handle, row)) => unsafe {
+                wz_capi_port::KeyView::holding(key, handle, row.key(), row.id(), row.head().count())
+            },
+            None => wz_capi_port::KeyView::literal(key),
+        })
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`

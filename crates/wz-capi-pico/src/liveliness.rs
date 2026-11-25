@@ -433,7 +433,9 @@ pub(crate) unsafe fn declare_liveliness_subscriber_in(
         let wire = key.wire(crate::session::EngineHold::as_ref(engine));
         engine
             .declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink)
-            .map(|id| DeclaredSubscriber::new(id, key))
+            // The session's record holds the declaration the key is announced on from here on:
+            // the door's hold goes with `key`, and the key is lent from the record.
+            .map(DeclaredSubscriber::new)
             .map_err(|refused| refusal_code(refused, Door::Entity))
     });
     settle_subscriber(state, declared)

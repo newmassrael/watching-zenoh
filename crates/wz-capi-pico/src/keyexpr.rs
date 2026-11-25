@@ -14,7 +14,7 @@ use core::mem::ManuallyDrop;
 
 use crate::prelude::*;
 
-use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, SessionKeys, WireKey};
+use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, KeyView, OwnKey, SessionKeys, WireKey};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::keyexpr_canon::{
     canonize_parts_as, KeyexprCanonError, KeyexprDialect, PartsForm, PartsRefusal,
@@ -26,6 +26,7 @@ use crate::abi::{
     z_owned_keyexpr_t, z_view_keyexpr_t, z_view_string_t,
 };
 use crate::ffi::{guard_val, guarded};
+use crate::pubsub::SubscriberState;
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION,
     Z_ERR_NULL, Z_OK,
@@ -52,7 +53,8 @@ const fn row_capacity<const N: usize>() -> usize {
 ///
 /// Both arms keep the literal at slots 0/1 (see [`z_loaned_keyexpr_t`]). A view's text is the
 /// caller's and is checked; a key that names the object keeping it (slot 3) lies in that object's
-/// text, which was a `str` when it was kept, and is read as it is.
+/// text, or in the text the session's record of a subscription keeps, either of which was a `str`
+/// when it was kept, and is read as it is.
 ///
 /// Out of line: every door that names a key reads it here, and each copy inlined carried the
 /// UTF-8 check of its own.
@@ -122,7 +124,71 @@ pub(crate) fn canon_key(text: &str) -> Result<(), ZResult> {
     }
 }
 
-/// The [`DeclaredKeyexpr`] behind a loaned keyexpr, or `None` for a view.
+/// What slot 3 of a loan names.
+enum LentKey<'a> {
+    /// Nothing: a view of the caller's text.
+    View,
+    /// A key this crate keeps, with the declaration that covers a prefix of it.
+    Kept(&'a DeclaredKeyexpr),
+    /// A subscription's key as the session's record of it keeps it ([`record_loan`]).
+    Record(&'a SubscriberState),
+}
+
+/// The bit slot 3 of a key lent from the session's record of a subscription carries
+/// ([`record_loan`]), the subscriber's state lying at the address without it. A kept key's
+/// address never carries it: both are aligned past it.
+const RECORD_TAG: usize = 1;
+
+const _: () = assert!(
+    core::mem::align_of::<DeclaredKeyexpr>() > RECORD_TAG
+        && core::mem::align_of::<SubscriberState>() > RECORD_TAG
+);
+
+/// What slot 3 of `ke` names.
+///
+/// # Safety
+/// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
+unsafe fn lent_of<'a>(ke: *const z_loaned_keyexpr_t) -> LentKey<'a> {
+    if ke.is_null() || (*ke)._state.is_null() {
+        return LentKey::View;
+    }
+    let state = (*ke)._state;
+    if (state as usize) & RECORD_TAG == 0 {
+        // SAFETY: an untagged slot 3 is a kept key, live while the loan is (the caller's).
+        LentKey::Kept(unsafe { &*(state as *const DeclaredKeyexpr) })
+    } else {
+        // SAFETY: a tagged slot 3 is the subscriber's state the tag was added to (`record_loan`),
+        // which stands while its loan does (the caller's).
+        LentKey::Record(unsafe {
+            &*state
+                .cast::<u8>()
+                .wrapping_sub(RECORD_TAG)
+                .cast::<SubscriberState>()
+        })
+    }
+}
+
+/// The loan of `view`, the key the session's record of the subscription whose state lies at
+/// `state` keeps: its text where the record keeps it, the address of the count of the declaration
+/// it names in slot 2, and the state, tagged, in slot 3, which names the session and the
+/// declaration a key made of the loan holds ([`SubscriberState::record_key`]). Valid while the
+/// state stays at its address and the subscription stands.
+pub(crate) fn record_loan(view: KeyView, state: *const SubscriberState) -> z_loaned_keyexpr_t {
+    z_loaned_keyexpr_t {
+        _start: view.start,
+        _len: view.len,
+        _handle: view.own.map_or(0, |own| own.row_address()),
+        _state: state
+            .cast::<u8>()
+            .wrapping_add(RECORD_TAG)
+            .cast_mut()
+            .cast::<c_void>(),
+    }
+}
+
+/// The [`DeclaredKeyexpr`] behind a loaned keyexpr, or `None` for a view and for a key lent from
+/// the session's record of a subscription, whose declaration a key declared on it asks of the
+/// session again and finds held.
 ///
 /// Only the owned keyexprs this crate builds, and the loans its entities hand
 /// out over their own keys, put anything in slot 3; a view leaves it null.
@@ -130,10 +196,10 @@ pub(crate) fn canon_key(text: &str) -> Result<(), ZResult> {
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
 pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'a DeclaredKeyexpr> {
-    if ke.is_null() || (*ke)._state.is_null() {
-        return None;
+    match lent_of(ke) {
+        LentKey::Kept(declared) => Some(declared),
+        LentKey::View | LentKey::Record(_) => None,
     }
-    Some(&*((*ke)._state as *const DeclaredKeyexpr))
 }
 
 /// How `ke` goes on `shared`'s wire: its own declaration's id and the rest of
@@ -153,8 +219,34 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
 pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
-    match declared_of(ke) {
-        Some(declared) => declared.wire(shared),
+    match lent_of(ke) {
+        LentKey::Kept(declared) => declared.wire(shared),
+        LentKey::Record(state) => {
+            let (session, own) = state.record_key();
+            record_wire(session, own, (*ke)._len, shared)
+        }
+        LentKey::View => WireKey::literal(),
+    }
+}
+
+/// How a key of `len` bytes lent from the session's record of a subscription on `session` goes on
+/// `shared`'s wire: the id of `own`, the declaration the record holds, and the rest of the key,
+/// when the subscription is `shared`'s; the literal otherwise. Read off the loan: no row, no lock.
+fn record_wire(
+    session: &crate::session::EngineHold,
+    own: Option<OwnKey>,
+    len: usize,
+    shared: &Engine,
+) -> WireKey {
+    let on = core::ptr::addr_eq(
+        crate::session::EngineHold::as_ref(session) as *const Engine,
+        shared as *const Engine,
+    );
+    match own
+        .filter(|_| on)
+        .and_then(|own| Some((own, len.checked_sub(own.prefix_len)?)))
+    {
+        Some((own, rest)) => WireKey::aliased_tail(own.mapping, rest).at_row(Some(own.row)),
         None => WireKey::literal(),
     }
 }
@@ -182,6 +274,18 @@ pub(crate) struct WireDeclaration {
 }
 
 impl WireDeclaration {
+    /// One more holder of `own`, the declaration the session's record of an entity holds, taken
+    /// at its row of `shared`: refused as [`Self::share`] is when its count holds as many holders
+    /// as it can.
+    fn lent(shared: &crate::session::EngineHold, own: OwnKey) -> Result<Self, ZResult> {
+        let named = own.named_hold();
+        let hold = named.share(crate::session::EngineHold::as_ref(shared));
+        // The record's own hold: it gives it back itself, so naming it gives nothing back.
+        named.outlived_its_session();
+        let hold = hold.ok_or(crate::result::Z_ERR_OVERFLOW)?;
+        Ok(Self::taken(shared, hold, own.prefix_len))
+    }
+
     /// The hold the caller took of `shared`, covering `prefix_len` bytes of the key.
     fn taken(shared: &crate::session::EngineHold, hold: KeyHold, prefix_len: usize) -> Self {
         Self {
@@ -435,6 +539,32 @@ impl DeclaredKeyexpr {
         Ok(Self {
             literal: KeyText::of_session(shared, literal)?,
             declaration: None,
+        })
+    }
+
+    /// `literal` kept for an object of `shared`'s session ([`KeyText::of_session`]), holding `own`,
+    /// the declaration the session's record of an entity holds for its key `named`, while
+    /// `literal` still begins with the bytes of `named` it covers, as [`Self::extended`] keeps
+    /// one. The hold is one more of the declaration's count, taken at its row
+    /// ([`WireDeclaration::lent`]). Refused as the text and the hold are.
+    fn of_record(
+        shared: &crate::session::EngineHold,
+        own: Option<OwnKey>,
+        named: &str,
+        literal: &str,
+    ) -> Result<Self, ZResult> {
+        // The text is kept first: a refusal then has no hold of the declaration to let go of.
+        let text = KeyText::of_session(shared, literal)?;
+        let declaration = own
+            .filter(|own| {
+                literal.get(..own.prefix_len).is_some()
+                    && literal.get(..own.prefix_len) == named.get(..own.prefix_len)
+            })
+            .map(|own| WireDeclaration::lent(shared, own))
+            .transpose()?;
+        Ok(Self {
+            literal: text,
+            declaration,
         })
     }
 
@@ -1296,9 +1426,13 @@ pub unsafe extern "C" fn z_keyexpr_clone(
         };
         // A copy its declaration's count or the heap has no room for is refused, and `dst` stays
         // null.
-        let key = match declared_of(src) {
-            Some(declared) => declared.share(),
-            None => DeclaredKeyexpr::literal_only(text),
+        let key = match lent_of(src) {
+            LentKey::Kept(declared) => declared.share(),
+            LentKey::Record(state) => {
+                let (session, own) = state.record_key();
+                DeclaredKeyexpr::of_record(session, own, text, text)
+            }
+            LentKey::View => DeclaredKeyexpr::literal_only(text),
         };
         match key {
             Ok(key) => store_owned_keyexpr(dst, key),
@@ -1398,9 +1532,13 @@ unsafe fn extended_from(
     left: *const z_loaned_keyexpr_t,
     literal: &str,
 ) -> Result<DeclaredKeyexpr, ZResult> {
-    match declared_of(left) {
-        Some(declared) => declared.extended(literal),
-        None => DeclaredKeyexpr::literal_only(literal),
+    match lent_of(left) {
+        LentKey::Kept(declared) => declared.extended(literal),
+        LentKey::Record(state) => {
+            let (session, own) = state.record_key();
+            DeclaredKeyexpr::of_record(session, own, keyexpr_str(left).unwrap_or_default(), literal)
+        }
+        LentKey::View => DeclaredKeyexpr::literal_only(literal),
     }
 }
 
