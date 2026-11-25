@@ -3396,8 +3396,8 @@ fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
 }
 
 /// The span of a session's arena its advanced publishers' caches keep their ring in
-/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life and zeroed then, so
-/// it holds an empty ring, and lent under the engine's lock of its own
+/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life, zero as its table
+/// was lent, so it holds an empty ring, and lent under the engine's lock of its own
 /// (`wz_capi_port::CacheBytes`).
 #[cfg(feature = "advanced-cache")]
 #[derive(Clone, Copy, Debug)]
@@ -3413,15 +3413,15 @@ unsafe impl Send for CacheSpan {}
 
 #[cfg(feature = "advanced-cache")]
 impl CacheSpan {
-    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back,
-    /// and zeroed. Refused as an arena with no room for a table lent no buffer.
+    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back.
+    /// Its bytes are as the table was lent them, zero (`Arena::lend_byte_cells`), and the open
+    /// claims it before anything writes it, so the claim writes none of them and a ring the caches
+    /// never fill is never written. Refused as an arena with no room for a table lent no buffer.
     pub(crate) fn claimed(cells: LentByteCells, bytes: usize) -> Result<Self, ArenaRefused> {
         let (base, len) = claimed(cells).ok_or(ArenaRefused::Lend(LendRefused::Exhausted {
             asked: Some(bytes),
             left: 0,
         }))?;
-        // SAFETY: the buffer is the arena's, claimed by this span alone, and `len` bytes long.
-        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, len) };
         Ok(Self { base, len })
     }
 
@@ -3766,6 +3766,28 @@ mod tests {
         lend.finish().expect("the arena holds the table");
         assert!(arena.arena.high_water() > 3 * 1024, "the table was lent");
         assert!(still_marked(&arena), "the lend wrote the table");
+    }
+
+    /// The caches' span is claimed as its table lent it and written by nothing more: bytes put in
+    /// the table's one buffer before the claim are still there after it (a buffer of a fresh table
+    /// is lent zero, which the claim then keeps). Turned red by a claim that writes the span over.
+    #[cfg(feature = "advanced-cache")]
+    #[test]
+    fn the_caches_span_is_claimed_as_its_table_lent_it() {
+        let mut arena = SessionArena::of_bytes(4096, &AllocatorMemory).expect("the host has it");
+        let mut lend = arena.lender();
+        let cells = lend.byte_cells(64, 1);
+        lend.finish().expect("the arena holds the table");
+        {
+            let mut buffer = cells.claim().expect("the table's one buffer");
+            assert!(buffer.as_mut_slice().iter().all(|b| *b == 0), "lent zero");
+            buffer.as_mut_slice().fill(MARK);
+        }
+        let span = CacheSpan::claimed(cells, 64).expect("the buffer is free again");
+        // SAFETY: the span is this test's alone, and the arena it lies in stands past its use.
+        let bytes = unsafe { span.bytes() };
+        assert_eq!(bytes.len(), 64, "the table's one buffer");
+        assert!(bytes.iter().all(|b| *b == MARK), "the claim wrote the span");
     }
 
     /// Whether each 4 KiB page of the `len` bytes at `at` is present in this process, read from
