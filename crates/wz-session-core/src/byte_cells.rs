@@ -29,6 +29,8 @@
 //! it; a claim and a release are plain loads and stores, not critical sections. A buffer's bytes
 //! are NOT cleared when it is lent or returned: a user writes what it reads back, and a link
 //! tracks the length of what it has put in.
+//!
+//! [`LentByteCells`]: crate::byte_cells::LentByteCells
 
 use core::cell::{Cell, UnsafeCell};
 use core::ptr::NonNull;

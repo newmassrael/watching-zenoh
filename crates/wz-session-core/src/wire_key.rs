@@ -9,6 +9,9 @@
 //! [`WireKey`] has no value for it: a builder that takes one cannot be handed that case, and the
 //! refusal of an id and a suffix that spell it is made once, where the two are put together
 //! ([`WireKey::from_parts`]).
+//!
+//! [`WireKey`]: crate::wire_key::WireKey
+//! [`WireKey::from_parts`]: crate::wire_key::WireKey::from_parts
 
 use core::num::NonZeroU16;
 

@@ -29,6 +29,13 @@
 //! growable on the heap one, where `N` is advisory as it is for every table of that policy and
 //! the bound is the one [`SlotMap::limit_to`] sets, or [`MAX_SLOTS`]. A table at its bound
 //! refuses an insert and hands the value back; nothing grows past it (P3).
+//!
+//! [`Handle`]: crate::slot_map::Handle
+//! [`SlotMap::pin`]: crate::slot_map::SlotMap::pin
+//! [`SlotMap::unpin`]: crate::slot_map::SlotMap::unpin
+//! [`SlotMap::lent`]: crate::slot_map::SlotMap::lent
+//! [`SlotMap::limit_to`]: crate::slot_map::SlotMap::limit_to
+//! [`MAX_SLOTS`]: crate::slot_map::MAX_SLOTS
 
 use core::fmt;
 use core::marker::PhantomData;

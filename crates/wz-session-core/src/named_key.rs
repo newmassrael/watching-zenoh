@@ -10,6 +10,11 @@
 //! declaration as the table that holds it states it ([`NamedKey::under`], which takes the rest
 //! of the text after the declared literal as the suffix). A [`Prefix`] is made by those tables
 //! only, so no caller pairs an id with a literal of its own.
+//!
+//! [`WireKey`]: crate::wire_key::WireKey
+//! [`NamedKey::literal`]: crate::named_key::NamedKey::literal
+//! [`NamedKey::under`]: crate::named_key::NamedKey::under
+//! [`Prefix`]: crate::named_key::Prefix
 
 use crate::wire_key::{KeyText, MappedId, WireKey};
 

@@ -618,7 +618,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
         &self.peer
     }
 
-    /// The two halves apart: the application's RemoteSubscriberTable<D, U, P> and the peer's RemoteSubscriberPeer<P>, for a caller
+    /// The two halves apart: the application's `RemoteSubscriberTable<D, U, P>` and the peer's `RemoteSubscriberPeer<P>`, for a caller
     /// that hands the second to a method of the first, as a session whose application half is
     /// shared with other faces must.
     pub fn split_mut(
@@ -1486,7 +1486,7 @@ impl RemoteSubscriberTable<BoxedDeclSink, BoxedUndeclSink> {
 // (owned `DeclareOwnedVariant`) + `has_matching`, now
 // `all(codec-declare, alloc)`-gated; the module un-gated from
 // `codec-declare`, so the test gate is now explicit (was inherited).
-#[cfg(all(test, feature = "codec-declare"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-declare"))]
 mod tests {
     //! R311ds — wider behavioural tests migrated here from the
     //! wz-runtime-tokio `declare/subscriber.rs` shell (R311dr-wider-tests

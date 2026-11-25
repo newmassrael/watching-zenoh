@@ -1578,7 +1578,7 @@ pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
 }
 
 /// [`dispatch_pending`] for a driver whose receive is in place ([`dispatch_datagram`],
-/// [`dispatch_datagram_reassembling`]): what that receive parked, which is only the rest of a
+/// `dispatch_datagram_reassembling`): what that receive parked, which is only the rest of a
 /// compressed batch, inflated into a buffer of its own and read by the copying path. Every other
 /// datagram is read where it lies to its end, or to where the link keeps it, and nothing of it is
 /// parked. A build that does not compress parks nothing in place, and this answers `None` with
@@ -1813,7 +1813,7 @@ pub enum DatagramPath {
     InPlace,
     /// The unit was an admissible `Fragment` and its payload was staged into
     /// its reassembly slot from where the unit lies
-    /// ([`dispatch_datagram_reassembling`]); a chain it completed was read in
+    /// (`dispatch_datagram_reassembling`); a chain it completed was read in
     /// that slot.
     FragmentInPlace,
     /// The unit was a lean lowlatency unit (`transport-lowlatency`): a bare
@@ -1842,7 +1842,7 @@ pub enum CopyReason {
     /// its own, written by the decompressor.
     Compressed,
     /// A `Fragment` on a path that holds no reassembly Router
-    /// ([`dispatch_datagram`]); [`dispatch_datagram_reassembling`] stages one
+    /// ([`dispatch_datagram`]); `dispatch_datagram_reassembling` stages one
     /// in place.
     Fragment,
     /// A `Fragment` whose own extension chain a participant must refuse: the
@@ -1952,7 +1952,7 @@ const REASSEMBLED_RECORD_FORM: crate::network_message::RecordForm = RECORD_FORM;
 /// handshake, KeepAlive or Close at the front, a `Frame` whose head does not decode or whose own
 /// extension chain must be refused (the FSM's `framing.error` arm), each read where it lies by the
 /// copying path's decode and judgement of one transport message and nothing more; a Fragment on a
-/// path with no Router, handed up by the copying path ([`dispatch_datagram_reassembling`] reads a
+/// path with no Router, handed up by the copying path (`dispatch_datagram_reassembling` reads a
 /// Fragment in place); and a compressed batch, inflated and read by the copying path. A `Frame` is
 /// read to the end of its records, which is the end of its unit unless a transport message of the
 /// same batch follows the last record (a second Frame header, a KeepAlive): the walk stops there
@@ -4572,7 +4572,12 @@ mod lifecycle_key_tests {
 // batch whose message holds an extension it does not define, with the M bit set,
 // and passes the same batch with the bit clear
 // (`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory() {`).
-#[cfg(all(test, feature = "codec-frame", feature = "codec-push"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "codec-push"
+))]
 mod mandatory_extension_seam_tests {
     use super::*;
     use crate::wire::parts::{ExtEntryOwned, ExtEntryOwnedVariant};

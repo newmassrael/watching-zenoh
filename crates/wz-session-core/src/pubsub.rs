@@ -37,7 +37,7 @@
 //!   the registry. They land in a future round once a use case
 //!   surfaces — pub/sub demo is sufficient for the AP MVP.
 //! - R227 — self-publish loopback. An in-process publisher can hand
-//!   a [`Sample`] to `SubscriberRegistry::local_publish`; the
+//!   a `Sample` to `SubscriberRegistry::local_publish`; the
 //!   registry walks the same locality + pattern-match dispatch that
 //!   wire-arrived Pushes go through, just with `is_remote = false`
 //!   so the locality predicate selects `allows_local()`. Subscribers
@@ -78,7 +78,7 @@
 //!   that impls [`SampleSink`] with no heap, registered through the
 //!   generic [`register_sink`](SubscriberRegistry::register_sink).
 //!
-//! Dispatch passes the projected owned [`Sample`] directly as
+//! Dispatch passes the projected owned `Sample` directly as
 //! `&dyn SampleView` (`Sample: SampleView`), so there is no
 //! intermediate projection step. `BoxedSink` is `Send`; callers that
 //! need cross-task sharing wrap the registry in `Arc<Mutex<…>>` as
@@ -1132,7 +1132,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// staged from is the change, and the change is recorded here once, in the
     /// table's epoch. A [`SubscriberRegistry`], which has one peer, stages them as
     /// it is told ([`SubscriberRegistry::register_sink`]); a table with many peers
-    /// leaves each of them to see the epoch move ([`SubscriberPeer::reconcile`]).
+    /// leaves each of them to see the epoch move (`SubscriberPeer::reconcile`).
     pub fn unregister(&mut self, id: SubscriptionId) -> bool {
         let Some(at) = self.subscribers.iter().position(|s| s.id == id) else {
             return false;
@@ -1936,7 +1936,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// borrowed views ([`SubscriberPeer::absorb_declare_view`],
     /// `respond_to_subscriber_interest_view`); a record of any other kind is another
     /// registry's.
-    #[cfg(feature = "rx-lent-control")]
+    #[cfg(all(feature = "storage-profile", feature = "rx-lent-control"))]
     fn dispatch_in_place_control<L: LocalSubscribers>(
         &mut self,
         subs: &mut L,
@@ -4222,7 +4222,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// callers: every declare route funnels through this method, so none
     /// can skip the push. A table shared by several peers stages it for the
     /// peer of the caller; every other peer finds it by its id when it next
-    /// reconciles ([`SubscriberPeer::reconcile`]).
+    /// reconciles (`SubscriberPeer::reconcile`).
     pub fn register_sink_for(
         &mut self,
         peer: &mut SubscriberPeer<P>,
@@ -4529,7 +4529,7 @@ impl<C, P: Storage> SubscriberRegistry<C, P> {
         &self.peer
     }
 
-    /// The two halves apart: the application's SubscriberTable<C, P> and the peer's SubscriberPeer<P>, for a caller
+    /// The two halves apart: the application's `SubscriberTable<C, P>` and the peer's `SubscriberPeer<P>`, for a caller
     /// that hands the second to a method of the first, as a session whose application half is
     /// shared with other faces must.
     pub fn split_mut(&mut self) -> (&mut SubscriberTable<C, P>, &mut SubscriberPeer<P>) {
@@ -4801,7 +4801,7 @@ impl<C, P: Storage> SubscriberRegistry<C, P> {
 /// the `BoxedSink` instantiation only) because they heap-box the closure via
 /// [`BoxedSink`]; a table with many peers registers through them as the
 /// application, and stages nothing for any peer
-/// ([`SubscriberPeer::reconcile`] does, from the epoch they bump).
+/// (`SubscriberPeer::reconcile` does, from the epoch they bump).
 #[cfg(feature = "alloc")]
 impl SubscriberTable<BoxedSink> {
     /// New empty table backed by heap-boxed closures ([`BoxedSink`]).
@@ -9068,6 +9068,7 @@ mod decode_isolation_tests {
 // every metadata feature OFF — so these RUN there.
 #[cfg(test)]
 #[cfg(all(
+    feature = "alloc",
     feature = "storage-profile",
     feature = "codec-push",
     feature = "pubsub-put",

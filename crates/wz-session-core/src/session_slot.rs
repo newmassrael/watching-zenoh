@@ -468,7 +468,7 @@ where
     ///
     /// The slot's entropy source is handed out beside the handle, once: the one exclusive
     /// reference to it, which the session's handshake binding holds
-    /// ([`SessionRuntime::EntropyDraw`](crate::link::SessionRuntime::EntropyDraw)); the bundle
+    /// ([`SessionRuntime::EntropyDraw`]); the bundle
     /// keeps none. The binding holds a count on the slot through its handle, so the slot
     /// outlives the reference.
     ///

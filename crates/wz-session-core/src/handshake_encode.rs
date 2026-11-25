@@ -898,8 +898,9 @@ mod tests {
     use super::{init_cbyte, pack_sn_res};
     use wz_codecs::whatami::WhatAmI;
 
-    /// A minimal params bundle for the OPEN lease-unit fixtures.
-    #[cfg(feature = "codec-open-body")]
+    /// A minimal params bundle for the OPEN lease-unit fixtures. Its signing key is the heap
+    /// profile's, so it is built where `alloc` is.
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     fn open_params(lease_ms: u64) -> crate::session_init_params::SessionInitParams {
         use alloc::vec;
         crate::session_init_params::SessionInitParams {
@@ -1015,7 +1016,7 @@ mod tests {
     /// to the seconds form (10000ms -> T=1 + VLE 10), a fractional one
     /// stays raw ms with T clear. The pre-ku manual `lease_in_seconds`
     /// knob let wz emit the non-compact form pico never sends.
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     #[test]
     fn encode_open_derives_t_flag_from_lease() {
         // OpenAck (no cookie field): [header][lease vle][initial_sn vle].
@@ -1031,7 +1032,7 @@ mod tests {
     /// in MILLISECONDS (`parse_inbound` applies `lease_from_wire`, the
     /// same boundary rule as `multicast_join::decode_join`) — no
     /// consumer ever sees the wire unit.
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     #[test]
     fn parse_inbound_projects_open_lease_to_ms() {
         let ack = super::encode_open(&open_params(10_000), true, None, &[]).expect("encodes");
@@ -1052,7 +1053,7 @@ mod tests {
     /// chain where it is staged, is the Open written whole: the Z flag follows the
     /// chain's presence, and the cookie and the chain land where the one encoder
     /// puts them.
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     #[test]
     fn an_open_written_head_then_chain_is_the_open_written_whole() {
         let params = open_params(10_000);

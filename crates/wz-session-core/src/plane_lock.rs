@@ -7,6 +7,9 @@
 //! the engine's port's, which this crate does not name, so the engine names it as a
 //! [`LockFamily`]. A queue the deliveries look at on every pass sits behind such a lock with a
 //! word of its own that says, without the lock, whether it holds anything ([`Queued`]).
+//!
+//! [`LockFamily`]: crate::plane_lock::LockFamily
+//! [`Queued`]: crate::plane_lock::Queued
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

@@ -318,7 +318,7 @@ impl QueryPeer {
 // routing cannot place (owed nothing), a keyexpr through the peer's space, and
 // one past the bounded buffer (the fallback). The allocation count of the path
 // is the lwIP harness's (`wz-session-lwip/tests/rx_frame_allocations.rs`).
-#[cfg(all(test, feature = "query-queryable"))]
+#[cfg(all(test, feature = "alloc", feature = "query-queryable"))]
 mod tests {
     use super::*;
     use crate::driver_loop::{InPlaceRecord, IterationEvent};

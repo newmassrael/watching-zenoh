@@ -95,9 +95,9 @@ pub struct PublishOptions<'a> {
     /// propagation is built (R233, `gated_encoding_field` on the Put body, gated
     /// `pubsub-encoding`) and foreign-proven — R311y207 (`wz_encoding_to_pico_zsub`,
     /// `text/plain` decoded by pico); loopback honours it from R232. Lent by a holder that keeps
-    /// it for the publish (a publisher's declared encoding, [`Self::with_encoding_lent`], an
-    /// encoding object of a C ABI, [`Self::with_encoding_ref`]), or owned
-    /// ([`Self::with_encoding`]).
+    /// it for the publish (a publisher's declared encoding, `Self::with_encoding_lent`, an
+    /// encoding object of a C ABI, `Self::with_encoding_ref`), or owned
+    /// (`Self::with_encoding`).
     pub encoding: Option<PublishEncoding<'a>>,
     /// R232 — body-level source identification propagated to `Sample.source_info`. Cooperates
     /// with the R231 self-echo dedup: when the dispatcher fires on a wire-arrived Push whose

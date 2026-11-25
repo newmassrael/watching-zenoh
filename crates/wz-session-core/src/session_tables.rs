@@ -40,6 +40,17 @@
 //!
 //! The faces' own tables (`peer_tables`) keep what each peer declared; these tables ask them
 //! through [`PeerDeclarations`] when a write filter or a matching listener is judged.
+//!
+//! [`SlotMap`]: crate::slot_map::SlotMap
+//! [`TableRows`]: crate::session_tables::TableRows
+//! [`Handle`]: crate::slot_map::Handle
+//! [`KeyForm::prefix`]: crate::session_tables::KeyForm::prefix
+//! [`SessionTables::wire_of`]: crate::session_tables::SessionTables::wire_of
+//! [`RegisterError`]: crate::registry_error::RegisterError
+//! [`Refused`]: crate::session_tables::Refused
+//! [`RowCallbacks`]: crate::session_tables::RowCallbacks
+//! [`RowCallback`]: crate::row_callback::RowCallback
+//! [`PeerDeclarations`]: crate::session_tables::PeerDeclarations
 
 use core::cell::Cell;
 use core::fmt;

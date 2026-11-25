@@ -409,7 +409,7 @@ impl LivelinessRegistry<BoxedDeclSink, BoxedUndeclSink> {
 // R311gb (Track 2) — test gate now explicit (was inherited from the
 // module's `codec-declare` gate); exercises `dispatch_declare` (owned
 // `DeclareOwnedVariant`), now `all(codec-declare, alloc)`-gated.
-#[cfg(all(test, feature = "codec-declare"))]
+#[cfg(all(test, feature = "alloc", feature = "codec-declare"))]
 mod tests {
     //! R311dm self-tests + R311ds wider behavioural tests for
     //! `LivelinessRegistry`.

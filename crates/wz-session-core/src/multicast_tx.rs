@@ -544,7 +544,7 @@ pub struct MulticastTxEncoded<'a> {
 }
 
 /// How a message lent for the call is framed onto a group, read as its owned form is
-/// ([`frame_meta`]): the three ways a group's messages take their band.
+/// (`frame_meta`): the three ways a group's messages take their band.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MulticastTxFraming {
@@ -1031,6 +1031,12 @@ pub fn multicast_tx_group_announcement<R>(
     key: crate::declare_form::GroupKey<'_>,
     f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
 ) -> Result<R, crate::send_wire_error::SendWireError> {
+    // Named by the arms of the kinds this build declares, which may be none.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token"
+    ))]
     use crate::declare_form::GroupDeclaration;
     use crate::send_wire_error::SendWireError;
     let crate::declare_form::GroupKey { mapping_id, suffix } = key;
@@ -1082,6 +1088,12 @@ pub fn multicast_tx_group_retraction<R>(
     key: crate::declare_form::GroupKey<'_>,
     f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
 ) -> Result<R, crate::send_wire_error::SendWireError> {
+    // Named by the arms of the kinds this build declares, which may be none.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token"
+    ))]
     use crate::declare_form::GroupDeclaration;
     use crate::send_wire_error::SendWireError;
     let refused = SendWireError::Codec(sce_forge_runtime::codec::CodecError::LengthOutOfRange);

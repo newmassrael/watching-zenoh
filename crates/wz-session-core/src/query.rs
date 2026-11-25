@@ -868,7 +868,7 @@ pub(crate) fn stage_queryable_interest<R: QueryableRows>(
 /// is delivered by serves either.
 pub trait LocalQueryables {
     /// What a matched queryable is asked through, with the context the dispatch is handed
-    /// ([`QueryDelivered`]): the row's own record of its queryable.
+    /// (`QueryDelivered`): the row's own record of its queryable.
     type Sink;
     /// The id the table gives a queryable's row, which a delivery names it by.
     type RowId: Copy;
@@ -3182,7 +3182,7 @@ impl DispatchOutcome {
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// R238 — in-process query loopback mirror of
-    /// [`crate::pubsub::SubscriberTable::local_publish`]. Fans the
+    /// `crate::pubsub::SubscriberTable::local_publish`. Fans the
     /// `(rid, keyexpr, query)` triple into every matching queryable
     /// that allows `Locality::SessionLocal` (or `Locality::Any`),
     /// pushing each callback's emitted [`QueryReply`] records into
@@ -8037,7 +8037,12 @@ mod request_decode_isolation_tests {
 // `query-queryable` build measuring nothing. Same reasoning the
 // receive-side decode-isolation module above already applies in the other
 // direction.
-#[cfg(all(test, feature = "query-queryable", feature = "storage-profile"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "query-queryable",
+    feature = "storage-profile"
+))]
 mod local_matching_tests {
     use super::*;
     use crate::locality::Locality;

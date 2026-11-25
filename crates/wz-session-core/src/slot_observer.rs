@@ -437,7 +437,7 @@ pub trait ObserverSinks {
     /// The context a matched row is delivered through, handed to the dispatch
     /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples,
     /// its queries and its tokens go to. `()` for rows that deliver themselves ([`SampleSink`],
-    /// [`crate::query::ResponderSink`], [`LivelinessSampleSink`]). How each kind's rows are told
+    /// `crate::query::ResponderSink`, [`LivelinessSampleSink`]). How each kind's rows are told
     /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`].
     type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>;
     /// The application's tables, of storage `P`, as one bundle: the registries of the storage
@@ -2626,9 +2626,11 @@ mod tests {
     }
 
     /// A sink that counts the bursts a drain opens and sends nothing.
+    #[cfg(feature = "interest-answer")]
     #[derive(Default)]
     struct Bursts(core::cell::Cell<usize>);
 
+    #[cfg(feature = "interest-answer")]
     impl ResponseSink for Bursts {
         #[cfg(all(feature = "codec-response", feature = "alloc"))]
         fn send_response(&self, _response: crate::wire::ResponseOwned) {}
@@ -2654,6 +2656,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "interest-answer")]
     impl DeclareReplySink for Bursts {
         #[cfg(feature = "liveliness-token")]
         fn send_declare_token_reply(&self, _token_id: u64, _keyexpr: &str, _interest_id: u64) {}
@@ -2672,6 +2675,7 @@ mod tests {
         fn send_undeclare_subscriber_reply(&self, _subscriber_id: u64) {}
     }
 
+    #[cfg(feature = "interest-answer")]
     impl LivelinessGetPrune for Bursts {
         #[cfg(feature = "liveliness-get")]
         fn prune_liveliness_get_interest(&self, _interest_id: u64) {}

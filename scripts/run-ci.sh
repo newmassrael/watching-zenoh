@@ -9764,7 +9764,10 @@ layer_c1am_cargo_test_adminspace() {
     # R3322 -- 8 -> 9: `two_spellings_of_one_zid_are_the_same_zid` joins
     # `same_zid`, the comparison of two spellings of one id. PRINTED by the
     # hosted run, whose red printed the missing leg.
-    _runci_guarded_test "C1AM zid_hex 9" 9 \
+    # 9 -> 10: `the_writer_renders_le_reversed_with_no_leading_zero` holds the
+    # writer every profile has to the recipe (the slot profile's unit tests,
+    # 0042e2984). PRINTED by hosted run 45486715960, whose red printed 10.
+    _runci_guarded_test "C1AM zid_hex 10" 10 \
         cargo test -p wz-session-core --lib zid_hex --quiet || return 1
     # The one `zid_to_zenoh_hex` test is the replication digest's, which is the wz-storage
     # crate's since the server-layer split (step 4).
@@ -12222,9 +12225,11 @@ layer_c1g_cargo_test_observer() {
     # ask with one request id are answered each on its own session's send path, and for one
     # session it sends and delivers what the one-session observer does, byte for byte, and a
     # host that holds the `Final`s back drains the replies alone. The file compiles only where
-    # the fixed-backing one above does not. 4 = what that command PRINTED.
+    # the fixed-backing one above does not. 4 = what that command PRINTED. 4 -> 7: a peer whose
+    # tables are lent is answered in the rows it was lent, and its interest and liveliness answers
+    # drain in place (6dbd65eae); PRINTED by hosted run 45486715960, whose red printed 7.
     wz_test_args wz-session-core slot_observer_heap
-    _runci_guarded_test C1g 4 \
+    _runci_guarded_test C1g 7 \
         cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete --quiet || return 1
     # R3315 -- the observer's place. The observer is 16 KB and the Zephyr node's stack is
     # 32 KB: a value of it passed through an install cost the node's main function 69 KB of

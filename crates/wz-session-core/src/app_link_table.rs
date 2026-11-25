@@ -1377,8 +1377,8 @@ impl AppLinkTable {
 
     /// Hold `bytes` a writer sends on `handle` and the program has not taken, behind any held
     /// before: the remainder of a writer that cannot wait for the program (an engine whose stream
-    /// seam takes every byte or fails), which offers it again from [`Self::remainder`] and drops
-    /// what the program took when [`Self::give_back_remainder`] answers the run [`Self::lend_remainder`] lent. Refused, with nothing held, on a link
+    /// seam takes every byte or fails), which offers it again (`lend_remainder`) and drops what the
+    /// program took when `give_back_remainder` answers the run it lent. Refused, with nothing held, on a link
     /// that is closing or closed, and past the bound ([`InboundRefusal::Full`]). The bytes go into
     /// storage of the bound the link's row holds.
     pub fn hold_remainder(

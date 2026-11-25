@@ -72,6 +72,20 @@
 //! table that holds rows of one are neither `Send` nor `Sync`, and every table that holds rows of an
 //! arena is dropped before the memory the arena was made over is given back
 //! ([`Arena::over`]'s contract, which every pointer here rests on).
+//!
+//! [`RowShape`]: crate::row_pool::RowShape
+//! [`Seq`]: crate::row_pool::Seq
+//! [`Keyed`]: crate::row_pool::Keyed
+//! [`RowPool`]: crate::row_pool::RowPool
+//! [`RowSpace`]: crate::row_pool::RowSpace
+//! [`PooledRows`]: crate::row_pool::PooledRows
+//! [`RowHandle`]: crate::row_pool::RowHandle
+//! [`MAX_POOL_ROWS`]: crate::row_pool::MAX_POOL_ROWS
+//! [`RowSource`]: crate::row_pool::RowSource
+//! [`PooledRows::refusals`]: crate::row_pool::PooledRows::refusals
+//! [`RowCounts::refused`]: crate::row_pool::RowCounts::refused
+//! [`Arena`]: crate::bounded::Arena
+//! [`Arena::over`]: crate::bounded::Arena::over
 
 use core::cell::Cell;
 use core::fmt;

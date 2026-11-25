@@ -15,6 +15,8 @@
 //! publication: the codec's form of a Query's value extension holds the encoding and the payload as
 //! one slice, which the caller does not have without a copy. The timestamp stack a query starts is the
 //! last envelope extension, written by its one writer (`ts_stack::TsStack::write`).
+//!
+//! [`GetParts`]: crate::query_parts::GetParts
 
 use sce_forge_runtime::codec::{CodecError, SceSink};
 
@@ -76,7 +78,7 @@ impl<'a> RequestWriter<'a> {
 
     /// Encode the `Request` into `sink`. `LengthOutOfRange`, before a byte is written, for what
     /// the owned builder refuses: a key suffix past the protocol's `u16` length, parameters, a
-    /// value or an attachment past its `u32` length, a schema past [`SCHEMA_MAX`], and a source
+    /// value or an attachment past its `u32` length, a schema past `SCHEMA_MAX`, and a source
     /// info whose id is not 1 to 16 bytes.
     pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
     where

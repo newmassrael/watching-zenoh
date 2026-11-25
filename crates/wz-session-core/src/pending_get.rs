@@ -8,6 +8,9 @@
 //! A leg's row ends when its entry is dropped from its face's table ([`PendingGet::unregister`]):
 //! the entry's sink says the leg's end. The rows are lent from the session's arena, one for each
 //! entry the faces' tables can hold, so a leg the tables admitted always finds a row.
+//!
+//! [`GetKind`]: crate::pending_get::GetKind
+//! [`PendingGet::unregister`]: crate::pending_get::PendingGet::unregister
 
 use crate::bounded::{BoundedVec, CapacityFull, Storage};
 #[cfg(feature = "storage-profile")]
