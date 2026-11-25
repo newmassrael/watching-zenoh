@@ -69,20 +69,32 @@ PY
 )" || fail "the build named no single pico header arm"
 rm -f "$report"
 
+# The library is the C library's crate, `wz-capi-pico-lib`, each feature named through its
+# dependency on the ABI crate (`abi/`), built as it ships: without `std`, by the `capi-nostd`
+# profile and its configuration, for the host's own target (crates/.cargo/capi-nostd.toml).
+host_triple="$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')"
+[ -n "$host_triple" ] || fail "rustc named no host target"
+lib_dir="$build/$host_triple/capi-nostd"
+nostd_args=(--profile capi-nostd --config .cargo/capi-nostd.toml --target "$host_triple")
+
 # The one library: the core and the doors.
 core_features=()
 if [ -n "$features" ]; then
-    core_features=(--features "$features")
+    core_features=(--features "abi/${features//,/,abi/}")
 fi
-(cd crates && cargo build -p wz-capi-pico ${core_features[@]+"${core_features[@]}"} --target-dir "$build") \
-    || fail "the one library did not build"
-cp "$build/debug/libwz_capi_pico.so" "$out/single/" || fail "the one library is not where cargo builds it"
+(cd crates && cargo build -p wz-capi-pico-lib ${core_features[@]+"${core_features[@]}"} \
+    "${nostd_args[@]}" --target-dir "$build") || fail "the one library did not build"
+cp "$lib_dir/libwz_capi_pico.so" "$out/single/" || fail "the one library is not where cargo builds it"
 
 # The core alone: the same crate and features, with the doors left to the other library. Built after
-# the one library into the same directory, so it replaces that file, which was copied out above.
-(cd crates && cargo rustc -p wz-capi-pico --lib ${core_features[@]+"${core_features[@]}"} \
-    --target-dir "$build" -- --cfg wz_additional_apart) || fail "the core alone did not build"
-cp "$build/debug/libwz_capi_pico.so" "$out/split/" || fail "the core alone is not where cargo builds it"
+# the one library into the same directory, so it replaces that file, which was copied out above. The
+# cfg is the ABI crate's, which `cargo rustc` would give only to the library's own crate, so it is
+# given to every crate of the target through a configuration whose array cargo joins with the one
+# the form without `std` names.
+(cd crates && cargo build -p wz-capi-pico-lib ${core_features[@]+"${core_features[@]}"} \
+    "${nostd_args[@]}" --config "target.'cfg(unix)'.rustflags = ['--cfg', 'wz_additional_apart']" \
+    --target-dir "$build") || fail "the core alone did not build"
+cp "$lib_dir/libwz_capi_pico.so" "$out/split/" || fail "the core alone is not where cargo builds it"
 
 # The doors' library, linked to the core just built: the features of the list it declares.
 ext_features="$( (cd crates && cargo metadata --format-version 1 --no-deps) | "$py" -c '
@@ -97,7 +109,7 @@ ext_args=()
 if [ -n "$ext_features" ]; then
     ext_args=(--features "$ext_features")
 fi
-(cd crates && WZ_CAPI_PICO_CORE_DIR="$build/debug" cargo build -p wz-capi-pico-ext \
+(cd crates && WZ_CAPI_PICO_CORE_DIR="$lib_dir" cargo build -p wz-capi-pico-ext \
     ${ext_args[@]+"${ext_args[@]}"} --target-dir "$build") || fail "the doors' library did not build"
 cp "$build/debug/libwz_capi_pico_ext.so" "$out/split/" || fail "the doors' library is not where cargo builds it"
 
