@@ -39,7 +39,7 @@ use crate::session_drive::{
 };
 use crate::sync::{FacePlace, Lend, LockKind};
 use crate::CoopLocalJoinHandle;
-use core::sync::atomic::{fence, AtomicBool, Ordering};
+use core::sync::atomic::{fence, AtomicU32, Ordering};
 
 /// The number a session knows one of its faces by.
 pub type FaceId = u64;
@@ -304,24 +304,38 @@ impl<S: FaceSession, E: LinkEnd, N: CountKind> FaceWire for Wire<S, E, N> {
 }
 
 /// The parts of one face's link that the face's place holds ([`FaceSite`]), read as the link's
-/// wire while the link is up or in its handshake.
+/// wire while the link is up or in its handshake, and paid what handles on the link owed them.
 pub trait WireParts: FaceParts {
     /// The wire the parts hold.
     type Wire: FaceWire;
 
     /// The parts' wire, while they hold one.
     fn wire(&self) -> Option<&Self::Wire>;
+
+    /// Pay `owed`, debts the parts define (bits within [`PARTS_DEBTS`], never none) that were
+    /// owed to the place while it was held ([`FaceSite::owe`]), with the parts lent. Takes no
+    /// lock of the session: the place's holder may hold that lock, or wait for it while it holds
+    /// the place, so a debt that needs the session's state is marked in the parts, and the
+    /// holder that finds the mark carries it out under that lock.
+    fn pay(&mut self, owed: u32);
 }
 
+/// The bit of a site's debts that is its link's close: told through the wire's own close
+/// ([`FaceWire::close`]), so why the link closes is the wire's to say, and nowhere else.
+const CLOSE_OWED: u32 = 1 << 31;
+
+/// The bits of a site's debts its parts define, and are paid ([`WireParts::pay`]).
+pub const PARTS_DEBTS: u32 = CLOSE_OWED - 1;
+
 /// A face's place for the parts of its link, apart from the session's state, and what the
-/// handles on the link ([`FaceAt`]) owe it: a close a handle could not tell while another
-/// thread held the place. Every lend of the parts goes through [`Self::lend`] or
-/// [`Self::try_lend`], which pay what is owed before they let go of the place, so a close owed
-/// is told once, by whichever holder pays it.
+/// handles on the link ([`FaceAt`]) and the session owe it: a close, and the parts' own debts,
+/// owed by whoever could not lend the place because another holder had it. Every lend of the
+/// parts goes through [`Self::lend`] or [`Self::try_lend`], which pay what is owed before they
+/// let go of the place, so a debt is paid once, by whichever holder pays it.
 pub struct FaceSite<K: LockKind, P: WireParts> {
     place: FacePlace<K, FaceHeld<P>>,
-    /// A close of the link owed by a handle that found the place held.
-    close_owed: AtomicBool,
+    /// What is owed to the parts the place holds: [`PARTS_DEBTS`] bits and [`CLOSE_OWED`].
+    owed: AtomicU32,
 }
 
 impl<K: LockKind, P: WireParts> FaceSite<K, P> {
@@ -329,14 +343,14 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
     pub fn empty() -> Self {
         Self {
             place: FacePlace::empty(),
-            close_owed: AtomicBool::new(false),
+            owed: AtomicU32::new(0),
         }
     }
 
-    /// Put `parts` in the place, as the face's link is made, and answer the parts it held. A
-    /// close owed to the link the place held is not the new link's.
+    /// Put `parts` in the place, as the face's link is made, and answer the parts it held. What
+    /// was owed to the link the place held is not the new link's.
     pub fn hold(&self, parts: FaceHeld<P>) -> Option<FaceHeld<P>> {
-        self.close_owed.store(false, Ordering::SeqCst);
+        self.owed.store(0, Ordering::SeqCst);
         self.place.hold(parts)
     }
 
@@ -369,22 +383,45 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         answer
     }
 
+    /// Owe the parts `debts`, bits within [`PARTS_DEBTS`] ([`WireParts::pay`]): paid at once
+    /// when the place is free now, else by its holder as it lets go, the calling thread's own
+    /// hold included. Debts owed again before they are paid are paid as one; debts owed to a place
+    /// that holds no parts are let go of, as there is no link to owe them to.
+    pub fn owe(&self, debts: u32) {
+        debug_assert_eq!(
+            debts & CLOSE_OWED,
+            0,
+            "a debt of the parts in the bit of the site's close"
+        );
+        self.owe_bits(debts & PARTS_DEBTS);
+    }
+
     /// Close the link: owed, and paid at once when the place is lent now, else by its holder
     /// as it lets go. Two closes owed before one is paid are told as one.
     fn close_or_owe(&self) {
-        self.close_owed.store(true, Ordering::SeqCst);
+        self.owe_bits(CLOSE_OWED);
+    }
+
+    /// Owe `bits` of the debt word, and pay them now when the place is free.
+    fn owe_bits(&self, bits: u32) {
+        if bits == 0 {
+            return;
+        }
+        self.owed.fetch_or(bits, Ordering::SeqCst);
         // Paid as the try lets go, or, the place held, by the holder or by the try's look after;
-        // a place with no parts has no link to close.
+        // a place with no parts has no link to owe them to.
         if let Lend::Empty = self.try_lend(|_| ()) {
-            self.close_owed.store(false, Ordering::SeqCst);
+            self.owed.fetch_and(!bits, Ordering::SeqCst);
         }
     }
 
-    /// Pay what is owed through `held`, which the caller holds lent: the one place a debt is
-    /// paid, so a close owed is told once.
-    fn pay(&self, held: &mut FaceHeld<P>) {
-        if self.close_owed.swap(false, Ordering::SeqCst) {
-            held.lend(close_wire);
+    /// Pay what is owed through `held`, which the caller holds lent from this site: the one
+    /// place a debt is paid, so each is paid once. Every lend pays as it lets go; a holder that
+    /// acts on what its parts were paid pays first, so that it acts on the debts owed until then.
+    pub fn pay(&self, held: &mut FaceHeld<P>) {
+        let owed = self.owed.swap(0, Ordering::SeqCst);
+        if owed != 0 {
+            held.lend(move |parts| pay_parts(parts, owed));
         }
     }
 
@@ -394,15 +431,20 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         // Orders the holder's let go before its look, and the debtor's debt before its try: one
         // of the two sees the other's write, so a debt is never left with neither to pay it.
         fence(Ordering::SeqCst);
-        if self.close_owed.load(Ordering::SeqCst) {
+        if self.owed.load(Ordering::SeqCst) != 0 {
             let _ = self.place.try_lend(|held| self.pay(held));
         }
     }
 }
 
-/// Close the link of `parts`, when they hold its wire ([`FaceWire::close`]).
-fn close_wire<P: WireParts>(parts: &mut P) {
-    if let Some(wire) = parts.wire() {
+/// Pay `owed` to `parts`: their own debts, then the close, through their wire when they hold one
+/// ([`FaceWire::close`]), last, so the debts are paid to the link they were owed to.
+fn pay_parts<P: WireParts>(parts: &mut P, owed: u32) {
+    let debts = owed & PARTS_DEBTS;
+    if debts != 0 {
+        parts.pay(debts);
+    }
+    if let Some(wire) = parts.wire().filter(|_| owed & CLOSE_OWED != 0) {
         wire.close();
     }
 }
@@ -2224,12 +2266,13 @@ mod tests {
     // of the test that made it.
     unsafe impl crate::sync::ConfinedOwner for TestOwner {}
 
-    /// The parts of a face's link in a face's place: its wire, while it holds one.
-    struct ApartParts(Option<ApartWire>);
+    /// The parts of a face's link in a face's place: its wire, while it holds one, and the sum of
+    /// the debts it was paid.
+    struct ApartParts(Option<ApartWire>, Ended);
 
     // SAFETY: the parts' `Rc` is reached by the thread of the test that made them alone; another
-    // thread of a test reaches the parts only to tell their wire an end, which it counts in an
-    // atomic. Nothing of them is bound to a thread.
+    // thread of a test reaches the parts only to tell their wire an end or pay them a debt, which
+    // it counts in an atomic. Nothing of them is bound to a thread.
     unsafe impl FaceParts for ApartParts {}
 
     impl WireParts for ApartParts {
@@ -2237,6 +2280,10 @@ mod tests {
 
         fn wire(&self) -> Option<&ApartWire> {
             self.0.as_ref()
+        }
+
+        fn pay(&mut self, owed: u32) {
+            self.1.fetch_add(owed, Ordering::SeqCst);
         }
     }
 
@@ -2246,14 +2293,102 @@ mod tests {
     /// Parts holding an established wire that holds input, its aborts counted in `aborted` and
     /// its ends in `ended`.
     fn held_parts(aborted: &Rc<Cell<u32>>, ended: &Ended) -> FaceHeld<ApartParts> {
-        let parts = ApartParts(Some(ApartWire {
-            holds: true,
-            finished: false,
-            aborted: Rc::clone(aborted),
-            ended: alloc::sync::Arc::clone(ended),
-        }));
+        paying_parts(aborted, ended, &Ended::default())
+    }
+
+    /// [`held_parts`] whose debts paid are summed in `paid`.
+    fn paying_parts(aborted: &Rc<Cell<u32>>, ended: &Ended, paid: &Ended) -> FaceHeld<ApartParts> {
+        let parts = ApartParts(
+            Some(ApartWire {
+                holds: true,
+                finished: false,
+                aborted: Rc::clone(aborted),
+                ended: alloc::sync::Arc::clone(ended),
+            }),
+            alloc::sync::Arc::clone(paid),
+        );
         // SAFETY: no handle on a cell of the parts lives outside them.
         unsafe { FaceHeld::gathered(parts) }
+    }
+
+    /// The parts' debts are paid at once to a free place; owed while the place is held, the
+    /// calling thread's own lend included, they are paid once as it lets go, each bit once
+    /// however often it was owed, with a close owed beside them told through the wire and never
+    /// handed to the parts; a holder pays them inside its lend when it asks; and debts owed to an
+    /// empty place are not paid to the parts held after. Turned red by a debt paid twice or not
+    /// at all (`FaceSite::pay`, `owe_bits`), the close's bit handed to `WireParts::pay`, or debts
+    /// of an empty place kept for the next link.
+    #[test]
+    fn the_parts_debts_are_paid_once_by_the_holder_and_the_close_through_the_wire() {
+        let (aborted, ended, paid) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        assert!(site.hold(paying_parts(&aborted, &ended, &paid)).is_none());
+        // SAFETY: the site outlives the handle, in this frame.
+        let at = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) };
+        site.owe(1);
+        assert_eq!(
+            paid.load(Ordering::SeqCst),
+            1,
+            "paid at once to a free place"
+        );
+        let inside = site.lend(|_| {
+            site.owe(2);
+            site.owe(2);
+            site.owe(4);
+            at.close();
+            (paid.load(Ordering::SeqCst), ended.load(Ordering::SeqCst))
+        });
+        assert_eq!(inside, Some((1, 0)), "nothing paid while the place is held");
+        assert_eq!(
+            paid.load(Ordering::SeqCst),
+            1 + 2 + 4,
+            "the parts' debts paid once each, without the close's bit"
+        );
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            1,
+            "the close told through the wire"
+        );
+        let asked = site.lend(|held| {
+            site.owe(8);
+            site.pay(held);
+            paid.load(Ordering::SeqCst)
+        });
+        assert_eq!(
+            asked,
+            Some(7 + 8),
+            "a holder pays when it asks, inside its lend"
+        );
+        assert_eq!(
+            paid.load(Ordering::SeqCst),
+            15,
+            "and not again as it lets go"
+        );
+        assert!(site.take().is_some());
+        site.owe(16);
+        assert_eq!(
+            site.owed.load(Ordering::SeqCst),
+            0,
+            "a debt owed to an empty place is let go of"
+        );
+        let next = Ended::default();
+        assert!(site.hold(paying_parts(&aborted, &ended, &next)).is_none());
+        assert!(site.lend(|_| ()).is_some());
+        assert_eq!(
+            next.load(Ordering::SeqCst),
+            0,
+            "a debt owed to an empty place is not the next link's"
+        );
+    }
+
+    /// A debt of the parts in the bit of the site's close fails a debug build: the close is the
+    /// site's to tell, through the wire. Turned red by an `owe` that takes the close's bit.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "the bit of the site's close")]
+    fn a_debt_in_the_bit_of_the_close_fails_a_debug_build() {
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        site.owe(1 << 31);
     }
 
     /// A link whose parts lie in a face's place is read through a lend of the place, and its end
