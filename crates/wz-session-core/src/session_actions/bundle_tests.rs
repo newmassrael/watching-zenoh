@@ -249,6 +249,28 @@ fn bundle() -> (
     (actions, link)
 }
 
+/// [`bundle`] with its link established ([`SessionLinkActions::enter_established`]): the
+/// bundle a data or reply send is made on, since the data-send gate opens only there. A test of
+/// what a send does is made on this one; a test of the gate itself starts from [`bundle`].
+/// Compiled with the sends its tests make: a plain put, a gated reply, a staged reply.
+#[cfg(any(
+    all(feature = "codec-push", not(feature = "tx-lend-only")),
+    all(feature = "reply-egress-gate", feature = "codec-response"),
+    all(
+        feature = "codec-response",
+        not(feature = "transport-stats"),
+        not(feature = "tx-lend-only")
+    )
+))]
+fn established_bundle() -> (
+    Arc<SessionLinkActions<PlainRuntime, StillClock>>,
+    Arc<CountingLink>,
+) {
+    let (actions, link) = bundle();
+    actions.enter_established();
+    (actions, link)
+}
+
 /// The halves a holder writes where it keeps them are the halves the bundle is made of: the link's
 /// half holds the sink handed and the kernel the parameters. A holder that refuses has its refusal
 /// answered and lets go of what it was handed, the sink's handle with it. Turned red by a bundle
@@ -404,7 +426,7 @@ mod reply_egress_gate {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use super::bundle;
+    use super::{bundle, established_bundle};
     use crate::network_message::MessageRef;
     use crate::response_build::build_response_reply;
     use crate::session_actions::ReplyEgressGate;
@@ -457,7 +479,7 @@ mod reply_egress_gate {
     /// is written; with the gate taken away a reply is written without the gate being asked.
     #[test]
     fn a_reply_the_gate_denies_is_not_written_and_one_it_admits_is() {
-        let (actions, link) = bundle();
+        let (actions, link) = established_bundle();
         let gate = Gate::new(false);
         actions.set_egress_reply_gate(Some(gate.installed()));
 
@@ -1039,6 +1061,7 @@ mod lent_frame_refusal {
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        actions.enter_established();
         assert_eq!(
             put(&actions),
             Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
@@ -1064,6 +1087,7 @@ mod lent_frame_refusal {
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        actions.enter_established();
         assert_eq!(put(&actions), Some(Ok(())));
         let (budget, _) = actions.negotiated_tx_limits_for(Reliability::Reliable);
         assert_eq!(
@@ -1083,6 +1107,7 @@ mod lent_frame_refusal {
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        actions.enter_established();
         assert_eq!(
             put(&actions),
             Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
@@ -1231,7 +1256,7 @@ mod lent_control_order {
 #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
 #[test]
 fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
-    let (actions, link) = bundle();
+    let (actions, link) = established_bundle();
     let long = "k".repeat(usize::from(u16::MAX) + 1);
     let key = crate::named_key::NamedKey::literal(&long).expect("a key");
     let sent = actions.send_plain_put_qos(
@@ -1272,7 +1297,7 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
 mod staged_replies {
     use core::sync::atomic::Ordering;
 
-    use super::bundle;
+    use super::established_bundle;
     use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
     use crate::response_sink::ResponseSink as _;
     use crate::sample::QosLevel;
@@ -1297,7 +1322,7 @@ mod staged_replies {
 
     #[test]
     fn a_staged_reply_the_writer_refuses_is_skipped_and_one_it_takes_is_written() {
-        let (actions, link) = bundle();
+        let (actions, link) = established_bundle();
         actions.send_reply_parts(staged("demo/asked", Some((&[], 1))));
         actions.send_reply_parts(staged("", None));
         assert_eq!(
