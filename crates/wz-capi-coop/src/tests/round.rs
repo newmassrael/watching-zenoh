@@ -1212,7 +1212,7 @@ struct OneLeg {
 }
 
 #[cfg(feature = "query")]
-impl crate::round::LegHolders<crate::round::CoopCalls> for OneLeg {
+impl crate::round::LegHolders<crate::calls::CoopCalls> for OneLeg {
     fn hold(&self, leg: LegId) -> bool {
         assert_eq!(leg, LegId::FIRST, "the test's one leg");
         self.held.fetch_add(1, Ordering::SeqCst);
@@ -1258,7 +1258,7 @@ fn holding_legs(
     // count of them is left to it for good.
     let leaked: &'static Arc<OneLeg> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(Arc::clone(legs)));
-    let held: core::ptr::NonNull<dyn wz_session_core::round::LegHolders<crate::round::CoopCalls>> =
+    let held: core::ptr::NonNull<dyn wz_session_core::round::LegHolders<crate::calls::CoopCalls>> =
         core::ptr::NonNull::from(&**leaked);
     // SAFETY: the legs are leaked, so they stand for as long as the round reaches them.
     unsafe { round.get_mut().calls_legs_of(held) };

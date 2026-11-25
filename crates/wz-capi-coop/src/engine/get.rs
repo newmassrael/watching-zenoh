@@ -21,7 +21,7 @@ use wz_capi_port::ReplyCallback;
 use wz_session_core::get_plane::GetCalls;
 use wz_session_core::reply_sink::ReplyView;
 
-use crate::round::CoopCalls;
+use crate::calls::CoopCalls;
 
 pub(super) use wz_session_core::get_plane::EndedLegs;
 pub(crate) use wz_session_core::get_plane::{Ended, LegId};

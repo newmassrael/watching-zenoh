@@ -3645,12 +3645,7 @@ fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
         feature = "threads",
         feature = "listen",
         feature = "group",
-        feature = "liveliness",
-        feature = "query",
-        feature = "queryable",
-        feature = "local-subscriber",
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
+        feature = "query"
     ));
     assert_eq!(cfg!(wz_round), queues);
 }

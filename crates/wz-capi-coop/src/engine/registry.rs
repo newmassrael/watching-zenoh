@@ -2002,36 +2002,14 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
-        #[cfg(not(any(
-            feature = "threads",
-            feature = "listen",
-            feature = "group",
-            feature = "liveliness",
-            feature = "queryable",
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        )))]
-        let delivery = RoundDelivery::new();
-        #[cfg(all(
-            any(
-                feature = "threads",
-                feature = "listen",
-                feature = "group",
-                feature = "liveliness",
-                feature = "queryable",
-                feature = "remote-declaration-watch",
-                feature = "declarations-synced-event"
-            ),
-            not(feature = "queryable")
-        ))]
-        let delivery = RoundDelivery::new(crate::round::leaked(4));
-        #[cfg(feature = "queryable")]
-        let delivery = RoundDelivery::new(
-            crate::round::leaked(4),
-            wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
+        let delivery = RoundDelivery {
+            #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+            round: crate::round::leaked(4),
+            #[cfg(feature = "queryable")]
+            plane: wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
                 alloc::boxed::Box::new(super::super::query::leaked_plane(1)),
             )),
-        );
+        };
         let registry = RegistryOf::<H>::new(
             &SessionLimits::defaults(),
             arena.arena_mut(),

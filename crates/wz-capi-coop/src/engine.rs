@@ -910,7 +910,7 @@ fn lend_session(
         round.reads_keys_in(keys);
         #[cfg(feature = "query")]
         {
-            let legs: NonNull<dyn LegHolders<crate::round::CoopCalls>> = NonNull::from(&*gets);
+            let legs: NonNull<dyn LegHolders<crate::calls::CoopCalls>> = NonNull::from(&*gets);
             // SAFETY: the round reaches the legs until the engine's drop lets it go
             // (`Round::let_go`), before the plane's owner, the session's state, is dropped;
             // until then the plane is held where it was placed, by this value and then by the
@@ -932,44 +932,19 @@ fn lend_session(
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
     // owner changes the round no more.
-    #[cfg(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group",
-        feature = "liveliness",
-        feature = "queryable",
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    ))]
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     let lane = unsafe { samples.share() };
     // SAFETY: the delivery is held by the registry, dropped before the plane wherever both are
     // held: here, where the registry is made after it, and in `SessionLent` and the session's
     // state, which hold the plane in a field after the registry's.
     #[cfg(feature = "queryable")]
-    let delivery = RoundDelivery::new(lane, unsafe { plane.share() });
-    #[cfg(all(
-        any(
-            feature = "threads",
-            feature = "listen",
-            feature = "group",
-            feature = "liveliness",
-            feature = "queryable",
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ),
-        not(feature = "queryable")
-    ))]
-    let delivery = RoundDelivery::new(lane);
-    #[cfg(not(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group",
-        feature = "liveliness",
-        feature = "queryable",
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    )))]
-    let delivery = RoundDelivery::new();
+    let asked = unsafe { plane.share() };
+    let delivery = RoundDelivery {
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        round: lane,
+        #[cfg(feature = "queryable")]
+        plane: asked,
+    };
     // The application's tables, lent from the rows the plan counts for them: the session's
     // one table set among them, which holds its subscribers and its queryables.
     let registry = Registry::new(
@@ -2463,63 +2438,15 @@ impl SubscriberCall {
 /// lock held; a query, the queryables' plane, which holds a call begun on a queryable's row until
 /// the query is handed to its callback. The registry holds it and hands it to each dispatch, so no
 /// row keeps a reference to either.
-/// The round is held only where a plane tells it through the delivery: a subscriber's sample where
-/// the read runs beside the program's calls, a token, a query, a declaration watch's event. A build
-/// of none of them (one that puts nothing in the round, or one whose round is told only by the
-/// engine itself) holds nothing.
+/// The round is held only where a plane tells it through the delivery: where the read runs beside
+/// the program's calls, a subscriber's sample, a token, a query and a declaration watch's event.
+/// The read that hands each record out as it is read hands each of them out itself, so its delivery
+/// holds the queryables' plane alone, for the session's own get, or nothing.
 pub(crate) struct RoundDelivery {
-    #[cfg(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group",
-        feature = "liveliness",
-        feature = "queryable",
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    ))]
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     round: PlacedRef<Round>,
     #[cfg(feature = "queryable")]
     plane: PlacedRef<QueryPlane>,
-}
-
-impl RoundDelivery {
-    /// Deliveries into `round`.
-    #[cfg(all(
-        any(
-            feature = "threads",
-            feature = "listen",
-            feature = "group",
-            feature = "liveliness",
-            feature = "queryable",
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ),
-        not(feature = "queryable")
-    ))]
-    fn new(round: PlacedRef<Round>) -> Self {
-        Self { round }
-    }
-
-    /// Deliveries told to no round: what the records of a build whose planes tell it none go
-    /// through.
-    #[cfg(not(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group",
-        feature = "liveliness",
-        feature = "queryable",
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    )))]
-    fn new() -> Self {
-        Self {}
-    }
-
-    /// Deliveries into `round`, and queries into `plane`, which only the engine reaches.
-    #[cfg(feature = "queryable")]
-    fn new(round: PlacedRef<Round>, plane: PlacedRef<QueryPlane>) -> Self {
-        Self { round, plane }
-    }
 }
 
 // The read that hands each record out as it is read hands every sample out itself, one subscriber
@@ -2895,12 +2822,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The port's mutex, as the lock the session core's planes keep their state under and the queues
-/// the deliveries drain sit behind: the round's planes' (`PlaneCalls::Queues`, every build that
-/// keeps the round), the faces' watchers (`connectivity`) and the gets' queues (`query`).
-#[cfg(any(wz_round, feature = "connectivity"))]
+/// the deliveries drain sit behind: the planes' of the engine's calls (`PlaneCalls::Queues`, every
+/// build that names them, `crate::calls`), the faces' watchers (`connectivity`) and the gets'
+/// queues (`query`).
+#[cfg(any(wz_round, feature = "queryable", feature = "connectivity"))]
 pub(crate) enum CoopLocks {}
 
-#[cfg(any(wz_round, feature = "connectivity"))]
+#[cfg(any(wz_round, feature = "queryable", feature = "connectivity"))]
 impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     type Lock<T> = Mutex<T>;
 
@@ -5300,7 +5228,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 any(feature = "threads", feature = "listen", feature = "group")
             ))]
             {
-                let answering: NonNull<dyn crate::round::AnswersQueries<crate::round::CoopCalls>> =
+                let answering: NonNull<dyn crate::round::AnswersQueries<crate::calls::CoopCalls>> =
                     this;
                 // SAFETY: the engine owns the round and tells it to answer no more first in
                 // its drop, before the round is let go of; the place is the engine's from here
@@ -9903,7 +9831,7 @@ impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G
     any(feature = "threads", feature = "listen", feature = "group")
 ))]
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>
-    crate::round::AnswersQueries<crate::round::CoopCalls> for CoopEngine<L, C>
+    crate::round::AnswersQueries<crate::calls::CoopCalls> for CoopEngine<L, C>
 {
     fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64) {
         self.run_queryable(call, query, generation);

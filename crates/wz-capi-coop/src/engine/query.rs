@@ -67,8 +67,8 @@ use wz_session_core::sample::QosLevel;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::sample::{EncodingHint, SourceInfo};
 
+use crate::calls::CoopCalls;
 use crate::form::Latch;
-use crate::round::CoopCalls;
 
 use super::{key_on_link, CoopEngine};
 
@@ -558,7 +558,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", wz_round))]
 mod round_tests {
     //! A link's query held in the session's round of deliveries: handed to the queryable it reached
     //! with its parts read where they lie, its call ended by the round.

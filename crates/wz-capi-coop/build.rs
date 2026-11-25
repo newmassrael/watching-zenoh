@@ -6,22 +6,18 @@
 //!
 //! A build whose read runs beside the program's calls (`threads`, `listen`, `group`) queues each
 //! record's callbacks in the round; the read that hands each record out as it is read (`direct`)
-//! queues only the kinds whose hand-out is still the round's: tokens, queries, replies, the
-//! session's own puts and the declaration watches. A build of none of them puts nothing in the
-//! round, and its text keeps none of what hands a round out. Each kind leaves this list in the
-//! commit that hands it out apart from the round.
+//! hands out every sample, token, query and declaration watch's event itself, and keeps the round
+//! only for what a get's leg is told (`query`: the session core's sink of a leg holds the round a
+//! reply it does not capture goes to). A build of none of them puts nothing in the round, and its
+//! text keeps none of what hands a round out. Each kind leaves this list in the commit that hands
+//! it out apart from the round.
 
 /// The features whose builds keep the round, as cargo names them to a build script.
 const KEEP_THE_ROUND: &[&str] = &[
     "CARGO_FEATURE_THREADS",
     "CARGO_FEATURE_LISTEN",
     "CARGO_FEATURE_GROUP",
-    "CARGO_FEATURE_LIVELINESS",
     "CARGO_FEATURE_QUERY",
-    "CARGO_FEATURE_QUERYABLE",
-    "CARGO_FEATURE_LOCAL_SUBSCRIBER",
-    "CARGO_FEATURE_REMOTE_DECLARATION_WATCH",
-    "CARGO_FEATURE_DECLARATIONS_SYNCED_EVENT",
 ];
 
 fn main() {

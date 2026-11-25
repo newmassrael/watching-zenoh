@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The engine's round of deliveries ([`wz_session_core::round`]): the calls its records owe and
-//! the kinds of record it keeps, as the engine's build names them (`CoopCalls`), the room one
-//! record a session is handed can take of it, and the gates that hold each link back while the
-//! round has not that room (decision Q4), or, where the read hands each record out as it is read,
-//! that tell the round where the datagram a link lends lies.
+//! The engine's round of deliveries ([`wz_session_core::round`]), of the calls and kinds of record
+//! the engine's build names (`crate::calls`): the room one record a session is handed can take of
+//! it, and the gates that hold each link back while the round has not that room (decision Q4), or,
+//! where the read hands each record out as it is read, that tell the round where the datagram a
+//! link lends lies.
 
 #[cfg(any(feature = "listen", feature = "group", not(feature = "threads")))]
 use core::cell::Cell;
@@ -22,29 +22,9 @@ use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_core::placed::Placed;
 #[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::placed::PlacedRef;
-use wz_session_core::plane_lock::LockFamily;
-use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
-use wz_session_core::sink::SampleRef;
 
-#[cfg(feature = "query")]
-use crate::engine::LegId;
-#[cfg(feature = "liveliness")]
-use crate::engine::LivelinessCall;
-#[cfg(feature = "queryable")]
-use crate::engine::QueryableCall;
+#[cfg(feature = "local-subscriber")]
 use crate::engine::SubscriberCall;
-#[cfg(all(
-    any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    ),
-    any(feature = "threads", feature = "listen", feature = "group")
-))]
-use crate::engine::WatchCall;
-#[cfg(feature = "query")]
-use wz_capi_port::ReplyCallback;
-#[cfg(feature = "liveliness")]
-use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
 #[cfg(all(
     feature = "queryable",
@@ -58,12 +38,10 @@ pub(crate) use wz_session_core::round::ReadRoom;
 pub(crate) use wz_session_core::round::RoundRows;
 pub use wz_session_core::round::{RoundCounts, RoundRowCounts};
 
+use crate::calls::CoopCalls;
+
 /// The engine's round of deliveries.
 pub(crate) type Round = wz_session_core::round::Round<CoopCalls>;
-
-/// How the engine's calls stand to its threads, and the latch its rows count calls on: the
-/// engine's form ([`crate::form`]).
-use crate::form::CoopForm;
 
 /// The bytes of one record of the engine's round.
 pub(crate) const RECORD_BYTES: usize = RoundRows::<CoopCalls>::RECORD_BYTES;
@@ -152,191 +130,6 @@ pub(crate) fn session_liveliness<const LIVE: usize>(limits: &SessionLimits) -> u
         .unwrap_or(LIVE)
 }
 
-/// The calls the engine's round owes and the kinds of record it keeps: each kind of row the
-/// engine's build keeps none of has the call [`Infallible`](core::convert::Infallible) and a
-/// record kind of no size.
-pub(crate) enum CoopCalls {}
-
-impl RoundCalls for CoopCalls {
-    type Subscriber = SubscriberCall;
-    #[cfg(feature = "liveliness")]
-    type Liveliness = LivelinessCall;
-    #[cfg(not(feature = "liveliness"))]
-    type Liveliness = core::convert::Infallible;
-    #[cfg(feature = "queryable")]
-    type Queryable = QueryableCall;
-    #[cfg(not(feature = "queryable"))]
-    type Queryable = core::convert::Infallible;
-    #[cfg(all(
-        any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ),
-        any(feature = "threads", feature = "listen", feature = "group")
-    ))]
-    type Watch = WatchCall;
-    #[cfg(not(all(
-        any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ),
-        any(feature = "threads", feature = "listen", feature = "group")
-    )))]
-    type Watch = core::convert::Infallible;
-    #[cfg(feature = "query")]
-    type Leg = LegId;
-    #[cfg(not(feature = "query"))]
-    type Leg = core::convert::Infallible;
-    #[cfg(feature = "query")]
-    type ReplyCallback = ReplyCallback;
-    #[cfg(not(feature = "query"))]
-    type ReplyCallback = core::convert::Infallible;
-    #[cfg(feature = "liveliness")]
-    type Tokens = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "liveliness"))]
-    type Tokens = wz_session_core::session_tables::Absent;
-    #[cfg(feature = "query")]
-    type Replies = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "query"))]
-    type Replies = wz_session_core::session_tables::Absent;
-    #[cfg(feature = "queryable")]
-    type Queries = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "queryable"))]
-    type Queries = wz_session_core::session_tables::Absent;
-    #[cfg(all(
-        any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ),
-        any(feature = "threads", feature = "listen", feature = "group")
-    ))]
-    type Watches = wz_session_core::session_tables::Present;
-    #[cfg(not(all(
-        any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ),
-        any(feature = "threads", feature = "listen", feature = "group")
-    )))]
-    type Watches = wz_session_core::session_tables::Absent;
-    #[cfg(feature = "local-subscriber")]
-    type Capture = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "local-subscriber"))]
-    type Capture = wz_session_core::session_tables::Absent;
-    #[cfg(feature = "group")]
-    type Group = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "group"))]
-    type Group = wz_session_core::session_tables::Absent;
-    type Locks = CoopSyncLocks;
-    #[cfg(all(test, feature = "std"))]
-    type Tally = Handed;
-    #[cfg(not(all(test, feature = "std")))]
-    type Tally = ();
-    type Form = CoopForm;
-}
-
-impl PlaneCalls for CoopCalls {
-    #[cfg(feature = "local-queryable")]
-    type LocalAnswers = wz_session_core::session_tables::Present;
-    #[cfg(not(feature = "local-queryable"))]
-    type LocalAnswers = wz_session_core::session_tables::Absent;
-    // The read that hands each record out as it is read hands a peer's reply to its get itself
-    // (`engine::replies`).
-    #[cfg(any(
-        feature = "local-queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
-    type Captures = wz_session_core::session_tables::Present;
-    #[cfg(not(any(
-        feature = "local-queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    )))]
-    type Captures = wz_session_core::session_tables::Absent;
-    type Queues = crate::engine::CoopLocks;
-}
-
-/// The port's lock, as the lock the round keeps what answers its queries under.
-pub(crate) enum CoopSyncLocks {}
-
-impl LockFamily for CoopSyncLocks {
-    type Lock<T> = wz_capi_port::sync::Lock<T>;
-
-    fn new<T>(value: T) -> Self::Lock<T> {
-        wz_capi_port::sync::Lock::new(value)
-    }
-
-    fn with<T, R>(lock: &Self::Lock<T>, f: impl FnOnce(&mut T) -> R) -> R {
-        lock.with(f)
-    }
-}
-
-impl RoundCall for SubscriberCall {
-    fn end(self) -> bool {
-        SubscriberCall::end(self)
-    }
-}
-
-impl SampleCall for SubscriberCall {
-    fn hand(&self, sample: &SampleRef<'_>) {
-        SubscriberCall::hand(self, sample);
-    }
-}
-
-#[cfg(feature = "liveliness")]
-impl RoundCall for LivelinessCall {
-    fn end(self) -> bool {
-        LivelinessCall::end(self)
-    }
-}
-
-#[cfg(feature = "liveliness")]
-impl wz_session_core::round::TokenCall for LivelinessCall {
-    fn same_row(&self, other: &Self) -> bool {
-        LivelinessCall::same_row(self, other)
-    }
-
-    fn hand(&self, sample: LivelinessSample<'_>) {
-        LivelinessCall::hand(self, sample);
-    }
-}
-
-#[cfg(feature = "queryable")]
-impl RoundCall for QueryableCall {
-    fn end(self) -> bool {
-        QueryableCall::end(self)
-    }
-}
-
-#[cfg(all(
-    any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    ),
-    any(feature = "threads", feature = "listen", feature = "group")
-))]
-impl RoundCall for WatchCall {
-    fn end(self) -> bool {
-        WatchCall::end(self)
-    }
-}
-
-#[cfg(all(
-    any(
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    ),
-    any(feature = "threads", feature = "listen", feature = "group")
-))]
-impl wz_session_core::round::WatchCall for WatchCall {
-    fn same_row(&self, other: &Self) -> bool {
-        WatchCall::same_row(self, other)
-    }
-
-    fn hand(&self, event: wz_session_core::round::DeclEvent<'_>) {
-        WatchCall::hand(self, event);
-    }
-}
-
 /// The rounds the engine's round handed out, the samples in them, and of those the ones read
 /// where their datagram lies, which the tests count.
 #[cfg(all(test, feature = "std"))]
@@ -393,7 +186,7 @@ pub(crate) fn leaked_placed(events: usize) -> &'static mut Placed<Round> {
     // Each table and the round on a span of its own, rounded up to the next start of one.
     let bytes = events * RECORD_BYTES
         + counts.callbacks * CALLBACK_BYTES
-        + counts.key_bytes::<CoopForm>()
+        + counts.key_bytes::<crate::form::CoopForm>()
         + core::mem::size_of::<Round>()
         + 4 * ARENA_ALIGN;
     let arena: &'static mut SessionArena = alloc::boxed::Box::leak(alloc::boxed::Box::new(
