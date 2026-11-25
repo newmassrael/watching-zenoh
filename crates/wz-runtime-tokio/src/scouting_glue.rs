@@ -97,7 +97,7 @@ use wz_codecs::{scout::Scout, whatami::WhatAmI};
 use wz_session_core::scouting::ScoutingPolicy;
 #[cfg(test)]
 use wz_session_core::scouting::{
-    ScoutingEvent, ScoutingHelloReceivedPayload, ScoutingInject, ScoutingState,
+    ScoutingEvent, ScoutingHelloReceivedRef, ScoutingInject, ScoutingState,
 };
 pub use wz_session_core::scouting_host::{decode_scouted_hello, ScoutOutcome, ScoutedHello};
 use wz_session_core::scouting_host::{
@@ -243,10 +243,9 @@ mod tests {
         if let Some(hello) = decode_scouted_hello(dgram) {
             *actions.pending_hello.lock().unwrap() = Some(hello);
         }
-        engine.raise_hello_received(ScoutingHelloReceivedPayload {
+        engine.process_hello_received_with(ScoutingHelloReceivedRef {
             exit_on_first: u8::from(actions.params.exit_on_first),
         });
-        engine.step();
     }
 
     /// `scout_emit` (Idle -> Sending entering transition) stages a
