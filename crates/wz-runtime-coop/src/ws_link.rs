@@ -367,5 +367,10 @@ mod links;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub use links::{WsDial, WsLinks, WsLinksDial, WsOpen, WS_RX_CAPACITY};
 
+#[cfg(feature = "session-slot")]
+mod slot;
+#[cfg(feature = "session-slot")]
+pub use slot::{WsAcceptor, WsStack};
+
 #[cfg(all(test, not(feature = "session-slot")))]
 mod tests;
