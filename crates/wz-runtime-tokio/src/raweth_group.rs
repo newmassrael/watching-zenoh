@@ -255,7 +255,7 @@ impl<C: RawEthCarrier> RawEthGroupSender<C> {
         match parse_inbound(datagram) {
             Ok(InboundFrame::Frame { payload, .. }) => self
                 .endpoint
-                .mapping_index_for(leading_message_key(&payload).as_deref()),
+                .mapping_index_for(leading_message_key(&payload)),
             #[cfg(feature = "reassembly")]
             Ok(InboundFrame::Fragment {
                 reliable,
@@ -278,7 +278,7 @@ impl<C: RawEthCarrier> RawEthGroupSender<C> {
                 if markers.first || slot.is_none() {
                     *slot = Some(
                         self.endpoint
-                            .mapping_index_for(leading_message_key(&payload).as_deref()),
+                            .mapping_index_for(leading_message_key(&payload)),
                     );
                 }
                 let index = slot.unwrap_or(0);

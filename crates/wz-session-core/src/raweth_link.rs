@@ -38,9 +38,6 @@
 //! rather than hidden by `tests::the_wire_order_is_picos_not_a_tidied_one`,
 //! and is why this module documents it instead of normalising it away.
 
-use alloc::string::String;
-use alloc::vec::Vec;
-
 /// Bytes in a MAC address (`_ZP_MAC_ADDR_LENGTH`).
 pub const MAC_LEN: usize = 6;
 
@@ -146,11 +143,6 @@ pub enum RawEthError {
     TooLong,
     /// A MAC that is not six colon-separated hex octets.
     MalformedMac,
-    /// A config value that is not the hex the key expects.
-    MalformedConfig {
-        /// The offending `key=value` pair.
-        pair: String,
-    },
 }
 
 impl core::fmt::Display for RawEthError {
@@ -177,7 +169,6 @@ impl core::fmt::Display for RawEthError {
                 )
             }
             RawEthError::MalformedMac => write!(f, "MAC is not six colon-separated hex octets"),
-            RawEthError::MalformedConfig { pair } => write!(f, "malformed raweth config {pair:?}"),
         }
     }
 }
@@ -338,14 +329,15 @@ fn take<const N: usize>(bytes: &[u8]) -> Option<([u8; N], &[u8])> {
 /// trusted. A length field that can disagree with the bytes it describes is
 /// the one field a caller must not be able to get wrong, and pico computes it
 /// the same way (tx.c:134/145) rather than accepting it.
-pub fn frame(header: &RawEthHeader, payload: &[u8]) -> Result<Vec<u8>, RawEthError> {
+#[cfg(feature = "alloc")]
+pub fn frame(header: &RawEthHeader, payload: &[u8]) -> Result<alloc::vec::Vec<u8>, RawEthError> {
     let total = header.len().saturating_add(payload.len());
     if total > MAX_ETH_FRAME_SIZE {
         return Err(RawEthError::FrameTooLarge { size: total });
     }
     let mut sized = *header;
     sized.data_length = payload.len() as u16;
-    let mut out = Vec::with_capacity(total);
+    let mut out = alloc::vec::Vec::with_capacity(total);
     out.resize(sized.len(), 0);
     let n = sized.encode_into(&mut out)?;
     out.truncate(n);
@@ -545,8 +537,8 @@ impl RethLocator {
 /// message to the destination its key picked (`_zp_raweth_set_socket` runs once per message,
 /// before the fragmenting loop, `vendor/zenoh-pico/src/transport/raweth/tx.c` @
 /// `// The message does not fit in the current batch, let's fragment it`). `None` as well for
-/// a key named by a declared id, which names no key text on the wire.
-pub fn leading_message_key(payload: &[u8]) -> Option<String> {
+/// a key named by a declared id, which names no key text on the wire. The key is read in place.
+pub fn leading_message_key(payload: &[u8]) -> Option<&str> {
     use sce_forge_runtime::codec::SceCursor;
     // The network message ids and the flag that says a key carries its suffix
     // (`vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h` @ `#define _Z_MID_N_PUSH 0x1d`).
@@ -569,7 +561,7 @@ pub fn leading_message_key(payload: &[u8]) -> Option<String> {
     }
     let len = usize::try_from(cursor.read_vle_u64().ok()?).ok()?;
     let suffix = cursor.peek_slice(len).ok()?;
-    core::str::from_utf8(suffix).ok().map(String::from)
+    core::str::from_utf8(suffix).ok()
 }
 
 /// Parse a `reth/<smac>[#key=value;...]` endpoint as zenoh-pico does.
@@ -758,7 +750,8 @@ pub fn member_address(mac: [u8; MAC_LEN]) -> core::net::SocketAddr {
 
 /// The `reth/` locator of the member [`member_address`] keyed `addr` by: its MAC, read back out
 /// of the modified EUI-64. `None` for an address no raweth member is keyed by.
-pub fn member_locator(addr: &core::net::SocketAddr) -> Option<String> {
+#[cfg(feature = "alloc")]
+pub fn member_locator(addr: &core::net::SocketAddr) -> Option<alloc::string::String> {
     let core::net::SocketAddr::V6(v6) = addr else {
         return None;
     };
@@ -771,9 +764,10 @@ pub fn member_locator(addr: &core::net::SocketAddr) -> Option<String> {
 }
 
 /// `mac` as a locator writes it, `aa:bb:cc:dd:ee:ff`, the form [`parse_mac`] reads.
-pub fn mac_text(mac: &[u8; MAC_LEN]) -> String {
+#[cfg(feature = "alloc")]
+pub fn mac_text(mac: &[u8; MAC_LEN]) -> alloc::string::String {
     use core::fmt::Write as _;
-    let mut text = String::with_capacity(3 * MAC_LEN - 1);
+    let mut text = alloc::string::String::with_capacity(MAC_TEXT_LEN);
     for (at, octet) in mac.iter().enumerate() {
         if at > 0 {
             text.push(':');
@@ -787,6 +781,8 @@ pub fn mac_text(mac: &[u8; MAC_LEN]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
+    use alloc::vec::Vec;
 
     const A: [u8; MAC_LEN] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
     const B: [u8; MAC_LEN] = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16];
@@ -795,6 +791,7 @@ mod tests {
     /// it, and an address no raweth member is keyed by reads as none. Turned red by an EUI-64
     /// that does not flip the universal bit, or a reading back that takes an address of another
     /// kind for a member.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_member_address_reads_back_as_its_mac() {
         use alloc::string::ToString;
@@ -855,6 +852,7 @@ mod tests {
         assert_eq!(RawEthHeader::decode(&plain_out).unwrap().1, ETH_HEADER_LEN);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn deframe_cuts_to_data_length_not_to_the_end_of_the_frame() {
         // A 60-byte minimum-size Ethernet frame carrying 3 payload bytes: the
@@ -870,6 +868,7 @@ mod tests {
         assert_eq!(header.smac, B);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_length_that_overruns_the_frame_is_rejected() {
         let mut f = frame(&RawEthHeader::new(A, B, DEFAULT_ETHTYPE, 0), b"abc").unwrap();
@@ -900,6 +899,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn an_oversized_frame_is_refused_rather_than_truncated() {
         let payload = alloc::vec![0u8; MAX_ETH_FRAME_SIZE];
@@ -1078,6 +1078,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn frame_recomputes_the_length_a_caller_got_wrong() {
         // The header says 999; the payload is 3 bytes. The frame must carry 3.
@@ -1101,15 +1102,15 @@ mod tests {
         let put = [
             0x3d, 0x00, 0x08, b'd', b'e', b'm', b'o', b'/', b'b', b'/', b'x', 0x01, 0x02, 0x03,
         ];
-        assert_eq!(leading_message_key(&put).as_deref(), Some("demo/b/x"));
-        assert_eq!(leading_message_key(&put[..11]).as_deref(), Some("demo/b/x"));
+        assert_eq!(leading_message_key(&put), Some("demo/b/x"));
+        assert_eq!(leading_message_key(&put[..11]), Some("demo/b/x"));
         // Cut inside the key: there is no key to read.
         assert_eq!(leading_message_key(&put[..6]), None);
         // Request and Response: the request id, then the key.
         let query = [0x3c, 0x05, 0x00, 0x03, b'a', b'/', b'b'];
-        assert_eq!(leading_message_key(&query).as_deref(), Some("a/b"));
+        assert_eq!(leading_message_key(&query), Some("a/b"));
         let reply = [0x3b, 0x81, 0x01, 0x00, 0x01, b'z'];
-        assert_eq!(leading_message_key(&reply).as_deref(), Some("z"));
+        assert_eq!(leading_message_key(&reply), Some("z"));
         // A put by a declared id, with and without a suffix of its own.
         assert_eq!(leading_message_key(&[0x1d, 0x03, 0x09]), None);
         assert_eq!(leading_message_key(&[0x3d, 0x03, 0x01, b'x']), None);
