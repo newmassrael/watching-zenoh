@@ -2819,7 +2819,7 @@ the close reaches nothing. The open of one more session is refused.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the sessions a process opens, and zenoh-pico reaches a session from a weak handle of the heap. Two hundred fifty-six rows hold the sessions a host program opens at once, and the parallel run of a test suite, whose tests open their sessions side by side in one process, stays under them; the table lies in static memory and takes nothing of the heap."
+reason = "No key of upstream's configuration bounds the sessions a process opens, and zenoh-pico reaches a session from a weak handle of the heap. Two hundred fifty-six rows hold the sessions a host program opens at once, and the parallel run of a test suite, whose tests open their sessions side by side in one process, stays under them; the table lies in static memory, three words a row under one lock (6 KiB on a 64-bit host), and takes nothing of the heap."
 
 [limit.pico_preset]
 value = 2

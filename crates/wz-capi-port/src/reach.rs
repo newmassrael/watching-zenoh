@@ -47,26 +47,48 @@ pub unsafe trait Reachable: Send + Sync {
     }
 }
 
-/// One row of the table: the generation it is at, the engine it holds while that engine's
-/// session is open, and whether an open has taken it for the engine it is making.
+/// One row of the table: the engine it holds while that engine's session is open, and its mark:
+/// the generation it is at, in every bit but [`CLAIMED`], and whether an open has taken it for the
+/// engine it is making, in that bit. Folded in one word, a row is the engine's two words and one
+/// more.
 struct Row {
-    generation: u32,
     engine: Option<NonNull<dyn Reachable>>,
-    claimed: bool,
+    mark: u32,
+}
+
+/// The bit of a row's mark that says an open has taken the row for the engine it is making.
+const CLAIMED: u32 = 1;
+
+/// What a row's mark moves on by at a close: one generation, in the bits above [`CLAIMED`].
+const GENERATION_STEP: u32 = 2;
+
+impl Row {
+    /// The generation the row is at.
+    fn generation(&self) -> u32 {
+        self.mark & !CLAIMED
+    }
+
+    /// Whether the row holds no engine and no open has taken it.
+    fn is_vacant(&self) -> bool {
+        self.engine.is_none() && self.mark & CLAIMED == 0
+    }
 }
 
 // SAFETY: the engine a row holds is `Send + Sync` (`Reachable`), and is reached only under the
-// row's lock or through a count taken under it.
+// table's lock or through a count taken under it.
 unsafe impl Send for Row {}
 
-/// The rows, one for each session of the process open at once.
-static ROWS: [Lock<Row>; caps::ENGINE_ROWS] = [const {
-    Lock::new(Row {
-        generation: 0,
-        engine: None,
-        claimed: false,
-    })
-}; caps::ENGINE_ROWS];
+/// The rows, one for each session of the process open at once, under one lock: what each takes it
+/// for (a claim, a fill, a clear, a reach) is a few words read and written, so one lock for the
+/// table costs no wait a lock for each row would spare, and the rows hold no lock of their own.
+static ROWS: Lock<[Row; caps::ENGINE_ROWS]> = Lock::new(
+    [const {
+        Row {
+            engine: None,
+            mark: 0,
+        }
+    }; caps::ENGINE_ROWS],
+);
 
 /// A reach of an engine through its row: a row and a generation, copied freely, keeping nothing
 /// of the engine standing.
@@ -90,14 +112,13 @@ impl ReachEngine {
     /// it; `None` when every row holds an engine or is taken, which refuses the open of one more
     /// session. The row is vacant again when the claim is let go of unfilled.
     pub fn claim() -> Option<RowClaim> {
-        ROWS.iter().enumerate().find_map(|(row, lock)| {
-            lock.with(|held| {
-                if held.engine.is_some() || held.claimed {
-                    return None;
-                }
-                held.claimed = true;
-                Some(RowClaim { row })
-            })
+        ROWS.with(|rows| {
+            let (row, held) = rows
+                .iter_mut()
+                .enumerate()
+                .find(|(_, held)| held.is_vacant())?;
+            held.mark |= CLAIMED;
+            Some(RowClaim { row })
         })
     }
 
@@ -116,22 +137,23 @@ impl ReachEngine {
     /// then on, and the row is vacant for the next. A count taken before is kept until it is
     /// given back. A reach whose row moved on already takes nothing out.
     pub fn clear(&self) {
-        if let Some(lock) = ROWS.get(self.row) {
-            lock.with(|held| {
-                if held.generation == self.generation && held.engine.is_some() {
-                    held.engine = None;
-                    held.generation = held.generation.wrapping_add(1);
-                }
-            });
-        }
+        ROWS.with(|rows| {
+            let named = rows
+                .get_mut(self.row)
+                .filter(|held| held.generation() == self.generation && held.engine.is_some());
+            if let Some(held) = named {
+                held.engine = None;
+                held.mark = held.mark.wrapping_add(GENERATION_STEP);
+            }
+        });
     }
 
     /// The engine, with a count of it kept for as long as the answer is held; `None` once its
     /// session closed, or its last holder let go.
     pub fn reach(&self) -> Option<Reached> {
-        let lock = ROWS.get(self.row)?;
-        let engine = lock.with(|held| {
-            if held.generation != self.generation {
+        let engine = ROWS.with(|rows| {
+            let held = rows.get(self.row)?;
+            if held.generation() != self.generation {
                 return None;
             }
             let engine = held.engine?;
@@ -157,13 +179,13 @@ impl RowClaim {
     pub unsafe fn fill(self, engine: NonNull<dyn Reachable>) -> ReachEngine {
         let row = self.row;
         core::mem::forget(self);
-        ROWS.get(row).map_or_else(ReachEngine::vacant, |lock| {
-            lock.with(|held| {
-                held.claimed = false;
+        ROWS.with(|rows| {
+            rows.get_mut(row).map_or_else(ReachEngine::vacant, |held| {
+                held.mark &= !CLAIMED;
                 held.engine = Some(engine);
                 ReachEngine {
                     row,
-                    generation: held.generation,
+                    generation: held.generation(),
                 }
             })
         })
@@ -172,9 +194,11 @@ impl RowClaim {
 
 impl Drop for RowClaim {
     fn drop(&mut self) {
-        if let Some(lock) = ROWS.get(self.row) {
-            lock.with(|held| held.claimed = false);
-        }
+        ROWS.with(|rows| {
+            if let Some(held) = rows.get_mut(self.row) {
+                held.mark &= !CLAIMED;
+            }
+        });
     }
 }
 
@@ -424,6 +448,17 @@ mod tests {
             engine.cancelled.load(Ordering::SeqCst),
             1,
             "a closed engine is not reached"
+        );
+    }
+
+    /// A row is the engine's two words and one more: its generation and its claim share one word,
+    /// and the table's one lock is not in it. Turned red by a row that holds its claim in a word
+    /// of its own on a 32-bit target, or a lock of its own.
+    #[test]
+    fn a_row_is_three_words() {
+        assert_eq!(
+            core::mem::size_of::<Row>(),
+            3 * core::mem::size_of::<usize>()
         );
     }
 
