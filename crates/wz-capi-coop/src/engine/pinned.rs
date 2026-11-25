@@ -74,20 +74,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let _ = reached;
     }
 
-    /// Take the subscribers' side of `messages`, the records of a frame of face `face` the copying
-    /// receive decoded, one record at a time in their order: each Push's sample is handed to each
-    /// subscriber its key reaches, one call at a time with the session let go of, each Response's
-    /// reply, and each alive token answering a pending liveliness get, is handed to the get it
-    /// answers in the same way (`replies`), and any other record is
-    /// taken under the lock as the frame's dispatch takes it. What the frame's other planes take
-    /// follows (`Planes::BesideSubscribers`). A session closed meanwhile takes no
-    /// record after the one whose callback closed it.
+    /// Take the subscribers' side of `messages`, the records of a frame of the face `records`
+    /// reads that the copying receive decoded, one record at a time in their order: each Push's
+    /// sample is handed to each subscriber its key reaches, one call at a time with the session
+    /// let go of, each Response's reply, and each alive token answering a pending liveliness get,
+    /// is handed to the get it answers in the same way (`replies`), each Request's query to each
+    /// queryable it reaches (`queries`), and any other record is taken under the lock as the
+    /// frame's dispatch takes it. What the frame's other planes take follows
+    /// (`Planes::BesideSubscribers`). A session closed meanwhile takes no record after the one
+    /// whose callback closed it.
     pub(super) fn hand_copied_records(
         &self,
-        face: HeldFace,
+        records: &super::direct::FaceRecords<C>,
         messages: &[wz_session_core::network_message::NetworkMessage],
         reliable: bool,
     ) {
+        let face = records.face;
         let reliability = wz_session_core::sample::Reliability::from_reliable_bool(reliable);
         for message in messages {
             let Some(mut held) = self.live() else {
@@ -100,6 +102,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 if let Some(reply) = held.0.session.registry.take_reply(face, response) {
                     self.hand_reply(held, face, &reply);
                 }
+                continue;
+            }
+            // A peer's query is handed to the queryables it reaches as a lent one is (`queries`),
+            // and owes its Final after; the queries' plane takes none of the frame's.
+            #[cfg(feature = "queryable")]
+            if let wz_session_core::network_message::NetworkMessage::Request(request) = message {
+                self.hand_owned_query(held, records, request);
                 continue;
             }
             // An alive token answering a pending liveliness get is that get's alone, handed to

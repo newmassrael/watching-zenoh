@@ -392,6 +392,15 @@ impl OtherPeers for NoOtherPeers {
     }
 }
 
+/// What the caller of the planes beside the subscribers' side of an event took of it itself, in
+/// the order of the event's records: the answers to the pending gets and snapshots, and the
+/// peer's queries, each then left alone by its plane.
+#[derive(Clone, Copy)]
+struct TakenAhead {
+    replies: bool,
+    queries: bool,
+}
+
 /// What the application registered, shared by every session of the process. See
 /// the module documentation. The sinks it registers are the types `K` names
 /// ([`ObserverSinks`]): [`SlotObserver`] is the heap profile's, with boxed closures.
@@ -1367,7 +1376,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         peers
             .subscribers
             .dispatch_iteration_event(&mut self.tables, cx, event);
-        self.planes_beside_subscribers(cx, peers, requesters, event, others, false);
+        let taken = TakenAhead {
+            replies: false,
+            queries: false,
+        };
+        self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
     }
 
     /// [`Self::dispatch_event_among`] to every plane but the subscribers' and the answers to the
@@ -1375,7 +1388,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// event's records and handed each answer to its get itself, in their order, before this
     /// (`SubscriberPeer::take_record`, `RequesterTables::dispatch_finals_of`): the planes below
     /// then resolve through the aliases the subscribers' side bound, as they do after it in
-    /// [`Self::dispatch_event_among`], and a Final ends its get after its answers.
+    /// [`Self::dispatch_event_among`], and a Final ends its get after its answers. A caller that
+    /// handed each peer's query to the queryables itself too (`QueryPeer::pin_request`), and
+    /// owed its Final, says so with `queries_taken`, and the queries' plane takes nothing.
     #[inline(never)]
     pub fn dispatch_event_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
         &mut self,
@@ -1384,12 +1399,17 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
+        queries_taken: bool,
     ) {
-        self.planes_beside_subscribers(cx, peers, requesters, event, others, true);
+        let taken = TakenAhead {
+            replies: true,
+            queries: queries_taken,
+        };
+        self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
     }
 
     /// The planes after the subscribers' side of an event, the pending gets and snapshots told
-    /// its answers unless `replies_taken`. Inlined into each of the two calls above, so each keeps the one
+    /// its answers and the queryables its queries unless the caller took them (`taken`). Inlined into each of the two calls above, so each keeps the one
     /// frame the planes' temporaries lie in.
     #[inline(always)]
     fn planes_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
@@ -1399,12 +1419,12 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
-        replies_taken: bool,
+        taken: TakenAhead,
     ) {
         // A peer's query is resolved through both id spaces while the queryables are asked, so
         // the tables lend the two apart.
         #[cfg(feature = "query-queryable")]
-        {
+        if !taken.queries {
             let (own, queryables) = self.tables.queries_mut();
             let spaces = peers.subscribers.mapping_spaces_over(own);
             match queryables {
@@ -1551,7 +1571,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "codec-response-final",
             feature = "liveliness-get"
         ))]
-        if replies_taken {
+        if taken.replies {
             requesters.dispatch_finals_of(event);
         } else {
             requesters.dispatch_iteration_event(event, peer_table);
@@ -1562,7 +1582,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "codec-response-final",
             feature = "liveliness-get"
         )))]
-        let _ = (&requesters, replies_taken);
+        let _ = (&requesters, taken.replies);
+        // Read only by the queries' plane, which a build with no queryable lacks.
+        #[cfg(not(feature = "query-queryable"))]
+        let _ = taken.queries;
         let _ = (&peers, &cx, event, others);
     }
 
@@ -2481,6 +2504,54 @@ mod tests {
             !peers.finals.is_empty(),
             "the routed query is owed its Final"
         );
+    }
+
+    /// The planes beside the subscribers' side of a frame leave a peer's query to a caller that
+    /// handed it to the queryables itself (`queries_taken`): no row is asked and no Final is
+    /// owed. A caller that did not have it dispatched there, its row asked and its Final owed, as
+    /// the whole fan does. Turned red by a queries' plane that runs for a query the caller took,
+    /// or one that skips a query it did not.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    #[test]
+    fn the_planes_beside_the_subscribers_leave_a_query_the_caller_took() {
+        use crate::session_tables::KeyForm;
+        for taken in [false, true] {
+            let mut observer = SlotObserverOf::<QuerySinks>::new();
+            let mut peers = PeerTables::new();
+            let mut requesters = Req::new();
+            let asked = observer
+                .tables
+                .declare_queryable("q/a", Locality::Any, false, KeyForm::default(), AskedRow)
+                .expect("a table of the build's bound has room");
+            let mut log = QueryLog::default();
+            crate::driver_loop::deliver_frame(&query_frame(), |event| {
+                observer.dispatch_event_beside_subscribers(
+                    &mut log,
+                    &mut peers,
+                    &mut requesters,
+                    event,
+                    &NoOtherPeers,
+                    taken,
+                )
+            });
+            if taken {
+                assert!(
+                    log.0.is_empty(),
+                    "a query the caller took is asked of no row"
+                );
+                assert!(peers.finals.is_empty(), "its Final is the caller's to owe");
+            } else {
+                assert_eq!(
+                    log.0,
+                    vec![asked.handle],
+                    "a query no caller took is dispatched"
+                );
+                assert!(
+                    !peers.finals.is_empty(),
+                    "the routed query is owed its Final"
+                );
+            }
+        }
     }
 
     /// A row that holds no queryable is asked nothing, whatever context the sink set names: the

@@ -129,9 +129,6 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
         let (plane, generation) = (&self.plane, self.generation);
         // The queries this frame carries arrive on this face's link.
         plane.set_arriving(generation);
-        // A query by an id of the shared dictionary is kept, so its replies mirror its key form.
-        #[cfg(feature = "shared-key-ids")]
-        actions.note_requests(&event);
         // What the declaration watches are told of this frame is this link's peer's.
         #[cfg(any(
             feature = "remote-declaration-watch",
@@ -241,14 +238,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
                 self.engine.hand_lent_reply(self.records.face, record);
             }
             // Handed to each queryable it reaches with the session let go of (`queries`), none of it
-            // into the round; a Request the lent form does not represent is dispatched as every
-            // record is.
+            // into the round, a Request the lent form does not represent by its owned projection.
             #[cfg(feature = "queryable")]
             IterationEvent::InPlace(ref record) if record.request().is_some() => {
-                if let Some(mut held) = self.engine.hand_lent_query(self.records, record, &event) {
-                    self.records
-                        .dispatch(&mut held.0.session.registry, event, Planes::All);
-                }
+                self.engine.hand_lent_query(self.records, record, &event);
             }
             // An alive token answering a pending liveliness get is handed to it as a reply is;
             // any other declaration of an interest is dispatched as every record is.
@@ -268,9 +261,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
             IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                 messages, reliable, ..
             }) => {
+                // A query by an id of the shared dictionary is kept before any queryable is handed
+                // it, so its replies mirror its key form.
+                #[cfg(feature = "queryable")]
+                self.records.note_requests(&event);
                 if let Some(messages) = wz_session_core::driver_loop::owned_records(messages) {
                     self.engine
-                        .hand_copied_records(self.records.face, messages, *reliable);
+                        .hand_copied_records(self.records, messages, *reliable);
                 }
                 let Some(mut held) = self.engine.live() else {
                     return;

@@ -320,6 +320,10 @@ impl QueryPeer {
             #[cfg(feature = "alloc")]
             encoding,
             lent_encoding,
+            #[cfg(feature = "alloc")]
+            value: None,
+            #[cfg(feature = "alloc")]
+            attachment_shared: None,
             #[cfg(all(feature = "alloc", feature = "pubsub-ts-stack"))]
             ts_stack,
             next: 0,
@@ -398,15 +402,8 @@ impl QueryPeer {
         L::Sink: QueryDelivered<X, L::RowId>,
     {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
-        // ranges), so this projection cannot refuse a decoded Request. The
-        // view is first filled into the codec's own record (the heap profile has the stack
-        // for its 1.8 KB, and this is the path of a Request the lent form cannot hold), and
-        // that record consumes itself into the owned one.
-        let mut record = wz_codecs::lent::Request::default();
-        if request.into_builder(&mut record).is_err() {
-            return;
-        }
-        if let Ok(owned) = record.try_into_owned_in::<crate::wire::WireStorage>() {
+        // ranges), so this projection cannot refuse a decoded Request.
+        if let Some(owned) = project_request(request) {
             self.dispatch_messages_with(
                 queryables,
                 cx,
@@ -419,6 +416,17 @@ impl QueryPeer {
             );
         }
     }
+}
+
+/// The owned record of `request`, a Request the lent form does not represent, as the copying
+/// receive decodes it. The view is first filled into the codec's own record (the heap profile has
+/// the stack for its 1.8 KB, and this is the path of a Request the lent form cannot hold), and
+/// that record consumes itself into the owned one. `None` for a view the codec refuses.
+#[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
+pub(super) fn project_request(request: &RequestView<'_>) -> Option<crate::wire::RequestOwned> {
+    let mut record = wz_codecs::lent::Request::default();
+    request.into_builder(&mut record).ok()?;
+    record.try_into_owned_in::<crate::wire::WireStorage>().ok()
 }
 
 /// A Request the lent form does not represent, read for a walk of the queryables: refused, for the
@@ -791,6 +799,93 @@ mod tests {
             shown, routed,
             "every routed query the lent form holds is pinned"
         );
+    }
+
+    /// A query pinned off its owned Request, as the copying receive decodes it, shows each queryable
+    /// what the owned dispatch of the same record shows its queryable, and stages what that
+    /// dispatch stages but the Final of the query it pins, which the walk owes. A key past the
+    /// bounded buffer is pinned too, composed as a string of its own, so every routed query is.
+    /// Turned red by a view that drops or moves a part, a Final staged for a pinned query, a
+    /// Final lost for one not pinned, or a long key left unrouted.
+    #[test]
+    fn an_owned_pinned_query_shows_what_the_owned_dispatch_shows() {
+        let full = {
+            let builder = RequestQueryBuilder::new(
+                41,
+                crate::wire_key::WireKey::literal("demo/full").expect("a literal key"),
+            )
+            .parameters(b"a=1")
+            .request_qos(0x0D);
+            #[cfg(feature = "query-attachment")]
+            let builder = builder.query_attachment(b"att");
+            #[cfg(feature = "query-value")]
+            let builder = builder.query_value(
+                b"value",
+                EncodingHint {
+                    packed_id: 0x0B,
+                    schema: Some(b"text".to_vec()),
+                },
+            );
+            #[cfg(feature = "query-source-info")]
+            let builder = builder.query_source_info(SourceInfo::new(&[1, 2, 3, 4], 7, 11));
+            builder.build().expect("build")
+        };
+        let cases = [
+            full,
+            // Through the peer's alias, with a suffix.
+            RequestQueryBuilder::new(
+                42,
+                crate::wire_key::WireKey::from_parts(5, Some("/more")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
+            // Matches nobody: still routed, so pinned, and its Final is the walk's to owe.
+            RequestQueryBuilder::new(
+                43,
+                crate::wire_key::WireKey::literal("other/a").expect("a literal key"),
+            )
+            .build()
+            .expect("build"),
+            // An id the peer never declared: never routed.
+            RequestQueryBuilder::new(
+                44,
+                crate::wire_key::WireKey::from_parts(77, None).expect("a key"),
+            )
+            .build()
+            .expect("build"),
+            // Past the bounded buffer on the fixed backing.
+            RequestQueryBuilder::new(
+                45,
+                crate::wire_key::WireKey::from_parts(6, Some("/tail")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
+        ];
+        let peer = peer();
+        let mut pinned = 0;
+        for (i, request) in cases.iter().enumerate() {
+            let (owned, _) = both(request);
+            let mut room = crate::query::pinned::QueryRoom::default();
+            let mut finals = FinalStage::new();
+            let query = QueryPeer::default().pin_request(request, &peer, &mut room, &mut finals);
+            let staged: Vec<_> = finals.drain_owed().collect();
+            match query {
+                Some(query) => {
+                    assert!(staged.is_empty(), "case {i}: the walk owes the Final");
+                    assert_eq!(
+                        owned.2,
+                        vec![(query.rid(), query.qos())],
+                        "case {i}: the Final the walk owes is the dispatch's"
+                    );
+                    if let Some(first) = owned.0.first() {
+                        assert_eq!(&query.hand(seen_of), first, "case {i}");
+                    }
+                    pinned += 1;
+                }
+                None => assert_eq!(staged, owned.2, "case {i}"),
+            }
+        }
+        assert_eq!(pinned, cases.len() - 1, "every case but the unroutable one");
     }
 
     /// A Request read where its frame lies names its key by the id, the suffix and the space the

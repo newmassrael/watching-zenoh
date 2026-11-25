@@ -18,11 +18,17 @@
 //! last, so a callback finds the session free and what the queryables before its own did. With no
 //! row left the query owes its Final, which waits for any hold a callback kept. Nothing of the
 //! query is held in the round.
+//!
+//! A Request the copying receive decoded is walked the same way, read off the owned record of the
+//! frame (`QueryPeer::pin_request`), and so is one the lent form does not represent, read off its
+//! owned projection: what the record does not hold itself lies in a room of the walk's frame. No
+//! query of the frame then reaches the queries' plane of its dispatch: the walk owes the Final of
+//! one no queryable answers as of one some did.
 
 use super::*;
 
 use wz_session_core::driver_loop::{InPlaceRecord, IterationEvent, OwedToProjection};
-use wz_session_core::query::pinned::PinnedQuery;
+use wz_session_core::query::pinned::{PinnedQuery, QueryRoom};
 use wz_session_core::wireexpr_resolve::KeyexprBuf;
 
 use super::direct::FaceRecords;
@@ -31,18 +37,20 @@ use super::query::QueryableCall;
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the query of the Request `record`, the record `event` of the face `records` reads,
     /// to each queryable it reaches, one call at a time with the session let go of, then owe its
-    /// Final. A Request no queryable is handed (no Query, its key unresolved, past the bounds or
-    /// the Finals the face holds) sends what its dispatch owes. The session, still held, for a
-    /// Request the lent form does not represent, which the caller dispatches as any other record;
-    /// nothing otherwise, and in a closed session.
+    /// Final; a Request the lent form does not represent by its owned projection. A Request no
+    /// queryable is handed (no Query, its key unresolved, past the bounds or the Finals the face
+    /// holds) sends what its dispatch owes. A closed session hands nothing.
     pub(super) fn hand_lent_query(
         &self,
         records: &FaceRecords<C>,
         record: &InPlaceRecord<'_, '_>,
         event: &IterationEvent<'_, '_>,
-    ) -> Option<LiveCore<'_, L, C>> {
+    ) {
         let mut room = KeyexprBuf::new();
-        let mut held = self.live()?;
+        let Some(mut held) = self.live() else {
+            return;
+        };
+        records.note_requests(event);
         let pinned = held
             .0
             .session
@@ -55,15 +63,59 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // runs (see the module's docs).
             Ok(Some(query)) => unsafe { past_the_lock(query, record) },
             Ok(None) => {
-                records.note_requests(event);
                 records.owe_finals(&mut held.0.session.registry);
-                return None;
+                return;
             }
-            Err(OwedToProjection) => return Some(held),
+            Err(OwedToProjection) => {
+                self.hand_projected_query(held, records, record);
+                return;
+            }
         };
-        records.note_requests(event);
         self.hand_query(held, records, &mut query);
-        None
+    }
+
+    /// [`Self::hand_lent_query`] for a Request the lent form does not represent: its owned
+    /// projection, read under `held`, handed as one the copying receive decoded. Out of line, so
+    /// the lent walk's frame does not hold the projection's.
+    #[inline(never)]
+    fn hand_projected_query(
+        &self,
+        held: LiveCore<'_, L, C>,
+        records: &FaceRecords<C>,
+        record: &InPlaceRecord<'_, '_>,
+    ) {
+        if let Some(request) = wz_session_core::query::pinned::project_request(record) {
+            self.hand_owned_query(held, records, &request);
+        }
+    }
+
+    /// Hand the query of `request`, a Request of the face `records` reads that the copying
+    /// receive decoded or the owned projection of a lent one, read under `held`, to each queryable
+    /// it reaches, one call at a time with the session let go of, then owe its Final. A Request
+    /// no queryable is handed sends what its dispatch owes. Out of line, so the room the query's
+    /// parts lie in is in a frame of its own.
+    #[inline(never)]
+    pub(super) fn hand_owned_query(
+        &self,
+        mut held: LiveCore<'_, L, C>,
+        records: &FaceRecords<C>,
+        request: &wz_session_core::wire::RequestOwned,
+    ) {
+        let mut room = QueryRoom::default();
+        let pinned = held
+            .0
+            .session
+            .registry
+            .pin_owned_query(records.face, request, &mut room);
+        let Some(query) = pinned else {
+            records.owe_finals(&mut held.0.session.registry);
+            return;
+        };
+        // SAFETY: what the query borrows outlives the walk, which holds it no longer than this
+        // call: `request` is the caller's, `room` stays in this frame, and the face's peer and
+        // its buffer are neither written nor let go of while it runs (see the module's docs).
+        let mut query = unsafe { past_the_lock(query, request) };
+        self.hand_query(held, records, &mut query);
     }
 
     /// Hand `query`, read under `held` for the face `records` reads, to each queryable it
@@ -126,15 +178,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 }
 
-/// `query`, read under the session's lock, held past it for as long as the read lends `_frame`.
+/// `query`, read under the session's lock, held past it for as long as `_record`, the record it
+/// was read off, is lent.
 ///
 /// # Safety
 ///
 /// Nothing the query borrows is written or let go of while the result is held.
-unsafe fn past_the_lock<'r>(
-    query: PinnedQuery<'_>,
-    _frame: &'r InPlaceRecord<'_, '_>,
-) -> PinnedQuery<'r> {
+unsafe fn past_the_lock<'r, R: ?Sized>(query: PinnedQuery<'_>, _record: &'r R) -> PinnedQuery<'r> {
     // SAFETY: the two types differ in their lifetime alone, so they are laid out alike; what the
     // result borrows is the caller's to keep where it lies.
     unsafe { core::mem::transmute::<PinnedQuery<'_>, PinnedQuery<'r>>(query) }

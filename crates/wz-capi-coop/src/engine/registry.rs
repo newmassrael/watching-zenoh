@@ -1025,6 +1025,9 @@ impl<H: Holders> RegistryOf<H> {
                 Planes::All => {
                     app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others)
                 }
+                // A build with queryables hands each of the frame's queries to them itself
+                // (`queries`); one without leaves them to the queries' plane, which owes each
+                // its Final.
                 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
                 Planes::BesideSubscribers => app.dispatch_event_beside_subscribers(
                     delivery,
@@ -1032,6 +1035,7 @@ impl<H: Holders> RegistryOf<H> {
                     &mut set.gets,
                     event,
                     &others,
+                    cfg!(feature = "queryable"),
                 ),
             }
         }
@@ -1417,6 +1421,30 @@ impl<H: Holders> RegistryOf<H> {
         face.peer
             .queries
             .pin_request_in_place(record, spaces, room, &mut face.peer.finals)
+    }
+
+    /// The query of `request`, a Request of face `face` the copying receive decoded or the owned
+    /// projection of one the lent form does not represent, read for a walk that hands it to each
+    /// queryable it reaches with the session let go of (`queries`), what the Request does not
+    /// hold kept in `room` (`QueryPeer::pin_request`): it borrows the face's peer, as long as
+    /// the session is held. `None`, with what the Request owes staged in the face's Finals, for
+    /// one no queryable is handed, and for a face the session no longer holds.
+    #[cfg(all(
+        feature = "queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn pin_owned_query<'q>(
+        &'q mut self,
+        face: HeldFace,
+        request: &'q wz_session_core::wire::RequestOwned,
+        room: &'q mut wz_session_core::query::pinned::QueryRoom,
+    ) -> Option<wz_session_core::query::pinned::PinnedQuery<'q>> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.peer
+            .queries
+            .pin_request(request, spaces, room, &mut face.peer.finals)
     }
 
     /// Hand the alive token at `keyexpr` to the pending liveliness get `interest_id` of face
