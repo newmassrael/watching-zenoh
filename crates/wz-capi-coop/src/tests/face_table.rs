@@ -259,8 +259,7 @@ fn a_query_is_answered_to_its_face_and_a_lost_face_leaves_the_other() {
                 },
             ),
         )
-        .expect("the engine has queryables in this build")
-        .id;
+        .expect("the engine has queryables in this build");
     until(&engine, "both routers to see the queryable", || {
         first.seen(|s| s.declares) >= 1 && second.seen(|s| s.declares) >= 1
     });

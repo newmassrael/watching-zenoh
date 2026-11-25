@@ -126,8 +126,7 @@ fn two_members_on_the_hosts_sockets_learn_each_other_and_a_put_crosses_the_group
                 })
             },
         )
-        .expect("a session with ids left declares")
-        .id;
+        .expect("a session with ids left declares");
     eventually("a put of the first to reach the second", || {
         first
             .publish_on_wire_all(
@@ -189,8 +188,7 @@ fn two_members_of_one_thread_on_the_hosts_sockets_learn_each_other() {
                     into.lock().unwrap().push(sample.payload().to_vec());
                 }),
             )
-            .expect("a session with ids left declares")
-            .id;
+            .expect("a session with ids left declares");
     });
     eventually("a put of the first to reach the second", || {
         first.call(|engine| {

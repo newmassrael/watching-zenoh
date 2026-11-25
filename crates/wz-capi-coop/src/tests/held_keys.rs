@@ -353,8 +353,7 @@ fn a_declaration_outlives_the_program_key_until_the_last_row_naming_it_goes() {
             None,
             sink(&dropped),
         )
-        .expect("declared")
-        .id;
+        .expect("declared");
     SessionDrive::close(&*engine);
     program.release(&*engine);
     assert_eq!(live_holds(&engine), 0, "no hold is live after the close");

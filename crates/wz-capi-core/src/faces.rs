@@ -8134,7 +8134,9 @@ mod matching_aggregate_tests {
         );
         // CONTROL: a holder lets go, and the declaration takes the room it left.
         holds.pop().expect("a hold").release(&shared);
-        let sub = declare(&shared).expect("a count with room takes the entry");
+        let sub = declare(&shared)
+            .expect("a count with room takes the entry")
+            .id;
         assert_eq!(
             shared
                 .lock()
@@ -10820,8 +10822,7 @@ mod face_up_order_tests {
                 None,
                 sink.clone(),
             )
-            .expect("declares")
-            .id;
+            .expect("declares");
         assert_eq!(
             (
                 declares_and_pushes_since(&near, near_before).0,
@@ -10989,8 +10990,7 @@ mod face_up_order_tests {
                 LinkRestriction::only([2]).expect("one slot"),
                 sink.clone(),
             )
-            .expect("declares")
-            .id;
+            .expect("declares");
         assert_eq!(
             (sent(&near) - near_before, sent(&far) > far_before),
             (0, true),
@@ -11648,8 +11648,7 @@ mod sink_release_tests {
                 }
             }),
         )
-        .expect("an open session declares")
-        .id;
+        .expect("an open session declares");
         let opts = wz_session_core::query_options::QueryOptions::get()
             .with_allowed_destination(Locality::SessionLocal);
         SessionEngine::get_on_wire(
@@ -11723,8 +11722,7 @@ mod sink_release_tests {
                 }
             }),
         )
-        .expect("an open session declares")
-        .id;
+        .expect("an open session declares");
         let releasing = {
             let go = Arc::clone(&go);
             std::thread::spawn(move || {

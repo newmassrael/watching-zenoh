@@ -153,8 +153,7 @@ fn hear(engine: &Engine, pattern: &str, wire: WireKey) -> Arc<Mutex<Vec<String>>
                 into.lock().unwrap().push(sample.keyexpr().to_owned());
             })
         })
-        .expect("a session with ids left declares")
-        .id;
+        .expect("a session with ids left declares");
     heard
 }
 
@@ -284,8 +283,7 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
                 },
             ),
         )
-        .expect("the engine has queryables in this build")
-        .id;
+        .expect("the engine has queryables in this build");
     let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let ended = Arc::new(Mutex::new(0usize));
     struct End(Arc<Mutex<usize>>);
@@ -589,8 +587,7 @@ fn reply_key_under(
                 },
             ),
         )
-        .expect("the engine has queryables in this build")
-        .id;
+        .expect("the engine has queryables in this build");
     router.send(super::Command::QueryById(9, 43, "/x"));
     super::until(&engine, "the peer to hear the reply", || {
         router.seen(|seen| seen.reply_keys.len()) == 1
@@ -720,8 +717,7 @@ fn filter_by(engine: &Engine, declared: ExprId) {
             }),
             false,
         )
-        .expect("a session with ids left declares")
-        .id;
+        .expect("a session with ids left declares");
 }
 
 #[test]
@@ -754,8 +750,7 @@ fn tokens_by(engine: &Engine, declared: ExprId) {
     let sink = wz_capi_port::LivelinessSink::shared(|_: LivelinessSample<'_>| {});
     engine
         .declare_liveliness_subscriber_on_wire(ASKED, WireKey::aliased(declared, None), false, sink)
-        .expect("the engine has liveliness")
-        .id;
+        .expect("the engine has liveliness");
 }
 
 #[cfg(feature = "liveliness")]

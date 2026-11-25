@@ -1218,8 +1218,7 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1281,8 +1280,7 @@ fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration()
             None,
             SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     // Waited for with the session unstepped.
     let unstepped = |what: &str, done: &dyn Fn(&Seen) -> bool| {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1475,8 +1473,7 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1544,8 +1541,7 @@ fn a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup() {
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1673,8 +1669,7 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
                 }
             })
         })
-        .expect("declared")
-        .id;
+        .expect("declared");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1713,8 +1708,7 @@ fn the_samples_of_one_batch_are_handed_in_the_read_that_hands_the_first() {
                 into.lock().unwrap().push(sample.payload().to_vec());
             }),
         )
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1756,8 +1750,7 @@ fn settled_links_are_moved_only_once_a_link_ends() {
                 into.lock().unwrap().push(sample.payload().to_vec());
             }),
         )
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1825,8 +1818,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
                 into.lock().unwrap().push(sample.payload().to_vec());
             }),
         )
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1914,8 +1906,7 @@ fn a_sample_for_three_subscribers_is_handed_to_each_in_order_with_the_session_fr
                     }
                 }),
             )
-            .expect("the session declares the subscriber")
-            .id;
+            .expect("the session declares the subscriber");
     }
     until(&engine, "the router to see the subscribers", || {
         router.seen(|s| s.declares) > declares_before
@@ -2502,8 +2493,7 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     let filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
@@ -2611,8 +2601,7 @@ fn a_stepped_session_keeps_its_lease() {
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     let quiet = Instant::now() + Duration::from_millis(3 * lease_ms);
     while Instant::now() < quiet {
         SessionDrive::read(&*engine, false).expect("the session stays open");
@@ -2660,8 +2649,7 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
                 stamp.lock().unwrap().get_or_insert(Instant::now());
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     SessionDrive::start_read_task(&*engine).expect("a read task");
     // The read task's first wait is under way before the push is sent.
     std::thread::sleep(Duration::from_millis(250));
@@ -3063,8 +3051,7 @@ fn a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered() {
                 })
             },
         )
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the declarations", || {
         router.seen(|s| s.declares) > declares_before
     });

@@ -220,8 +220,7 @@ fn hearing(session: &Engine) -> Arc<Mutex<Vec<Vec<u8>>>> {
                 into.lock().unwrap().push(sample.payload().to_vec());
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     heard
 }
 

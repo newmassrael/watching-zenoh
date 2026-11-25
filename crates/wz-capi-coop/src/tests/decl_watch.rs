@@ -170,8 +170,7 @@ mod watched {
                     into.lock().unwrap().push("sample".to_owned());
                 }),
             )
-            .expect("the session declares the subscriber")
-            .id;
+            .expect("the session declares the subscriber");
         let early = Log::new();
         watch(&engine, DeclPlane::Subscribers, &early);
         for (id, key) in (1..).zip(KEYS) {
@@ -523,8 +522,7 @@ mod watched {
                     order.lock().unwrap().push("sample");
                 })
             })
-            .expect("declared")
-            .id;
+            .expect("declared");
         router.send(Command::DeclareSubscriber(3, "demo/w/order"));
         router.send(Command::Push("demo/w/order", b"x"));
         until(&engine, "the declaration and the sample", || {

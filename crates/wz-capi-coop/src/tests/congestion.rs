@@ -754,8 +754,7 @@ mod stalled_link {
                     }
                 })
             })
-            .expect("the session declares the subscriber")
-            .id;
+            .expect("the session declares the subscriber");
         SessionDrive::start_read_task(&*reading).expect("the reading client's read task starts");
         let started = Instant::now();
         while publisher.faces_up() < 2 {

@@ -266,8 +266,7 @@ fn a_put_made_inside_a_callback_reaches_it_again_to_depth_three() {
                 }
             }),
         )
-        .expect("a session with ids left declares")
-        .id;
+        .expect("a session with ids left declares");
     let into = handed.clone();
     engine
         .declare_subscriber_on_wire(
@@ -279,8 +278,7 @@ fn a_put_made_inside_a_callback_reaches_it_again_to_depth_three() {
                 into.lock().unwrap().push((1, sample.payload().to_vec()));
             }),
         )
-        .expect("a session with ids left declares")
-        .id;
+        .expect("a session with ids left declares");
 
     assert_eq!(put_own(&engine, "demo/l/deep", &[0]), Ok(2));
     assert_eq!(
@@ -369,8 +367,7 @@ fn subscribe_putting(
                     }
                 }),
             )
-            .expect("a session with ids left declares")
-            .id;
+            .expect("a session with ids left declares");
     }
 }
 
@@ -584,8 +581,7 @@ fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
                 }
             }),
         )
-        .expect("declared")
-        .id;
+        .expect("declared");
     let releasing = {
         let let_go = let_go.clone();
         std::thread::spawn(move || {

@@ -374,8 +374,7 @@ fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
                 into.lock().unwrap().push(sample.payload().to_vec());
             })
         })
-        .expect("a session with ids left declares")
-        .id;
+        .expect("a session with ids left declares");
     heard
 }
 
@@ -615,8 +614,7 @@ mod asked {
                     },
                 ),
             )
-            .expect("the engine has queryables in this build")
-            .id;
+            .expect("the engine has queryables in this build");
     }
 
     #[test]
@@ -690,8 +688,7 @@ mod asked {
                     },
                 ),
             )
-            .expect("the engine has queryables in this build")
-            .id;
+            .expect("the engine has queryables in this build");
         until_members_know_each_other(&first, &second);
 
         let (issued, seen) = ask(&first, "demo/group/kept");

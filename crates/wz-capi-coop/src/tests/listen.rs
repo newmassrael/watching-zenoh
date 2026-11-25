@@ -124,8 +124,7 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
                 into.lock().unwrap().push(sample.payload().to_vec());
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
 
     let first = client(&endpoint, 0xc1);
     let second = client(&endpoint, 0xc2);
@@ -165,8 +164,7 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
                 },
             ),
         )
-        .expect("the engine has queryables in this build")
-        .id;
+        .expect("the engine has queryables in this build");
     }
     let replies = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let ended = Arc::new(Mutex::new(0usize));
@@ -289,8 +287,7 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
             into.lock().unwrap().push(sample.payload().to_vec());
         }),
     )
-    .expect("the session declares the subscriber")
-    .id;
+    .expect("the session declares the subscriber");
     let put = |peer: &Stepped, tag: u8, at: u8| {
         // Long enough that a batch holds a few, so a sample read into another link's buffer
         // would show in its bytes.
@@ -417,8 +414,7 @@ fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
                 into.lock().unwrap().push(sample.payload().to_vec());
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
 
     let first = client(&endpoint, 0xc1);
     let second = client(&endpoint, 0xc2);
@@ -513,8 +509,7 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     // The client's open waits for the listener's answer, and this thread is what steps the
     // listener: the client opens on a thread of its own meanwhile.
     let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
@@ -590,8 +585,7 @@ fn a_read_goes_on_with_the_input_its_step_left_held() {
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
     reads_until(&engine, "the client's face", || engine.faces_up() == 1);
     let peer = dialing.join().expect("the client opens");
@@ -662,8 +656,7 @@ fn a_lone_stream_link_is_waited_on_with_its_port_as_a_listener_is() {
             count.fetch_add(1, Ordering::SeqCst);
         })
     })
-    .expect("the session declares the subscriber")
-    .id;
+    .expect("the session declares the subscriber");
     eventually("the listener to hold the client's face", || {
         listener.faces_up() == 1
     });
@@ -720,8 +713,7 @@ fn a_composed_key_past_the_row_is_counted_where_the_session_reads_it() {
                 into.lock().unwrap().push(sample.keyexpr().to_owned());
             }),
         )
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     let peer = client(&endpoint, 0xc1);
     eventually("the listener to hold the client's face", || {
         listener.faces_up() == 1

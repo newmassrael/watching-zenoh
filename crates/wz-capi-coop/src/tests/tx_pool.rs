@@ -116,8 +116,7 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
             }
         }),
     )
-    .expect("the good peer declares its subscriber")
-    .id;
+    .expect("the good peer declares its subscriber");
     eventually("the good peer's face", || publisher.faces_up() == 1);
     let slow = stepped(CoopConfig {
         endpoints: vec![endpoint],
@@ -288,8 +287,7 @@ fn a_droppable_publish_of_one_thread_is_dropped_while_a_slow_link_holds_the_slot
                     }
                 }),
             )
-            .expect("the good peer declares its subscriber")
-            .id;
+            .expect("the good peer declares its subscriber");
     });
     let faces_up = || publisher.call(|engine| engine.faces_up());
     eventually("the good peer's face", || faces_up() == 1);

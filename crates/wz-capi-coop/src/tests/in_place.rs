@@ -32,8 +32,7 @@ fn a_push_read_in_place_reaches_the_subscriber() {
                     .push((sample.keyexpr().to_owned(), sample.payload().to_vec()));
             })
         })
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares >= 1)
     });
@@ -77,8 +76,7 @@ fn a_key_named_by_an_alias_the_peer_undeclares_is_read_where_the_alias_kept_it()
     let _ = watched.set(EngineHold::downgrade(&engine));
     engine
         .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, sink)
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares >= 1)
     });
@@ -128,8 +126,7 @@ fn a_batch_of_more_samples_than_the_round_holds_reaches_the_subscriber_in_order(
                 into.lock().unwrap().push((sample.payload().to_vec(), free));
             }),
         )
-        .expect("the session declares the subscriber")
-        .id;
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares >= 1)
     });
