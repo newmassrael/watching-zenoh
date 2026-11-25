@@ -41,9 +41,11 @@ use wz_codecs::query::QueryView;
 use wz_codecs::query_ext_entry::{QueryExtEntryView, QueryExtEntryViewVariant};
 use wz_codecs::request::{RequestView, RequestViewVariant};
 
+use super::pinned::PinnedQuery;
 use super::{
     DispatchOutcome, LocalQueryables, QueryDelivered, QueryEnvelope, QueryPeer, QueryProjection,
 };
+use crate::driver_loop::{InPlaceRecord, OwedToProjection};
 use crate::ext_view::{walked, ExtEntryView};
 use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage};
 use crate::wireexpr_resolve::{
@@ -216,6 +218,119 @@ impl QueryPeer {
         }
     }
 
+    /// Read the Request `record` lends for a walk that hands its query to each queryable it reaches
+    /// with no lock held ([`PinnedQuery`]), by the rules of `Self::dispatch_request_in_place`:
+    /// the key resolved through `peer_keyexpr_table` and copied into `room`, every other part read
+    /// where the frame lies. `None`, with what the Request owes staged in `pending_final_rids` as
+    /// its dispatch stages it, for a record that is no Query, one the table has no room to owe a
+    /// Final for, one whose key does not resolve and one past the bounds the face holds queries to.
+    /// The query handed back owes its Final once the walk is over, which stages nothing here.
+    /// Refused with [`OwedToProjection`] for a Request the lent form does not represent where the
+    /// build dispatches its owned projection instead, which the caller then does.
+    pub fn pin_request_in_place<'a, 'q, 'f: 'q, PS, OS, S>(
+        &mut self,
+        record: &InPlaceRecord<'q, 'f>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+        room: &'q mut KeyexprBuf,
+        pending_final_rids: &mut FinalStage<S>,
+    ) -> Result<Option<PinnedQuery<'q>>, OwedToProjection>
+    where
+        PS: crate::bounded::Storage,
+        OS: crate::bounded::Storage,
+        S: crate::bounded::Storage,
+    {
+        let Some(request) = record.request() else {
+            return Ok(None);
+        };
+        let RequestViewVariant::CodecZenohQuery(query) = &request.body else {
+            return Ok(None);
+        };
+        if !pending_final_rids.has_room() {
+            pending_final_rids.refuse_request();
+            return Ok(None);
+        }
+        let (target, qos) = read_envelope_extensions(request);
+        if has_sliced_value(walked(query.extensions.as_deref())) {
+            return lent_form_refused(request.rid, qos, pending_final_rids);
+        }
+        let spaces = MappingSpaces::from_sender(peer_keyexpr_table.into(), record.sender());
+        let mut composed = KeyexprBuf::new();
+        let keyexpr = match resolve_wireexpr_viewed(&request.keyexpr.body, spaces, &mut composed) {
+            Ok(Some(keyexpr)) => keyexpr,
+            Ok(None) => {
+                if DispatchOutcome::UNRESOLVED.owes_final(self.answers_unresolved_queries()) {
+                    pending_final_rids.owe(request.rid, qos);
+                }
+                return Ok(None);
+            }
+            Err(KeyexprPastBound) => {
+                return lent_form_refused(request.rid, qos, pending_final_rids);
+            }
+        };
+        // The key may be the peer's, which the session's lock keeps and the walk lets go of.
+        room.clear();
+        if room.push_str(keyexpr).is_err() {
+            return lent_form_refused(request.rid, qos, pending_final_rids);
+        }
+        let room: &'q KeyexprBuf = room;
+        let keyexpr = room.as_str();
+        #[cfg(all(feature = "alloc", feature = "pubsub-ts-stack"))]
+        let ts_stack = crate::ts_stack::read_ts_stack(walked(request.extensions.as_ref()));
+        let projection = lent_projection(
+            query,
+            #[cfg(feature = "pubsub-ts-stack")]
+            None,
+        );
+        let (max_parameters, max_attachment) = self.query_size_bounds();
+        if super::request_past_bounds(
+            projection.parameters,
+            projection.attachment,
+            max_parameters,
+            max_attachment,
+        ) {
+            self.oversize_refused = self.oversize_refused.saturating_add(1);
+            pending_final_rids.owe(request.rid, qos);
+            return Ok(None);
+        }
+        #[cfg(all(feature = "alloc", feature = "query-value"))]
+        let plain = projection.plain_value;
+        #[cfg(all(feature = "alloc", feature = "query-value"))]
+        let (payload, encoding, lent_encoding) = match plain {
+            Some(parts) => (
+                Some(parts.payload),
+                Some(crate::sample::EncodingHint {
+                    packed_id: parts.packed_id,
+                    schema: parts.schema.map(<[u8]>::to_vec),
+                }),
+                Some((parts.packed_id, parts.schema)),
+            ),
+            None => (None, None, None),
+        };
+        #[cfg(all(feature = "alloc", not(feature = "query-value")))]
+        let (payload, encoding, lent_encoding) = (None, None, None);
+        #[cfg(not(feature = "alloc"))]
+        let lent_encoding = None;
+        Ok(Some(PinnedQuery {
+            rid: request.rid,
+            target,
+            qos,
+            requester: self.requester,
+            keyexpr,
+            facts: crate::keyexpr_match::KeyFacts::of(keyexpr),
+            parameters: projection.parameters,
+            attachment: projection.attachment,
+            source_info: projection.source_info,
+            #[cfg(feature = "alloc")]
+            payload,
+            #[cfg(feature = "alloc")]
+            encoding,
+            lent_encoding,
+            #[cfg(all(feature = "alloc", feature = "pubsub-ts-stack"))]
+            ts_stack,
+            next: 0,
+        }))
+    }
+
     /// The lent dispatch itself: [`Self::dispatch_request`]'s steps over the
     /// Request where it lies.
     fn dispatch_lent<
@@ -308,6 +423,26 @@ impl QueryPeer {
                 pending_final_rids,
             );
         }
+    }
+}
+
+/// A Request the lent form does not represent, read for a walk of the queryables: refused, for the
+/// caller to dispatch its owned projection, where the build has one; otherwise owed its Final as a
+/// query that matched nobody is, as [`QueryPeer::dispatch_request_in_place`] owes it.
+fn lent_form_refused<'q, S: crate::bounded::Storage>(
+    rid: crate::wire_id::RequestId,
+    qos: crate::sample::QosLevel,
+    pending_final_rids: &mut FinalStage<S>,
+) -> Result<Option<PinnedQuery<'q>>, OwedToProjection> {
+    #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
+    {
+        let _ = (rid, qos, pending_final_rids);
+        Err(OwedToProjection)
+    }
+    #[cfg(any(not(feature = "alloc"), feature = "rx-lent-only"))]
+    {
+        pending_final_rids.owe(rid, qos);
+        Ok(None)
     }
 }
 
@@ -541,6 +676,127 @@ mod tests {
             finals += owned.2.len();
         }
         assert_eq!(finals, cases.len() - 1, "every case but the unroutable one");
+    }
+
+    /// What a queryable is shown of `view`, as owned values: what `recording` notes.
+    fn seen_of(view: &dyn crate::query_sink::QueryView) -> Seen {
+        use crate::query_sink::QueryView as _;
+        Seen {
+            keyexpr: String::from(view.keyexpr()),
+            parameters: view.parameters().map(<[u8]>::to_vec),
+            attachment: view.attachment().map(<[u8]>::to_vec),
+            payload: view.payload().map(<[u8]>::to_vec),
+            encoding: view.encoding().cloned(),
+            source_info: view.source_info().cloned(),
+            rid: view.rid(),
+            is_local: view.is_local(),
+            qos: view.qos(),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: view.ts_stack().cloned(),
+        }
+    }
+
+    /// A query pinned where its frame lies for a walk of the queryables shows each what the lent
+    /// dispatch of the same record shows its queryable, under the key that dispatch resolves through
+    /// the peer's space, and stages what that dispatch stages but the Final of the query it pins,
+    /// which the walk owes once its last queryable was handed it. A record that reaches no
+    /// queryable stages what the dispatch stages, and a key past the bounded buffer is left to the
+    /// owned projection. Turned red by a view that drops or moves a part, a key not read through
+    /// the peer's space, or a Final staged for a pinned query.
+    #[test]
+    fn a_pinned_query_shows_what_the_lent_dispatch_shows() {
+        let full = {
+            let builder = RequestQueryBuilder::new(
+                31,
+                crate::wire_key::WireKey::literal("demo/full").expect("a literal key"),
+            )
+            .parameters(b"a=1")
+            .request_qos(0x0D);
+            #[cfg(feature = "query-attachment")]
+            let builder = builder.query_attachment(b"att");
+            #[cfg(feature = "query-value")]
+            let builder = builder.query_value(
+                b"value",
+                EncodingHint {
+                    packed_id: 0x0B,
+                    schema: Some(b"text".to_vec()),
+                },
+            );
+            #[cfg(feature = "query-source-info")]
+            let builder = builder.query_source_info(SourceInfo::new(&[1, 2, 3, 4], 7, 11));
+            builder.build().expect("build")
+        };
+        let cases = [
+            full,
+            // Through the peer's alias, with a suffix.
+            RequestQueryBuilder::new(
+                32,
+                crate::wire_key::WireKey::from_parts(5, Some("/more")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
+            // An id the peer never declared: never routed, owed nothing.
+            RequestQueryBuilder::new(
+                33,
+                crate::wire_key::WireKey::from_parts(77, None).expect("a key"),
+            )
+            .build()
+            .expect("build"),
+            // Past the bounded buffer, last.
+            RequestQueryBuilder::new(
+                34,
+                crate::wire_key::WireKey::from_parts(6, Some("/tail")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
+        ];
+        let peer = peer();
+        let mut shown = 0;
+        for (i, request) in cases.iter().enumerate() {
+            let (_, lent) = both(request);
+            let wire = request
+                .try_as_borrowed()
+                .expect("a borrowed view")
+                .encode_to_vec();
+            let decoded =
+                RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+            let record =
+                InPlaceRecord::request_of_frame(&decoded, true, 0, crate::qos::Priority::DEFAULT);
+            let mut room = KeyexprBuf::new();
+            let mut finals = FinalStage::new();
+            let pinned =
+                QueryPeer::default().pin_request_in_place(&record, &peer, &mut room, &mut finals);
+            let staged: Vec<_> = finals.drain_owed().collect();
+            match pinned {
+                Ok(Some(query)) => {
+                    assert!(staged.is_empty(), "case {i}: the walk owes the Final");
+                    assert_eq!(lent.2.len(), 1, "case {i}: one Final owed by the dispatch");
+                    assert_eq!(
+                        (query.rid(), query.qos()),
+                        lent.2[0],
+                        "case {i}: the Final the walk owes is the dispatch's"
+                    );
+                    let first = lent.0.first().expect("the dispatch reached its queryable");
+                    assert_eq!(&query.hand(seen_of), first, "case {i}");
+                    shown += 1;
+                }
+                Ok(None) => assert_eq!(staged, lent.2, "case {i}"),
+                Err(OwedToProjection) => assert!(
+                    crate::bounded::ENFORCES_CAPACITY && i == cases.len() - 1,
+                    "case {i}: only a key past the buffer is left to the owned projection"
+                ),
+            }
+        }
+        // The growable backing composes the long key too, and pins its query.
+        let routed = if crate::bounded::ENFORCES_CAPACITY {
+            2
+        } else {
+            3
+        };
+        assert_eq!(
+            shown, routed,
+            "every routed query the lent form holds is pinned"
+        );
     }
 
     /// A Request read where its frame lies names its key by the id, the suffix and the space the

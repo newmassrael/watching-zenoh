@@ -2973,6 +2973,40 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         release_drained(self.kept_queryables_mut()?, cursor)
     }
 
+    /// The next queryable `query` reaches, with the tables held, the walk moved past it: the row's
+    /// callback, which a call is begun on before the tables are let go, `None` when no row at or
+    /// after the query's place is reached. The rows are walked in the table's order from the place
+    /// after the last one reached, matched by the rule every fan-out of a peer's query keeps, so a
+    /// query is handed to the rows the fan-out of its dispatch reaches, in its order, one call at a
+    /// time; a row undeclared while an earlier call ran is retired and begins no call.
+    #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+    pub fn next_queryable_reached(
+        &self,
+        query: &mut crate::query::pinned::PinnedQuery<'_>,
+    ) -> Option<&F::Queryable> {
+        const {
+            assert!(row_may_lie_in::<F::Queryable, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
+        }
+        let from = query.reached_from();
+        let (place, row) = self
+            .kept_queryables()?
+            .live_handles()
+            .skip_while(|(place, _, _)| *place < from)
+            .find_map(|(place, _, row)| {
+                let found = QueryableRef {
+                    #[cfg(feature = "alloc")]
+                    id: u64::from(row.id),
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                    complete: row.complete,
+                };
+                query.reaches(found).then_some((place, row))
+            })?;
+        query.passed(place);
+        Some(&row.callback)
+    }
+
     /// Begin a call of the liveliness subscriber `handle` names, with the tables held: what the call is made
     /// with once they are let go, `None` when no live row is named. See [`Self::begin_subscriber`].
     pub fn begin_liveliness_subscriber(

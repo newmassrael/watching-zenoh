@@ -441,14 +441,7 @@ impl<C: PlaneCalls> QueryPlane<C> {
     ) {
         let generation = self.arriving_on();
         let rid = view.rid();
-        if !self.with_holds(|holds| holds.admit(generation, rid)) {
-            self.refused.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        // A row handed nothing gives the hold back, and the query owes its Final as one that
-        // reached no queryable.
-        let Some(call) = begin() else {
-            self.with_holds(|holds| holds.release(generation, rid));
+        let Some(call) = self.admit_call(generation, rid, begin) else {
             return;
         };
         // The session's own get is handed to the queryables it matched by the get itself, from its
@@ -469,6 +462,29 @@ impl<C: PlaneCalls> QueryPlane<C> {
         if !unsafe { round.offer_query(call, view, generation) } {
             self.with_holds(|holds| holds.release(generation, rid));
         }
+    }
+
+    /// What a query of link `generation` that reaches a queryable does first: hold its Final and
+    /// begin a call on the queryable's row (`begin`, which a row past the most calls its latch
+    /// counts answers with none). `None` when no row is left for its Final, which refuses the
+    /// query ([`FinalHolds::admit`]) before any call is begun and counts it, and when `begin`
+    /// began none: that row's hold is given back, and the query owes its Final as one that reached
+    /// no queryable.
+    pub fn admit_call(
+        &self,
+        generation: u64,
+        rid: RequestId,
+        begin: impl FnOnce() -> Option<C::Queryable>,
+    ) -> Option<C::Queryable> {
+        if !self.with_holds(|holds| holds.admit(generation, rid)) {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let call = begin();
+        if call.is_none() {
+            self.with_holds(|holds| holds.release(generation, rid));
+        }
+        call
     }
 
     /// The queryables the session's own get matched while it was asked, the list left empty; none
