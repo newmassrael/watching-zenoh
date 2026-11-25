@@ -358,11 +358,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
             }
             return LinkInput::Tick;
         }
-        let Some(answer) = self
-            .dial
-            .as_mut()
-            .and_then(|dial| dial.answer::<L::Pump, LinkCount>())
-        else {
+        let links = &core.transport.links;
+        let Some(answer) = self.dial.as_mut().and_then(|dial| links.answer_dial(dial)) else {
             return LinkInput::Tick;
         };
         let Some(dial) = self.dial.take() else {
@@ -375,15 +372,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
     fn dial_row(&mut self, core: &Core<L, C>, row: usize) -> LinkInput {
         self.dial = None;
         let transport = &core.transport;
-        let pending = match transport.begin_dial(transport.endpoints.dial_text(row)) {
-            Ok(pending) => pending,
+        let begun = match transport.begin_dial(transport.endpoints.dial_text(row)) {
+            Ok(begun) => begun,
             Err(refused) => {
                 self.last = Some(OpenError::from(refused));
                 return LinkInput::DialRefused;
             }
         };
-        let mut dial = Dial::new(DialEndpoint::Listed(row), pending);
-        match dial.answer::<L::Pump, LinkCount>() {
+        let mut dial = Dial::begun(DialEndpoint::Listed(row), begun);
+        match transport.links.answer_dial(&mut dial) {
             None => {
                 self.dial = Some(dial);
                 LinkInput::DialPending

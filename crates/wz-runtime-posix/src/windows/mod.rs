@@ -495,85 +495,47 @@ pub(crate) fn name_of(
     name.to_socket_addr().ok_or(ws::WSAEAFNOSUPPORT)
 }
 
-/// The addresses Winsock's resolver (`getaddrinfo`, of `ws2_32`, whose sockets the process
-/// already opens) answered for a host name that a dial has not tried yet, in its order: its own
-/// list, held only while the dial is made and freed once, as the POSIX half's
-/// (`crate::net::Resolved`) is. Asked as that half asks it, of every family and the stream kind
-/// alone, as zenoh-pico asks it on Windows
+/// The addresses Winsock's resolver (`getaddrinfo`, of `ws2_32`, whose sockets the process already
+/// opens) answers for the host `name`, each at its port, written to the front of `found` in its
+/// order: how many, `0` when it answers none, fails, or Winsock does not start. Asked as the POSIX
+/// half asks it, of every family and the stream kind alone, as zenoh-pico asks it on Windows
 /// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @ `getaddrinfo(`), and walked as
-/// that open walks the answer (`it = it->ai_next`).
-pub(crate) struct Resolved {
-    /// The list the resolver made, freed when this is dropped; null for none.
-    list: *mut ws::ADDRINFOA,
-    /// The answer of the list to try next; null once none is left.
-    next: *const ws::ADDRINFOA,
-}
-
-// SAFETY: the list is the resolver's heap memory, reached through this value alone, so it may be
-// walked and freed on any thread.
-unsafe impl Send for Resolved {}
-// SAFETY: as for `Send`; and no method that takes `&self` reads through the pointers.
-unsafe impl Sync for Resolved {}
-
-impl Resolved {
-    /// No address: what a dial of an address, an accepted connection and a connection made hold.
-    pub(crate) const NONE: Self = Self {
-        list: core::ptr::null_mut(),
-        next: core::ptr::null(),
+/// that open walks the answer, in its order.
+pub(crate) fn resolve(
+    name: &wz_runtime_coop::locator_text::NamedHost<'_>,
+    found: &mut [SocketAddr],
+) -> usize {
+    let text = crate::resolve::terminated(name);
+    if startup().is_err() {
+        return 0;
+    }
+    let hints = ws::ADDRINFOA {
+        ai_family: i32::from(ws::AF_UNSPEC),
+        ai_socktype: ws::SOCK_STREAM,
+        ..Default::default()
     };
-
-    /// The addresses the resolver answers for the host `name`; none when it answers none, fails,
-    /// or Winsock does not start. Out of line: a `tcp/` dial and a `udp/` one of a host share
-    /// it.
-    #[inline(never)]
-    pub(crate) fn of(name: &wz_runtime_coop::locator_text::NamedHost<'_>) -> Self {
-        let text = crate::resolve::terminated(name);
-        if startup().is_err() {
-            return Self::NONE;
-        }
-        let hints = ws::ADDRINFOA {
-            ai_family: i32::from(ws::AF_UNSPEC),
-            ai_socktype: ws::SOCK_STREAM,
-            ..Default::default()
-        };
-        let mut list: *mut ws::ADDRINFOA = core::ptr::null_mut();
-        // SAFETY: `text` ends in a 0 byte, `hints` is live for the call, and the call writes
-        // `list`, which the value made of it frees.
-        let failed =
-            unsafe { ws::getaddrinfo(text.as_ptr(), core::ptr::null(), &hints, &mut list) } != 0;
-        if failed {
-            return Self::NONE;
-        }
-        Self {
-            list,
-            next: list.cast_const(),
+    let mut answers: *mut ws::ADDRINFOA = core::ptr::null_mut();
+    // SAFETY: `text` ends in a 0 byte, `hints` is live for the call, and the call writes
+    // `answers`, which is freed below once read.
+    let failed =
+        unsafe { ws::getaddrinfo(text.as_ptr(), core::ptr::null(), &hints, &mut answers) } != 0;
+    if failed {
+        return 0;
+    }
+    let mut count: usize = 0;
+    let mut next = answers.cast_const();
+    // SAFETY: each answer of the list is the resolver's, live until the list is freed.
+    while let (Some(answer), Some(place)) = (unsafe { next.as_ref() }, found.get_mut(count)) {
+        next = answer.ai_next.cast_const();
+        if let Some(at) = answered_address(answer, name.port()) {
+            *place = at;
+            // `count` names a place of `found`, so the sum does not wrap.
+            count = count.wrapping_add(1);
         }
     }
-
-    /// The next address of the list, at `port`, past each answer of a family other than the two:
-    /// `None` once none is left. The resolver was asked for no service, so an answer names no
-    /// port, and the one the name is dialled at is written in.
-    #[inline(never)]
-    pub(crate) fn next_at(&mut self, port: u16) -> Option<SocketAddr> {
-        // SAFETY: `next` is null or an answer of the list, live until the list is freed.
-        while let Some(answer) = unsafe { self.next.as_ref() } {
-            self.next = answer.ai_next.cast_const();
-            if let Some(at) = answered_address(answer, port) {
-                return Some(at);
-            }
-        }
-        None
-    }
-}
-
-impl Drop for Resolved {
-    fn drop(&mut self) {
-        if !self.list.is_null() {
-            // SAFETY: `list` is the list the resolver made, freed once, here, and nothing read of
-            // it is held.
-            unsafe { ws::freeaddrinfo(self.list) };
-        }
-    }
+    // SAFETY: `answers` is the list the call made, freed once, and nothing read of it is held.
+    unsafe { ws::freeaddrinfo(answers) };
+    count
 }
 
 /// The address of one answer of the resolver, at `port`; `None` for a family other than the two.

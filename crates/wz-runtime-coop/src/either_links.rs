@@ -236,17 +236,15 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     const IPV6: bool = A::IPV6 || B::IPV6;
 
     // A name is resolved by the chosen stack, so either may answer it; the chosen one that has no
-    // resolver refuses it.
+    // resolver answers none.
     const RESOLVES: bool = A::RESOLVES || B::RESOLVES;
 
-    fn begin_named(
+    fn resolve(
         &self,
         name: &crate::locator_text::NamedHost<'_>,
-    ) -> Result<Self::Dial, LinkOpenError> {
-        match self {
-            Self::Left(links) => links.begin_named(name).map(EitherDial::Left),
-            Self::Right(links) => links.begin_named(name).map(EitherDial::Right),
-        }
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        on_side!(EitherLinks, self, links => links.resolve(name, found))
     }
 
     type Waits = EitherWaits<A::Waits, B::Waits>;

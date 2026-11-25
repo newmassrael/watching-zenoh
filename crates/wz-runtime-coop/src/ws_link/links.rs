@@ -470,18 +470,12 @@ where
     // A name is resolved by the network the stack's IP links are opened on.
     const RESOLVES: bool = S::RESOLVES;
 
-    // A `ws/` host is refused: its request names the address it reached
-    // (`send_request`), which a dial of a name has not chosen when the request is made.
-    fn begin_named(
+    fn resolve(
         &self,
         name: &crate::locator_text::NamedHost<'_>,
-    ) -> Result<Self::Dial, LinkOpenError> {
-        match name.link() {
-            crate::locator_text::NamedLink::Ws => Err(LinkOpenError::Unsupported),
-            crate::locator_text::NamedLink::Ip(_) => {
-                self.links.begin_named(name).map(WsLinksDial::Links)
-            }
-        }
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        self.links.resolve(name, found)
     }
 
     type Waits = S::Waits;

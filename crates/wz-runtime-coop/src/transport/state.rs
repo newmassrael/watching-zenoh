@@ -43,6 +43,7 @@ use wz_session_core::unicast_rx::RouterLend;
 #[cfg(feature = "group")]
 use super::GroupRecord;
 use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
+use crate::dial::Begun;
 use crate::executor::SpawnRefusal;
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
@@ -55,7 +56,6 @@ use crate::group_transport::GroupTransport;
 use crate::link_cells::{CellRc, CountKind, OneTask};
 #[cfg(feature = "listen")]
 use crate::locator_text::parse_listen_locator;
-use crate::locator_text::{read_dial_target, DialRefused, DialTarget};
 use crate::reassembly_rx::SessionReassembly;
 use crate::session_drive::{
     place_session_with_router, spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink,
@@ -412,34 +412,18 @@ impl<T: TransportFaces> TransportState<T> {
         }
     }
 
-    /// Begin a dial of `endpoint`, which the network answers later: of the address it names
-    /// (`SessionLinks::begin_initiator`), or of the host it names (`SessionLinks::begin_named`),
-    /// whose addresses the stack's own dial resolves and tries in turn, so the dial is one dial
-    /// here either way. [`TransportRefusal::Unreachable`] when the endpoint does not parse, names
-    /// a host over a network with no resolver ([`DialRefused::NoResolver`]), or the network
-    /// refuses the dial at once. Out of line: the dial role and a face added by the program each
-    /// begin a dial.
+    /// Begin a dial of `endpoint`, which the network answers later: of the address it names, or of
+    /// a host it names at the addresses the network resolves it to, the one dial of every
+    /// endpoint (`crate::dial::begin`). [`TransportRefusal::Unreachable`] when the endpoint does
+    /// not parse, names a host no dial of a name reaches over these links, or the network refuses
+    /// the dial at once. Out of line: the dial role and a face added by the program each begin a
+    /// dial.
     #[inline(never)]
-    pub fn begin_dial(&self, endpoint: &str) -> Result<DialOf<T>, TransportRefusal> {
+    pub fn begin_dial(&self, endpoint: &str) -> Result<Begun<DialOf<T>>, TransportRefusal> {
         // Each refusal is the endpoint's, made in one place: the text and the cause are written
         // into the answer once, whichever step refused.
-        let why = match read_dial_target(endpoint) {
-            Ok(DialTarget::At(to)) => match self.links.begin_dial(to) {
-                Ok(dial) => return Ok(dial),
-                Err(refused) => Refusal::Link(refused),
-            },
-            Ok(DialTarget::Named(_)) if !<T::Links as SessionLinks<CountOf<T>>>::RESOLVES => {
-                Refusal::Locator(DialRefused::NoResolver)
-            }
-            Ok(DialTarget::Named(name)) => match self.links.begin_named(&name) {
-                Ok(dial) => return Ok(dial),
-                Err(refused) => Refusal::Link(refused),
-            },
-            Err(refused) => Refusal::Locator(refused),
-        };
-        Err(TransportRefusal::Unreachable(EndpointRefusal::new(
-            endpoint, why,
-        )))
+        crate::dial::begin::<CountOf<T>, T::Links>(endpoint, self.links.links())
+            .map_err(|why| TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, why)))
     }
 
     /// The text of the endpoint a dial reaches: the session's, by its row, or the one the dial
@@ -905,8 +889,8 @@ impl<T: TransportFaces> TransportState<T> {
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn dial_row(&mut self, at: usize, row: usize) -> Result<AnswerOf<T>, TransportRefusal> {
-        let pending = self.begin_dial(self.endpoints.dial_text(row))?;
-        Ok(self.links.ask_dial(at, DialEndpoint::Listed(row), pending))
+        let begun = self.begin_dial(self.endpoints.dial_text(row))?;
+        Ok(self.links.ask_dial(at, DialEndpoint::Listed(row), begun))
     }
 
     /// The link a dial of `endpoint` answered with, or why it is none: the endpoint and the

@@ -202,16 +202,16 @@ pub trait DatagramSocket: Sized {
     /// resolver is refused where the endpoint is read, and an image over one carries no resolver.
     const RESOLVES: bool = false;
 
-    /// The first address the platform's resolver answers for the host `name`, at its port: where
-    /// a `udp/` dial of the host opens its link, a datagram link having no connection whose
-    /// refusal would pass it to the next. `None` when the resolver answers none or fails, and on
-    /// a platform without one ([`Self::RESOLVES`]). The name is one
-    /// `crate::locator_text::read_dial_target` read, so a resolver is handed it whole, with no
-    /// byte a C string would end at. It blocks for as long as the resolver takes, so a link's
-    /// dial asks it as it begins and nothing on a link's way does.
-    fn resolve(name: &crate::locator_text::NamedHost<'_>) -> Option<SocketAddr> {
-        let _ = name;
-        None
+    /// The addresses the host `name` stands for on the platform's network, each at its port,
+    /// written to the front of `found` in the order the platform's resolver answers them: how
+    /// many. `0` when the resolver answers none or fails, and on a platform without one
+    /// ([`Self::RESOLVES`]). The name is one `crate::locator_text::read_dial_target` read, so a
+    /// resolver is handed it whole, with no byte a C string would end at. It blocks for as long
+    /// as the resolver takes, so a link's dial asks it as it begins and nothing on a link's way
+    /// does.
+    fn resolve(name: &crate::locator_text::NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
+        let _ = (name, found);
+        0
     }
 }
 
@@ -307,8 +307,8 @@ impl<U: DatagramSocket> DatagramSocket for NoDatagramOf<U> {
     // The platform resolves a name for the stack's other links, as its waits wait on them.
     const RESOLVES: bool = U::RESOLVES;
 
-    fn resolve(name: &crate::locator_text::NamedHost<'_>) -> Option<SocketAddr> {
-        U::resolve(name)
+    fn resolve(name: &crate::locator_text::NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
+        U::resolve(name, found)
     }
 
     fn local(&self) -> SocketAddr {

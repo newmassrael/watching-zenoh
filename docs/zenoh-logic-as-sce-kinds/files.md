@@ -484,6 +484,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/app_link.rs` | S12 | |
 | `crates/wz-runtime-coop/src/atomic.rs` | S5 | |
 | `crates/wz-runtime-coop/src/cs.rs` | S5 | |
+| `crates/wz-runtime-coop/src/dial.rs` | S5 | |
 | `crates/wz-runtime-coop/src/either_links.rs` | S5 | |
 | `crates/wz-runtime-coop/src/executor.rs` | S5 | |
 | `crates/wz-runtime-coop/src/face_send.rs` | S5 | |
