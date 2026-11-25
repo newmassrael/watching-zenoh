@@ -62,7 +62,9 @@ use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundRows};
 use crate::RowPolicy;
 use wz_capi_port::reach::{ReachEngine, RowClaim};
 use wz_runtime_coop::kept::Shared;
-use wz_session_core::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::bounded::Arena;
+use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::key_arena::KeyRef;
@@ -229,12 +231,17 @@ mod registry;
 use crate::region::{RegionBlock, RegionField, StateRegion};
 #[cfg(not(feature = "runtime-plan"))]
 pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
+// The values the state owns and its tasks reach by handles, as fields of the region.
+#[cfg(not(feature = "runtime-plan"))]
+mod state_places;
 pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(any(feature = "listen", feature = "group"))]
 pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
+#[cfg(not(feature = "runtime-plan"))]
+pub(crate) use state_places::StatePlaces;
 
 /// How the session's state holds its registry: by value where the open lent its tables from the
 /// arena, and by the handle of the field of the session's region where the build laid it out
@@ -883,18 +890,30 @@ fn lend_session(
     // What the gets share: placed here, so the round is told whose legs' callbacks its replies'
     // records hold counts of before it is shared.
     #[cfg(feature = "query")]
+    let get_plane = GetPlane::new(EndedLegs::over(legs), held_replies, LegRows::over(leg_rows));
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     let gets = arena
         .arena_mut()
-        .place(GetPlane::new(
-            EndedLegs::over(legs),
-            held_replies,
-            LegRows::over(leg_rows),
-        ))
+        .place(get_plane)
         .map_err(ArenaRefused::Lend)?;
-    // The round lies in the arena beside its tables, owned by the session's state and reached by
-    // handles that count nothing.
+    // The plane, the round, the step places and the queryables' plane lie in the region where the
+    // build fixes the session's shape, each in a field of it no other owner reaches.
+    // SAFETY: the region was placed above, and nothing reaches its places' fields but this open,
+    // which writes each once; the block is held after every owner written in it (`SessionLent`,
+    // then `Core`), and neither moves nor goes back before them.
+    #[cfg(not(feature = "runtime-plan"))]
+    let region_places = unsafe { StateRegion::places_at(state.as_ptr()) };
+    // SAFETY: as above, for the gets' field.
+    #[cfg(all(feature = "query", not(feature = "runtime-plan")))]
+    let gets = unsafe { StatePlaces::gets(region_places, get_plane) };
+    // The round lies beside its tables, owned by the session's state and reached by handles that
+    // count nothing.
+    #[cfg(feature = "runtime-plan")]
     let mut samples =
         Round::placed_over(arena.arena_mut(), round_rows).map_err(ArenaRefused::Lend)?;
+    // SAFETY: as above, for the round's field.
+    #[cfg(not(feature = "runtime-plan"))]
+    let mut samples = unsafe { StatePlaces::round(region_places, round_rows) };
     // No handle of the round is taken yet: it reads the keys a peer's aliases keep in the
     // session's key arena where they lie.
     let round = samples.get_mut();
@@ -907,17 +926,23 @@ fn lend_session(
         // then the plane is held where it was placed, by this value and then by the state.
         unsafe { round.calls_legs_of(legs) };
     }
+    #[cfg(feature = "runtime-plan")]
     let steps = StepPlaces::placed_in(arena.arena_mut()).map_err(ArenaRefused::Lend)?;
+    // SAFETY: as above, for the step places' fields.
+    #[cfg(not(feature = "runtime-plan"))]
+    let steps = unsafe { StatePlaces::steps(region_places) };
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
+    let query_plane = QueryPlane::over(query::FinalHolds::over(held_finals, refused_finals));
+    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     let plane = arena
         .arena_mut()
-        .place(QueryPlane::over(query::FinalHolds::over(
-            held_finals,
-            refused_finals,
-        )))
+        .place(query_plane)
         .map_err(ArenaRefused::Lend)?;
+    // SAFETY: as above, for the queryables' field.
+    #[cfg(all(feature = "queryable", not(feature = "runtime-plan")))]
+    let plane = unsafe { StatePlaces::queries(region_places, query_plane) };
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
     // owner changes the round no more.
@@ -1865,15 +1890,20 @@ type RegistryLend = StepLend<Registry, PlacedRef<LendCell<Registry>>>;
 type RouterPlace = PlacedRef<LendCell<SessionReassembly>>;
 
 /// The bytes of the place the session lends its registry in ([`RegistryLend`]).
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(all(
+    feature = "runtime-plan",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 pub(crate) const REGISTRY_LEND_BYTES: usize = core::mem::size_of::<LendCell<Registry>>();
 
 /// The bytes of the place the session lends its reassembly Router in ([`RouterPlace`]).
+#[cfg(feature = "runtime-plan")]
 pub(crate) const ROUTER_LEND_BYTES: usize = core::mem::size_of::<LendCell<SessionReassembly>>();
 
 /// The places the session lends its registry and its reassembly Router in for a pass of its
-/// tasks, each in the session's arena and reached through handles that count nothing: owned by
-/// [`Core`], after every holder of a handle of them.
+/// tasks, each in the session's arena, or in its region where the build fixes its shape
+/// (`StatePlaces::steps`), and reached through handles that count nothing: owned by [`Core`],
+/// after every holder of a handle of them.
 struct StepPlaces {
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     registry: Placed<LendCell<Registry>>,
@@ -1882,6 +1912,7 @@ struct StepPlaces {
 
 impl StepPlaces {
     /// Both places, nothing lent in either, placed in `arena`. Refused past what it has left.
+    #[cfg(feature = "runtime-plan")]
     fn placed_in(arena: &mut Arena) -> Result<Self, LendRefused> {
         Ok(Self {
             #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -3086,11 +3117,11 @@ fn as_link_admission<C: ClockSource + 'static>(
 /// reach by handles that count nothing, each where its feature is ([`ArenaPlan::holding_planes`]).
 #[derive(Clone, Copy)]
 pub(crate) struct SessionPlanes {
-    /// The queryables' plane (`QueryPlane`).
-    #[cfg(feature = "queryable")]
+    /// The queryables' plane (`QueryPlane`), in the arena where the open lays it out.
+    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     pub(crate) queries: usize,
-    /// The gets' plane (`GetPlane`).
-    #[cfg(feature = "query")]
+    /// The gets' plane (`GetPlane`), in the arena where the open lays it out.
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     pub(crate) gets: usize,
     /// The plane of the watchers of the faces (`FacePlane`).
     #[cfg(feature = "connectivity")]
@@ -3100,9 +3131,9 @@ pub(crate) struct SessionPlanes {
 impl SessionPlanes {
     /// This build's planes.
     pub(crate) const OF_BUILD: Self = Self {
-        #[cfg(feature = "queryable")]
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         queries: core::mem::size_of::<QueryPlane>(),
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         gets: core::mem::size_of::<GetPlane>(),
         #[cfg(feature = "connectivity")]
         faces: core::mem::size_of::<FacePlane>(),

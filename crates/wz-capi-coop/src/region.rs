@@ -22,7 +22,7 @@ use wz_session_core::key_arena::{place_region, KeyArena, KeySpace};
 use wz_session_core::limits::SessionLimits;
 
 use crate::arena::{ArenaMemory, ArenaRefused, ArenaRegion};
-use crate::engine::{RegistryRegion, REGISTRY_REGION_LINES};
+use crate::engine::{RegistryRegion, StatePlaces, REGISTRY_REGION_LINES};
 use crate::open_source::EndpointList;
 use crate::CoopConfig;
 
@@ -140,10 +140,13 @@ pub const STATE_REGION_LINES: usize = REGISTRY_REGION_LINES;
 /// drops it first.
 pub struct StateRegion {
     registry: RegistryRegion,
+    /// The values the state owns and its tasks reach by handles: its round, its planes and its
+    /// step places, written by the open (`StatePlaces`), none of them laid out over rows here.
+    places: StatePlaces,
     keys: KeyArena<{ caps::KEY_ARENA_BYTES }>,
 }
 
-// SAFETY: the registry's region and the key arena are `ZeroEmpty`.
+// SAFETY: the registry's region, the places and the key arena are `ZeroEmpty`.
 unsafe impl ZeroEmpty for StateRegion {}
 
 impl StateRegion {
@@ -200,6 +203,15 @@ impl StateRegion {
         // SAFETY: the caller's contract: a field of a region that lies at a pointer that is not
         // null is not null either.
         unsafe { NonNull::new_unchecked(addr_of_mut!((*region.as_ptr()).registry)) }
+    }
+
+    /// Where the places of the state's own values in the region at `region` lie.
+    ///
+    /// # Safety
+    /// `region` points at a `StateRegion`.
+    pub(crate) unsafe fn places_at(region: NonNull<Self>) -> NonNull<StatePlaces> {
+        // SAFETY: as `registry_at`.
+        unsafe { NonNull::new_unchecked(addr_of_mut!((*region.as_ptr()).places)) }
     }
 }
 

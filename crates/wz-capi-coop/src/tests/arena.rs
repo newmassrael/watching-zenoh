@@ -748,8 +748,10 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
 
 /// The plan lays out no delivery area: every record is read where it lies, so the plan has no lane
 /// and no flag of one, and the round's tables are laid out next to each other, the round itself
-/// after them, one of it. Turned red by a plan that reserves the area again, or that lays out no
-/// place for the round the open places in the arena (`lend_session`).
+/// after them, one of it where the open places the round in the arena, none where the build fixes
+/// the session's shape and the round lies in its region (`StatePlaces`). Turned red by a plan that
+/// reserves the area again, that lays out no place for the round the open places in the arena
+/// (`lend_session`), or one for the round the region holds.
 #[test]
 fn the_plan_lays_out_no_delivery_lane() {
     let built =
@@ -762,35 +764,47 @@ fn the_plan_lays_out_no_delivery_lane() {
         .position(|part| *part == "delivery records")
         .expect("CONTROL: the round's tables are laid out");
     assert_eq!(
-        parts[records..records + 4],
-        [
-            "delivery records",
-            "delivery callbacks",
-            "delivery keys",
-            "delivery round"
-        ]
+        parts[records..records + 3],
+        ["delivery records", "delivery callbacks", "delivery keys"]
     );
-    let round = row(&built, "delivery round");
-    assert_eq!(
-        (round.count, round.entry_bytes),
-        (1, core::mem::size_of::<crate::round::Round>())
-    );
+    #[cfg(feature = "runtime-plan")]
+    {
+        assert_eq!(parts.get(records + 3), Some(&"delivery round"));
+        let round = row(&built, "delivery round");
+        assert_eq!(
+            (round.count, round.entry_bytes),
+            (1, core::mem::size_of::<crate::round::Round>())
+        );
+    }
+    #[cfg(not(feature = "runtime-plan"))]
+    assert!(!parts.contains(&"delivery round"));
 }
 
 /// The plan lays out one place for each step lend the open places in the arena
 /// (`crate::engine::StepPlaces`): the registry's and the reassembly Router's, a cell each, and no
-/// registry's where the read steps its one link itself and dispatches under the session's lock.
-/// Turned red by a plan that leaves a lend out, whose open would place it past what the arena has,
-/// or that reserves one the open never places, which lending every row would leave empty.
+/// registry's where the read steps its one link itself and dispatches under the session's lock;
+/// none where the build fixes the session's shape and the places lie in its region
+/// (`StatePlaces::steps`). Turned red by a plan that leaves a lend out, whose open would place it
+/// past what the arena has, or that reserves one the open never places, which lending every row
+/// would leave empty.
 #[test]
 fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(any(
+        not(feature = "runtime-plan"),
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
     assert!(
         built.rows().all(|row| row.part() != "registry lend"),
-        "a read that steps its one link lends no registry"
+        "a read that steps its one link, or a region, lends no registry from the arena"
     );
+    #[cfg(not(feature = "runtime-plan"))]
+    assert!(
+        built.rows().all(|row| row.part() != "router lend"),
+        "the region holds the Router's place"
+    );
+    #[cfg(feature = "runtime-plan")]
     for (part, bytes) in [
         #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         ("registry lend", crate::engine::REGISTRY_LEND_BYTES),

@@ -148,11 +148,14 @@ use crate::engine::LegHold;
 use crate::engine::LegSink;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(all(
+    feature = "runtime-plan",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 use crate::engine::REGISTRY_LEND_BYTES;
+use crate::engine::ROOM_PLACE_BYTES;
 #[cfg(feature = "runtime-plan")]
-use crate::engine::{CoopTables, FACE_SET_BYTES};
-use crate::engine::{ROOM_PLACE_BYTES, ROUTER_LEND_BYTES};
+use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
 use crate::open_source::EndpointList;
 use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -465,11 +468,18 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The round's records, the callbacks they owe, its keys and the round itself: the round keeps no
-/// area, since every record is read where it lies.
-const LANE_ROWS: usize = 4;
-/// The places the session lends its registry and its reassembly Router in for a step.
-const STEP_LEND_ROWS: usize = 2;
+/// The round's records, the callbacks they owe, its keys and, where the open places it in the
+/// arena (`runtime-plan`), the round itself: the round keeps no area, since every record is read
+/// where it lies.
+const LANE_ROWS: usize = 3 + cfg!(feature = "runtime-plan") as usize;
+/// The places the session lends its Router and, where its links run as tasks, its registry in for
+/// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
+const STEP_LEND_ROWS: usize = cfg!(feature = "runtime-plan") as usize
+    * (1 + cfg!(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group"
+    )) as usize);
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
@@ -480,29 +490,33 @@ const PORT_RX_ROWS: usize = 4 * cfg!(feature = "listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
 const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
-/// The application's tables apart from the session's one table set: the declaration watchers.
-const OBSERVER_ROWS: usize = 1;
-/// The pending gets, the ends of their legs, the legs' callbacks, the session's note of each leg
-/// pending and the replies the gets that consolidate hold, all of a build that asks (`query`): one
-/// that asks nothing holds no table of gets.
-const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
-/// The faces' sets, and the index of the held ones where the build takes faces beside its dial
-/// role's (`TAKES_FACES`): a session of that face alone knows it holds the first set.
-const FACE_ROWS: usize = 1 + TAKES_FACES as usize;
+/// The application's tables apart from the session's one table set: the declaration watchers,
+/// where the arena lends them (`runtime-plan`).
+const OBSERVER_ROWS: usize = cfg!(feature = "runtime-plan") as usize;
+/// The ends of the legs, the legs' callbacks, the session's note of each leg pending, the replies
+/// the gets that consolidate hold and, where the arena lends them (`runtime-plan`), the pending
+/// gets, all of a build that asks (`query`): one that asks nothing holds no table of gets.
+const GET_ROWS: usize =
+    (4 + cfg!(feature = "runtime-plan") as usize) * cfg!(feature = "query") as usize;
+/// The faces' sets where the arena lends them (`runtime-plan`), and the index of the held ones
+/// where the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face
+/// alone knows it holds the first set.
+const FACE_ROWS: usize = cfg!(feature = "runtime-plan") as usize + TAKES_FACES as usize;
 /// The faces' rooms, laid out at the open ([`ArenaPlan::holding_rooms`]), and their places, one
 /// for each set of face tables.
 const ROOM_ROWS: usize = 2;
-/// The peers' tables, and the pools their rows lie in where the faces share them.
-const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
+/// The peers' tables, and the pools their rows lie in where the faces share them, where the arena
+/// lends them (`runtime-plan`).
+const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize * (1 + 3 * SHARES_ROWS as usize);
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
 /// session whose faces share their pools, so counted where a build shares them at all.
 const OWED_ROWS: usize = (cfg!(all(
     feature = "liveliness",
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
-/// The session's declarations ([`ArenaPlan::put_entities`]): the session's one table set and the
-/// key arena.
-const ENTITY_ROWS: usize = 2;
+/// The session's declarations, the session's one table set and the key arena, where the arena
+/// lends them (`runtime-plan`; `ArenaPlan::put_entities`).
+const ENTITY_ROWS: usize = 2 * cfg!(feature = "runtime-plan") as usize;
 /// The links' cells, their gates', their sessions' actions' and the halves those hold, each a
 /// table of flags and cells ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 8;
@@ -565,9 +579,10 @@ const RUNTIME_ROWS: usize = 2;
 /// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
 const ENGINE_STATE_ROWS: usize = 1;
 /// The planes the session's queryables, gets and watchers of its faces share, each where its
-/// feature is ([`ArenaPlan::holding_planes`]).
-const PLANE_ROWS: usize = cfg!(feature = "queryable") as usize
-    + cfg!(feature = "query") as usize
+/// feature is ([`ArenaPlan::holding_planes`]); the first two where the arena holds them
+/// (`runtime-plan`).
+const PLANE_ROWS: usize = cfg!(feature = "runtime-plan") as usize
+    * (cfg!(feature = "queryable") as usize + cfg!(feature = "query") as usize)
     + cfg!(feature = "connectivity") as usize;
 /// The admission the links of a session that listens ask while their handshakes run
 /// (`ArenaPlan::holding_admission`).
@@ -1764,7 +1779,9 @@ impl ArenaPlan {
             self.session.round.key_bytes::<CoopForm>(),
         );
         // The round itself, placed beside its tables (`Round::placed_over`): its one owner and
-        // the handles of it that count nothing.
+        // the handles of it that count nothing. Where the build fixes the session's shape the round
+        // and the step places below lie in the session's region instead (`StatePlaces`).
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::DeliveryRound,
             1,
@@ -1773,8 +1790,12 @@ impl ArenaPlan {
         // The places the session lends its registry and its Router in for a step, a place each
         // (`crate::engine::StepPlaces`); a read that steps its one link itself dispatches under the
         // session's lock and lends no registry.
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(all(
+            feature = "runtime-plan",
+            any(feature = "threads", feature = "listen", feature = "group")
+        ))]
         self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
+        #[cfg(feature = "runtime-plan")]
         self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
         self.put_table(
@@ -2357,9 +2378,11 @@ impl ArenaPlan {
         &mut self,
         planes: crate::engine::SessionPlanes,
     ) -> Result<(), ArenaRefused> {
-        #[cfg(feature = "queryable")]
+        // Where the build fixes the session's shape these two lie in its region
+        // (`crate::engine::StatePlaces`).
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         self.put(ArenaPart::GetPlaneState, 1, planes.gets);
         #[cfg(feature = "connectivity")]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
