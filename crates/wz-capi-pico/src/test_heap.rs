@@ -19,10 +19,12 @@ std::thread_local! {
 }
 
 /// Every allocation of the calling thread while `run` runs, counted: read by the tests of a
-/// session's doors, on the tokio engine and on the cooperative one with threads.
+/// session's doors, on the tokio engine through the connectivity plane's tests and on the
+/// cooperative one with threads by the kept query's, so it is built where one of them is.
 #[cfg(any(
-    feature = "engine-tokio",
+    all(feature = "engine-tokio", feature = "connectivity"),
     all(
+        not(feature = "engine-tokio"),
         feature = "std",
         feature = "peer",
         feature = "query",
@@ -44,7 +46,19 @@ pub(crate) fn refused<R>(run: impl FnOnce() -> R) -> R {
     answer
 }
 
-/// The test binary's allocator ([`allocations`], [`refused`]).
+/// `run`'s answer, what the calling thread allocates while it runs neither refused nor counted:
+/// the test binary's own reading of how it is run, which is no allocation of a door under test.
+#[cfg(wz_process_pools)]
+pub(crate) fn uncounted<R>(run: impl FnOnce() -> R) -> R {
+    let was_refusing = REFUSING.with(|refusing| refusing.replace(false));
+    let was_counting = COUNTING.with(Cell::take);
+    let answer = run();
+    COUNTING.with(|count| count.set(was_counting));
+    REFUSING.with(|refusing| refusing.set(was_refusing));
+    answer
+}
+
+/// The test binary's allocator ([`allocations`], [`refused`], [`uncounted`]).
 struct TestHeap;
 
 // SAFETY: every call is the system allocator's, with the arguments it was given, or a refusal

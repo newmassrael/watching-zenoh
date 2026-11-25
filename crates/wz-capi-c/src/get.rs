@@ -44,14 +44,14 @@ use crate::abi::{
 use crate::bytes::{BytesState, Payload};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
-#[cfg(feature = "router-node")]
-use crate::result::Z_EUNAVAILABLE;
-use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
 use crate::sample::{sample_kind_of, SampleMarshal};
 use crate::session::{session_handle, SessionHandle};
 use crate::statement::QueryStatement;
 
+use wz_capi_core::cancellation::{register_fan, CancellableFan, CancellationToken};
 use wz_capi_core::faces::SharedSession;
+use wz_capi_port::lodge::Strong;
 
 /// The Rust-side wrapper a get's per-face reply callbacks share.
 pub(crate) type CReplyClosure = FfiClosure<z_closure_reply_callback_t>;
@@ -223,9 +223,7 @@ pub struct z_get_options_t {
 /// # Safety
 /// `options` must be null or a valid get-options struct.
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-unsafe fn take_get_token(
-    options: *mut z_get_options_t,
-) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+unsafe fn take_get_token(options: *mut z_get_options_t) -> Option<CancelToken> {
     if options.is_null() {
         return None;
     }
@@ -238,9 +236,7 @@ unsafe fn take_get_token(
 /// # Safety
 /// `options` is unused; the signature matches the sibling above.
 #[cfg(feature = "zenoh-c-no-unstable-api")]
-unsafe fn take_get_token(
-    _options: *mut z_get_options_t,
-) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+unsafe fn take_get_token(_options: *mut z_get_options_t) -> Option<CancelToken> {
     None
 }
 
@@ -1064,7 +1060,7 @@ pub(crate) fn issue_get(
     opts: QueryOptions,
     value: crate::bytes::ValueChunk,
     closure: Arc<CReplyClosure>,
-    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
+    token: Option<CancelToken>,
 ) -> ZResult {
     // R2949 — the cancellation is registered BEFORE any leg is issued, which is
     // upstream's ordering (`register_query_cancellation` runs before the query
@@ -1073,14 +1069,9 @@ pub(crate) fn issue_get(
     // (`zenoh/src/api/session.rs` @ `bail!("Query was cancelled")`), which
     // zenoh-c reports as `Z_EGENERIC`. `closure` drops on that return, so the C
     // `drop(context)` still reports the get over.
-    let fan = match &token {
-        None => None,
-        Some(token) => {
-            let Some(fan) = wz_capi_core::cancellation::register_fan(token) else {
-                return crate::result::Z_EGENERIC;
-            };
-            Some(fan)
-        }
+    let fan = match register_on(token.as_ref()) {
+        Ok(fan) => fan,
+        Err(refusal) => return refusal,
     };
     let anyke = parameters
         .as_deref()
@@ -1192,6 +1183,26 @@ pub(crate) fn with_promoted_value(
     (opts, promoted)
 }
 
+/// A token a get was handed, one count of the token both C ABIs share.
+pub(crate) type CancelToken = Strong<CancellationToken>;
+
+/// A get's registration on `token`, made before any of its legs is issued: none without a token,
+/// the fan its legs share with one. A token whose cancel has started fails the get with
+/// `Z_EGENERIC`, upstream's "Query was cancelled", and a heap with no room for the fan with
+/// `Z_EUNAVAILABLE`.
+pub(crate) fn register_on(
+    token: Option<&CancelToken>,
+) -> Result<Option<Strong<CancellableFan>>, ZResult> {
+    let Some(token) = token else {
+        return Ok(None);
+    };
+    match register_fan(token) {
+        Ok(Some(fan)) => Ok(Some(fan)),
+        Ok(None) => Err(crate::result::Z_EGENERIC),
+        Err(_) => Err(Z_EUNAVAILABLE),
+    }
+}
+
 /// R2949 — what one leg's reply callback owns: the C closure, the reply gate,
 /// and the get's fan, which is its registration on its token, dropped in that
 /// order (fields drop in declaration order, so a `cancel` waiting on the fan
@@ -1205,7 +1216,7 @@ pub(crate) fn with_promoted_value(
 pub(crate) struct LegReply {
     pub(crate) closure: Arc<CReplyClosure>,
     pub(crate) gate: Arc<ReplyGate>,
-    pub(crate) _fan: Option<Arc<wz_capi_core::cancellation::CancellableFan>>,
+    pub(crate) _fan: Option<Strong<CancellableFan>>,
 }
 
 impl LegReply {
@@ -1536,16 +1547,11 @@ pub(crate) fn issue_get_on_node(
     opts: QueryOptions,
     value: crate::bytes::ValueChunk,
     closure: Arc<CReplyClosure>,
-    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
+    token: Option<CancelToken>,
 ) -> ZResult {
-    let fan = match &token {
-        None => None,
-        Some(token) => {
-            let Some(fan) = wz_capi_core::cancellation::register_fan(token) else {
-                return crate::result::Z_EGENERIC;
-            };
-            Some(fan)
-        }
+    let fan = match register_on(token.as_ref()) {
+        Ok(fan) => fan,
+        Err(refusal) => return refusal,
     };
     let anyke = parameters
         .as_deref()

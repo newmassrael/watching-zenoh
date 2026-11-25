@@ -239,6 +239,49 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, Lent> {
     }
 }
 
+/// The rows of a [`DeclObserverPair`] of the region policy, which a region lays out beside it:
+/// each list's, at the build's bound.
+pub struct DeclObserverRows<D, U> {
+    on_decl: [core::mem::MaybeUninit<KeyedSink<D>>; caps::MAX_DECL_OBSERVERS],
+    on_undecl: [core::mem::MaybeUninit<KeyedSink<U>>; caps::MAX_DECL_OBSERVERS],
+}
+
+// SAFETY: both lists' rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl<D, U> crate::bounded::ZeroEmpty for DeclObserverRows<D, U> {}
+
+/// The lines a region's description holds for one [`DeclObserverPair`] of the region policy: its
+/// two lists' rows.
+pub const DECL_OBSERVER_LINES: usize = 2;
+
+// SAFETY: of the region policy, at all zero bytes: each list is a `LentSeq` of no rows, the quota a
+// `Limited` (`ZeroEmpty`) admitting nothing until the session states it, and the id source zero.
+// Nothing drops a value, each list holding none.
+unsafe impl<D: DeclSink, U: UndeclSink> crate::bounded::ZeroEmpty
+    for DeclObserverPair<D, U, crate::bounded::Region>
+{
+}
+
+impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, crate::bounded::Region> {
+    /// The description of a pair of the region policy at `at` in a region and its
+    /// [`DeclObserverRows`] at `rows`: the lines of its two lists' rows.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<DECL_OBSERVER_LINES> {
+        crate::bounded::RegionLines::EMPTY
+            .seq(crate::bounded::SeqPlace::of::<KeyedSink<D>>(
+                at.wrapping_add(core::mem::offset_of!(Self, on_decl)),
+                rows.wrapping_add(core::mem::offset_of!(DeclObserverRows<D, U>, on_decl)),
+                caps::MAX_DECL_OBSERVERS,
+            ))
+            .seq(crate::bounded::SeqPlace::of::<KeyedSink<U>>(
+                at.wrapping_add(core::mem::offset_of!(Self, on_undecl)),
+                rows.wrapping_add(core::mem::offset_of!(DeclObserverRows<D, U>, on_undecl)),
+                caps::MAX_DECL_OBSERVERS,
+            ))
+    }
+}
+
 impl<D: DeclSink, U: UndeclSink, P: Storage> DeclObserverPair<D, U, P> {
     /// Hold each list to the `MAX_DECL_OBSERVERS` its creator resolved: an install that would
     /// leave more observers in its list than `quota` admits is refused
@@ -740,5 +783,63 @@ mod tests {
             Pair::lent(&mut short, rows).is_err(),
             "an arena one byte short holds no pair"
         );
+    }
+
+    /// A pair of the region policy of all zero bytes holds no observer and admits none; placed by
+    /// its two lines beside its rows and held to the build's quota, it takes the build's observers
+    /// in each list and refuses one more. Turned red by `places` naming one list's rows for the
+    /// other, or by a zero quota that admits an observer.
+    #[test]
+    fn a_region_pair_of_zero_bytes_placed_by_its_lines_holds_the_builds_observers() {
+        use crate::bounded::{Region, ZeroEmpty};
+        type Pair = DeclObserverPair<CountingDeclSink, CountingUndeclSink, Region>;
+        #[repr(C)]
+        struct OnePair {
+            pair: Pair,
+            rows: DeclObserverRows<CountingDeclSink, CountingUndeclSink>,
+        }
+        // SAFETY: both fields are `ZeroEmpty`.
+        unsafe impl ZeroEmpty for OnePair {}
+        const LINES: crate::bounded::RegionLines<DECL_OBSERVER_LINES> = Pair::places(
+            core::mem::offset_of!(OnePair, pair),
+            core::mem::offset_of!(OnePair, rows),
+        );
+        let layout = std::alloc::Layout::new::<OnePair>();
+        // SAFETY: the layout is of a type of some bytes.
+        let block = unsafe { std::alloc::alloc_zeroed(layout) };
+        let region = core::ptr::NonNull::new(block).expect("the test allocator answers");
+        // SAFETY: the zeroed block is a `OnePair`, every field of which is empty at zero bytes.
+        let one = unsafe { &mut *block.cast::<OnePair>() };
+        assert_eq!((one.pair.decl_len(), one.pair.undecl_len()), (0, 0));
+        assert!(
+            one.pair.install_decl(CountingDeclSink::default()).is_err(),
+            "a pair placed no rows admits nothing"
+        );
+        // SAFETY: the lines name the pair's two lists and the rows beside them, aligned, which
+        // nothing but the pair reaches.
+        unsafe { crate::bounded::place_seqs(region, LINES.seq_lines()) };
+        one.pair
+            .limit_to(crate::limits::SessionLimits::BUILD.max_decl_observers_held());
+        for _ in 0..caps::MAX_DECL_OBSERVERS {
+            one.pair
+                .install_decl(CountingDeclSink::default())
+                .expect("within the rows");
+            one.pair
+                .install_undecl(CountingUndeclSink::default())
+                .expect("within the rows");
+        }
+        assert!(one.pair.install_decl(CountingDeclSink::default()).is_err());
+        assert!(one
+            .pair
+            .install_undecl(CountingUndeclSink::default())
+            .is_err());
+        let held = caps::MAX_DECL_OBSERVERS;
+        assert_eq!((one.pair.decl_len(), one.pair.undecl_len()), (held, held));
+        // SAFETY: the pair is dropped once, in place, dropping the observers its rows hold; the
+        // block goes back with its layout.
+        unsafe {
+            core::ptr::drop_in_place(block.cast::<OnePair>());
+            std::alloc::dealloc(block, layout);
+        }
     }
 }

@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use wz_capi_port::told::{ToldKey, ToldPlane};
 use wz_capi_port::SessionEngine;
-use wz_session_core::face::FaceEventKind;
+use wz_session_core::face::{FaceEventKind, FaceSnapshot};
 use wz_session_core::link::LinkKind;
+use wz_session_core::link_life::LinkPhase;
 
 use super::{config, open, open_with, until, CatchAll, Command, CoopConfig, Router};
 
@@ -52,8 +53,9 @@ fn a_closed_session_refuses_a_face_watch() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     wz_capi_port::SessionDrive::close(&*engine);
-    let sink: wz_session_core::face::FaceEventSink = Arc::new(|_kind, _face| {});
-    let held = Arc::downgrade(&sink);
+    let watcher = Arc::new(|_: FaceEventKind, _: &FaceSnapshot| {});
+    let held = Arc::downgrade(&watcher);
+    let sink = wz_session_core::face::FaceEventSink::of_arc(watcher);
     assert_eq!(engine.watch_faces(sink), Err(wz_capi_port::Refusal::Closed));
     assert!(held.upgrade().is_none(), "the refused sink is let go of");
 }
@@ -75,14 +77,16 @@ fn a_watcher_is_told_of_the_face_lost_and_the_one_dialled_again() {
     let into = told.clone();
     let reach = engine.clone();
     let id = engine
-        .watch_faces(Arc::new(move |kind, face| {
-            into.lock().unwrap().push((
-                kind,
-                face.zid[0],
-                face.links.len(),
-                reach.face_snapshots().len(),
-            ));
-        }))
+        .watch_faces(wz_session_core::face::FaceEventSink::of_arc(Arc::new(
+            move |kind: FaceEventKind, face: &FaceSnapshot| {
+                into.lock().unwrap().push((
+                    kind,
+                    face.zid[0],
+                    face.links.len(),
+                    reach.face_snapshots().len(),
+                ));
+            },
+        )))
         .expect("an open session watches its faces");
     assert!(
         told.lock().unwrap().is_empty(),
@@ -100,6 +104,11 @@ fn a_watcher_is_told_of_the_face_lost_and_the_one_dialled_again() {
         [(FaceEventKind::Down, 0xc3, 1, 0)],
         "the face as it was, told with no face standing and the session free"
     );
+    assert!(
+        !matches!(engine.dial_phase(), Some(LinkPhase::Up | LinkPhase::Closed)),
+        "the life of the face lost walks its endpoints again: {:?}",
+        engine.dial_phase()
+    );
 
     let router = Router::start_on(port, CatchAll::None);
     until(&engine, "the link to be dialled again", || {
@@ -109,6 +118,11 @@ fn a_watcher_is_told_of_the_face_lost_and_the_one_dialled_again() {
         told.lock().unwrap()[1],
         (FaceEventKind::Up, 0xc3, 1, 1),
         "the face that came up stands by the time it is told"
+    );
+    assert_eq!(
+        engine.dial_phase(),
+        Some(LinkPhase::Up),
+        "the face told up stands on a life that is up"
     );
 
     assert!(engine.unwatch_faces(id));

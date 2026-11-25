@@ -436,6 +436,22 @@ impl<P: Storage> Default for RemoteQueryablePeer<P> {
     }
 }
 
+// SAFETY: of the region policy, at all zero bytes: the declared queryables are a `FixedIdMap` and
+// the repeated declarations a static sequence (both `ZeroEmpty`); the bounds are `Limited`
+// (`ZeroEmpty`), bounds of nothing until the session states them; the key arena handle is a
+// `LentKeys` of none; every count is zero and the epoch is no bytes.
+unsafe impl crate::bounded::ZeroEmpty for RemoteQueryablePeer<crate::bounded::Region> {}
+
+#[cfg(feature = "storage-profile")]
+impl RemoteQueryablePeer<crate::bounded::Region> {
+    /// Where a table of the region policy at `at` in a region keeps its handle to the region's key
+    /// arena: the line of a region's description
+    /// ([`place_region`](crate::key_arena::place_region)) that hands it the arena.
+    pub const fn key_line(at: usize) -> usize {
+        at.wrapping_add(core::mem::offset_of!(Self, keys))
+    }
+}
+
 impl RemoteQueryablePeer<Static> {
     /// A peer of the static policy that has declared nothing. `const`, so a session
     /// slot that holds one can be a `static`.
@@ -993,6 +1009,37 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U, Profile> {
     /// profile. Both observer lists start empty.
     pub fn with_sink_backing() -> Self {
         Self::default()
+    }
+}
+
+/// The lines a region's description holds for one [`RemoteQueryableTable`] of the region policy: its
+/// watchers'.
+pub const REMOTE_QUERYABLE_TABLE_LINES: usize = crate::decl_sink::DECL_OBSERVER_LINES;
+
+// SAFETY: of the region policy, at all zero bytes: the watchers are a `DeclObserverPair` of the
+// region policy (`ZeroEmpty`); the matching watches a `MatchingWatchList` of none (`ZeroEmpty`) or no
+// field at all. Nothing drops a value, every list holding none.
+unsafe impl<D: DeclSink, U: UndeclSink, M: MatchingReport> crate::bounded::ZeroEmpty
+    for RemoteQueryableTable<D, U, crate::bounded::Region, M>
+{
+}
+
+impl<D: DeclSink, U: UndeclSink, M: MatchingReport>
+    RemoteQueryableTable<D, U, crate::bounded::Region, M>
+{
+    /// The description of a table of the region policy at `at` in a region and its watchers'
+    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<REMOTE_QUERYABLE_TABLE_LINES> {
+        crate::bounded::RegionLines::EMPTY.with(
+            &DeclObserverPair::<D, U, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, observers)),
+                rows,
+            ),
+            0,
+        )
     }
 }
 

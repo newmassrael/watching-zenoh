@@ -182,13 +182,19 @@ pub fn face_reply(callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
     Box::new(move |reply: &dyn ReplyView| callback.call(reply))
 }
 
-/// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's.
-pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> LivelinessSink {
+/// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's, and
+/// what tells when it is let go of.
+pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> (LivelinessSink, SinkRelease) {
+    let (sink, release) = Released::new(sink);
     let sink = Arc::new(sink);
-    Arc::new(move || {
+    let factory: LivelinessSink = Arc::new(move || {
         let sink = Arc::clone(&sink);
-        Box::new(move |sample: LivelinessSample<'_>| sink.call(sample))
-    })
+        Box::new(move |sample: LivelinessSample<'_>| {
+            let _in_call = SampleCallGuard::enter();
+            sink.call(sample);
+        })
+    });
+    (factory, release)
 }
 
 /// Mints one subscriber callback per face: what this registry keeps for one C subscription, since
@@ -198,13 +204,103 @@ pub type SubscriberSink =
     Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
 
 /// The port's callback `sink` as a per-face factory: each face's callback calls the one sink
-/// through a shared borrow, and the sink is let go of with the last of them, after its last call.
-pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> SubscriberSink {
+/// through a shared borrow, and the sink is let go of with the last of them, after its last call;
+/// with it, what tells when that has happened ([`SinkRelease`]).
+pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> (SubscriberSink, SinkRelease) {
+    let (sink, release) = Released::new(sink);
     let sink = Arc::new(sink);
-    Arc::new(move || {
+    let factory: SubscriberSink = Arc::new(move || {
         let sink = Arc::clone(&sink);
-        Box::new(move |sample: &dyn SampleView| sink.call(sample))
-    })
+        Box::new(move |sample: &dyn SampleView| {
+            let _in_call = SampleCallGuard::enter();
+            sink.call(sample);
+        })
+    });
+    (factory, release)
+}
+
+/// A port's callback that says when it has been let go of: set after its drop has run, so a
+/// [`SinkRelease`] that reads it set reads a drop that is over, not one under way.
+struct Released<S> {
+    sink: core::mem::ManuallyDrop<S>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<S> Released<S> {
+    fn new(sink: S) -> (Self, SinkRelease) {
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = SinkRelease(Arc::clone(&done));
+        (
+            Self {
+                sink: core::mem::ManuallyDrop::new(sink),
+                done,
+            },
+            release,
+        )
+    }
+}
+
+impl<S> core::ops::Deref for Released<S> {
+    type Target = S;
+
+    fn deref(&self) -> &S {
+        &self.sink
+    }
+}
+
+impl<S> Drop for Released<S> {
+    fn drop(&mut self) {
+        // SAFETY: the sink is dropped once, here, and nothing reads it after.
+        unsafe { core::mem::ManuallyDrop::drop(&mut self.sink) };
+        self.done.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// What tells when a subscriber's callback has been let go of, its drop run: the engine's half of
+/// the port's contract that an undeclare returns after it
+/// ([`wz_capi_port::SessionEngine::undeclare_subscriber`]).
+pub struct SinkRelease(Arc<std::sync::atomic::AtomicBool>);
+
+impl SinkRelease {
+    /// Wait until the callback has been let go of, unless this thread is inside a subscriber
+    /// callback: there the call that runs holds the callback, or may be what another thread's
+    /// wait waits for, and the callback is let go of as the last call ends.
+    pub fn wait(self) {
+        if SampleCallGuard::active() {
+            return;
+        }
+        while !self.0.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+thread_local! {
+    /// Depth of subscriber callback calls on THIS thread ([`SampleCallGuard`]).
+    static IN_SAMPLE_CALL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Marks this thread inside a subscriber callback while held. A counter rather than a bool, as a
+/// callback may reach another subscriber's through the session, and the inner end must not clear
+/// the outer mark.
+struct SampleCallGuard;
+
+impl SampleCallGuard {
+    fn enter() -> Self {
+        IN_SAMPLE_CALL.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+
+    /// Whether this thread is inside a subscriber callback now.
+    fn active() -> bool {
+        IN_SAMPLE_CALL.with(|depth| depth.get()) > 0
+    }
+}
+
+impl Drop for SampleCallGuard {
+    fn drop(&mut self) {
+        IN_SAMPLE_CALL.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
 }
 
 /// Mints one queryable callback per face.
@@ -2029,6 +2125,9 @@ impl core::ops::DerefMut for InnerGuard<'_> {
 
 #[derive(Default)]
 struct Inner {
+    /// What tells when each C subscription's callback, a liveliness one's too, has been let go of,
+    /// by id: what its undeclare waits on ([`SharedSession::keep_sink_release`]).
+    sink_releases: Vec<(SubId, SinkRelease)>,
     faces: BTreeMap<u64, FaceEntry>,
     /// The sessions of `faces`, as one shared list that a sender takes a reference to instead
     /// of collecting a new one per message ([`SharedSession::face_set`]). Rebuilt by
@@ -2305,6 +2404,28 @@ impl Inner {
             .filter(move |(id, _)| links.allows(link_slot_of_face(**id)))
             .map(|(_, face)| face)
             .chain(self.local_face.iter_mut())
+    }
+}
+
+/// Why a node's local plane was not made ([`SharedSession::new`]): the plane's open is refused
+/// and the node with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaneRefused {
+    /// The host had no entropy for the plane's cookie signing key.
+    EntropyUnavailable,
+    /// The runtime had no room for the plane's action bundle.
+    HeapRefused,
+}
+
+impl From<wz_runtime_tokio::session_glue::EntropyUnavailable> for PlaneRefused {
+    fn from(_: wz_runtime_tokio::session_glue::EntropyUnavailable) -> Self {
+        Self::EntropyUnavailable
+    }
+}
+
+impl From<wz_session_core::link::HeapRefused> for PlaneRefused {
+    fn from(_: wz_session_core::link::HeapRefused) -> Self {
+        Self::HeapRefused
     }
 }
 
@@ -2783,7 +2904,7 @@ impl SharedSession {
         clock: TokioTime,
         zid: SessionZid,
         session_policy: SessionPolicy,
-    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+    ) -> Result<Self, PlaneRefused> {
         Self::new_with_resources(clock, zid, SessionResources::under(session_policy))
     }
 
@@ -2795,7 +2916,7 @@ impl SharedSession {
         zid: SessionZid,
         node_hlc: NodeHlc,
         session_policy: SessionPolicy,
-    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+    ) -> Result<Self, PlaneRefused> {
         Self::new_with_resources(
             clock,
             zid,
@@ -2813,7 +2934,7 @@ impl SharedSession {
         clock: TokioTime,
         zid: SessionZid,
         resources: SessionResources,
-    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+    ) -> Result<Self, PlaneRefused> {
         let SessionResources {
             node_hlc,
             shm_clients,
@@ -2874,7 +2995,7 @@ impl SharedSession {
                 limits: session_limits,
             },
         )?;
-        let actions = new_session_actions(driver, params, clock);
+        let actions = new_session_actions(driver, params, clock)?;
         // Nothing establishes the plane, whose link no handshake runs over: its sends (the
         // declarations of its own registrations) are let through from the start.
         actions.open_without_handshake();
@@ -5766,7 +5887,7 @@ impl SharedSession {
             .map(|(_, sink)| sink.clone())
             .collect();
         for sink in sinks {
-            sink(kind, snapshot);
+            sink.tell(kind, snapshot);
         }
     }
 
@@ -7131,6 +7252,7 @@ impl SharedSession {
     /// replays it, and drop every face's wz subscriber for it (each emitting
     /// its wire undeclare).
     pub fn undeclare_subscriber(&self, id: SubId) {
+        let mut released = None;
         let mut dropped = Vec::new();
         let mut dropped_entry = None;
         let mut dropped_live = Vec::new();
@@ -7141,6 +7263,9 @@ impl SharedSession {
         let dropped_group_live;
         {
             let mut guard = self.lock();
+            if let Some(at) = guard.sink_releases.iter().position(|(held, _)| *held == id) {
+                released = Some(guard.sink_releases.swap_remove(at).1);
+            }
             // Open-debt item 913 — the group faces' copies, into the same out-of-lock
             // drop as the unicast faces'.
             #[cfg(feature = "multicast-transport")]
@@ -7206,6 +7331,17 @@ impl SharedSession {
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
+        // The port's contract: the undeclare returns once the callback has been let go of, unless
+        // it is made from inside a subscriber callback.
+        if let Some(released) = released {
+            released.wait();
+        }
+    }
+
+    /// Keep what tells when subscriber `id`'s callback has been let go of, for its undeclare to
+    /// wait on ([`Self::undeclare_subscriber`]).
+    pub(crate) fn keep_sink_release(&self, id: SubId, release: SinkRelease) {
+        self.lock().sink_releases.push((id, release));
     }
 }
 
@@ -7774,7 +7910,10 @@ mod matching_aggregate_tests {
             Err(Refusal::Closed)
         );
         assert_eq!(
-            SessionEngine::watch_faces(&shared, Arc::new(|_kind, _face| {})),
+            SessionEngine::watch_faces(
+                &shared,
+                FaceEventSink::of_arc(Arc::new(|_: FaceEventKind, _: &FaceSnapshot| {}))
+            ),
             Err(Refusal::Closed),
             "a closed session refuses to watch its faces"
         );
@@ -11078,6 +11217,124 @@ mod aggregation_tests {
             ),
             (1, 1),
             "the last subscriber under the aggregate retracts it on every face"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sink_release_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use wz_session_core::reliability::Reliability;
+    use wz_session_core::sample_kind::SampleKind;
+    use wz_session_core::sink::SampleRef;
+
+    /// Sets its flag when dropped: what a C closure's `drop(context)` stands for.
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A port callback that does nothing and sets `flag` when it is let go of.
+    fn sink_dropping(flag: &Arc<AtomicBool>) -> wz_capi_port::SubscriberSink {
+        let dropped = Dropped(Arc::clone(flag));
+        wz_capi_port::SubscriberSink::shared(move |_sample: &dyn SampleView| {
+            let _ = &dropped;
+        })
+    }
+
+    /// A wait for a callback's release returns only once the last holder of it has let go and
+    /// its drop has run, though that holder is another thread's. Turned red by a release told
+    /// before the drop runs, or a wait that does not wait.
+    #[test]
+    fn a_release_is_waited_for_until_the_last_holder_lets_the_callback_go() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let (factory, release) = face_sink(sink_dropping(&flag));
+        let minted = factory();
+        drop(factory);
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(minted);
+        });
+        release.wait();
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "the wait returned before the callback's drop ran"
+        );
+        holder.join().expect("the holder's thread");
+    }
+
+    /// A wait made from inside a subscriber callback returns at once, the callback still held,
+    /// which is let go of as its last holder goes. Turned red by a callback that does not mark its
+    /// thread, or a wait that waits there (which never returns).
+    #[test]
+    fn a_release_waited_for_inside_a_subscriber_callback_returns_at_once() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let slot: Arc<StdMutex<Option<SinkRelease>>> = Arc::default();
+        let returned = Arc::new(AtomicBool::new(false));
+        let (factory, release) = {
+            let dropped = Dropped(Arc::clone(&flag));
+            let slot = Arc::clone(&slot);
+            let returned = Arc::clone(&returned);
+            face_sink(wz_capi_port::SubscriberSink::shared(
+                move |_sample: &dyn SampleView| {
+                    let _ = &dropped;
+                    let taken = slot.lock().unwrap_or_else(|held| held.into_inner()).take();
+                    if let Some(release) = taken {
+                        release.wait();
+                        returned.store(true, Ordering::SeqCst);
+                    }
+                },
+            ))
+        };
+        *slot.lock().unwrap_or_else(|held| held.into_inner()) = Some(release);
+        let mut minted = factory();
+        let sample = SampleRef::new("wz/release", b"", SampleKind::Put, Reliability::Reliable);
+        minted(&sample);
+        assert!(
+            returned.load(Ordering::SeqCst),
+            "the wait inside the callback returned"
+        );
+        assert!(!flag.load(Ordering::SeqCst), "the callback is still held");
+        drop(minted);
+        drop(factory);
+        assert!(flag.load(Ordering::SeqCst), "let go with its last holder");
+    }
+
+    /// The port's undeclare of a subscriber returns with its callback let go of. Turned red by a
+    /// declaration that keeps no release, or an undeclare that returns while the callback is held.
+    #[test]
+    fn the_ports_undeclare_returns_with_the_callback_let_go_of() {
+        use wz_capi_port::SessionEngine;
+
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x12; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
+        let flag = Arc::new(AtomicBool::new(false));
+        let id = SessionEngine::declare_subscriber_on_wire(
+            &shared,
+            "wz/release/port",
+            WireKey::literal(),
+            wz_session_core::locality::Locality::Any,
+            None,
+            sink_dropping(&flag),
+        )
+        .expect("an open session declares");
+        assert!(!flag.load(Ordering::SeqCst), "held while declared");
+        SessionEngine::undeclare_subscriber(&shared, id);
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "let go of when the undeclare returns"
+        );
+        assert!(
+            shared.lock().sink_releases.is_empty(),
+            "the undeclare took its release"
         );
     }
 }

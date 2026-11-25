@@ -42,6 +42,7 @@
 //! [`QueryPlane::take_asked`]: crate::query_plane::QueryPlane::take_asked
 //! [`QueryPlane::next_generation`]: crate::query_plane::QueryPlane::next_generation
 
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 // The split `round` uses: the host profile has the native atomics, the `no_std` profile gets the
 // critical-section ones for the cores that have none.
@@ -345,11 +346,19 @@ struct LocalAsking<C: PlaneCalls> {
     asked: <C::Queues as LockFamily>::Lock<Asked<C>>,
 }
 
-impl<C: PlaneCalls> Default for LocalAsking<C> {
-    fn default() -> Self {
-        Self {
-            asking: AtomicBool::new(false),
-            asked: C::Queues::new(BoundedVec::new_static()),
+impl<C: PlaneCalls> LocalAsking<C> {
+    /// No get asked, made in `at` with its lock.
+    ///
+    /// # Safety
+    /// As for [`LockFamily::init_at`], of a `Self`.
+    unsafe fn init_at(at: NonNull<Self>) {
+        let at = at.as_ptr();
+        // SAFETY: the caller's contract, for each field, written once.
+        unsafe {
+            addr_of_mut!((*at).asking).write(AtomicBool::new(false));
+            C::Queues::init_at(NonNull::new_unchecked(addr_of_mut!((*at).asked)), |asked| {
+                asked.write(BoundedVec::new_static())
+            });
         }
     }
 }
@@ -373,14 +382,26 @@ pub struct QueryPlane<C: PlaneCalls> {
 
 impl<C: PlaneCalls> QueryPlane<C> {
     /// A plane that holds the Finals of its queries in `holds` ([`FinalHolds`]), rows the
-    /// session's arena lent.
-    pub fn over(holds: FinalHolds) -> Self {
-        Self {
-            generation: AtomicU64::new(0),
-            arriving: AtomicU64::new(0),
-            holds: C::Queues::new(holds),
-            refused: AtomicU64::new(0),
-            local: <C::LocalAnswers as Presence>::empty::<LocalAsking<C>>(),
+    /// session's arena lent, made in `at` with its locks.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The plane is not moved from `at` until it is dropped there.
+    pub unsafe fn init_at(at: NonNull<Self>, holds: FinalHolds) {
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            addr_of_mut!((*at).generation).write(AtomicU64::new(0));
+            addr_of_mut!((*at).arriving).write(AtomicU64::new(0));
+            C::Queues::init_at(NonNull::new_unchecked(addr_of_mut!((*at).holds)), |held| {
+                held.write(holds)
+            });
+            addr_of_mut!((*at).refused).write(AtomicU64::new(0));
+            <C::LocalAnswers as Presence>::init_at::<LocalAsking<C>>(
+                NonNull::new_unchecked(addr_of_mut!((*at).local)),
+                |local| LocalAsking::init_at(local),
+            );
         }
     }
 
@@ -441,14 +462,7 @@ impl<C: PlaneCalls> QueryPlane<C> {
     ) {
         let generation = self.arriving_on();
         let rid = view.rid();
-        if !self.with_holds(|holds| holds.admit(generation, rid)) {
-            self.refused.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        // A row handed nothing gives the hold back, and the query owes its Final as one that
-        // reached no queryable.
-        let Some(call) = begin() else {
-            self.with_holds(|holds| holds.release(generation, rid));
+        let Some(call) = self.admit_call(generation, rid, begin) else {
             return;
         };
         // The session's own get is handed to the queryables it matched by the get itself, from its
@@ -469,6 +483,56 @@ impl<C: PlaneCalls> QueryPlane<C> {
         if !unsafe { round.offer_query(call, view, generation) } {
             self.with_holds(|holds| holds.release(generation, rid));
         }
+    }
+
+    /// What a query that reached a queryable does in a session whose read hands each query of its
+    /// links to the queryables itself (`QueryPeer::pin_request`), so only the session's own get
+    /// is dispatched here: hold the get's Final and begin a call on the queryable's row (`begin`),
+    /// noted for the get to hand its own view once the session's lock is let go
+    /// ([`Self::take_asked`]). Nothing is held in a round. A query that arrives while no get of
+    /// the session's own is asked takes no hold and begins no call, so its dispatch owes its Final
+    /// as one that reached no queryable; so does one past the list of the get's queryables, which
+    /// is counted as refused.
+    pub fn arrive_own(&self, begin: impl FnOnce() -> Option<C::Queryable>, view: &dyn QueryView) {
+        let Some(local) = <C::LocalAnswers as Presence>::get::<LocalAsking<C>>(&self.local) else {
+            return;
+        };
+        if !local.asking.load(Ordering::Acquire) {
+            return;
+        }
+        if C::Queues::with(&local.asked, |asked| asked.free_slots() == 0) {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let Some(call) = self.admit_call(LOCAL_QUERY, view.rid(), begin) else {
+            return;
+        };
+        // The room was read above, and only the dispatch under the session's lock notes a call.
+        let noted = C::Queues::with(&local.asked, |asked| asked.push_with(|| call));
+        debug_assert!(noted, "the get's list had room for the call");
+    }
+
+    /// What a query of link `generation` that reaches a queryable does first: hold its Final and
+    /// begin a call on the queryable's row (`begin`, which a row past the most calls its latch
+    /// counts answers with none). `None` when no row is left for its Final, which refuses the
+    /// query ([`FinalHolds::admit`]) before any call is begun and counts it, and when `begin`
+    /// began none: that row's hold is given back, and the query owes its Final as one that reached
+    /// no queryable.
+    pub fn admit_call(
+        &self,
+        generation: u64,
+        rid: RequestId,
+        begin: impl FnOnce() -> Option<C::Queryable>,
+    ) -> Option<C::Queryable> {
+        if !self.with_holds(|holds| holds.admit(generation, rid)) {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let call = begin();
+        if call.is_none() {
+            self.with_holds(|holds| holds.release(generation, rid));
+        }
+        call
     }
 
     /// The queryables the session's own get matched while it was asked, the list left empty; none

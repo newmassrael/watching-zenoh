@@ -270,7 +270,7 @@ pub const HELD_SESSIONS: usize = generated::HELD_SESSIONS;
 pub const CALLBACK_THREADS: usize = generated::CALLBACK_THREADS;
 
 /// The sessions open at once in a process: the rows of the one table a reach of a session's engine
-/// names it by (`wz_capi_port::reach`). The open of one more is refused.
+/// names it by (the cooperative engine's `reach`). The open of one more is refused.
 pub const ENGINE_ROWS: usize = generated::ENGINE_ROWS;
 
 /// The owned samples a program holds through the C ABI at once: the slots of the process's pool of

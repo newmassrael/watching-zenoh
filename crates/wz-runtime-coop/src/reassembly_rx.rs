@@ -224,7 +224,7 @@ pub use in_place::{
 /// author API, a singleton). So the arena is a VALUE owned by the session that
 /// stages into it, built over storage handed to it: the image's own placed
 /// table ([`PoolStorage::Static`]) or one the arena owns on the heap
-/// (`PoolStorage::owned`, absent under `session-slot`), allocated once when the
+/// (`PoolStorage::try_owned`, absent under `session-slot`), allocated once when the
 /// session is built.
 ///
 /// The slot lifecycle is the generated one, walked by its own edges and
@@ -263,7 +263,7 @@ mod in_place {
         /// section its memory map names. One per session: two sessions take
         /// two tables.
         Static(&'static mut ReassemblyPoolMcu),
-        /// A table this arena owns on the heap. [`PoolStorage::owned`] builds
+        /// A table this arena owns on the heap. [`PoolStorage::try_owned`] builds
         /// one. Absent under `session-slot`: a session in a slot has a table in
         /// its pump's cell, never one it allocates.
         #[cfg(not(feature = "session-slot"))]
@@ -298,7 +298,8 @@ mod in_place {
         }
 
         /// A table of its own, every slot free, allocated once here and never
-        /// again: what a session that is handed nothing stages into.
+        /// again: what a session that is handed nothing stages into; `None` when
+        /// the heap has no room for it.
         ///
         /// Built IN the heap allocation, never on the stack: the emit's
         /// `ReassemblyPoolMcu::new` returns the table BY VALUE (16 KiB of
@@ -309,7 +310,7 @@ mod in_place {
         /// and `SlotState::Free` is the explicit discriminant `0`. The
         /// assertion re-establishes that against the built table.
         #[cfg(not(feature = "session-slot"))]
-        pub fn owned() -> Self {
+        pub fn try_owned() -> Option<Self> {
             let layout = core::alloc::Layout::new::<ReassemblyPoolMcu>();
             // SAFETY: `alloc_zeroed` returns a block of `layout`, sized and
             // aligned for the table; the all-zero pattern is a valid table
@@ -318,7 +319,7 @@ mod in_place {
             let pool = unsafe {
                 let raw = alloc::alloc::alloc_zeroed(layout) as *mut ReassemblyPoolMcu;
                 if raw.is_null() {
-                    alloc::alloc::handle_alloc_error(layout);
+                    return None;
                 }
                 Box::from_raw(raw)
             };
@@ -326,9 +327,9 @@ mod in_place {
                 pool.free_count(),
                 SLOT_COUNT,
                 "the zero pattern is no longer the pool's initial state: the emit's \
-                 SlotState discriminants moved and PoolStorage::owned must be rewritten"
+                 SlotState discriminants moved and PoolStorage::try_owned must be rewritten"
             );
-            Self::Owned(pool)
+            Some(Self::Owned(pool))
         }
 
         fn pool(&self) -> &ReassemblyPoolMcu {
@@ -570,7 +571,7 @@ mod in_place_tests {
         (
             mcu_reassembly(&SessionPolicy::defaults()),
             in_place_reassembly(
-                ReassemblyArena::new(PoolStorage::owned()),
+                ReassemblyArena::new(PoolStorage::try_owned().expect("the heap has room")),
                 &SessionPolicy::defaults(),
             ),
         )
@@ -705,6 +706,16 @@ mod in_place_tests {
         }
     }
 
+    /// A table the heap has no room for is none, where an allocation that ended the program on the
+    /// refusal would end this test. Turned red by `try_owned` answering the refusal with
+    /// `handle_alloc_error`.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_table_the_heap_has_no_room_for_is_none() {
+        assert!(crate::table_tests::refused(PoolStorage::try_owned).is_none());
+        assert!(PoolStorage::try_owned().is_some());
+    }
+
     /// Two sessions, two tables: each arena stages into the table it was handed
     /// (one the image placed, one of its own), the delivered message lies in
     /// that table, and one arena's chains take nothing from the other's.
@@ -712,15 +723,19 @@ mod in_place_tests {
     fn each_arena_stages_into_the_table_it_was_handed() {
         // The image's placed table, stood in for by a leaked one: a static the
         // test cannot declare (the emit's constructor is not `const`).
-        let placed: &'static mut ReassemblyPoolMcu = match PoolStorage::owned() {
-            PoolStorage::Owned(table) => alloc::boxed::Box::leak(table),
-            PoolStorage::Static(_) => unreachable!("owned() owns"),
-        };
+        let placed: &'static mut ReassemblyPoolMcu =
+            match PoolStorage::try_owned().expect("the heap has room") {
+                PoolStorage::Owned(table) => alloc::boxed::Box::leak(table),
+                PoolStorage::Static(_) => unreachable!("try_owned() owns"),
+            };
         let placed_at = placed as *const ReassemblyPoolMcu as usize;
         let policy = SessionPolicy::defaults();
         let mut first =
             in_place_reassembly(ReassemblyArena::new(PoolStorage::Static(placed)), &policy);
-        let mut second = in_place_reassembly(ReassemblyArena::new(PoolStorage::owned()), &policy);
+        let mut second = in_place_reassembly(
+            ReassemblyArena::new(PoolStorage::try_owned().expect("the heap has room")),
+            &policy,
+        );
 
         first.ingest(frag(b"p", 1, true, b"hello "), MASK, 0, |_| {
             panic!("not final")
@@ -753,9 +768,9 @@ mod in_place_tests {
     #[test]
     #[should_panic(expected = "every slot free")]
     fn a_table_with_a_slot_out_is_refused() {
-        let mut storage = PoolStorage::owned();
+        let mut storage = PoolStorage::try_owned().expect("the heap has room");
         let PoolStorage::Owned(table) = &mut storage else {
-            unreachable!("owned() owns")
+            unreachable!("try_owned() owns")
         };
         // The handle is let go of without the return edge: the slot stays out.
         let _out = table.pool_acquire_for_encode().expect("a free slot");

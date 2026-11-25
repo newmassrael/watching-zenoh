@@ -111,6 +111,10 @@ pub enum JoinOutcome {
     /// Rejected — the session already holds `max_links` links. A MAX_LINKS
     /// (0x04) link-only close was emitted on the secondary's own link.
     OverLimit,
+    /// Rejected — the runtime had no room for the joined binding
+    /// ([`wz_session_core::link::HeapRefused`]). A GENERIC link-only close was emitted on the
+    /// secondary's own link, and the session's link set is as it was.
+    HeapRefused,
 }
 
 /// Emit the aggregation-reject link-only close on `secondary`'s own link, when
@@ -177,17 +181,22 @@ pub fn join_link(
         return JoinOutcome::OverLimit;
     }
 
-    // (4) attach the secondary's LinkState to the shared core + return the
-    // transplant handle bound to that core.
+    // (4) the transplant handle bound to the shared core, made before the secondary's
+    // LinkState joins the core's link set, so a binding the runtime has no room for leaves
+    // the set as it was. R2952 — through the runtime's `wrap_actions`, so the joined binding
+    // gets the same block-first hand-off the first one did.
+    let Ok(joined) = SessionLinkActions::<crate::runtime_impl::TokioRuntime>::joined(
+        primary.core.clone(),
+        secondary.link.clone(),
+    ) else {
+        reject_link(
+            secondary,
+            wz_session_core::close_reason::CloseReason::Generic as u8,
+        );
+        return JoinOutcome::HeapRefused;
+    };
     primary.add_link(secondary.link.clone(), bound);
-    // R2952 — through the runtime's `wrap_actions`, so the joined binding gets
-    // the same block-first hand-off the first one did.
-    JoinOutcome::Joined(
-        SessionLinkActions::<crate::runtime_impl::TokioRuntime>::joined(
-            primary.core.clone(),
-            secondary.link.clone(),
-        ),
-    )
+    JoinOutcome::Joined(joined)
 }
 
 #[cfg(test)]
@@ -776,12 +785,14 @@ mod tests {
             primary_link.clone(),
             params(),
             TokioTime::new(),
-        );
+        )
+        .expect("the heap has room");
         let secondary = crate::session_glue::new_session_actions(
             secondary_link.clone(),
             params(),
             TokioTime::new(),
-        );
+        )
+        .expect("the heap has room");
         let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
         primary
             .core

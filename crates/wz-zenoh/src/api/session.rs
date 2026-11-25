@@ -4243,15 +4243,17 @@ mod tokio_engine {
     /// goes down a `Delete`.
     #[cfg(feature = "unstable")]
     pub(super) fn face_sink(sink: FaceSink) -> FaceEventSink {
-        Arc::new(move |event, snapshot| {
-            if let Some(face) = face_of(snapshot) {
-                let kind = match event {
-                    FaceEventKind::Up => SampleKind::Put,
-                    FaceEventKind::Down => SampleKind::Delete,
-                };
-                sink(kind, &face);
-            }
-        })
+        FaceEventSink::of_arc(Arc::new(
+            move |event: FaceEventKind, snapshot: &FaceSnapshot| {
+                if let Some(face) = face_of(snapshot) {
+                    let kind = match event {
+                        FaceEventKind::Up => SampleKind::Put,
+                        FaceEventKind::Down => SampleKind::Delete,
+                    };
+                    sink(kind, &face);
+                }
+            },
+        ))
     }
 
     /// A publication the engine refused.

@@ -73,7 +73,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use wz_capi_core::faces::{FaceEventKind, FaceSnapshot, LinkSnapshot};
+use wz_capi_core::faces::{FaceEventKind, FaceEventSink, FaceSnapshot, LinkSnapshot};
 
 use crate::abi::{
     z_closure_drop_callback_t, z_loaned_session_t, z_moved_string_t, z_owned_string_array_t,
@@ -2087,11 +2087,13 @@ unsafe fn declare_link_listener(
     // `for link in self.runtime().get_links(transport.as_ref()) {`): a link that comes up between
     // the two is reported, where reading first lost it. What the watch is told meanwhile is held
     // and reported after the history, in order, so a link's going never precedes its report.
-    let watcher = source.watch(Arc::new(move |kind, snapshot: &FaceSnapshot| {
-        if !snapshot.is_multicast && passes(filter, snapshot) {
-            sink.deliver_or_hold(kind, snapshot, deliver_link_event);
-        }
-    }));
+    let watcher = source.watch(FaceEventSink::of_arc(Arc::new(
+        move |kind: FaceEventKind, snapshot: &FaceSnapshot| {
+            if !snapshot.is_multicast && passes(filter, snapshot) {
+                sink.deliver_or_hold(kind, snapshot, deliver_link_event);
+            }
+        },
+    )));
     if history {
         for snapshot in source.connected() {
             if passes(filter, &snapshot) {
@@ -2193,13 +2195,15 @@ unsafe fn declare_transport_listener(
     // `for transport in self.runtime().get_transports() {`): a transport that comes up between the
     // two is reported, where reading first lost it, and one that went there was reported up and
     // never down. What the watch is told meanwhile is held and reported after the history.
-    let watcher = source.watch(Arc::new(move |kind, snapshot: &FaceSnapshot| {
-        if snapshot.is_multicast {
-            sink.deliver_or_hold(kind, &as_announced(snapshot), deliver_transport_event);
-        } else {
-            sink.deliver_or_hold(kind, snapshot, deliver_transport_event);
-        }
-    }));
+    let watcher = source.watch(FaceEventSink::of_arc(Arc::new(
+        move |kind: FaceEventKind, snapshot: &FaceSnapshot| {
+            if snapshot.is_multicast {
+                sink.deliver_or_hold(kind, &as_announced(snapshot), deliver_transport_event);
+            } else {
+                sink.deliver_or_hold(kind, snapshot, deliver_transport_event);
+            }
+        },
+    )));
     if history {
         for snapshot in source.connected() {
             deliver_transport_event(&closure, FaceEventKind::Up, &snapshot);

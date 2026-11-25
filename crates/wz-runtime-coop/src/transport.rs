@@ -35,8 +35,8 @@ use crate::ClockSource;
 mod state;
 #[cfg(feature = "reassembly")]
 pub use state::{
-    DialRow, DialWalk, FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, TransportFaces,
-    TransportRouter, TransportState, WireMaking,
+    FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, TransportFaces, TransportRouter,
+    TransportState, WireMaking,
 };
 
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
@@ -162,6 +162,8 @@ pub enum TransportRefusal {
     EntropyUnavailable,
     /// The session's runtime had no task for a link's session or a group's.
     NoTask(SpawnRefusal),
+    /// The heap had no room for a link's shared handle.
+    HeapRefused,
 }
 
 /// What the transport reads of the session's half of a link beyond what its supervisor asks

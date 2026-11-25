@@ -69,7 +69,8 @@ struct Answer {
 async fn acceptor_answers(init_syn_wire: Vec<u8>) -> Answer {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);
@@ -154,7 +155,8 @@ async fn an_init_syn_of_the_protocol_version_is_answered_in_it() {
 async fn the_init_syn_wz_sends_announces_the_protocol_version() {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::OutboundStart);
@@ -184,7 +186,8 @@ async fn the_init_syn_wz_sends_announces_the_protocol_version() {
 async fn an_initiator_does_not_refuse_an_init_ack_for_its_version() {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::OutboundStart);

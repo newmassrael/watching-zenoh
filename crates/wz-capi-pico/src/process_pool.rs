@@ -956,13 +956,13 @@ impl Drop for Pools {
 struct Reserved(Option<Pools>);
 
 impl Reserved {
-    /// The pools reserved now, the build's ([`BUILT_PLAN`]) reserved here when none are; `None`
-    /// when the counts make no pool or the heap has not the memory. One body for every caller, and
+    /// The pools reserved now, the first plan's ([`first_plan`]) reserved here when none are;
+    /// `None` when the counts make no pool or the heap has not the memory. One body for every caller, and
     /// the pools are laid where they are held rather than returned and copied in.
     #[inline(never)]
     fn built(&mut self) -> Option<&mut Pools> {
         if self.0.is_none() {
-            let plan = BUILT_PLAN.ok()?;
+            let plan = first_plan()?;
             let (base, layout) = heap_memory(&plan)?;
             let pools = self.0.insert(Pools::unlaid(base, Origin::Heap(layout)));
             // SAFETY: the pools are unlaid, over an allocation of this layout's, aligned to the
@@ -1102,6 +1102,119 @@ const BUILT_PLAN: Result<Plan, Unplanned> = match built_counts() {
     Ok(objects) => Plan::of(&objects),
     Err(unplanned) => Err(unplanned),
 };
+
+/// The plan the first object reserves when no pools are: the build's ([`BUILT_PLAN`]).
+#[cfg(not(test))]
+fn first_plan() -> Option<Plan> {
+    BUILT_PLAN.ok()
+}
+
+/// The plan the first object of this crate's unit-test binary reserves: the build's counts once
+/// for each test the runner runs at once. Each test is a program of its own, which may hold what
+/// the build's counts admit, but the runner runs them on its threads in one process, which has
+/// one reservation: held to one program's counts, the tests that each hold a config while their
+/// open reads it would, started together, find the pool of configs empty, though none of them
+/// holds more than a program may.
+#[cfg(test)]
+fn first_plan() -> Option<Plan> {
+    let objects = built_counts().ok()?;
+    let programs = crate::test_heap::uncounted(test_runner::threads);
+    Plan::of(&objects.times(programs)).ok()
+}
+
+#[cfg(test)]
+impl Counts {
+    /// These counts `programs` times over, each held at the largest a count can be.
+    fn times(&self, programs: usize) -> Self {
+        // Destructured whole, so a count added to the struct is refused here until it is scaled.
+        let Self {
+            sessions,
+            publishers,
+            subscribers,
+            queryables,
+            liveliness_tokens,
+            liveliness_subscribers,
+            samples,
+            replies,
+            queries,
+            configs,
+            hellos,
+            queriers,
+            keyexprs,
+            payload_blocks,
+            encodings,
+            gets,
+            liveliness_gets,
+            matching_listeners,
+            decl_watches,
+            transport_events_listeners,
+            advanced_publishers,
+            advanced_subscribers,
+            link_events_listeners,
+        } = *self;
+        let each = |count: usize| count.saturating_mul(programs);
+        Self {
+            sessions: each(sessions),
+            publishers: each(publishers),
+            subscribers: each(subscribers),
+            queryables: each(queryables),
+            liveliness_tokens: each(liveliness_tokens),
+            liveliness_subscribers: each(liveliness_subscribers),
+            samples: each(samples),
+            replies: each(replies),
+            queries: each(queries),
+            configs: each(configs),
+            hellos: each(hellos),
+            queriers: each(queriers),
+            keyexprs: each(keyexprs),
+            payload_blocks: payload_blocks.map(each),
+            encodings: each(encodings),
+            gets: each(gets),
+            liveliness_gets: each(liveliness_gets),
+            matching_listeners: each(matching_listeners),
+            decl_watches: each(decl_watches),
+            transport_events_listeners: each(transport_events_listeners),
+            advanced_publishers: each(advanced_publishers),
+            advanced_subscribers: each(advanced_subscribers),
+            link_events_listeners: each(link_events_listeners),
+        }
+    }
+}
+
+/// How the unit-test binary is run.
+#[cfg(test)]
+mod test_runner {
+    extern crate std;
+
+    /// How many tests the runner runs at once, read as libtest reads it: `--test-threads` on its
+    /// command line, else `RUST_TEST_THREADS`, else the threads the host runs in parallel; one at
+    /// least.
+    pub(super) fn threads() -> usize {
+        let mut args = std::env::args();
+        let mut stated = None;
+        while let Some(arg) = args.next() {
+            if let Some(count) = arg.strip_prefix("--test-threads=") {
+                stated = count.parse::<usize>().ok();
+            } else if arg == "--test-threads" {
+                stated = args.next().and_then(|count| count.parse::<usize>().ok());
+            }
+        }
+        stated
+            .or_else(|| {
+                std::env::var("RUST_TEST_THREADS")
+                    .ok()?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .filter(|count| *count > 0)
+            .or_else(|| {
+                std::thread::available_parallelism()
+                    .ok()
+                    .map(core::num::NonZeroUsize::get)
+            })
+            .unwrap_or(1)
+    }
+}
 
 /// Whether `place` lies in the pools reserved now.
 #[cfg(test)]
@@ -1253,6 +1366,84 @@ mod tests {
         assert_eq!(block_of(1041), 1056);
         assert_eq!(block_of(usize::MAX), usize::MAX - (SLOT_ALIGN - 1));
         assert_eq!(block_of(usize::MAX) % SLOT_ALIGN, 0);
+    }
+
+    /// The test binary reserves the build's counts once for each test its runner runs at once,
+    /// every count scaled and none left out, so the tests that each hold what a program may hold,
+    /// a config while their open reads it among them, find room beside one another. Turned red by
+    /// a first plan of the test binary that is the build's alone (on a runner of more than one
+    /// thread), or a scaling that leaves a count as it was.
+    #[test]
+    fn the_test_binary_reserves_the_builds_counts_for_each_test_at_once() {
+        let programs = crate::test_heap::uncounted(test_runner::threads);
+        assert!(programs >= 1, "a runner runs one test at least");
+        let built = BUILT_PLAN.expect("the build's counts make pools");
+        let first = first_plan().expect("the test binary's counts make pools");
+        for kind in [Kind::Config, Kind::Sample, Kind::Keyexpr, Kind::Encoding] {
+            assert_eq!(
+                first.slots[kind as usize],
+                built.slots[kind as usize].saturating_mul(programs),
+                "{kind:?}"
+            );
+        }
+        let one = Counts {
+            sessions: 1,
+            publishers: 2,
+            subscribers: 3,
+            queryables: 4,
+            liveliness_tokens: 5,
+            liveliness_subscribers: 6,
+            samples: 7,
+            replies: 8,
+            queries: 9,
+            configs: 10,
+            hellos: 11,
+            queriers: 12,
+            keyexprs: 13,
+            payload_blocks: [14, 15, 16],
+            encodings: 17,
+            gets: 18,
+            liveliness_gets: 19,
+            matching_listeners: 20,
+            decl_watches: 21,
+            transport_events_listeners: 22,
+            advanced_publishers: 23,
+            advanced_subscribers: 24,
+            link_events_listeners: 25,
+        };
+        assert_eq!(
+            one.times(3),
+            Counts {
+                sessions: 3,
+                publishers: 6,
+                subscribers: 9,
+                queryables: 12,
+                liveliness_tokens: 15,
+                liveliness_subscribers: 18,
+                samples: 21,
+                replies: 24,
+                queries: 27,
+                configs: 30,
+                hellos: 33,
+                queriers: 36,
+                keyexprs: 39,
+                payload_blocks: [42, 45, 48],
+                encodings: 51,
+                gets: 54,
+                liveliness_gets: 57,
+                matching_listeners: 60,
+                decl_watches: 63,
+                transport_events_listeners: 66,
+                advanced_publishers: 69,
+                advanced_subscribers: 72,
+                link_events_listeners: 75,
+            }
+        );
+        assert_eq!(
+            one.times(usize::MAX).configs,
+            usize::MAX,
+            "held at the largest"
+        );
     }
 
     /// The largest payload block holds the largest message a session hands a program and its
@@ -1978,12 +2169,13 @@ mod tests {
         );
     }
 
-    /// The build's pools are laid where the reservation holds them as a reservation laid aside
-    /// lays them, and once: the next object finds the same pools. Turned red by a reservation that
-    /// lays its pools again for each object, or leaves a part of them unlaid.
+    /// The first plan's pools are laid where the reservation holds them as a reservation of that
+    /// plan laid aside lays them, and once: the next object finds the same pools. Turned red by a
+    /// reservation that lays its pools again for each object, leaves a part of them unlaid, or
+    /// lays a plan other than the one the first object reserves.
     #[test]
     fn the_builds_pools_are_laid_where_they_are_held_and_once() {
-        let plan = BUILT_PLAN.expect("the build's counts make pools");
+        let plan = first_plan().expect("the test binary's counts make pools");
         let aside = reserve_from_heap(&plan).expect("the test's heap has the memory");
         let mut reserved = Reserved(None);
         let pools = reserved.built().expect("the test's heap has the memory");

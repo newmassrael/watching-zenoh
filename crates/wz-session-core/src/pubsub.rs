@@ -478,12 +478,12 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION for the reason the table above is: our id space is the one of
     /// the session's own bundle, and two sessions have two.
     #[cfg(feature = "alloc")]
-    own_mapping_space: Option<SharedOwnMappingSpace>,
+    own_mapping_space: crate::bounded::ZeroOption<SharedOwnMappingSpace>,
     /// The key ids every node of the deployment shares, when the session holds them
     /// (`shared-key-ids`): an id neither declared space holds is read in it. Installed, as the
     /// own space is, by the engine that opened the session; `None` keeps the two spaces alone.
     #[cfg(feature = "shared-key-ids")]
-    shared_key_ids: Option<crate::shared_key_ids::SharedKeyIds>,
+    shared_key_ids: crate::bounded::ZeroOption<crate::shared_key_ids::SharedKeyIds>,
     /// R231 — this session's own zid prefix (1..=16 bytes),
     /// negotiated during the session-FSM open handshake. When set,
     /// [`dispatch_push`](SubscriberTable::dispatch_push) suppresses wire-arrived
@@ -508,7 +508,7 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION: two sessions of one process may carry two zids, and an echo
     /// is a sample that names the zid of the session it came back on.
     // Inline whatever the policy: sixteen bytes no table lends.
-    own_zid: Option<OwnZid>,
+    own_zid: OwnZid,
 }
 
 /// This session's own zid as the self-echo check compares it: 1 to 16 bytes inline and their
@@ -522,6 +522,21 @@ struct OwnZid {
 
 #[cfg(feature = "storage-profile")]
 impl OwnZid {
+    /// No zid: a length of none, which no zid has, so naming of all zero bytes holds none.
+    const NONE: Self = Self {
+        bytes: [0; 16],
+        len: 0,
+    };
+
+    /// The zid's bytes, `None` where none is held.
+    fn held(&self) -> Option<&[u8]> {
+        if self.len == 0 {
+            None
+        } else {
+            Some(self.as_slice())
+        }
+    }
+
     /// The zid `zid` spells, or `None` for one not 1 to 16 bytes long.
     fn of(zid: &[u8]) -> Option<Self> {
         if !(1..=16).contains(&zid.len()) {
@@ -693,6 +708,13 @@ pub struct SubInterestRefusals {
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 mod in_place;
+#[cfg(all(feature = "storage-profile", feature = "alloc", feature = "pubsub-put"))]
+pub use in_place::PlainPutKeys;
+#[cfg(all(
+    feature = "storage-profile",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+pub use in_place::{LentPush, LentRoom};
 
 /// R3040 (transport-shm) -- the priority band a received Push was sent at: the
 /// shared [`priority_band`](crate::put_payload::priority_band) over the push's own
@@ -978,14 +1000,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
         if !is_remote {
             return Admission::Matched;
         }
-        match self
-            .key_gate
-            .admit_key_from(class, PeerOp::Publish, keyexpr)
-        {
-            Ok(Admitted::Key(key)) => Admission::Numbered(key),
-            Ok(Admitted::Unchecked) => Admission::Matched,
-            Err(_) => Admission::Refused,
-        }
+        admit_from_peer(&mut self.key_gate, keyexpr, class)
     }
 
     /// The declaration id the next subscription or aggregate reply takes, or
@@ -1557,6 +1572,44 @@ impl<Q: Storage> SubscriberPeer<Q> {
         is_remote: bool,
         sender: u64,
     ) {
+        let Some(sample) = self.project_push(&*subs, push, reliability, is_remote, sender) else {
+            return;
+        };
+        // The rows this sample reaches are handed it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
+        if is_remote {
+            subs.deliver_from_peer(
+                sample.keyexpr(),
+                self.class,
+                PeerDelivery::default(),
+                |id, row| {
+                    cx.deliver(id, row, &sample, turn);
+                    turn = FanOut::later();
+                },
+            );
+        } else {
+            subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
+                cx.deliver(id, row, &sample, turn);
+                turn = FanOut::later();
+            });
+        }
+    }
+
+    /// The projection of `push` into the [`Sample`] its subscribers are handed, by
+    /// [`Self::dispatch_push`]'s rules: its key resolved against both id spaces, its body's
+    /// fields, the outer QoS and the reliability; `None` for a Push nobody is handed (a key that
+    /// does not resolve, a body this build does not deliver, the session's own sample echoed
+    /// back from a peer). The sample is owned, so whoever hands it out holds nothing of this side.
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+    #[cfg(feature = "alloc")]
+    fn project_push<L: LocalSubscribers>(
+        &mut self,
+        subs: &L,
+        push: &PushOwned,
+        reliability: Reliability,
+        is_remote: bool,
+        sender: u64,
+    ) -> Option<Sample> {
         // R121d / R311gl CLEANUP-2 — resolve the Push's keyexpr against
         // the peer mapping table via the shared `resolve_wireexpr` SSOT
         // (the same resolver the four remote-declare registries + the
@@ -1588,7 +1641,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 // every such buffer, confirmed, until the transport ends.
                 #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
                 self.settle_unrouted_shm(push);
-                return;
+                return None;
             }
         };
 
@@ -1679,10 +1732,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     // descriptor this branch resolves.
                     #[cfg(feature = "transport-shm")]
                     let put_payload = if crate::put_payload::is_sliced(put) {
-                        match self.unswap_shm_payload(push, put) {
-                            Some(bytes) => bytes,
-                            None => return,
-                        }
+                        self.unswap_shm_payload(push, put)?
                     } else {
                         // The inline layout never fails: no slice, no descriptor.
                         crate::put_payload::collect_wire_payload(put, |_| None)
@@ -1696,7 +1746,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     let put_payload = match crate::put_payload::collect_wire_payload(put, |_| None)
                     {
                         Ok(bytes) => bytes,
-                        Err(_) => return,
+                        Err(_) => return None,
                     };
                     (
                         SampleKind::Put,
@@ -1746,7 +1796,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                         body_source_info,
                     )
                 }
-                _ => return,
+                _ => return None,
             };
         let outer_exts: &[crate::wire::parts::ExtEntryOwned] =
             push.extensions.entries().unwrap_or(&[]);
@@ -1827,29 +1877,12 @@ impl<Q: Storage> SubscriberPeer<Q> {
             if let (Some(own), Some(info)) = (self.own_zid(), sample.source_info.as_ref()) {
                 let prefix = info.zid_prefix();
                 if !prefix.is_empty() && prefix == own {
-                    return;
+                    return None;
                 }
             }
         }
 
-        // The rows this sample reaches are handed it in one fan-out, each told its turn.
-        let mut turn = FanOut::begin();
-        if is_remote {
-            subs.deliver_from_peer(
-                sample.keyexpr(),
-                self.class,
-                PeerDelivery::default(),
-                |id, row| {
-                    cx.deliver(id, row, &sample, turn);
-                    turn = FanOut::later();
-                },
-            );
-        } else {
-            subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
-                cx.deliver(id, row, &sample, turn);
-                turn = FanOut::later();
-            });
-        }
+        Some(sample)
     }
 }
 
@@ -1931,6 +1964,36 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
     }
 
+    /// The subscribers' side of `event` but its samples, for a caller that hands each Push's
+    /// sample out itself, one subscriber at a time (`Self::lend_in_place`, `Self::take_record`): an
+    /// owned frame's records that are no Push are taken as [`Self::take_control_record`] takes
+    /// them, and a record lent where its frame lies as the lent dispatch takes its control side. A
+    /// Push is left to the caller, so no delivery context is read.
+    // Out of line, for the stack, as `Self::dispatch_iteration_event` is.
+    #[inline(never)]
+    #[cfg(feature = "storage-profile")]
+    pub fn take_control_of_event<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        event: IterationEvent<'_, '_>,
+    ) {
+        match event {
+            #[cfg(feature = "alloc")]
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    for message in messages {
+                        self.take_control_record(subs, message);
+                    }
+                }
+            }
+            #[cfg(feature = "rx-lent-control")]
+            IterationEvent::InPlace(record) => self.dispatch_in_place_control(subs, &record),
+            _ => {}
+        }
+        // Read by the arms that exist; with none compiled in it is not.
+        let _ = &subs;
+    }
+
     /// The control records this registry owns, lent where
     /// their frame lies: a `Declare`'s `DeclKexpr` / `UndeclKexpr` bind and unbind
     /// the peer's keyexpr aliases, and a subscriber `Interest` is answered from this
@@ -2004,26 +2067,44 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ) {
         #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
         let reliability = _reliability;
+        // R227 — wire-arrived Push carries `is_remote = true` so
+        // the locality filter selects `allows_remote()`. The
+        // self-publish loopback path (see
+        // [`local_publish`](LocalSubscribers::local_publish)) enters
+        // `fire_to_subscribers`
+        // directly with `is_remote = false`.
+        //
+        // R311h — the `NetworkMessage::Push` variant is elided when
+        // `codec-push` is off. R311dx-pre — the dispatch arm here is
+        // gated one level finer, on `any(pubsub-put, pubsub-delete)`:
+        // projecting a Push into a Sample needs at least one body op
+        // (Put/Del), so a `codec-push`-only build can parse a Push
+        // frame but has no body op to interpret it. The arm is then
+        // absent and the Push falls through to the control side, which
+        // drops it, mirroring the `PushOwnedVariant::Default` silent-drop. The
+        // loopback path ([`local_publish`](LocalSubscribers::local_publish)) stays
+        // unguarded — it does not depend on the wire codec gate.
+        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+        if let NetworkMessage::Push(push) = message {
+            self.dispatch_push(subs, cx, push, reliability, true, 0);
+            return;
+        }
+        self.take_control_record(subs, message);
+        // `cx` is read by the Push's arm alone, which a build with no body op lacks.
+        let _ = &cx;
+    }
+
+    /// The subscribers' side of `message`, an owned record that is no Push, as [`Self::dispatch`]
+    /// takes it: a `Declare`'s alias is bound or unbound, and a subscriber `Interest` is answered
+    /// from this session's own subscriptions. A record of any other kind is another plane's. No
+    /// sample is handed out, so no delivery context is read.
+    #[cfg(feature = "alloc")]
+    pub fn take_control_record<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        message: &NetworkMessage,
+    ) {
         match message {
-            // R227 — wire-arrived Push carries `is_remote = true` so
-            // the locality filter selects `allows_remote()`. The
-            // self-publish loopback path (see
-            // [`local_publish`](LocalSubscribers::local_publish)) enters
-            // `fire_to_subscribers`
-            // directly with `is_remote = false`.
-            //
-            // R311h — the `NetworkMessage::Push` variant is elided when
-            // `codec-push` is off. R311dx-pre — the dispatch arm here is
-            // gated one level finer, on `any(pubsub-put, pubsub-delete)`:
-            // projecting a Push into a Sample needs at least one body op
-            // (Put/Del), so a `codec-push`-only build can parse a Push
-            // frame but has no body op to interpret it. The arm is then
-            // absent and the Push falls through to `_ => {}` (drop),
-            // mirroring the `PushOwnedVariant::Default` silent-drop. The
-            // loopback path ([`local_publish`](LocalSubscribers::local_publish)) stays
-            // unguarded — it does not depend on the wire codec gate.
-            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-            NetworkMessage::Push(push) => self.dispatch_push(subs, cx, push, reliability, true, 0),
             #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body, subs.own_space()),
             // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
@@ -2038,9 +2119,30 @@ impl<Q: Storage> SubscriberPeer<Q> {
             }
             _ => {}
         }
-        // `subs` and `cx` are read by the arms that exist; with none compiled in they are
-        // not, and the signature is the same in every subset.
-        let _ = (&subs, &cx);
+        // `subs` is read by the arms that exist; with none compiled in it is not, and the
+        // signature is the same in every subset.
+        let _ = &subs;
+    }
+
+    /// The subscribers' side of `message`, one owned record of a frame, for a delivery that hands
+    /// each sample out itself, one subscriber at a time: a Push is projected into the sample its
+    /// subscribers are handed (`project_push`; `None` for one nobody is handed), and any other
+    /// record is taken as [`Self::take_control_record`] takes it, which hands nothing out and
+    /// reads no delivery context.
+    #[cfg(feature = "alloc")]
+    pub fn take_record<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        message: &NetworkMessage,
+        _reliability: Reliability,
+    ) -> Option<crate::sample::Sample> {
+        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+        if let NetworkMessage::Push(push) = message {
+            let reliability = _reliability;
+            return self.project_push(&*subs, push, reliability, true, 0);
+        }
+        self.take_control_record(subs, message);
+        None
     }
 
     /// A peer's subscriber Interest, in a build that answers none (`interest-answer` off): no row
@@ -2183,13 +2285,30 @@ impl<Q: Storage> SubscriberPeer<Q> {
 }
 
 /// What the key gate said of a message.
-enum Admission {
+pub(crate) enum Admission {
     /// Dropped: the key is outside the closed key set.
     Refused,
     /// Not looked up: an open table, or a message of the application's own. Delivered by matching.
     Matched,
     /// A key of the closed key set, by number. Delivered by the selection of that key.
     Numbered(KeyId),
+}
+
+/// What `gate` says of a message a peer sent on `keyexpr`, the peer being the row `class` of the
+/// image's allowance: the one rule every delivery of a peer's message to the session's subscribers
+/// keeps, whichever table holds them, so that no table hands a subscriber what another drops. A
+/// refusal is counted on `gate`.
+#[inline]
+pub(crate) fn admit_from_peer(
+    gate: &mut KeyGate<'_>,
+    keyexpr: &str,
+    class: Option<ClassId>,
+) -> Admission {
+    match gate.admit_key_from(class, PeerOp::Publish, keyexpr) {
+        Ok(Admitted::Key(key)) => Admission::Numbered(key),
+        Ok(Admitted::Unchecked) => Admission::Matched,
+        Err(_) => Admission::Refused,
+    }
 }
 
 /// Deliver a peer's message on a key of the closed key set to the subscribers its selection
@@ -2257,6 +2376,14 @@ struct MemoSlot<P: Storage> {
     hits: BoundedVec<u16, { caps::MAX_SUBSCRIPTIONS }, P>,
 }
 
+impl<P: Storage> MemoSlot<P> {
+    /// Whether the slot's answer holds for a delivery at `epoch` that arrived from the wire
+    /// (`remote`) or not.
+    fn answers(&self, epoch: u64, remote: bool) -> bool {
+        self.epoch == epoch && self.remote == remote
+    }
+}
+
 // A slot keeps a position in 16 bits. A table of a build that enforces capacity holds at most
 // `MAX_SUBSCRIPTIONS` rows, so where it has slots every position it can hold fits one, and no key
 // it matches is left out of the cache for the position of a match (`fire_into_memoized`).
@@ -2284,13 +2411,17 @@ const _: () = assert!(
 /// fixed table with none holds nothing at all.
 pub(crate) struct MatchMemo<P: Storage> {
     slots: BoundedVec<Option<MemoSlot<P>>, { caps::MATCH_MEMO_FIXED_SLOTS }, P>,
-    /// How many times a slot was written. A repeated key may be answered from the slot the key
-    /// before it was, but only while no slot has been written since.
-    writes: u64,
-    /// The slot the last delivery was answered from, and `writes` as it was then; `None` when
-    /// that delivery was not answered from a slot at all (a key too deep to match).
-    last: Option<(usize, u64)>,
+    /// The slot the last delivery was answered from or written to, counted from 1, and 0 when it
+    /// was neither (a key too deep to match, or too long to keep): a count rather than an
+    /// `Option`, so a memory of all zero bytes remembers no delivery. Only a delivery writes a
+    /// slot, and it names that slot here, so the slot named still holds what the last delivery was
+    /// answered with.
+    last_at: usize,
 }
+
+// SAFETY: its slots are a sequence of a policy whose sequences are empty at all zero bytes
+// (`ZeroSeqs`), and a memory of no last answer is a zero count.
+unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for MatchMemo<P> {}
 
 impl<P: Storage> MatchMemo<P> {
     /// A memory of `memo_slots::<P>(stated)` empty slots.
@@ -2300,11 +2431,17 @@ impl<P: Storage> MatchMemo<P> {
             // A fixed table's capacity is its slot count, so this never refuses.
             let _ = slots.push(None);
         }
-        Self {
-            slots,
-            writes: 0,
-            last: None,
-        }
+        Self { slots, last_at: 0 }
+    }
+
+    /// The slot the last delivery was answered from or written to.
+    fn last_answer(&self) -> Option<usize> {
+        self.last_at.checked_sub(1)
+    }
+
+    /// Remember that the slot `at` answered the delivery now.
+    fn answered_by(&mut self, at: usize) {
+        self.last_at = at.saturating_add(1);
     }
 
     /// How many slots the memory holds: the count it was made with. A fixed table's is the
@@ -2316,6 +2453,8 @@ impl<P: Storage> MatchMemo<P> {
     /// The slot `key` maps to: a hash of its bytes (FNV-1a, which is a handful of
     /// instructions per byte and has no setup), folded to the table's size.
     fn slot_of(&self, key: &str) -> usize {
+        #[cfg(test)]
+        MEMO_HASHES.with(|hashes| hashes.set(hashes.get() + 1));
         let mut hash: u32 = 0x811c_9dc5;
         for byte in key.as_bytes() {
             hash ^= u32::from(*byte);
@@ -2435,11 +2574,11 @@ pub(crate) fn any_local_match<R: SubscriberRows>(rows: &R, key: &str) -> bool {
 /// The subscribers fired and the order they fire in are the scan's: the matched positions
 /// are kept ascending, which is the table's order.
 ///
-/// `repeats_previous` is the caller's word that `key` is the key of the delivery just before this
-/// one (the next record of a frame naming the same key). Then, when that delivery was answered
-/// from a slot and no slot has been written nor the table changed since, this one is answered
-/// from the same slot without hashing the key or comparing it again; anything else is looked up
-/// as usual.
+/// The slot the delivery before this one was answered from is tried first, so a stream of one key
+/// is answered without hashing the key: there the key is compared with the slot's, which a slot
+/// holds only when the key hashes to it. `repeats_previous` is the caller's word that `key` is
+/// the key of the delivery just before this one (the next record of a frame naming the same key);
+/// then the key is not compared either. Anything else is looked up by its hash.
 pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     rows: &mut R,
     memo: &mut MatchMemo<P>,
@@ -2453,27 +2592,19 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     if memo.slot_count() == 0 {
         return scan_subscribers(rows, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
-    if repeats_previous {
-        if let Some((at, writes)) = memo.last {
-            if writes == memo.writes {
-                if let Some(Some(slot)) = memo.slots.get(at) {
-                    if slot.epoch == epoch && slot.remote == is_remote {
-                        for position in slot.hits.iter() {
-                            if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
-                                deliver(id, sink);
-                            }
-                        }
-                        return slot.hits.len();
-                    }
-                }
-            }
-        }
-    }
-    memo.last = None;
-    let at = memo.slot_of(key);
+    let last = memo.last_answer().filter(|&at| {
+        memo.slots
+            .get(at)
+            .and_then(Option::as_ref)
+            .is_some_and(|slot| {
+                slot.answers(epoch, is_remote) && (repeats_previous || slot.key == key)
+            })
+    });
+    let at = last.unwrap_or_else(|| memo.slot_of(key));
     if let Some(Some(slot)) = memo.slots.get(at) {
-        if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
-            memo.last = Some((at, memo.writes));
+        if last.is_some() || (slot.answers(epoch, is_remote) && slot.key == key) {
+            // The field, as `answered_by` writes it: `slot` still borrows the slots.
+            memo.last_at = at.saturating_add(1);
             for position in slot.hits.iter() {
                 if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
                     deliver(id, sink);
@@ -2482,6 +2613,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
             return slot.hits.len();
         }
     }
+    memo.last_at = 0;
     // Not remembered at this epoch: match it with the scan, noting each hit. A key
     // that cannot be matched at all (deeper than the bound) delivers to nobody and is not
     // remembered.
@@ -2521,10 +2653,38 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
         key: text,
         hits,
     });
-    // A count of writes, read only for equality with the one a remembered slot was written at.
-    memo.writes = memo.writes.wrapping_add(1);
-    memo.last = Some((at, memo.writes));
+    memo.answered_by(at);
     fired
+}
+
+/// Whether `keyexpr`, read as `facts`, is deeper than the matcher's bound on the fixed backing: a
+/// message on it is delivered to nobody. The depth is counted only for a key the facts do not
+/// already place within the bound.
+pub(crate) fn past_matcher_depth(keyexpr: &str, facts: KeyFacts) -> bool {
+    crate::bounded::ENFORCES_CAPACITY
+        && !facts.is_key()
+        && keyexpr.split('/').count() > MAX_KEYEXPR_CHUNKS
+}
+
+/// Whether a message on `keyexpr`, read as `facts`, from a peer when `is_remote` and from the
+/// session itself otherwise, reaches the subscriber `row`: its locality admits the origin and its
+/// pattern intersects the key. The rule of every walk of the subscribers ([`scan_subscribers`]
+/// and the walk that pins one row at a time).
+pub(crate) fn row_reaches(
+    row: &RowRef<'_>,
+    keyexpr: &str,
+    facts: KeyFacts,
+    is_remote: bool,
+) -> bool {
+    let pass = if is_remote {
+        row.origin.allows_remote()
+    } else {
+        row.origin.allows_local()
+    };
+    // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
+    // applies the fixed backing's depth bound to it, the same defensive
+    // over-depth skip every scan inherits from the one seam.
+    pass && keyexpr_intersects_text_with(row.pattern, row.facts, keyexpr, facts)
 }
 
 /// The one matcher: every subscriber whose locality admits the origin and whose pattern
@@ -2568,22 +2728,11 @@ pub(crate) fn scan_subscribers<R: SubscriberRows>(
     // it. The matcher would refuse it for every subscriber anyway; the depth
     // is counted here only for that answer, and only for a key the facts do not
     // already place within the bound.
-    if crate::bounded::ENFORCES_CAPACITY
-        && !facts.is_key()
-        && keyexpr.split('/').count() > MAX_KEYEXPR_CHUNKS
-    {
+    if past_matcher_depth(keyexpr, facts) {
         return None;
     }
     rows.each_row_mut(|position, row, id, sink| {
-        let pass = if is_remote {
-            row.origin.allows_remote()
-        } else {
-            row.origin.allows_local()
-        };
-        // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
-        // applies the fixed backing's depth bound to it, the same defensive
-        // over-depth skip every scan inherits from the one seam.
-        if pass && keyexpr_intersects_text_with(row.pattern, row.facts, keyexpr, facts) {
+        if row_reaches(&row, keyexpr, facts, is_remote) {
             // R311gb-2b — deliver via the DIP seam (borrowed view,
             // no projection step). On MCU the sink is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.
@@ -2739,6 +2888,13 @@ std::thread_local! {
     pub(crate) static MATCH_SCANS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
+// How many times the receive match cache hashed a key on this thread (`MatchMemo::slot_of`): a
+// key answered from the slot the delivery before was answered from is not hashed.
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static MEMO_HASHES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 impl<C, P: Storage> SubscriberTable<C, P> {
     /// R311y788 — the SESSION-LOCAL half of a publisher's matching
     /// status: `true` iff at least one subscriber registered on THIS
@@ -2784,10 +2940,10 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
                 keys: Default::default(),
                 #[cfg(feature = "alloc")]
-                own_mapping_space: None,
+                own_mapping_space: crate::bounded::ZeroOption::NONE,
                 #[cfg(feature = "shared-key-ids")]
-                shared_key_ids: None,
-                own_zid: None,
+                shared_key_ids: crate::bounded::ZeroOption::NONE,
+                own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::default(),
@@ -2818,10 +2974,10 @@ impl SubscriberPeer<crate::bounded::Static> {
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
                 keys: crate::bounded::InlineKeys,
                 #[cfg(feature = "alloc")]
-                own_mapping_space: None,
+                own_mapping_space: crate::bounded::ZeroOption::NONE,
                 #[cfg(feature = "shared-key-ids")]
-                shared_key_ids: None,
-                own_zid: None,
+                shared_key_ids: crate::bounded::ZeroOption::NONE,
+                own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::new_static(),
@@ -2837,6 +2993,57 @@ impl SubscriberPeer<crate::bounded::Static> {
             class: None,
             _policy: core::marker::PhantomData,
         }
+    }
+}
+
+/// The rows of a [`SubscriberPeer`] of the region policy, which a region lays out beside it: the
+/// staging of the answers to the peer's interests, at the build's bound. The peer's aliases and
+/// interests are inline in the side, at their bounds, as the region policy keeps a peer's rows.
+pub struct SubscriberPeerRows {
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+    staged: [core::mem::MaybeUninit<SubInterestReply>; caps::MAX_PENDING_DECLARES],
+}
+
+// SAFETY: the staging's rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl crate::bounded::ZeroEmpty for SubscriberPeerRows {}
+
+/// The lines a region's description holds for one [`SubscriberPeer`] of the region policy, at
+/// most: its staging's rows; and its two handles to the key arena, its aliases' and its interests'.
+pub const SUBSCRIBER_PEER_LINES: usize = 2;
+
+// SAFETY: of the region policy, at all zero bytes: the aliases are a `FixedIdMap` and the interests
+// a static sequence (`ZeroEmpty`), the staging a `LentSeq` of no rows, each key arena handle a
+// `LentKeys` of none; the bounds are `Limited` (`ZeroEmpty`), bounds of nothing until the session
+// states them; the own id space and the shared key ids are `ZeroOption`s of none, the own zid is
+// one of no bytes (`OwnZid::NONE`), the class is `None` (`ClassId` is a transparent `NonZeroU16`);
+// the shared-memory state is `ZeroEmpty`; every count and epoch is zero; the composing row is
+// `ComposeInline` (`ZeroEmpty`). Nothing drops a value, every sequence holding none.
+unsafe impl crate::bounded::ZeroEmpty for SubscriberPeer<crate::bounded::Region> {}
+
+impl SubscriberPeer<crate::bounded::Region> {
+    /// The description of a side of the region policy at `at` in a region and its
+    /// [`SubscriberPeerRows`] at `rows`: the line of its staging's rows and its handles to the
+    /// region's key arena, those the build keeps.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<SUBSCRIBER_PEER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY;
+        #[cfg(feature = "storage-profile")]
+        let lines = lines.keys_at(at.wrapping_add(core::mem::offset_of!(Self, naming.keys)));
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+        let lines = lines
+            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
+            .seq(crate::bounded::SeqPlace::of::<SubInterestReply>(
+                at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
+                rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
+                caps::MAX_PENDING_DECLARES,
+            ));
+        #[cfg(not(feature = "storage-profile"))]
+        let _ = at;
+        #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
+        let _ = rows;
+        lines
     }
 }
 
@@ -3148,7 +3355,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// error under this workspace's deny-warnings docs policy.)
     #[cfg(feature = "alloc")]
     pub fn set_own_mapping_space(&mut self, space: SharedOwnMappingSpace) {
-        self.naming.own_mapping_space = Some(space);
+        self.naming.own_mapping_space.set(Some(space));
     }
 
     /// R311y739 — release the installed own space; `M=0` aliases refuse again.
@@ -3156,7 +3363,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// session teardown / re-init, exactly as `clear_own_zid` pairs its install.
     #[cfg(feature = "alloc")]
     pub fn clear_own_mapping_space(&mut self) {
-        self.naming.own_mapping_space = None;
+        self.naming.own_mapping_space.set(None);
     }
 
     /// Install the key ids every node of the deployment shares: from now on an id that neither
@@ -3165,14 +3372,14 @@ impl<P: Storage> SubscriberPeer<P> {
     /// its link carries anything; a second install replaces the first.
     #[cfg(feature = "shared-key-ids")]
     pub fn set_shared_key_ids(&mut self, ids: crate::shared_key_ids::SharedKeyIds) {
-        self.naming.shared_key_ids = Some(ids);
+        self.naming.shared_key_ids.set(Some(ids));
     }
 
     /// Release the installed dictionary: an id neither declared space holds resolves to
     /// nothing again.
     #[cfg(feature = "shared-key-ids")]
     pub fn clear_shared_key_ids(&mut self) {
-        self.naming.shared_key_ids = None;
+        self.naming.shared_key_ids.set(None);
     }
 
     /// R311y739 — BOTH id spaces, for this registry and for every consumer the
@@ -3320,7 +3527,7 @@ impl<P: Storage> SubscriberPeer<P> {
         let Some(own) = OwnZid::of(zid) else {
             return false;
         };
-        self.naming.own_zid = Some(own);
+        self.naming.own_zid = own;
         true
     }
 
@@ -3330,7 +3537,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// every wire-arrived Push fires its matching subscribers.
     #[cfg(feature = "storage-profile")]
     pub fn clear_own_zid(&mut self) {
-        self.naming.own_zid = None;
+        self.naming.own_zid = OwnZid::NONE;
     }
 
     /// R231 — expose the currently-installed own zid for diagnostic
@@ -3339,7 +3546,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// `source_info.zid_prefix()`.
     #[cfg(feature = "storage-profile")]
     pub fn own_zid(&self) -> Option<&[u8]> {
-        self.naming.own_zid.as_ref().map(OwnZid::as_slice)
+        self.naming.own_zid.held()
     }
 
     /// R121d — absorb a `Declare` envelope's inner body so the
@@ -3569,7 +3776,7 @@ impl<P: Storage> PeerNaming<P> {
         #[cfg(not(feature = "alloc"))]
         let own = tables;
         #[cfg(feature = "shared-key-ids")]
-        if let Some(ids) = &self.shared_key_ids {
+        if let Some(ids) = self.shared_key_ids.as_ref() {
             return MappingSpaces::<P, O>::of_aliases(&self.aliases, own).with_shared(ids);
         }
         MappingSpaces::<P, O>::of_aliases(&self.aliases, own)
@@ -5019,6 +5226,33 @@ mod tests {
     // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
     use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
 
+    /// An own zid of all zero bytes is none, as one cleared is; one set reads back its bytes.
+    /// Turned red by `OwnZid::held` reading a length of zero as a zid.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn an_own_zid_of_zero_bytes_is_none() {
+        // SAFETY: sixteen bytes and a length, all integers.
+        let zeroed: OwnZid = unsafe { core::mem::zeroed() };
+        assert_eq!(zeroed.held(), None);
+        assert_eq!(OwnZid::NONE.held(), None);
+        let set = OwnZid::of(&[1, 2, 3]).unwrap();
+        assert_eq!(set.held(), Some(&[1_u8, 2, 3][..]));
+    }
+
+    /// A match memory of all zero bytes remembers no answer; one answered remembers its slot until
+    /// it forgets it. Turned red by `last_answer` reading a zero `last_at` as slot 0.
+    #[test]
+    fn a_match_memory_of_zero_bytes_remembers_no_answer() {
+        // SAFETY: `MatchMemo` is `ZeroEmpty`.
+        let mut memo: MatchMemo<crate::bounded::Region> = unsafe { core::mem::zeroed() };
+        assert_eq!(memo.last_answer(), None);
+        assert_eq!(memo.slot_count(), 0);
+        memo.answered_by(0);
+        assert_eq!(memo.last_answer(), Some(0));
+        memo.last_at = 0;
+        assert_eq!(memo.last_answer(), None);
+    }
+
     #[test]
     fn dispatch_fires_callback_on_matching_keyexpr() {
         let mut registry = SubscriberRegistry::new();
@@ -5037,6 +5271,63 @@ mod tests {
             counter.load(Ordering::SeqCst),
             1,
             "matching keyexpr fires the callback exactly once"
+        );
+    }
+
+    /// A record taken alone, for a delivery that hands each sample out itself: a Push is
+    /// projected into the sample its subscribers are handed and handed to none of them by the
+    /// take, and a Push whose key names an alias the peer never declared projects nothing. The
+    /// CONTROL is the dispatch of the same Push, which hands it out. Turned red by a take that
+    /// hands the sample through its context, or projects a key that does not resolve.
+    #[test]
+    fn a_push_taken_alone_is_projected_and_handed_to_no_subscriber() {
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counted = counter.clone();
+        let _id = registry
+            .register("topic/a", move |_push| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
+        let push = NetworkMessage::Push(Box::new(push_with_keyexpr("topic/a")));
+        let unknown = NetworkMessage::Push(Box::new(
+            Push {
+                keyexpr: Wireexpr {
+                    body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                        id: 7,
+                        suffix_len: None,
+                        suffix: None,
+                    }),
+                },
+                ..Push::default()
+            }
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap(),
+        ));
+        {
+            let SubscriberRegistry { table, peer } = &mut registry;
+            let taken = peer.take_record(table, &push, Reliability::Reliable);
+            assert_eq!(
+                taken.map(|sample| sample.keyexpr),
+                Some("topic/a".to_string()),
+                "the Push's sample, its key resolved"
+            );
+            assert!(
+                peer.take_record(table, &unknown, Reliability::Reliable)
+                    .is_none(),
+                "a key that does not resolve projects nothing"
+            );
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "the take handed the sample to a subscriber"
+        );
+        registry.dispatch(&push, Reliability::Reliable);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "CONTROL: the dispatch of the same Push hands it out"
         );
     }
 
@@ -6942,6 +7233,82 @@ mod tests {
             );
             assert_eq!(got, want, "reliable={reliable}");
         }
+    }
+
+    /// The keys of a frame's plain Puts read one record at a time, as a walk that hands each to
+    /// one subscriber at a time reads them: an alias, a record that repeats it, a literal, and
+    /// an id nobody declared, which reads nothing and leaves no key for the record after it to
+    /// repeat. The CONTROL is the reader's own flag on the repeating records. Turned red by a read
+    /// that lets a repeat rest on a dropped record, or composes a key other than the owned path's.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn the_keys_of_plain_puts_read_one_at_a_time_as_the_frame_names_them() {
+        let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8]); 5] = [
+            (7, None, b"one"),
+            (7, None, b"two"),
+            (0, Some("demo/literal"), b"three"),
+            (9, None, b"nobody declared 9"),
+            (9, None, b"nor here"),
+        ];
+        let mut batch = Vec::new();
+        for (id, suffix, payload) in puts {
+            let push = crate::lent_push::put_with_qos(
+                id,
+                suffix,
+                payload,
+                crate::sample::QosLevel::from_raw(0x05),
+            )
+            .unwrap();
+            let mut one = Vec::new();
+            push.encode(&mut sce_forge_runtime::codec::VecSink::new(&mut one))
+                .unwrap();
+            batch.extend_from_slice(&one);
+        }
+        let mut registry: SubscriberRegistry<BoxedSink> = SubscriberRegistry::new();
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "demo/alias"))),
+            Reliability::Reliable,
+        );
+        let frame = crate::link::RxBytes::from(batch);
+        let read = crate::plain_push::read_plain_puts(&frame).expect("every record is plain");
+        assert_eq!(
+            read.iter().map(|put| put.repeats_key).collect::<Vec<_>>(),
+            vec![false, true, false, false, true],
+            "CONTROL: the reader marks the records that repeat the key before them"
+        );
+        let SubscriberRegistry { table, peer } = &mut registry;
+        let mut keys = super::in_place::PlainPutKeys::new(&frame);
+        let mut got = Vec::new();
+        for put in &read {
+            let repeats = peer.plain_put_key(&*table, &mut keys, put);
+            let named = repeats.map(|repeats| {
+                let sample = keys.sample(put, Reliability::Reliable, repeats);
+                (
+                    keys.key().to_string(),
+                    crate::sink::SampleView::payload(&sample).to_vec(),
+                )
+            });
+            got.push((repeats, named));
+        }
+        assert_eq!(
+            got,
+            vec![
+                (
+                    Some(false),
+                    Some(("demo/alias".to_string(), b"one".to_vec()))
+                ),
+                (
+                    Some(true),
+                    Some(("demo/alias".to_string(), b"two".to_vec()))
+                ),
+                (
+                    Some(false),
+                    Some(("demo/literal".to_string(), b"three".to_vec()))
+                ),
+                (None, None),
+                (None, None),
+            ]
+        );
     }
 
     /// Records that repeat the key before them are delivered as the owned path delivers
@@ -9667,6 +10034,58 @@ mod match_memo_position_tests {
             10,
             "every message is delivered"
         );
+    }
+
+    /// A stream of one key is answered from the slot the message before it was, without hashing
+    /// the key again, though no caller says the key repeats; a different key is not answered from
+    /// that slot, and a registration between two messages is seen by the second.
+    #[test]
+    fn a_stream_of_one_key_is_answered_without_hashing_it_again() {
+        let hashes = || MEMO_HASHES.with(|count| count.get());
+        let scans = || MATCH_SCANS.with(|count| count.get());
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let mut table: SubscriberTable<Count, Heap> = SubscriberTable::default();
+        table
+            // A literal key: a build without the wildcard features matches a pattern only as text.
+            .register_sink("a/x", Locality::Any, Count(delivered.clone()))
+            .expect("a heap table grows");
+        table.limit_memo_to(1);
+        let sample = |keyexpr: &'static str| BorrowedSample {
+            keyexpr,
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+
+        let (hashed, scanned) = (hashes(), scans());
+        for _ in 0..5 {
+            assert_eq!(table.dispatch_borrowed(&sample("a/x"), true), 1);
+        }
+        assert_eq!(
+            hashes() - hashed,
+            1,
+            "the key is hashed for its first message alone"
+        );
+        assert_eq!(scans() - scanned, 1, "and matched for it alone");
+
+        assert_eq!(
+            table.dispatch_borrowed(&sample("a/y"), true),
+            0,
+            "another key is not answered from the slot the stream left"
+        );
+        assert_eq!(delivered.load(Ordering::Relaxed), 5);
+
+        table
+            .register_sink("a/x", Locality::Any, Count(delivered.clone()))
+            .expect("a heap table grows");
+        let scanned = scans();
+        assert_eq!(table.dispatch_borrowed(&sample("a/x"), true), 2);
+        assert_eq!(
+            scans() - scanned,
+            1,
+            "a registration is seen by the next message"
+        );
+        assert_eq!(delivered.load(Ordering::Relaxed), 7);
     }
 }
 

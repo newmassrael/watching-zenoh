@@ -146,6 +146,52 @@ impl PeerDeclarations for Peers {
     }
 }
 
+/// Every kind of entity is admitted by the one body (`Declaring::keyed`) and holds the declaration
+/// its key is named under as every other kind does: once while it stands, and not after it goes.
+///
+/// # Control
+///
+/// A kind whose declaration skips `Declaring::hold` for its prefix, or whose undeclaration keeps
+/// the hold, reds that kind's line.
+#[test]
+fn every_kind_of_entity_holds_its_prefix_declaration_alike() {
+    let mut tables = Tables::new();
+    let prefix = tables.declare_keyexpr("demo").unwrap();
+    let holds = |tables: &Tables| tables.keyexprs().get(prefix.handle).unwrap().holds();
+    let alone = holds(&tables);
+    let form = KeyForm {
+        prefix: Some(prefix.handle),
+        own: None,
+        retraction: Retraction::ById,
+    };
+    let sub = tables
+        .declare_subscriber("demo/s", Locality::Any, form, 1)
+        .unwrap();
+    assert_eq!(holds(&tables), alone + 1, "a subscriber holds its prefix");
+    let qbl = tables
+        .declare_queryable("demo/q", Locality::Any, true, form, 2)
+        .unwrap();
+    assert_eq!(holds(&tables), alone + 2, "a queryable holds its prefix");
+    let token = tables.declare_token("demo/t", form).unwrap();
+    assert_eq!(holds(&tables), alone + 3, "a token holds its prefix");
+    let live = tables
+        .declare_liveliness_subscriber("demo/l", true, form, 3)
+        .unwrap();
+    assert_eq!(
+        holds(&tables),
+        alone + 4,
+        "a liveliness subscriber holds its prefix"
+    );
+    assert_eq!([sub.id, qbl.id, token.id, live.id], [1, 2, 3, 4]);
+    assert!(tables.undeclare_subscriber(sub.handle).is_some());
+    assert!(tables.undeclare_queryable(qbl.handle).is_some());
+    assert!(tables.undeclare_token(token.handle).is_some());
+    assert!(tables
+        .undeclare_liveliness_subscriber(live.handle)
+        .is_some());
+    assert_eq!(holds(&tables), alone, "each kind let its hold go");
+}
+
 #[test]
 fn every_kind_of_entity_takes_its_id_from_one_space() {
     let mut tables = Tables::new();
@@ -3295,4 +3341,462 @@ fn a_write_filter_row_answers_as_its_handle_does() {
     assert!(row_open(&tables));
     assert_eq!(tables.write_filter_open(filter, &peers), Some(true));
     assert_eq!(peers.asked.get(), 2);
+}
+
+/// Entity ids counted from zero: none given hands out 1 first, the last id is `u32::MAX`, and ids
+/// from 0 are ids from 1. Turned red by `EntityIds::next` answering 0 for none given.
+#[test]
+fn entity_ids_of_zero_hand_out_one_first_and_end_at_the_last() {
+    let mut ids = EntityIds::default();
+    assert_eq!(ids.next(), Some(1));
+    assert_eq!(ids.take(), Some(1));
+    assert_eq!(ids.take(), Some(2));
+    let mut last = EntityIds::from_next(Some(u32::MAX));
+    assert_eq!(last.take(), Some(u32::MAX));
+    assert_eq!(last.take(), None);
+    assert_eq!(EntityIds::from_next(None).next(), None);
+    assert_eq!(EntityIds::from_next(Some(0)).next(), Some(1));
+    assert_eq!(EntityIds::from_next(Some(7)).next(), Some(7));
+}
+
+/// Plane bounds of zero bytes bind no plane; bounds from rows bind each plane to its own count.
+/// Turned red by `of_filter` reading a bound uninverted.
+#[test]
+fn plane_bounds_of_zero_bind_nothing_and_bounds_of_rows_bind_each_plane() {
+    let unbound = PlaneBounds::UNBOUND;
+    assert_eq!(unbound.of_filter(Plane::Subscribers, false), usize::MAX);
+    assert_eq!(unbound.of_filter(Plane::Subscribers, true), usize::MAX);
+    let rows = TableRows {
+        publishers: 3,
+        queriers: 2,
+        key_listeners: 1,
+        ..small_rows()
+    };
+    let bound = PlaneBounds::of(&rows);
+    assert_eq!(bound.of_filter(Plane::Subscribers, false), 3);
+    assert_eq!(
+        bound.of_filter(
+            Plane::Queryables {
+                complete_required: false
+            },
+            false
+        ),
+        2
+    );
+    assert_eq!(bound.of_filter(Plane::Subscribers, true), 1);
+}
+
+/// A session's tables of the region policy, their rows and their key arena, as a region of the
+/// build's shape lays them out.
+struct OneSession {
+    tables: SessionTables<Calls, Region>,
+    rows: SessionRows<Calls>,
+    keys: crate::key_arena::KeyArena<4096>,
+}
+
+// SAFETY: every field is `ZeroEmpty`.
+unsafe impl ZeroEmpty for OneSession {}
+
+/// The description of a `OneSession`.
+const ONE_SESSION: RegionLines<SESSION_TABLE_LINES> = SessionTables::<Calls, Region>::places(
+    core::mem::offset_of!(OneSession, tables),
+    core::mem::offset_of!(OneSession, rows),
+);
+
+/// Tables of the region policy of all zero bytes are empty and refuse nothing they are asked to
+/// read; placed by their description, each holds its build's bound of rows and keeps its keys in
+/// the region's key arena. Turned red by a table left out of `SessionTables::places`, by the key
+/// handle's line left out, or by a zero field that is not an empty one.
+#[test]
+fn region_tables_of_zero_bytes_placed_by_their_description_declare_and_undeclare() {
+    let layout = std::alloc::Layout::new::<OneSession>();
+    // SAFETY: the layout is of a type of some bytes.
+    let block = unsafe { std::alloc::alloc_zeroed(layout) };
+    let region = NonNull::new(block).expect("the test allocator answers");
+    let session = block.cast::<OneSession>();
+    // SAFETY: the zeroed block is a `OneSession`, every field of which is `ZeroEmpty`; the key arena
+    // is reached by this one reference, made before any key exists and not used after `space`.
+    let space = unsafe {
+        (*core::ptr::addr_of_mut!((*session).keys))
+            .space(SessionLimits::defaults().max_keyexpr_bytes_held())
+    };
+    // SAFETY: the description is the region's own, its lines naming the tables' columns and handle
+    // in it and the rows beside them, which nothing else reaches; the key arena stays in the block
+    // until it is given back below.
+    unsafe { crate::key_arena::place_region(region, space, &ONE_SESSION) };
+    // SAFETY: the tables field alone, projected from the block; the rows and the key arena are
+    // reached only through the tables from here on.
+    let tables = unsafe { &mut *core::ptr::addr_of_mut!((*session).tables) };
+    assert!(tables.subscribers().is_empty());
+    assert_eq!(tables.next_entity_id(), Some(1));
+    assert_eq!(tables.subscribers().capacity(), caps::MAX_SUBSCRIPTIONS);
+    let first = tables
+        .declare_subscriber("a/b", Locality::Any, KeyForm::default(), 1)
+        .unwrap();
+    assert_eq!(tables.subscribers().get(first.handle).unwrap().id(), 1);
+    assert_eq!(
+        tables
+            .subscribers()
+            .get(first.handle)
+            .unwrap()
+            .key()
+            .as_str(),
+        "a/b"
+    );
+    for n in 1..caps::MAX_SUBSCRIPTIONS {
+        let key = std::format!("a/{n}");
+        tables
+            .declare_subscriber(&key, Locality::Any, KeyForm::default(), 2)
+            .unwrap();
+    }
+    let refused = tables
+        .declare_subscriber("a/full", Locality::Any, KeyForm::default(), 3)
+        .unwrap_err();
+    assert_eq!(refused.why, RegisterError::TableFull);
+    let undeclared = tables.undeclare_subscriber(first.handle).unwrap();
+    assert_eq!(undeclared.taken.unwrap(), 1);
+    let declared = tables.declare_keyexpr("k/one").unwrap();
+    assert_eq!(declared.id, 1, "a zero expression id mints 1 first");
+    // SAFETY: the tables are dropped once, in place, while the key arena their keys lie in is still
+    // in the block; then the block goes back with its layout.
+    unsafe {
+        core::ptr::drop_in_place(core::ptr::addr_of_mut!((*session).tables));
+        std::alloc::dealloc(block, layout);
+    }
+}
+
+/// Every row `fan` pins, each call ended at once: the number each row's closure was given.
+fn pinned_in_turn(tables: &mut LatchedTables, fan: &mut PinnedFanOut<'_>) -> Vec<u32> {
+    let mut seen = Vec::new();
+    while let Some(call) = tables.pin_next_subscriber(fan) {
+        seen.push(call.call);
+        assert!(
+            !ended::<CClosure<u32>>(call),
+            "a live row's call marks nothing"
+        );
+    }
+    seen
+}
+
+/// The walk that pins one row at a time reaches the rows a peer's fan-out reaches, in its order: a
+/// row whose locality hears no peer, or whose pattern does not meet the key, is passed. Turned red
+/// by a walk that skips a row, repeats one, or matches by another rule than the fan-out's.
+#[test]
+fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
+    use crate::pubsub::{LocalSubscribers, PeerDelivery};
+    let mut tables = latched_tables();
+    let mut declared = Vec::new();
+    for (n, key, origin) in [
+        (1, "a/b", Locality::Any),
+        (2, "a/*", Locality::Remote),
+        (3, "c", Locality::Any),
+        (4, "a/**", Locality::SessionLocal),
+        (5, "a/b", Locality::Any),
+    ] {
+        let row = tables
+            .declare_subscriber(key, origin, KeyForm::default(), latched(n))
+            .unwrap();
+        declared.push((row.handle, n));
+    }
+    let mut fanned = Vec::new();
+    tables.deliver_from_peer("a/b", None, PeerDelivery::default(), |id, _| {
+        fanned.extend(
+            declared
+                .iter()
+                .filter(|(handle, _)| *handle == id)
+                .map(|(_, n)| *n),
+        );
+    });
+    assert_eq!(fanned, std::vec![1, 2, 5], "CONTROL: the fan-out's rows");
+    let mut fan = PinnedFanOut::new("a/b", None);
+    assert_eq!(pinned_in_turn(&mut tables, &mut fan), fanned);
+    assert!(
+        tables.pin_next_subscriber(&mut fan).is_none(),
+        "a walk that ended stays ended"
+    );
+}
+
+/// The walk of a message the session itself published reaches the rows its own loopback reaches,
+/// in its order: a row whose locality hears only peers is passed, and one that hears only the
+/// session is reached. Turned red by a walk of the session's own message that matches the rows by
+/// a peer's origin.
+#[test]
+fn the_pinned_walk_of_the_sessions_own_message_reaches_the_rows_its_loopback_reaches() {
+    use crate::pubsub::LocalSubscribers;
+    let mut tables = latched_tables();
+    let mut declared = Vec::new();
+    for (n, key, origin) in [
+        (1, "a/b", Locality::Any),
+        (2, "a/*", Locality::Remote),
+        (3, "c", Locality::Any),
+        (4, "a/**", Locality::SessionLocal),
+        (5, "a/b", Locality::Any),
+    ] {
+        let row = tables
+            .declare_subscriber(key, origin, KeyForm::default(), latched(n))
+            .unwrap();
+        declared.push((row.handle, n));
+    }
+    let mut fanned = Vec::new();
+    tables.fire_matching("a/b", true, false, |id, _| {
+        fanned.extend(
+            declared
+                .iter()
+                .filter(|(handle, _)| *handle == id)
+                .map(|(_, n)| *n),
+        );
+    });
+    assert_eq!(fanned, std::vec![1, 4, 5], "CONTROL: the loopback's rows");
+    let mut fan = PinnedFanOut::local("a/b");
+    assert_eq!(pinned_in_turn(&mut tables, &mut fan), fanned);
+    assert_eq!(
+        pinned_in_turn(&mut tables, &mut PinnedFanOut::new("a/b", None)),
+        std::vec![1, 2, 5],
+        "CONTROL: a peer's message on the same key reaches the rows that hear peers"
+    );
+}
+
+/// A row undeclared while a call pinned before it runs begins no call, so the walk passes it; a
+/// row undeclared while its own call runs keeps its slot until that call ends, which says so and
+/// lets the drained walk take it. Turned red by a walk that pins a retired row, or by a pin that
+/// does not hold the row's latch up across its call.
+#[test]
+fn a_row_undeclared_while_a_pinned_call_runs_is_passed_and_let_go_after() {
+    let mut tables = latched_tables();
+    let one = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(1))
+        .unwrap();
+    let two = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(2))
+        .unwrap();
+    let three = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(3))
+        .unwrap();
+    let mut fan = PinnedFanOut::new("k", None);
+    let first = tables.pin_next_subscriber(&mut fan).expect("the first row");
+    assert_eq!(first.call, 1);
+    // Its own row undeclared under its call: kept, its callback not handed back.
+    assert!(tables
+        .undeclare_subscriber(one.handle)
+        .unwrap()
+        .taken
+        .is_none());
+    // The next row undeclared before the walk reaches it: no call runs, so it goes at once.
+    assert!(tables
+        .undeclare_subscriber(two.handle)
+        .unwrap()
+        .taken
+        .is_some());
+    let next = tables.pin_next_subscriber(&mut fan).expect("the row after");
+    assert_eq!(next.call, 3, "the undeclared row is passed");
+    assert!(!ended::<CClosure<u32>>(next));
+    assert!(tables.pin_next_subscriber(&mut fan).is_none());
+    assert!(
+        tables.release_drained_subscriber(&mut 0).is_none(),
+        "CONTROL: the first call still runs"
+    );
+    assert!(
+        ended::<CClosure<u32>>(first),
+        "the last call of a retired row"
+    );
+    assert!(tables.release_drained_subscriber(&mut 0).is_some());
+    assert!(!tables.subscribers().holds_slot(one.handle));
+    assert!(tables.subscribers().contains(three.handle));
+}
+
+/// Three subscribers that hear peers, on `a/b`, `a/*` and `a/c` (numbered 1, 2, 3), in tables
+/// whose key gate is `gate`. Of the keys of the test catalogue, `a/b` is one and `a/c` is not.
+#[cfg(feature = "key-set-closed")]
+fn gated_tables(gate: KeyGate<'static>) -> LatchedTables {
+    let mut tables = latched_tables();
+    for (n, key) in [(1, "a/b"), (2, "a/*"), (3, "a/c")] {
+        tables
+            .declare_subscriber(key, Locality::Any, KeyForm::default(), latched(n))
+            .unwrap();
+    }
+    tables.set_key_gate(gate);
+    tables
+}
+
+/// The subscribers a peer of `class` reaches with a message on `key` through the fan-out.
+#[cfg(feature = "key-set-closed")]
+fn fanned_out(tables: &mut LatchedTables, key: &str, class: Option<ClassId>) -> usize {
+    crate::pubsub::LocalSubscribers::deliver_from_peer(
+        tables,
+        key,
+        class,
+        crate::pubsub::PeerDelivery::default(),
+        |_, _| {},
+    )
+}
+
+/// A closed key set drops a peer's message on a key outside it before the fan-out reaches any
+/// subscriber, and counts it; a key of the set reaches the rows its pattern meets. Turned red by a
+/// fan-out of the session's tables that does not put the message to the key gate.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_closed_key_set_drops_a_peers_message_outside_it_from_the_fan_out() {
+    use crate::key_catalogue::tests::TABLE;
+    let mut open = gated_tables(KeyGate::open());
+    assert_eq!(
+        fanned_out(&mut open, "a/c", None),
+        2,
+        "CONTROL: an open gate admits every key"
+    );
+    let mut tables = gated_tables(KeyGate::closed(&TABLE));
+    assert_eq!(fanned_out(&mut tables, "a/b", None), 2, "a key of the set");
+    assert_eq!(fanned_out(&mut tables, "a/c", None), 0, "a key outside it");
+    assert_eq!(
+        tables.key_gate_refused(),
+        crate::key_gate::Refused {
+            total: 1,
+            outside_set: 1,
+            ..crate::key_gate::Refused::default()
+        }
+    );
+}
+
+/// A closed key set that declares its peers drops what a peer's row does not allow, and what a
+/// peer it does not declare sends, by the class the fan-out is given. Turned red by a fan-out that
+/// drops the class it is given.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_closed_key_set_drops_from_the_fan_out_what_the_peers_row_does_not_allow() {
+    use crate::key_catalogue::tests::TABLE;
+    use crate::key_gate::tests::{ALLOWANCE, PEER_A, PEER_B};
+    let mut tables = gated_tables(KeyGate::closed(&TABLE).with_allowance(&ALLOWANCE));
+    let a = ALLOWANCE.class_of(&PEER_A);
+    let b = ALLOWANCE.class_of(&PEER_B);
+    assert_eq!(
+        fanned_out(&mut tables, "a/b", a),
+        2,
+        "CONTROL: A's row allows a/b"
+    );
+    assert_eq!(fanned_out(&mut tables, "a/b", b), 0, "B's row does not");
+    assert_eq!(
+        fanned_out(&mut tables, "a/b", None),
+        0,
+        "a peer not declared"
+    );
+    assert_eq!(tables.key_gate_refused().peer_not_allowed, 1);
+    assert_eq!(tables.key_gate_refused().peer_unknown, 1);
+}
+
+/// The walk that pins one row at a time keeps the fan-out's key gate: a peer's message on a key
+/// outside a closed set reaches no row, counted once for the message however often the walk is
+/// asked, and the session's own message is not gated. Turned red by a pinned walk that does not
+/// put the message to the gate, or that asks it at each pin.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_closed_key_set_drops_a_peers_message_outside_it_from_the_pinned_walk() {
+    use crate::key_catalogue::tests::TABLE;
+    let mut open = gated_tables(KeyGate::open());
+    assert_eq!(
+        pinned_in_turn(&mut open, &mut PinnedFanOut::new("a/c", None)),
+        std::vec![2, 3],
+        "CONTROL: an open gate admits every key"
+    );
+    let mut tables = gated_tables(KeyGate::closed(&TABLE));
+    assert_eq!(
+        pinned_in_turn(&mut tables, &mut PinnedFanOut::new("a/b", None)),
+        std::vec![1, 2],
+        "a key of the set"
+    );
+    let mut fan = PinnedFanOut::new("a/c", None);
+    assert!(
+        tables.pin_next_subscriber(&mut fan).is_none(),
+        "a key outside it"
+    );
+    assert!(
+        tables.pin_next_subscriber(&mut fan).is_none(),
+        "a refused walk stays ended"
+    );
+    assert_eq!(
+        tables.key_gate_refused().outside_set,
+        1,
+        "counted once for the message"
+    );
+    assert_eq!(
+        pinned_in_turn(&mut tables, &mut PinnedFanOut::local("a/c")),
+        std::vec![2, 3],
+        "the session's own message is not gated"
+    );
+    assert_eq!(tables.key_gate_refused().total, 1);
+}
+
+/// The pinned walk asks the key gate with the class it carries: what a peer's row does not allow
+/// reaches no row. Turned red by a walk that asks the gate without the peer's class.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_closed_key_set_drops_from_the_pinned_walk_what_the_peers_row_does_not_allow() {
+    use crate::key_catalogue::tests::TABLE;
+    use crate::key_gate::tests::{ALLOWANCE, PEER_A, PEER_B};
+    let mut tables = gated_tables(KeyGate::closed(&TABLE).with_allowance(&ALLOWANCE));
+    let a = ALLOWANCE.class_of(&PEER_A);
+    let b = ALLOWANCE.class_of(&PEER_B);
+    assert_eq!(
+        pinned_in_turn(&mut tables, &mut PinnedFanOut::new("a/b", a)),
+        std::vec![1, 2],
+        "CONTROL: A's row allows a/b"
+    );
+    assert!(pinned_in_turn(&mut tables, &mut PinnedFanOut::new("a/b", b)).is_empty());
+    assert_eq!(tables.key_gate_refused().peer_not_allowed, 1);
+}
+
+/// Every liveliness subscriber `fan` pins, each call ended at once: the number each row's
+/// closure was given.
+fn tokens_pinned_in_turn(tables: &LatchedTables, fan: &mut PinnedTokenFan<'_>) -> Vec<u32> {
+    let mut seen = Vec::new();
+    while let Some(call) = tables.pin_next_liveliness_subscriber(fan) {
+        seen.push(call.call);
+        assert!(
+            !ended::<CClosure<u32>>(call),
+            "a live row's call marks nothing"
+        );
+    }
+    seen
+}
+
+/// A peer token's walk pins, one at a time in the table's order, each liveliness subscriber whose
+/// pattern meets its key, and of a historical token only the rows that asked for history; a row
+/// undeclared before the walk reaches it begins no call. The CONTROL is the live token, which
+/// reaches the row that asked no history too. Turned red by a walk that matches by another rule
+/// than the token fan's (`token_reaches`), repeats a row, or pins a row undeclared.
+#[test]
+fn a_tokens_walk_pins_each_liveliness_subscriber_it_reaches_in_turn() {
+    let mut tables = latched_tables();
+    tables
+        .declare_liveliness_subscriber("demo/**", false, KeyForm::default(), latched(1))
+        .unwrap();
+    tables
+        .declare_liveliness_subscriber("other/**", true, KeyForm::default(), latched(2))
+        .unwrap();
+    let asked = tables
+        .declare_liveliness_subscriber("demo/*", true, KeyForm::default(), latched(3))
+        .unwrap();
+    assert_eq!(
+        tokens_pinned_in_turn(&tables, &mut PinnedTokenFan::new("demo/t", false)),
+        [1, 3],
+        "CONTROL: a live token reaches every row its key meets"
+    );
+    assert_eq!(
+        tokens_pinned_in_turn(&tables, &mut PinnedTokenFan::new("demo/t", true)),
+        [3],
+        "a historical token reaches only the rows that asked for history"
+    );
+    let mut fan = PinnedTokenFan::new("demo/t", false);
+    let first = tables
+        .pin_next_liveliness_subscriber(&mut fan)
+        .expect("the first row");
+    assert_eq!(first.call, 1);
+    assert!(!ended::<CClosure<u32>>(first));
+    assert!(tables
+        .undeclare_liveliness_subscriber(asked.handle)
+        .unwrap()
+        .taken
+        .is_some());
+    assert!(
+        tables.pin_next_liveliness_subscriber(&mut fan).is_none(),
+        "a row undeclared between two pins begins no call"
+    );
 }

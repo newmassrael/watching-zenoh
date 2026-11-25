@@ -16,10 +16,13 @@
 //! the first against the build's contract fails there too.
 
 use core::cell::UnsafeCell;
+use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// A value behind the flag of a build of one thread.
+/// A value behind the flag of a build of one thread. Seen by the crate, as the form's lock type
+/// that names it (`LockForm::Lock` of `OneThread`) is.
 pub(crate) struct OneThreadLock<T> {
     held: AtomicBool,
     value: UnsafeCell<T>,
@@ -33,7 +36,36 @@ pub(crate) struct OneThreadLock<T> {
 unsafe impl<T: Send> Sync for OneThreadLock<T> {}
 
 impl<T> OneThreadLock<T> {
+    /// A clear flag made in `place`, before the value `make` writes in the place it is handed
+    /// and lends back. A maker that lends back anything but the place it was handed has not
+    /// written it there, and is refused with a panic.
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self` and aligned for it, and what it held is
+    /// overwritten without being dropped.
+    pub(super) unsafe fn init_at(
+        place: NonNull<Self>,
+        make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
+    ) {
+        let at = place.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` (the caller's contract), so each field is
+        // too, and each is written once: the value in its cell (`UnsafeCell<T>` and
+        // `MaybeUninit<T>` each have the layout of `T`) by `make`, which lent the cell back and
+        // so wrote it.
+        unsafe {
+            addr_of_mut!((*at).held).write(AtomicBool::new(false));
+            let cell = &mut *addr_of_mut!((*at).value).cast::<MaybeUninit<T>>();
+            let field: *const T = cell.as_ptr();
+            let made: *const T = make(cell);
+            assert!(
+                core::ptr::eq(made, field),
+                "the value is written in the place it was handed"
+            );
+        }
+    }
+
     /// `value`, behind a clear flag.
+    #[cfg(all(test, feature = "std"))]
     pub(super) fn new(value: T) -> Self {
         Self {
             held: AtomicBool::new(false),
@@ -116,6 +148,37 @@ impl<T> Drop for OneThreadGuard<'_, T> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::OneThreadLock;
+
+    /// A lock made in place is clear and holds the value written in its own place. Turned red by
+    /// a make that writes the value anywhere but inside the lock, or leaves the flag set.
+    #[test]
+    fn a_lock_made_in_place_holds_the_value_written_there() {
+        let mut place = core::mem::MaybeUninit::<OneThreadLock<[u8; 32]>>::uninit();
+        let start = place.as_ptr() as usize;
+        let lock_bytes = start..start + core::mem::size_of::<OneThreadLock<[u8; 32]>>();
+        let mut handed = 0usize;
+        // SAFETY: the place is valid for writes of the lock, which stays there.
+        unsafe {
+            OneThreadLock::init_at(
+                core::ptr::NonNull::from(&mut place).cast::<OneThreadLock<[u8; 32]>>(),
+                |value: &mut core::mem::MaybeUninit<[u8; 32]>| {
+                    handed = value.as_ptr() as usize;
+                    value.write([3; 32])
+                },
+            );
+        }
+        assert!(
+            lock_bytes.contains(&handed),
+            "the value is written inside the lock's place"
+        );
+        // SAFETY: made above.
+        let lock = unsafe { place.assume_init_ref() };
+        assert_eq!(
+            lock.try_lock().map(|value| value[31]),
+            Some(3),
+            "made clear"
+        );
+    }
 
     /// A take holds the value until its guard drops: a try meanwhile finds it held, and one after
     /// takes it with what the first hold wrote. Turned red by a guard whose drop leaves the flag

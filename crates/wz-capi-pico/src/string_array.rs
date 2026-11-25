@@ -106,11 +106,8 @@ enum Items {
     Owned(Vec<Box<StringArrayEntry>>),
     /// Views of strings another object owns, read in place for as long as the lender keeps them
     /// (`StringArrayState::lent`): a scouted Hello's locators, handed to a scout's callback with
-    /// no copy.
-    #[cfg_attr(
-        not(any(feature = "scout", feature = "scout-mcu", test)),
-        allow(dead_code)
-    )]
+    /// no copy. Only scouting lends them, so a build without it reads no array of this kind.
+    #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
     Lent {
         views: *const z_loaned_string_t,
         len: usize,
@@ -182,13 +179,21 @@ impl StringArrayState {
     }
 
     /// Whether the strings are another object's (`Self::lent`).
+    #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
     fn is_lent(&self) -> bool {
         matches!(self.items, Items::Lent { .. })
+    }
+
+    /// Whether the strings are another object's: never, in a build that does not scout.
+    #[cfg(not(any(feature = "scout", feature = "scout-mcu", test)))]
+    fn is_lent(&self) -> bool {
+        false
     }
 
     pub(crate) fn len(&self) -> usize {
         match &self.items {
             Items::Owned(entries) => entries.len(),
+            #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
             Items::Lent { len, .. } => *len,
         }
     }
@@ -197,7 +202,25 @@ impl StringArrayState {
         match &self.items {
             Items::Owned(entries) => entries.get(k).map(|entry| &entry.view),
             // SAFETY: `k` is within the views, which outlive the array (`Self::lent`).
+            #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
             Items::Lent { views, len } => (k < *len).then(|| unsafe { &*views.add(k) }),
+        }
+    }
+
+    /// How many strings the array holds once a copy of `bytes` is added to those it owns, in
+    /// place. A lent array's strings are its lender's, so nothing is added to them; nor does a
+    /// full heap add anything; either answers the count as it was.
+    fn push_copy(&mut self, bytes: &[u8]) -> usize {
+        match &mut self.items {
+            Items::Owned(entries) => {
+                if let Ok(entry) = StringArrayEntry::copy_of(bytes) {
+                    // A refused push lets the entry go and leaves the entries as they were.
+                    let _ = try_push(entries, entry);
+                }
+                entries.len()
+            }
+            #[cfg(any(feature = "scout", feature = "scout-mcu", test))]
+            Items::Lent { len, .. } => *len,
         }
     }
 }
@@ -463,25 +486,13 @@ unsafe fn string_array_push(
     let Some(state) = string_array_state_mut(array) else {
         return 0;
     };
-    let len = state.len();
-    // A lent array's strings are its lender's: nothing is added to them.
-    let Items::Owned(entries) = &mut state.items else {
-        return len;
-    };
     let Some(view) = value.as_ref() else {
-        return len;
+        return state.len();
     };
     let Some(bytes) = crate::abi::view_bytes(view._start, view._len) else {
-        return len;
+        return state.len();
     };
-    // A full heap adds nothing, and the length is answered as it was.
-    let Ok(entry) = StringArrayEntry::copy_of(bytes) else {
-        return len;
-    };
-    if try_push(entries, entry).is_err() {
-        return len;
-    }
-    entries.len()
+    state.push_copy(bytes)
 }
 
 /// Deep-copy a string array (pico `z_string_array_clone`).
@@ -848,6 +859,34 @@ mod tests {
             );
             assert_eq!(entries(&state), strings.map(|s| s.as_bytes().to_vec()));
             z_string_array_drop(z_string_array_move(&mut owned));
+        }
+    }
+
+    /// A push the heap refuses adds nothing and answers the count the array had, its strings as
+    /// they were. Turned red by a refused push that counts an entry it did not add, or loses one
+    /// the array held.
+    #[test]
+    fn a_push_the_heap_refuses_adds_nothing() {
+        let value = z_loaned_string_t {
+            _start: b"first".as_ptr(),
+            _len: 5,
+        };
+        // SAFETY: every pointer is a live value of its type this test owns, and the array is
+        // dropped once.
+        unsafe {
+            let mut arr = z_owned_string_array_t::null_value();
+            z_string_array_new(&mut arr);
+            assert_eq!(
+                z_string_array_push_by_copy(z_string_array_loan_mut(&mut arr), &value),
+                1
+            );
+            let refused = crate::test_heap::refused(|| {
+                z_string_array_push_by_copy(z_string_array_loan_mut(&mut arr), &value)
+            });
+            assert_eq!(refused, 1);
+            let state = string_array_state(z_string_array_loan(&arr)).expect("an array");
+            assert_eq!(entries(state), [b"first".to_vec()]);
+            z_string_array_drop(z_string_array_move(&mut arr));
         }
     }
 }

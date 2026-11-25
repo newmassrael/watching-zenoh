@@ -104,17 +104,40 @@ enum Command {
     DeclareSubscriber(wz_session_core::wire_id::EntityId, &'static str),
     /// Declare queryable `.0` on the key, complete as `.2` says. Declared only: it answers
     /// nothing, which is all a test of what matches needs. Only the builds whose tests watch or
-    /// match a peer's queryables send it.
+    /// match a peer's queryables send it: a key's matching listener, the faces' table of a listener
+    /// with local queryables, a declaration watch of the queryables.
     #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        feature = "key-matching-listener"
+        feature = "key-matching-listener",
+        all(
+            feature = "listen",
+            feature = "query",
+            feature = "queryable",
+            feature = "local-queryable"
+        ),
+        all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "query", feature = "queryable")
+        )
     ))]
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
     #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        feature = "key-matching-listener"
+        feature = "key-matching-listener",
+        all(
+            feature = "listen",
+            feature = "query",
+            feature = "queryable",
+            feature = "local-queryable"
+        ),
+        all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "query", feature = "queryable")
+        )
     ))]
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
@@ -147,6 +170,13 @@ enum Command {
         &'static [u8],
         &'static [u8],
     ),
+    /// Declare each subscriber `.0` names, id and key, in one batch window, so that one frame
+    /// carries them all.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    DeclareSubscriberBatch(&'static [(wz_session_core::wire_id::EntityId, &'static str)]),
     /// Send the final of the initial declarations, as a peer does once it has declared what it
     /// held when the link came up.
     #[cfg(any(
@@ -163,6 +193,14 @@ enum Command {
     /// Ask a query of request id `.0` on the key.
     #[cfg(feature = "queryable")]
     Query(wz_session_core::wire_id::RequestId, &'static str),
+    /// In one batch window, so that one frame carries all three: push on the key `.0`, ask a
+    /// query of request id `.1` on the key `.2`, and push on `.0` again.
+    #[cfg(feature = "queryable")]
+    QueryBetweenPushes(
+        &'static str,
+        wz_session_core::wire_id::RequestId,
+        &'static str,
+    ),
     /// Ask a query of request id `.0` naming its key by id `.1` in the sender's space and the
     /// rest `.2`, which no declaration precedes: an id of the key ids both ends share.
     #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
@@ -202,6 +240,10 @@ enum Command {
     /// sequence number `.2`.
     #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
     PushSequenced(&'static str, &'static [u8], u32),
+    /// Ask the session, as Interest `.0`, for its subscribers on the key, those it holds now and
+    /// those it declares later.
+    #[cfg(feature = "interest-answer")]
+    AskSubscribers(u64, &'static str),
     /// Hold the cache of that advanced publisher: a queryable on its `@adv` key that answers as
     /// the publisher's own cache does, out of the samples with the sequence numbers `.0`, each
     /// carrying its number as its payload. The selectors it is asked are recorded.
@@ -220,6 +262,12 @@ struct Seen {
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     undeclared_subscribers: Vec<u64>,
     interests: usize,
+    /// The Interest each subscriber declaration that answers one names, in the order they arrived.
+    #[cfg(feature = "interest-answer")]
+    subscriber_answers: Vec<u64>,
+    /// The Interest each declaration Final names, in the order they arrived.
+    #[cfg(feature = "interest-answer")]
+    interest_finals: Vec<u64>,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
     samples: Vec<(String, Vec<u8>)>,
@@ -434,10 +482,11 @@ fn run_router(
     let links = router_links(init.batch_size);
     let OpenedLink { sink, pump } = links.open_acceptor(port).expect("bind the router's end");
     let _ = ready.send(());
-    let runtime = CoopRuntime::new(PosixClock);
-    let local = CoopLocalSet::new(&runtime);
+    let runtime = CoopRuntime::try_new(PosixClock).expect("the heap has room");
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
-    let actions = new_session_actions(sink, init, CoopTime::new(&runtime));
+    let actions =
+        new_session_actions(sink, init, CoopTime::new(&runtime)).expect("the heap has room");
     let observer = std::rc::Rc::new(std::cell::RefCell::new(ApplicationLayerObserver::new()));
     if catch_all == CatchAll::Held {
         let samples = seen.clone();
@@ -502,7 +551,8 @@ fn run_router(
         &local,
         pump,
         actions.clone(),
-        wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
+        wz_runtime_coop::session_runtime::SessionEntropy::try_new(PosixEntropy)
+            .expect("the heap has room"),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
@@ -529,6 +579,19 @@ fn run_router(
                                     gone,
                                 ) => seen.undeclared_subscribers.push(gone.id),
                                 _ => {}
+                            }
+                            #[cfg(feature = "interest-answer")]
+                            if let Some(interest) = declare.interest_id {
+                                use wz_codecs::declare::DeclareOwnedVariant as Body;
+                                match &declare.body {
+                                    Body::CodecZenohDeclSubscriber(_) => {
+                                        seen.subscriber_answers.push(interest);
+                                    }
+                                    Body::CodecZenohDeclFinal(_) => {
+                                        seen.interest_finals.push(interest);
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         NetworkMessage::Interest(_interest) => {
@@ -601,6 +664,18 @@ fn run_router(
                         }
                         _ => {}
                     }
+                    #[cfg(feature = "interest-answer")]
+                    if let Some(interest) = declare.interest_id {
+                        match &declare.body {
+                            wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(_) => {
+                                seen.subscriber_answers.push(interest);
+                            }
+                            wz_codecs::lent::DeclareVariant::CodecZenohDeclFinal(_) => {
+                                seen.interest_finals.push(interest);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 if let Some(_interest) = record.interest() {
                     seen.interests += 1;
@@ -665,9 +740,20 @@ fn run_router(
                 );
             }
             #[cfg(any(
-                feature = "query",
-                feature = "queryable",
-                feature = "key-matching-listener"
+                feature = "key-matching-listener",
+                all(
+                    feature = "listen",
+                    feature = "query",
+                    feature = "queryable",
+                    feature = "local-queryable"
+                ),
+                all(
+                    any(
+                        feature = "remote-declaration-watch",
+                        feature = "declarations-synced-event"
+                    ),
+                    any(feature = "query", feature = "queryable")
+                )
             ))]
             Ok(Command::DeclareQueryable(id, key, complete)) => {
                 let _ = actions.send_declare_queryable(
@@ -677,12 +763,27 @@ fn run_router(
                 );
             }
             #[cfg(any(
-                feature = "query",
-                feature = "queryable",
-                feature = "key-matching-listener"
+                feature = "key-matching-listener",
+                all(
+                    feature = "listen",
+                    feature = "query",
+                    feature = "queryable",
+                    feature = "local-queryable"
+                ),
+                all(
+                    any(
+                        feature = "remote-declaration-watch",
+                        feature = "declarations-synced-event"
+                    ),
+                    any(feature = "query", feature = "queryable")
+                )
             ))]
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
+            }
+            #[cfg(feature = "interest-answer")]
+            Ok(Command::AskSubscribers(id, key)) => {
+                let _ = actions.send_interest_subscribers(id, true, true, 0, Some(key));
             }
             #[cfg(feature = "liveliness-get")]
             Ok(Command::MuteInterests) => {
@@ -715,6 +816,20 @@ fn run_router(
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
+            }
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            Ok(Command::DeclareSubscriberBatch(declared)) => {
+                let _ = actions.batch_start();
+                for &(id, key) in declared {
+                    let _ = actions.send_declare_subscriber(
+                        id,
+                        wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                    );
+                }
+                let _ = actions.batch_stop();
             }
             Ok(Command::PushBatch(key, count)) => {
                 let _ = actions.batch_start();
@@ -821,6 +936,14 @@ fn run_router(
             #[cfg(feature = "queryable")]
             Ok(Command::Query(rid, key)) => {
                 let _ = actions.send_request_query(rid, 0, Some(key));
+            }
+            #[cfg(feature = "queryable")]
+            Ok(Command::QueryBetweenPushes(pushed, rid, asked)) => {
+                let _ = actions.batch_start();
+                let _ = actions.send_push_literal(pushed, b"before", true);
+                let _ = actions.send_request_query(rid, 0, Some(asked));
+                let _ = actions.send_push_literal(pushed, b"after", true);
+                let _ = actions.batch_stop();
             }
             #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
             Ok(Command::QueryById(rid, id, rest)) => {
@@ -1149,6 +1272,55 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
     });
 }
 
+/// A subscriber the program declares after a peer asked for the session's subscribers, current and
+/// future, is told to that peer in answer to its Interest by the declaration itself: the session is
+/// not stepped after it, so no record, keep-alive or lease check of the link's can stage the
+/// answer. The CONTROL is the declaration itself, which reaches the peer unstepped too, so what
+/// the session sends outside a step is seen. Turned red by an answer staged only by the next event
+/// of the link's session.
+#[cfg(feature = "interest-answer")]
+#[test]
+fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration() {
+    const INTEREST: u64 = 41;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    router.send(Command::AskSubscribers(INTEREST, "demo/**"));
+    until(&engine, "the session to answer the Interest", || {
+        router.seen(|s| s.interest_finals.contains(&INTEREST))
+    });
+    assert!(
+        !router.seen(|s| s.subscriber_answers.contains(&INTEREST)),
+        "CONTROL: no subscriber answered the Interest before one is declared"
+    );
+    let declared_before = router.seen(|s| s.subscribers.len());
+    engine
+        .declare_subscriber_on_wire(
+            "demo/a",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
+        )
+        .expect("the session declares the subscriber");
+    // Waited for with the session unstepped.
+    let unstepped = |what: &str, done: &dyn Fn(&Seen) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !router.seen(done) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what} with the session unstepped"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    unstepped("CONTROL: the declaration", &|s| {
+        s.subscribers.len() > declared_before
+    });
+    unstepped("the answer to the Interest", &|s| {
+        s.subscriber_answers.contains(&INTEREST)
+    });
+}
+
 /// A publish that finds nothing handed to the session takes the session's lock once and the queue
 /// of handed legs not at all, so a stream of puts pays no lock for what no other publish left
 /// behind. The CONTROL is a read step, which looks at the queue under its lock every time. A
@@ -1298,22 +1470,27 @@ fn the_sessions_step_ends_a_chain_past_its_deadline() {
 }
 
 /// The samples a read takes from a link that leaves its datagram where it lies are handed to the
-/// subscriber's callback where they lie: the samples of each datagram are handed on through the
-/// delivery lane, which has no lock, as one record, its payloads read in the datagram, which is
-/// held back only until the last callback returns. A read that finds nothing hands nothing out.
-/// One thread delivers, so the list of the threads delivering beside it is never taken. The
-/// CONTROL is the count of the samples handed to the subscriber.
+/// subscriber's callback where they lie, each once, with the session free: their payloads are
+/// read in the datagram, which is held back only until the last callback returns. A read that
+/// finds nothing hands nothing out. One thread delivers, so the list of the threads delivering
+/// beside it is never taken. The CONTROL is the count of the samples handed to the subscriber.
 #[test]
 fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
+    let free: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
     engine
         .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
             let count = count.clone();
+            let free = free.clone();
             SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    free.lock().unwrap().push(engine.session_is_free());
+                }
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
@@ -1325,7 +1502,7 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         engine.declarations_synced()
     });
     let (handed, lent, list) = (
-        engine.rounds_handed(),
+        engine.samples_handed(),
         engine.samples_lent(),
         engine.delivery_list_takes(),
     );
@@ -1333,7 +1510,7 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         let _ = SessionDrive::read(&*engine, false);
     }
     assert_eq!(
-        (engine.rounds_handed(), engine.samples_lent()),
+        (engine.samples_handed(), engine.samples_lent()),
         (handed, lent),
         "a read with nothing to read handed something out"
     );
@@ -1346,14 +1523,19 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         received.load(Ordering::SeqCst) == SAMPLES
     });
     assert_eq!(
+        engine.samples_handed() - handed,
+        SAMPLES,
+        "each sample handed once"
+    );
+    assert_eq!(
         engine.samples_lent() - lent,
         SAMPLES,
-        "each sample handed where its datagram lies, none copied into the lane"
+        "each sample handed where its datagram lies, none copied"
     );
-    let records = engine.rounds_handed() - handed;
-    assert!(
-        (1..=SAMPLES).contains(&records),
-        "{records} records handed on: one for each datagram the samples came in"
+    assert_eq!(
+        *free.lock().unwrap(),
+        [true; SAMPLES],
+        "a callback found the session held"
     );
     assert_eq!(
         engine.delivery_list_takes(),
@@ -1514,7 +1696,7 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
     until(&engine, "the push and the retraction after it", || {
         !seen.lock().unwrap().is_empty() && engine.write_filter_active(filter)
     });
-    let threads = <crate::round::CoopForm as ThreadForm>::OTHER_THREADS;
+    let threads = <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
     assert_eq!(
         *seen.lock().unwrap(),
         [threads],
@@ -1662,7 +1844,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     router.send(Command::PushBatch("demo/batch", SAMPLES));
     // Nothing steps the session meanwhile, so the datagram lies in its socket before the read.
     std::thread::sleep(Duration::from_millis(300));
-    let rounds = engine.rounds_handed();
+    let samples = engine.samples_handed();
     let polls = engine.link_polls();
     let task_clock_reads = engine.task_clock_reads();
     #[cfg(any(feature = "listen", feature = "group"))]
@@ -1674,9 +1856,10 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
         sent,
         "every sample, in order, by the one read"
     );
-    assert!(
-        engine.rounds_handed() - rounds >= usize::from(SAMPLES) / RECORDS,
-        "the datagram was read in more steps than one, a round each"
+    assert_eq!(
+        engine.samples_handed() - samples,
+        usize::from(SAMPLES),
+        "each sample of the datagram handed once"
     );
     assert!(
         engine.link_polls() - polls <= 1,
@@ -2157,7 +2340,10 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
 /// counts: any queryable on the key, or only a complete one when the plane requires it, as
 /// zenoh-pico's listener is that filter's callback. The CONTROL is a subscriber on the key, which
 /// the router declares first and which opens a subscriber filter while neither listener hears it.
-#[cfg(any(feature = "query", feature = "queryable"))]
+#[cfg(all(
+    any(feature = "query", feature = "queryable"),
+    feature = "key-matching-listener"
+))]
 #[test]
 fn a_queryable_matching_listener_counts_what_its_filter_counts() {
     let router = Router::start(CatchAll::None);
@@ -3602,7 +3788,11 @@ mod program_clock;
 mod queryable;
 pub(crate) mod redial_heap;
 mod redial_wait;
+// The state of a session whose shape the build fixes: a build that plans at the open has none.
+#[cfg(not(feature = "runtime-plan"))]
+mod region;
 mod replay;
+#[cfg(wz_round)]
 mod round;
 // The cells a link's task takes: a build whose read steps its one link itself runs none.
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -3622,3 +3812,18 @@ mod ticker;
 mod timestamps;
 #[cfg(feature = "listen")]
 mod tx_pool;
+
+/// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's
+/// build script): a build whose read runs beside the program's calls. The read that hands each
+/// record out as it is read queues none, a get's reply included. A build that keeps none compiles
+/// no `crate::round`, so this is read here, where every build reads it. A feature added to one
+/// list and not the other turns this red.
+#[test]
+fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
+    let queues = cfg!(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group"
+    ));
+    assert_eq!(cfg!(wz_round), queues);
+}

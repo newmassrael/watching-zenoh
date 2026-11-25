@@ -115,7 +115,24 @@ compile_error!(
 mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
+// The calls the engine's rows are made through, as the round, the queries' plane and the gets'
+// plane name them: only a build that keeps one of them names them.
+#[cfg(any(wz_round, feature = "query", feature = "queryable"))]
+mod calls;
 mod engine;
+// The places a session's arena lends for values lodged by counts, given back from any thread.
+mod lodging;
+// The state of a session whose shape the build fixes, one struct the allocator hands zeroed.
+#[cfg(not(feature = "runtime-plan"))]
+pub mod region;
+/// The storage policy of the session's registry, named once so every table of it and the rows each
+/// is given agree on it: lent from the arena where the open lays the arena out from its config
+/// (`runtime-plan`), and placed in the region the build lays out otherwise (`region`).
+#[cfg(feature = "runtime-plan")]
+pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
+/// See the form of a build with `runtime-plan`.
+#[cfg(not(feature = "runtime-plan"))]
+pub(crate) type RowPolicy = wz_session_core::bounded::Region;
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
 
@@ -144,6 +161,8 @@ pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.
 pub mod open_source;
 // What the session hands its callbacks after its lock: one table a round, read where the records lie.
+// A build that puts nothing in it (`wz_round`, the crate's build script) has none.
+#[cfg(wz_round)]
 pub mod round;
 #[cfg(feature = "scout")]
 pub mod scout;
@@ -172,7 +191,7 @@ mod tests;
 pub use engine::ClockMoves;
 pub use engine::{
     ClockMovesWord, ComposedLinks, CoopConfig, CoopDrive, CoopEngine, CoopLinks, EndpointRefusal,
-    EngineHandle, EngineHold, KeyWireFormRefused, OpenError, OpenKeyIds, Refusal,
+    EngineHandle, EngineHold, KeyWireFormRefused, OpenError, OpenKeyIds, Refusal, RowClaim,
 };
 /// Why the session's runtime had no task for a link or a group ([`OpenError::NoTask`]).
 pub use wz_runtime_coop::executor::SpawnRefusal;

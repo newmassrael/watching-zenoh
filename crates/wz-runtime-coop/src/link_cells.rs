@@ -19,7 +19,7 @@
 //! drops it through that, whatever view of it the handle is (the value's own type, a trait object
 //! of it or a part of it), so a kind of link adds no body of its own here.
 
-use alloc::alloc::{alloc, dealloc, handle_alloc_error};
+use alloc::alloc::{alloc, dealloc};
 use core::alloc::Layout;
 use core::cell::Cell;
 use core::marker::PhantomData;
@@ -481,18 +481,10 @@ const fn fits_layout(size: usize, layout: Layout) -> bool {
 }
 
 impl<K, N: CountKind> CellRc<K, N> {
-    /// `value` in a cell of its own on the heap, its handles counted by `N`. A heap that refuses
-    /// the cell ends the program, as a `Box` of the value would.
-    pub fn on_heap(value: K) -> Self {
-        let layout = Layout::new::<Slot<K, N::Flag>>();
-        let Some(head) =
-            heap_head::<N::Flag>(layout, Slot::<K, N::Flag>::WHOLE, Slot::<K, N::Flag>::PLACE)
-        else {
-            handle_alloc_error(layout)
-        };
-        // SAFETY: the head heads a cell of `Slot<K, N::Flag>`'s layout, written with one handle,
-        // whose value this writes.
-        unsafe { Self::fill(head, value) }
+    /// `value` in a cell of its own on the heap, its handles counted by `N`. `None`, with
+    /// `value` let go of, when the heap refuses the cell: the program goes on.
+    pub fn try_on_heap(value: K) -> Option<Self> {
+        Self::in_cells_of(None, value).ok()
     }
 
     /// The handle of the cell `head` heads, its value written from `value`.
@@ -532,6 +524,15 @@ impl<K, N: CountKind> CellRc<K, N> {
         }
     }
 
+    /// The bytes of a cell that holds a `K` counted by `N`, a whole number of an arena's
+    /// alignments: what a cell `Self::in_cells_of` made on the heap asked of it.
+    pub const fn cell_bytes_of() -> usize {
+        match size_of::<Slot<K, N::Flag>>().checked_next_multiple_of(ARENA_ALIGN) {
+            Some(bytes) => bytes,
+            None => usize::MAX,
+        }
+    }
+
     /// [`CellRc::claim`] for handles counted by `N`, of a table whose flags are the form `N`
     /// gives a cell back by.
     pub fn claim_of(cells: Option<&LentByteCells<N::Flag>>) -> Option<CellClaim<K, N>> {
@@ -548,15 +549,6 @@ impl<K, N: CountKind> CellRc<K, N> {
     }
 }
 
-#[cfg(target_has_atomic = "8")]
-impl<K> CellRc<K, Atomic> {
-    /// `value` in a cell of its own on the heap, its handles counted as an `Arc`'s are: the
-    /// handle of a value several threads hold ([`Atomic`]).
-    pub fn shared(value: K) -> Self {
-        Self::on_heap(value)
-    }
-}
-
 impl<K> CellRc<K> {
     /// `value` in a cell of `cells`, or `value` back when every cell is taken or a cell is too
     /// small for it, or not aligned for it.
@@ -566,7 +558,7 @@ impl<K> CellRc<K> {
 
     /// `value` in a cell of `cells` when a table is lent, or `value` back when none of its cells
     /// takes it ([`Self::place`]); in a cell of its own on the heap when no table is
-    /// ([`Self::boxed`]), or `value` back when the heap refuses the cell. What every maker of a link's part asks, whichever memory the session
+    /// ([`Self::try_boxed`]), or `value` back when the heap refuses the cell. What every maker of a link's part asks, whichever memory the session
     /// lends. The cell is made by `head_in`, out of line; what is left here, for each kind of
     /// value, is moving the value into it.
     pub fn in_cells(cells: Option<&LentByteCells>, value: K) -> Result<Self, K> {
@@ -582,10 +574,10 @@ impl<K> CellRc<K> {
         Self::claim_of(cells)
     }
 
-    /// `value` in a cell of its own on the heap: the handle of a link lent no table. A heap that
-    /// refuses the cell ends the program, as a `Box` of the value would.
-    pub fn boxed(value: K) -> Self {
-        Self::on_heap(value)
+    /// `value` in a cell of its own on the heap: the handle of a link lent no table. `None`, with
+    /// `value` let go of, when the heap refuses the cell.
+    pub fn try_boxed(value: K) -> Option<Self> {
+        Self::try_on_heap(value)
     }
 
     /// Whether a value of `K` fits a cell of `size` bytes of a table, whose cells start on an
@@ -804,9 +796,10 @@ impl<K: SessionDatagramLink + 'static, N: CountKind> CellRc<K, N> {
 }
 
 /// `driver` in a cell of its own on the heap, as the session's actions send through it: the sink
-/// of a link no table lends a cell.
-pub fn heap_sink<K: BoxedLinkDriver + 'static>(driver: K) -> CellRc<dyn BoxedLinkDriver> {
-    CellRc::boxed(driver).into_sink()
+/// of a link no table lends a cell. `None`, with `driver` let go of, when the heap refuses the
+/// cell.
+pub fn heap_sink<K: BoxedLinkDriver + 'static>(driver: K) -> Option<CellRc<dyn BoxedLinkDriver>> {
+    CellRc::try_boxed(driver).map(CellRc::into_sink)
 }
 
 impl<T: ?Sized, N: CountKind> Deref for CellRc<T, N> {
@@ -1207,7 +1200,7 @@ mod tests {
         let placed = CellRc::place(&cells, Counted(drops.clone()))
             .ok()
             .expect("a cell");
-        let boxed = CellRc::boxed(Counted(drops.clone()));
+        let boxed = CellRc::try_boxed(Counted(drops.clone())).expect("the heap has room");
         for handle in [placed, boxed] {
             // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
             let named: CellRc<dyn Named> =
@@ -1219,6 +1212,27 @@ mod tests {
         }
         assert_eq!(drops.get(), 2, "each value dropped once");
         assert_eq!(cells.in_use(), 0, "and the table's cell given back");
+    }
+
+    /// A heap that refuses a cell of its own answers `None` and lets the value go, and the
+    /// program goes on; a sink and a pump share the answer. Turned red by `try_boxed` making its
+    /// cell with a maker that ends the program on a refused heap, or keeping the value past the
+    /// refusal.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_cell_the_heap_refuses_is_none_and_lets_its_value_go() {
+        let drops = Rc::new(Cell::new(0));
+        let refused =
+            crate::table_tests::refused(|| CellRc::try_boxed(Counted(drops.clone())).is_none());
+        assert!(refused, "a refused heap makes no cell");
+        assert_eq!(drops.get(), 1, "the value is let go of");
+        let kept = CellRc::try_boxed(Counted(drops.clone())).expect("the heap has room");
+        drop(kept);
+        assert_eq!(
+            drops.get(),
+            2,
+            "a heap with room holds the value until its last handle"
+        );
     }
 
     /// One cell seen through two trait objects, as a link is by the session's actions and by its
@@ -1270,7 +1284,7 @@ mod tests {
         let placed = CellRc::place(&cells, Wide(Counted(drops.clone())))
             .ok()
             .expect("a cell");
-        let boxed = CellRc::boxed(Wide(Counted(drops.clone())));
+        let boxed = CellRc::try_boxed(Wide(Counted(drops.clone()))).expect("the heap has room");
         for handle in [&placed, &boxed] {
             assert_eq!((CellRc::as_ptr(handle) as usize).checked_rem(16), Some(0));
             assert_eq!(handle.0.name(), 7);
@@ -1371,7 +1385,8 @@ mod tests {
     fn atomic_handles_let_go_on_several_threads_drop_the_value_once() {
         extern crate std;
         let drops = alloc::sync::Arc::new(AtomicUsize::new(0));
-        let handle = CellRc::shared(DropsOnce(drops.clone()));
+        let handle =
+            CellRc::<_, Atomic>::try_on_heap(DropsOnce(drops.clone())).expect("the heap has room");
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 let mine = handle.clone();
@@ -1461,7 +1476,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a cell was held by more handles than its count holds")]
     fn a_clone_past_the_count_is_named_in_a_test_build() {
-        let handle = CellRc::boxed(7u32);
+        let handle = CellRc::try_boxed(7u32).expect("the heap has room");
         count_at_its_most(&handle);
         let _ = handle.clone();
     }
@@ -1471,7 +1486,7 @@ mod tests {
     #[cfg(not(debug_assertions))]
     #[test]
     fn a_clone_past_the_count_is_counted_and_keeps_the_count() {
-        let handle = CellRc::boxed(7u32);
+        let handle = CellRc::try_boxed(7u32).expect("the heap has room");
         count_at_its_most(&handle);
         let before = held_past_count();
         let clone = handle.clone();

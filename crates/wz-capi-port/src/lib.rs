@@ -103,9 +103,6 @@ pub mod observation;
 pub mod os;
 mod peers;
 mod query;
-// The reach of a session's engine that keeps nothing of it standing, through one table of the
-// process.
-pub mod reach;
 mod refusal;
 // The limits of the process's runtime, which the machines it makes apart from any session read.
 pub mod runtime_limits;

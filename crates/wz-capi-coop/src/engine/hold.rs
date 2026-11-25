@@ -4,20 +4,17 @@
 //! The holders of a session's engine. The engine lies in its session's own arena, counted by its
 //! holders there ([`EngineHold`]), so the open takes no memory of the heap for it; it is reached
 //! without being held ([`EngineHandle`]) through the row of the process's table it was put in at
-//! its open (`wz_capi_port::reach`), which its close takes it out of, so a handle kept past the
+//! its open (`super::reach`), which its close takes it out of, so a handle kept past the
 //! close reaches nothing, whatever still holds the engine.
 
-use core::marker::PhantomData;
 use core::ops::Deref;
+#[cfg(feature = "threads")]
 use core::ptr::NonNull;
 
-#[cfg(feature = "query")]
-use wz_capi_port::cancellation::FanCanceller;
-use wz_capi_port::reach::{ReachEngine, Reachable};
 use wz_capi_port::EngineHolder;
 use wz_runtime_coop::kept::Shared;
 
-use super::{ClockSource, CoopEngine, CoopLinks};
+use super::{ClockSource, CoopEngine, CoopLinks, ReachEngine};
 
 /// A holder of a session's engine: cloning takes a count of the engine, dropping gives it back,
 /// and the last holder drops the engine where it lies and gives the session's arena back.
@@ -76,8 +73,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHold<CoopEn
 /// and the generation the row was at when the engine was put in it, two words copied freely.
 /// It reaches the engine while the session is open and one of the engine's holders is left.
 pub struct EngineHandle<E> {
-    reach: ReachEngine,
-    engine: PhantomData<fn() -> E>,
+    reach: ReachEngine<E>,
 }
 
 impl<E> Clone for EngineHandle<E> {
@@ -95,22 +91,15 @@ impl<E> EngineHandle<E> {
     }
 
     /// The handle of the engine `reach` reaches.
-    pub(super) const fn reaching(reach: ReachEngine) -> Self {
-        Self {
-            reach,
-            engine: PhantomData,
-        }
+    pub(super) const fn reaching(reach: ReachEngine<E>) -> Self {
+        Self { reach }
     }
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<CoopEngine<L, C>> {
     /// A holder of the engine, while its session is open and one of its holders is left.
     pub fn upgrade(&self) -> Option<EngineHold<CoopEngine<L, C>>> {
-        let engine = self.reach.reach()?.into_raw().cast::<CoopEngine<L, C>>();
-        // SAFETY: the row holds, at the generation the handle names, the engine the handle was
-        // made of, which is of this type and lies where its open placed it (`engine_of`); the
-        // count the reach took is handed over.
-        Some(EngineHold(unsafe { Shared::from_counted(engine) }))
+        self.reach.reach().map(EngineHold)
     }
 
     /// Whether the engine's session is open: the engine is in its row and no close or step ended
@@ -156,34 +145,5 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // SAFETY: every engine lies where its open placed it, the value of a `Shared`, and its
         // place stands while `self` is borrowed.
         unsafe { Shared::retain_live(NonNull::from(self)) }.map(EngineHold)
-    }
-}
-
-// SAFETY: every engine lies where its open placed it (`engine_of`), the value of a `Shared` counted
-// by its holders: a count is taken only while one is held. The engine is taken out of its row at
-// its close and first in its drop, before its place is given back.
-unsafe impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Reachable
-    for CoopEngine<L, C>
-{
-    fn retain_live(&self) -> bool {
-        // SAFETY: as the impl's: the engine is the value of a `Shared` whose place stands.
-        match unsafe { Shared::retain_live(NonNull::from(self)) } {
-            Some(held) => {
-                // The count is the caller's now, given back by `release`.
-                core::mem::forget(held);
-                true
-            }
-            None => false,
-        }
-    }
-
-    unsafe fn release(&self) {
-        // SAFETY: the caller's: the count `retain_live` took, given back once.
-        drop(unsafe { Shared::from_counted(NonNull::from(self)) });
-    }
-
-    #[cfg(feature = "query")]
-    fn canceller(&self) -> Option<&dyn FanCanceller> {
-        Some(self)
     }
 }

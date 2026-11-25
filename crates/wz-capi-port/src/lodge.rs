@@ -10,11 +10,12 @@
 //! back with the last of them, by the function its maker named. A weak count reads the value only
 //! by upgrading, which fails once the value is gone.
 
+use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::mem::MaybeUninit;
-use core::ptr::NonNull;
-use core::sync::atomic::{fence, AtomicUsize, Ordering};
+use core::mem::{ManuallyDrop, MaybeUninit};
+use core::ptr::{addr_of_mut, NonNull};
+use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -39,6 +40,200 @@ impl<T> Lodging<T> {
     }
 }
 
+/// No place for a value: the heap refused its box, or every place of a table is held. What a
+/// maker answers in place of ending the program, as a C ABI answers its failed `malloc`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoPlace;
+
+/// A place a holder lent for one lodged value, with what gives it back: what a session's region,
+/// a table of slots or a static table ([`StaticPlaces`]) hands a maker, which lodges its value
+/// there ([`Strong::lodge_at`]). Dropped unused, the place goes back at once.
+pub struct Lent<T> {
+    place: NonNull<MaybeUninit<Lodging<T>>>,
+    give_back: unsafe fn(*mut c_void),
+    context: *mut c_void,
+}
+
+impl<T> Lent<T> {
+    /// The layout of a place a `T` is lodged in: what a holder that lends places for values it
+    /// does not name lays each of them out by ([`Self::of_bytes`]).
+    pub const LAYOUT: Layout = Layout::new::<MaybeUninit<Lodging<T>>>();
+
+    /// The place `bytes` names, for a `T`: [`NoPlace`], the place given back at once, when it
+    /// is smaller or less aligned than a `T`'s lodging ([`Self::LAYOUT`]).
+    #[inline]
+    pub fn of_bytes(bytes: LentBytes) -> Result<Self, NoPlace> {
+        // The check is one body for every `T`; what is a `T`'s is the cast alone.
+        let bytes = bytes.fitting(Self::LAYOUT)?;
+        // SAFETY: `LentBytes::new`'s, for a place at least as large and as aligned as a `T`'s
+        // lodging (`LentBytes::fitting`).
+        Ok(unsafe { Self::new(bytes.place.cast(), bytes.give_back, bytes.context) })
+    }
+
+    /// A place in a box of its own, given back to the heap with the last count of what is lodged
+    /// there, or at once when dropped unused; [`NoPlace`] when the heap refuses the box. What a
+    /// holder with no place of its own to lend hands a maker.
+    pub fn try_boxed() -> Result<Self, NoPlace> {
+        // Laid out as `Box::new(Lodging::vacant())` lays it out, so `free_box` gives it back.
+        let layout = Self::LAYOUT;
+        // SAFETY: a lodging has bytes: its counts.
+        let place = NonNull::new(unsafe { alloc::alloc::alloc(layout) })
+            .ok_or(NoPlace)?
+            .cast::<MaybeUninit<Lodging<T>>>();
+        // SAFETY: the block is this place's alone, of a lodging's layout from the global
+        // allocator, valid for writes of one and holding none; `free_box` gives it back once,
+        // with a value lodged there or none.
+        Ok(unsafe { Self::new(place, free_box::<T>, place.as_ptr().cast::<c_void>()) })
+    }
+
+    /// The place at `place`, which `give_back(context)` gives back once.
+    ///
+    /// # Safety
+    /// As [`Strong::lodge`]'s `place`, `give_back` and `context`; and `give_back(context)` may
+    /// also run with no value lodged, when the lent place is dropped unused.
+    pub unsafe fn new(
+        place: NonNull<MaybeUninit<Lodging<T>>>,
+        give_back: unsafe fn(*mut c_void),
+        context: *mut c_void,
+    ) -> Self {
+        Self {
+            place,
+            give_back,
+            context,
+        }
+    }
+}
+
+impl<T> Drop for Lent<T> {
+    fn drop(&mut self) {
+        // SAFETY: `new`'s: nothing was lodged, so the place goes back now, once.
+        unsafe { (self.give_back)(self.context) };
+    }
+}
+
+/// A place of a layout a holder lent for a value of a type it does not name, with what gives it
+/// back: what a session's memory, laid out by the layouts an ABI stated at its open, hands the ABI,
+/// which lodges its value there as in any lent place ([`Lent::of_bytes`]). Dropped unused, the
+/// place goes back at once.
+pub struct LentBytes {
+    place: NonNull<u8>,
+    layout: Layout,
+    give_back: unsafe fn(*mut c_void),
+    context: *mut c_void,
+}
+
+impl LentBytes {
+    /// The place of `layout` at `place`, which `give_back(context)` gives back once.
+    ///
+    /// # Safety
+    /// As [`Lent::new`]'s, for a place valid for writes of `layout` and aligned to it.
+    pub unsafe fn new(
+        place: NonNull<u8>,
+        layout: Layout,
+        give_back: unsafe fn(*mut c_void),
+        context: *mut c_void,
+    ) -> Self {
+        Self {
+            place,
+            layout,
+            give_back,
+            context,
+        }
+    }
+
+    /// The layout the place holds.
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// These bytes, to be given back by what a lodging there names and no longer by their drop,
+    /// when they hold at least `layout`; [`NoPlace`], the place given back at once, when they are
+    /// smaller or less aligned.
+    fn fitting(self, layout: Layout) -> Result<ManuallyDrop<Self>, NoPlace> {
+        if self.layout.size() < layout.size() || self.layout.align() < layout.align() {
+            return Err(NoPlace);
+        }
+        Ok(ManuallyDrop::new(self))
+    }
+}
+
+impl Drop for LentBytes {
+    fn drop(&mut self) {
+        // SAFETY: `new`'s: nothing was lodged, so the place goes back now, once.
+        unsafe { (self.give_back)(self.context) };
+    }
+}
+
+/// Places for lodged values in a `static`, each lent to one value at a time and taken back with
+/// the last count of it: a value the whole process shares lies in one of them, so it asks nothing
+/// of a pool or a heap, and a table with every place held refuses the next value, never ending
+/// the program. A `static` never moves, so a lock made in a place stays where it was made.
+pub struct StaticPlaces<T, const N: usize> {
+    places: [UnsafeCell<MaybeUninit<Lodging<T>>>; N],
+    /// Whether each place is lent.
+    held: [AtomicBool; N],
+}
+
+// SAFETY: a place is written only by the one lend that took its mark, and read after through the
+// counts of the value lodged there, which are shared and sent as `Strong<T>` is.
+unsafe impl<T: Send + Sync, const N: usize> Sync for StaticPlaces<T, N> {}
+
+impl<T, const N: usize> StaticPlaces<T, N> {
+    /// A table with no place lent.
+    pub const fn new() -> Self {
+        Self {
+            places: [const { UnsafeCell::new(MaybeUninit::uninit()) }; N],
+            held: [const { AtomicBool::new(false) }; N],
+        }
+    }
+
+    /// A place no value holds, lent until the last count of what is lodged there lets it go;
+    /// `None` when every place is held.
+    pub fn lend(&'static self) -> Option<Lent<T>> {
+        for (place, held) in self.places.iter().zip(&self.held) {
+            // Acquire, to see the drop of the value the place held last before it is written again.
+            if held
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                // SAFETY: the place is this table's, which never moves, and holds no value now that
+                // its mark is this call's; `free_mark` clears the mark once, after the last count.
+                return Some(unsafe {
+                    Lent::new(
+                        NonNull::new_unchecked(place.get()),
+                        free_mark,
+                        core::ptr::from_ref(held).cast_mut().cast::<c_void>(),
+                    )
+                });
+            }
+        }
+        None
+    }
+
+    /// How many places are lent. For tests and diagnostics.
+    pub fn lent(&self) -> usize {
+        self.held
+            .iter()
+            .filter(|held| held.load(Ordering::Relaxed))
+            .count()
+    }
+}
+
+impl<T, const N: usize> Default for StaticPlaces<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Clear the mark of a static place: the place is free for the next value.
+///
+/// # Safety
+/// `context` is the mark of a place [`StaticPlaces::lend`] lent, cleared once.
+unsafe fn free_mark(context: *mut c_void) {
+    // SAFETY: the caller's: the mark is a static table's, which outlives every call.
+    unsafe { &*context.cast::<AtomicBool>() }.store(false, Ordering::Release);
+}
+
 /// A count of a lodged value; dropped, it lets go of it.
 pub struct Strong<T> {
     at: NonNull<Lodging<T>>,
@@ -59,11 +254,42 @@ unsafe impl<T: Send + Sync> Send for WeakRef<T> {}
 unsafe impl<T: Send + Sync> Sync for WeakRef<T> {}
 
 impl<T> Strong<T> {
-    /// `value` in a box of its own, given back to the heap with the last count of it.
-    pub fn boxed(value: T) -> Self {
-        let place = NonNull::from(Box::leak(Box::new(Lodging::<T>::vacant())));
-        // SAFETY: the box is this value's alone and is given back by `free_box`, once.
-        unsafe { Self::lodge(place, value, free_box::<T>, place.as_ptr().cast::<c_void>()) }
+    /// The value `make` writes in a box of its own ([`Lent::try_boxed`]), where it stays: what a
+    /// value holding a lock is made in, its locks made there ([`crate::os::mutex_in`]). [`NoPlace`]
+    /// when the heap refuses the box, with `make` not called.
+    ///
+    /// # Safety
+    /// `make` leaves a valid `T` in the place it is handed, which is valid for writes of one,
+    /// aligned for it and holds none.
+    pub unsafe fn try_boxed_in(make: impl FnOnce(NonNull<T>)) -> Result<Self, NoPlace> {
+        let lent = Lent::try_boxed()?;
+        // SAFETY: the caller's.
+        Ok(unsafe { Self::lodge_at(lent, make) })
+    }
+
+    /// `value` in the place `lent` names, given back with the last count of the value and of
+    /// its place. Safe where [`Self::lodge_at`] is not: the whole value is written at once.
+    pub fn new_at(lent: Lent<T>, value: T) -> Self {
+        let write = |at: NonNull<T>| {
+            // SAFETY: the place `lodge_at` hands is valid for writes of a `T` and holds none.
+            unsafe { at.as_ptr().write(value) }
+        };
+        // SAFETY: `write` leaves `value` whole in the place it is handed.
+        unsafe { Self::lodge_at(lent, write) }
+    }
+
+    /// The value `make` writes in the place `lent` names, where it stays: the place a session's
+    /// region, a table of slots or a static table ([`StaticPlaces::lend`]) lent, given back with
+    /// the last count of the value and of its place.
+    ///
+    /// # Safety
+    /// `make` leaves a valid `T` in the place it is handed, which is valid for writes of one,
+    /// aligned for it and holds none.
+    pub unsafe fn lodge_at(lent: Lent<T>, make: impl FnOnce(NonNull<T>)) -> Self {
+        let lent = core::mem::ManuallyDrop::new(lent);
+        // SAFETY: `Lent::new`'s for the place, now the value's, given back by the counts and not
+        // by the lent place's drop; `make` is the caller's.
+        unsafe { Self::lodge_in(lent.place, make, lent.give_back, lent.context) }
     }
 
     /// `value` in the place at `place`, which `give_back(context)` gives back once, after the
@@ -79,18 +305,43 @@ impl<T> Strong<T> {
         give_back: unsafe fn(*mut c_void),
         context: *mut c_void,
     ) -> Self {
-        let at = place.cast::<Lodging<T>>();
-        // SAFETY: the caller's: the place is free and valid for the write.
+        let write = |at: NonNull<T>| {
+            // SAFETY: the place `lodge_in` hands is valid for writes of a `T` and holds none.
+            unsafe { at.as_ptr().write(value) }
+        };
+        // SAFETY: the caller's, and `write` leaves `value` in the place it is handed.
+        unsafe { Self::lodge_in(place, write, give_back, context) }
+    }
+
+    /// The value `make` writes in the place at `place`, where it stays, as [`Self::lodge`] lodges
+    /// one: what a value holding a lock is made in, its locks made there
+    /// ([`crate::os::mutex_in`]).
+    ///
+    /// # Safety
+    /// As [`Self::lodge`]; and `make` leaves a valid `T` in the place it is handed, which is valid
+    /// for writes of one, aligned for it and holds none.
+    pub unsafe fn lodge_in(
+        place: NonNull<MaybeUninit<Lodging<T>>>,
+        make: impl FnOnce(NonNull<T>),
+        give_back: unsafe fn(*mut c_void),
+        context: *mut c_void,
+    ) -> Self {
+        let at = place.cast::<Lodging<T>>().as_ptr();
+        // SAFETY: the caller's: the place is free and valid for writes of a `Lodging<T>`, and each
+        // field is written once through a pointer to it, the value by `make` in its cell
+        // (`UnsafeCell<MaybeUninit<T>>` has the layout of `T`), not null as it is inside the place.
         unsafe {
-            at.as_ptr().write(Lodging {
-                strong: AtomicUsize::new(1),
-                weak: AtomicUsize::new(1),
-                value: UnsafeCell::new(MaybeUninit::new(value)),
-                give_back,
-                context,
-            });
+            addr_of_mut!((*at).strong).write(AtomicUsize::new(1));
+            addr_of_mut!((*at).weak).write(AtomicUsize::new(1));
+            addr_of_mut!((*at).give_back).write(give_back);
+            addr_of_mut!((*at).context).write(context);
+            make(NonNull::new_unchecked(
+                addr_of_mut!((*at).value).cast::<T>(),
+            ));
         }
-        Self { at }
+        Self {
+            at: place.cast::<Lodging<T>>(),
+        }
     }
 
     fn lodging(&self) -> &Lodging<T> {
@@ -324,7 +575,7 @@ impl Drop for LodgedCount {
 ///
 /// # Safety
 /// `raw` names a lodging of a `T` of which the caller holds a count.
-unsafe fn retain_raw<T>(raw: *const c_void) {
+pub(crate) unsafe fn retain_raw<T>(raw: *const c_void) {
     // SAFETY: the caller's count holds the lodging; Relaxed, as `Strong::clone`'s.
     unsafe { &*raw.cast::<Lodging<T>>() }
         .strong
@@ -335,15 +586,15 @@ unsafe fn retain_raw<T>(raw: *const c_void) {
 ///
 /// # Safety
 /// `raw` is a count of a `T`'s lodging that the caller gives up, once.
-unsafe fn release_raw<T>(raw: *mut c_void) {
+pub(crate) unsafe fn release_raw<T>(raw: *mut c_void) {
     // SAFETY: the caller's.
     drop(unsafe { Strong::<T>::from_raw(raw) });
 }
 
-/// Give back a box [`Strong::boxed`] made.
+/// Give back a box [`Lent::try_boxed`] made.
 ///
 /// # Safety
-/// `context` is that box, whose value was dropped, given back once.
+/// `context` is that box, whose value was dropped or never written, given back once.
 unsafe fn free_box<T>(context: *mut c_void) {
     // SAFETY: the caller's; a vacant lodging drops nothing of the value.
     drop(unsafe { Box::from_raw(context.cast::<MaybeUninit<Lodging<T>>>()) });
@@ -352,6 +603,105 @@ unsafe fn free_box<T>(context: *mut c_void) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value holding a lock, made in its lodging's place with its lock made there, is read and
+    /// locked through every count, and the place goes back once, after the last. Turned red by a
+    /// `lodge_in` that writes the counts or the value anywhere but the place it was handed.
+    #[test]
+    fn a_value_made_in_its_place_is_shared_by_its_counts() {
+        struct Held {
+            count: crate::os::Mutex<u32>,
+        }
+        let mut place = Lodging::<Held>::vacant();
+        let given = AtomicUsize::new(0);
+        let make = |at: NonNull<Held>| {
+            // SAFETY: the place is the lodging's, valid for one `Held`, never moved while counted.
+            unsafe {
+                crate::os::mutex_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at.as_ptr()).count)),
+                    |value| value.write(1),
+                );
+            }
+        };
+        // SAFETY: the place is vacant and stands, as the counter does, past every count here;
+        // `make` makes the whole `Held`.
+        let first = unsafe {
+            Strong::lodge_in(
+                NonNull::from(&mut place),
+                make,
+                count_back,
+                core::ptr::from_ref(&given).cast_mut().cast::<c_void>(),
+            )
+        };
+        let second = first.clone();
+        *second.count.lock() += 1;
+        assert_eq!(*first.count.lock(), 2);
+        assert_eq!(Strong::strong_count(&first), 2);
+        drop(first);
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            0,
+            "a count still holds the place"
+        );
+        drop(second);
+        assert_eq!(given.load(Ordering::Relaxed), 1);
+    }
+
+    /// A static table lends each place to one value at a time: a full table refuses the next
+    /// value, and a place goes back with the last count of its value, or at once when the place
+    /// lent is dropped unused. Turned red by a lend that hands a held place again, or by a give
+    /// back that leaves the place marked lent.
+    #[test]
+    fn a_static_table_lends_each_place_once_and_takes_it_back() {
+        static TABLE: StaticPlaces<u32, 2> = StaticPlaces::new();
+        let first_place = TABLE.lend().expect("CONTROL: a fresh table lends");
+        let write = |at: NonNull<u32>| {
+            // SAFETY: the place a lent place hands is valid for one `u32` and holds none.
+            unsafe { at.as_ptr().write(1) }
+        };
+        // SAFETY: `write` makes the whole value.
+        let first = unsafe { Strong::lodge_at(first_place, write) };
+        let unused = TABLE.lend().expect("the second place is free");
+        assert!(TABLE.lend().is_none(), "every place is held");
+        drop(unused);
+        assert_eq!(TABLE.lent(), 1, "a place dropped unused goes back at once");
+        let copy = first.clone();
+        drop(first);
+        assert_eq!(*copy, 1);
+        assert_eq!(TABLE.lent(), 1, "a count still holds the place");
+        drop(copy);
+        assert_eq!(TABLE.lent(), 0, "the last count gave the place back");
+        assert!(TABLE.lend().is_some(), "a place given back is lent again");
+    }
+
+    /// A value made in a box of its own is read through its counts and dropped once, with the
+    /// last of them. Turned red by a `try_boxed_in` that drops the value with the first count, or
+    /// never.
+    #[test]
+    fn a_value_made_in_its_own_box_is_dropped_with_its_last_count() {
+        struct Dropped<'a>(&'a AtomicUsize);
+        impl Drop for Dropped<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let drops = AtomicUsize::new(0);
+        let make = |at: NonNull<Dropped<'_>>| {
+            // SAFETY: the place `try_boxed_in` hands is valid for one value and holds none.
+            unsafe { at.as_ptr().write(Dropped(&drops)) }
+        };
+        // SAFETY: `make` makes the whole value.
+        let first = unsafe { Strong::try_boxed_in(make) }.expect("the heap has room");
+        let second = first.clone();
+        drop(first);
+        assert_eq!(drops.load(Ordering::Relaxed), 0, "a count still holds it");
+        drop(second);
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            1,
+            "dropped once, with the last"
+        );
+    }
 
     /// Count one giving back of a place, in the counter `context` names.
     ///
@@ -440,7 +790,7 @@ mod tests {
     /// to the count unchecked overflows it, which reds the refusal and the count after it.
     #[test]
     fn an_upgrade_past_the_most_counts_is_refused() {
-        let count = Strong::boxed(7u32);
+        let count = Strong::new_at(Lent::try_boxed().expect("the test's heap"), 7u32);
         let weak = Strong::downgrade(&count);
         let upgraded = weak.upgrade().expect("CONTROL: the value is held");
         assert_eq!(Strong::strong_count(&count), 2, "the upgrade is a count");
@@ -456,5 +806,69 @@ mod tests {
         count.lodging().strong.store(1, Ordering::Relaxed);
         drop(weak);
         drop(count);
+    }
+
+    /// Count a place given back on the counter at `context`.
+    ///
+    /// # Safety
+    /// `context` is a counter that outlives every place it counts.
+    unsafe fn count_given(context: *mut c_void) {
+        // SAFETY: the caller's.
+        unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A place lent by its bytes holds a value whose lodging fits it, and goes back once, with the
+    /// value's last count; one too small for the value's lodging is refused and goes back at once.
+    /// Turned red by an `of_bytes` that takes a place smaller than the lodging, or that gives a
+    /// place back twice or not at all.
+    #[test]
+    fn a_place_lent_by_its_bytes_holds_the_lodgings_it_fits() {
+        let given = AtomicUsize::new(0);
+        let context = core::ptr::from_ref(&given).cast_mut().cast::<c_void>();
+        let mut small = Lodging::<u64>::vacant();
+        // SAFETY: the place is the test's, valid for a `u64`'s lodging and holding none, and the
+        // counter outlives it.
+        let bytes = unsafe {
+            LentBytes::new(
+                NonNull::from(&mut small).cast(),
+                Lent::<u64>::LAYOUT,
+                count_given,
+                context,
+            )
+        };
+        assert_eq!(bytes.layout(), Lent::<u64>::LAYOUT);
+        assert!(
+            Lent::<[u64; 8]>::of_bytes(bytes).is_err(),
+            "a lodging past the place is refused"
+        );
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            1,
+            "the refused place went back"
+        );
+        let mut place = Lodging::<u64>::vacant();
+        // SAFETY: as above.
+        let bytes = unsafe {
+            LentBytes::new(
+                NonNull::from(&mut place).cast(),
+                Lent::<u64>::LAYOUT,
+                count_given,
+                context,
+            )
+        };
+        let lent = Lent::<u32>::of_bytes(bytes).expect("a smaller lodging fits the place");
+        let count = Strong::new_at(lent, 7u32);
+        assert_eq!(*count, 7);
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            1,
+            "the value holds the place"
+        );
+        drop(count);
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            2,
+            "the last count gave the place back"
+        );
     }
 }

@@ -241,13 +241,19 @@
       "id": "record-walk-each",
       "where": {"file": "network_message.rs", "anchor": "each.take_record(WalkedRecord::"},
       "callees": "network_message::EachRecord>::take_record$",
-      "why": "the walk hands each record, owned or lent (lend_push, lend_request, lend_response, lend_declare, lend_unknown and the rest), to its consumer through `&mut dyn EachRecord`, so its body and each kind's reader are compiled once for every consumer; the one impl of the trait is the blanket one over a closure, whose take_record calls the closure directly: the closure of one of the walk's callers, as record-walk-go-on, or try_for_each_record_while's that counts a lent record's class first"
+      "why": "the walk hands each record, owned or lent (lend_push, lend_request, lend_response), to its consumer through `&mut dyn EachRecord`, so its body and each kind's reader are compiled once for every consumer; the one impl of the trait is the blanket one over a closure, whose take_record calls the closure directly: the closure of one of the walk's callers, as record-walk-go-on, or try_for_each_record_while's that counts a lent record's class first"
     },
     {
-      "id": "record-walk-each-oam",
-      "where": {"file": "network_message.rs", "anchor": "each.take_record(walked)"},
+      "id": "record-walk-each-pulled",
+      "where": {"file": "network_message.rs", "anchor": "each.take_record(B::walked(&body))"},
       "callees": "network_message::EachRecord>::take_record$",
-      "why": "lend_oam hands its record to the consumer as record-walk-each does, bound to a name first because the counters' build hands the Oam and every other build a skipped record"
+      "why": "the form that lends every kind pulls each record off the payload (Records, whose pull hands out its kind and where it lies) and reads its body when it lends it, one lend_pulled per kind (read_push, read_declare, read_oam and the rest), and hands it to the consumer as record-walk-each does, as the record the walk names"
+    },
+    {
+      "id": "record-walk-each-skipped",
+      "where": {"file": "network_message.rs", "anchor": "each.take_record(WalkedRecord::Skipped)"},
+      "callees": "network_message::EachRecord>::take_record$",
+      "why": "a record the pull hands out that no consumer reads (an Oam of a build without the transport counters, the tail of a payload behind a MID with no decoder) is handed to the consumer as record-walk-each-pulled hands the others, once the pull has read past it"
     },
     {
       "id": "own-mapping",

@@ -24,14 +24,20 @@
 //! | `Handshaking` | `Ended`, or the deadline | end the handshake; dial the next endpoint; none left: back off or end |
 //! | `Up` | `Ended` | lose the link; dial the first endpoint at once, or end |
 //! | `Backoff` | its end | dial the first endpoint |
+//! | `Idle` | `Taken` | a link accepted on a port: its handshake runs, given up `accept_timeout_ms` from now |
+//! | `Handshaking` | `HeldElsewhere` | end the handshake; stand by (`Held`) |
+//! | `Held` | `NodeFree` | dial the first endpoint |
 //! | any but `Closed` | `Close` | let go of the dial or the link; `Closed` |
 //!
 //! "Back off or end": the session dials every endpoint again `redial_ms` after the dials ended,
 //! counted from the time of the input that ended them, once its link has been up and when it has
 //! a `redial_ms`; before that, or without one, it ends. An established link that ends is dialled
-//! again at once, from the first endpoint. These are the decisions the cooperative engine's
-//! supervisor makes for its dial role's face (`wz_runtime_coop::face_life` and the engine's
-//! `dial`, `carry_out`, `follow` and `redial_later`), here for a session of that face alone.
+//! again at once, from the first endpoint. The cooperative engine keeps one such link for each
+//! face it holds, and carries out its effects with the face's I/O.
+//!
+//! A face taken beside the dial role's ([`LinkRole::Taken`]) is dialled once at most and goes
+//! with its link: where the dial role's face would dial on, back off, stand by or end the
+//! session, a taken face's link is closed and the owner takes the face out ([`Effects::removes`]).
 //!
 //! A handshake that completed is established even when its link ended after: the owner reports
 //! `Established` before `Ended` when it reads both at one look.
@@ -117,6 +123,18 @@ pub struct LinkTimes {
     pub redial_ms: Option<u64>,
     /// How often a dial under way is asked whether it was answered, in milliseconds.
     pub dial_look_ms: u64,
+    /// How long the handshake of a link accepted on a port may take, in milliseconds.
+    pub accept_timeout_ms: u64,
+}
+
+/// Which face of the session the link is: the one that dials the session's endpoints, kept for
+/// as long as the session is, or one taken beside it, which goes with its link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkRole {
+    /// The dial role's face.
+    Dial,
+    /// A face taken beside the dial role's: a link accepted on a port, or an endpoint attached.
+    Taken,
 }
 
 /// Why the handshake a made dial asked for could not begin.
@@ -134,8 +152,10 @@ pub enum Refused {
 /// What the link's owner reports to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkInput {
-    /// The session opens.
+    /// The session opens, or a taken face's endpoint is attached.
     Open,
+    /// A taken face holds a link accepted on a port, whose handshake runs.
+    Taken,
     /// The dial the link asked for is under way.
     DialPending,
     /// The dial made a link.
@@ -150,6 +170,10 @@ pub enum LinkInput {
     Established,
     /// The link's pump ended: a lease that ran out, a Close from the peer, a read that failed.
     Ended,
+    /// The handshake ended because the node it reached is held by another face.
+    HeldElsewhere,
+    /// No other face holds the node the dial role stands by for.
+    NodeFree,
     /// The session closes.
     Close,
     /// Only the time moved.
@@ -180,7 +204,9 @@ pub enum LinkPhase {
         /// When the endpoints are dialled again.
         until_us: u64,
     },
-    /// Closed, or ended.
+    /// The dial role standing by while another face holds the node its link reached.
+    Held,
+    /// Closed, ended, or, for a taken face, gone.
     Closed,
 }
 
@@ -193,6 +219,7 @@ pub enum LinkPhase {
 pub struct Effects {
     duties: Duties,
     row: usize,
+    gone: bool,
 }
 
 impl Effects {
@@ -237,9 +264,14 @@ impl Effects {
         self.duties.has(LinkBinding::END_SESSION)
     }
 
+    /// A taken face's link is gone: the face goes, with its tables.
+    pub fn removes(self) -> bool {
+        self.gone
+    }
+
     /// Nothing to do.
     pub fn is_empty(self) -> bool {
-        self.duties.is_empty()
+        self.duties.is_empty() && !self.gone
     }
 }
 
@@ -258,6 +290,7 @@ enum DialStage {
 #[derive(Debug, Clone, Copy)]
 struct LinkData {
     times: LinkTimes,
+    role: LinkRole,
     /// The endpoints the session dials, rows `0..endpoints`.
     endpoints: usize,
     /// The endpoint dialled, or whose link's handshake runs.
@@ -290,18 +323,21 @@ struct WalkEvents {
     next: UnicastLinkEvent,
     exhausted: UnicastLinkEvent,
     ended: UnicastLinkEvent,
+    gone: UnicastLinkEvent,
 }
 
 const FROM_DIALING: WalkEvents = WalkEvents {
     next: UnicastLinkEvent::DialNext,
     exhausted: UnicastLinkEvent::DialExhausted,
     ended: UnicastLinkEvent::DialEnded,
+    gone: UnicastLinkEvent::DialGone,
 };
 
 const FROM_HANDSHAKING: WalkEvents = WalkEvents {
     next: UnicastLinkEvent::HandshakeNext,
     exhausted: UnicastLinkEvent::HandshakeExhausted,
     ended: UnicastLinkEvent::HandshakeEnded,
+    gone: UnicastLinkEvent::HandshakeGone,
 };
 
 /// The one link of a session that holds one face, with its life's machine.
@@ -311,11 +347,16 @@ pub struct UnicastLink {
 }
 
 impl UnicastLink {
-    /// Build the link of a session that dials `endpoints` endpoints under `times` in `slot`,
-    /// where its owner keeps it, `Idle`, and lend it. Built in place: the machine's engine is
+    /// Build the link of a face of `role` of a session that dials `endpoints` endpoints under
+    /// `times` in `slot`, where its owner keeps it, `Idle`, and lend it. Built in place: the machine's engine is
     /// the largest part, and a value moved into its place would be a slot of each frame it passed
     /// through. Nothing of it needs dropping: the machine holds no resource.
-    pub fn init_in(slot: &mut MaybeUninit<Self>, times: LinkTimes, endpoints: usize) -> &mut Self {
+    pub fn init_in(
+        slot: &mut MaybeUninit<Self>,
+        times: LinkTimes,
+        role: LinkRole,
+        endpoints: usize,
+    ) -> &mut Self {
         let at = slot.as_mut_ptr();
         // SAFETY: `at` points at storage for one link that holds no value. The numbers are
         // written to their field, and the machine is built in its field by `new_in_place`, which
@@ -324,6 +365,7 @@ impl UnicastLink {
         let link = unsafe {
             addr_of_mut!((*at).data).write(LinkData {
                 times,
+                role,
                 endpoints,
                 row: 0,
                 stage: DialStage::Owed,
@@ -349,6 +391,22 @@ impl UnicastLink {
         link
     }
 
+    /// [`Self::init_in`] for an owner that keeps the link as a field of a value it moves into
+    /// its place (a face's record), built in a slot of this frame and moved out whole.
+    pub fn new(times: LinkTimes, role: LinkRole, endpoints: usize) -> Self {
+        let mut slot = MaybeUninit::uninit();
+        Self::init_in(&mut slot, times, role, endpoints);
+        // SAFETY: `init_in` wrote both fields of the link in `slot`. The machine holds no
+        // address of itself (its engine is built in place for the stack alone), so the link it
+        // makes is whole wherever it is moved.
+        unsafe { slot.assume_init() }
+    }
+
+    /// Which face of the session the link is.
+    pub fn role(&self) -> LinkRole {
+        self.data.role
+    }
+
     /// Where the link stands.
     pub fn phase(&self) -> LinkPhase {
         let data = &self.data;
@@ -363,6 +421,7 @@ impl UnicastLink {
             UnicastLinkState::Backoff => LinkPhase::Backoff {
                 until_us: data.until_us,
             },
+            UnicastLinkState::Held => LinkPhase::Held,
             UnicastLinkState::Closed => LinkPhase::Closed,
         }
     }
@@ -370,8 +429,8 @@ impl UnicastLink {
     /// When the owner is next to look at the link though it brings no input, `now_us` being
     /// the time now: at once while a dial or a handshake it asked for is owed a report, at the
     /// next look of a dial under way or its deadline when that is sooner, at a handshake's
-    /// deadline, and at the end of a wait. `None` for a link that is up, idle or closed, which
-    /// only an input moves on.
+    /// deadline, and at the end of a wait. `None` for a link that is up, idle, standing by or
+    /// closed, which only an input moves on.
     pub fn wake_at(&self, now_us: u64) -> Option<u64> {
         let data = &self.data;
         match self.engine.get_current_state() {
@@ -385,7 +444,10 @@ impl UnicastLink {
             },
             UnicastLinkState::Handshaking => Some(data.deadline_us),
             UnicastLinkState::Backoff => Some(data.until_us),
-            UnicastLinkState::Idle | UnicastLinkState::Up | UnicastLinkState::Closed => None,
+            UnicastLinkState::Idle
+            | UnicastLinkState::Up
+            | UnicastLinkState::Held
+            | UnicastLinkState::Closed => None,
         }
     }
 
@@ -398,6 +460,12 @@ impl UnicastLink {
         let event = match self.engine.get_current_state() {
             UnicastLinkState::Idle => match input {
                 LinkInput::Open => self.walk_from_idle(),
+                LinkInput::Taken => {
+                    self.data.row = 0;
+                    self.data.deadline_us = now_us
+                        .saturating_add(self.data.times.accept_timeout_ms.saturating_mul(1000));
+                    Some(UnicastLinkEvent::LinkTaken)
+                }
                 _ => None,
             },
             UnicastLinkState::Dialing => self.dialing(input, now_us),
@@ -407,6 +475,10 @@ impl UnicastLink {
                     Some(UnicastLinkEvent::HandshakeDone)
                 }
                 LinkInput::Ended => Some(self.walk_on(now_us, &FROM_HANDSHAKING)),
+                LinkInput::HeldElsewhere => Some(match self.data.role {
+                    LinkRole::Dial => UnicastLinkEvent::HandshakeHeld,
+                    LinkRole::Taken => UnicastLinkEvent::HandshakeGone,
+                }),
                 _ if now_us >= self.data.deadline_us => {
                     Some(self.walk_on(now_us, &FROM_HANDSHAKING))
                 }
@@ -420,6 +492,13 @@ impl UnicastLink {
                 self.dial_row(0);
                 Some(UnicastLinkEvent::BackoffOver)
             }
+            UnicastLinkState::Held => match input {
+                LinkInput::NodeFree => {
+                    self.dial_row(0);
+                    Some(UnicastLinkEvent::HeldOver)
+                }
+                _ => None,
+            },
             UnicastLinkState::Backoff | UnicastLinkState::Closed => None,
         };
         match event {
@@ -429,11 +508,14 @@ impl UnicastLink {
     }
 
     /// [`Self::input`] for what a pump of the established link came to: one that terminated
-    /// ended the link, and one stopped at its iteration cap goes on.
+    /// ended the link, and one stopped at its iteration cap goes on. A pump refused before it ran
+    /// dropped the link it was given, so the link has ended as one that terminated has.
     #[cfg(feature = "storage-profile")]
     pub fn pumped(&mut self, outcome: DriverOutcome, now_us: u64) -> Effects {
         match outcome {
-            DriverOutcome::Terminated => self.input(LinkInput::Ended, now_us),
+            DriverOutcome::Terminated | DriverOutcome::Refused => {
+                self.input(LinkInput::Ended, now_us)
+            }
             DriverOutcome::IterationLimit => Effects::default(),
         }
     }
@@ -486,8 +568,11 @@ impl UnicastLink {
 
     /// The event that takes the walk over the endpoints on to `row` at `now_us`, by `from`:
     /// that endpoint dialled while there is one; past the last, a wait counted from `now_us` when
-    /// the session dials again, and its end otherwise.
+    /// the session dials again, and its end otherwise. A taken face walks nowhere: it goes.
     fn walk(&mut self, row: usize, now_us: u64, from: &WalkEvents) -> UnicastLinkEvent {
+        if self.data.role == LinkRole::Taken {
+            return from.gone;
+        }
         if row < self.data.endpoints {
             self.dial_row(row);
             return from.next;
@@ -509,8 +594,11 @@ impl UnicastLink {
     }
 
     /// The event an established link that ended comes to: dialled again at once from the first
-    /// endpoint, or the session's end.
+    /// endpoint, or the session's end; for a taken face, the face gone.
     fn lost(&mut self) -> UnicastLinkEvent {
+        if self.data.role == LinkRole::Taken {
+            return UnicastLinkEvent::LinkGone;
+        }
         if self.data.redials() && self.data.endpoints > 0 {
             self.dial_row(0);
             UnicastLinkEvent::LinkLost
@@ -531,6 +619,12 @@ impl UnicastLink {
         Effects {
             duties: self.engine.policy().actions().duties.take(),
             row: self.data.row,
+            gone: matches!(
+                event,
+                UnicastLinkEvent::DialGone
+                    | UnicastLinkEvent::HandshakeGone
+                    | UnicastLinkEvent::LinkGone
+            ),
         }
     }
 }
@@ -545,6 +639,7 @@ mod tests {
         open_timeout_ms: 1000,
         redial_ms: Some(5000),
         dial_look_ms: 1,
+        accept_timeout_ms: 2000,
     };
 
     fn made(
@@ -552,7 +647,7 @@ mod tests {
         times: LinkTimes,
         endpoints: usize,
     ) -> &mut UnicastLink {
-        UnicastLink::init_in(slot, times, endpoints)
+        UnicastLink::init_in(slot, times, LinkRole::Dial, endpoints)
     }
 
     /// Open, the first endpoint answered at once, its handshake completed: the link is up at
@@ -889,5 +984,110 @@ mod tests {
         let lost = link.pumped(DriverOutcome::Terminated, 2);
         assert!(lost.lose());
         assert_eq!(lost.dial(), Some(0));
+    }
+
+    /// A pump refused before it ran dropped its link: the established link is lost and the first
+    /// endpoint dialled again, as for one that terminated.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_refused_pump_ends_the_link() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 1);
+        bring_up(link, 0);
+        let lost = link.pumped(DriverOutcome::Refused, 1);
+        assert!(lost.lose());
+        assert_eq!(lost.dial(), Some(0));
+        assert_eq!(link.phase(), LinkPhase::Dialing { row: 0 });
+    }
+
+    /// A face taken beside the dial role's, from a link accepted on a port.
+    fn taken(slot: &mut MaybeUninit<UnicastLink>, endpoints: usize) -> &mut UnicastLink {
+        UnicastLink::init_in(slot, TIMES, LinkRole::Taken, endpoints)
+    }
+
+    /// An accepted link runs its handshake for `accept_timeout_ms` from when it was taken, and a
+    /// handshake over takes the face out, ending no session and dialling nothing. Turned red by a
+    /// taken face that walks the endpoints (`walk` without its role).
+    #[test]
+    fn an_accepted_link_runs_until_its_accept_timeout_then_its_face_goes() {
+        let mut slot = MaybeUninit::uninit();
+        let link = taken(&mut slot, 2);
+        assert!(link.input(LinkInput::Taken, 100).is_empty());
+        let deadline = 100 + 2000 * MS;
+        assert_eq!(
+            link.phase(),
+            LinkPhase::Handshaking {
+                row: 0,
+                deadline_us: deadline,
+            }
+        );
+        assert!(link.input(LinkInput::Tick, deadline - 1).is_empty());
+        let over = link.input(LinkInput::Tick, deadline);
+        assert!(over.end_handshake());
+        assert!(over.removes());
+        assert!(!over.ends_session());
+        assert_eq!(over.dial(), None);
+        assert_eq!(link.phase(), LinkPhase::Closed);
+    }
+
+    /// A taken face's established link that ends takes the face with it, whatever the session's
+    /// `redial_ms`; the dial role's lost link is never `removes`.
+    #[test]
+    fn a_taken_faces_lost_link_takes_the_face_and_dials_nothing() {
+        let mut slot = MaybeUninit::uninit();
+        let link = taken(&mut slot, 2);
+        link.input(LinkInput::Taken, 0);
+        assert!(link.input(LinkInput::Established, 1).bring_up());
+        let lost = link.input(LinkInput::Ended, 2);
+        assert!(lost.lose());
+        assert!(lost.removes());
+        assert!(!lost.ends_session());
+        assert_eq!(lost.dial(), None);
+
+        let mut slot = MaybeUninit::uninit();
+        let dial = made(&mut slot, TIMES, 2);
+        bring_up(dial, 0);
+        assert!(!dial.input(LinkInput::Ended, 1).removes());
+    }
+
+    /// An attached endpoint is dialled once: a refusal takes its face out and ends no session.
+    #[test]
+    fn an_attached_face_is_dialled_once() {
+        let mut slot = MaybeUninit::uninit();
+        let link = taken(&mut slot, 1);
+        assert_eq!(link.input(LinkInput::Open, 0).dial(), Some(0));
+        let refused = link.input(LinkInput::DialRefused, 1);
+        assert!(refused.removes());
+        assert!(!refused.ends_session());
+        assert_eq!(refused.dial(), None);
+        assert_eq!(link.phase(), LinkPhase::Closed);
+    }
+
+    /// The dial role's handshake that reached a node another face holds ends and stands by; the
+    /// time moves nothing then, and the first endpoint is dialled once the node is free. A taken
+    /// face in the same place goes instead.
+    #[test]
+    fn a_dial_role_stands_by_for_a_held_node_and_dials_once_it_is_free() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 2);
+        link.input(LinkInput::Open, 0);
+        link.input(LinkInput::DialMade, 0);
+        link.input(LinkInput::HandshakeBegun, 0);
+        let held = link.input(LinkInput::HeldElsewhere, 5);
+        assert!(held.end_handshake());
+        assert_eq!(held.dial(), None);
+        assert!(!held.removes());
+        assert_eq!(link.phase(), LinkPhase::Held);
+        assert_eq!(link.wake_at(5), None);
+        assert!(link.input(LinkInput::Tick, 1_000_000 * MS).is_empty());
+        assert_eq!(link.input(LinkInput::NodeFree, 6).dial(), Some(0));
+        assert_eq!(link.phase(), LinkPhase::Dialing { row: 0 });
+
+        let mut slot = MaybeUninit::uninit();
+        let other = taken(&mut slot, 1);
+        other.input(LinkInput::Taken, 0);
+        let gone = other.input(LinkInput::HeldElsewhere, 1);
+        assert!(gone.end_handshake());
+        assert!(gone.removes());
     }
 }

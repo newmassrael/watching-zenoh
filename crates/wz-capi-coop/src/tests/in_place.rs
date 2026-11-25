@@ -14,7 +14,6 @@ use wz_session_core::sink::SampleView;
 
 use super::entity_tables::{lowered, open_under};
 use super::{open, until, CatchAll, Command, Engine, Router};
-use crate::round::RoundCounts;
 use crate::{EngineHandle, EngineHold};
 
 /// A Push the router sends is read in place and reaches the subscriber with its key and payload.
@@ -100,10 +99,10 @@ fn a_key_named_by_an_alias_the_peer_undeclares_is_read_where_the_alias_kept_it()
 }
 
 /// A batch that carries more samples than the session's round holds reaches the subscriber whole
-/// and in order: the round fills, the rest of the batch waits in the link while the round is
-/// handed out, and the read goes on from the next sample, losing none (decision Q4). The CONTROL
-/// is the round's counts: nothing was dropped or held over, and the batch took a round for each
-/// round's worth of its samples.
+/// and in order, each sample once and with the session free, however the read hands them out:
+/// where the round fills, the rest of the batch waits in the link while the round is handed out,
+/// and the read goes on from the next sample, losing none (decision Q4). The CONTROL is the
+/// session's count of the samples it handed out.
 #[test]
 fn a_batch_of_more_samples_than_the_round_holds_reaches_the_subscriber_in_order() {
     const SAMPLES: u8 = 24;
@@ -115,6 +114,7 @@ fn a_batch_of_more_samples_than_the_round_holds_reaches_the_subscriber_in_order(
     );
     let got = Arc::new(Mutex::new(Vec::new()));
     let into = got.clone();
+    let session = EngineHold::downgrade(&engine);
     engine
         .declare_subscriber_on_wire(
             "demo/**",
@@ -122,32 +122,31 @@ fn a_batch_of_more_samples_than_the_round_holds_reaches_the_subscriber_in_order(
             Locality::Any,
             None,
             SubscriberSink::shared(move |sample: &dyn SampleView| {
-                into.lock().unwrap().push(sample.payload().to_vec());
+                let free = session.upgrade().map(|engine| engine.session_is_free());
+                into.lock().unwrap().push((sample.payload().to_vec(), free));
             }),
         )
         .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares >= 1)
     });
-    let handed = engine.rounds_handed();
+    let handed = engine.samples_handed();
     router.send(Command::PushBatch("demo/batch", SAMPLES));
     until(&engine, "every sample", || {
         got.lock().unwrap().len() >= usize::from(SAMPLES)
     });
-    let sent: Vec<Vec<u8>> = (0..SAMPLES).map(|index| vec![index]).collect();
+    let sent: Vec<(Vec<u8>, Option<bool>)> = (0..SAMPLES)
+        .map(|index| (vec![index], Some(true)))
+        .collect();
     assert_eq!(
         *got.lock().unwrap(),
         sent,
-        "each sample once, in the order sent"
+        "each sample once, in the order sent, to a callback that found the session free"
     );
     assert_eq!(
-        engine.round_counts(),
-        RoundCounts::default(),
-        "nothing was lost"
-    );
-    assert!(
-        engine.rounds_handed() - handed >= usize::from(SAMPLES) / RECORDS,
-        "a round for each {RECORDS} samples at least"
+        engine.samples_handed() - handed,
+        usize::from(SAMPLES),
+        "the session handed each sample of the batch once"
     );
 }
 

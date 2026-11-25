@@ -131,6 +131,94 @@ pub struct RequesterRows {
     pub liveliness_gets: usize,
 }
 
+/// The rows of a [`Requesters`] of the region policy, which a region lays out beside it: each
+/// registry's, at the build's bounds.
+pub struct RequesterRegionRows<R: ReplySink, G: ReplySink> {
+    replies: crate::reply::ReplyRegistryRows<R>,
+    #[cfg(feature = "liveliness-get")]
+    liveliness_gets: crate::declare::liveliness_get::LivelinessGetRows<G>,
+    _gets: core::marker::PhantomData<G>,
+}
+
+// SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`) or no bytes, holding no value until
+// placed.
+unsafe impl<R: ReplySink, G: ReplySink> crate::bounded::ZeroEmpty for RequesterRegionRows<R, G> {}
+
+/// The lines a region's description holds for one [`Requesters`] of the region policy, at most:
+/// the pending queries' and, with `liveliness-get`, the pending snapshots' and their markers'.
+pub const REQUESTER_LINES: usize = crate::reply::REPLY_REGISTRY_LINES + 2;
+
+impl<R: ReplySink, G: ReplySink> Requesters<R, G, crate::bounded::Region> {
+    /// The description of requesters of the region policy at `at` in a region and their
+    /// [`RequesterRegionRows`] at `rows`: each registry's lines, and the queries' handle to the
+    /// region's key arena. The registries are written as [`Default`] makes them before the region
+    /// is placed, and held to the session's limits after ([`Self::limit_to`]).
+    pub const fn places(at: usize, rows: usize) -> crate::bounded::RegionLines<REQUESTER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY.with(
+            &ReplyRegistry::<R, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, replies)),
+                rows.wrapping_add(core::mem::offset_of!(RequesterRegionRows<R, G>, replies)),
+            ),
+            0,
+        );
+        #[cfg(feature = "liveliness-get")]
+        let lines = lines.with(
+            &LivelinessGetRegistry::<G, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, liveliness_gets)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    RequesterRegionRows<R, G>,
+                    liveliness_gets
+                )),
+            ),
+            0,
+        );
+        lines
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod requester_region_tests {
+    use super::{RequesterRegionRows, Requesters, REQUESTER_LINES};
+    use crate::bounded::Region;
+    use crate::caps;
+    use crate::reply_sink::BoxedReplySink;
+
+    type RegionRequesters = Requesters<BoxedReplySink, BoxedReplySink, Region>;
+
+    /// The requesters' description names the pending queries' rows at the build's bound, the
+    /// snapshots' two tables where the build keeps them, and one handle to the key arena, each
+    /// row line inside the rows laid out for them. Turned red by a line of the wrong bound, a
+    /// missing table, or rows placed outside `RequesterRegionRows`.
+    #[test]
+    fn region_requesters_describe_each_registrys_rows_inside_their_rows() {
+        const AT: usize = 64;
+        const ROWS: usize = AT + core::mem::size_of::<RegionRequesters>();
+        let lines = RegionRequesters::places(AT, ROWS);
+        let seqs = lines.seq_lines();
+        let snapshots = cfg!(feature = "liveliness-get");
+        assert_eq!(seqs.len(), 1 + 2 * usize::from(snapshots));
+        assert!(seqs.len() <= REQUESTER_LINES);
+        assert_eq!(seqs[0].room as usize, caps::MAX_PENDING_QUERIES);
+        if snapshots {
+            assert_eq!(seqs[1].room as usize, caps::MAX_PENDING_LIVELINESS_GETS);
+            assert_eq!(seqs[2].room as usize, caps::MAX_PENDING_LIVELINESS_GETS);
+        }
+        assert_eq!(lines.key_lines().len(), 1);
+        let end =
+            ROWS + core::mem::size_of::<RequesterRegionRows<BoxedReplySink, BoxedReplySink>>();
+        for line in seqs {
+            assert!(
+                (AT..ROWS).contains(&line.seq),
+                "a table lies in the requesters"
+            );
+            assert!(
+                (ROWS..end).contains(&line.rows),
+                "its rows lie in their rows"
+            );
+        }
+    }
+}
+
 impl<R: ReplySink, G: ReplySink> Requesters<R, G, Lent> {
     /// No query pending, each registry's rows lent from `arena` as `rows` states, the keyexpr
     /// each query was asked under kept in `keys`, the session's key arena, and held to `limits`
@@ -225,6 +313,17 @@ pub trait RequesterTables {
         peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
     );
 
+    /// [`Self::dispatch_iteration_event`] to the Finals alone, for a caller that handed each answer
+    /// of a frame the copying receive decoded to the pending gets and snapshots itself, in their
+    /// order, before this (`ReplyRegistry::take_response`, `LivelinessGetRegistry::claim_token`):
+    /// each Final then ends its get after every answer the frame carried.
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_finals_of(&mut self, event: IterationEvent<'_, '_>);
+
     /// Whether a snapshot terminated since the last drain, its prune still to run.
     #[cfg(feature = "liveliness-get")]
     fn has_finalized(&self) -> bool;
@@ -255,6 +354,18 @@ impl<R: ReplySink, G: ReplySink, P: Storage> RequesterTables for Requesters<R, G
             .dispatch_iteration_event(event, peer_table);
         #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
         self.replies.dispatch_iteration_event(event, peer_table);
+    }
+
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_finals_of(&mut self, event: IterationEvent<'_, '_>) {
+        #[cfg(feature = "liveliness-get")]
+        self.liveliness_gets.dispatch_finals_of(event);
+        #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
+        self.replies.dispatch_finals_of(event);
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -293,6 +404,13 @@ impl RequesterTables for NoRequesters {
         _peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
     ) {
     }
+
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_finals_of(&mut self, _event: IterationEvent<'_, '_>) {}
 
     #[cfg(feature = "liveliness-get")]
     fn has_finalized(&self) -> bool {
@@ -360,6 +478,49 @@ impl OtherPeers for NoOtherPeers {
     fn answers(&self, _criterion: &crate::declare::queryable::QuerierCriterion) -> bool {
         false
     }
+}
+
+/// What the caller of a dispatch of an event took of its records itself, ahead of the dispatch and
+/// in their order: each part then left alone by its plane. A caller that took nothing names the
+/// default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TakenAhead {
+    /// Every peer's query, handed to the queryables and owed its Final by the caller
+    /// (`QueryPeer::pin_request`).
+    pub queries: bool,
+    /// Every peer token, bound or unbound in the peer's table and handed to the liveliness
+    /// subscribers by the caller (`PeerTokens::take_token_view`): the plane keeps only the marks
+    /// that end the subscribers' histories.
+    pub tokens: bool,
+    /// Every `Declare` of an owned frame, dispatched to the planes that tell what a peer declares
+    /// one message at a time by the caller (`SlotObserverOf::dispatch_declare_message`), so a
+    /// room the caller hands out after each message holds no more than one message makes.
+    pub declares: bool,
+}
+
+/// Whether `event` is a frame of owned records, whose Declares a caller may take one message at a
+/// time (`TakenAhead::declares`); a record lent where its frame lies is one message already.
+fn owned_frame(event: IterationEvent<'_, '_>) -> bool {
+    #[cfg(feature = "alloc")]
+    {
+        matches!(
+            event,
+            IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload { .. })
+        )
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = event;
+        false
+    }
+}
+
+/// [`TakenAhead`] with what the entry point itself says of the answers to the pending gets and
+/// snapshots, taken ahead by a caller of the planes beside the subscribers.
+#[derive(Clone, Copy)]
+struct Taken {
+    replies: bool,
+    ahead: TakenAhead,
 }
 
 /// What the application registered, shared by every session of the process. See
@@ -438,8 +599,11 @@ pub trait ObserverSinks {
     /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples,
     /// its queries and its tokens go to. `()` for rows that deliver themselves ([`SampleSink`],
     /// `crate::query::ResponderSink`, [`LivelinessSampleSink`]). How each kind's rows are told
-    /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`].
-    type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>;
+    /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`]; a
+    /// subscriber's sample is handed to it ([`SampleDelivery`]) only by a dispatch that hands the
+    /// samples out through it, so a caller that hands each sample out itself
+    /// ([`SlotObserverOf::dispatch_event_but_samples`]) names a context that takes none.
+    type Delivery;
     /// The application's tables, of storage `P`, as one bundle: the registries of the storage
     /// policies ([`RegistryTables`]), or the session's one table set, whose rows are the session's
     /// only record of each entity. One type for every kind the bundle holds, so a kind that moves
@@ -1166,6 +1330,103 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     }
 }
 
+/// The rows of a [`SlotObserverOf`] of the region policy apart from its application tables', which
+/// a region lays out beside it: the declaration watchers' lists, at the build's bound, and
+/// `LOCAL_TOKENS` rows of the session's own tokens (none where the tables keep the tokens as rows).
+pub struct ObserverRegionRows<K: ObserverSinks, const LOCAL_TOKENS: usize> {
+    #[cfg(feature = "declare-subscriber")]
+    remote_subscribers: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "declare-queryable")]
+    remote_queryables: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "liveliness-token")]
+    liveliness: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "liveliness-token")]
+    local_tokens: crate::declare::local_token::LocalTokenRows<LOCAL_TOKENS>,
+    _sinks: core::marker::PhantomData<K>,
+}
+
+// SAFETY: every field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
+unsafe impl<K: ObserverSinks, const LOCAL_TOKENS: usize> crate::bounded::ZeroEmpty
+    for ObserverRegionRows<K, LOCAL_TOKENS>
+{
+}
+
+/// The lines a region's description holds for one [`SlotObserverOf`] of the region policy apart
+/// from its application tables', at most: three watcher pairs' and the session's own tokens'.
+pub const SLOT_OBSERVER_LINES: usize = 3 * crate::decl_sink::DECL_OBSERVER_LINES + 1;
+
+// SAFETY: of the region policy, at all zero bytes: the application tables are `ZeroEmpty` (the
+// bound), each watcher table and the registry of the session's own tokens is one of the region
+// policy (`ZeroEmpty`), and the matching sink's place holds no byte. A build with the switchboard
+// keeps a registry that is not empty at zero bytes, and has no observer of the region policy.
+#[cfg(not(feature = "switchboard"))]
+unsafe impl<K: ObserverSinks, M: MatchingReport> crate::bounded::ZeroEmpty
+    for SlotObserverOf<K, crate::bounded::Region, M>
+where
+    K::Tables<crate::bounded::Region>: crate::bounded::ZeroEmpty,
+{
+}
+
+impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::Region, M> {
+    /// The description of an observer of the region policy at `at` in a region and its
+    /// [`ObserverRegionRows`] at `rows`, apart from its application tables, which the region
+    /// describes by their own type (`SessionTables::places` at the offset of [`Self::tables`]):
+    /// the lines of the watchers' lists and of the session's own tokens, and the tokens' handle to
+    /// the key arena, those the build keeps.
+    pub const fn places<const LOCAL_TOKENS: usize>(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<SLOT_OBSERVER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY;
+        #[cfg(feature = "declare-subscriber")]
+        let lines = lines.with(
+            &RemoteSubscriberTable::<K::Declared, K::Undeclared, crate::bounded::Region, M>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, remote_subscribers)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    ObserverRegionRows<K, LOCAL_TOKENS>,
+                    remote_subscribers
+                )),
+            ),
+            0,
+        );
+        #[cfg(feature = "declare-queryable")]
+        let lines = lines.with(
+            &RemoteQueryableTable::<K::Declared, K::Undeclared, crate::bounded::Region, M>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, remote_queryables)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    ObserverRegionRows<K, LOCAL_TOKENS>,
+                    remote_queryables
+                )),
+            ),
+            0,
+        );
+        #[cfg(feature = "liveliness-token")]
+        let lines = lines
+            .with(
+                &LivelinessRegistry::<K::Declared, K::Undeclared, crate::bounded::Region>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, liveliness)),
+                    rows.wrapping_add(core::mem::offset_of!(
+                        ObserverRegionRows<K, LOCAL_TOKENS>,
+                        liveliness
+                    )),
+                ),
+                0,
+            )
+            .with(
+                &LocalTokenRegistry::<crate::bounded::Region>::places::<LOCAL_TOKENS>(
+                    at.wrapping_add(core::mem::offset_of!(Self, local_tokens)),
+                    rows.wrapping_add(core::mem::offset_of!(
+                        ObserverRegionRows<K, LOCAL_TOKENS>,
+                        local_tokens
+                    )),
+                ),
+                0,
+            );
+        let _ = (at, rows);
+        lines
+    }
+}
+
 impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
     /// An observer with nothing registered whose application tables are lent from `arena`, as
     /// many rows each as `rows` states (the subscriptions' table reads its own of them,
@@ -1314,12 +1575,23 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         peers: &mut PeerTables<T>,
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
-    ) {
-        self.dispatch_event_among(cx, peers, requesters, event, &NoOtherPeers);
+    ) where
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
+    {
+        self.dispatch_event_among(
+            cx,
+            peers,
+            requesters,
+            event,
+            &NoOtherPeers,
+            TakenAhead::default(),
+        );
     }
 
     /// [`Self::dispatch_event`] for a session that holds other faces: `others` is what their
-    /// peers declare, counted by the matching verdicts beside this face's own.
+    /// peers declare, counted by the matching verdicts beside this face's own. What the caller took
+    /// of the event's records itself, before this, it says with `taken`, and the planes of those
+    /// parts take nothing of them.
     // Each plane's fan below is a function of its own and not inlined here: inlined, the
     // temporaries of every plane (the views and records each decodes) are laid out in this one
     // frame, which the compiler does not overlap reliably, and the frame is held on every event
@@ -1333,14 +1605,158 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
-    ) {
+        taken: TakenAhead,
+    ) where
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
+    {
         peers
             .subscribers
             .dispatch_iteration_event(&mut self.tables, cx, event);
+        let taken = Taken {
+            replies: false,
+            ahead: taken,
+        };
+        self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
+    }
+
+    /// [`Self::dispatch_event_among`] for a caller that hands every sample of the event out itself,
+    /// one subscriber at a time (`SubscriberPeer::lend_in_place`, `SubscriberPeer::take_record`):
+    /// the subscribers' side takes the rest of the event (`SubscriberPeer::take_control_of_event`),
+    /// binding the aliases the planes below resolve through, and no sample reaches `cx`, so a
+    /// delivery that holds no sample is enough for it. What else the caller took itself it says
+    /// with `taken`, as there.
+    #[inline(never)]
+    pub fn dispatch_event_but_samples<Q: RequesterTables, O: OtherPeers, T: Storage>(
+        &mut self,
+        cx: &mut K::Delivery,
+        peers: &mut PeerTables<T>,
+        requesters: &mut Q,
+        event: IterationEvent<'_, '_>,
+        others: &O,
+        taken: TakenAhead,
+    ) {
+        peers
+            .subscribers
+            .take_control_of_event(&mut self.tables, event);
+        let taken = Taken {
+            replies: false,
+            ahead: taken,
+        };
+        self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
+    }
+
+    /// [`Self::dispatch_event_among`] to every plane but the subscribers' and the answers to the
+    /// pending gets and snapshots, for a caller that took the subscribers' side of each of the
+    /// event's records and handed each answer to its get itself, in their order, before this
+    /// (`SubscriberPeer::take_record`, `RequesterTables::dispatch_finals_of`): the planes below
+    /// then resolve through the aliases the subscribers' side bound, as they do after it in
+    /// [`Self::dispatch_event_among`], and a Final ends its get after its answers. What else the
+    /// caller took itself it says with `taken`, as there.
+    #[inline(never)]
+    pub fn dispatch_event_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
+        &mut self,
+        cx: &mut K::Delivery,
+        peers: &mut PeerTables<T>,
+        requesters: &mut Q,
+        event: IterationEvent<'_, '_>,
+        others: &O,
+        taken: TakenAhead,
+    ) {
+        let taken = Taken {
+            replies: true,
+            ahead: taken,
+        };
+        self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
+    }
+
+    /// The planes that tell what a peer declares (its subscribers, its queryables and its tokens),
+    /// for the one owned `Declare` `message` of a frame whose dispatch leaves them its Declares
+    /// (`TakenAhead::declares`): as [`Self::dispatch_event_among`] tells them each of the frame's,
+    /// against the same id spaces and matching verdicts, so a caller can hand out what one message
+    /// told before the next is dispatched. A message that is no `Declare` tells nothing.
+    #[cfg(feature = "alloc")]
+    #[inline(never)]
+    pub fn dispatch_declare_message<Q: RequesterTables, O: OtherPeers, T: Storage>(
+        &mut self,
+        peers: &mut PeerTables<T>,
+        requesters: &Q,
+        message: &crate::network_message::NetworkMessage,
+        others: &O,
+    ) {
+        let messages = core::slice::from_ref(message);
+        #[cfg(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        ))]
+        let peer_table = peers
+            .subscribers
+            .mapping_spaces_over(self.tables.own_space());
+        #[cfg(feature = "declare-subscriber")]
+        {
+            let subscribers = &self.tables;
+            self.remote_subscribers.dispatch_messages_with_local(
+                &mut peers.remote_subscribers,
+                messages,
+                peer_table,
+                &|c| {
+                    crate::declare::holds_watches::<M>()
+                        && ((c.locality.allows_local()
+                            && subscribers.has_local_matching(c.keyexpr.as_str()))
+                            || others.subscribes(c))
+                },
+            );
+        }
+        #[cfg(all(feature = "declare-queryable", feature = "query-queryable"))]
+        {
+            let queryables = self.tables.queryables();
+            self.remote_queryables.dispatch_messages_with_local(
+                &mut peers.remote_queryables,
+                messages,
+                peer_table,
+                &|c| {
+                    crate::declare::holds_watches::<M>()
+                        && ((c.locality.allows_local()
+                            && queryables.is_some_and(|queryables| {
+                                queryables
+                                    .has_local_queryable(c.keyexpr.as_str(), c.complete_required)
+                            }))
+                            || others.answers(c))
+                },
+            );
+        }
+        #[cfg(all(feature = "declare-queryable", not(feature = "query-queryable")))]
+        self.remote_queryables.dispatch_messages_with_local(
+            &mut peers.remote_queryables,
+            messages,
+            peer_table,
+            &|c| crate::declare::holds_watches::<M>() && others.answers(c),
+        );
+        #[cfg(all(feature = "liveliness-token", feature = "liveliness-get"))]
+        self.liveliness
+            .dispatch_messages_unclaimed(messages, peer_table, &|id| requesters.claims(id));
+        #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
+        self.liveliness.dispatch_messages(messages, peer_table);
+        let _ = (&peers, requesters, messages, others);
+    }
+
+    /// The planes after the subscribers' side of an event, the pending gets and snapshots told
+    /// its answers and the queryables its queries unless the caller took them (`taken`). Inlined into each of the three calls above, so each keeps the one
+    /// frame the planes' temporaries lie in.
+    #[inline(always)]
+    fn planes_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
+        &mut self,
+        cx: &mut K::Delivery,
+        peers: &mut PeerTables<T>,
+        requesters: &mut Q,
+        event: IterationEvent<'_, '_>,
+        others: &O,
+        taken: Taken,
+    ) {
         // A peer's query is resolved through both id spaces while the queryables are asked, so
         // the tables lend the two apart.
         #[cfg(feature = "query-queryable")]
-        {
+        if !taken.ahead.queries {
             let (own, queryables) = self.tables.queries_mut();
             let spaces = peers.subscribers.mapping_spaces_over(own);
             match queryables {
@@ -1376,28 +1792,38 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             #[cfg(not(feature = "liveliness-get"))]
             let claimed = |_: u64| false;
             let (own, subscribers) = self.tables.liveliness_mut();
-            let spaces = peers.subscribers.mapping_spaces_over(own);
-            match subscribers {
-                Some(subscribers) => peers.tokens.dispatch_iteration_event_unclaimed(
-                    subscribers,
-                    cx,
-                    event,
-                    spaces,
-                    &claimed,
-                ),
-                // Tables that keep no liveliness subscriber still keep the peer's tokens.
-                None => peers.tokens.dispatch_iteration_event_unclaimed(
-                    &mut crate::session_tables::AbsentTable::<
-                        <K::Tables<P> as LivelinessTables<
-                            K::LivelinessSubscriber,
-                            K::LivelinessSubscriberId,
-                        >>::LivelinessSubscribers,
-                    >::new(),
-                    cx,
-                    event,
-                    spaces,
-                    &claimed,
-                ),
+            if taken.ahead.tokens {
+                if let Some(subscribers) = subscribers {
+                    crate::declare::liveliness_subscriber::mark_histories_unclaimed(
+                        subscribers,
+                        event,
+                        &claimed,
+                    );
+                }
+            } else {
+                let spaces = peers.subscribers.mapping_spaces_over(own);
+                match subscribers {
+                    Some(subscribers) => peers.tokens.dispatch_iteration_event_unclaimed(
+                        subscribers,
+                        cx,
+                        event,
+                        spaces,
+                        &claimed,
+                    ),
+                    // Tables that keep no liveliness subscriber still keep the peer's tokens.
+                    None => peers.tokens.dispatch_iteration_event_unclaimed(
+                        &mut crate::session_tables::AbsentTable::<
+                            <K::Tables<P> as LivelinessTables<
+                                K::LivelinessSubscriber,
+                                K::LivelinessSubscriberId,
+                            >>::LivelinessSubscribers,
+                        >::new(),
+                        cx,
+                        event,
+                        spaces,
+                        &claimed,
+                    ),
+                }
             }
         }
         // The two id spaces this session resolves through, as the subscriber side
@@ -1416,8 +1842,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             .mapping_spaces_over(self.tables.own_space());
         // R311y788 -- the remote-subscriber fan carries the session-local half of
         // the matching verdict, read from the sibling subscriber table.
+        // A caller that dispatches each Declare of an owned frame itself
+        // (`TakenAhead::declares`) leaves the frame's to the planes below it alone.
+        let declares = !(taken.ahead.declares && owned_frame(event));
         #[cfg(feature = "declare-subscriber")]
-        {
+        if declares {
             let subscribers = &self.tables;
             self.remote_subscribers.dispatch_iteration_event_with_local(
                 &mut peers.remote_subscribers,
@@ -1432,7 +1861,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             );
         }
         #[cfg(all(feature = "declare-queryable", feature = "query-queryable"))]
-        {
+        if declares {
             let queryables = self.tables.queryables();
             self.remote_queryables.dispatch_iteration_event_with_local(
                 &mut peers.remote_queryables,
@@ -1450,20 +1879,33 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             );
         }
         #[cfg(all(feature = "declare-queryable", not(feature = "query-queryable")))]
-        self.remote_queryables.dispatch_iteration_event_with_local(
-            &mut peers.remote_queryables,
-            event,
-            peer_table,
-            &|c| crate::declare::holds_watches::<M>() && others.answers(c),
-        );
+        if declares {
+            self.remote_queryables.dispatch_iteration_event_with_local(
+                &mut peers.remote_queryables,
+                event,
+                peer_table,
+                &|c| crate::declare::holds_watches::<M>() && others.answers(c),
+            );
+        }
         // A `Declare(DeclToken)` whose outer `interest_id` names a pending
         // liveliness GET belongs to that GET and to no observer plane (zenoh
         // answers the query and returns first): the claim is per id.
         #[cfg(all(feature = "liveliness-token", feature = "liveliness-get"))]
-        self.liveliness
-            .dispatch_iteration_event_unclaimed(event, peer_table, &|id| requesters.claims(id));
+        if declares {
+            self.liveliness
+                .dispatch_iteration_event_unclaimed(event, peer_table, &|id| requesters.claims(id));
+        }
         #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
-        self.liveliness.dispatch_iteration_event(event, peer_table);
+        if declares {
+            self.liveliness.dispatch_iteration_event(event, peer_table);
+        }
+        // Read only by the declaration planes, which a build with none of them lacks.
+        #[cfg(not(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )))]
+        let _ = declares;
         // R283 -- stage an interest-response for each inbound non-final liveliness
         // Interest, whole chains or none, into THIS session's staging. A build that answers no
         // peer's Interest (`interest-answer` off) stages none, as the subscriber plane does
@@ -1487,15 +1929,22 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "codec-response-final",
             feature = "liveliness-get"
         ))]
-        requesters.dispatch_iteration_event(event, peer_table);
+        if taken.replies {
+            requesters.dispatch_finals_of(event);
+        } else {
+            requesters.dispatch_iteration_event(event, peer_table);
+        }
         // Consumed only by the arms above, which a build with none of them lacks.
         #[cfg(not(any(
             feature = "codec-response",
             feature = "codec-response-final",
             feature = "liveliness-get"
         )))]
-        let _ = &requesters;
-        let _ = (&peers, event, others);
+        let _ = (&requesters, taken.replies);
+        // Read only by the queries' plane, which a build with no queryable lacks.
+        #[cfg(not(feature = "query-queryable"))]
+        let _ = taken.ahead.queries;
+        let _ = (&peers, &cx, event, others);
     }
 
     /// Drain what the last [`Self::dispatch_event`] staged for this session
@@ -1568,6 +2017,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
     {
         self.dispatch_event(cx, peers, requesters, event);
         self.flush_pending(peers, requesters, actions);
@@ -2218,6 +2668,69 @@ mod tests {
         );
     }
 
+    /// The fan that leaves a frame's samples to its caller takes the rest of it and delivers no
+    /// sample: the Push beside the `DeclKexpr` reaches no row through the context, and the alias
+    /// the `DeclKexpr` bound resolves a later Push the whole fan delivers.
+    #[test]
+    fn the_fan_but_samples_binds_the_aliases_and_delivers_no_sample() {
+        use crate::session_tables::KeyForm;
+        use wz_codecs::lent::{Push, WireexprLocal};
+        let mut observer = SlotObserverOf::<LoggedTableSinks>::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = Req::new();
+        let reached = observer
+            .tables
+            .declare_subscriber(
+                "topic/a",
+                Locality::Any,
+                KeyForm::default(),
+                BoxedSink::new(|_s: &dyn SampleView| {}),
+            )
+            .expect("a table of the build's bound has room");
+        let outcome = frame(vec![
+            NetworkMessage::Declare(Box::new(fx::declare_envelope_decl_kexpr(fx::decl_kexpr(
+                7, "topic/a",
+            )))),
+            NetworkMessage::Push(Box::new(push_literal("topic/a"))),
+        ]);
+        let mut log = HandleLog::default();
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event_but_samples(
+                &mut log,
+                &mut peers,
+                &mut requesters,
+                event,
+                &NoOtherPeers,
+                TakenAhead::default(),
+            )
+        });
+        assert!(
+            log.0.is_empty(),
+            "no sample of the event reaches the context"
+        );
+        let aliased = Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 7,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .unwrap();
+        let outcome = frame(vec![NetworkMessage::Push(Box::new(aliased))]);
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event(&mut log, &mut peers, &mut requesters, event)
+        });
+        assert_eq!(
+            log.0,
+            vec![reached.handle],
+            "the alias the fan bound resolves the next Push"
+        );
+    }
+
     /// The row of a queryable these tests declare: a callback the tables call only while they are
     /// held, which only a context asks.
     #[cfg(all(
@@ -2415,6 +2928,106 @@ mod tests {
         );
     }
 
+    /// The planes beside the subscribers' side of a frame leave a peer's query to a caller that
+    /// handed it to the queryables itself (`TakenAhead::queries`): no row is asked and no Final
+    /// is owed. A caller that did not have it dispatched there, its row asked and its Final owed,
+    /// as the whole fan does. Turned red by a queries' plane that runs for a query the caller took,
+    /// or one that skips a query it did not.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    #[test]
+    fn the_planes_beside_the_subscribers_leave_a_query_the_caller_took() {
+        use crate::session_tables::KeyForm;
+        for taken in [false, true] {
+            let mut observer = SlotObserverOf::<QuerySinks>::new();
+            let mut peers = PeerTables::new();
+            let mut requesters = Req::new();
+            let asked = observer
+                .tables
+                .declare_queryable("q/a", Locality::Any, false, KeyForm::default(), AskedRow)
+                .expect("a table of the build's bound has room");
+            let mut log = QueryLog::default();
+            crate::driver_loop::deliver_frame(&query_frame(), |event| {
+                observer.dispatch_event_beside_subscribers(
+                    &mut log,
+                    &mut peers,
+                    &mut requesters,
+                    event,
+                    &NoOtherPeers,
+                    TakenAhead {
+                        queries: taken,
+                        tokens: false,
+                        declares: false,
+                    },
+                )
+            });
+            if taken {
+                assert!(
+                    log.0.is_empty(),
+                    "a query the caller took is asked of no row"
+                );
+                assert!(peers.finals.is_empty(), "its Final is the caller's to owe");
+            } else {
+                assert_eq!(
+                    log.0,
+                    vec![asked.handle],
+                    "a query no caller took is dispatched"
+                );
+                assert!(
+                    !peers.finals.is_empty(),
+                    "the routed query is owed its Final"
+                );
+            }
+        }
+    }
+
+    /// The whole fan leaves a peer's query to a caller that handed it to the queryables itself
+    /// (`TakenAhead::queries`), as the planes beside the subscribers do: no row is asked and no
+    /// Final is owed. The CONTROL is a caller that did not, its row asked and its Final owed. Turned red by
+    /// a whole fan that runs the queries' plane for a query the caller took.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    #[test]
+    fn the_whole_fan_leaves_a_query_the_caller_took() {
+        use crate::session_tables::KeyForm;
+        for taken in [false, true] {
+            let mut observer = SlotObserverOf::<QuerySinks>::new();
+            let mut peers = PeerTables::new();
+            let mut requesters = Req::new();
+            let asked = observer
+                .tables
+                .declare_queryable("q/a", Locality::Any, false, KeyForm::default(), AskedRow)
+                .expect("a table of the build's bound has room");
+            let mut log = QueryLog::default();
+            crate::driver_loop::deliver_frame(&query_frame(), |event| {
+                observer.dispatch_event_among(
+                    &mut log,
+                    &mut peers,
+                    &mut requesters,
+                    event,
+                    &NoOtherPeers,
+                    TakenAhead {
+                        queries: taken,
+                        tokens: false,
+                        declares: false,
+                    },
+                )
+            });
+            if taken {
+                assert!(
+                    log.0.is_empty(),
+                    "a query the caller took is asked of no row"
+                );
+                assert!(peers.finals.is_empty(), "its Final is the caller's to owe");
+            } else {
+                assert_eq!(
+                    log.0,
+                    vec![asked.handle],
+                    "CONTROL: the query is dispatched"
+                );
+                assert!(!peers.finals.is_empty(), "CONTROL: its Final is owed");
+            }
+        }
+    }
+
     /// A row that holds no queryable is asked nothing, whatever context the sink set names: the
     /// query still reaches it and is owed its Final, and the context records no row.
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
@@ -2572,6 +3185,73 @@ mod tests {
         );
     }
 
+    /// A caller that took each peer token itself (`TakenAhead::tokens`) leaves the tokens' plane
+    /// only the mark a responder's `DeclFinal` sets: the token is neither told to a row nor bound
+    /// in the peer's table, and the history subscriber's replay is marked ended all the same. The
+    /// CONTROL is the same frame with nothing taken, which tells the token and binds it. Turned
+    /// red by a plane that takes a token its caller took, or one that drops the history's mark
+    /// with it.
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    #[test]
+    fn a_caller_that_took_the_tokens_leaves_the_plane_the_history_mark_alone() {
+        use crate::declare::liveliness_sample::LivelinessSampleKind;
+        use crate::session_tables::KeyForm;
+        for taken in [false, true] {
+            let mut observer = SlotObserverOf::<TokenSinks>::new();
+            let mut peers = PeerTables::new();
+            let mut requesters = Req::new();
+            let asked = observer
+                .tables
+                .declare_liveliness_subscriber("t/a", true, KeyForm::default(), AskedRow)
+                .expect("a table of the build's bound has room");
+            let outcome =
+                frame(vec![
+                    NetworkMessage::Declare(Box::new(fx::declare_envelope_decl_token(
+                        fx::decl_token(5, 0, Some("t/a")),
+                    ))),
+                    NetworkMessage::Declare(Box::new(
+                        fx::declare_envelope_decl_final_with_interest(u64::from(asked.id)),
+                    )),
+                ]);
+            let mut log = TokenLog::default();
+            crate::driver_loop::deliver_frame(&outcome, |event| {
+                observer.dispatch_event_among(
+                    &mut log,
+                    &mut peers,
+                    &mut requesters,
+                    event,
+                    &NoOtherPeers,
+                    TakenAhead {
+                        queries: false,
+                        tokens: taken,
+                        declares: false,
+                    },
+                )
+            });
+            let ended = observer
+                .tables
+                .liveliness_subscribers()
+                .get(asked.handle)
+                .expect("the subscriber stands")
+                .history_complete();
+            assert!(ended, "the history's end is marked either way");
+            if taken {
+                assert!(
+                    log.0.is_empty(),
+                    "a token the caller took is told to no row"
+                );
+                assert_eq!(peers.tokens.count(), 0, "nor bound by the plane");
+            } else {
+                assert_eq!(
+                    log.0,
+                    vec![(asked.handle, LivelinessSampleKind::Put)],
+                    "CONTROL: the token is told"
+                );
+                assert_eq!(peers.tokens.count(), 1, "CONTROL: and bound");
+            }
+        }
+    }
+
     /// The same two messages in both tests: a Push and a `DeclareSubscriber`, each
     /// naming id 7 with `M=0`.
     fn own_alias_frame() -> DriverLoopOutcome {
@@ -2605,6 +3285,56 @@ mod tests {
             vec!["ours/x".to_string()],
             "the declare-subscriber plane resolved id 7 in OUR space"
         );
+    }
+
+    /// A dispatch whose caller takes the frame's Declares one message at a time
+    /// (`TakenAhead::declares`) tells the declaration planes none of them, and the caller's
+    /// dispatch of the one `Declare` tells it as the frame's would have. The CONTROL is the same
+    /// frame with nothing taken, which tells it in the frame's pass. Turned red by a frame pass that
+    /// tells a Declare its caller took, which a watch would be told twice, or a message dispatch
+    /// that tells nothing.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn a_caller_that_takes_the_declares_tells_each_once_by_its_message() {
+        for taken in [false, true] {
+            let mut f = fixture(true);
+            let outcome = own_alias_frame();
+            crate::driver_loop::deliver_frame(&outcome, |event| {
+                f.observer.dispatch_event_beside_subscribers(
+                    &mut (),
+                    &mut f.peers,
+                    &mut f.requesters,
+                    event,
+                    &NoOtherPeers,
+                    TakenAhead {
+                        declares: taken,
+                        ..TakenAhead::default()
+                    },
+                )
+            });
+            let told: Vec<String> = if taken {
+                Vec::new()
+            } else {
+                vec!["ours/x".to_string()]
+            };
+            assert_eq!(*f.declared.lock().unwrap(), told, "the frame's pass");
+            if taken {
+                let declare = NetworkMessage::Declare(Box::new(
+                    fx::declare_envelope_decl_subscriber(fx::decl_subscriber_nonlocal(1, 7, None)),
+                ));
+                f.observer.dispatch_declare_message(
+                    &mut f.peers,
+                    &f.requesters,
+                    &declare,
+                    &NoOtherPeers,
+                );
+                assert_eq!(
+                    *f.declared.lock().unwrap(),
+                    vec!["ours/x".to_string()],
+                    "the message's dispatch tells it once"
+                );
+            }
+        }
     }
 
     /// The anti-vacuity twin: the same frame against a session with no own space

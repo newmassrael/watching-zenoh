@@ -21,6 +21,8 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ffi::c_void;
+use core::ptr::NonNull;
 
 use crate::link::{LinkKind, LinkSubject};
 #[cfg(feature = "session-unicast")]
@@ -751,17 +753,130 @@ pub enum FaceEventKind {
     Down,
 }
 
-/// A face-lifecycle observer.
-///
-/// `Arc` rather than `Box` because a registry clones the sink list OUT of its lock before it
-/// invokes any of them: a sink may reach code that re-enters the registry.
-pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>;
+/// A face-lifecycle observer told the whole face, a snapshot of it and of its links
+/// ([`FaceSnapshot`]), each time one comes up or goes: a count of the watcher, as a
+/// [`FaceRowSink`] is, and copied out of a registry's lock before it is told, so a sink may reach
+/// code that re-enters the registry.
+pub type FaceEventSink = FaceWatcher<FaceSnapshot>;
 
 /// A face-lifecycle observer told a row at a time ([`FaceLinkRow`]): each link of a face that
 /// came up or went, its links in order, or the one row of a face with none, the face's facts in
 /// each. The rows of one face are told one after another. A row holds everything in itself, so
 /// an engine that writes its rows in place tells them with nothing allocated.
-pub type FaceRowSink = Arc<dyn Fn(FaceEventKind, &FaceLinkRow) + Send + Sync>;
+pub type FaceRowSink = FaceWatcher<FaceLinkRow>;
+
+/// A count of a watcher of the faces told a `T` of each face that came up or went
+/// ([`FaceEventSink`], [`FaceRowSink`]), copied out of a registry's lock before it is told. The
+/// watcher lies where its maker put it and is counted by its maker's functions
+/// ([`Self::counted`]), so one in a place its session lent takes nothing of the heap; one in an
+/// `Arc` is counted by the `Arc`'s counts ([`Self::of_arc`]).
+pub struct FaceWatcher<T> {
+    raw: NonNull<c_void>,
+    tell: unsafe fn(*const c_void, FaceEventKind, &T),
+    retain: unsafe fn(*const c_void),
+    release: unsafe fn(*mut c_void),
+}
+
+// SAFETY: made only by `FaceWatcher::counted`, whose caller vouches that the watcher and its
+// counts are reached from any thread; the sink holds no `T`, only functions that are handed one.
+unsafe impl<T> Send for FaceWatcher<T> {}
+// SAFETY: as `Send`.
+unsafe impl<T> Sync for FaceWatcher<T> {}
+
+impl<T> Clone for FaceWatcher<T> {
+    fn clone(&self) -> Self {
+        // SAFETY: this count holds the watcher, so another may be taken from it (`counted`).
+        unsafe { (self.retain)(self.raw.as_ptr().cast_const()) };
+        Self {
+            raw: self.raw,
+            tell: self.tell,
+            retain: self.retain,
+            release: self.release,
+        }
+    }
+}
+
+impl<T> Drop for FaceWatcher<T> {
+    fn drop(&mut self) {
+        // SAFETY: this count was given to the sink (`counted`) and is let go of once, here.
+        unsafe { (self.release)(self.raw.as_ptr()) };
+    }
+}
+
+impl<T> FaceWatcher<T> {
+    /// The watcher `sink` counts, in its `Arc`: each copy one more count of the `Arc`.
+    pub fn of_arc<F>(sink: Arc<F>) -> Self
+    where
+        F: Fn(FaceEventKind, &T) + Send + Sync + 'static,
+    {
+        // SAFETY: `into_raw` gives up the `Arc`'s count, never null, to the sink; `F` is `Send +
+        // Sync`, stands while a count of its `Arc` is held, and the three functions tell, take
+        // and let go of a count of that `Arc<F>`.
+        unsafe {
+            Self::counted(
+                NonNull::new_unchecked(Arc::into_raw(sink).cast_mut().cast::<c_void>()),
+                tell_arc::<T, F>,
+                retain_arc::<F>,
+                release_arc::<F>,
+            )
+        }
+    }
+
+    /// The watcher at `raw`, of which this sink is one count: `tell` tells it what came or went,
+    /// `retain` takes one more count of it, and `release` lets one go, the last letting the
+    /// watcher go as its maker said.
+    ///
+    /// # Safety
+    /// `raw` is a count of a watcher that may be reached from any thread, given up to the sink;
+    /// the watcher stands while a count of it is held; each function may be called with `raw`
+    /// from any thread while a count is held, `release` once for each count.
+    pub unsafe fn counted(
+        raw: NonNull<c_void>,
+        tell: unsafe fn(*const c_void, FaceEventKind, &T),
+        retain: unsafe fn(*const c_void),
+        release: unsafe fn(*mut c_void),
+    ) -> Self {
+        Self {
+            raw,
+            tell,
+            retain,
+            release,
+        }
+    }
+
+    /// Tell the watcher of a face that came up or went.
+    pub fn tell(&self, kind: FaceEventKind, what: &T) {
+        // SAFETY: this sink is a count of the watcher, which stands while it is held (`counted`).
+        unsafe { (self.tell)(self.raw.as_ptr().cast_const(), kind, what) }
+    }
+}
+
+/// Tell the watcher in the `Arc` at `raw` what came or went.
+///
+/// # Safety
+/// `raw` is an `Arc<F>`'s pointer, of which the caller holds a count for the call.
+unsafe fn tell_arc<T, F: Fn(FaceEventKind, &T)>(raw: *const c_void, kind: FaceEventKind, what: &T) {
+    // SAFETY: the caller's count holds the value.
+    (unsafe { &*raw.cast::<F>() })(kind, what);
+}
+
+/// Take one more count of the `Arc` at `raw`.
+///
+/// # Safety
+/// As [`tell_arc`].
+unsafe fn retain_arc<F>(raw: *const c_void) {
+    // SAFETY: the caller's.
+    unsafe { Arc::increment_strong_count(raw.cast::<F>()) };
+}
+
+/// Let go of one count of the `Arc` at `raw`.
+///
+/// # Safety
+/// `raw` is a count of an `Arc<F>` the caller gives up, once.
+unsafe fn release_arc<F>(raw: *mut c_void) {
+    // SAFETY: the caller's.
+    drop(unsafe { Arc::from_raw(raw.cast_const().cast::<F>()) });
+}
 
 /// The one link of a group member's transport, as the host that joined the group labels it:
 /// this node's end on the group (`src`), the member's end and the kind of link the group is

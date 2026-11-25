@@ -46,6 +46,22 @@ impl<T> Placed<T> {
     pub unsafe fn share(&self) -> PlacedRef<T> {
         PlacedRef { at: self.at }
     }
+
+    /// The owner of the value `write` writes at `at`, a place in memory another owner holds (a
+    /// field of a session's region) rather than a span an arena lends: a value of kilobytes is
+    /// built where it is to lie, and dropped there when this is, the memory staying its holder's.
+    ///
+    /// # Safety
+    /// `at` is aligned and valid for writes of one `T`, which `write` writes whole; nothing else
+    /// drops the value or reaches it but through this owner and its handles; and the memory stays,
+    /// unmoved, until after this owner is dropped.
+    pub unsafe fn written_at(at: NonNull<T>, write: impl FnOnce(*mut T)) -> Self {
+        write(at.as_ptr());
+        Self {
+            at,
+            _owns: PhantomData,
+        }
+    }
 }
 
 impl<T> Deref for Placed<T> {
@@ -206,6 +222,29 @@ mod tests {
         let handle = PlacedRef::of_static(&VALUE);
         assert_eq!(*handle, 7);
         assert!(core::ptr::eq(&*handle, &VALUE));
+    }
+
+    /// A value written at a place its owner does not lend is read there, through the owner and a
+    /// handle, and dropped once, by the owner, the place left to its holder. Turned red by an owner
+    /// that reads anywhere but the place it was given, or drops its value twice or not at all.
+    #[test]
+    fn a_value_written_at_a_held_place_is_read_there_and_dropped_once_by_its_owner() {
+        let drops = Cell::new(0);
+        let mut place = core::mem::MaybeUninit::<Counted<'_>>::uninit();
+        let at = NonNull::from(&mut place).cast::<Counted<'_>>();
+        // SAFETY: the place is a local's, aligned for the value and written whole by the closure;
+        // the owner and its handle are its only way in, and the local outlives them.
+        let mut owner = unsafe { Placed::written_at(at, |at| at.write(Counted(&drops, 1))) };
+        owner.get_mut().1 = 3;
+        // SAFETY: the handle is used only while `owner` lives, and nothing changes it then.
+        let handle = unsafe { owner.share() };
+        assert!(
+            core::ptr::eq(&*handle, at.as_ptr()),
+            "read where it was written"
+        );
+        assert_eq!((handle.1, owner.1), (3, 3));
+        drop(owner);
+        assert_eq!(drops.get(), 1, "dropped once, by its owner");
     }
 
     /// Says a number, as the trait a handle is mapped to reads it.

@@ -485,8 +485,8 @@ fn reads_until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) -> u
 }
 
 /// The puts a client writes in one batch window reach a listener's subscriber over the stream
-/// link where they lie in the link's receive buffer: the batch is one record of the lane, each put
-/// lying in it and none copied into the lane, and the listener hands them all out in a few reads
+/// link where they lie in the link's receive buffer: each put is handed once where it lies, none
+/// copied, and the listener hands them all out in a few reads
 /// however many the batch holds (one or two when nothing else arrives; at most a quarter of the
 /// puts is asserted), where a link that handed one sample where it lies a read took a read a put.
 /// The listener is stepped by this thread, so each read is counted. The CONTROL is the
@@ -542,19 +542,19 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
         "the window is written as it closes"
     );
     std::thread::sleep(Duration::from_millis(100));
-    let (handed, lent) = (engine.rounds_handed(), engine.samples_lent());
+    let (handed, lent) = (engine.samples_handed(), engine.samples_lent());
     let reads = reads_until(&engine, "the puts", || {
         received.load(Ordering::SeqCst) == PUTS
     });
     assert_eq!(
-        engine.samples_lent() - lent,
+        engine.samples_handed() - handed,
         PUTS,
-        "each put handed where it lies in the stream link's buffer, none copied into the lane"
+        "each put of the batch handed once"
     );
     assert_eq!(
-        engine.rounds_handed() - handed,
-        1,
-        "one record of the lane for the batch's puts"
+        engine.samples_lent() - lent,
+        PUTS,
+        "each put handed where it lies in the stream link's buffer, none copied"
     );
     assert!(
         reads <= PUTS / 4,

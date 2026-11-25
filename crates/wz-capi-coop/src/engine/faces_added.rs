@@ -23,7 +23,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .transport
             .links
             .faces()
-            .filter(|face| face.id != DIAL_FACE && matches!(face.link, Link::Opening { .. }))
+            .filter(|face| {
+                face.id != DIAL_FACE && matches!(face.life.phase(), LinkPhase::Handshaking { .. })
+            })
             .count();
         if pending >= self.config.accept_pending || self.faces_full() {
             return;
@@ -39,22 +41,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return;
         };
         self.transport.links.advance_face_id();
-        // The handshake is the acceptor's whole-handshake bound; the session's own timer in the
-        // state machine is the same bound and ends the task, so whichever is first removes the face.
-        let deadline_us = self.clock.now_us().saturating_add(
-            self.config
-                .timeouts
-                .accepting_inactivity_ms
-                .saturating_mul(1000),
-        );
-        self.push_face(
-            held,
-            Link::Opening {
-                wire,
-                next: 0,
-                deadline_us,
-            },
-        );
+        // The handshake is given up at the acceptor's whole-handshake bound (`link_times`); the
+        // session's own timer in the state machine is the same bound and ends the task, so
+        // whichever is first removes the face.
+        let at = held.at();
+        if self.push_face(held, Link::Wire(wire), 0) {
+            let now_us = self.clock.now_us();
+            if let Some(face) = self.transport.links.face_mut(at) {
+                // A taken link's handshake asks for nothing of the session.
+                let _ = face.life.input(LinkInput::Taken, now_us);
+            }
+        }
     }
 
     /// Whether the table holds as many faces as `max_faces` admits beside the dial role's, a place
@@ -70,23 +67,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Add a face whose link is `link` at the place its tables were lent at (`held`): a dial
     /// under way or a handshake. It is told the session's declarations at the session's pace, as
-    /// every face is. A place the table has no room at, which the callers refuse before they make
-    /// the face, lets the face go with its tables.
-    fn push_face(&mut self, held: HeldFace, link: Link<FaceLink<C, L>, L::Dial>) {
-        let face = Face {
-            id: held.id(),
-            link,
-            replay: Replay::idle(),
-            facts: None,
-            #[cfg(feature = "connectivity")]
-            told: FaceTold::default(),
-        };
-        if let Err(face) = self.transport.links.place_face(held.at(), face) {
-            if let Some(wire) = face.link.wire() {
+    /// every face is. Its life is one taken beside the dial role's, over `endpoints` endpoints of
+    /// its own, not opened yet. A place the table has no room at, which the callers refuse before
+    /// they make the face, lets the face go with its tables: whether the face was placed.
+    fn push_face(
+        &mut self,
+        held: HeldFace,
+        link: Link<FaceLink<C, L>, L::Dial>,
+        endpoints: usize,
+    ) -> bool {
+        let times = self.link_times();
+        let Some(place) = self.transport.links.vacant_place(held.at()) else {
+            if let Some(wire) = link.wire() {
                 wire.abort();
             }
             self.session.registry.remove_face(held);
+            return false;
+        };
+        // The face is built in its place, its life where it lies (`Face::make_in`), which lends
+        // the place it was given, so the table holds it.
+        let placed = place
+            .fill(|place| Face::make_in(place, held.id(), link, times, LinkRole::Taken, endpoints))
+            .is_some();
+        if !placed {
+            self.session.registry.remove_face(held);
         }
+        placed
     }
 }
 
@@ -141,15 +147,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
         };
         core.transport.links.advance_face_id();
-        let deadline_us = core.open_deadline_us();
-        core.push_face(
+        let at = held.at();
+        // Its life dials its one endpoint once: the dial begun above is that dial, under way, and
+        // its answer is asked at the steps that follow.
+        if core.push_face(
             held,
-            Link::Dialing {
-                dial: Dial::new(DialEndpoint::Named(named), pending),
-                next: 0,
-                deadline_us,
-            },
-        );
+            Link::Dialing(Dial::new(DialEndpoint::Named(named), pending)),
+            1,
+        ) {
+            let now_us = core.now_us();
+            if let Some(face) = core.transport.links.face_mut(at) {
+                let _ = face.life.input(LinkInput::Open, now_us);
+                let _ = face.life.input(LinkInput::DialPending, now_us);
+            }
+        }
         Ok(id)
     }
 }

@@ -14,7 +14,9 @@
 
 mod one_thread_lock;
 
+use core::mem::MaybeUninit;
 use core::ops::DerefMut;
+use core::ptr::NonNull;
 
 use wz_capi_port::os::{Mutex, MutexGuard};
 use wz_runtime_coop::sync::{Confined, ConfinedOwner, LockKind};
@@ -49,8 +51,18 @@ pub(crate) trait LockForm: ThreadForm {
     /// A hold of a [`Self::Lock`], let go as it drops.
     type Guard<'a, T: 'a>: DerefMut<Target = T>;
 
-    /// `value`, behind a lock nobody holds.
-    fn new<T>(value: T) -> Self::Lock<T>;
+    /// A lock nobody holds made in `place`, around the value `make` writes in the place it is
+    /// handed and lends back: a kernel's lock may point at itself, so it is made where it stays,
+    /// and the value is written there and not in a frame on its way.
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a [`Self::Lock`] and aligned for it, and what it held is
+    /// overwritten without being dropped. The lock is not moved from `place` until it is dropped
+    /// there (`drop_in_place`).
+    unsafe fn init_at<T>(
+        place: NonNull<Self::Lock<T>>,
+        make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
+    );
 
     /// The value, held until the guard drops; a take while it is held waits until it is not.
     fn lock<'a, T: 'a>(lock: &'a Self::Lock<T>) -> Self::Guard<'a, T>;
@@ -87,8 +99,12 @@ impl LockForm for Threads {
     type SessionLock = Confined<UnderCoreLock>;
 
     #[inline]
-    fn new<T>(value: T) -> Mutex<T> {
-        Mutex::new(value)
+    unsafe fn init_at<T>(
+        place: NonNull<Mutex<T>>,
+        make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
+    ) {
+        // SAFETY: the caller's contract is `mutex_in`'s.
+        unsafe { wz_capi_port::os::mutex_in(place, make) }
     }
 
     #[inline]
@@ -114,8 +130,12 @@ impl LockForm for OneThread {
     type SessionLock = Confined<UnderCoreLock>;
 
     #[inline]
-    fn new<T>(value: T) -> OneThreadLock<T> {
-        OneThreadLock::new(value)
+    unsafe fn init_at<T>(
+        place: NonNull<OneThreadLock<T>>,
+        make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
+    ) {
+        // SAFETY: the caller's contract is the lock's.
+        unsafe { OneThreadLock::init_at(place, make) }
     }
 
     #[inline]
@@ -186,21 +206,33 @@ mod tests {
     /// A take of `F`'s lock holds the value until its guard drops: a try meanwhile finds it
     /// held, one after takes it with what the hold wrote, and the value owned whole is that too.
     fn a_take_holds_until_its_guard_drops<F: LockForm>() {
-        let mut lock = F::new(1_u8);
-        let mut held = F::lock(&lock);
+        let mut place = core::mem::MaybeUninit::<F::Lock<u8>>::uninit();
+        // SAFETY: the place is valid for writes of the lock, which stays there and is dropped
+        // there below.
+        unsafe {
+            F::init_at(
+                core::ptr::NonNull::from(&mut place).cast::<F::Lock<u8>>(),
+                |value: &mut core::mem::MaybeUninit<u8>| value.write(1),
+            )
+        };
+        // SAFETY: made above.
+        let lock = unsafe { place.assume_init_mut() };
+        let mut held = F::lock(lock);
         *held = 2;
-        assert!(F::try_lock(&lock).is_none(), "held, a try takes nothing");
+        assert!(F::try_lock(lock).is_none(), "held, a try takes nothing");
         drop(held);
         assert_eq!(
-            F::try_lock(&lock).map(|value| *value),
+            F::try_lock(lock).map(|value| *value),
             Some(2),
             "let go, a try takes what the hold wrote"
         );
         assert_eq!(
-            *F::get_mut(&mut lock),
+            *F::get_mut(lock),
             2,
             "owned whole, the value is the last written"
         );
+        // SAFETY: made above, dropped once, where it was made.
+        unsafe { place.assume_init_drop() };
     }
 
     /// Both forms' locks keep a value as a lock does. Turned red by a form whose guard does not

@@ -766,6 +766,42 @@ impl<P: Storage> Default for ReplyStage<P> {
     }
 }
 
+// SAFETY: the rows and the arena are sequences of a policy whose sequences are empty at all zero
+// bytes (`ZeroSeqs`); no refusal is a zero count; the bounds are `Limited` (`ZeroEmpty`), bounds of
+// nothing until the session states them (`Self::limit_to`).
+unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for ReplyStage<P> {}
+
+/// The rows of a [`ReplyStage`] of the region policy, which a region lays out beside the stage:
+/// `MAX_PENDING_REPLIES` rows and the `REPLY_STAGE_BYTES` their keys and payloads lie in, the
+/// build's bounds, as a stage of the lent policy is lent them by an open of the build's limits.
+pub struct ReplyStageRows {
+    rows: [core::mem::MaybeUninit<Row<crate::bounded::Region>>; caps::MAX_PENDING_REPLIES],
+    arena: [core::mem::MaybeUninit<u8>; caps::REPLY_STAGE_BYTES],
+}
+
+// SAFETY: both columns are `MaybeUninit`, valid as any bytes, and hold no value until placed.
+unsafe impl crate::bounded::ZeroEmpty for ReplyStageRows {}
+
+impl ReplyStage<crate::bounded::Region> {
+    /// The lines of a region's description ([`place_seqs`](crate::bounded::place_seqs)) that
+    /// place this stage's rows and its bytes, the stage at `at` in the region and its
+    /// [`ReplyStageRows`] at `rows`.
+    pub const fn places(at: usize, rows: usize) -> [crate::bounded::SeqPlace; 2] {
+        [
+            crate::bounded::SeqPlace::of::<Row<crate::bounded::Region>>(
+                at.wrapping_add(core::mem::offset_of!(Self, rows)),
+                rows.wrapping_add(core::mem::offset_of!(ReplyStageRows, rows)),
+                caps::MAX_PENDING_REPLIES,
+            ),
+            crate::bounded::SeqPlace::of::<u8>(
+                at.wrapping_add(core::mem::offset_of!(Self, arena)),
+                rows.wrapping_add(core::mem::offset_of!(ReplyStageRows, arena)),
+                caps::REPLY_STAGE_BYTES,
+            ),
+        ]
+    }
+}
+
 /// The one thing a responder does with the stage it is lent: put a reply in it. A trait apart from
 /// [`ReplyStaging`] so a responder holds the stage of any storage policy behind one reference,
 /// whatever policy the session's tables of its peer are.
@@ -1063,6 +1099,33 @@ impl<P: Storage> Default for FinalStage<P> {
             refused_requests: 0,
             quota: crate::limits::MaxPendingFinalsHeld::build_default(),
         }
+    }
+}
+
+// SAFETY: the rows are a sequence of a policy whose sequences are empty at all zero bytes
+// (`ZeroSeqs`); no refusal is a zero count; the quota is `Limited` (`ZeroEmpty`), a quota of
+// nothing until the session states it (`Self::limit_to`).
+unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for FinalStage<P> {}
+
+/// The rows of a [`FinalStage`] of the region policy, which a region lays out beside the stage:
+/// `MAX_PENDING_FINALS` of them, the build's bound.
+pub struct FinalStageRows {
+    rows: [core::mem::MaybeUninit<(crate::wire_id::RequestId, QosLevel)>; caps::MAX_PENDING_FINALS],
+}
+
+// SAFETY: the rows are `MaybeUninit`, valid as any bytes, and hold no value until placed.
+unsafe impl crate::bounded::ZeroEmpty for FinalStageRows {}
+
+impl FinalStage<crate::bounded::Region> {
+    /// The line of a region's description ([`place_seqs`](crate::bounded::place_seqs)) that
+    /// places this stage's rows, the stage at `at` in the region and its [`FinalStageRows`] at
+    /// `rows`.
+    pub const fn place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
+        crate::bounded::SeqPlace::of::<(crate::wire_id::RequestId, QosLevel)>(
+            at.wrapping_add(core::mem::offset_of!(Self, rows)),
+            rows.wrapping_add(core::mem::offset_of!(FinalStageRows, rows)),
+            caps::MAX_PENDING_FINALS,
+        )
     }
 }
 

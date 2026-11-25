@@ -1,47 +1,32 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A strict reader of the one record a data stream is made of: a `Push` that carries a
-//! `Put` with nothing on it but, at most, the QoS byte.
+//! The lane of a data stream: a frame every record of which is a plain `Put`, kept as the places
+//! of each record's parts in the frame rather than as an owned message per record.
 //!
-//! The generated codec reads any `Push`, and what it hands back (a borrowed view, which
-//! the heap profile then copies into an owned message, a box and a string and an extension
-//! list) is built for generality: a publisher that sends the same small message a million
-//! times pays for all of it each time. This reader recognises the shape a stream has and
-//! nothing else. For that shape it returns the key's parts and the payload's range,
-//! read where they lie, with no allocation and a few dozen instructions; for anything
-//! else it answers `None` and the caller reads the record with the generated codec, as it
-//! always did. So it never has to be right about a record it does not accept, and the one
-//! requirement on it is the one the tests state: where it accepts, it reads what the
-//! generated codec reads.
+//! A plain Put is a `Push` whose own chain is the QoS extension alone, or none, and whose body is
+//! a `Put` with no timestamp, no encoding and no chain of its own: the record a publisher that
+//! sends the same small message many times sends. Each record is read by the one reader of a Push
+//! (`network_message::push_read`), so the lane reads what the generated codec reads and refuses
+//! what it refuses; of the reading it keeps the key's id and mapping, the places of the suffix
+//! and the payload, and the QoS byte. A frame that holds any other record, or bytes the reader
+//! refuses, is not read here at all: the owned parse reads it, so a frame's records are never
+//! split between the two.
 //!
-//! The shape, as the generated `Push`, `Wireexpr`, `WireexprLocal`, `ExtEntry` and `MsgPut`
-//! decode it:
-//!
-//! - the Push header: MID `0x1d`, the `N` flag (a suffix follows the id), the `M` flag
-//!   (the id is in the SENDER's mapping, not ours) and the `Z` flag (an extension chain
-//!   follows the key);
-//! - the key: `id` as a VLE, and with `N` a VLE length and that many bytes of UTF-8;
-//! - with `Z`, exactly one extension, the QoS: header `0x21` (identity 1, not mandatory,
-//!   a VLE body), no further extension after it;
-//! - the body: the Put header `0x01` (no timestamp, no encoding, no extension), a VLE length
-//!   and that many payload bytes.
-//!
-//! Positions are `u32` offsets into the buffer the record was read from, so a record is
-//! twenty-odd bytes that outlive the borrow and a frame's records are one small vector.
+//! Places are `u32` offsets into the frame, so a record is twenty-odd bytes that outlive the
+//! borrow and a frame's records are one small vector.
 
-/// The Push header's MID.
-const PUSH_MID: u8 = 0x1d;
-/// `N`: a key suffix follows the id.
-const FLAG_N: u8 = 0x20;
-/// `M`: the id names a key in the sender's mapping.
-const FLAG_M: u8 = 0x40;
-/// `Z`: an extension chain follows the key.
-const FLAG_Z: u8 = 0x80;
-/// The QoS extension's header: identity `0x1`, not mandatory, a VLE (`Z64`) body, and the
-/// `Z` bit clear, which is what makes it the last of its chain.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+use crate::network_message::push_read;
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+use sce_forge_runtime::codec::SceCursor;
+
+/// The QoS extension's header: identity `0x1`, not mandatory, a VLE (`Z64`) body, and the `Z`
+/// bit clear, which is what makes it the last of its chain.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 const QOS_EXT_HEADER: u8 = 0x21;
 /// The Put header with no timestamp, no encoding and no extension.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 const PLAIN_PUT_HEADER: u8 = 0x01;
 
 /// One plain `Put` read where it lies: where its key and payload are, not copies of them.
@@ -59,186 +44,104 @@ pub struct PlainPut {
     pub qos: Option<u8>,
     /// This record names the SAME key as the record before it in its frame: the same id in the
     /// same mapping, and either no suffix on both or the same bytes. [`read_plain_puts`] sets it
-    /// from the comparison it already makes of the suffix, so the layers that follow it (the key's
-    /// composition, its match against the subscribers, a subscriber's list of keys) need not
-    /// compare the same text again for every message of a stream. `false` for the first record
-    /// of a frame and for a record read alone.
+    /// as it reads, from the record's prefix when that repeats the one before it, so the layers
+    /// that follow it (the key's composition, its match against the subscribers, a subscriber's
+    /// list of keys) need not compare the same text again for every message of a stream. `false`
+    /// for the first record of a frame and for a record read alone.
     pub repeats_key: bool,
 }
 
-/// Read a VLE (zenoh `ZInt`) at `*at`, advancing it. The codec's rule: up to nine bytes,
-/// seven data bits each with the high bit saying another follows, and the ninth byte
-/// carrying eight data bits.
-///
-/// Nearly every number a record carries (a key id, a length) is one byte, so that case is the
-/// part that is inlined into the reader; the longer ones are the call.
-#[inline(always)]
-fn vle(buf: &[u8], at: &mut usize) -> Option<u64> {
-    if let Some(&byte) = buf.get(*at) {
-        if byte & 0x80 == 0 {
-            // A byte was read at `*at`, so one past it is within the buffer's length.
-            *at = at.saturating_add(1);
-            return Some(u64::from(byte));
-        }
-    }
-    vle_long(buf, at)
-}
-
-/// [`vle`] for a number that is not one byte, or a buffer that ends.
-///
-/// The loop ends on the bytes it reads, not on a count, so it is one loop in the image and not
-/// nine copies of its body.
-#[inline(never)]
-fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
-    let mut value: u64 = 0;
-    // Seven bits a byte, so the ninth byte is the one at a shift of 56, which is below the width
-    // of a `u64` as every shift here is.
-    let mut shift: u32 = 0;
-    loop {
-        let byte = *buf.get(*at)?;
-        *at = at.saturating_add(1);
-        if shift == 56 {
-            return Some(value | u64::from(byte).wrapping_shl(shift));
-        }
-        value |= u64::from(byte & 0x7f).wrapping_shl(shift);
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-        shift = shift.saturating_add(7);
-    }
-}
-
-/// Read a key's id at `*at`, advancing it: a VLE of an `ExprId` in at most three
-/// bytes, the third carrying the two top bits. Anything else answers `None` and the
-/// caller hands the record to the generated `WireexprLocal` or `WireexprNonlocal`,
-/// which read a ZInt of any length and hold its value to an `ExprId`, as upstream
-/// does (`commons/zenoh-codec/src/core/wire_expr.rs` @
-/// `let zodec = Zenoh080Bounded::<ExprId>::new();`): a wider id is refused there,
-/// and an id padded past three bytes is read there.
-#[inline(always)]
-fn vle_expr_id(buf: &[u8], at: &mut usize) -> Option<crate::wire_id::ExprId> {
-    let mut value: crate::wire_id::ExprId = 0;
-    // The first two bytes carry seven bits each, the third the two top bits of the sixteen.
-    for shift in [0u32, 7] {
-        let byte = *buf.get(*at)?;
-        *at = at.saturating_add(1);
-        value |= crate::wire_id::ExprId::from(byte & 0x7f).wrapping_shl(shift);
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-    }
-    let byte = *buf.get(*at)?;
-    *at = at.saturating_add(1);
-    if byte > 0x03 {
-        return None;
-    }
-    Some(value | crate::wire_id::ExprId::from(byte).wrapping_shl(14))
-}
-
-/// Read the plain `Put` that starts at `buf[at]`, and where it ends, or `None` when what
-/// is there is anything else: another message, an extension this reader does not know, a
-/// timestamp, an encoding, a sliced payload, a suffix that is not UTF-8, a length past the
-/// end of the buffer.
-///
-/// `None` is not an error: the caller reads the record with the generated codec, which
-/// decides whether it is one.
-#[inline]
-pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
-    let read = read_plain_put_after(buf, at, None)?;
-    Some((read.put, read.end))
-}
-
-/// What reading one record gives: the record, where it ends, whether its suffix IS the bytes
-/// of the one it was offered as known, and where the part of it that does not depend on the
-/// payload ends.
-struct Read {
+/// One plain Put as the lane keeps it, with the bytes of its suffix, which the next record's are
+/// compared with, and where the part of it that does not depend on the payload ends.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+struct Read<'f> {
     put: PlainPut,
-    end: usize,
-    // These two are read only by the frame reader, which needs `alloc`; a build without it
-    // reads one record.
-    #[cfg(feature = "alloc")]
-    same_suffix: bool,
-    /// Everything up to and including the Put header: the Push header, the key, the QoS
+    suffix: Option<&'f [u8]>,
+    /// Everything up to and including the Put header: the Push header, the key and the QoS
     /// extension. What follows is the payload's length and the payload.
-    #[cfg(feature = "alloc")]
     prefix_end: usize,
 }
 
-/// [`read_plain_put`] for a record that follows one whose suffix bytes were `known_utf8`:
-/// a suffix of the same bytes is not checked again. A stream's records carry one key, and
-/// checking it once per frame rather than once per record is what keeps the check off the
-/// per-message cost; the bytes are equal, so the answer is.
+/// Where `part`, a slice of `frame`, lies in it.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+fn place(frame: &[u8], part: &[u8]) -> Option<(u32, u32)> {
+    let start = (part.as_ptr() as usize).checked_sub(frame.as_ptr() as usize)?;
+    let end = start.checked_add(part.len())?;
+    Some((u32::try_from(start).ok()?, u32::try_from(end).ok()?))
+}
+
+/// How far `cursor`, which runs over `frame`, has read.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+fn read_to(frame: &[u8], cursor: &SceCursor<'_>) -> usize {
+    frame.len().saturating_sub(cursor.remaining())
+}
+
+/// The plain Put at the cursor, which runs over `frame`, read past; `None` when the record there
+/// is any other or bytes the reader refuses, and the cursor is then not to be read on.
 ///
-/// The third value is whether the record's suffix IS those bytes (false when it has none),
-/// which is the comparison the check above makes, handed on so the caller does not make it
-/// again to tell whether the key repeats.
+/// The envelope is the Push reader's (`push_read::read_envelope`). Its verdict is the rule's on
+/// the QoS extension alone, which no participant refuses (the tests hold it so), and a record
+/// that carries any other extension is declined. The body of a plain Put is its header and its
+/// payload, which the reader's payload part reads (`push_read::read_payload`).
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 #[inline]
-fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Option<Read> {
-    #[cfg(feature = "alloc")]
-    let mut same_suffix = false;
-    let mut cursor = at;
-    let header = *buf.get(cursor)?;
-    // Each step past a byte that was read stays within the buffer's length.
-    cursor = cursor.saturating_add(1);
-    if header & 0x1f != PUSH_MID {
+fn read_plain_put<'f>(frame: &'f [u8], cursor: &mut SceCursor<'f>) -> Option<Read<'f>> {
+    use wz_codecs::ext_entry::ExtEntryViewVariant;
+    use wz_codecs::wireexpr::WireexprViewVariant;
+    // The reader reads a record its caller dispatched by its MID.
+    if cursor.peek_u8().ok()? & 0x1f != wz_codecs::wire_const::N_MID_PUSH {
         return None;
     }
-    let id = vle_expr_id(buf, &mut cursor)?;
-    let suffix = if header & FLAG_N != 0 {
-        let length = usize::try_from(vle(buf, &mut cursor)?).ok()?;
-        // The codec refuses a suffix longer than a key holds (`LengthOutOfRange`); this reader
-        // does not accept it.
-        if length > usize::from(u16::MAX) {
-            return None;
+    let mut view = wz_codecs::push::PushView::default();
+    push_read::read_envelope(cursor, &mut view, &mut push_read::Lending).ok()?;
+    let qos = match &view.extensions {
+        None => None,
+        Some(chain) if chain.inner().len() == 1 => {
+            let entry = chain.inner().iter().next()?;
+            if entry.header != QOS_EXT_HEADER {
+                return None;
+            }
+            // The encoding the header names is the one the codec reads a number in.
+            let ExtEntryViewVariant::CodecZenohExtZint(value) = entry.body else {
+                return None;
+            };
+            // The QoS byte is the low byte of the extension's value, as `extract_qos` reads it.
+            Some(value.value as u8)
         }
-        let end = cursor.checked_add(length)?;
-        let bytes = buf.get(cursor..end)?;
-        // The codec refuses a suffix that is not UTF-8; this reader does not accept it.
-        let same = known_utf8 == Some(bytes);
-        if !same {
-            core::str::from_utf8(bytes).ok()?;
-        }
-        #[cfg(feature = "alloc")]
-        {
-            same_suffix = same;
-        }
-        let range = (u32::try_from(cursor).ok()?, u32::try_from(end).ok()?);
-        cursor = end;
-        Some(range)
-    } else {
-        None
+        Some(_) => return None,
     };
-    let qos = if header & FLAG_Z != 0 {
-        if *buf.get(cursor)? != QOS_EXT_HEADER {
-            return None;
-        }
-        cursor = cursor.saturating_add(1);
-        let value = vle(buf, &mut cursor)?;
-        // The QoS byte is the low byte of the extension's value, as `extract_qos` reads it.
-        Some(value as u8)
-    } else {
-        None
-    };
-    if *buf.get(cursor)? != PLAIN_PUT_HEADER {
+    if cursor.peek_u8().ok()? != PLAIN_PUT_HEADER {
         return None;
     }
-    cursor = cursor.saturating_add(1);
-    #[cfg(feature = "alloc")]
-    let prefix_end = cursor;
-    let (end, payload) = read_payload(buf, cursor)?;
+    cursor.advance(1).ok()?;
+    let prefix_end = read_to(frame, cursor);
+    let (_, payload) = push_read::read_payload(cursor).ok()?;
+    let (id, sender_mapping, suffix) = match &view.keyexpr.body {
+        WireexprViewVariant::WireexprLocal(key) => (
+            key.id,
+            true,
+            key.suffix.map(|text| text.into_inner().as_bytes()),
+        ),
+        WireexprViewVariant::WireexprNonlocal(key) => (
+            key.id,
+            false,
+            key.suffix.map(|text| text.into_inner().as_bytes()),
+        ),
+    };
+    let suffix_place = match suffix {
+        Some(bytes) => Some(place(frame, bytes)?),
+        None => None,
+    };
     Some(Read {
         put: PlainPut {
             id,
-            sender_mapping: header & FLAG_M != 0,
-            suffix,
-            payload,
+            sender_mapping,
+            suffix: suffix_place,
+            payload: place(frame, payload)?,
             qos,
             repeats_key: false,
         },
-        end,
-        #[cfg(feature = "alloc")]
-        same_suffix,
-        #[cfg(feature = "alloc")]
+        suffix,
         prefix_end,
     })
 }
@@ -248,7 +151,7 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
 /// width its length allows, which is the whole of it without a call to the C library's
 /// `memcmp` (whose call, setup and dispatch cost more than the comparison of fourteen bytes).
 /// A longer slice is the library's.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 #[inline(always)]
 fn equal_short(a: &[u8], b: &[u8]) -> bool {
     debug_assert_eq!(a.len(), b.len());
@@ -270,51 +173,38 @@ fn equal_short(a: &[u8], b: &[u8]) -> bool {
     }
 }
 
-/// The payload's length and the payload of the record whose fixed prefix ends at `cursor`:
-/// where the record ends and where its payload lies. What [`read_plain_put_after`] does after
-/// the Put header.
-#[inline]
-fn read_payload(buf: &[u8], mut cursor: usize) -> Option<(usize, (u32, u32))> {
-    let length = usize::try_from(vle(buf, &mut cursor)?).ok()?;
-    let end = cursor.checked_add(length)?;
-    buf.get(cursor..end)?;
-    Some((end, (u32::try_from(cursor).ok()?, u32::try_from(end).ok()?)))
-}
-
 /// Every record of a frame's batch as a plain `Put`, or `None` when ANY of them is not
 /// (and when the batch holds none): all or nothing, so a frame is read by one reader
 /// and the order of its records is never split between two.
 ///
 /// One allocation for the whole frame, sized by its first record, which is what a
 /// stream's frame of equal messages needs.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
     let mut puts = alloc::vec::Vec::new();
-    let mut at = 0usize;
-    // The suffix of the record just read, which the next one may repeat.
-    let mut previous: Option<&[u8]> = None;
-    // The record just read, whose key the next one may repeat, and where its fixed prefix
-    // lies: the bytes of the Push header, the key, the QoS extension and the Put header.
-    let mut before: Option<(PlainPut, usize, usize)> = None;
-    while at < buf.len() {
+    let mut cursor = SceCursor::new(buf);
+    // The record just read, whose key the next one may repeat: its reading, where it starts, the
+    // length of its fixed prefix (the bytes of the Push header, the key, the QoS extension and
+    // the Put header) and the bytes of its suffix.
+    let mut before: Option<(PlainPut, usize, usize, Option<&[u8]>)> = None;
+    while cursor.remaining() > 0 {
+        let at = read_to(buf, &cursor);
         // A stream's records differ in their payload and nothing else, so a record that
         // starts with the same prefix bytes as the one before it is read as that one was:
         // the reading of those bytes is a function of the bytes alone. What is left to read
-        // is the payload's length.
-        if let Some((last, start, prefix_len)) = before {
-            let prefix_end = at.checked_add(prefix_len);
-            let now = prefix_end.and_then(|to| buf.get(at..to));
+        // is the payload.
+        if let Some((last, start, prefix_len, last_suffix)) = before {
+            let now = at.checked_add(prefix_len).and_then(|to| buf.get(at..to));
             let then = start
                 .checked_add(prefix_len)
                 .and_then(|to| buf.get(start..to));
-            let same_prefix = match (prefix_end, now, then) {
-                (Some(prefix_end), Some(now), Some(then)) if equal_short(now, then) => {
-                    Some(prefix_end)
-                }
-                _ => None,
+            let same_prefix = match (now, then) {
+                (Some(now), Some(then)) => equal_short(now, then),
+                _ => false,
             };
-            if let Some(prefix_end) = same_prefix {
-                let (end, payload) = read_payload(buf, prefix_end)?;
+            if same_prefix {
+                cursor.advance(prefix_len).ok()?;
+                let (_, payload) = push_read::read_payload(&mut cursor).ok()?;
                 // The suffix lies at the same distance from the start of the record.
                 let moved = |range: (u32, u32)| {
                     let to_at = |position: u32| {
@@ -328,47 +218,32 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
                 };
                 let put = PlainPut {
                     suffix,
-                    payload,
+                    payload: place(buf, payload)?,
                     repeats_key: true,
                     ..last
                 };
-                previous = put
-                    .suffix
-                    .and_then(|(from, to)| buf.get(from as usize..to as usize))
-                    .or(previous);
-                before = Some((put, at, prefix_len));
+                // The same bytes as the suffix before, which is all a comparison reads of them.
+                before = Some((put, at, prefix_len, last_suffix));
                 puts.push(put);
-                at = end;
                 continue;
             }
         }
-        let read = read_plain_put_after(buf, at, previous)?;
+        let read = read_plain_put(buf, &mut cursor)?;
         let mut put = read.put;
-        // With a suffix on both, `previous` is the record before's own suffix, so `same_suffix`
-        // is the comparison with it.
-        put.repeats_key = before.is_some_and(|(before, _, _)| {
-            before.id == put.id
-                && before.sender_mapping == put.sender_mapping
-                && match (before.suffix, put.suffix) {
-                    (None, None) => true,
-                    (Some(_), Some(_)) => read.same_suffix,
-                    _ => false,
-                }
+        put.repeats_key = before.is_some_and(|(last, _, _, last_suffix)| {
+            last.id == put.id
+                && last.sender_mapping == put.sender_mapping
+                && last_suffix == read.suffix
         });
         // A record read at `at` ends, and its prefix ends, at or past `at`.
-        before = Some((put, at, read.prefix_end.saturating_sub(at)));
-        previous = put
-            .suffix
-            .and_then(|(from, to)| buf.get(from as usize..to as usize))
-            .or(previous);
+        before = Some((put, at, read.prefix_end.saturating_sub(at), read.suffix));
         if puts.capacity() == 0 {
             // Records of the size the first one is: its bytes, and the header around them.
-            let width = read.end.saturating_sub(at).max(1);
+            let width = read_to(buf, &cursor).saturating_sub(at).max(1);
             let records = buf.len().checked_div(width).unwrap_or(1);
             puts.reserve_exact(records.clamp(1, 4096));
         }
         puts.push(put);
-        at = read.end;
     }
     if puts.is_empty() {
         None
@@ -380,8 +255,14 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
 #[cfg(all(test, feature = "alloc", feature = "codec-push"))]
 mod tests {
     use super::*;
-    use sce_forge_runtime::codec::SceCursor;
     use wz_codecs::lent::{Push, PushVariant, WireexprVariant};
+
+    /// The plain Put at the start of `bytes`, read alone, and where it ends.
+    fn read_one(bytes: &[u8]) -> Option<(PlainPut, usize)> {
+        let mut cursor = SceCursor::new(bytes);
+        let read = read_plain_put(bytes, &mut cursor)?;
+        Some((read.put, bytes.len() - cursor.remaining()))
+    }
 
     /// The id, whether the mapping is the sender's, the suffix, the payload, the QoS byte and
     /// the length of the record: what the generated codec reads out of one.
@@ -485,7 +366,7 @@ mod tests {
                         }
                         .expect("within the bounds");
                         let bytes = encode(&push);
-                        let (plain, end) = read_plain_put(&bytes, 0)
+                        let (plain, end) = read_one(&bytes)
                             .unwrap_or_else(|| panic!("id {id} suffix {suffix:?} qos {qos:?}"));
                         let (cid, cmapping, csuffix, cpayload, cqos, cend) =
                             through_the_codec(&bytes).expect("the codec reads it");
@@ -535,7 +416,7 @@ mod tests {
             b'b',
             b'c'
         ];
-        let (read, end) = read_plain_put(&plain, 0).expect("the control is plain");
+        let (read, end) = read_one(&plain).expect("the control is plain");
         assert_eq!((read.id, read.qos, end), (3, Some(0x1a), plain.len()));
         assert_eq!(
             through_the_codec(&plain).expect("the codec reads the control"),
@@ -550,34 +431,34 @@ mod tests {
             );
             let at = put.iter().position(|b| *b == PLAIN_PUT_HEADER).unwrap();
             put[at] |= flag;
-            assert!(read_plain_put(&put, 0).is_none(), "put flag {flag:#04x}");
+            assert!(read_one(&put).is_none(), "put flag {flag:#04x}");
         }
         // A Del body, and a message that is not a Push.
         let mut del = plain.clone();
         let at = del.len() - 3 - 1 - 1;
         del[at] = 0x02;
-        assert!(read_plain_put(&del, 0).is_none());
+        assert!(read_one(&del).is_none());
         let mut other = plain.clone();
         other[0] = (other[0] & !0x1f) | 0x1b;
-        assert!(read_plain_put(&other, 0).is_none());
+        assert!(read_one(&other).is_none());
         // An extension that is not the QoS: another identity, a second one behind it.
         let mut foreign = plain.clone();
         let ext = foreign.iter().position(|b| *b == QOS_EXT_HEADER).unwrap();
         foreign[ext] = 0x22;
-        assert!(read_plain_put(&foreign, 0).is_none());
+        assert!(read_one(&foreign).is_none());
         let mut chained = plain.clone();
         chained[ext] |= 0x80;
-        assert!(read_plain_put(&chained, 0).is_none());
+        assert!(read_one(&chained).is_none());
         // A suffix that is not UTF-8, and a length that runs past the buffer.
         let mut bad = encode(
             &crate::lent_push::put_with_qos(0, Some("ab"), b"x", crate::sample::QosLevel::DEFAULT)
                 .expect("within the bounds"),
         );
         bad[2] = 0xff;
-        assert!(read_plain_put(&bad, 0).is_none());
+        assert!(read_one(&bad).is_none());
         let truncated = &plain[..plain.len() - 1];
-        assert!(read_plain_put(truncated, 0).is_none());
-        assert!(read_plain_put(&[], 0).is_none());
+        assert!(read_one(truncated).is_none());
+        assert!(read_one(&[]).is_none());
     }
 
     /// A suffix as long as a key holds reads, and one byte longer is declined here as the codec
@@ -594,12 +475,12 @@ mod tests {
             out
         };
         let longest = record(65_535, &[0xff, 0xff, 0x03]);
-        let (plain, end) = read_plain_put(&longest, 0).expect("the longest suffix reads");
+        let (plain, end) = read_one(&longest).expect("the longest suffix reads");
         assert_eq!((plain.suffix, end), (Some((5, 5 + 65_535)), longest.len()));
         assert!(through_the_codec(&longest).is_some());
 
         let longer = record(65_536, &[0x80, 0x80, 0x04]);
-        assert!(read_plain_put(&longer, 0).is_none());
+        assert!(read_one(&longer).is_none());
         assert!(through_the_codec(&longer).is_none());
     }
 
@@ -619,7 +500,7 @@ mod tests {
             ]
         };
         let widest = record([0xff, 0xff, 0x03]);
-        let (plain, end) = read_plain_put(&widest, 0).expect("the widest id reads");
+        let (plain, end) = read_one(&widest).expect("the widest id reads");
         assert_eq!((plain.id, end), (u16::MAX, widest.len()));
         assert_eq!(
             through_the_codec(&widest).map(|read| read.0),
@@ -627,34 +508,35 @@ mod tests {
         );
 
         let wider = record([0x80, 0x80, 0x04]);
-        assert!(read_plain_put(&wider, 0).is_none());
+        assert!(read_one(&wider).is_none());
         assert!(through_the_codec(&wider).is_none());
     }
 
-    /// An id padded past its value's length is read: in three bytes here and by the
-    /// codec, in four only by the codec, which takes a ZInt of any length as upstream
-    /// does, so a record this reader declines is not lost.
+    /// An id padded past its value's length reads as the codec reads it, in three bytes, in four
+    /// and in nine: the reader of a Push takes a ZInt of any length, as upstream does, so a
+    /// stream whose sender pads its ids stays on the lane.
     #[test]
-    fn a_padded_id_is_read_by_the_codec_where_this_reader_declines_it() {
+    fn a_padded_id_reads_as_the_codec_reads_it() {
         let record = |id: &[u8]| {
             let mut out = alloc::vec![0x5du8];
             out.extend_from_slice(id);
             out.extend_from_slice(&[PLAIN_PUT_HEADER, 1, b'x']);
             out
         };
-        // 5 in three bytes.
-        let three = record(&[0x85, 0x80, 0x00]);
-        let (plain, end) = read_plain_put(&three, 0).expect("a three-byte id reads");
-        assert_eq!((plain.id, end), (5, three.len()));
-        assert_eq!(through_the_codec(&three).map(|read| read.0), Some(5));
-
-        // 5 in four bytes, and the widest id in nine.
-        let four = record(&[0x85, 0x80, 0x80, 0x00]);
-        assert!(read_plain_put(&four, 0).is_none());
-        assert_eq!(through_the_codec(&four).map(|read| read.0), Some(5));
-        let nine = record(&[0xff, 0xff, 0x83, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
-        assert!(read_plain_put(&nine, 0).is_none());
-        assert_eq!(through_the_codec(&nine).map(|read| read.0), Some(u16::MAX));
+        let cases: [(&[u8], crate::wire_id::ExprId); 3] = [
+            (&[0x85, 0x80, 0x00], 5),
+            (&[0x85, 0x80, 0x80, 0x00], 5),
+            (
+                &[0xff, 0xff, 0x83, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00],
+                u16::MAX,
+            ),
+        ];
+        for (id, value) in cases {
+            let bytes = record(id);
+            let (plain, end) = read_one(&bytes).unwrap_or_else(|| panic!("{bytes:02x?}"));
+            assert_eq!((plain.id, end), (value, bytes.len()));
+            assert_eq!(through_the_codec(&bytes).map(|read| read.0), Some(value));
+        }
     }
 
     /// The reader against the codec over damaged bytes: one byte of a valid record changed to
@@ -698,7 +580,7 @@ mod tests {
                 for value in 0..=255u8 {
                     let mut bytes = seed.clone();
                     bytes[position] = value;
-                    if let Some((plain, end)) = read_plain_put(&bytes, 0) {
+                    if let Some((plain, end)) = read_one(&bytes) {
                         let (cid, cmapping, csuffix, cpayload, cqos, cend) =
                             through_the_codec(&bytes).unwrap_or_else(|| {
                                 panic!("the reader accepted what the codec refuses: byte {position} = {value:#04x}")
@@ -805,9 +687,9 @@ mod tests {
     /// reuses a record's reading must give back, field for field.
     fn read_one_by_one(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
         let mut out: alloc::vec::Vec<PlainPut> = alloc::vec::Vec::new();
-        let mut at = 0;
-        while at < buf.len() {
-            let (mut put, end) = read_plain_put(buf, at)?;
+        let mut cursor = SceCursor::new(buf);
+        while cursor.remaining() > 0 {
+            let mut put = read_plain_put(buf, &mut cursor)?.put;
             let key = |p: &PlainPut| p.suffix.map(|(a, b)| buf[a as usize..b as usize].to_vec());
             put.repeats_key = out.last().is_some_and(|last| {
                 last.id == put.id
@@ -815,7 +697,6 @@ mod tests {
                     && key(last) == key(&put)
             });
             out.push(put);
-            at = end;
         }
         if out.is_empty() {
             None
@@ -898,5 +779,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The one extension a plain Put carries is one a participant takes whatever it says: what
+    /// lets the lane hand a plain Put over without the verdict the owned parse judges each record
+    /// by.
+    #[test]
+    fn the_extension_a_plain_put_carries_is_never_refused() {
+        use crate::ext_admit::{judge_ext_chain, ExtCarrier, NetworkEnvelope};
+        assert!(
+            judge_ext_chain(ExtCarrier::Network(NetworkEnvelope::Push), [QOS_EXT_HEADER])
+                .refusal()
+                .is_none()
+        );
     }
 }

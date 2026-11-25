@@ -47,6 +47,7 @@
 
 use core::cell::{OnceCell, UnsafeCell};
 use core::convert::Infallible;
+use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 // The split `hlc` and `session_actions` use: the host profile has the native atomics, the
@@ -56,7 +57,9 @@ use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize};
 #[cfg(feature = "no_std")]
 use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 
-use crate::bounded::{Arena, BoundedVec, CapacityFull, LendRefused, Lent, Static, Storage};
+use crate::bounded::{
+    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Static, Storage, ZeroEmpty,
+};
 use crate::byte_cells::{ByteBuf, KeptBytes};
 use crate::caps;
 use crate::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -205,7 +208,36 @@ pub trait RecordForm: ThreadForm {
     /// # Errors
     /// Refused past the build's bound of the table or past what the arena has left.
     fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused>;
+
+    /// The rows a region the build lays out keeps the records of a round of this form in
+    /// ([`RoundRowPlaces`]): the build's bound of them where an arena would lend them, none where
+    /// the round keeps them in itself.
+    type RecordPlaces<T>: ZeroEmpty;
+
+    /// The bytes such a region keeps the keys of a round of this form in: as many of the build's
+    /// longest keys as the form holds ([`Self::KEYS`]).
+    type KeyPlaces: ZeroEmpty;
+
+    /// The records of a round of `rows` records over `places`, at most the rows there.
+    ///
+    /// # Safety
+    /// `places` is aligned and valid for reads and writes, holds no value, and is reached by
+    /// nothing but the records handed back for as long as they live.
+    unsafe fn records_in<T>(
+        places: NonNull<Self::RecordPlaces<T>>,
+        rows: usize,
+    ) -> Self::Records<T>;
+
+    /// The keys of a round of `bytes` bytes of them over `places`, at most the bytes there.
+    ///
+    /// # Safety
+    /// As [`Self::records_in`]'s, for `places`.
+    unsafe fn keys_in(places: NonNull<Self::KeyPlaces>, bytes: usize) -> RoundKeys;
 }
+
+/// The table a round writes its records' keys in: the bytes of as many of the build's longest
+/// keys as the form that holds the most of them keeps.
+pub type RoundKeys = BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>;
 
 /// The records of a round, in the order they were written.
 pub trait RecordRows<T>: Default + core::ops::Deref<Target = [T]> + core::ops::DerefMut {
@@ -248,6 +280,23 @@ impl RecordForm for crate::row_callback::Threads {
     fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused> {
         arena.lend(rows)
     }
+
+    type RecordPlaces<T> = [MaybeUninit<T>; caps::DELIVERY_LANE_EVENTS];
+
+    type KeyPlaces = [MaybeUninit<u8>; key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>()];
+
+    unsafe fn records_in<T>(
+        places: NonNull<Self::RecordPlaces<T>>,
+        rows: usize,
+    ) -> Self::Records<T> {
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, rows) }
+    }
+
+    unsafe fn keys_in(places: NonNull<Self::KeyPlaces>, bytes: usize) -> RoundKeys {
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, bytes) }
+    }
 }
 
 impl RecordForm for crate::row_callback::OneThread {
@@ -262,17 +311,40 @@ impl RecordForm for crate::row_callback::OneThread {
     fn records<T>(_arena: &mut Arena, _rows: usize) -> Result<Self::Records<T>, LendRefused> {
         Ok(BoundedVec::new_static())
     }
+
+    type RecordPlaces<T> = ();
+
+    type KeyPlaces = [MaybeUninit<u8>; caps::MAX_KEYEXPR_BYTES];
+
+    unsafe fn records_in<T>(
+        _places: NonNull<Self::RecordPlaces<T>>,
+        _rows: usize,
+    ) -> Self::Records<T> {
+        BoundedVec::new_static()
+    }
+
+    unsafe fn keys_in(places: NonNull<Self::KeyPlaces>, bytes: usize) -> RoundKeys {
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, bytes) }
+    }
 }
 
 /// What the session's planes are made of in an engine's own types beyond what its round owes:
-/// whether the session's own queryables answer its gets, and the locks the planes keep their state
-/// and their queues under. The get plane ([`crate::get_plane`]) and the query plane
-/// ([`crate::query_plane`]) read both.
+/// whether the session's own queryables answer its gets, whether a thread that holds the session's
+/// lock may take the callback a reply reaches, and the locks the planes keep their state and their
+/// queues under. The get plane ([`crate::get_plane`]) and the query plane
+/// ([`crate::query_plane`]) read them.
 pub trait PlaneCalls: RoundCalls {
     /// Whether the session's own queryables answer a get of the session on the thread that holds
-    /// the session's lock: the get plane captures the callback the answer reaches, and the query
-    /// plane notes the calls the get begins.
+    /// the session's lock: the query plane notes the calls the get begins, and the get plane
+    /// captures the callback the answer reaches, which [`Self::Captures`] keeps.
     type LocalAnswers: Presence;
+    /// Whether the get plane keeps a capture ([`crate::get_plane::GetPlane::capture`]): the
+    /// callback a reply handed to the sinks reaches is taken out for the thread that holds the
+    /// session's lock, to hand it the reply itself once it lets go. Present where the session's
+    /// own queryables answer its gets, and where the session's read hands each record out as it is
+    /// read, so a peer's reply is handed by the read and not held in the round.
+    type Captures: Presence;
     /// The locks of the planes' state and of the queues every delivery looks at
     /// ([`Queued`](crate::plane_lock::Queued)).
     type Queues: LockFamily;
@@ -742,7 +814,51 @@ impl<C: RoundCalls> RoundRows<C> {
             longest_key: counts.longest_key,
         })
     }
+
+    /// The tables of a round of `counts` over the rows of a region the build lays out
+    /// ([`RoundRowPlaces`]), each at most the build's bound there: what a session whose shape the
+    /// build fixes keeps in place of [`Self::lent`]'s, lent from no arena.
+    ///
+    /// # Safety
+    /// `at` points at rows, aligned, that hold no value, that nothing reaches but the tables handed
+    /// back, and that neither move nor are given back while those tables, or the round they are
+    /// moved into, live.
+    pub unsafe fn placed_in(at: NonNull<RoundRowPlaces<C>>, counts: RoundRowCounts) -> Self {
+        let at = at.as_ptr();
+        // SAFETY: the caller's contract, for each field of the rows, each reached by one table:
+        // a field of a value at a pointer that is not null is not null either.
+        unsafe {
+            Self {
+                records: <C::Form as RecordForm>::records_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).records)),
+                    counts.records,
+                ),
+                callbacks: BoundedVec::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).callbacks)),
+                    counts.callbacks,
+                ),
+                keys: <C::Form as RecordForm>::keys_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).keys)),
+                    counts.key_bytes::<C::Form>(),
+                ),
+                longest_key: counts.longest_key,
+            }
+        }
+    }
 }
+
+/// The rows of a round's tables where a region the build lays out keeps them, beside the round
+/// instead of lent from an arena ([`RoundRows::placed_in`]): the build's bound of each table, as
+/// the form keeps it ([`RecordForm::RecordPlaces`], [`RecordForm::KeyPlaces`]).
+pub struct RoundRowPlaces<C: RoundCalls> {
+    records: <C::Form as RecordForm>::RecordPlaces<Entry<C>>,
+    callbacks: [MaybeUninit<Owed<C>>; caps::DELIVERY_LANE_CALLBACKS],
+    keys: <C::Form as RecordForm>::KeyPlaces,
+}
+
+// SAFETY: the form's places are `ZeroEmpty` by the trait's bounds, and the callbacks' rows are
+// `MaybeUninit`, which hold no value at any bytes.
+unsafe impl<C: RoundCalls> ZeroEmpty for RoundRowPlaces<C> {}
 
 /// The table holds nothing; the session may write it.
 const EMPTY: u8 = 0;
@@ -1079,14 +1195,15 @@ type Legs<C> = Option<NonNull<dyn LegHolders<C>>>;
 /// The datagram of a group a record of the round reads, its first byte and its length.
 type GroupRead = Option<(*const u8, usize)>;
 
-/// What the round's ends of calls leave the session to let go of: whether a row may wait, and the
-/// drops under way of the rows the session took ([`Round::take_marked`], [`Round::releasing`]).
-/// The rows that wait are found by a walk of the session's tables, each row's latch its own mark
-/// (`SessionTables::release_drained_subscriber` and its kin), so the round keeps no list of them
-/// and none can overflow. Written by whoever ends a call: a delivery emptying the round with no
-/// lock of the session held, the session's own put after its calls, the session refusing a record
-/// under its lock.
-struct Released<C: RoundCalls> {
+/// What the ends of the calls of the session's rows leave it to let go of: whether a row may wait,
+/// and the drops under way of the rows the session took ([`RowReleases::take_marked`],
+/// [`Self::releasing`]). The rows that wait are found by a walk of the session's tables, each
+/// row's latch its own mark (`SessionTables::release_drained_subscriber` and its kin), so no list
+/// of them is kept and none can overflow. The round of a build that queues the calls keeps one
+/// ([`Round::releases`]); an engine that hands each record out as it is read ends each call in
+/// its own walk and keeps one of its own.
+#[derive(Debug, Default)]
+pub struct RowReleases {
     /// Set by a call that was the last of a row undeclared while it ran, after its latch said so;
     /// cleared by the session as it starts a walk. The session walks only while it is set, so the
     /// ends of the calls of live rows cost it no walk.
@@ -1094,6 +1211,58 @@ struct Released<C: RoundCalls> {
     /// The rows taken out of their tables whose drop has not ended ([`Releasing`]): an
     /// undeclaration that waits for its row reads that no drop is under way.
     dropping: AtomicUsize,
+}
+
+impl RowReleases {
+    /// No row waits and no drop is under way.
+    pub const fn new() -> Self {
+        Self {
+            marked: AtomicBool::new(false),
+            dropping: AtomicUsize::new(0),
+        }
+    }
+
+    /// Say that a row waits: set after the row's latch said its last call ended, so a session that
+    /// reads it set finds the row drained when it walks.
+    fn mark(&self) {
+        self.marked.store(true, Ordering::Release);
+    }
+
+    /// Whether a row may wait to be let go of since this was last asked: a call that was the last
+    /// of a row undeclared while it ran has ended. Asking clears it, so the session walks its
+    /// tables for such rows (`SessionTables::release_drained_subscriber` and its kin) once each
+    /// time one may wait, and not at all while none does. A walk begun after the asking finds every
+    /// row marked before it, its latch drained before the mark was set; a row whose last call ends
+    /// after the asking sets it again, for the next walk.
+    pub fn take_marked(&self) -> bool {
+        // A load first: a mark is rare, and asking while none is set takes no locked operation. A
+        // mark set as this reads is left set for the next asking, as an exchange ordered before
+        // it would leave it.
+        self.marked.load(Ordering::Relaxed) && self.marked.swap(false, Ordering::AcqRel)
+    }
+
+    /// Count the drop of a row the session took out of its tables, under its lock, as under way
+    /// until what this hands back is dropped, after the row was.
+    pub fn releasing(&self) -> Releasing<'_> {
+        self.dropping.fetch_add(1, Ordering::AcqRel);
+        Releasing { releases: self }
+    }
+
+    /// Whether no drop of a row the session took out of its tables is under way: what an
+    /// undeclaration that waits for its row reads once the row left its table.
+    pub fn settled(&self) -> bool {
+        self.dropping.load(Ordering::Acquire) == 0
+    }
+}
+
+/// What the round's ends of calls leave the session to let go of ([`RowReleases`]), and the
+/// holders of the legs' callbacks its replies' records hold counts of. Written by whoever ends a
+/// call: a delivery emptying the round with no lock of the session held, the session's own put
+/// after its calls, the session refusing a record under its lock.
+struct Released<C: RoundCalls> {
+    /// Whether a row waits and the drops under way, which the session reads
+    /// ([`Round::releases`]).
+    rows: RowReleases,
     /// The rows of the legs' callbacks the replies' records hold counts of, once the session told
     /// the round of them ([`Round::calls_legs_of`]): a round never told holds no reply.
     legs: <C::Replies as Presence>::Table<Legs<C>>,
@@ -1102,8 +1271,7 @@ struct Released<C: RoundCalls> {
 impl<C: RoundCalls> Released<C> {
     fn new() -> Self {
         Self {
-            marked: AtomicBool::new(false),
-            dropping: AtomicUsize::new(0),
+            rows: RowReleases::new(),
             legs: <C::Replies as Presence>::empty::<Legs<C>>(),
         }
     }
@@ -1143,10 +1311,9 @@ impl<C: RoundCalls> Released<C> {
         Some(unsafe { legs.as_ref() })
     }
 
-    /// Say that a row waits: set after the row's latch said its last call ended, so a session that
-    /// reads it set finds the row drained when it walks.
+    /// Say that a row waits ([`RowReleases::mark`]).
     fn mark(&self) {
-        self.marked.store(true, Ordering::Release);
+        self.rows.mark();
     }
 
     /// End what `owed` is: a call, by [`Self::end`]; any other callback is let go of here.
@@ -1168,14 +1335,14 @@ impl<C: RoundCalls> Released<C> {
 }
 
 /// The drop of a row the session took out of its tables, under way until this is dropped, which
-/// its taker does once the row was dropped ([`Round::releasing`]).
-pub struct Releasing<'r, C: RoundCalls> {
-    released: &'r Released<C>,
+/// its taker does once the row was dropped ([`RowReleases::releasing`]).
+pub struct Releasing<'r> {
+    releases: &'r RowReleases,
 }
 
-impl<C: RoundCalls> Drop for Releasing<'_, C> {
+impl Drop for Releasing<'_> {
     fn drop(&mut self) {
-        self.released.dropping.fetch_sub(1, Ordering::AcqRel);
+        self.releases.dropping.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -1240,9 +1407,19 @@ struct Answering<C: RoundCalls>(
     <C::Locks as LockFamily>::Lock<Option<NonNull<dyn AnswersQueries<C>>>>,
 );
 
-impl<C: RoundCalls> Default for Answering<C> {
-    fn default() -> Self {
-        Self(<C::Locks as LockFamily>::new(None))
+impl<C: RoundCalls> Answering<C> {
+    /// Nothing answering yet, made in `at` with its lock.
+    ///
+    /// # Safety
+    /// As for [`LockFamily::init_at`], of a `Self`.
+    unsafe fn init_at(at: NonNull<Self>) {
+        // SAFETY: the caller's contract, for the one field.
+        unsafe {
+            <C::Locks as LockFamily>::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at.as_ptr()).0)),
+                |held| held.write(None),
+            );
+        }
     }
 }
 
@@ -1268,6 +1445,19 @@ impl<C: RoundCalls> Round<C> {
         // SAFETY: `write_in` writes every field of a round at the place it is given, which
         // `place_with` gives aligned and valid for writes of one.
         unsafe { arena.place_with(|at: *mut Self| Self::write_in(at, rows)) }
+    }
+
+    /// The session's round over `rows`, built at `at`, a place of the session's own memory that
+    /// an arena does not lend (a field of its region): owned by one owner and reached by handles
+    /// that count nothing, as [`Self::placed_over`]'s round is.
+    ///
+    /// # Safety
+    /// `at` is aligned and valid for writes of one round, which nothing else drops or reaches but
+    /// through the owner handed back; the memory stays, unmoved, until after that owner is dropped.
+    pub unsafe fn placed_at(at: NonNull<Self>, rows: RoundRows<C>) -> Placed<Self> {
+        // SAFETY: `write_in` writes every field of a round at the place it is given, which the
+        // caller gives aligned and valid for writes of one, and keeps for the owner.
+        unsafe { Placed::written_at(at, |at: *mut Self| Self::write_in(at, rows)) }
     }
 
     /// An empty round written where `at` points, field by field.
@@ -1349,9 +1539,9 @@ impl<C: RoundCalls> Round<C> {
                 UnsafeCell::new(<C::Capture as Presence>::empty::<Option<Captured<C>>>()),
             );
             ptr::write(addr_of_mut!((*at).released), Released::new());
-            ptr::write(
-                addr_of_mut!((*at).answering),
-                <C::Queries as Presence>::empty::<Answering<C>>(),
+            <C::Queries as Presence>::init_at::<Answering<C>>(
+                NonNull::new_unchecked(addr_of_mut!((*at).answering)),
+                |answering| Answering::init_at(answering),
             );
             ptr::write(addr_of_mut!((*at).dropped), AtomicU64::new(0));
             ptr::write(addr_of_mut!((*at).held_over), AtomicU64::new(0));
@@ -2340,7 +2530,8 @@ impl<C: RoundCalls> Round<C> {
     /// Let go of the round's tables, their records and the callbacks those owe, each call ended,
     /// before the arena that lent them: what the session's end does. The tables left are lent
     /// nothing, so the round's own drop, which may come after the arena's, reads none of the arena.
-    /// A row whose last call this ends is marked ([`Self::take_marked`]) and goes with the tables.
+    /// A row whose last call this ends is marked ([`RowReleases::take_marked`]) and goes with the
+    /// tables.
     ///
     /// # Safety
     /// No delivery runs and none starts: the session's last handle is being let go of.
@@ -2393,47 +2584,28 @@ impl<C: RoundCalls> Round<C> {
     }
 
     /// End `call`, which the session's own put made ([`Self::captured`]): its row is marked to be
-    /// let go of ([`Self::take_marked`]) when it was the row's last call.
+    /// let go of ([`RowReleases::take_marked`]) when it was the row's last call.
     pub fn end_call(&self, call: C::Subscriber) {
         self.released.end(call);
     }
 
     /// End `call`, which the session's own get began on a queryable it asked and handed with no
-    /// lock held: its row is marked to be let go of ([`Self::take_marked`]) when it was the
+    /// lock held: its row is marked to be let go of ([`RowReleases::take_marked`]) when it was the
     /// row's last call.
     pub fn end_query_call(&self, call: C::Queryable) {
         self.released.end_query(call);
     }
 
     /// End `call`, which the session's declaration made of a liveliness subscriber's history: its
-    /// row is marked to be let go of ([`Self::take_marked`]) when it was the row's last call.
+    /// row is marked to be let go of ([`RowReleases::take_marked`]) when it was the row's last call.
     pub fn end_liveliness_call(&self, call: C::Liveliness) {
         self.released.end_liveliness(call);
     }
 
-    /// Whether a row may wait to be let go of since this was last asked: a call that was the last
-    /// of a row undeclared while it ran has ended. Asking clears it, so the session walks its
-    /// tables for such rows (`SessionTables::release_drained_subscriber` and its kin) once each
-    /// time one may wait, and not at all while none does. A walk begun after the asking finds every
-    /// row marked before it, its latch drained before the mark was set; a row whose last call ends
-    /// after the asking sets it again, for the next walk.
-    pub fn take_marked(&self) -> bool {
-        self.released.marked.swap(false, Ordering::AcqRel)
-    }
-
-    /// Count the drop of a row the session took out of its tables, under its lock, as under way
-    /// until what this hands back is dropped, after the row was.
-    pub fn releasing(&self) -> Releasing<'_, C> {
-        self.released.dropping.fetch_add(1, Ordering::AcqRel);
-        Releasing {
-            released: &self.released,
-        }
-    }
-
-    /// Whether no drop of a row the session took out of its tables is under way: what an
-    /// undeclaration that waits for its row reads once the row left its table.
-    pub fn released_settled(&self) -> bool {
-        self.released.dropping.load(Ordering::Acquire) == 0
+    /// What the ends of the calls the round owes leave the session to let go of: a call that was
+    /// the last of a row undeclared while it ran marks it ([`RowReleases::take_marked`]).
+    pub fn releases(&self) -> &RowReleases {
+        &self.released.rows
     }
 
     /// Empty a sealed round no delivery has taken, handing nothing out, its calls ended: what the
@@ -2455,10 +2627,14 @@ impl<C: RoundCalls> Round<C> {
     /// there was anything to hand. Nothing of the session is held; a delivery that finds the table
     /// not sealed, or taken by another, hands nothing.
     pub fn deliver(&self) -> bool {
-        if self
-            .state
-            .compare_exchange(SEALED, DELIVERING, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
+        // A load first: the last pass of every delivery finds the table not sealed, and is
+        // answered without a locked operation. A table sealed as this reads is left for the next
+        // delivery, as an exchange ordered before the seal would leave it.
+        if self.state.load(Ordering::Relaxed) != SEALED
+            || self
+                .state
+                .compare_exchange(SEALED, DELIVERING, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
         {
             return false;
         }

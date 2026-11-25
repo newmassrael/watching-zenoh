@@ -7,8 +7,9 @@
 //! session.
 //!
 //! What a link means to the protocol (its handshake, what is declared over it, what its loss takes
-//! with it) is the session's. A [`LinkSupervisor`] decides what has happened to a face's link
-//! ([`crate::face_life`]) and hands that back, and the session acts on it; it asks the session of a link only
+//! with it) is the session's. A [`LinkSupervisor`] reads what has happened to a face's link as the
+//! input of the face's life (`wz_session_core::link_life`), which decides what the session does
+//! about it; it asks the session of a link only
 //! what [`FaceSession`] names. So the driver owns the facts of the links (their tasks and their
 //! waits) once, and the session owns what it declared over them once
 //! (`docs/c-abi-architecture.md`, P1 and P2).
@@ -17,8 +18,8 @@
 //! the session's open admits, and none grows after: a face or a dial past the room is refused
 //! (P3).
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::mem::MaybeUninit;
 use core::ops::Deref;
 
 #[cfg(feature = "session-unicast-accept")]
@@ -27,15 +28,15 @@ use wz_session_core::bounded::{push_text, BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::DriverOutcome;
+use wz_session_core::link_life::{LinkInput, LinkPhase, LinkRole, UnicastLink};
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::same_zid;
 
-use crate::face_life::{FaceRole, Phase, Signals};
 use crate::link_cells::{CellRc, CountKind, FaceHeld, FaceParts, OneTask};
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
-    SessionDatagramLink, SessionLinks, WaitOn,
+    LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial, SessionDatagramLink,
+    SessionLinks, WaitOn,
 };
 use crate::sync::{AtSeat, FacePlace, Lend, LockKind, SeatOf};
 use crate::CoopLocalJoinHandle;
@@ -96,6 +97,21 @@ pub trait FaceRecord<N: CountKind = OneTask> {
 
     /// The face's link, to replace.
     fn link_mut(&mut self) -> &mut Link<Self::Wire, Self::Dial>;
+
+    /// The life of the face's link: where it stands, the one state of it the session keeps.
+    fn life(&self) -> &UnicastLink;
+
+    /// The life of the face's link, to give an input.
+    fn life_mut(&mut self) -> &mut UnicastLink;
+
+    /// The face's link while it is established: what the session's sends go through.
+    fn up(&self) -> Option<&Self::Wire> {
+        if self.life().phase() == LinkPhase::Up {
+            self.link().wire()
+        } else {
+            None
+        }
+    }
 }
 
 /// What the supervisor reads of a face's link while it is up or in its handshake, and how it ends
@@ -684,76 +700,26 @@ where
     }
 }
 
-/// A face's link: up, in its handshake, being dialled, waiting to be dialled, or standing by. A
-/// dial under way is held in its face's link, so a face has one dial at most and the faces' table
-/// is the dials' table too.
+/// What a face holds for its link: nothing, a dial under way, or the link a dial made or a port
+/// gave. Where the link stands (dialled, in its handshake, up, waiting, standing by) is the face's
+/// life's alone ([`FaceRecord::life`]); this is the I/O that life asks for. A dial under way is
+/// held in its face's link, so a face has one dial at most and the faces' table is the dials'
+/// table too.
 pub enum Link<W, D> {
-    /// Established: the session's sends go through it.
-    Up(W),
-    /// A handshake under way, given up at `deadline_us`. The dial role's face has dialled the
-    /// endpoint before `next` and goes on to the one after; another face holds a link it dialled
-    /// once or took off a port, and is removed when the handshake fails.
-    Opening {
-        /// The link in its handshake.
-        wire: W,
-        /// The endpoint the dial role dials next when this one fails.
-        next: usize,
-        /// When the handshake is given up.
-        deadline_us: u64,
-    },
-    /// A dial under way, given up at `deadline_us`, as is the handshake that follows it.
-    Dialing {
-        /// The dial, asked at each move of the face ([`Dial::answer`]).
-        dial: Dial<D>,
-        /// The endpoint the dial role dials next when this one fails.
-        next: usize,
-        /// When the dial is given up.
-        deadline_us: u64,
-    },
-    /// Lost, or no endpoint answered: the endpoints are dialled again at `at_us`.
-    Waiting {
-        /// When the endpoints are dialled again.
-        at_us: u64,
-    },
-    /// The dial role's face, whose link reached the node `zid` while another face holds that
-    /// node or brings a link to it up: it stands by, and is dialled again once no other face has
-    /// the node. Only a session that takes faces besides its dial (`listen`) has another face.
-    #[cfg(feature = "listen")]
-    Held {
-        /// The node the link reached.
-        zid: SessionZid,
-    },
+    /// No link: not dialled yet, between two dials, waiting to dial again, or standing by.
+    Idle,
+    /// A dial under way, asked at each move of the face ([`Dial::answer`]).
+    Dialing(Dial<D>),
+    /// A link in its handshake or established: the session's sends go through it once it is up.
+    Wire(W),
 }
 
 impl<W, D> Link<W, D> {
-    /// The link's wire while it is up or in its handshake.
+    /// The link's wire while it is in its handshake or up.
     pub fn wire(&self) -> Option<&W> {
         match self {
-            Link::Up(wire) | Link::Opening { wire, .. } => Some(wire),
+            Link::Wire(wire) => Some(wire),
             _ => None,
-        }
-    }
-
-    /// Where the link stands, without the wire and the dial it holds: what the face's value
-    /// decides on (`face_life`).
-    pub fn phase(&self) -> Phase {
-        match self {
-            Link::Up(_) => Phase::Up,
-            Link::Opening {
-                next, deadline_us, ..
-            } => Phase::Opening {
-                next: *next,
-                deadline_us: *deadline_us,
-            },
-            Link::Dialing {
-                next, deadline_us, ..
-            } => Phase::Dialing {
-                next: *next,
-                deadline_us: *deadline_us,
-            },
-            Link::Waiting { at_us } => Phase::Waiting { at_us: *at_us },
-            #[cfg(feature = "listen")]
-            Link::Held { zid } => Phase::Held { node: *zid },
         }
     }
 }
@@ -811,7 +777,7 @@ impl EndpointTexts {
 
     /// Write the text of the next endpoint of `role`, in the order the session dials them or
     /// listens on them: its place, which a dial names it by ([`DialEndpoint::Listed`]) or a port
-    /// by ([`DialEndpoint::Port`]).
+    /// by (`DialEndpoint::Port`, with `listen`).
     #[inline(never)]
     pub fn write(&mut self, role: EndpointRole, text: &str) -> Result<usize, EndpointTextRefused> {
         let rows = match role {
@@ -873,14 +839,18 @@ impl EndpointTexts {
 
 /// Which endpoint a dial reaches: one of the session's own to dial, by its row; one of those it
 /// listens on, by its row, for a link taken off that port; or one named by whoever asked for the
-/// dial after the open, its text held by the dial alone. None allocates.
+/// dial after the open, its text held by the dial alone. None allocates. A build without
+/// `listen` takes no port and dials no face beside the dial role's, so its endpoint is a row
+/// alone: every dial, link and refusal that carries one moves a word, not a text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialEndpoint {
     /// The endpoint to dial in this row of the session's texts.
     Listed(usize),
     /// The endpoint to listen on in this row of the session's texts.
+    #[cfg(feature = "listen")]
     Port(usize),
     /// An endpoint named apart from the session's texts.
+    #[cfg(feature = "listen")]
     Named(LocatorText),
 }
 
@@ -889,7 +859,9 @@ impl DialEndpoint {
     pub fn text<'a>(&'a self, texts: &'a EndpointTexts) -> &'a str {
         match self {
             DialEndpoint::Listed(at) => texts.dial_text(*at),
+            #[cfg(feature = "listen")]
             DialEndpoint::Port(at) => texts.listen_text(*at),
+            #[cfg(feature = "listen")]
             DialEndpoint::Named(text) => text,
         }
     }
@@ -920,7 +892,7 @@ impl<D> Dial<D> {
 
     /// Ask the dial whether its link is made: the link, the refusal, or `None` while it is still
     /// being made. What a session's driver reads of a dial at each move of its face
-    /// (`face_life::Signals::dial`).
+    /// ([`LinkSupervisor::read_face`]).
     pub fn answer<P, N: CountKind>(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>>
     where
         D: PendingDial<P, N>,
@@ -939,11 +911,9 @@ pub type DialAnswer<P, N = OneTask> = Option<Result<OpenedLink<P, N>, LinkOpenEr
 /// room for a link it does not have.
 pub struct FaceRead {
     /// Which face it is: the dial role's, or one taken besides.
-    pub role: FaceRole,
-    /// Where the face's link stands.
-    pub phase: Phase,
-    /// What the link did since the face was last read.
-    pub signals: Signals,
+    pub role: LinkRole,
+    /// What the face's link came to since it was last read, as its life's input.
+    pub input: LinkInput,
 }
 
 /// Why the handshake of a face ended ([`LinkSupervisor::handshake_end`]).
@@ -958,9 +928,10 @@ pub enum HandshakeEnd {
 }
 
 /// A port the session listens on, and the row of the endpoint its links are stated for, when the
-/// session states one.
+/// session states one. A build without `listen` opens no port, so it holds none of them.
+#[cfg(feature = "listen")]
 struct Listening<P, N: CountKind> {
-    listener: Box<dyn LinkListener<P, N>>,
+    listener: alloc::boxed::Box<dyn crate::session_drive::LinkListener<P, N>>,
     endpoint: Option<usize>,
     /// What the port gave the last read's wait to wait on, when the port is asked for a
     /// connection only once a wait found it ready (`LinkListener::asked_when_ready`); `None` for
@@ -971,6 +942,7 @@ struct Listening<P, N: CountKind> {
 }
 
 /// What a link taken off a port came to ([`LinkSupervisor::accept_at`]).
+#[cfg(feature = "listen")]
 pub enum Accepted<P, N: CountKind = OneTask> {
     /// A connection, with the endpoint its port is stated for.
     Link(OpenedLink<P, N>, Option<DialEndpoint>),
@@ -1020,17 +992,22 @@ pub enum IdleWait {
 impl IdleWait {
     /// Wait on the links and ports with `waits`, the waits of their stack
     /// ([`SessionLinks::waits`]), sleeping with `sleep` (milliseconds) where there is nothing to
-    /// wait on. The wait keeps the session's buffer it was made in, holding the entries the stack
-    /// found ready ([`LinkWaits::wait_ready`]), for the session to take back
-    /// ([`LinkSupervisor::waited`]). Out of line: a session's open and each of its
-    /// reads wait.
+    /// wait on. The wait keeps the session's buffer it was made in, for the session to take back
+    /// ([`LinkSupervisor::waited`]): in a build with ports or groups, holding the entries the
+    /// stack found ready ([`LinkWaits::wait_ready`]), which only such a build reads; in one
+    /// without, as it was made. Out of line: a session's open and each of its reads wait.
     #[inline(never)]
     pub fn wait(&mut self, waits: &impl LinkWaits, sleep: impl FnOnce(u32)) {
         match self {
             IdleWait::None => {}
             IdleWait::Input { on, ms } => {
-                let ready = waits.wait_ready(on, *ms);
-                on.truncate(ready);
+                #[cfg(any(feature = "listen", feature = "group"))]
+                {
+                    let ready = waits.wait_ready(on, *ms);
+                    on.truncate(ready);
+                }
+                #[cfg(not(any(feature = "listen", feature = "group")))]
+                waits.wait(on, *ms);
             }
             IdleWait::Sleep(ms) | IdleWait::Behind(ms) => sleep(*ms),
         }
@@ -1100,12 +1077,13 @@ pub trait FacePlaces<F> {
     where
         F: 'a;
 
-    /// Put `face` at the free place `at`; handed back at the dial role's place, at a place
-    /// another face holds, and past the table.
-    fn put(&mut self, at: usize, face: F) -> Result<(), F>;
+    /// The free place `at`, to put a face in or build one in where it lies; `None` at the dial
+    /// role's place, at a place another face holds, and past the table.
+    fn vacant(&mut self, at: usize) -> Option<VacantPlace<'_, F>>;
 
-    /// Take the face at `at` out, its place free from then; the dial role's is never taken.
-    fn take(&mut self, at: usize) -> Option<F>;
+    /// Drop the face at `at` where it lies, its place free from then: whether one was there. The
+    /// dial role's is never dropped.
+    fn free(&mut self, at: usize) -> bool;
 
     /// Take out every face but the dial role's.
     fn keep_dial_only(&mut self);
@@ -1117,8 +1095,95 @@ pub trait FacePlaces<F> {
 /// walk over the faces ends at the last face and passes over no free place past it: a session
 /// that keeps places for many faces and holds one or two walks one or two at each step.
 pub struct ManyFaces<F> {
-    faces: Vec<Option<F>>,
+    faces: Vec<FacePlace<F>>,
     places: usize,
+}
+
+/// A place of [`ManyFaces`]: a face or none, in storage the face is built in where it lies, so
+/// a face whose largest part is built in place ([`VacantPlace::fill`]) is moved by nothing.
+struct FacePlace<F> {
+    held: bool,
+    face: MaybeUninit<F>,
+}
+
+impl<F> FacePlace<F> {
+    /// A place no face holds.
+    fn free() -> Self {
+        Self {
+            held: false,
+            face: MaybeUninit::uninit(),
+        }
+    }
+
+    /// A place that holds `face`.
+    fn holding(face: F) -> Self {
+        Self {
+            held: true,
+            face: MaybeUninit::new(face),
+        }
+    }
+
+    /// The face the place holds.
+    fn get(&self) -> Option<&F> {
+        // SAFETY: `held` is set only once the face is written whole (`holding`,
+        // `VacantPlace::put`, `VacantPlace::fill`), and cleared only where it is dropped.
+        self.held.then(|| unsafe { self.face.assume_init_ref() })
+    }
+
+    /// The face the place holds, to change.
+    fn get_mut(&mut self) -> Option<&mut F> {
+        if !self.held {
+            return None;
+        }
+        // SAFETY: as `get`.
+        Some(unsafe { self.face.assume_init_mut() })
+    }
+
+    /// Drop the face the place holds, where it lies: whether one was there.
+    fn clear(&mut self) -> bool {
+        if !core::mem::take(&mut self.held) {
+            return false;
+        }
+        // SAFETY: `held` was set, so the face is whole (`get`); it is cleared before the drop,
+        // so the face is dropped once.
+        unsafe { self.face.assume_init_drop() };
+        true
+    }
+}
+
+impl<F> Drop for FacePlace<F> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// A free place of a face table ([`FacePlaces::vacant`]), to put a face in or build one in where
+/// it lies. A place left with no face stays free.
+pub struct VacantPlace<'a, F> {
+    held: &'a mut bool,
+    face: &'a mut MaybeUninit<F>,
+}
+
+impl<'a, F> VacantPlace<'a, F> {
+    /// Put `face` in the place.
+    pub fn put(self, face: F) -> &'a mut F {
+        let face = self.face.write(face);
+        *self.held = true;
+        face
+    }
+
+    /// Build a face in the place with `make`, which writes it whole where it lies and lends it,
+    /// so no caller moves it. `None`, the place left free, when `make` lends a face it did not
+    /// build in the place it was given: safe code lends the place only once it has written it.
+    pub fn fill(self, make: impl FnOnce(&mut MaybeUninit<F>) -> &mut F) -> Option<&'a mut F> {
+        let at: *const F = self.face.as_ptr();
+        let made = make(self.face);
+        if !core::ptr::eq(made, at) {
+            return None;
+        }
+        *self.held = true;
+        Some(made)
+    }
 }
 
 impl<F> FacePlaces<F> for ManyFaces<F> {
@@ -1127,7 +1192,7 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
     fn with_dial(dial: F, places: usize) -> Self {
         let places = places.max(1);
         let mut faces = Vec::with_capacity(places);
-        faces.push(Some(dial));
+        faces.push(FacePlace::holding(dial));
         Self { faces, places }
     }
 
@@ -1136,25 +1201,25 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
     }
 
     fn get(&self, at: usize) -> Option<&F> {
-        self.faces.get(at)?.as_ref()
+        self.faces.get(at)?.get()
     }
 
     fn get_mut(&mut self, at: usize) -> Option<&mut F> {
-        self.faces.get_mut(at)?.as_mut()
+        self.faces.get_mut(at)?.get_mut()
     }
 
     fn iter<'a>(&'a self) -> impl Iterator<Item = &'a F>
     where
         F: 'a,
     {
-        self.faces.iter().flatten()
+        self.faces.iter().filter_map(FacePlace::get)
     }
 
     fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut F>
     where
         F: 'a,
     {
-        self.faces.iter_mut().flatten()
+        self.faces.iter_mut().filter_map(FacePlace::get_mut)
     }
 
     fn placed<'a>(&'a self) -> impl Iterator<Item = (usize, &'a F)>
@@ -1164,7 +1229,7 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
         self.faces
             .iter()
             .enumerate()
-            .filter_map(|(at, face)| Some((at, face.as_ref()?)))
+            .filter_map(|(at, place)| Some((at, place.get()?)))
     }
 
     fn placed_mut<'a>(&'a mut self) -> impl Iterator<Item = (usize, &'a mut F)>
@@ -1174,40 +1239,46 @@ impl<F> FacePlaces<F> for ManyFaces<F> {
         self.faces
             .iter_mut()
             .enumerate()
-            .filter_map(|(at, face)| Some((at, face.as_mut()?)))
+            .filter_map(|(at, place)| Some((at, place.get_mut()?)))
     }
 
-    fn put(&mut self, at: usize, face: F) -> Result<(), F> {
+    fn vacant(&mut self, at: usize) -> Option<VacantPlace<'_, F>> {
         if at == 0 || at >= self.places {
-            return Err(face);
-        }
-        // The free places up to `at` join the row; the room for every place was reserved by
-        // `with_dial`, so none allocates.
-        if at >= self.faces.len() {
-            self.faces.resize_with(at.saturating_add(1), || None);
-        }
-        match self.faces.get_mut(at) {
-            Some(place) if place.is_none() => {
-                *place = Some(face);
-                Ok(())
-            }
-            _ => Err(face),
-        }
-    }
-
-    fn take(&mut self, at: usize) -> Option<F> {
-        if at == 0 {
             return None;
         }
-        let face = self.faces.get_mut(at)?.take();
+        // The free places up to `at` join the row; the room for every place was reserved by
+        // `with_dial`, so none allocates. A place left with no face is trimmed with the next
+        // face that goes.
+        if at >= self.faces.len() {
+            self.faces
+                .resize_with(at.saturating_add(1), FacePlace::free);
+        }
+        let place = self.faces.get_mut(at)?;
+        if place.held {
+            return None;
+        }
+        Some(VacantPlace {
+            held: &mut place.held,
+            face: &mut place.face,
+        })
+    }
+
+    fn free(&mut self, at: usize) -> bool {
+        if at == 0 {
+            return false;
+        }
+        let Some(place) = self.faces.get_mut(at) else {
+            return false;
+        };
+        let freed = place.clear();
         // The row ends at the last place still held, the dial role's at the least.
         let held = self
             .faces
             .iter()
-            .rposition(Option::is_some)
+            .rposition(|place| place.held)
             .map_or(1, |last| last.saturating_add(1));
         self.faces.truncate(held);
-        face
+        freed
     }
 
     fn keep_dial_only(&mut self) {
@@ -1269,12 +1340,12 @@ impl<F> FacePlaces<F> for OneFace<F> {
         core::iter::once((0, &mut self.face))
     }
 
-    fn put(&mut self, _at: usize, face: F) -> Result<(), F> {
-        Err(face)
+    fn vacant(&mut self, _at: usize) -> Option<VacantPlace<'_, F>> {
+        None
     }
 
-    fn take(&mut self, _at: usize) -> Option<F> {
-        None
+    fn free(&mut self, _at: usize) -> bool {
+        false
     }
 
     fn keep_dial_only(&mut self) {}
@@ -1290,6 +1361,7 @@ pub struct LinkSupervisor<L: SessionLinks<N>, F, P = ManyFaces<F>, N: CountKind 
     /// taken out, so its place names it for that whole time, and the session names the face's
     /// other tables by the same place. A place no face holds is free for the next.
     faces: P,
+    #[cfg(feature = "listen")]
     listeners: Vec<Listening<L::Pump, N>>,
     /// The one buffer a read's waits are gathered in, reserved at the open for every link, port
     /// and wake a read waits on at once; `None` while a read waits with it, so that a read on
@@ -1300,13 +1372,19 @@ pub struct LinkSupervisor<L: SessionLinks<N>, F, P = ManyFaces<F>, N: CountKind 
     /// session that moved its links on compares, to move them again only once one may have
     /// changed ([`Self::moves`]). Wraps; only its change is read.
     moves: u32,
+    /// The node the dial role's face stands by for while another face holds it: read where its
+    /// handshake ended, kept until no other face holds the node. Only the dial role stands by.
+    #[cfg(feature = "listen")]
+    stood_by: Option<SessionZid>,
     /// How often a face's link was put in, brought up or ended, or a face placed or taken out:
     /// equal at two reads, the faces whose links are up and how each names what it sends are as
     /// they were ([`Self::generation`]). A reach of a face to change what the session keeps of
     /// it, which each step makes, does not count. Wraps; only its change is read.
     generation: u64,
-    /// The record each face is kept as: the table `P` holds it, the supervisor names it.
-    records: core::marker::PhantomData<fn() -> F>,
+    /// The record each face is kept as, which the table `P` holds, and how its links' handles
+    /// are counted (`N`), which a build without `listen` names in no field: the supervisor
+    /// names both.
+    records: core::marker::PhantomData<fn() -> (F, N)>,
 }
 
 impl<
@@ -1320,18 +1398,21 @@ impl<
     /// places in all (one at least, the dial role's), each face with a dial under way at most, and
     /// `waits` waits a read makes at once, reserved now; `None` when the heap refuses that room,
     /// which an open answers as it answers an arena that cannot be reserved. The ports are the
-    /// open's, taken as it listens ([`Self::listen`]). Faces taken after are numbered from 1.
+    /// open's, taken as it listens (`listen`). Faces taken after are numbered from 1.
     pub fn new(links: L, dial: F, places: usize, waits: usize) -> Option<Self> {
         let mut room = Vec::new();
         room.try_reserve_exact(waits).ok()?;
         Some(Self {
             links,
             faces: P::with_dial(dial, places),
+            #[cfg(feature = "listen")]
             listeners: Vec::new(),
             waits: Some(room),
             next_face: 1,
             moves: 0,
             generation: 0,
+            #[cfg(feature = "listen")]
+            stood_by: None,
             records: core::marker::PhantomData,
         })
     }
@@ -1412,11 +1493,19 @@ impl<
     }
 
     /// Whether a port is to be asked for a connection at the next step: one asked at every step,
-    /// or one a wait found ready ([`Self::accept_at`]).
+    /// or one a wait found ready (`accept_at`). Never in a build without `listen`, which holds
+    /// no port.
     pub fn ports_to_ask(&self) -> bool {
-        self.listeners
-            .iter()
-            .any(|listening| listening.on.is_none() || listening.ready)
+        #[cfg(feature = "listen")]
+        {
+            self.listeners
+                .iter()
+                .any(|listening| listening.on.is_none() || listening.ready)
+        }
+        #[cfg(not(feature = "listen"))]
+        {
+            false
+        }
     }
 
     /// How many places a face holds, the dial role's among them.
@@ -1434,20 +1523,34 @@ impl<
         self.next_face = self.next_face.saturating_add(1);
     }
 
-    /// Put `face` at the free place `at`, which it keeps until it is taken out; handed back at
+    /// Put `face` at the free place `at`, which it keeps until it is dropped; handed back at
     /// the dial role's place, at a place another face holds, and past the table.
     pub fn place_face(&mut self, at: usize, face: F) -> Result<(), F> {
-        self.moved();
-        self.regenerated();
-        self.faces.put(at, face)
+        match self.vacant_place(at) {
+            Some(place) => {
+                place.put(face);
+                Ok(())
+            }
+            None => Err(face),
+        }
     }
 
-    /// Take the face at `at` out of the table, its place free from then; the dial role's, at the
-    /// first, is never taken. No other face moves.
-    pub fn take_face(&mut self, at: usize) -> Option<F> {
+    /// The free place `at`, to build a face in where it lies ([`VacantPlace::fill`]), which it
+    /// keeps until it is dropped; `None` at the dial role's place, at a place another face holds,
+    /// and past the table.
+    pub fn vacant_place(&mut self, at: usize) -> Option<VacantPlace<'_, F>> {
         self.moved();
         self.regenerated();
-        self.faces.take(at)
+        self.faces.vacant(at)
+    }
+
+    /// Drop the face at `at` where it lies, its place free from then: the number it was known by.
+    /// The dial role's, at the first, is never dropped. No other face moves.
+    pub fn drop_face(&mut self, at: usize) -> Option<FaceId> {
+        self.moved();
+        self.regenerated();
+        let id = self.faces.get(at)?.id();
+        self.faces.free(at).then_some(id)
     }
 
     /// Begin a dial of `to`, which the network answers later.
@@ -1459,6 +1562,7 @@ impl<
 
     /// Listen on `at`, whose links are stated for the endpoint in row `endpoint` of the session's
     /// texts when the session states one.
+    #[cfg(feature = "listen")]
     pub fn listen(&mut self, at: Locator, endpoint: Option<usize>) -> Result<(), LinkOpenError> {
         let listener = self.links.open_listener(at)?;
         self.moved();
@@ -1471,12 +1575,20 @@ impl<
         Ok(())
     }
 
-    /// Whether the session listens on any port.
+    /// Whether the session listens on any port: never in a build without `listen`.
     pub fn listens(&self) -> bool {
-        !self.listeners.is_empty()
+        #[cfg(feature = "listen")]
+        {
+            !self.listeners.is_empty()
+        }
+        #[cfg(not(feature = "listen"))]
+        {
+            false
+        }
     }
 
     /// The locator each port is bound to, with the port the stack chose where 0 was asked for.
+    #[cfg(feature = "listen")]
     pub fn listening(&self) -> impl Iterator<Item = Locator> + '_ {
         self.listeners
             .iter()
@@ -1485,6 +1597,7 @@ impl<
 
     /// Take a connection off the port at `at`: `None` past the last port. A port broken for good
     /// is let go of, so the port after it is then at `at`.
+    #[cfg(feature = "listen")]
     pub fn accept_at(&mut self, at: usize) -> Option<Accepted<L::Pump, N>> {
         let listening = self.listeners.get_mut(at)?;
         // A port a wait names is asked only once a wait found it ready: under a stream of input
@@ -1515,29 +1628,54 @@ impl<
         }
     }
 
-    /// Let go of the dial of the face at `at`, which is over, the face waiting from `at_us`: the
-    /// endpoint it dialled, moved out of the dial, which the refusal or the link's session names.
-    /// `None` for a face that held no dial, which waits all the same, and for one past the table.
-    pub fn end_dial(&mut self, at: usize, at_us: u64) -> Option<DialEndpoint> {
+    /// Let go of the dial of the face at `at`, which is over: the endpoint it dialled, moved out of
+    /// the dial, which the refusal or the link's session names. `None` for a face that held no
+    /// dial, whose link is left as it is, and for one past the table. Out of line: a dial that
+    /// answered and one that failed are each ended here.
+    #[inline(never)]
+    pub fn end_dial(&mut self, at: usize) -> Option<DialEndpoint> {
         let link = self.face_mut(at)?.link_mut();
-        match core::mem::replace(link, Link::Waiting { at_us }) {
-            Link::Dialing { dial, .. } => Some(dial.into_endpoint()),
-            _ => None,
-        }
+        // Only the endpoint is moved out, and the dial it leaves is let go of where it lies: a
+        // link moved out whole is copied to the caller's frame, and its dial again, at each place
+        // this is inlined.
+        let Link::Dialing(dial) = link else {
+            return None;
+        };
+        let endpoint = core::mem::replace(&mut dial.endpoint, DialEndpoint::Listed(0));
+        *link = Link::Idle;
+        Some(endpoint)
     }
 
-    /// The face at `at`, whose handshake completed, holds its link up.
+    /// Ask the dial `pending` of `endpoint`, begun for the face at `at`, once. A dial the network
+    /// has not answered yet is put in the face where it lies, and `None` is handed back; one
+    /// answered at once is let go of, before its link is opened, and its answer is handed back,
+    /// the face keeping what it held. A dial for a face past the table is let go of. The time the
+    /// dial is given up at is its face's life's, read once the ask returned, so a host whose ask
+    /// blocks (a refused loopback connect on Windows) does not spend the dial's time on it.
+    pub fn ask_dial(
+        &mut self,
+        at: usize,
+        endpoint: DialEndpoint,
+        mut pending: L::Dial,
+    ) -> DialAnswer<L::Pump, N> {
+        // A dial that answered has handed out all it held (the socket, the link's buffers, the
+        // program's link), and keeps only handles that own nothing, so it is let go of here with
+        // nothing to observe: every stack's dial takes those out as it answers.
+        if let Some(answer) = pending.poll() {
+            return Some(answer);
+        }
+        // Written into the face from the dial this frame holds, and not handed back through the
+        // transport and the session's dial, each of which would move it once more.
+        self.put_link(at, Link::Dialing(Dial::new(endpoint, pending)));
+        None
+    }
+
+    /// The face at `at`, whose handshake completed, holds its link up: the link it holds is the
+    /// one its handshake ran over, and is now one the session's sends go through, a change of the
+    /// faces' links ([`Self::generation`]). A face past the table changes nothing.
     pub fn establish(&mut self, at: usize) {
-        self.regenerated();
-        let Some(face) = self.face_mut(at) else {
-            return;
-        };
-        let link = face.link_mut();
-        if let Link::Opening { .. } = link {
-            if let Link::Opening { wire, .. } = core::mem::replace(link, Link::Waiting { at_us: 0 })
-            {
-                *link = Link::Up(wire);
-            }
+        if self.face(at).is_some() {
+            self.regenerated();
         }
     }
 
@@ -1560,63 +1698,112 @@ impl<
             .any(|face| face.link().wire().is_some_and(FaceWire::holds_input))
     }
 
-    /// What the face at `at`, numbered `id`, holds: its role, where its link stands and what it
-    /// did since (`Signals`); the answer of a dial under way is asked here and written to `answer`,
-    /// kept there for the link it made, which is left as it was for a face with no dial. A face past the table reads as one taken besides the dial role's that waits
-    /// with no time to dial again. The role is the place's: the first is the dial role's, placed
-    /// by [`Self::new`] and never taken out ([`Self::take_face`]). A table of the dial role's face
-    /// alone reads every place in that role, and holds no other face to hold a node.
+    /// What the face at `at`, numbered `id`, holds: its role, and what its link came to since it
+    /// was last read at `now_us`, as the input its life takes. The answer of a dial under way is
+    /// asked here; once it answers, the dial is let go of, its answer written to `answer` and the
+    /// endpoint it dialled to `dialled`, kept there for the link it made. A handshake that
+    /// completed is read as established even when its link ended after. A face past the table
+    /// reads as one taken besides the dial role's whose link moved nothing. The role is the
+    /// place's: the first is the dial role's, placed by [`Self::new`] and never dropped
+    /// ([`Self::drop_face`]). A table of the dial role's face alone reads every place in that role,
+    /// and holds no other face to hold a node.
     // Out of line, so its caller reads the role as a value and takes one path for either role.
     #[inline(never)]
     pub fn read_face(
         &mut self,
         at: usize,
         id: FaceId,
+        now_us: u64,
         answer: &mut DialAnswer<L::Pump, N>,
+        dialled: &mut Option<DialEndpoint>,
     ) -> FaceRead {
         // A session that takes no face besides its dial has the dial role alone: a place past the
         // first holds a departed face's tomb there, which never moves.
         #[cfg(feature = "listen")]
         let role = if at == 0 || !P::TAKES {
-            FaceRole::Dial
+            LinkRole::Dial
         } else {
-            FaceRole::Taken
+            LinkRole::Taken
         };
         #[cfg(not(feature = "listen"))]
-        let role = FaceRole::Dial;
-        let phase = self
-            .face(at)
-            .map_or(Phase::Waiting { at_us: u64::MAX }, |face| {
-                face.link().phase()
-            });
-        let mut signals = Signals::default();
-        match self.face_mut(at).map(|face| face.link_mut()) {
-            Some(Link::Dialing { dial, .. }) => {
-                *answer = dial.answer();
-                signals.dial = answer.as_ref().map(Result::is_ok);
+        let role = LinkRole::Dial;
+        let Some(face) = self.face_mut(at) else {
+            return FaceRead {
+                role,
+                input: LinkInput::Tick,
+            };
+        };
+        let phase = face.life().phase();
+        let asked = match face.link_mut() {
+            Link::Dialing(dial) => dial.answer(),
+            _ => None,
+        };
+        if let Some(answered) = asked {
+            let input = if answered.is_ok() {
+                LinkInput::DialMade
+            } else {
+                LinkInput::DialRefused
+            };
+            *answer = Some(answered);
+            if let Link::Dialing(dial) = core::mem::replace(face.link_mut(), Link::Idle) {
+                *dialled = Some(dial.into_endpoint());
             }
-            // An established link and one in its handshake read their wire's end by one look; only
-            // the handshake's has an establishment to report.
-            Some(link) => {
-                if let Some(wire) = link.wire() {
-                    signals.ended = wire.finished();
-                    signals.established =
-                        matches!(link, Link::Opening { .. }) && wire.established();
+            return FaceRead { role, input };
+        }
+        // An established link and one in its handshake read their wire's end by one look; only
+        // the handshake's has an establishment to report, and only its end can find the node it
+        // reached held by another face.
+        let (input, over) = match (face.link().wire(), phase) {
+            (Some(wire), LinkPhase::Handshaking { deadline_us, .. }) => {
+                if wire.established() {
+                    (LinkInput::Established, false)
+                } else if wire.finished() {
+                    (LinkInput::Ended, true)
+                } else {
+                    (LinkInput::Tick, now_us >= deadline_us)
                 }
             }
-            None => {}
-        }
+            (Some(wire), _) if wire.finished() => (LinkInput::Ended, false),
+            _ => (LinkInput::Tick, false),
+        };
         #[cfg(feature = "listen")]
-        if let Phase::Held { node } = &phase {
-            signals.node_held = P::TAKES && self.node_is_held(node.as_slice(), id);
-        }
+        let input = self.read_node(at, id, role, phase, input, over);
         #[cfg(not(feature = "listen"))]
-        let _ = id;
-        FaceRead {
-            role,
-            phase,
-            signals,
+        let _ = (id, over);
+        FaceRead { role, input }
+    }
+
+    /// What the node the dial role's face reached makes of its input `input`: a handshake that is
+    /// over (`over`) at a node another face holds stands the face by for it, and a face standing
+    /// by dials again once no other face holds the node. Only a table that takes faces besides
+    /// the dial role's has another face to hold a node.
+    #[cfg(feature = "listen")]
+    fn read_node(
+        &mut self,
+        at: usize,
+        id: FaceId,
+        role: LinkRole,
+        phase: LinkPhase,
+        input: LinkInput,
+        over: bool,
+    ) -> LinkInput {
+        if role != LinkRole::Dial || !P::TAKES {
+            return input;
         }
+        if over {
+            if let Some(node) = self.held_node(at, id) {
+                self.stood_by = Some(node);
+                return LinkInput::HeldElsewhere;
+            }
+        }
+        if phase == LinkPhase::Held
+            && !self
+                .stood_by
+                .is_some_and(|node| self.node_is_held(node.as_slice(), id))
+        {
+            return LinkInput::NodeFree;
+        }
+        input
     }
 
     /// The node the link of the face at `at`, numbered `id`, reached, when another face holds
@@ -1693,7 +1880,7 @@ impl<
     /// `others` after them; no wait at all when a link holds input. A link that owes its stack the
     /// rest of a frame is waited on for room as well. A link that waits in its own loop, or a port
     /// that gives no wait, bounds the wait at a look; a face bounds it at the time its link stands
-    /// to be looked at again (`face_life::Phase::wake_at`): a dial under way or waiting at its
+    /// to be looked at again ([`UnicastLink::wake_at`]): a dial under way or waiting at its
     /// next look, a handshake at its deadline. `beside`, a wake of the stack's (the program's word
     /// that the session's clock moved on), ends whatever wait the links make, a sleep to the next
     /// dial among them; it makes no wait where they make none. `now_us` reads the clock, which
@@ -1725,12 +1912,17 @@ impl<
         let mut read_now = || *now.get_or_insert_with(&mut *now_us);
         for face in self.faces.iter() {
             // The soonest a face's link is to be looked at again bounds the wait.
-            if let Some(wake_us) = face.link().phase().wake_at(&mut read_now) {
+            let life = face.life();
+            let wake = match life.phase() {
+                LinkPhase::Up | LinkPhase::Idle | LinkPhase::Held | LinkPhase::Closed => None,
+                _ => life.wake_at(read_now()),
+            };
+            if let Some(wake_us) = wake {
                 let left_ms = wake_us.saturating_sub(read_now()).saturating_div(1000);
                 dial_left_ms = Some(dial_left_ms.map_or(left_ms, |held| held.min(left_ms)));
             }
             match face.link() {
-                Link::Up(wire) | Link::Opening { wire, .. } => {
+                Link::Wire(wire) => {
                     if wire.holds_input() {
                         holds = true;
                     } else if wire.waits_for_buffer() {
@@ -1749,9 +1941,7 @@ impl<
                 }
                 // A face waiting, dialling or standing by brings no input of its own: its time,
                 // read above, is what wakes the read for it.
-                Link::Waiting { .. } | Link::Dialing { .. } => {}
-                #[cfg(feature = "listen")]
-                Link::Held { .. } => {}
+                Link::Idle | Link::Dialing(_) => {}
             }
         }
         if holds {
@@ -1761,6 +1951,7 @@ impl<
         }
         // Asked at each wait: a listener whose own work is under way (a WebSocket handshake) or
         // that takes no connection now gives no wait on its port until that changes.
+        #[cfg(feature = "listen")]
         for listening in &mut self.listeners {
             let on = listening.listener.input_wait();
             let was = listening.on;
@@ -1837,6 +2028,7 @@ impl<
                     wire.input_seen(on.iter().any(|ready| ready.on == port));
                 }
             }
+            #[cfg(feature = "listen")]
             for listening in &mut self.listeners {
                 if listening
                     .on
@@ -1868,22 +2060,26 @@ impl<
     pub fn end_dials_and_ports(&mut self) {
         for face in self.faces_mut() {
             let link = face.link_mut();
-            if let Link::Dialing { .. } = link {
-                *link = Link::Waiting { at_us: u64::MAX };
+            if let Link::Dialing(_) = link {
+                *link = Link::Idle;
             }
         }
+        #[cfg(feature = "listen")]
         self.listeners.clear();
     }
 
     /// End every face's link, whatever it is doing, telling an established peer so, after
-    /// `each` is shown the face. The dial role's face stays, with no link and no redial; the
-    /// others go.
+    /// `each` is shown the face. Each face's life is closed, which lets go of what it held; the
+    /// dial role's face stays, with no link and no redial; the others go.
     pub fn end_faces(&mut self, mut each: impl FnMut(&mut F)) {
         self.regenerated();
         for face in self.faces_mut() {
             each(face);
-            let link = core::mem::replace(face.link_mut(), Link::Waiting { at_us: u64::MAX });
-            if let Link::Up(wire) | Link::Opening { wire, .. } = link {
+            // A close asks to let go of the dial or the link, which is what follows here for
+            // every face alike, so its effects are not read; it reads no time.
+            let _ = face.life_mut().input(LinkInput::Close, 0);
+            let link = core::mem::replace(face.link_mut(), Link::Idle);
+            if let Link::Wire(wire) = link {
                 wire.close();
                 wire.abort();
             }
@@ -1895,12 +2091,14 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::boxed::Box;
     use alloc::rc::Rc;
     use alloc::vec;
     use core::cell::Cell;
     use core::sync::atomic::Ordering;
     use wz_session_core::link::RxFrame;
 
+    use crate::session_drive::LinkListener;
     use crate::{ClockSource, CoopLocalSet, CoopRuntime};
 
     struct Still;
@@ -1950,6 +2148,60 @@ mod tests {
     struct TestFace {
         id: FaceId,
         link: TestLink,
+        life: UnicastLink,
+    }
+
+    /// The life of a test face's link: the dial role's over two endpoints, not opened yet.
+    fn idle_life() -> UnicastLink {
+        life_in(&[])
+    }
+
+    /// The dial role's life over two endpoints, a dial and its handshake given ten seconds and
+    /// the endpoints dialled again 5 ms after none answered, moved by `inputs` at time 0.
+    fn life_in(inputs: &[LinkInput]) -> UnicastLink {
+        let times = wz_session_core::link_life::LinkTimes {
+            open_timeout_ms: 10_000,
+            redial_ms: Some(5),
+            dial_look_ms: DIAL_LOOK_MS,
+            accept_timeout_ms: 1,
+        };
+        let mut life = UnicastLink::new(times, LinkRole::Dial, 2);
+        for input in inputs {
+            let _ = life.input(*input, 0);
+        }
+        life
+    }
+
+    /// A life waiting until 5 ms to dial again: up once, lost, then both endpoints refused.
+    fn backing_off() -> UnicastLink {
+        life_in(&[
+            LinkInput::Open,
+            LinkInput::DialMade,
+            LinkInput::HandshakeBegun,
+            LinkInput::Established,
+            LinkInput::Ended,
+            LinkInput::DialRefused,
+            LinkInput::DialRefused,
+        ])
+    }
+
+    /// A life standing by for a node another face held when its handshake ended.
+    #[cfg(feature = "listen")]
+    fn standing_by() -> UnicastLink {
+        life_in(&[
+            LinkInput::Open,
+            LinkInput::DialMade,
+            LinkInput::HandshakeBegun,
+            LinkInput::HeldElsewhere,
+        ])
+    }
+
+    /// Give the dial role's face of `faces` the life `life`.
+    fn set_life<L: SessionLinks<Pump = Rc<Quiet>, Dial = Answer>>(
+        faces: &mut LinkSupervisor<L, TestFace>,
+        life: UnicastLink,
+    ) {
+        faces.face_mut(0).expect("the dial role's face").life = life;
     }
 
     impl FaceRecord for TestFace {
@@ -1967,6 +2219,14 @@ mod tests {
 
         fn link_mut(&mut self) -> &mut TestLink {
             &mut self.link
+        }
+
+        fn life(&self) -> &UnicastLink {
+            &self.life
+        }
+
+        fn life_mut(&mut self) -> &mut UnicastLink {
+            &mut self.life
         }
     }
 
@@ -2017,8 +2277,10 @@ mod tests {
 
     /// A network whose ports are each waited on by `Socket(9)` and never hold a connection: how
     /// often one was asked for a connection, and whether its ports are asked only when ready.
+    #[cfg(feature = "listen")]
     struct Ports(Rc<Cell<u32>>, bool);
 
+    #[cfg(feature = "listen")]
     impl SessionLinks for Ports {
         type Pump = Rc<Quiet>;
         type Dial = Answer;
@@ -2046,8 +2308,10 @@ mod tests {
 
     /// A port waited on by `Socket(9)` that holds no connection, counting each time it is asked,
     /// and asked only when ready as `.1` says.
+    #[cfg(feature = "listen")]
     struct Empty(Rc<Cell<u32>>, bool);
 
+    #[cfg(feature = "listen")]
     impl LinkListener<Rc<Quiet>> for Empty {
         fn local(&self) -> Locator {
             Locator::tcp(core::net::SocketAddr::from(([127, 0, 0, 1], 7447)))
@@ -2068,8 +2332,10 @@ mod tests {
     }
 
     /// The waits of a stack that found none of what it waited on ready.
+    #[cfg(feature = "listen")]
     struct NoneReady;
 
+    #[cfg(feature = "listen")]
     impl LinkWaits for NoneReady {
         fn wait(&self, _on: &[LinkWait], _timeout_ms: u32) {}
 
@@ -2102,18 +2368,25 @@ mod tests {
         }
     }
 
-    /// A dial that answers `answer` the first time it is asked, and nothing after.
-    struct Answer(Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>>);
+    /// A dial that answers `.0` the first time it is asked, and nothing after, counting each ask
+    /// in `.1` when it is given a count.
+    struct Answer(
+        Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>>,
+        Option<Rc<Cell<u32>>>,
+    );
 
     impl PendingDial<Rc<Quiet>> for Answer {
         fn poll(&mut self) -> Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>> {
+            if let Some(asks) = &self.1 {
+                asks.set(asks.get() + 1);
+            }
             self.0.take()
         }
     }
 
     impl From<OpenedLink<Rc<Quiet>>> for Answer {
         fn from(opened: OpenedLink<Rc<Quiet>>) -> Self {
-            Answer(Some(Ok(opened)))
+            Answer(Some(Ok(opened)), None)
         }
     }
 
@@ -2121,14 +2394,8 @@ mod tests {
     fn dialing(
         endpoint: DialEndpoint,
         answer: Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>>,
-        next: usize,
-        deadline_us: u64,
     ) -> TestLink {
-        Link::Dialing {
-            dial: Dial::new(endpoint, Answer(answer)),
-            next,
-            deadline_us,
-        }
+        Link::Dialing(Dial::new(endpoint, Answer(answer, None)))
     }
 
     fn session(established: bool, node: Option<&[u8]>) -> Session {
@@ -2153,7 +2420,9 @@ mod tests {
         if finished {
             local.run_until_idle();
         }
-        let link = CellRc::boxed(Quiet { holds }).into_link();
+        let link = CellRc::try_boxed(Quiet { holds })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         Wire::new(session, task, link, input_wait, room_wait)
     }
@@ -2182,7 +2451,9 @@ mod tests {
     #[test]
     fn a_wire_ends_its_link_by_the_end_it_was_made_with() {
         let end = Rc::new(HeldEnd::default());
-        let link = CellRc::boxed(Quiet { holds: false }).into_link();
+        let link = CellRc::try_boxed(Quiet { holds: false })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         let wire = Wire::new(
             session(true, None),
@@ -2227,7 +2498,9 @@ mod tests {
     /// An established wire over a link waited on by `on`, owing a write when `owes`.
     fn waited_wire(local: &CoopLocalSet<Still>, on: WaitOn, owes: bool) -> Wire<Session> {
         let task = local.spawn_local(async { DriverOutcome::Terminated });
-        let link = CellRc::boxed(Waited { on, owes }).into_link();
+        let link = CellRc::try_boxed(Waited { on, owes })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         Wire::new(session(true, None), task, link, input_wait, room_wait)
     }
@@ -2251,8 +2524,17 @@ mod tests {
     }
 
     fn supervisor(link: TestLink, faces: usize) -> LinkSupervisor<Net, TestFace> {
-        LinkSupervisor::new(Net, TestFace { id: 100, link }, faces, 2)
-            .expect("the heap holds two waits")
+        LinkSupervisor::new(
+            Net,
+            TestFace {
+                id: 100,
+                link,
+                life: idle_life(),
+            },
+            faces,
+            2,
+        )
+        .expect("the heap holds two waits")
     }
 
     /// What a face holds of a link whose parts lie apart from it: a handle that reads and ends
@@ -2319,6 +2601,7 @@ mod tests {
     struct ApartFace {
         id: FaceId,
         link: Link<ApartWire, Answer>,
+        life: UnicastLink,
     }
 
     impl FaceRecord for ApartFace {
@@ -2337,6 +2620,14 @@ mod tests {
         fn link_mut(&mut self) -> &mut Link<ApartWire, Answer> {
             &mut self.link
         }
+
+        fn life(&self) -> &UnicastLink {
+            &self.life
+        }
+
+        fn life_mut(&mut self) -> &mut UnicastLink {
+            &mut self.life
+        }
     }
 
     /// A face whose link is held as a handle of the record's own kind, not as the link's parts,
@@ -2353,16 +2644,17 @@ mod tests {
         };
         let dial = ApartFace {
             id: 100,
-            link: Link::Up(apart(false, false)),
+            link: Link::Wire(apart(false, false)),
+            life: idle_life(),
         };
         let mut faces: LinkSupervisor<Net, ApartFace> =
             LinkSupervisor::new(Net, dial, 1, 2).expect("the heap holds two waits");
         assert!(!faces.holds_input(), "CONTROL: a link that holds no input");
-        faces.put_link(0, Link::Up(apart(true, true)));
+        faces.put_link(0, Link::Wire(apart(true, true)));
         assert!(faces.holds_input(), "the handle's input read");
-        let mut answer = None;
-        let read = faces.read_face(0, 100, &mut answer);
-        assert!(read.signals.ended, "the handle's end read");
+        let (mut answer, mut dialled) = (None, None);
+        let read = faces.read_face(0, 100, 0, &mut answer, &mut dialled);
+        assert!(read.input == LinkInput::Ended, "the handle's end read");
         assert_eq!(aborted.get(), 0, "CONTROL: nothing ended the link yet");
         faces.end_faces(|_| {});
         assert_eq!(aborted.get(), 1, "the handle ended the link");
@@ -2800,6 +3092,7 @@ mod tests {
     struct SiteFace {
         id: FaceId,
         link: Link<FaceAt<crate::sync::Shared, ApartParts, Rc<HeldEnd>>, Answer>,
+        life: UnicastLink,
     }
 
     #[cfg(feature = "host-lock")]
@@ -2818,6 +3111,14 @@ mod tests {
 
         fn link_mut(&mut self) -> &mut Link<Self::Wire, Answer> {
             &mut self.link
+        }
+
+        fn life(&self) -> &UnicastLink {
+            &self.life
+        }
+
+        fn life_mut(&mut self) -> &mut UnicastLink {
+            &mut self.life
         }
     }
 
@@ -2838,7 +3139,8 @@ mod tests {
         let at = unsafe { FaceAt::new(&site, Rc::clone(&end), None, None) };
         let dial = SiteFace {
             id: 100,
-            link: Link::Up(at),
+            link: Link::Wire(at),
+            life: idle_life(),
         };
         let mut faces: LinkSupervisor<Net, SiteFace> =
             LinkSupervisor::new(Net, dial, 1, 2).expect("the heap holds two waits");
@@ -2879,13 +3181,14 @@ mod tests {
     /// that counts one (`face`, `faces`).
     #[test]
     fn a_change_of_a_face_is_counted_and_a_look_is_not() {
-        let mut faces = supervisor(Link::Waiting { at_us: 5 }, 2);
+        let mut faces = supervisor(Link::Idle, 2);
         assert!(!faces.ports_to_ask(), "no port, none to ask");
+        assert!(!faces.listens(), "no port is listened on");
         let before = faces.moves();
         assert!(faces.face(0).is_some());
         assert_eq!(faces.faces().count(), 1);
         assert_eq!(faces.moves(), before, "a look changes nothing");
-        faces.put_link(0, Link::Waiting { at_us: 9 });
+        faces.put_link(0, Link::Idle);
         let put = faces.moves();
         assert_ne!(put, before, "a link put in is a change");
         assert!(faces.face_mut(0).is_some());
@@ -2896,14 +3199,14 @@ mod tests {
     /// nothing else: not at a reach of a face to change what the session keeps of it, nor at the
     /// read of a face each step makes. Turned red by a generation that moves at `face_mut`,
     /// `faces_mut` or `read_face`, or one that stays at `put_link`, `establish`, `place_face`,
-    /// `take_face` or `end_faces`.
+    /// `drop_face` or `end_faces`.
     #[test]
     fn the_links_generation_moves_at_a_change_of_a_link_alone() {
-        let mut faces = supervisor(Link::Waiting { at_us: 5 }, 2);
+        let mut faces = supervisor(Link::Idle, 2);
         let start = faces.generation();
         assert!(faces.face_mut(0).is_some());
         assert_eq!(faces.faces_mut().count(), 1);
-        let _ = faces.read_face(0, 100, &mut None);
+        let _ = faces.read_face(0, 0, 100, &mut None, &mut None);
         assert_eq!(
             faces.generation(),
             start,
@@ -2914,18 +3217,19 @@ mod tests {
             assert_ne!(faces.generation(), seen, "{what} is a change");
             seen = faces.generation();
         };
-        faces.put_link(0, Link::Waiting { at_us: 9 });
+        faces.put_link(0, Link::Idle);
         moved(&faces, "a link put in");
         faces.establish(0);
         moved(&faces, "a link brought up");
         let other = TestFace {
+            life: idle_life(),
             id: 1,
-            link: Link::Waiting { at_us: 0 },
+            link: Link::Idle,
         };
         assert!(faces.place_face(1, other).is_ok());
         moved(&faces, "a face placed");
-        assert!(faces.take_face(1).is_some());
-        moved(&faces, "a face taken out");
+        assert_eq!(faces.drop_face(1), Some(1));
+        moved(&faces, "a face dropped");
         faces.end_faces(|_| {});
         moved(&faces, "the links ended");
     }
@@ -2935,30 +3239,11 @@ mod tests {
     fn a_dial_answers_once_and_names_its_endpoint() {
         let mut dial = Dial::new(
             DialEndpoint::Listed(1),
-            Answer(Some(Err(LinkOpenError::Refused))),
+            Answer(Some(Err(LinkOpenError::Refused)), None),
         );
         assert_eq!(dial.endpoint(), &DialEndpoint::Listed(1));
         assert!(matches!(dial.answer(), Some(Err(LinkOpenError::Refused))));
         assert!(dial.answer().is_none(), "answered once");
-    }
-
-    /// A link in its handshake is brought up once the handshake completed; one up already stays.
-    #[test]
-    fn an_opening_link_is_brought_up() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
-        let mut faces = supervisor(
-            Link::Opening {
-                wire: wire(&local, session(true, None), false, false),
-                next: 3,
-                deadline_us: 50,
-            },
-            1,
-        );
-        faces.establish(0);
-        assert!(matches!(dial(&faces).link, Link::Up(_)), "brought up");
-        faces.establish(0);
-        assert!(matches!(dial(&faces).link, Link::Up(_)), "and stays up");
     }
 
     /// Another face holds a node while its link to it is up, and a face never holds one for
@@ -2966,13 +3251,14 @@ mod tests {
     #[cfg(feature = "listen")]
     #[test]
     fn a_node_is_held_by_another_face_while_its_link_is_up() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let node = [7u8, 1];
-        let mut faces = supervisor(Link::Held { zid: held_node() }, 2);
+        let mut faces = supervisor(Link::Idle, 2);
         let other = TestFace {
+            life: idle_life(),
             id: 1,
-            link: Link::Up(wire(&local, session(true, Some(&node)), false, false)),
+            link: Link::Wire(wire(&local, session(true, Some(&node)), false, false)),
         };
         assert!(faces.place_face(1, other).is_ok());
         assert!(faces.node_is_held(&node, 100));
@@ -2980,108 +3266,105 @@ mod tests {
             !faces.node_is_held(&node, 1),
             "a face does not hold the node for itself"
         );
-        assert!(faces.take_face(1).is_some());
+        assert!(faces.drop_face(1).is_some());
         assert!(!faces.node_is_held(&node, 100));
     }
 
-    /// A face is read as its link stands: a dial's answer is asked once and kept, a link in its
-    /// handshake says whether it completed, a face that stands by finds its node held by a face
-    /// that reaches it, and a face past the table reads as one waiting with no time to dial again.
+    /// A face is read as the input its life takes: a dial's answer once, its dial then let go of
+    /// and its endpoint handed over; a handshake's establishment before its end; an established
+    /// link's end; and nothing for a face whose link moved, or one past the table. Turned red by a
+    /// read that keeps an answered dial in the face, or reads an ended handshake that completed
+    /// as ended.
     #[test]
-    fn a_face_is_read_as_its_link_stands() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+    fn a_face_is_read_as_the_input_its_life_takes() {
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(
-            dialing(
-                DialEndpoint::Listed(0),
-                Some(Err(LinkOpenError::Refused)),
-                1,
-                50,
-            ),
+            dialing(DialEndpoint::Listed(0), Some(Err(LinkOpenError::Refused))),
             2,
         );
-        let mut answer = None;
-        let read = faces.read_face(0, 100, &mut answer);
+        let (mut answer, mut dialled) = (None, None);
+        let read = faces.read_face(0, 100, 0, &mut answer, &mut dialled);
+        assert_eq!(read.input, LinkInput::DialRefused);
         assert!(matches!(answer, Some(Err(LinkOpenError::Refused))));
-        assert_eq!(read.signals.dial, Some(false));
-        let mut again_answer = None;
-        let again = faces.read_face(0, 100, &mut again_answer);
-        assert!(again_answer.is_none(), "a dial is asked once");
-        assert_eq!(again.signals.dial, None);
-
-        let node = [7u8, 1];
-        let opening = TestFace {
-            id: 1,
-            link: Link::Opening {
-                wire: wire(&local, session(true, Some(&node)), false, false),
-                next: 0,
-                deadline_us: 50,
-            },
-        };
-        assert!(faces.place_face(1, opening).is_ok());
-        let mut answer = None;
-        let read = faces.read_face(1, 1, &mut answer);
-        assert_eq!(
-            read.phase,
-            Phase::Opening {
-                next: 0,
-                deadline_us: 50
-            }
+        assert_eq!(dialled, Some(DialEndpoint::Listed(0)));
+        assert!(
+            matches!(dial(&faces).link, Link::Idle),
+            "the dial is let go of"
         );
-        assert!(read.signals.established);
-        assert!(!read.signals.ended);
-        assert!(answer.is_none(), "a handshake's face writes no answer");
-        // An established link reads its wire's end and reports no establishment: only a
-        // handshake's link has one to report.
+        let again = faces.read_face(0, 100, 0, &mut None, &mut None);
+        assert_eq!(again.input, LinkInput::Tick, "answered once");
+
+        // The dial role's life is walked to its handshake, as the session's carrying out does.
+        let face = faces.face_mut(0).expect("the dial role's face");
+        let _ = face.life.input(LinkInput::Open, 0);
+        let _ = face.life.input(LinkInput::DialMade, 0);
+        let _ = face.life.input(LinkInput::HandshakeBegun, 0);
         faces.put_link(
-            1,
-            Link::Up(wire(&local, session(true, Some(&node)), false, false)),
+            0,
+            Link::Wire(wire(&local, session(true, None), false, true)),
         );
-        let up = faces.read_face(1, 1, &mut None);
-        assert_eq!(up.phase, Phase::Up);
-        assert!(!up.signals.established);
-        assert!(!up.signals.ended);
+        let read = faces.read_face(0, 100, 0, &mut None, &mut None);
+        assert_eq!(read.input, LinkInput::Established, "before its end");
 
-        #[cfg(feature = "listen")]
-        {
-            faces.put_link(0, Link::Held { zid: held_node() });
-            assert!(faces.read_face(0, 100, &mut None).signals.node_held);
-            assert!(
-                !faces.read_face(0, 1, &mut None).signals.node_held,
-                "a face does not hold the node for itself"
-            );
-        }
+        let face = faces.face_mut(0).expect("the dial role's face");
+        let _ = face.life.input(LinkInput::Established, 0);
+        assert_eq!(face.life.phase(), LinkPhase::Up);
+        let read = faces.read_face(0, 100, 0, &mut None, &mut None);
+        assert_eq!(
+            read.input,
+            LinkInput::Ended,
+            "an established link that ended"
+        );
+        faces.put_link(
+            0,
+            Link::Wire(wire(&local, session(true, None), false, false)),
+        );
+        let read = faces.read_face(0, 100, 0, &mut None, &mut None);
+        assert_eq!(read.input, LinkInput::Tick);
 
-        let mut answer = None;
-        let past = faces.read_face(9, 9, &mut answer);
-        assert_eq!(past.phase, Phase::Waiting { at_us: u64::MAX });
-        assert_eq!(past.signals, Signals::default());
-        assert!(answer.is_none());
+        let past = faces.read_face(9, 9, 0, &mut None, &mut None);
+        assert_eq!(past.input, LinkInput::Tick, "past the table");
     }
-
     /// A face is read in the role of its row: the first, which the table never lets go of, is the
     /// dial role's, and any other, or one past the table, one taken besides. Turned red by a role
     /// read off anything but the row.
     #[test]
     fn a_face_is_read_in_the_role_of_its_row() {
-        let mut faces = supervisor(Link::Waiting { at_us: 0 }, 2);
+        let mut faces = supervisor(Link::Idle, 2);
         let taken = TestFace {
+            life: idle_life(),
             id: 1,
-            link: Link::Waiting { at_us: 0 },
+            link: Link::Idle,
         };
         assert!(faces.place_face(1, taken).is_ok());
-        assert_eq!(faces.read_face(0, 100, &mut None).role, FaceRole::Dial);
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).role,
+            LinkRole::Dial
+        );
         #[cfg(feature = "listen")]
         {
-            assert_eq!(faces.read_face(1, 1, &mut None).role, FaceRole::Taken);
-            assert_eq!(faces.read_face(9, 9, &mut None).role, FaceRole::Taken);
+            assert_eq!(
+                faces.read_face(1, 1, 0, &mut None, &mut None).role,
+                LinkRole::Taken
+            );
+            assert_eq!(
+                faces.read_face(9, 9, 0, &mut None, &mut None).role,
+                LinkRole::Taken
+            );
         }
         // Without `listen` no face is taken besides the dial: a place past the first holds only a
         // departed face's tomb, read in the one role there is.
         #[cfg(not(feature = "listen"))]
         {
-            assert_eq!(faces.read_face(1, 1, &mut None).role, FaceRole::Dial);
-            assert_eq!(faces.read_face(9, 9, &mut None).role, FaceRole::Dial);
+            assert_eq!(
+                faces.read_face(1, 1, 0, &mut None, &mut None).role,
+                LinkRole::Dial
+            );
+            assert_eq!(
+                faces.read_face(9, 9, 0, &mut None, &mut None).role,
+                LinkRole::Dial
+            );
         }
     }
 
@@ -3092,21 +3375,38 @@ mod tests {
     #[test]
     fn a_table_of_one_face_reads_every_place_in_the_dial_role() {
         #[cfg(feature = "listen")]
-        let link = Link::Held { zid: held_node() };
+        let link = Link::Idle;
         #[cfg(not(feature = "listen"))]
-        let link = Link::Waiting { at_us: 0 };
-        let mut faces: LinkSupervisor<Net, TestFace, OneFace<TestFace>> =
-            LinkSupervisor::new(Net, TestFace { id: 100, link }, 2, 2)
-                .expect("the heap holds two waits");
+        let link = Link::Idle;
+        let mut faces: LinkSupervisor<Net, TestFace, OneFace<TestFace>> = LinkSupervisor::new(
+            Net,
+            TestFace {
+                id: 100,
+                link,
+                life: idle_life(),
+            },
+            2,
+            2,
+        )
+        .expect("the heap holds two waits");
         assert!(!faces.takes_faces());
         assert!(
-            supervisor(Link::Waiting { at_us: 0 }, 2).takes_faces(),
+            supervisor(Link::Idle, 2).takes_faces(),
             "CONTROL: a table of many faces takes them"
         );
-        assert_eq!(faces.read_face(0, 100, &mut None).role, FaceRole::Dial);
-        assert_eq!(faces.read_face(1, 1, &mut None).role, FaceRole::Dial);
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).role,
+            LinkRole::Dial
+        );
+        assert_eq!(
+            faces.read_face(1, 1, 0, &mut None, &mut None).role,
+            LinkRole::Dial
+        );
         #[cfg(feature = "listen")]
-        assert!(!faces.read_face(0, 100, &mut None).signals.node_held);
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).input,
+            LinkInput::Tick
+        );
     }
 
     /// A dial that is over is let go of and hands over the endpoint it dialled, its own text
@@ -3114,32 +3414,62 @@ mod tests {
     /// none, and a face past the table is left as it is.
     #[test]
     fn an_ended_dial_hands_over_its_endpoint_and_its_face_waits() {
+        #[cfg(feature = "listen")]
         let named = DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"));
-        let mut faces = supervisor(dialing(named.clone(), None, 1, 50), 2);
-        assert_eq!(faces.end_dial(0, 7), Some(named));
-        assert!(matches!(dial(&faces).link, Link::Waiting { at_us: 7 }));
+        #[cfg(not(feature = "listen"))]
+        let named = DialEndpoint::Listed(3);
+        let mut faces = supervisor(dialing(named.clone(), None), 2);
+        assert_eq!(faces.end_dial(0), Some(named));
+        assert!(matches!(dial(&faces).link, Link::Idle));
 
-        faces.put_link(0, Link::Waiting { at_us: 3 });
-        assert_eq!(faces.end_dial(0, 9), None, "no dial, no endpoint");
-        assert!(matches!(dial(&faces).link, Link::Waiting { at_us: 9 }));
+        faces.put_link(0, Link::Idle);
+        assert_eq!(faces.end_dial(0), None, "no dial, no endpoint");
+        assert!(matches!(dial(&faces).link, Link::Idle));
 
-        assert_eq!(faces.end_dial(5, 11), None, "past the table");
-        assert!(matches!(dial(&faces).link, Link::Waiting { at_us: 9 }));
+        assert_eq!(faces.end_dial(5), None, "past the table");
+        assert!(matches!(dial(&faces).link, Link::Idle));
+    }
+
+    /// A dial is asked once where it is put: one under way is put in the face, and one answered
+    /// at once is handed back with its answer, the face keeping the dial it held. Turned red by an
+    /// answered dial put in the face, or one under way handed back and not put there.
+    #[test]
+    fn a_dial_under_way_is_put_in_its_face_and_one_answered_is_handed_back() {
+        let asks = Rc::new(Cell::new(0));
+        let mut faces = supervisor(Link::Idle, 1);
+        let answered = faces.ask_dial(0, DialEndpoint::Listed(2), Answer(None, Some(asks.clone())));
+        assert!(answered.is_none(), "the dial is under way");
+        assert_eq!(asks.get(), 1, "asked once");
+        match &dial(&faces).link {
+            Link::Dialing(dial) => assert_eq!(dial.endpoint(), &DialEndpoint::Listed(2)),
+            _ => panic!("the face holds the dial under way"),
+        }
+
+        let answered = faces.ask_dial(
+            0,
+            DialEndpoint::Listed(0),
+            Answer(Some(Err(LinkOpenError::Refused)), Some(asks.clone())),
+        );
+        assert!(matches!(answered, Some(Err(LinkOpenError::Refused))));
+        assert_eq!(asks.get(), 2, "asked once more");
+        assert!(
+            matches!(
+                &dial(&faces).link,
+                Link::Dialing(dial) if dial.endpoint() == &DialEndpoint::Listed(2)
+            ),
+            "an answered dial is not put in the face"
+        );
     }
 
     /// The node a face's handshake reached is the one it stands by for only while another face
     /// reaches it; a face with no link, or one past the table, reached none.
     #[test]
     fn a_face_stands_by_for_its_node_only_while_another_face_reaches_it() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let node = [7u8, 1];
         let mut faces = supervisor(
-            Link::Opening {
-                wire: wire(&local, session(false, Some(&node)), false, false),
-                next: 0,
-                deadline_us: 50,
-            },
+            Link::Wire(wire(&local, session(false, Some(&node)), false, false)),
             2,
         );
         assert!(
@@ -3147,29 +3477,77 @@ mod tests {
             "no other face reaches it"
         );
         let other = TestFace {
+            life: idle_life(),
             id: 1,
-            link: Link::Up(wire(&local, session(true, Some(&node)), false, false)),
+            link: Link::Wire(wire(&local, session(true, Some(&node)), false, false)),
         };
         assert!(faces.place_face(1, other).is_ok());
         assert!(faces.held_node(0, 100) == Some(held_node()));
-        assert!(faces.take_face(1).is_some());
+        assert!(faces.drop_face(1).is_some());
         assert!(faces.held_node(0, 100).is_none());
-        faces.put_link(0, Link::Waiting { at_us: 0 });
+        faces.put_link(0, Link::Idle);
         assert!(faces.held_node(0, 100).is_none(), "a face with no link");
         assert!(faces.held_node(9, 100).is_none(), "a face past the table");
+    }
+
+    /// The dial role's handshake that ends at a node another face holds is read as held
+    /// elsewhere, and its life stands by; while the other face holds the node nothing moves it,
+    /// and once that face goes the node is read as free. CONTROL: with no other face, the same
+    /// end is read as ended. Turned red by a stand-by left to a link the life no longer holds.
+    #[cfg(feature = "listen")]
+    #[test]
+    fn the_dial_role_stands_by_while_another_face_holds_its_node() {
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let node = [7u8, 1];
+        let mut faces = supervisor(
+            Link::Wire(wire(&local, session(false, Some(&node)), false, true)),
+            2,
+        );
+        set_life(
+            &mut faces,
+            life_in(&[
+                LinkInput::Open,
+                LinkInput::DialMade,
+                LinkInput::HandshakeBegun,
+            ]),
+        );
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).input,
+            LinkInput::Ended,
+            "CONTROL: no other face holds the node"
+        );
+        let other = TestFace {
+            life: idle_life(),
+            id: 1,
+            link: Link::Wire(wire(&local, session(true, Some(&node)), false, false)),
+        };
+        assert!(faces.place_face(1, other).is_ok());
+        let read = faces.read_face(0, 100, 0, &mut None, &mut None);
+        assert_eq!(read.input, LinkInput::HeldElsewhere);
+        let face = faces.face_mut(0).expect("the dial role's face");
+        assert!(face.life.input(read.input, 0).end_handshake());
+        assert_eq!(face.life.phase(), LinkPhase::Held);
+        faces.put_link(0, Link::Idle);
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).input,
+            LinkInput::Tick,
+            "the other face holds the node still"
+        );
+        assert!(faces.drop_face(1).is_some());
+        assert_eq!(
+            faces.read_face(0, 100, 0, &mut None, &mut None).input,
+            LinkInput::NodeFree
+        );
     }
 
     /// A handshake that ended names the Close its peer sent, else the end of its task, else the
     /// deadline it is given up at; ending the link's task is what makes it the second.
     #[test]
     fn a_handshake_end_names_the_close_the_task_end_or_the_deadline() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
-        let opening = |session| Link::Opening {
-            wire: wire(&local, session, false, false),
-            next: 0,
-            deadline_us: 50,
-        };
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let opening = |session| Link::Wire(wire(&local, session, false, false));
         let closed = Session {
             closed: Some(CloseReason::Generic),
             ..session(false, None)
@@ -3183,7 +3561,7 @@ mod tests {
         assert_eq!(faces.handshake_end(0), HandshakeEnd::NoAnswerInTime);
         faces.abort_link(0);
         assert_eq!(faces.handshake_end(0), HandshakeEnd::Ended);
-        faces.put_link(0, Link::Waiting { at_us: 0 });
+        faces.put_link(0, Link::Idle);
         faces.abort_link(0);
         assert_eq!(faces.handshake_end(0), HandshakeEnd::Ended, "no link");
         faces.abort_link(9);
@@ -3210,10 +3588,11 @@ mod tests {
     /// gives up no face at the dial role's place.
     #[test]
     fn the_table_takes_no_face_past_its_room_and_never_gives_up_the_dial_role() {
-        let mut faces = supervisor(Link::Waiting { at_us: 0 }, 2);
+        let mut faces = supervisor(Link::Idle, 2);
         let face = |id| TestFace {
+            life: idle_life(),
             id,
-            link: Link::Waiting { at_us: 0 },
+            link: Link::Idle,
         };
         assert!(faces.place_face(1, face(1)).is_ok());
         assert!(matches!(
@@ -3228,10 +3607,10 @@ mod tests {
             matches!(faces.place_face(0, face(4)), Err(TestFace { id: 4, .. })),
             "the dial role's place"
         );
-        assert!(faces.take_face(0).is_none(), "the dial role's face stays");
-        assert!(faces.take_face(2).is_none(), "past the table");
-        assert_eq!(faces.take_face(1).map(|face| face.id), Some(1));
-        assert!(faces.take_face(1).is_none(), "the place is free");
+        assert!(faces.drop_face(0).is_none(), "the dial role's face stays");
+        assert!(faces.drop_face(2).is_none(), "past the table");
+        assert_eq!(faces.drop_face(1), Some(1));
+        assert!(faces.drop_face(1).is_none(), "the place is free");
         assert_eq!(faces.next_face_id(), 1);
         faces.advance_face_id();
         assert_eq!(faces.next_face_id(), 2);
@@ -3242,15 +3621,16 @@ mod tests {
     /// left (the faces after it moved down a place).
     #[test]
     fn a_face_keeps_its_place_while_another_is_taken_out() {
-        let mut faces = supervisor(Link::Waiting { at_us: 0 }, 4);
+        let mut faces = supervisor(Link::Idle, 4);
         let face = |id| TestFace {
+            life: idle_life(),
             id,
-            link: Link::Waiting { at_us: 0 },
+            link: Link::Idle,
         };
         assert!(faces.place_face(1, face(1)).is_ok());
         assert!(faces.place_face(2, face(2)).is_ok());
         assert_eq!(faces.held(), 3);
-        assert_eq!(faces.take_face(1).map(|face| face.id), Some(1));
+        assert_eq!(faces.drop_face(1), Some(1));
         assert_eq!(faces.face(2).map(|face| face.id), Some(2), "it stays");
         assert!(faces.face(1).is_none());
         assert_eq!(faces.held(), 2);
@@ -3306,17 +3686,33 @@ mod tests {
             "",
             "past the dial rows"
         );
-        assert_eq!(DialEndpoint::Port(0).text(&texts), "tcp/0.0.0.0:7447");
+        #[cfg(feature = "listen")]
+        {
+            assert_eq!(DialEndpoint::Port(0).text(&texts), "tcp/0.0.0.0:7447");
+            assert_eq!(
+                DialEndpoint::Port(1).text(&texts),
+                "",
+                "past the listen rows"
+            );
+            assert_eq!(
+                DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"))
+                    .text(&texts),
+                "tcp/1.2.3.4:1"
+            );
+        }
+    }
+
+    /// A build that takes no port and dials no face beside the dial role's names an endpoint by
+    /// its row alone, so a dial, a link and the endpoint a dial hands over carry a word and no
+    /// text. Turned red by a variant that holds a text left in that build.
+    #[cfg(not(feature = "listen"))]
+    #[test]
+    fn an_endpoint_of_a_build_that_only_dials_is_a_row() {
         assert_eq!(
-            DialEndpoint::Port(1).text(&texts),
-            "",
-            "past the listen rows"
+            core::mem::size_of::<DialEndpoint>(),
+            core::mem::size_of::<usize>()
         );
-        assert_eq!(
-            DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"))
-                .text(&texts),
-            "tcp/1.2.3.4:1"
-        );
+        assert!(core::mem::size_of::<Option<DialEndpoint>>() <= 2 * core::mem::size_of::<usize>());
     }
 
     /// A text is written in the next row and answered with its place; one longer than a row is
@@ -3350,9 +3746,10 @@ mod tests {
     /// A read asks each port for its wait when it waits, not once when the port opened: a port
     /// that gives none now is looked at again after a bounded sleep. Turned red by a wait read
     /// once at the listen and kept.
+    #[cfg(feature = "listen")]
     #[test]
     fn a_read_asks_each_port_for_its_wait_at_each_wait() {
-        let mut faces = supervisor(Link::Waiting { at_us: u64::MAX }, 1);
+        let mut faces = supervisor(Link::Idle, 1);
         faces
             .listen(
                 Locator::tcp(core::net::SocketAddr::from(([0, 0, 0, 0], 7447))),
@@ -3373,6 +3770,10 @@ mod tests {
         ));
     }
 
+    /// A read sleeps to the end of a wait to dial again, and to the next look of a dial under way
+    /// when its deadline is later; a face standing by gives no time, and its read takes none
+    /// from the clock. A link holding input makes no wait. Turned red by a wake read off the link
+    /// and not off the face's life.
     #[test]
     fn a_read_sleeps_to_the_next_dial_and_does_not_wait_on_held_input() {
         let mut clock_reads = 0;
@@ -3380,30 +3781,52 @@ mod tests {
             clock_reads += 1;
             1_000u64
         };
-        let mut faces = supervisor(Link::Waiting { at_us: 5_000 }, 1);
+        let mut faces = supervisor(Link::Idle, 1);
+        set_life(&mut faces, backing_off());
+        assert_eq!(
+            faces.face(0).map(|face| face.life.phase()),
+            Some(LinkPhase::Backoff { until_us: 5_000 })
+        );
         assert!(matches!(
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(4)
         ));
         // A dial under way is looked at again on the next look, its deadline being later.
-        faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, u64::MAX));
+        faces.put_link(0, dialing(DialEndpoint::Listed(0), None));
+        set_life(
+            &mut faces,
+            life_in(&[LinkInput::Open, LinkInput::DialPending]),
+        );
         assert!(matches!(
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(1)
         ));
         #[cfg(feature = "listen")]
         {
-            faces.put_link(0, Link::Held { zid: held_node() });
+            faces.put_link(0, Link::Idle);
+            set_life(&mut faces, standing_by());
+            let before = clock_reads;
             assert!(matches!(
-                faces.idle_wait(10, &mut now, [], None),
+                faces.idle_wait(
+                    10,
+                    &mut || {
+                        clock_reads += 1;
+                        1_000u64
+                    },
+                    [],
+                    None
+                ),
                 IdleWait::None
             ));
+            assert_eq!(clock_reads, before, "a face standing by reads no clock");
         }
-        assert_eq!(clock_reads, 1, "only the waiting face read the clock");
 
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
-        faces.put_link(0, Link::Up(wire(&local, session(true, None), true, false)));
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        faces.put_link(
+            0,
+            Link::Wire(wire(&local, session(true, None), true, false)),
+        );
         assert!(faces.holds_input());
         assert!(matches!(
             faces.idle_wait(10, &mut || 0u64, [], None),
@@ -3417,14 +3840,14 @@ mod tests {
     /// owe and wakes its owner on room.
     #[test]
     fn a_read_waits_on_each_links_handle_and_on_its_room_while_it_owes() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let group = LinkWait::input(WaitOn::Socket(9));
         for (owes, first) in [
             (false, LinkWait::input(WaitOn::Socket(3))),
             (true, LinkWait::input_or_room(WaitOn::Socket(3))),
         ] {
-            let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), owes)), 1);
+            let mut faces = supervisor(Link::Wire(waited_wire(&local, WaitOn::Socket(3), owes)), 1);
             match faces.idle_wait(10, &mut || 0u64, [group], None) {
                 IdleWait::Input { on, ms } => {
                     assert_eq!(on, [first, group], "owes {owes}");
@@ -3445,13 +3868,15 @@ mod tests {
     #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_wait_tells_each_waited_link_what_it_found_and_a_move_reads_them_all() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let waited = |session: Session, on: WaitOn| -> TestLink {
             let task = local.spawn_local(async { DriverOutcome::Terminated });
-            let link = CellRc::boxed(Waited { on, owes: false }).into_link();
+            let link = CellRc::try_boxed(Waited { on, owes: false })
+                .expect("the heap has room")
+                .into_link();
             let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
-            Link::Up(Wire::new(session, task, link, input_wait, room_wait))
+            Link::Wire(Wire::new(session, task, link, input_wait, room_wait))
         };
         let (found, empty, own) = (
             session(true, None),
@@ -3462,13 +3887,15 @@ mod tests {
             (found.seen.clone(), empty.seen.clone(), own.seen.clone());
         let mut faces = supervisor(waited(found, WaitOn::Socket(3)), 3);
         let empty = TestFace {
+            life: idle_life(),
             id: 1,
             link: waited(empty, WaitOn::Socket(4)),
         };
         assert!(faces.place_face(1, empty).is_ok());
         let own = TestFace {
+            life: idle_life(),
             id: 2,
-            link: Link::Up(wire(&local, own, false, false)),
+            link: Link::Wire(wire(&local, own, false, false)),
         };
         assert!(faces.place_face(2, own).is_ok());
         let seen = || (found_seen.get(), empty_seen.get(), own_seen.get());
@@ -3504,15 +3931,23 @@ mod tests {
     /// buffer, or by one dropped without bounding the wait.
     #[test]
     fn a_read_past_its_reserved_room_looks_again_and_grows_nothing() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let first = LinkWait::input(WaitOn::Socket(3));
         let group = LinkWait::input(WaitOn::Socket(9));
         for (room, waited, ms) in [(2, vec![first, group], 10), (1, vec![first], 1)] {
-            let link = Link::Up(waited_wire(&local, WaitOn::Socket(3), false));
-            let mut faces: LinkSupervisor<Net, TestFace> =
-                LinkSupervisor::new(Net, TestFace { id: 100, link }, 1, room)
-                    .expect("the heap holds the waits");
+            let link = Link::Wire(waited_wire(&local, WaitOn::Socket(3), false));
+            let mut faces: LinkSupervisor<Net, TestFace> = LinkSupervisor::new(
+                Net,
+                TestFace {
+                    id: 100,
+                    link,
+                    life: idle_life(),
+                },
+                1,
+                room,
+            )
+            .expect("the heap holds the waits");
             match faces.idle_wait(10, &mut || 0u64, [group], None) {
                 IdleWait::Input { on, ms: bound } => {
                     assert_eq!(on, waited, "room {room}");
@@ -3531,17 +3966,19 @@ mod tests {
     #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn a_publish_gathers_the_links_owing_a_write_without_allocating() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
-        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), true)), 3);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let mut faces = supervisor(Link::Wire(waited_wire(&local, WaitOn::Socket(3), true)), 3);
         let quiet = TestFace {
+            life: idle_life(),
             id: 1,
-            link: Link::Up(waited_wire(&local, WaitOn::Socket(4), false)),
+            link: Link::Wire(waited_wire(&local, WaitOn::Socket(4), false)),
         };
         assert!(faces.place_face(1, quiet).is_ok());
         let owing = TestFace {
+            life: idle_life(),
             id: 2,
-            link: Link::Up(waited_wire(&local, WaitOn::Socket(5), true)),
+            link: Link::Wire(waited_wire(&local, WaitOn::Socket(5), true)),
         };
         assert!(faces.place_face(2, owing).is_ok());
         let (waits, made) = crate::table_tests::allocations(|| faces.owing_waits());
@@ -3564,14 +4001,18 @@ mod tests {
     #[test]
     #[should_panic(expected = "more links owe a write than the outbound slots they hold")]
     fn more_links_owing_than_the_slots_they_hold_is_named_in_a_test_build() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let past = OWING_WAITS.saturating_add(1);
-        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), true)), past);
+        let mut faces = supervisor(
+            Link::Wire(waited_wire(&local, WaitOn::Socket(3), true)),
+            past,
+        );
         for id in 1..past {
             let owing = TestFace {
+                life: idle_life(),
                 id: FaceId::try_from(id).unwrap_or(FaceId::MAX),
-                link: Link::Up(waited_wire(&local, WaitOn::Socket(3 + id), true)),
+                link: Link::Wire(waited_wire(&local, WaitOn::Socket(3 + id), true)),
             };
             assert!(faces.place_face(id, owing).is_ok(), "room for each face");
         }
@@ -3595,16 +4036,69 @@ mod tests {
         assert!(matches!(wait, IdleWait::Input { ref on, .. } if *on == [link]));
     }
 
+    /// A wait asks its stack which entries were ready only in a build that reads them (`listen`
+    /// or `group`), and leaves those alone in its buffer; a build without either asks for the
+    /// plain wait and leaves the buffer as it was made. Turned red by an arm that asks the other
+    /// call, or a build without ports that cuts its buffer to what was found ready.
+    #[test]
+    fn a_wait_asks_which_entries_were_ready_only_where_they_are_read() {
+        /// Counts each kind of wait; its stack finds nothing ready.
+        #[derive(Default)]
+        struct Counted {
+            plain: core::sync::atomic::AtomicU32,
+            ready: core::sync::atomic::AtomicU32,
+        }
+
+        impl LinkWaits for Counted {
+            fn wait(&self, _on: &[LinkWait], _timeout_ms: u32) {
+                self.plain.fetch_add(1, Ordering::Relaxed);
+            }
+
+            fn wait_ready(&self, _on: &mut [LinkWait], _timeout_ms: u32) -> usize {
+                self.ready.fetch_add(1, Ordering::Relaxed);
+                0
+            }
+
+            fn wait_room(&self, _on: WaitOn, _timeout_us: u64) -> bool {
+                true
+            }
+        }
+
+        let link = LinkWait::input(WaitOn::Socket(3));
+        let stack = Counted::default();
+        let mut wait = IdleWait::Input {
+            on: vec![link],
+            ms: 10,
+        };
+        wait.wait(&stack, |_| panic!("no sleep"));
+        let IdleWait::Input { on, .. } = wait else {
+            panic!("the wait keeps its buffer");
+        };
+        let asked = (
+            stack.plain.load(Ordering::Relaxed),
+            stack.ready.load(Ordering::Relaxed),
+        );
+        if cfg!(any(feature = "listen", feature = "group")) {
+            assert_eq!(asked, (0, 1), "the wait that tells what was ready");
+            assert!(on.is_empty(), "nothing was found ready");
+        } else {
+            assert_eq!(asked, (1, 0), "the plain wait");
+            assert_eq!(on, [link], "the buffer as it was made");
+        }
+    }
+
     /// The looks at a port a test of `accept_at` makes, its port asked only when ready as
     /// `when_ready` says: one before any wait, three after a wait that found nothing ready, three
     /// after one whose stack cannot tell. How often the port was asked.
+    #[cfg(feature = "listen")]
     fn asks_of_a_port(when_ready: bool) -> u32 {
         let asked = Rc::new(Cell::new(0));
         let mut faces: LinkSupervisor<Ports, TestFace> = LinkSupervisor::new(
             Ports(asked.clone(), when_ready),
             TestFace {
+                life: idle_life(),
                 id: 100,
-                link: Link::Waiting { at_us: u64::MAX },
+                link: Link::Idle,
             },
             1,
             2,
@@ -3641,6 +4135,7 @@ mod tests {
     /// batch asks the stack nothing. CONTROL: a port that is not so is asked at every look.
     /// Turned red by a step that asks every port (the readiness test taken out of `accept_at`),
     /// or a wait that marks a port it did not find ready.
+    #[cfg(feature = "listen")]
     #[test]
     fn a_port_is_asked_for_a_connection_only_after_a_wait_found_it_ready() {
         assert_eq!(
@@ -3656,14 +4151,16 @@ mod tests {
     /// for its wait, a wait that found nothing ready leaves it unasked
     /// (`a_port_is_asked_for_a_connection_only_after_a_wait_found_it_ready`). Turned red by a port
     /// left to a wait the read made no room for, which is then never asked.
+    #[cfg(feature = "listen")]
     #[test]
     fn a_port_its_read_has_no_room_to_wait_on_is_asked_at_every_look() {
         let asked = Rc::new(Cell::new(0));
         let mut faces: LinkSupervisor<Ports, TestFace> = LinkSupervisor::new(
             Ports(asked.clone(), true),
             TestFace {
+                life: idle_life(),
                 id: 100,
-                link: Link::Waiting { at_us: u64::MAX },
+                link: Link::Idle,
             },
             1,
             0,
@@ -3693,7 +4190,8 @@ mod tests {
     #[test]
     fn a_wake_beside_the_links_joins_their_wait_and_makes_none_of_its_own() {
         let wake = LinkWait::input(WaitOn::Wake(5));
-        let mut faces = supervisor(Link::Waiting { at_us: 5_000 }, 1);
+        let mut faces = supervisor(Link::Idle, 1);
+        set_life(&mut faces, backing_off());
         assert!(
             matches!(
                 faces.idle_wait(10, &mut || 1_000u64, [], None),
@@ -3710,7 +4208,7 @@ mod tests {
         }
         #[cfg(feature = "listen")]
         {
-            faces.put_link(0, Link::Held { zid: held_node() });
+            set_life(&mut faces, standing_by());
             assert!(
                 matches!(
                     faces.idle_wait(10, &mut || 0u64, [], Some(wake)),
@@ -3720,10 +4218,10 @@ mod tests {
             );
         }
 
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let link = LinkWait::input(WaitOn::Socket(3));
-        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), false)), 1);
+        let mut faces = supervisor(Link::Wire(waited_wire(&local, WaitOn::Socket(3), false)), 1);
         match faces.idle_wait(10, &mut || 0u64, [], Some(wake)) {
             IdleWait::Input { on, ms } => {
                 assert_eq!(on, [link, wake], "the wake after the links");
@@ -3739,10 +4237,10 @@ mod tests {
     /// waits into a buffer of its own, which after the open is one of the heap.
     #[test]
     fn a_read_while_another_waits_with_the_buffer_waits_behind_and_allocates_nothing() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let link = LinkWait::input(WaitOn::Socket(3));
-        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), false)), 1);
+        let mut faces = supervisor(Link::Wire(waited_wire(&local, WaitOn::Socket(3), false)), 1);
         let first = faces.idle_wait(10, &mut || 0u64, [], None);
         assert!(
             matches!(first, IdleWait::Input { ref on, ms: 10 } if *on == [link]),
@@ -3769,44 +4267,25 @@ mod tests {
         assert_eq!(made, 0, "the buffer handed back is the one reserved");
     }
 
-    /// A read that waits on more than the open reserved room for is named in a test build.
-    /// Turned red by a wait that grows the buffer after the open in silence.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "a read waited on more than the open reserved room for")]
-    fn a_read_past_the_reserved_room_is_named_in_a_test_build() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
-        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), false)), 1);
-        let others = [
-            LinkWait::input(WaitOn::Socket(4)),
-            LinkWait::input(WaitOn::Socket(5)),
-        ];
-        let _ = faces.idle_wait(10, &mut || 0u64, others, None);
-    }
-
     #[test]
     fn ending_lets_dials_go_first_then_tells_established_peers_and_keeps_the_dial_role() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
-        let mut faces = supervisor(dialing(DialEndpoint::Listed(0), None, 1, 10), 3);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let mut faces = supervisor(dialing(DialEndpoint::Listed(0), None), 3);
         faces.end_dials_and_ports();
         assert!(
-            matches!(dial(&faces).link, Link::Waiting { at_us: u64::MAX }),
+            matches!(dial(&faces).link, Link::Idle),
             "a dial under way is let go of"
         );
         let up = session(true, None);
         let up_ended = up.ended.clone();
         let opening = session(false, None);
         let opening_ended = opening.ended.clone();
-        faces.put_link(0, Link::Up(wire(&local, up, false, false)));
+        faces.put_link(0, Link::Wire(wire(&local, up, false, false)));
         let other = TestFace {
+            life: idle_life(),
             id: 1,
-            link: Link::Opening {
-                wire: wire(&local, opening, false, false),
-                next: 0,
-                deadline_us: 0,
-            },
+            link: Link::Wire(wire(&local, opening, false, false)),
         };
         assert!(faces.place_face(1, other).is_ok());
         let mut shown = 0;
@@ -3817,10 +4296,65 @@ mod tests {
         assert_eq!(faces.held(), 1);
         assert!(faces.face(1).is_none(), "the others go");
         assert_eq!(faces.places(), 3, "their places stay, free");
-        assert!(matches!(
-            dial(&faces).link,
-            Link::Waiting { at_us: u64::MAX }
-        ));
+        assert!(matches!(dial(&faces).link, Link::Idle));
+    }
+
+    /// Put `face` at the place `at` of `table`, as [`LinkSupervisor::place_face`] puts it.
+    fn put<F, P: FacePlaces<F>>(table: &mut P, at: usize, face: F) -> Result<(), F> {
+        match table.vacant(at) {
+            Some(place) => {
+                place.put(face);
+                Ok(())
+            }
+            None => Err(face),
+        }
+    }
+
+    /// A face is built where its place lies and dropped there: the face a maker writes in its
+    /// place is the one the place holds, a maker that lends a face it did not build there leaves
+    /// the place free, and a face freed, or one the table still holds when it goes, is dropped
+    /// once.
+    ///
+    /// # Control
+    ///
+    /// A `fill` that held a place whatever its maker lent reds the assertion on place 2; a `free`
+    /// or a drop of the table that left the face undropped reds the counts.
+    #[test]
+    fn a_face_is_built_where_its_place_lies_and_dropped_there() {
+        let dial = Rc::new(0_u32);
+        let one = Rc::new(1_u32);
+        let mut table = ManyFaces::with_dial(Rc::clone(&dial), 3);
+        let made = table
+            .vacant(1)
+            .and_then(|place| place.fill(|slot| slot.write(Rc::clone(&one))))
+            .map(|face| **face);
+        assert_eq!(made, Some(1), "the face built in its place is lent");
+        assert_eq!(
+            Rc::strong_count(&one),
+            2,
+            "the place holds the face it built"
+        );
+        assert!(table.vacant(1).is_none(), "a place built in is held");
+        let elsewhere = table
+            .vacant(2)
+            .and_then(|place| place.fill(|_| Box::leak(Box::new(Rc::new(7_u32)))));
+        assert!(elsewhere.is_none(), "a face built elsewhere is not placed");
+        assert!(table.get(2).is_none(), "its place stays free");
+        assert!(table.free(1), "the face at place 1 goes");
+        assert_eq!(
+            Rc::strong_count(&one),
+            1,
+            "a face freed is dropped where it lay"
+        );
+        assert!(!table.free(1), "a free place frees nothing");
+        assert_eq!(put(&mut table, 2, Rc::clone(&one)), Ok(()));
+        drop(table);
+        assert_eq!(
+            Rc::strong_count(&one),
+            1,
+            "the table's drop drops what it holds"
+        );
+        assert_eq!(Rc::strong_count(&dial), 1, "the dial role's face with it");
     }
 
     /// A table of many faces keeps the dial role's at the first place for good, puts a face at a
@@ -3828,25 +4362,29 @@ mod tests {
     ///
     /// # Control
     ///
-    /// A `put` that took the dial role's place, or a `take` that gave it up, reds the first
+    /// A `put` that took the dial role's place, or a `free` that gave it up, reds the first
     /// assertions; a walk that read the free places reds the `placed` list.
     #[test]
     fn a_table_of_many_faces_keeps_each_face_at_its_place() {
         let mut table = ManyFaces::with_dial(10_u32, 3);
         assert_eq!(table.places(), 3);
         assert_eq!(
-            table.put(0, 11),
+            put(&mut table, 0, 11),
             Err(11),
             "the dial role's place is never put"
         );
-        assert_eq!(table.take(0), None, "the dial role's face is never taken");
-        assert_eq!(table.put(2, 12), Ok(()));
-        assert_eq!(table.put(2, 13), Err(13), "a held place is not put again");
-        assert_eq!(table.put(3, 14), Err(14), "past the table");
+        assert!(!table.free(0), "the dial role's face is never taken");
+        assert_eq!(put(&mut table, 2, 12), Ok(()));
+        assert_eq!(
+            put(&mut table, 2, 13),
+            Err(13),
+            "a held place is not put again"
+        );
+        assert_eq!(put(&mut table, 3, 14), Err(14), "past the table");
         assert_eq!(table.placed().collect::<Vec<_>>(), [(0, &10), (2, &12)]);
         assert_eq!(table.get(1), None, "a free place holds no face");
-        assert_eq!(table.take(2), Some(12));
-        assert_eq!(table.put(1, 15), Ok(()));
+        assert!(table.free(2));
+        assert_eq!(put(&mut table, 1, 15), Ok(()));
         table.keep_dial_only();
         assert_eq!(table.iter().collect::<Vec<_>>(), [&10]);
         assert_eq!(table.places(), 3, "the places stay, free");
@@ -3870,15 +4408,15 @@ mod tests {
             1,
             "the dial role's place alone is walked"
         );
-        assert_eq!(table.put(4, 14), Ok(()));
+        assert_eq!(put(&mut table, 4, 14), Ok(()));
         assert_eq!(table.faces.len(), 5, "the walk reaches the face at place 4");
-        assert_eq!(table.put(1, 11), Ok(()));
+        assert_eq!(put(&mut table, 1, 11), Ok(()));
         assert_eq!(
             table.faces.len(),
             5,
             "a face before the last does not lengthen the walk"
         );
-        assert_eq!(table.take(4), Some(14));
+        assert!(table.free(4));
         assert_eq!(
             table.faces.len(),
             2,
@@ -3886,9 +4424,9 @@ mod tests {
         );
         assert_eq!(table.placed().collect::<Vec<_>>(), [(0, &10), (1, &11)]);
         assert_eq!(table.get(4), None, "a place past the walk holds no face");
-        assert_eq!(table.take(4), None, "nor is one taken from it");
-        assert_eq!(table.put(10, 20), Ok(()), "the last place is put");
-        assert_eq!(table.put(11, 21), Err(21), "past the table");
+        assert!(!table.free(4), "nor is one taken from it");
+        assert_eq!(put(&mut table, 10, 20), Ok(()), "the last place is put");
+        assert_eq!(put(&mut table, 11, 21), Err(21), "past the table");
         assert_eq!(
             table.faces.capacity(),
             room,
@@ -3917,8 +4455,8 @@ mod tests {
         assert_eq!(table.places(), 1, "one place, whatever the open counts");
         assert_eq!(table.get(0), Some(&10));
         assert_eq!(table.get(1), None, "no place past the first");
-        assert_eq!(table.put(1, 11), Err(11), "no face is put beside it");
-        assert_eq!(table.take(0), None, "the dial role's face is never taken");
+        assert_eq!(put(&mut table, 1, 11), Err(11), "no face is put beside it");
+        assert!(!table.free(0), "the dial role's face is never taken");
         if let Some(face) = table.get_mut(0) {
             *face = 12;
         }

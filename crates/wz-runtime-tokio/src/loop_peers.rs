@@ -157,7 +157,9 @@ type LoopPlanner = PeerPlanner<PeerKey, FaceId, LOOP_PEER_ROWS, LOOP_PEER_DIALS>
 
 /// The peers a face loop holds, and what it is doing for each.
 pub struct LoopPeers {
-    planner: Box<LoopPlanner>,
+    /// Made by the first open: a loop told to hold no peer asks the heap for no table, and an open
+    /// the heap has no room for is refused as one the table has no row for.
+    planner: Option<Box<LoopPlanner>>,
     /// How to dial each configured endpoint the planner holds: the scheme and
     /// the `#` retry overrides the operator wrote, by the member's key.
     endpoints: BTreeMap<EndpointKey, MeshDialTarget>,
@@ -169,7 +171,7 @@ impl LoopPeers {
     /// No peer held, retries on `policy` (upstream's `connect/retry`).
     pub fn new(policy: RetryPolicy) -> Self {
         Self {
-            planner: LoopPlanner::new_boxed(),
+            planner: None,
             endpoints: BTreeMap::new(),
             retry: RedialSchedule::new(policy),
         }
@@ -194,14 +196,13 @@ impl LoopPeers {
         cx: &PeerContext<'_>,
         next_id: &mut u64,
     ) -> Vec<PeerAction> {
-        let key = PeerKey::Node(zid);
-        let (opened, actions) = self.plan(cx, |planner, ports, emit| {
-            planner.open_passive(key.clone(), ports, next_id, emit)
-        });
-        if let Err(why) = opened {
-            log::warn!("loop peers: no room to hold {key} ({why:?}); refusing the open");
-        }
-        actions
+        self.open_with(
+            PeerKey::Node(zid),
+            true,
+            cx,
+            next_id,
+            LoopPlanner::try_boxed,
+        )
     }
 
     /// The node `zid` opened a session to this loop, held as face `id`: a node waiting under a
@@ -215,10 +216,11 @@ impl LoopPeers {
         next_id: &mut u64,
     ) -> Vec<PeerAction> {
         let key = PeerKey::Node(zid);
-        let (_, actions) = self.plan(cx, |planner, ports, emit| {
+        self.plan(cx, |planner, ports, emit| {
             planner.inbound_up(key.clone(), id, ports, next_id, emit)
-        });
-        actions
+        })
+        .map(|(_, actions)| actions)
+        .unwrap_or_default()
     }
 
     /// A source gave the directory a hint for the node `zid`. A node that was opened before
@@ -314,18 +316,26 @@ impl LoopPeers {
         self.plan(cx, |planner, ports, emit| {
             planner.retry_due(key, generation, ports, next_id, emit)
         })
-        .1
+        .map(|(_, actions)| actions)
+        .unwrap_or_default()
     }
 
     /// Whether face `id` is a dial this planner asked for.
     pub fn is_dialing(&self, id: FaceId) -> bool {
-        self.planner.is_dialing(id)
+        self.planner
+            .as_ref()
+            .is_some_and(|planner| planner.is_dialing(id))
     }
 
     /// Whether face `id` is a dial this planner made for a node, which the loop
     /// holds by one face.
     pub fn dials_a_node(&self, id: FaceId) -> bool {
-        matches!(self.planner.dial_key(id), Some(PeerKey::Node(_)))
+        matches!(
+            self.planner
+                .as_ref()
+                .and_then(|planner| planner.dial_key(id)),
+            Some(PeerKey::Node(_))
+        )
     }
 
     /// The dial of face `id` ended as `end`. `None` when the face is not one of
@@ -339,7 +349,7 @@ impl LoopPeers {
     ) -> Option<(bool, Vec<PeerAction>)> {
         let (keep, actions) = self.plan(cx, |planner, ports, emit| {
             planner.dial_ended(id, end, ports, next_id, emit)
-        });
+        })?;
         keep.map(|keep| (keep, actions))
     }
 
@@ -352,7 +362,7 @@ impl LoopPeers {
     ) -> Option<Vec<PeerAction>> {
         let (held, actions) = self.plan(cx, |planner, ports, emit| {
             planner.face_down(id, ports, next_id, emit)
-        });
+        })?;
         held.then_some(actions)
     }
 
@@ -372,12 +382,13 @@ impl LoopPeers {
         self.plan(cx, |planner, ports, emit| {
             planner.withdraw(zid, Some(PeerKey::Node(*zid)), ports, next_id, emit)
         })
-        .1
+        .map(|(_, actions)| actions)
+        .unwrap_or_default()
     }
 
     /// The state of `key`'s machine.
     pub fn state(&self, key: &PeerKey) -> Option<PeerConnectionState> {
-        self.planner.state(key)
+        self.planner.as_ref().and_then(|planner| planner.state(key))
     }
 
     /// Every machine, as the loop publishes it for the status query (decision
@@ -388,7 +399,7 @@ impl LoopPeers {
     #[cfg(feature = "session-close-ingress")]
     pub fn board_rows(&self) -> crate::peer_board::BoardRows {
         let mut rows = crate::peer_board::BoardRows::new();
-        for (key, state, remote) in self.planner.machines() {
+        for (key, state, remote) in self.planner.iter().flat_map(|planner| planner.machines()) {
             let (zid, endpoint) = match key {
                 PeerKey::Node(zid) => (*zid, None),
                 PeerKey::Endpoint(endpoint) => match remote {
@@ -413,22 +424,22 @@ impl LoopPeers {
     }
 
     /// Run one call of the planner against the loop's ports, and return what it
-    /// answered with the actions it asked for. An operator is told of the wait
+    /// answered with the actions it asked for; `None` before an open made the planner,
+    /// when no peer is held. An operator is told of the wait
     /// that follows a lost session at `info` and of the others at `debug`.
     fn plan<R>(
         &mut self,
         cx: &PeerContext<'_>,
         call: impl FnOnce(&mut LoopPlanner, &mut LoopPorts<'_>, &mut dyn FnMut(PeerAction)) -> R,
-    ) -> (R, Vec<PeerAction>) {
+    ) -> Option<(R, Vec<PeerAction>)> {
+        let planner = self.planner.as_deref_mut()?;
         let mut ports = LoopPorts {
             cx,
             endpoints: &self.endpoints,
             retry: &mut self.retry,
         };
         let mut actions = Vec::new();
-        let answer = call(&mut self.planner, &mut ports, &mut |action| {
-            actions.push(action)
-        });
+        let answer = call(planner, &mut ports, &mut |action| actions.push(action));
         for action in &actions {
             if let PeerAction::Retry {
                 key,
@@ -446,26 +457,57 @@ impl LoopPeers {
                 }
             }
         }
-        (answer, actions)
+        Some((answer, actions))
     }
 
     /// `open` for `key`: the authority admitted it.
     fn open(&mut self, key: PeerKey, cx: &PeerContext<'_>, next_id: &mut u64) -> Vec<PeerAction> {
-        let (opened, actions) = self.plan(cx, |planner, ports, emit| {
-            planner.open(key.clone(), ports, next_id, emit)
-        });
-        if let Err(why) = opened {
-            log::warn!("loop peers: no room to hold {key} ({why:?}); refusing the open");
-            if let PeerKey::Endpoint(endpoint) = &key {
-                self.endpoints.remove(endpoint);
+        self.open_with(key, false, cx, next_id, LoopPlanner::try_boxed)
+    }
+
+    /// `open` for `key`, or with `passive` its passive form, the planner made by `make` if no
+    /// open made it before. A key refused, for a table with no row or a heap with no room for the
+    /// table, is told to the operator and its endpoint is let go.
+    fn open_with(
+        &mut self,
+        key: PeerKey,
+        passive: bool,
+        cx: &PeerContext<'_>,
+        next_id: &mut u64,
+        make: impl FnOnce() -> Option<Box<LoopPlanner>>,
+    ) -> Vec<PeerAction> {
+        if self.planner.is_none() {
+            self.planner = make();
+        }
+        let planned = self.plan(cx, |planner, ports, emit| {
+            if passive {
+                planner.open_passive(key.clone(), ports, next_id, emit)
+            } else {
+                planner.open(key.clone(), ports, next_id, emit)
             }
+        });
+        let actions = match planned {
+            Some((Ok(()), actions)) => return actions,
+            Some((Err(why), actions)) => {
+                log::warn!("loop peers: no room to hold {key} ({why:?}); refusing the open");
+                actions
+            }
+            None => {
+                log::warn!("loop peers: no heap for the peer table; refusing the open of {key}");
+                Vec::new()
+            }
+        };
+        if let PeerKey::Endpoint(endpoint) = &key {
+            self.endpoints.remove(endpoint);
         }
         actions
     }
 
     /// Stop working to hold `key`, and leave a session it has standing.
     fn forget(&mut self, key: &PeerKey) {
-        self.planner.forget(key);
+        if let Some(planner) = self.planner.as_deref_mut() {
+            planner.forget(key);
+        }
         if let PeerKey::Endpoint(endpoint) = key {
             self.endpoints.remove(endpoint);
         }
@@ -528,12 +570,63 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(|| {
-                let peers = LoopPeers::new(RetryPolicy::constant(1000));
+                let directory = directory_with(&["tcp/127.0.0.1:7200"]);
+                let cx = PeerContext {
+                    directory: &directory,
+                    now_ms: 0,
+                };
+                let mut peers = LoopPeers::new(RetryPolicy::constant(1000));
                 assert_eq!(peers.state(&NODE), None);
+                // The first open is what builds the planner.
+                assert!(!peers.open_node(A, &cx, &mut 0).is_empty());
+                assert_eq!(peers.state(&NODE), Some(S::Connecting));
             })
             .expect("a thread of 256 KiB")
             .join()
             .expect("the peers of a loop are built within 256 KiB of stack");
+    }
+
+    /// An open the heap has no room for the planner of is refused: nothing is dialled, nothing is
+    /// held, an endpoint it named is let go, and every call after it answers as for no peer. The
+    /// next open the heap has room for dials. Turned red by `open_with` not answering a planner
+    /// `make` refused, or by the planner being made before the first open.
+    #[test]
+    fn an_open_the_heap_has_no_room_for_the_planner_of_is_refused() {
+        let directory = directory_with(&["tcp/127.0.0.1:7209"]);
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let mut peers = LoopPeers::new(RetryPolicy::constant(1000));
+        assert!(peers.planner.is_none(), "no table before the first open");
+        let mut next_id = 10;
+        assert!(peers
+            .open_with(NODE, false, &cx, &mut next_id, || None)
+            .is_empty());
+        let member = endpoint("tcp/127.0.0.1:7210");
+        let member_key = EndpointKey {
+            at: member.key.clone(),
+            listing: 0,
+        };
+        peers.endpoints.insert(member_key.clone(), member);
+        let refused = PeerKey::Endpoint(member_key);
+        assert!(peers
+            .open_with(refused.clone(), false, &cx, &mut next_id, || None)
+            .is_empty());
+        assert_eq!(peers.endpoints().count(), 0, "a refused endpoint is let go");
+        assert!(peers.planner.is_none());
+        assert_eq!(peers.state(&NODE), None);
+        assert_eq!(peers.state(&refused), None);
+        assert!(!peers.is_dialing(FaceId(10)));
+        assert!(peers
+            .dial_ended(FaceId(10), UP, &cx, &mut next_id)
+            .is_none());
+        assert!(peers.face_down(FaceId(10), &cx, &mut next_id).is_none());
+        assert_eq!(next_id, 10, "no face id was taken");
+
+        let (id, _) = the_dial(&peers.open_node(A, &cx, &mut next_id));
+        assert_eq!(id, FaceId(10));
+        assert_eq!(peers.state(&NODE), Some(S::Connecting));
     }
 
     #[test]

@@ -140,7 +140,7 @@ fn SysTick() {
 }
 
 /// Single global SysTick instance — both the `ClockSource` handle
-/// passed to `CoopRuntime::new` and the lwIP-side `sys_now()` extern
+/// passed to `CoopRuntime::try_new` and the lwIP-side `sys_now()` extern
 /// share this so reload accounting stays consistent across both call
 /// surfaces. The wrap-tear-safe read, the R311y15 monotonic floor, and
 /// the R311y21 u64 reload counter live once in `wz_mcu_clock::SystickClock`
@@ -152,7 +152,7 @@ static GLOBAL_CLOCK: SystickClock<{ CYCLES_PER_US }> = SystickClock::new();
 /// the shared [`GLOBAL_CLOCK`]. Cheap to clone (unit struct).
 ///
 /// R311bq — only used by the async main path (which constructs
-/// `CoopRuntime::new(SystickClockRef)` + `CoopTime::new(&runtime)`).
+/// `CoopRuntime::try_new(SystickClockRef)` + `CoopTime::new(&runtime)`).
 /// The sync-only thumbv6m path reads `GLOBAL_CLOCK.now_us()` directly
 /// for any timing it needs (currently none — `wfi()` + the SysTick
 /// interrupt drive cadence), so the impl is gated on native-atomic
@@ -248,7 +248,14 @@ fn check_stack(tag: &str) {
 fn run(link: LwipLink) -> ! {
     hprintln!("R311bi: lwIP UDP loopback e2e demo starting");
 
-    let runtime = CoopRuntime::new(SystickClockRef);
+    let Some(runtime) = CoopRuntime::try_new(SystickClockRef) else {
+        hprintln!("R311bi FAIL: no heap for the runtime");
+        debug::exit(debug::EXIT_FAILURE);
+        // Off QEMU the exit returns; the demo stops here.
+        loop {
+            cortex_m::asm::wfi();
+        }
+    };
     let time = CoopTime::new(&runtime);
 
     let sock: LwipUdpSocket =

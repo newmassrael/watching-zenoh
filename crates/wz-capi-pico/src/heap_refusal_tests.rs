@@ -15,6 +15,7 @@ use crate::bytes::{
     z_slice_move, z_string_copy_from_str, z_string_drop, z_string_empty, z_string_from_str,
     z_string_loan, z_string_move,
 };
+use crate::encoding::z_encoding_to_string;
 use crate::handlers::{_z_fifo_mt_t, _z_rc_decrease_strong, _z_rc_init};
 use crate::keyexpr::{
     z_internal_keyexpr_check, z_keyexpr_clone, z_keyexpr_drop, z_keyexpr_from_substr,
@@ -183,5 +184,22 @@ fn a_full_heap_is_answered_by_the_handler_doors() {
         let mut fifo = core::mem::MaybeUninit::<_z_fifo_mt_t>::zeroed();
         let installed = refused(|| crate::handlers::_z_fifo_mt_init(fifo.as_mut_ptr(), 4));
         assert_eq!(installed, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+    }
+}
+
+/// An encoding rendered as a string the heap has no room for is refused and the string left null;
+/// with room it is rendered. Turned red by the rendering made with the encoding module's infallible
+/// `parts_to_bytes`, which ends the process on the refusal.
+#[test]
+fn a_full_heap_is_answered_by_the_encoding_to_string_door() {
+    // SAFETY: the string is the test's own; the null encoding reads as the default.
+    unsafe {
+        let mut string = crate::abi::z_owned_string_t::null_value();
+        let rendered = refused(|| z_encoding_to_string(core::ptr::null(), &mut string));
+        assert_eq!(rendered, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert!(!z_internal_string_check(&string));
+        assert_eq!(z_encoding_to_string(core::ptr::null(), &mut string), Z_OK);
+        assert!(z_internal_string_check(&string));
+        z_string_drop(z_string_move(&mut string));
     }
 }

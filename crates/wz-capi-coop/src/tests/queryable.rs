@@ -59,6 +59,44 @@ fn a_query_is_answered_and_its_final_follows_the_reply() {
     assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
 }
 
+/// A query asked in one frame between two Pushes is answered as one asked alone is: its reply,
+/// then its Final, each once. Its Final is owed by its own record's dispatch and taken there, so the
+/// drain after the Push that follows it in the frame finds none owed, which a debug build asserts
+/// (`RegistryOf::settle`). Turned red by a Final left owed past its Request's record, or by
+/// a drain after a run of Pushes that sends one again.
+#[cfg(feature = "std")]
+#[test]
+fn a_query_between_pushes_is_answered_then_finalled_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    declare(&engine, "demo/between/**", move |_, query, out| {
+        out.reply_keyed(query.keyexpr(), b"one")
+            .expect("a reply on the query's own key");
+    });
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
+    let (alone, ..) = engine.push_dispatches();
+    let within = engine.drains_within_frames();
+    router.send(Command::QueryBetweenPushes(
+        "demo/pushed",
+        11,
+        "demo/between/a",
+    ));
+    until(&engine, "both Pushes, the reply and the final", || {
+        engine.push_dispatches().0 >= alone + 2 && router.seen(|s| s.answers.len()) >= 2
+    });
+    let quiet = std::time::Instant::now() + Duration::from_millis(400);
+    while std::time::Instant::now() < quiet {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
+    assert!(
+        engine.drains_within_frames() > within,
+        "the Request came in the frame of the Push before it"
+    );
+}
+
 /// A query the callback keeps holds its Final until the C program lets go of it, and a reply made
 /// in between goes out before the Final. The CONTROL is the wait: with the query kept, no Final
 /// reaches the router however long the session is stepped.

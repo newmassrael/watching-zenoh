@@ -384,6 +384,9 @@ pub struct UdpDriver<S: DatagramSocket, B: RxStore, T: TxStore> {
     kept: Cell<Option<usize>>,
     /// Whether the session asked, while a datagram is lent, to keep it.
     keeping: Cell<bool>,
+    /// The datagrams the copying receive let go of for want of heap room, until the loop takes them.
+    #[cfg(feature = "alloc")]
+    rx_drops: crate::link_storage::RxDrops,
     /// The last receive failure, kept for the deploy to report: the loop's
     /// seam returns a frame or nothing, and a socket that fails must not
     /// read as a quiet one.
@@ -491,6 +494,8 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
             stash: Cell::new(None),
             kept: Cell::new(None),
             keeping: Cell::new(false),
+            #[cfg(feature = "alloc")]
+            rx_drops: crate::link_storage::RxDrops::new(),
             rx_error: Cell::new(None),
             idle_wait_ms: SERVICE_WAIT_MS as u32,
             armed_wait_ms: Cell::new(SERVICE_WAIT_MS),
@@ -817,7 +822,12 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
     // binding for both receives, and the buffer is idle after it as after any datagram let go of.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        crate::link_storage::copied_receive(self)
+        crate::link_storage::copied_receive(self, &self.rx_drops)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn take_rx_dropped(&self) -> usize {
+        self.rx_drops.take()
     }
 
     fn holds_input(&self) -> bool {
@@ -1130,10 +1140,14 @@ pub(crate) type SharedBook<N> =
     CellRc<<N as CountKind>::Local<PortBook<<N as CountKind>::Flag>>, N>;
 
 /// A book over the rows a session lent, or rows of the stack's own, for the ports of a stack
-/// whose sessions count a link's handles as `N` does.
+/// whose sessions count a link's handles as `N` does, or the bytes of the book's cell the heap
+/// refused, the rows let go of.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-pub(crate) fn shared_book<N: CountKind>(rows: Option<PortRows<Lent, N::Flag>>) -> SharedBook<N> {
-    CellRc::on_heap(N::new_local(PortBook::of(rows)))
+pub(crate) fn shared_book<N: CountKind>(
+    rows: Option<PortRows<Lent, N::Flag>>,
+) -> Result<SharedBook<N>, usize> {
+    <SharedBook<N>>::in_cells_of(None, N::new_local(PortBook::of(rows)))
+        .map_err(|_| <SharedBook<N>>::cell_bytes_of())
 }
 
 /// Where a [`UdpPort`] reads its datagrams and holds those it sorted for a peer: memory of its
@@ -1227,16 +1241,18 @@ impl<F: CellFlag> PortRx<F> {
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 impl<S: DatagramSocket> UdpPort<S> {
     /// The port of `socket`, which reads each datagram into `rx_capacity` bytes of its own before
-    /// it sorts it: the largest datagram a link of the port receives whole.
-    pub fn new(socket: S, rx_capacity: usize) -> Self {
-        Self::in_book(socket, rx_capacity, &shared_book(None))
+    /// it sorts it: the largest datagram a link of the port receives whole. `None` when the heap
+    /// has no room for the book the port keeps its peers in.
+    pub fn new(socket: S, rx_capacity: usize) -> Option<Self> {
+        Some(Self::in_book(socket, rx_capacity, &shared_book(None).ok()?))
     }
 
     /// The port of `socket` over the slots of `table`, which its session lent: each datagram is
     /// read into one and held there for its peer, and the largest a link of the port receives
-    /// whole is a slot. `None` when the table has no slot free to read into.
+    /// whole is a slot. `None` when the heap has no room for the book the port keeps its peers
+    /// in, or the table no slot free to read into.
     pub fn lent(socket: S, table: LentByteCells) -> Option<Self> {
-        Self::lent_in_book(socket, table, &shared_book(None))
+        Self::lent_in_book(socket, table, &shared_book(None).ok()?)
     }
 }
 
@@ -1646,7 +1662,7 @@ mod tests {
     #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
     #[test]
     fn a_port_holds_each_datagram_in_a_buffer_a_read_gave_back() {
-        let port = shared(UdpPort::new(Loop::default(), 64));
+        let port = shared(UdpPort::new(Loop::default(), 64).expect("the heap has room"));
         queued(&port.socket, SYN);
         let peer = UdpPort::take_fresh(&port)
             .expect("the socket reads")
@@ -1685,10 +1701,28 @@ mod tests {
         })
     }
 
+    /// A heap with no room for the book a port keeps its peers in is answered: the book is the
+    /// bytes of its cell, and a port of its own is none, and the program goes on. Turned red by a
+    /// book made over a cell the heap cannot refuse, which ends the process, or by a refusal
+    /// that names other bytes than the book's cell.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[test]
+    fn a_book_the_heap_has_no_room_for_is_refused_and_named() {
+        let refused = crate::table_tests::refused(|| shared_book::<OneTask>(None).err());
+        assert_eq!(refused, Some(<SharedBook<OneTask>>::cell_bytes_of()));
+        let socket = Loop::default();
+        let port = crate::table_tests::refused(|| UdpPort::new(socket, 64).is_none());
+        assert!(port, "a port with no book is no port");
+        assert!(
+            shared_book::<OneTask>(None).is_ok(),
+            "CONTROL: a heap with room makes the book"
+        );
+    }
+
     /// `port` behind its first handle, as a listener holds it.
     #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
     fn shared<S: DatagramSocket>(port: UdpPort<S>) -> CellRc<UdpPort<S>> {
-        CellRc::on_heap(port)
+        CellRc::try_on_heap(port).expect("the heap has room")
     }
 
     /// A port whose stack counts a link's handles across threads is shared, with the links of its
@@ -1732,7 +1766,7 @@ mod tests {
         let table = arena.lend_byte_cells(64, 2).expect("the port's table");
         let mut buf = [0u8; 64];
 
-        let own = shared(UdpPort::new(Loop::default(), 64));
+        let own = shared(UdpPort::new(Loop::default(), 64).expect("the heap has room"));
         queued(&own.socket, SYN);
         let peer = UdpPort::take_fresh(&own)
             .expect("the socket reads")
@@ -1851,11 +1885,11 @@ mod tests {
             arena.lend(1).expect("the peers' rows"),
             arena.lend(4).expect("the queue's rows"),
         );
-        let book = shared_book::<OneTask>(Some(rows));
+        let book = shared_book::<OneTask>(Some(rows)).expect("the heap has room");
         let lent = shared(
             UdpPort::lent_in_book(Loop::default(), table, &book).expect("a slot to read into"),
         );
-        let own = shared(UdpPort::new(Loop::default(), 64));
+        let own = shared(UdpPort::new(Loop::default(), 64).expect("the heap has room"));
         let mut buf = [0u8; 64];
 
         for (port, over_lent) in [(&lent, true), (&own, false)] {
@@ -1921,7 +1955,7 @@ mod tests {
             arena.lend(1).expect("the peers' rows"),
             arena.lend(4).expect("the queue's rows"),
         );
-        let book = shared_book::<OneTask>(Some(rows));
+        let book = shared_book::<OneTask>(Some(rows)).expect("the heap has room");
         let first = shared(UdpPort::in_book(Loop::default(), 64, &book));
         let second = shared(UdpPort::in_book(Loop::default(), 64, &book));
         let mut buf = [0u8; 64];
@@ -1948,7 +1982,7 @@ mod tests {
             "the row the first peer held"
         );
 
-        let own = shared(UdpPort::new(Loop::default(), 64));
+        let own = shared(UdpPort::new(Loop::default(), 64).expect("the heap has room"));
         queued(&own.socket, SYN);
         let _first = UdpPort::take_fresh(&own)
             .expect("the socket reads")

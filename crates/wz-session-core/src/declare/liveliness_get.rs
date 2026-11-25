@@ -90,6 +90,22 @@ use crate::wireexpr_resolve::resolve_wireexpr_in;
 #[cfg(feature = "storage-profile")]
 use crate::wireexpr_resolve::MappingSpaces;
 
+/// The reply a pending liveliness get is handed for an alive token at `keyexpr` answering
+/// `interest_id`: a Put whose request id is the interest id the get holds, carrying no value, a
+/// token saying only that its key is alive.
+pub fn token_reply(interest_id: u64, keyexpr: &str) -> BorrowedReply<'_> {
+    BorrowedReply {
+        rid: crate::wire_id::interest_id_as_read(interest_id),
+        keyexpr,
+        kind: ReplyKind::Put,
+        payload: &[],
+        err_encoding: None,
+        // A liveliness reply carries no value side-bands (Put-token only).
+        attachment: None,
+        put_encoding: None,
+    }
+}
+
 /// One outstanding liveliness get. Private to this module; consumers
 /// interact through [`LivelinessGetRegistry::register`] /
 /// [`LivelinessGetRegistry::unregister`] and the higher-level
@@ -207,6 +223,41 @@ impl<C: ReplySink> LivelinessGetRegistry<C, Lent> {
             (Some(pending), Some(finalized)) => pending.checked_add(finalized),
             _ => None,
         }
+    }
+}
+
+/// The rows of a [`LivelinessGetRegistry`] of the region policy, which a region lays out beside
+/// it: its pending gets' and the markers they leave, each at the build's bound.
+pub struct LivelinessGetRows<C: ReplySink> {
+    pending: [core::mem::MaybeUninit<PendingGet<C>>; caps::MAX_PENDING_LIVELINESS_GETS],
+    finalized: [core::mem::MaybeUninit<u64>; caps::MAX_PENDING_LIVELINESS_GETS],
+}
+
+// SAFETY: both tables' rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl<C: ReplySink> crate::bounded::ZeroEmpty for LivelinessGetRows<C> {}
+
+/// The lines a region's description holds for one [`LivelinessGetRegistry`] of the region
+/// policy: its two tables' rows.
+pub const LIVELINESS_GET_LINES: usize = 2;
+
+impl<C: ReplySink> LivelinessGetRegistry<C, crate::bounded::Region> {
+    /// The description of a registry of the region policy at `at` in a region and its
+    /// [`LivelinessGetRows`] at `rows`: the lines of its pending gets' rows and of their markers'.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<LIVELINESS_GET_LINES> {
+        crate::bounded::RegionLines::EMPTY
+            .seq(crate::bounded::SeqPlace::of::<PendingGet<C>>(
+                at.wrapping_add(core::mem::offset_of!(Self, pending)),
+                rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, pending)),
+                caps::MAX_PENDING_LIVELINESS_GETS,
+            ))
+            .seq(crate::bounded::SeqPlace::of::<u64>(
+                at.wrapping_add(core::mem::offset_of!(Self, finalized)),
+                rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, finalized)),
+                caps::MAX_PENDING_LIVELINESS_GETS,
+            ))
     }
 }
 
@@ -374,16 +425,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// keyexpr through the peer table and funnels through here. Returns
     /// the count of sinks fired (0 if no get matches, else 1).
     pub fn dispatch_reply_borrowed(&mut self, interest_id: u64, keyexpr: &str) -> usize {
-        let reply = BorrowedReply {
-            rid: crate::wire_id::interest_id_as_read(interest_id),
-            keyexpr,
-            kind: ReplyKind::Put,
-            payload: &[],
-            err_encoding: None,
-            // A liveliness reply carries no value side-bands (Put-token only).
-            attachment: None,
-            put_encoding: None,
-        };
+        let reply = token_reply(interest_id, keyexpr);
         let mut fired: usize = 0;
         for pending in self.pending.iter_mut() {
             if pending.interest_id == interest_id {
@@ -569,6 +611,108 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
             // requester's concern.
             _ => {}
         }
+    }
+
+    /// The alive token `declare`, a record of a frame the copying receive decoded, answers a
+    /// pending get of this table with, for a caller that hands the reply to the get itself: its
+    /// key, resolved as [`Self::dispatch_declare`] resolves it, written into `room`, and the
+    /// interest id it answers, both of which the caller hands the get
+    /// ([`Self::dispatch_reply_borrowed`]) and its callback ([`token_reply`]). `None` for a
+    /// declaration that answers no pending get here, and one whose key does not resolve or does
+    /// not fit `room` (counted, [`Self::oversize`]): the get is handed nothing of it.
+    #[cfg(feature = "alloc")]
+    pub fn claim_token<'a, PS: Storage, OS: Storage>(
+        &mut self,
+        declare: &DeclareOwned,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+        room: &mut crate::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<u64> {
+        let interest_id = declare.interest_id.filter(|&id| self.has_pending(id))?;
+        let DeclareOwnedVariant::CodecZenohDeclToken(decl) = &declare.body else {
+            return None;
+        };
+        let resolved = resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table.into())?;
+        self.claim_into(interest_id, &resolved, room)
+    }
+
+    /// [`Self::claim_token`] for a `Declare` the in-place receive path lends, its key resolved as
+    /// [`Self::dispatch_declare_view`] resolves it.
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "codec-declare",
+        feature = "rx-lent-control"
+    ))]
+    pub fn claim_token_view<'a, 'f, PS: Storage, OS: Storage>(
+        &mut self,
+        declare: &wz_codecs::lent::Declare<'f>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+        room: &mut crate::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<u64> {
+        use wz_codecs::lent::DeclareVariant;
+        let interest_id = declare.interest_id.filter(|&id| self.has_pending(id))?;
+        let DeclareVariant::CodecZenohDeclToken(decl) = &declare.body else {
+            return None;
+        };
+        let mut composed = crate::wireexpr_resolve::KeyexprBuf::new();
+        let resolved = match crate::wireexpr_resolve::resolve_wireexpr_view(
+            &decl.keyexpr.body,
+            peer_keyexpr_table.into(),
+            &mut composed,
+        ) {
+            Ok(resolved) => resolved?,
+            Err(_) => {
+                self.oversize = self.oversize.saturating_add(1);
+                return None;
+            }
+        };
+        self.claim_into(interest_id, resolved, room)
+    }
+
+    /// `keyexpr`, the key of an alive token answering the pending get `interest_id`, written
+    /// into `room`, where the caller reads it while the frame it was read off is let go of;
+    /// `None`, counted, for a key past `room`.
+    #[cfg(any(
+        feature = "alloc",
+        all(
+            feature = "storage-profile",
+            feature = "codec-declare",
+            feature = "rx-lent-control"
+        )
+    ))]
+    fn claim_into(
+        &mut self,
+        interest_id: u64,
+        keyexpr: &str,
+        room: &mut crate::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<u64> {
+        crate::wireexpr_resolve::KeyexprOut::clear(room);
+        if crate::wireexpr_resolve::KeyexprOut::push_str(room, keyexpr).is_err() {
+            self.oversize = self.oversize.saturating_add(1);
+            return None;
+        }
+        Some(interest_id)
+    }
+
+    /// [`Self::dispatch_iteration_event`] to the `DeclFinal`s of a frame the copying receive
+    /// decoded alone, for a caller that took each alive token of it answering a pending get
+    /// itself ([`Self::claim_token`]), in their order, before this: a `DeclFinal` then ends its
+    /// get after every token the frame carried. Any other event is a no-op.
+    #[cfg(feature = "storage-profile")]
+    pub fn dispatch_finals_of(&mut self, event: IterationEvent<'_, '_>) {
+        #[cfg(feature = "alloc")]
+        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
+            for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
+                if let NetworkMessage::Declare(declare) = message {
+                    if let (Some(interest_id), DeclareOwnedVariant::CodecZenohDeclFinal(_)) =
+                        (declare.interest_id, &declare.body)
+                    {
+                        self.fire_final_for(interest_id);
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "alloc"))]
+        let _ = event;
     }
 
     /// [`Self::dispatch_declare`] for a `Declare` the in-place receive path lends
@@ -888,6 +1032,76 @@ mod tests {
         assert_eq!(r.lock().unwrap().len(), 1, "one alive token");
         assert_eq!(*f.lock().unwrap(), vec![42], "final fired once");
         assert_eq!(reg.len(), 0, "DeclFinal removes the pending get");
+    }
+
+    /// A frame whose alive tokens a caller claimed and handed itself, one at a time, is told its
+    /// `DeclFinal`s alone after them: the token reaches the get once, by the key the claim wrote
+    /// into the caller's room, and the Final ends the get after it. A token that answers no
+    /// pending get, and a Final, are claimed by none. Turned red by a claim that hands the get the
+    /// token itself, one that claims a stranger's token or a Final, or a dispatch of the frame's
+    /// Finals that hands the token a second time or drops the Final.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_frame_whose_tokens_were_claimed_ends_its_get_after_them() {
+        if !crate::driver_loop::OWNED_RECORDS {
+            return;
+        }
+        let mut reg = LivelinessGetRegistry::new();
+        let r: Captured = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(42, None, make_get(r.clone(), f.clone()))
+            .unwrap();
+        let token = declare_envelope_decl_token_with_interest(
+            decl_token(11, 0, Some("liveliness/dev11")),
+            42,
+        );
+        let stranger = declare_envelope_decl_token_with_interest(
+            decl_token(12, 0, Some("liveliness/dev12")),
+            43,
+        );
+        let fin = declare_envelope_decl_final_with_interest(42);
+        let mut room = crate::wireexpr_resolve::KeyexprBuf::new();
+        assert_eq!(
+            reg.claim_token(&stranger, &HashMap::new(), &mut room),
+            None,
+            "a token answering no pending get was claimed"
+        );
+        assert_eq!(
+            reg.claim_token(&fin, &HashMap::new(), &mut room),
+            None,
+            "a Final was claimed as a token"
+        );
+        assert_eq!(
+            reg.claim_token(&token, &HashMap::new(), &mut room),
+            Some(42)
+        );
+        assert!(
+            r.lock().unwrap().is_empty(),
+            "the claim handed the get the token itself"
+        );
+        let key = crate::wireexpr_resolve::KeyexprOut::as_str(&room);
+        assert_eq!(key, "liveliness/dev11");
+        assert_eq!(reg.dispatch_reply_borrowed(42, key), 1);
+
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: crate::driver_loop::frame_records(vec![
+                NetworkMessage::Declare(alloc::boxed::Box::new(token)),
+                NetworkMessage::Declare(alloc::boxed::Box::new(fin)),
+            ]),
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        };
+        reg.dispatch_finals_of(IterationEvent::Poll(&outcome));
+        assert_eq!(
+            *r.lock().unwrap(),
+            vec![(42, "liveliness/dev11".to_string())],
+            "the frame's token was handed again"
+        );
+        assert_eq!(*f.lock().unwrap(), vec![42], "the Final was dropped");
+        assert_eq!(reg.len(), 0, "the Final left its get pending");
     }
 
     /// The sink is handed the interest id at the width upstream reads it,

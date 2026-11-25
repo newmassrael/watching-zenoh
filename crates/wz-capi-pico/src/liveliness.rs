@@ -30,8 +30,8 @@
 //! memory would leave every subscriber believing the token is still alive,
 //! which is the exact failure the plane exists to prevent.
 
-use alloc::sync::Arc;
 use core::ffi::c_void;
+use wz_capi_port::lodge::Strong;
 
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::cancellation::CancellationToken;
@@ -483,12 +483,12 @@ impl z_liveliness_get_options_t {
     /// # Safety
     /// The field must be null or a moved token this crate produced.
     #[cfg(feature = "unstable-api")]
-    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Strong<CancellationToken>> {
         crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
     }
 
     #[cfg(not(feature = "unstable-api"))]
-    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Strong<CancellationToken>> {
         None
     }
 }

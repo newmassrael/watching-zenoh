@@ -151,9 +151,9 @@ use crate::ext_chain::ExtChainBuf;
     feature = "session-extcompression"
 ))]
 use crate::ext_chain_role::ExtChainRole;
-#[cfg(not(feature = "session-slot"))]
-use crate::link::ShareValues;
 use crate::link::{BoxedLinkDriver, SessionRuntime};
+#[cfg(not(feature = "session-slot"))]
+use crate::link::{HeapRefused, ShareValues};
 use crate::peer_init_caps::PeerInitCaps;
 // A4 — the CachedDeclaration / ReplayDeclarationsError types stay ungated
 // (the reconnect module rides this module's own alloc+session-unicast gate)
@@ -945,13 +945,17 @@ impl<R: SessionRuntime> OutOfBand<R> {
         }
     }
 
-    /// Stage a request (`set` marks it) and wake the loops parked on it.
+    /// Stage a request (`set` marks it) and wake the loops parked on it. An access of the state
+    /// refused for being made from inside another of it stages nothing; none of these accesses
+    /// makes one.
     fn raise(&self, set: impl FnOnce(&mut OutOfBandState)) {
-        let parked = R::with_local(&self.state, |s| {
+        let staged = R::with_local(&self.state, |s| {
             set(s);
             core::mem::take(&mut s.parked)
         });
-        parked.wake();
+        if let Ok(parked) = staged {
+            parked.wake();
+        }
     }
 
     /// Wake every parked loop with nothing staged: each asks again and parks
@@ -959,17 +963,19 @@ impl<R: SessionRuntime> OutOfBand<R> {
     /// stay, so the wakers of loops that have ended do not pile up in the set.
     #[cfg(feature = "transport-multilink")]
     fn wake_parked(&self) {
-        R::with_local(&self.state, |s| core::mem::take(&mut s.parked)).wake();
+        if let Ok(parked) = R::with_local(&self.state, |s| core::mem::take(&mut s.parked)) {
+            parked.wake();
+        }
     }
 
-    /// Take a request (`take` reads and clears it).
-    fn take<U>(&self, take: impl FnOnce(&mut OutOfBandState) -> U) -> U {
-        R::with_local(&self.state, take)
+    /// Take a request (`take` reads and clears it); a refused access takes nothing.
+    fn take<U: Default>(&self, take: impl FnOnce(&mut OutOfBandState) -> U) -> U {
+        R::with_local(&self.state, take).unwrap_or_default()
     }
 
     /// Whether any request is staged, read and left for the drive loop to take.
     fn staged(&self) -> bool {
-        R::with_local(&self.state, |s| s.any())
+        R::with_local(&self.state, |s| s.any()).unwrap_or(false)
     }
 
     /// Resolves once any request is staged — the branch a parked drive loop
@@ -1006,6 +1012,8 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
     ) -> core::task::Poll<()> {
         #[cfg(feature = "transport-multilink")]
         let deletion_owed = self.deletion_owed;
+        // A refused access parks nothing, so the loop is let go to ask again rather than left
+        // with no waker to wake it.
         R::with_local(&self.slot.state, |s| {
             #[cfg(feature = "transport-multilink")]
             if deletion_owed && s.transport_deleted {
@@ -1018,6 +1026,7 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
                 core::task::Poll::Pending
             }
         })
+        .unwrap_or(core::task::Poll::Ready(()))
     }
 }
 
@@ -5217,6 +5226,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// clock (R263 + R294) consumed by [`Self::handle_inbound`] and the
     /// `record_established_at` action.
     ///
+    /// [`HeapRefused`] when the heap has no room for the bundle's halves or its handle, the
+    /// parts handed let go of: the open that asked for it is refused.
+    ///
     /// Absent under `session-slot`: there the bundle is built in a slot of fixed
     /// storage (`crate::session_slot::SessionSlots`), not behind a handle the
     /// runtime wraps it in.
@@ -5225,11 +5237,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         driver: R::LinkSink,
         params: SessionInitParams,
         clock: T,
-    ) -> R::ActionsHandle<T>
+    ) -> Result<R::ActionsHandle<T>, HeapRefused>
     where
         R: ShareValues,
     {
-        R::wrap_actions(Self::build(driver, params, clock))
+        R::wrap_actions(Self::build(driver, params, clock)?)
     }
 
     /// The bundle itself, built from its parts: what [`Self::new_generic`] wraps
@@ -5246,19 +5258,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// each half is wrapped in the per-profile `R::Shared` pointer (tokio
     /// `Arc`, lwIP `Rc`) so N links can share ONE core; at N=1 both are
     /// refcount-1 pointers, behavior-identical to the pre-split struct.
+    ///
+    /// [`HeapRefused`] when the heap has no room for either half's pointer, both halves let go
+    /// of.
     #[cfg(not(feature = "session-slot"))]
-    pub fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self
+    pub fn build(
+        driver: R::LinkSink,
+        params: SessionInitParams,
+        clock: T,
+    ) -> Result<Self, HeapRefused>
     where
         R: ShareValues,
     {
-        let held = Self::build_held(driver, params, clock, |halves| {
+        Self::build_held(driver, params, clock, |halves| {
             let (link, kernel) = halves.into_values();
-            Ok::<_, core::convert::Infallible>((Self::hold_link(link), Self::hold_core(kernel)))
-        });
-        match held {
-            Ok(actions) => actions,
-            Err(never) => match never {},
-        }
+            Ok::<_, HeapRefused>((Self::hold_link(link)?, Self::hold_core(kernel)?))
+        })
     }
 
     /// The bundle built from its parts, each half made where `hold` keeps it: written in a place
@@ -5678,7 +5693,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (Under `session-slot` the half is the bundle's own field and is written
     /// there by `build_in`.)
     #[cfg(not(feature = "session-slot"))]
-    fn hold_link(link: LinkState<R>) -> R::Shared<LinkState<R>>
+    fn hold_link(link: LinkState<R>) -> Result<R::Shared<LinkState<R>>, HeapRefused>
     where
         R: ShareValues,
     {
@@ -5687,7 +5702,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The kernel half of the bundle as it holds it; see `hold_link`.
     #[cfg(not(feature = "session-slot"))]
-    fn hold_core(core: SessionCore<R, T>) -> R::Shared<SessionCore<R, T>>
+    fn hold_core(core: SessionCore<R, T>) -> Result<R::Shared<SessionCore<R, T>>, HeapRefused>
     where
         R: ShareValues,
     {
@@ -5700,12 +5715,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// multilink join used to build this struct literally, which would have
     /// left a joined link sending block-first as blocking).
     ///
+    /// [`HeapRefused`] when the heap has no room for the binding's handle, `core` and `link`
+    /// let go of.
+    ///
     /// Absent under `session-slot`, which holds exactly one kernel and one link.
     #[cfg(not(feature = "session-slot"))]
     pub fn joined(
         core: R::Shared<SessionCore<R, T>>,
         link: R::Shared<LinkState<R>>,
-    ) -> R::ActionsHandle<T> {
+    ) -> Result<R::ActionsHandle<T>, HeapRefused> {
         R::wrap_actions(Self {
             core,
             link,
@@ -8503,10 +8521,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> usize {
         let own = self.own_batch_advertisement() as usize;
         let link = self.link_driver().link_mtu_for(class);
-        match peer {
-            Some(p) => own.min(p.batch_size as usize).min(link),
-            None => own.min(link),
-        }
+        // A peer not heard from bounds nothing. One formula with no branch on the caps: a branch
+        // here is a condition the caller's loop over the classes is unswitched on, which writes
+        // the whole loop out once for each arm.
+        let peer = peer.map_or(usize::MAX, |p| usize::from(p.batch_size));
+        own.min(peer).min(link)
     }
 
     /// The batch size this node advertises in its Init, and the own side of

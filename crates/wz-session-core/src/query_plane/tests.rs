@@ -37,6 +37,12 @@ fn holds(rows: usize) -> FinalHolds {
     )
 }
 
+/// A plane over `holds`, made in a box of its own.
+fn plane<C: PlaneCalls>(holds: FinalHolds) -> alloc::boxed::Box<QueryPlane<C>> {
+    // SAFETY: the box's place is valid for writes of the plane, which stays there.
+    crate::plane_lock::boxed_at(|at| unsafe { QueryPlane::init_at(at, holds) })
+}
+
 /// A call begun on a test's queryable row, which counts its end.
 struct Begun(Arc<AtomicUsize>);
 
@@ -70,6 +76,7 @@ impl RoundCalls for Local {
 
 impl PlaneCalls for Local {
     type LocalAnswers = Present;
+    type Captures = Present;
     type Queues = StdLocks;
 }
 
@@ -96,6 +103,7 @@ impl RoundCalls for Linked {
 
 impl PlaneCalls for Linked {
     type LocalAnswers = Absent;
+    type Captures = Absent;
     type Queues = StdLocks;
 }
 
@@ -169,7 +177,7 @@ fn within_five_seconds<R: Send + 'static>(
 #[test]
 fn a_full_table_refuses_the_row_and_keeps_the_one_held() {
     let (first, refused, still_full, next) = within_five_seconds("a refused take", || {
-        let plane = QueryPlane::<Local>::over(holds(1));
+        let plane = plane::<Local>(holds(1));
         let first = OwnFinalHold::take(&plane, 1);
         let refused = OwnFinalHold::take(&plane, 2).is_none();
         let still_full = OwnFinalHold::take(&plane, 3).is_none();
@@ -321,7 +329,7 @@ fn a_refused_take_withholds_no_final() {
 /// Returning the wrapped value without the step over `LOCAL_QUERY` reds the second assertion.
 #[test]
 fn a_links_generation_is_never_the_sessions_own() {
-    let plane = QueryPlane::<Linked>::over(FinalHolds::default());
+    let plane = plane::<Linked>(FinalHolds::default());
     assert_eq!(plane.next_generation(), 1);
     plane
         .generation
@@ -342,7 +350,7 @@ fn a_links_generation_is_never_the_sessions_own() {
 /// an arrival that begins its call before its Final is admitted, or that counts no refusal.
 #[test]
 fn a_query_no_row_holds_is_refused_before_its_call_begins() {
-    let plane = QueryPlane::<Linked>::over(holds(1));
+    let plane = plane::<Linked>(holds(1));
     let round = crate::round::tests::round::<Linked>();
     let calls = Calls::default();
     plane.set_arriving(5);
@@ -371,7 +379,7 @@ fn a_query_no_row_holds_is_refused_before_its_call_begins() {
 /// its hold back, and is no refusal.
 #[test]
 fn a_query_no_call_begins_for_gives_its_hold_back() {
-    let plane = QueryPlane::<Linked>::over(holds(1));
+    let plane = plane::<Linked>(holds(1));
     let round = crate::round::tests::round::<Linked>();
     plane.set_arriving(5);
     // SAFETY: this thread is the round's one writer.
@@ -389,7 +397,7 @@ fn a_query_no_call_begins_for_gives_its_hold_back() {
 /// round, which ends its call. Turned red by an arrival that offers the get's query to the round.
 #[test]
 fn the_sessions_own_get_notes_the_calls_it_begins() {
-    let plane = QueryPlane::<Local>::over(holds(2));
+    let plane = plane::<Local>(holds(2));
     let round = crate::round::tests::round::<Local>();
     let calls = Calls::default();
     plane.set_arriving(5);
@@ -421,7 +429,7 @@ fn the_sessions_own_get_notes_the_calls_it_begins() {
 /// Turned red by a plane of such a session that takes the query as its own get's.
 #[test]
 fn a_session_whose_own_queryables_answer_none_notes_no_call() {
-    let plane = QueryPlane::<Linked>::over(holds(1));
+    let plane = plane::<Linked>(holds(1));
     let round = crate::round::tests::round::<Linked>();
     let calls = Calls::default();
     plane.set_arriving(5);
@@ -437,4 +445,46 @@ fn a_session_whose_own_queryables_answer_none_notes_no_call() {
         plane.with_holds(|holds| holds.owe(5, 9, QosLevel::DEFAULT)),
         "held and let go of under the link's generation"
     );
+}
+
+/// A session whose read takes each query of its links notes only its own get's calls: a query
+/// that arrives outside the get takes no hold and begins no call, so its Final goes out as one no
+/// queryable was reached by; one that arrives while the get is asked is noted for the get under
+/// the session's own generation, its call not ended. A plane of a session whose own queryables
+/// answer none of its gets begins no call either. The CONTROL is the get's call, noted. Turned red
+/// by an `arrive_own` that begins a call outside the get, or that leaves the get's call unnoted.
+#[test]
+fn a_read_that_takes_its_links_queries_notes_only_its_own_gets_calls() {
+    let plane = plane::<Local>(holds(2));
+    let calls = Calls::default();
+    plane.set_arriving(5);
+    plane.arrive_own(|| calls.begin(), &Query(7));
+    assert_eq!(calls.begun(), 0, "a link's query begins no call here");
+    assert!(plane.take_asked().is_empty(), "nothing is noted for it");
+    assert!(
+        plane.with_holds(|holds| holds.owe(5, 7, QosLevel::DEFAULT)),
+        "no hold is taken, so its Final goes out"
+    );
+    plane.asking_locally(|| plane.arrive_own(|| calls.begin(), &Query(9)));
+    let asked = plane.take_asked();
+    assert_eq!(asked.len(), 1, "CONTROL: the get's call is noted");
+    assert_eq!(calls.ended(), 0, "and left for the get to end");
+    assert!(
+        !plane.with_holds(|holds| holds.owe(LOCAL_QUERY, 9, QosLevel::DEFAULT)),
+        "its Final is held under the session's own generation"
+    );
+    for call in asked {
+        call.end();
+    }
+    assert_eq!(calls.ended(), 1);
+
+    // The local `plane` shadows the helper here.
+    let linked = self::plane::<Linked>(holds(1));
+    linked.asking_locally(|| linked.arrive_own(|| calls.begin(), &Query(11)));
+    assert_eq!(
+        calls.begun(),
+        1,
+        "a plane that answers no get of its own begins no call"
+    );
+    assert!(linked.take_asked().is_empty());
 }

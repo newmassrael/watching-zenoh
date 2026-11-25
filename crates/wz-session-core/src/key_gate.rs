@@ -262,7 +262,7 @@ impl<'a> KeyGate<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::key_catalogue::tests::TABLE;
 
@@ -344,14 +344,15 @@ mod tests {
 
     // Three keys, "a", "a/*" and "a/b" (the test table of `key_catalogue`), and two declared peers: A
     // may publish on key 2 ("a/b") and B on key 0 ("a").
-    const PEER_A: [u8; 16] = [1; 16];
-    const PEER_B: [u8; 16] = [2; 16];
+    pub(crate) const PEER_A: [u8; 16] = [1; 16];
+    pub(crate) const PEER_B: [u8; 16] = [2; 16];
     const PEERS: [[u8; 16]; 2] = [PEER_A, PEER_B];
     const PEER_BITS: [u8; 2] = [0b100, 0b001];
-    const ALLOWANCE: PeerAllowance<'static> = match PeerAllowance::try_new(&PEERS, 3, &PEER_BITS) {
-        Ok(table) => table,
-        Err(_) => panic!("the test table is a table"),
-    };
+    pub(crate) const ALLOWANCE: PeerAllowance<'static> =
+        match PeerAllowance::try_new(&PEERS, 3, &PEER_BITS) {
+            Ok(table) => table,
+            Err(_) => panic!("the test table is a table"),
+        };
 
     #[test]
     fn a_message_from_a_declared_peer_is_admitted_on_the_keys_its_row_allows() {

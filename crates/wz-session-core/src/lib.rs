@@ -1346,9 +1346,10 @@ pub mod encoded_push;
 #[cfg(feature = "codec-push")]
 pub mod lent_push;
 
-/// A strict, allocation-free reader of the one record a data stream is made of (a `Push`
-/// carrying a `Put` with at most the QoS extension): the key's parts and the payload as
-/// ranges of the buffer, `None` for anything else so the generated codec reads it.
+/// The lane of a data stream: a frame every record of which is a plain `Put` (a `Push`
+/// carrying a `Put` with at most the QoS extension), read by the one reader of a Push and kept
+/// as the places of each record's key and payload; `None` for a frame with any other record,
+/// which the owned parse reads.
 pub mod plain_push;
 
 /// The payload of a Put body and the one rule that picks between its two wire
@@ -2259,6 +2260,12 @@ pub mod unicast_rx;
 /// send reach it: by `&mut`, lent by its one owner. Gated like [`unicast_rx`].
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod transport_place;
+
+/// The unicast transport of a session that holds one face as one value: its link's life, its
+/// receive and its timers, handed the link's reports, its datagrams and the time. Gated like
+/// [`unicast_rx`].
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+pub mod unicast_transport;
 
 /// The words of the session lifecycle that need no allocator: the open verdict, the
 /// refusals, the open key and the capability document. Unconditional, so a node of the

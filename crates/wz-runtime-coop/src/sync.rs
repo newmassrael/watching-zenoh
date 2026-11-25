@@ -179,8 +179,13 @@ pub trait LockKind: 'static {
     fn new_local<T: Send + 'static>(value: T) -> Self::Local<T>;
 
     /// Run `f` on the value of `local`, which no other holder reaches meanwhile.
+    /// [`LocalHeld`](wz_session_core::link::LocalHeld), and `f` not run, when this task reaches
+    /// the value again from inside its own access, which one task's `RefCell` can tell.
     #[cfg(feature = "session-unicast")]
-    fn with_local<T: Send + 'static, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U;
+    fn with_local<T: Send + 'static, U>(
+        local: &Self::Local<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Result<U, wz_session_core::link::LocalHeld>;
 }
 
 /// What one task at a time holds ([`Shared`] and [`Confined`]): handles counted with plain loads
@@ -209,8 +214,11 @@ macro_rules! one_task_holders {
         fn with_local<T: Send + 'static, U>(
             local: &Self::Local<T>,
             f: impl FnOnce(&mut T) -> U,
-        ) -> U {
-            f(&mut *local.borrow_mut())
+        ) -> Result<U, wz_session_core::link::LocalHeld> {
+            match local.try_borrow_mut() {
+                Ok(mut value) => Ok(f(&mut value)),
+                Err(_) => Err(wz_session_core::link::LocalHeld),
+            }
         }
     };
 }
@@ -406,8 +414,11 @@ impl LockKind for ManyThreads {
 
     #[cfg(feature = "session-unicast")]
     #[inline]
-    fn with_local<T: Send + 'static, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
-        local.with(f)
+    fn with_local<T: Send + 'static, U>(
+        local: &Self::Local<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Result<U, wz_session_core::link::LocalHeld> {
+        Ok(local.with(f))
     }
 }
 
@@ -1113,14 +1124,15 @@ mod many_threads_tests {
             for _ in 0..4 {
                 scope.spawn(|| {
                     for _ in 0..1000 {
-                        Kind::with_local(&local, |count| *count += 1);
+                        Kind::with_local(&local, |count| *count += 1)
+                            .expect("no access is made inside another");
                         word.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     }
                     flag.store(true, core::sync::atomic::Ordering::Release);
                 });
             }
         });
-        assert_eq!(Kind::with_local(&local, |count| *count), 4000);
+        assert_eq!(Kind::with_local(&local, |count| *count), Ok(4000));
         assert_eq!(word.load(core::sync::atomic::Ordering::Relaxed), 4000);
         assert!(flag.load(core::sync::atomic::Ordering::Acquire));
     }
@@ -1133,9 +1145,11 @@ mod many_threads_tests {
     #[test]
     fn a_session_of_several_threads_counts_shared_handles_atomically() {
         use crate::link_cells::{Atomic, CellRc, OneFace};
-        let handle: CellRc<u32, <Kind as LockKind>::SharedCount> = CellRc::<u32, Atomic>::shared(5);
+        let handle: CellRc<u32, <Kind as LockKind>::SharedCount> =
+            CellRc::<u32, Atomic>::try_on_heap(5).expect("the heap has room");
         assert_eq!(*handle, 5);
-        let link: CellRc<u32, <Kind as LockKind>::LinkCount> = CellRc::<u32, OneFace>::on_heap(6);
+        let link: CellRc<u32, <Kind as LockKind>::LinkCount> =
+            CellRc::<u32, OneFace>::try_on_heap(6).expect("the heap has room");
         assert_eq!(*link, 6);
     }
 
@@ -1167,7 +1181,8 @@ mod many_threads_tests {
 
         type Runtime = crate::CoopRuntime<Still, dyn BoxedLinkDriver, Kind>;
         let mut face = FaceHeld::gather(|| {
-            let shared: CellRc<u32, OneFace> = <Runtime as ShareValues>::share(7);
+            let shared: CellRc<u32, OneFace> =
+                <Runtime as ShareValues>::share(7).expect("the heap has room");
             Halves(shared.clone(), shared)
         });
         let read = std::thread::spawn(move || {

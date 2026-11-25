@@ -57,17 +57,19 @@ use core::cell::Cell;
 use core::fmt;
 
 use crate::bounded::{
-    Arena, CapacityFull, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
-    TableLender,
+    Arena, CapacityFull, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Region,
+    RegionLines, Storage, TableLender, ZeroEmpty,
 };
 use crate::caps;
 use crate::declare_form::RetractionKey;
-use crate::key_arena::{KeySpace, LentKeys};
+use crate::key_arena::{KeyRef, KeySpace, LentKeys};
+use crate::key_gate::{ClassId, KeyGate};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
 use crate::named_key::{NamedKey, Prefix};
 use crate::pubsub::{
-    any_local_match, fire_into_memoized, scan_subscribers, MatchMemo, RowRef, SubscriberRows,
+    admit_from_peer, any_local_match, fire_into_memoized, past_matcher_depth, row_reaches,
+    scan_subscribers, Admission, MatchMemo, RowRef, SubscriberRows,
 };
 #[cfg(feature = "storage-profile")]
 use crate::query::any_local_queryable;
@@ -77,7 +79,7 @@ use crate::query::{fire_queryables, QueryableRef, QueryableRows};
 use crate::registry_error::RegisterError;
 use crate::row_callback::RowCallback;
 use crate::sink::RowAccess;
-use crate::slot_map::{Handle, Removal, SlotMap, Slots};
+use crate::slot_map::{Handle, Removal, SlotMap, SlotRows, Slots};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 use crate::wire_key::MappedId;
 
@@ -274,12 +276,23 @@ pub trait RowCallbacks {
 /// names it [`Absent`]: the table is a value of no size and nothing to drop, every read of it finds
 /// nothing and every declaration on it is refused, each answered where the compiler sees it, so
 /// the code that would walk, lend or drop the table is not in the build.
-pub trait Presence {
+pub trait Presence: sealed::Presence {
     /// The table of a kind whose table is `T`.
     type Table<T>;
 
     /// The table of no rows, as `T`'s `Default` makes it where the kind is kept.
     fn empty<T: Default>() -> Self::Table<T>;
+
+    /// The table made at `at`, where it stays: by `make`, handed the place, where the kind is
+    /// kept, and of no bytes otherwise. What a table that holds a lock is made by.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a table and aligned for it, and `make` writes a whole `T` at
+    /// the place it is handed.
+    unsafe fn init_at<T>(
+        at: core::ptr::NonNull<Self::Table<T>>,
+        make: impl FnOnce(core::ptr::NonNull<T>),
+    );
 
     /// The table, to read, where the kind is kept.
     fn get<T>(table: &Self::Table<T>) -> Option<&T>;
@@ -341,6 +354,16 @@ impl<K, T, const N: usize> LentTable for SlotMap<K, T, N, Lent> {
     }
 }
 
+mod sealed {
+    /// The two answers to whether a kind is kept, and no other: what lets tables of the region
+    /// policy, and their rows, state that they are empty at all zero bytes whichever a build
+    /// gives, a kept table being its own table and an absent one no bytes.
+    pub trait Presence {}
+
+    impl Presence for super::Present {}
+    impl Presence for super::Absent {}
+}
+
 /// A kind the tables keep: its table is the table itself.
 #[derive(Debug)]
 pub enum Present {}
@@ -350,6 +373,10 @@ impl Presence for Present {
 
     fn empty<T: Default>() -> T {
         T::default()
+    }
+
+    unsafe fn init_at<T>(at: core::ptr::NonNull<T>, make: impl FnOnce(core::ptr::NonNull<T>)) {
+        make(at);
     }
 
     fn get<T>(table: &T) -> Option<&T> {
@@ -402,6 +429,9 @@ impl<T> Default for AbsentTable<T> {
     }
 }
 
+// SAFETY: an absent table is a `PhantomData`, no bytes.
+unsafe impl<T> ZeroEmpty for AbsentTable<T> {}
+
 impl<T> fmt::Debug for AbsentTable<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("AbsentTable")
@@ -413,6 +443,14 @@ impl Presence for Absent {
 
     fn empty<T: Default>() -> AbsentTable<T> {
         AbsentTable::new()
+    }
+
+    unsafe fn init_at<T>(
+        at: core::ptr::NonNull<AbsentTable<T>>,
+        _make: impl FnOnce(core::ptr::NonNull<T>),
+    ) {
+        // SAFETY: `at` is valid for writes of the table (the caller's contract).
+        unsafe { at.as_ptr().write(AbsentTable::new()) }
     }
 
     fn get<T>(_table: &AbsentTable<T>) -> Option<&T> {
@@ -1199,36 +1237,70 @@ impl TableRows {
 /// The most write filters of each owner the tables hold, in the one table lent for all: a
 /// publisher's are held to `MAX_PUBLISHERS`, a querier's to `MAX_QUERIERS` and a key listener's
 /// to the key listeners' rows.
+// Each bound is kept inverted, as `slot_map`'s limit is, so tables of all zero bytes are bound by
+// nothing but each table's own rows until the session's open holds them to its limits.
 #[derive(Clone, Copy, Debug)]
 struct PlaneBounds {
-    publishers: usize,
-    queriers: usize,
-    listeners: usize,
+    inverted_publishers: usize,
+    inverted_queriers: usize,
+    inverted_listeners: usize,
 }
 
 impl PlaneBounds {
     /// No bound but the table's own.
     const UNBOUND: Self = Self {
-        publishers: usize::MAX,
-        queriers: usize::MAX,
-        listeners: usize::MAX,
+        inverted_publishers: 0,
+        inverted_queriers: 0,
+        inverted_listeners: 0,
     };
 
     /// The bounds `rows` gives.
     fn of(rows: &TableRows) -> Self {
         Self {
-            publishers: rows.publishers,
-            queriers: rows.queriers,
-            listeners: rows.key_listeners,
+            inverted_publishers: !rows.publishers,
+            inverted_queriers: !rows.queriers,
+            inverted_listeners: !rows.key_listeners,
         }
     }
 
     /// The bound of a filter of `plane`'s kind, or of a key listener's.
     fn of_filter(self, plane: Plane, for_listener: bool) -> usize {
         match plane {
-            _ if for_listener => self.listeners,
-            Plane::Subscribers => self.publishers,
-            Plane::Queryables { .. } => self.queriers,
+            _ if for_listener => !self.inverted_listeners,
+            Plane::Subscribers => !self.inverted_publishers,
+            Plane::Queryables { .. } => !self.inverted_queriers,
+        }
+    }
+}
+
+/// The entity ids a session's tables handed out, counted, so tables of all zero bytes have handed
+/// out none and hand out 1 first, and every id is spent once `EntityId::MAX` of them were.
+#[derive(Clone, Copy, Debug, Default)]
+struct EntityIds {
+    given: EntityId,
+}
+
+impl EntityIds {
+    /// The id the next declaration takes, `None` once every one has been handed out.
+    const fn next(self) -> Option<EntityId> {
+        self.given.checked_add(1)
+    }
+
+    /// The next id, now handed out.
+    fn take(&mut self) -> Option<EntityId> {
+        let id = self.next()?;
+        self.given = id;
+        Some(id)
+    }
+
+    /// Ids handed out from `next` on, or none with `None`. No session hands out 0, so ids from 0
+    /// are ids from 1.
+    const fn from_next(next: Option<EntityId>) -> Self {
+        Self {
+            given: match next {
+                Some(next) => next.saturating_sub(1),
+                None => EntityId::MAX,
+            },
         }
     }
 }
@@ -1344,8 +1416,10 @@ pub struct GetBegun {
 /// The session's one table set. See the module.
 pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     keys: P::Keys,
-    /// The next entity id, `None` once every one has been handed out.
-    next_entity: Option<EntityId>,
+    /// The entity ids handed out.
+    next_entity: EntityIds,
+    /// The next key expression id to try: 0 is tried as 1, so tables of all zero bytes mint 1
+    /// first.
     next_expr: ExprId,
     next_request: RequestId,
     /// Moves after every subscriber declared or undeclared ([`crate::pubsub::LocalSubscribers::epoch`]).
@@ -1353,6 +1427,9 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     /// Which subscribers the keys delivered lately reached, valid at one `subscriber_epoch`: the
     /// subscriber table's receive match cache, over these rows' places.
     memo: MatchMemo<P>,
+    /// What decides which keys a peer's message may be on, asked before any subscriber is looked
+    /// up ([`Self::set_key_gate`]).
+    key_gate: KeyGate<'static>,
     keyexprs: Keyexprs<P>,
     subscribers: Subscribers<F, P>,
     queryables: QueryablesKept<F, P>,
@@ -1573,7 +1650,7 @@ fn release_drained<K, R: Entity, P: Storage, const N: usize>(
 struct Declaring<'a, P: Storage> {
     keys: &'a P::Keys,
     keyexprs: &'a mut Keyexprs<P>,
-    next_entity: &'a mut Option<EntityId>,
+    next_entity: &'a mut EntityIds,
 }
 
 impl<P: Storage> Declaring<'_, P> {
@@ -1582,22 +1659,26 @@ impl<P: Storage> Declaring<'_, P> {
     /// hold has as many holders as its count holds: a row that named it holding nothing would name
     /// a declaration its last counted holder's going retracts.
     fn entity_key(&self, text: &str, form: KeyForm) -> Result<EntityKey<P::Key>, RegisterError> {
-        let prefix = self.holdable(form.prefix.filter(|&prefix| {
+        // Each declaration is looked up once, and its count read off the row that look found.
+        let prefix = Self::holdable(form.prefix.and_then(|prefix| {
             self.keyexprs
                 .get(prefix)
-                .is_some_and(|row| text.starts_with(KeyBacking::as_str(&row.key)))
+                .filter(|row| text.starts_with(KeyBacking::as_str(&row.key)))
+                .map(|row| (prefix, row.holds))
         }))?;
         // The declaration of the entity's own key: the one the form states, or else the one a
         // named retraction names, found by its id once, here, and held by handle from here on.
         // One no longer declared is not held, and a retraction that named it names the key whole.
-        let stated = form.own.filter(|&own| self.keyexprs.get(own).is_some());
-        let named = self.holdable(stated.or_else(|| {
+        let stated = form
+            .own
+            .and_then(|own| Some((own, self.keyexprs.get(own)?.holds)));
+        let named = Self::holdable(stated.or_else(|| {
             match form.retraction {
                 Retraction::Named(named) if named.mapping_id != 0 => self
                     .keyexprs
                     .iter()
                     .find(|(_, row)| row.id == named.mapping_id)
-                    .map(|(handle, _)| handle),
+                    .map(|(handle, row)| (handle, row.holds)),
                 _ => None,
             }
         }))?;
@@ -1610,13 +1691,13 @@ impl<P: Storage> Declaring<'_, P> {
         })
     }
 
-    /// `declaration` where it stands and its count has room for one more holder; `None` where it
-    /// went, which is held by nothing; refused where its count is full.
+    /// A declaration found standing, with the holders its count has: its handle where the count
+    /// has room for one more; `None` where none was found, which is held by nothing; refused
+    /// where its count is full.
     fn holdable(
-        &self,
-        declaration: Option<KeyexprHandle>,
+        found: Option<(KeyexprHandle, KeyexprHolds)>,
     ) -> Result<Option<KeyexprHandle>, RegisterError> {
-        match declaration.and_then(|handle| Some((handle, self.keyexprs.get(handle)?.holds))) {
+        match found {
             Some((_, holds)) if holds == KeyexprHolds::MAX => Err(RegisterError::KeyexprHoldsFull),
             stands => Ok(stands.map(|(handle, _)| handle)),
         }
@@ -1624,6 +1705,9 @@ impl<P: Storage> Declaring<'_, P> {
 
     /// The id and the key of an entity declared on `text` as `form` asks, into a table with
     /// room for its row (`room`): the first refusal met when there is none, with nothing kept.
+    // Out of line: one body admits every kind of entity, so each kind a build links adds only the
+    // insert of its own row (`Self::declare`), not another copy of the key's admission.
+    #[inline(never)]
     fn keyed(
         &mut self,
         room: bool,
@@ -1639,9 +1723,7 @@ impl<P: Storage> Declaring<'_, P> {
 
     /// The next entity id.
     fn mint(&mut self) -> Result<EntityId, RegisterError> {
-        let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
-        *self.next_entity = id.checked_add(1);
-        Ok(id)
+        self.next_entity.take().ok_or(RegisterError::IdsExhausted)
     }
 
     /// Hold the declaration `prefix` names once more.
@@ -1652,8 +1734,7 @@ impl<P: Storage> Declaring<'_, P> {
     }
 
     /// Declare an entity on `text` into `table`: the row `make` builds of its id, its key and
-    /// `callback`, or the refusal with `callback` back (`back` takes it out of a row the table
-    /// refused).
+    /// `callback`, or the refusal with `callback` back.
     // Out of line: the declaration of each kind measured smaller with the row built and placed
     // apart from the caller that hands it its parts.
     #[inline(never)]
@@ -1664,7 +1745,6 @@ impl<P: Storage> Declaring<'_, P> {
         form: KeyForm,
         callback: C,
         make: impl FnOnce(EntityId, EntityKey<P::Key>, C) -> R,
-        back: impl FnOnce(R) -> C,
     ) -> Result<Declared<K>, Refused<C>> {
         // One refusal hands `callback` back for a full table, a key not kept and the ids run out
         // alike: each of its own would move the callback into the refusal once more.
@@ -1673,15 +1753,19 @@ impl<P: Storage> Declaring<'_, P> {
             Err(why) => return Err(Refused { why, callback }),
         };
         let (prefix, named) = key.holds();
-        match table.insert(make(id, key, callback)) {
+        // The row is built only in the slot it is kept in: a table that refuses it after all hands
+        // its parts back whole, the key let go of here and the callback with the refusal.
+        match table.insert_with((id, key, callback), |(id, key, callback)| {
+            make(id, key, callback)
+        }) {
             Ok(handle) => {
                 self.hold(prefix);
                 self.hold(named);
                 Ok(Declared { handle, id })
             }
-            Err(CapacityFull(row)) => Err(Refused {
+            Err((_, _, callback)) => Err(Refused {
                 why: RegisterError::TableFull,
-                callback: back(row),
+                callback,
             }),
         }
     }
@@ -1694,13 +1778,14 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn new() -> Self {
         Self {
             keys: Default::default(),
-            next_entity: Some(1),
+            next_entity: EntityIds::default(),
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
             memo: MatchMemo::new(
                 <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
             ),
+            key_gate: KeyGate::of_build(),
             keyexprs: SlotMap::new(),
             subscribers: SlotMap::new(),
             queryables: <F::QueryablePresence as Presence>::empty::<Queryables<F, P>>(),
@@ -1731,6 +1816,20 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// How many distinct keys the subscribers' receive match cache remembers at once.
     pub fn memo_slot_count(&self) -> usize {
         self.memo.slot_count()
+    }
+
+    /// Replace the gate that decides which keys a message from a peer may be on, which starts as
+    /// what the build's `key-set` policy states, as
+    /// [`crate::pubsub::SubscriberTable::set_key_gate`] does: a closed image hands it the gate over
+    /// its generated table. The counts of the gate it replaces are not carried over. The rows hold
+    /// no entity of the image's, so a key of the set reaches the rows its pattern meets.
+    pub fn set_key_gate(&mut self, gate: KeyGate<'static>) {
+        self.key_gate = gate;
+    }
+
+    /// How many messages from a peer the key gate dropped, by reason: all zero for an open gate.
+    pub const fn key_gate_refused(&self) -> crate::key_gate::Refused {
+        self.key_gate.refused()
     }
 
     /// Hold each table to the rows `rows` gives it, under the build's bound.
@@ -1927,20 +2026,19 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     // Out of line, as the engine's own taking of an id is: measured smaller apart.
     #[inline(never)]
     pub fn take_entity_id(&mut self) -> Option<EntityId> {
-        let id = self.next_entity?;
-        self.next_entity = id.checked_add(1);
-        Some(id)
+        self.next_entity.take()
     }
 
     /// The entity id the next declaration takes, `None` once every one has been handed out.
     pub fn next_entity_id(&self) -> Option<EntityId> {
-        self.next_entity
+        self.next_entity.next()
     }
 
     /// Hand out entity ids from `next` on, or none with `None`: for a host that carries a
-    /// session's numbering over, and for a test that reaches the end of the space.
+    /// session's numbering over, and for a test that reaches the end of the space. No id is 0, so
+    /// ids from 0 are ids from 1.
     pub fn entity_ids_from(&mut self, next: Option<EntityId>) {
-        self.next_entity = next;
+        self.next_entity = EntityIds::from_next(next);
     }
 
     /// Mint key expression ids from `next` on, past the last to 1 as every mint goes on: for a
@@ -2049,7 +2147,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 origin,
                 callback,
             },
-            SubscriberRow::into_callback,
         )?;
         self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
         Ok(declared)
@@ -2098,21 +2195,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             keyexprs: &mut self.keyexprs,
             next_entity: &mut self.next_entity,
         }
-        .declare(
-            queryables,
-            key,
-            form,
-            callback,
-            |id, key, callback| QueryableRow {
+        .declare(queryables, key, form, callback, |id, key, callback| {
+            QueryableRow {
                 facts: KeyFacts::of(key.as_str()),
                 id,
                 key,
                 origin,
                 complete,
                 callback,
-            },
-            QueryableRow::into_callback,
-        )
+            }
+        })
     }
 
     /// Undeclare the queryable `handle` names, its callback handed back.
@@ -2144,14 +2236,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             keyexprs: &mut self.keyexprs,
             next_entity: &mut self.next_entity,
         }
-        .declare(
-            tokens,
-            key,
-            form,
-            (),
-            |id, key, ()| TokenRow { id, key },
-            |_| (),
-        )
+        .declare(tokens, key, form, (), |id, key, ()| TokenRow { id, key })
         .map_err(|refused| refused.why)
     }
 
@@ -2183,20 +2268,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             keyexprs: &mut self.keyexprs,
             next_entity: &mut self.next_entity,
         }
-        .declare(
-            subscribers,
-            key,
-            form,
-            callback,
-            |id, key, callback| LivelinessSubscriberRow {
+        .declare(subscribers, key, form, callback, |id, key, callback| {
+            LivelinessSubscriberRow {
                 id,
                 key,
                 history,
                 history_complete: Cell::new(false),
                 callback,
-            },
-            LivelinessSubscriberRow::into_callback,
-        )
+            }
+        })
     }
 
     /// Undeclare the liveliness subscriber `handle` names, its callback handed back: its id is its
@@ -2239,8 +2319,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             suffix,
         } = kept_name(key, name).ok_or(RegisterError::KeyexprTooLong)?;
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
-        let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
-        self.next_entity = id.checked_add(1);
+        let id = self.next_entity.take().ok_or(RegisterError::IdsExhausted)?;
         let handle = interests
             .insert(InterestRow {
                 id,
@@ -2975,6 +3054,55 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.subscribers.get(handle)?.callback.begin()
     }
 
+    /// The next subscriber `fan` reaches, with a call begun on its row, with the tables held: what
+    /// the call is made with once they are let go, `None` when no row at or after `fan`'s place is
+    /// reached. A peer's message is first put to the key gate, once, at the walk's first pin, by
+    /// the rule [`crate::pubsub::LocalSubscribers::deliver_from_peer`] keeps, and a refused one
+    /// reaches no row. The rows are walked in the table's order from the place after the last one
+    /// pinned, matched by the rule every walk of the subscribers keeps (`row_reaches`), so a
+    /// message is handed to the rows a fan-out from its origin reaches, in its order, one call at a
+    /// time; a row undeclared while an earlier call ran is retired and begins no call. End each
+    /// call with [`RowCallback::end`]; when it was the last call of a row undeclared meanwhile, let
+    /// the row go with [`Self::release_drained_subscriber`].
+    pub fn pin_next_subscriber(
+        &mut self,
+        fan: &mut PinnedFanOut<'_>,
+    ) -> Option<<F::Subscriber as RowCallback>::Call> {
+        const {
+            assert!(row_may_lie_in::<F::Subscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
+        }
+        if fan.ungated {
+            fan.ungated = false;
+            if matches!(
+                admit_from_peer(&mut self.key_gate, fan.key, fan.class),
+                Admission::Refused
+            ) {
+                fan.reaches_none = true;
+            }
+        }
+        if fan.reaches_none {
+            return None;
+        }
+        let from = fan.next;
+        let (place, call) = self
+            .subscribers
+            .live_handles()
+            .skip_while(|(place, _, _)| *place < from)
+            .find_map(|(place, _, row)| {
+                let found = RowRef {
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                };
+                if !row_reaches(&found, fan.key, fan.facts, fan.remote) {
+                    return None;
+                }
+                row.callback.begin().map(|call| (place, call))
+            })?;
+        fan.next = place.saturating_add(1);
+        Some(call)
+    }
+
     /// Let go of the subscriber `handle` named, undeclared while a call of it ran, once that call
     /// ended last: its row, to drop where no lock is held.
     pub fn release_subscriber(&mut self, handle: SubscriberHandle) -> Option<Subscriber<F, P>> {
@@ -3013,6 +3141,40 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         release_drained(self.kept_queryables_mut()?, cursor)
     }
 
+    /// The next queryable `query` reaches, with the tables held, the walk moved past it: the row's
+    /// callback, which a call is begun on before the tables are let go, `None` when no row at or
+    /// after the query's place is reached. The rows are walked in the table's order from the place
+    /// after the last one reached, matched by the rule every fan-out of a peer's query keeps, so a
+    /// query is handed to the rows the fan-out of its dispatch reaches, in its order, one call at a
+    /// time; a row undeclared while an earlier call ran is retired and begins no call.
+    #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+    pub fn next_queryable_reached(
+        &self,
+        query: &mut crate::query::pinned::PinnedQuery<'_>,
+    ) -> Option<&F::Queryable> {
+        const {
+            assert!(row_may_lie_in::<F::Queryable, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
+        }
+        let from = query.reached_from();
+        let (place, row) = self
+            .kept_queryables()?
+            .live_handles()
+            .skip_while(|(place, _, _)| *place < from)
+            .find_map(|(place, _, row)| {
+                let found = QueryableRef {
+                    #[cfg(feature = "alloc")]
+                    id: u64::from(row.id),
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                    complete: row.complete,
+                };
+                query.reaches(found).then_some((place, row))
+            })?;
+        query.passed(place);
+        Some(&row.callback)
+    }
+
     /// Begin a call of the liveliness subscriber `handle` names, with the tables held: what the call is made
     /// with once they are let go, `None` when no live row is named. See [`Self::begin_subscriber`].
     pub fn begin_liveliness_subscriber(
@@ -3043,6 +3205,33 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         cursor: &mut usize,
     ) -> Option<LivelinessSubscriber<F, P>> {
         release_drained(self.kept_liveliness_subscribers_mut()?, cursor)
+    }
+
+    /// The next liveliness subscriber the peer token `fan` walks reaches, with a call begun on its
+    /// row, with the tables held: [`Self::pin_next_subscriber`] for a token, the rows matched by
+    /// the rule every token fan keeps (`token_reaches`). End each call with
+    /// [`RowCallback::end`]; when it was the last call of a row undeclared meanwhile, let the row
+    /// go with [`Self::release_drained_liveliness_subscriber`].
+    pub fn pin_next_liveliness_subscriber(
+        &self,
+        fan: &mut PinnedTokenFan<'_>,
+    ) -> Option<<F::LivelinessSubscriber as RowCallback>::Call> {
+        const {
+            assert!(row_may_lie_in::<F::LivelinessSubscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
+        }
+        let from = fan.next;
+        let (place, call) = self
+            .kept_liveliness_subscribers()?
+            .live_handles()
+            .skip_while(|(place, _, _)| *place < from)
+            .find_map(|(place, _, row)| {
+                if !token_reaches(row, fan.key, fan.historical) {
+                    return None;
+                }
+                row.callback.begin().map(|call| (place, call))
+            })?;
+        fan.next = place.saturating_add(1);
+        Some(call)
     }
 
     /// Begin a call of the matching listener `handle` names, with the tables held: what the call is made
@@ -3288,13 +3477,14 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
         let mut lend = TableLender::new(arena);
         let tables = Self {
             keys: LentKeys::from(keys),
-            next_entity: Some(1),
+            next_entity: EntityIds::default(),
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
             // A table whose rows are lent at open remembers no key: each slot of the cache would
             // be rows of its own, which only the arena could give it.
             memo: MatchMemo::new(0),
+            key_gate: KeyGate::of_build(),
             keyexprs: SlotMap::lent_from(&mut lend, rows.keyexprs),
             subscribers: SlotMap::lent_from(&mut lend, rows.subscribers),
             queryables: <F::QueryablePresence as Presence>::lent_from::<Queryables<F, Lent>>(
@@ -3364,6 +3554,119 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             rest = tail;
         }
         sum
+    }
+}
+
+// SAFETY: the key arena handle is `LentKeys`, whose zero is no arena; the ids are counts of ids
+// handed out, a zero expression id is minted as 1, the request id and the epoch are counts; the
+// match memory and the held replies are `ZeroEmpty` of this policy; every table is a `SlotMap` of
+// this policy (`ZeroEmpty`) or, absent, no bytes (`Presence` is sealed to the two); the plane
+// bounds of zero are none. Nothing drops a value, every sequence holding none.
+unsafe impl<F: RowCallbacks> ZeroEmpty for SessionTables<F, Region> {}
+
+/// The lines a region's description holds for one [`SessionTables`] of the region policy, at most:
+/// two for each of its nine tables, one for its held replies; and its one key arena handle.
+pub const SESSION_TABLE_LINES: usize = 19;
+
+/// The rows of a [`SessionTables`] of the region policy, which a region lays out beside the tables:
+/// each table's [`SlotRows`] at the build's bound of it, none of a kind the build keeps none of.
+pub struct SessionRows<F: RowCallbacks> {
+    keyexprs: SlotRows<KeyexprRow<KeyRef>, { caps::MAX_DECLARED_KEYEXPRS }>,
+    subscribers: SlotRows<Subscriber<F, Region>, { caps::MAX_SUBSCRIPTIONS }>,
+    queryables: <F::QueryablePresence as Presence>::Table<
+        SlotRows<Queryable<F, Region>, { caps::MAX_QUERYABLES }>,
+    >,
+    tokens: <F::LivelinessPresence as Presence>::Table<
+        SlotRows<TokenRow<KeyRef>, { caps::MAX_LOCAL_TOKENS }>,
+    >,
+    liveliness_subscribers: <F::LivelinessPresence as Presence>::Table<
+        SlotRows<LivelinessSubscriber<F, Region>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
+    >,
+    interests: <F::FilterPresence as Presence>::Table<SlotRows<InterestRow<KeyRef>, INTEREST_ROWS>>,
+    write_filters:
+        <F::FilterPresence as Presence>::Table<SlotRows<WriteFilterRow<KeyRef>, FILTER_ROWS>>,
+    matching: <F::FilterPresence as Presence>::Table<
+        SlotRows<Matching<F>, { caps::MAX_MATCHING_LISTENERS }>,
+    >,
+    pending_gets: <F::GetPresence as Presence>::Table<
+        SlotRows<PendingGet<F, Region>, { caps::MAX_PENDING_QUERIES }>,
+    >,
+    #[cfg(feature = "storage-profile")]
+    held: [core::mem::MaybeUninit<crate::reply_hold::HeldReply<PendingGetHandle, Region>>;
+        caps::MAX_PENDING_REPLIES],
+}
+
+// SAFETY: each table's rows are `SlotRows` (`ZeroEmpty`) or, of a kind not kept, no bytes
+// (`Presence` is sealed to the two); the held replies' rows are `MaybeUninit`.
+unsafe impl<F: RowCallbacks> ZeroEmpty for SessionRows<F> {}
+
+impl<F: RowCallbacks> SessionTables<F, Region> {
+    /// The description of tables of the region policy at `at` in a region and their rows, a
+    /// [`SessionRows`], at `rows`: a line for each column of each table the build keeps, one for
+    /// the held replies, and the tables' handle to the region's key arena. What
+    /// [`place_region`](crate::key_arena::place_region) reads to make zeroed tables a session's.
+    pub const fn places(at: usize, rows: usize) -> RegionLines<SESSION_TABLE_LINES> {
+        let mut lines = RegionLines::EMPTY
+            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
+            .seqs(&<Keyexprs<Region>>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, keyexprs)),
+                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, keyexprs)),
+            ))
+            .seqs(&<Subscribers<F, Region>>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, subscribers)),
+                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, subscribers)),
+            ));
+        if <F::QueryablePresence as Presence>::KEPT {
+            lines = lines.seqs(&<Queryables<F, Region>>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, queryables)),
+                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, queryables)),
+            ));
+        }
+        if <F::LivelinessPresence as Presence>::KEPT {
+            lines = lines
+                .seqs(&<Tokens<Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, tokens)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, tokens)),
+                ))
+                .seqs(&<LivelinessSubscribers<F, Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, liveliness_subscribers)),
+                    rows.wrapping_add(core::mem::offset_of!(
+                        SessionRows<F>,
+                        liveliness_subscribers
+                    )),
+                ));
+        }
+        if <F::FilterPresence as Presence>::KEPT {
+            lines = lines
+                .seqs(&<Interests<Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, interests)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, interests)),
+                ))
+                .seqs(&<WriteFilters<Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, write_filters)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, write_filters)),
+                ))
+                .seqs(&<MatchingListeners<F, Region>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, matching)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, matching)),
+                ));
+        }
+        if <F::GetPresence as Presence>::KEPT {
+            lines = lines.seqs(&<PendingGets<F, Region>>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, pending_gets)),
+                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, pending_gets)),
+            ));
+        }
+        #[cfg(feature = "storage-profile")]
+        {
+            lines = lines.seq(
+                crate::reply_hold::HeldReplies::<PendingGetHandle, Region>::place(
+                    at.wrapping_add(core::mem::offset_of!(Self, held)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, held)),
+                ),
+            );
+        }
+        lines
     }
 }
 
@@ -3461,6 +3764,7 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
 
     fn next_subscription_id(&self) -> u64 {
         self.next_entity
+            .next()
             .map_or(u64::from(u32::MAX).saturating_add(1), u64::from)
     }
 
@@ -3484,7 +3788,7 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
     }
 
     fn next_entity_id(&self) -> Option<u32> {
-        self.next_entity
+        self.next_entity.next()
     }
 
     fn consume_entity_id(&mut self) {
@@ -3513,15 +3817,21 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
         )
     }
 
-    /// The table set holds no key gate yet: a peer's message on any key is matched against
-    /// every subscription that hears peers.
+    /// A key of a closed set is matched by its pattern like any other: the rows hold no entity of
+    /// the image's to select by.
     fn deliver_from_peer<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
-        _class: Option<crate::key_gate::ClassId>,
+        class: Option<ClassId>,
         how: crate::pubsub::PeerDelivery,
         deliver: D,
     ) -> usize {
+        if matches!(
+            admit_from_peer(&mut self.key_gate, key, class),
+            Admission::Refused
+        ) {
+            return 0;
+        }
         if how.no_allocation && !P::ENFORCES_CAPACITY {
             return scan_subscribers(&mut self.subscribers, key, true, deliver, |_| {})
                 .unwrap_or(0);
@@ -3550,6 +3860,88 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
             for (handle, row) in self.subscribers.iter_mut() {
                 cx.end_plain_frame(handle, RowAccess::Held(&mut row.callback));
             }
+        }
+    }
+}
+
+/// A message's walk of the subscribers it reaches, one row pinned at a time
+/// ([`SessionTables::pin_next_subscriber`]): the key, read once, where the message came from, and
+/// the place the next row is looked for from. Held by whoever delivers the message, beside the key,
+/// across the calls it makes with the tables let go, so the tables keep nothing of a delivery under
+/// way.
+pub struct PinnedFanOut<'k> {
+    key: &'k str,
+    facts: KeyFacts,
+    /// The message is a peer's, not the session's own: which origins of the rows admit it.
+    remote: bool,
+    /// The row of the image's allowance the session found for the peer the message came from.
+    class: Option<ClassId>,
+    /// A peer's message the key gate has not been asked of yet: asked at the first pin, so that a
+    /// refusal is counted once for the message and not once for each row.
+    ungated: bool,
+    /// Deeper than the matcher's bound, or refused by the key gate: the message reaches no row.
+    reaches_none: bool,
+    /// The place the next row is looked for from: the one after the row pinned last.
+    next: usize,
+}
+
+/// A peer token's walk of the liveliness subscribers it reaches, one row pinned at a time
+/// ([`SessionTables::pin_next_liveliness_subscriber`]): its key, whether it is historical (an
+/// answer to a CURRENT interest), and the place the next row is looked for from. Held by whoever
+/// hands the token out, beside the key, as [`PinnedFanOut`] is.
+pub struct PinnedTokenFan<'k> {
+    key: &'k str,
+    historical: bool,
+    /// The place the next row is looked for from: the one after the row pinned last.
+    next: usize,
+}
+
+impl<'k> PinnedTokenFan<'k> {
+    /// The walk of the liveliness subscribers a token on `key` reaches, from the table's first row.
+    pub fn new(key: &'k str, historical: bool) -> Self {
+        Self {
+            key,
+            historical,
+            next: 0,
+        }
+    }
+}
+
+/// Whether a peer token on `key` reaches the liveliness subscriber `row`: a row whose pattern
+/// intersects the key, and, of a historical token, only one that asked for history.
+fn token_reaches<Key: KeyBacking, Cb>(
+    row: &LivelinessSubscriberRow<Key, Cb>,
+    key: &str,
+    historical: bool,
+) -> bool {
+    (!historical || row.history) && keyexpr_intersects(text(&row.key.key), key)
+}
+
+impl<'k> PinnedFanOut<'k> {
+    /// The walk of the subscribers a peer's message on `key` reaches, from the table's first row:
+    /// `class` is the row of the image's allowance the session found for the peer, which the key
+    /// gate is asked with.
+    pub fn new(key: &'k str, class: Option<ClassId>) -> Self {
+        Self::from_origin(key, true, class)
+    }
+
+    /// The walk of the subscribers a message the session itself published on `key` reaches, from
+    /// the table's first row: the rows whose origin admits the session's own messages. The
+    /// application's own message is not put to the key gate.
+    pub fn local(key: &'k str) -> Self {
+        Self::from_origin(key, false, None)
+    }
+
+    fn from_origin(key: &'k str, remote: bool, class: Option<ClassId>) -> Self {
+        let facts = KeyFacts::of(key);
+        Self {
+            key,
+            facts,
+            remote,
+            class,
+            ungated: remote,
+            reaches_none: past_matcher_depth(key, facts),
+            next: 0,
         }
     }
 }
@@ -3728,9 +4120,8 @@ impl<Key: KeyBacking, Cb: RowCallback, P: Storage>
         historical: bool,
         mut deliver: D,
     ) -> usize {
-        let reaches = |row: &LivelinessSubscriberRow<Key, Cb>| {
-            (!historical || row.history) && keyexpr_intersects(text(&row.key.key), keyexpr)
-        };
+        let reaches =
+            |row: &LivelinessSubscriberRow<Key, Cb>| token_reaches(row, keyexpr, historical);
         let mut fired: usize = 0;
         if Cb::READS_ROW_IN_PLACE {
             for (_, handle, row) in self.live_handles() {

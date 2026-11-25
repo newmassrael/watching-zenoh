@@ -757,7 +757,7 @@ mod watched {
     use std::sync::{Arc, Mutex};
 
     use wz_capi_port::{SessionDrive, SessionEngine};
-    use wz_session_core::face::{FaceEventKind, FaceSnapshot};
+    use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
     use wz_session_core::link::LinkKind;
 
     use super::{
@@ -771,9 +771,11 @@ mod watched {
         let told: Arc<Mutex<Vec<(FaceEventKind, FaceSnapshot)>>> = Arc::default();
         let into = Arc::clone(&told);
         first
-            .watch_faces(Arc::new(move |kind: FaceEventKind, face: &FaceSnapshot| {
-                into.lock().unwrap().push((kind, face.clone()));
-            }))
+            .watch_faces(FaceEventSink::of_arc(Arc::new(
+                move |kind: FaceEventKind, face: &FaceSnapshot| {
+                    into.lock().unwrap().push((kind, face.clone()));
+                },
+            )))
             .expect("an open session watches its faces");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
         let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");

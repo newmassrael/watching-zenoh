@@ -5,9 +5,11 @@
 //!
 //! What the session's registry hands a leg's pending entry happens under the session's lock, and a
 //! callback of the program never runs there, so the entry's sink ([`LegSink`]) hands each reply
-//! on to be called after the lock: to the thread that made it, for an answer of the session's own
-//! queryables ([`PlaneCalls::LocalAnswers`]); to the session's round of deliveries
-//! ([`crate::round`]) otherwise. What the entry's consolidation held to its end waits in the rows
+//! on to be called after the lock: to the thread that holds the lock, for an answer of the
+//! session's own queryables and for every reply where the read hands each record out as it is read
+//! ([`PlaneCalls::Captures`]); to the session's round of deliveries ([`crate::round`])
+//! otherwise. An engine that captures every reply it hands a get keeps no round for them
+//! ([`EveryReplyCaptured`]). What the entry's consolidation held to its end waits in the rows
 //! it was held in, due ([`LegHold`]), and what the entry gave up whole in the plane's held table;
 //! the leg's end is said when the entry is dropped (its Final, its deadline, its cancellation, the
 //! loss of its link) by a guard the sink owns, with the request id of the timeout that ended it
@@ -28,7 +30,8 @@
 //! row, to be dropped where no lock is held.
 //!
 //! [`LegSink`]: crate::get_plane::LegSink
-//! [`PlaneCalls::LocalAnswers`]: crate::round::PlaneCalls::LocalAnswers
+//! [`EveryReplyCaptured`]: crate::get_plane::EveryReplyCaptured
+//! [`PlaneCalls::Captures`]: crate::round::PlaneCalls::Captures
 //! [`LegHold`]: crate::get_plane::LegHold
 //! [`EndedLegs`]: crate::get_plane::EndedLegs
 //! [`GetPlane::forget_end`]: crate::get_plane::GetPlane::forget_end
@@ -36,7 +39,7 @@
 //! [`LegId`]: crate::get_plane::LegId
 
 use alloc::collections::VecDeque;
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::Ordering;
 // The split `round` uses: the host profile has the native atomics, the `no_std` profile gets the
 // critical-section ones for the cores that have none.
@@ -252,12 +255,22 @@ enum Capture {
     On(Option<LegId>),
 }
 
-/// The capture of a plane whose session's own queryables answer its gets, under the engine's lock.
+/// The capture of a plane that keeps one ([`PlaneCalls::Captures`]), under the engine's lock.
 struct Capturing<C: GetCalls>(<C::Locks as LockFamily>::Lock<Capture>);
 
-impl<C: GetCalls> Default for Capturing<C> {
-    fn default() -> Self {
-        Self(C::Locks::new(Capture::Off))
+impl<C: GetCalls> Capturing<C> {
+    /// A capture that takes nothing, made in `at` with its lock.
+    ///
+    /// # Safety
+    /// As for [`LockFamily::init_at`], of a `Self`.
+    unsafe fn init_at(at: NonNull<Self>) {
+        // SAFETY: the caller's contract, for the one field.
+        unsafe {
+            C::Locks::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at.as_ptr()).0)),
+                |capture| capture.write(Capture::Off),
+            );
+        }
     }
 }
 
@@ -275,29 +288,53 @@ pub struct GetPlane<C: GetCalls> {
     replies: <C::Locks as LockFamily>::Lock<HeldReplies<u64, Lent>>,
     /// The legs' callbacks, each held by count (see the module).
     legs: <C::Locks as LockFamily>::Lock<LegRows<C>>,
-    /// Whether a thread that holds the session's lock takes the callback the answer it makes
-    /// reaches ([`Self::capture`]), where the session's own queryables answer its gets.
-    capture: <C::LocalAnswers as Presence>::Table<Capturing<C>>,
+    /// Whether a thread that holds the session's lock takes the callback the reply it hands the
+    /// sinks reaches ([`Self::capture`]), where the plane keeps a capture.
+    capture: <C::Captures as Presence>::Table<Capturing<C>>,
 }
 
 impl<C: GetCalls> GetPlane<C> {
     /// A plane with nothing ended, its ends waiting in `ended`, the replies its gets hold in
-    /// `replies` and its legs' callbacks in `legs`.
-    pub fn new(ended: EndedLegs, replies: HeldReplies<u64, Lent>, legs: LegRows<C>) -> Self {
-        Self {
-            ended: Queued::new(ended),
-            held: Queued::new(VecDeque::new()),
-            replies: C::Locks::new(replies),
-            legs: C::Locks::new(legs),
-            capture: <C::LocalAnswers as Presence>::empty::<Capturing<C>>(),
+    /// `replies` and its legs' callbacks in `legs`, made in `at` with its locks.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The plane is not moved from `at` until it is dropped there.
+    pub unsafe fn init_at(
+        at: NonNull<Self>,
+        ended: EndedLegs,
+        replies: HeldReplies<u64, Lent>,
+        legs: LegRows<C>,
+    ) {
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            Queued::init_at(NonNull::new_unchecked(addr_of_mut!((*at).ended)), |queue| {
+                queue.write(ended)
+            });
+            Queued::init_at(NonNull::new_unchecked(addr_of_mut!((*at).held)), |queue| {
+                queue.write(VecDeque::new())
+            });
+            C::Locks::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at).replies)),
+                |held| held.write(replies),
+            );
+            C::Locks::init_at(NonNull::new_unchecked(addr_of_mut!((*at).legs)), |rows| {
+                rows.write(legs)
+            });
+            <C::Captures as Presence>::init_at::<Capturing<C>>(
+                NonNull::new_unchecked(addr_of_mut!((*at).capture)),
+                |capturing| Capturing::init_at(capturing),
+            );
         }
     }
 
     /// Take out, instead of queueing, the callback of the leg the replies handed to the sinks from
     /// here on reach, until [`Self::captured`]: how the thread that makes an answer of the
-    /// session's own queryables, holding the session's lock, learns what to call to hand it the
-    /// answer itself once it lets go. A plane whose session answers none of its own gets captures
-    /// nothing.
+    /// session's own queryables, or the read that hands a peer's reply out as it is read, holding
+    /// the session's lock, learns what to call to hand it the reply itself once it lets go. A plane
+    /// that keeps no capture ([`PlaneCalls::Captures`]) captures nothing.
     pub fn capture(&self) {
         if let Some(capturing) = self.capturing() {
             C::Locks::with(&capturing.0, |capture| *capture = Capture::On(None));
@@ -316,9 +353,9 @@ impl<C: GetCalls> GetPlane<C> {
         })
     }
 
-    /// The capture, where the session's own queryables answer its gets.
+    /// The capture, where the plane keeps one.
     fn capturing(&self) -> Option<&Capturing<C>> {
-        <C::LocalAnswers as Presence>::get::<Capturing<C>>(&self.capture)
+        <C::Captures as Presence>::get::<Capturing<C>>(&self.capture)
     }
 
     /// Whether leg `leg`'s callback was taken out for the thread that captures, with a count of
@@ -474,41 +511,70 @@ impl<C: GetCalls> Drop for LegEnd<C> {
     }
 }
 
+/// Where a leg's sink hands a reply no thread captured ([`GetPlane::capture`]), for the leg's
+/// callback to be handed it once the session's lock is let go of.
+pub trait UncapturedReplies<C: GetCalls> {
+    /// Hand `reply` on for the callback in row `leg`.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock, as [`Round::offer_reply`] asks of its caller.
+    unsafe fn offer(&self, leg: LegId, reply: &dyn ReplyView);
+}
+
+/// The session's round of deliveries holds the reply for the leg's callback.
+impl<C: GetCalls> UncapturedReplies<C> for PlacedRef<Round<C>> {
+    unsafe fn offer(&self, leg: LegId, reply: &dyn ReplyView) {
+        // SAFETY: the caller holds the session's lock, as this trait's contract says.
+        unsafe { self.offer_reply(leg, reply) };
+    }
+}
+
+/// Where a leg's sink hands a reply no thread captured, for an engine that captures every reply
+/// it hands its gets, each under a capture of its own: the read that hands each record out as it
+/// is read captures the get a peer's reply answers, and the thread that answers a get of the
+/// session's own queryables the get its answer reaches. A reply reaches one get, so each capture
+/// takes it, and the sink keeps no handle of a round, which such an engine need not keep. A reply
+/// handed to a sink outside a capture is a defect of the engine: a debug build stops there.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EveryReplyCaptured;
+
+impl<C: GetCalls> UncapturedReplies<C> for EveryReplyCaptured {
+    unsafe fn offer(&self, _leg: LegId, _reply: &dyn ReplyView) {
+        debug_assert!(false, "a reply reached a leg's sink outside a capture");
+    }
+}
+
 /// The sink of leg `leg`'s pending entry, holding a count of the row of the leg's callback. A
 /// reply the session's own queryables made while the plane captures is the thread's that made it,
 /// which hands it to the callback once it lets go of the session ([`GetPlane::capture`]); any
-/// other is held for the callback in the session's round of deliveries ([`Round::offer_reply`]).
+/// other is handed to `U`, the session's round of deliveries ([`Round::offer_reply`]) unless
+/// the engine captures every reply ([`EveryReplyCaptured`]).
 /// What the entry's consolidation held to its end waits in the plane's held table
 /// ([`GetPlane::take_held`]), and the timeout of a leg that timed out in the leg's end
 /// ([`Ended`]). The sink's drop is the leg's end: the Final says nothing more, as the registry
 /// drops the entry once its Finals are in. The end holds the entry's count of the row past the
 /// entry ([`Ended`]), so the entry's drop, under the session's lock, never lets the callback go.
-pub struct LegSink<C: GetCalls> {
+pub struct LegSink<C: GetCalls, U: UncapturedReplies<C> = PlacedRef<Round<C>>> {
     leg: u64,
-    round: PlacedRef<Round<C>>,
+    uncaptured: U,
     end: LegEnd<C>,
 }
 
-impl<C: GetCalls> LegSink<C> {
+impl<C: GetCalls, U: UncapturedReplies<C>> LegSink<C, U> {
     /// The sink of leg `leg`, handing what it is handed to the callback in `row`, of which it
-    /// takes over the count [`GetPlane::open_leg`] took, and the replies the round holds for it
-    /// to the session's round `round`.
+    /// takes over the count [`GetPlane::open_leg`] took, and the replies no thread captured to
+    /// `uncaptured`.
     ///
     /// # Safety
     /// The sink is handed its replies by the holder of the session's lock alone, as
-    /// [`Round::offer_reply`] asks of its caller: the engine registers it in the session's tables
-    /// of pending gets, which it reaches under that lock. The owners of the round and of the plane
-    /// outlive the sink, whose drop writes its end into the plane, as
-    /// [`crate::placed::Placed::share`] asks of every handle.
-    pub unsafe fn new(
-        leg: u64,
-        row: LegId,
-        plane: PlacedRef<GetPlane<C>>,
-        round: PlacedRef<Round<C>>,
-    ) -> Self {
+    /// [`UncapturedReplies::offer`] asks of its caller: the engine registers it in the session's
+    /// tables of pending gets, which it reaches under that lock. The owners of the plane and of
+    /// what `uncaptured` hands replies to outlive the sink, whose drop writes its end into the
+    /// plane, as [`crate::placed::Placed::share`] asks of every handle.
+    pub unsafe fn new(leg: u64, row: LegId, plane: PlacedRef<GetPlane<C>>, uncaptured: U) -> Self {
         Self {
             leg,
-            round,
+            uncaptured,
             end: LegEnd {
                 leg,
                 timed_out: None,
@@ -519,14 +585,14 @@ impl<C: GetCalls> LegSink<C> {
     }
 }
 
-impl<C: GetCalls> ReplySink for LegSink<C> {
+impl<C: GetCalls, U: UncapturedReplies<C>> ReplySink for LegSink<C, U> {
     fn on_reply(&mut self, reply: &dyn ReplyView) {
         if self.end.plane.captures(self.end.row) {
             return;
         }
         // SAFETY: the contract of `Self::new`: the sink is handed a reply under the session's
         // lock.
-        unsafe { self.round.offer_reply(self.end.row, reply) };
+        unsafe { self.uncaptured.offer(self.end.row, reply) };
     }
 
     fn on_final(&mut self, _rid: RequestId) {}

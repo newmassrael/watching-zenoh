@@ -84,6 +84,34 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> Default for LivelinessRegistry<D, U
     }
 }
 
+/// The lines a region's description holds for one [`LivelinessRegistry`] of the region policy: its
+/// watchers'.
+pub const LIVELINESS_REGISTRY_LINES: usize = crate::decl_sink::DECL_OBSERVER_LINES;
+
+// SAFETY: of the region policy, at all zero bytes: the watchers are a `DeclObserverPair` of the
+// region policy (`ZeroEmpty`); the count of tokens not announced zero. Nothing drops a value, every list holding none.
+unsafe impl<D: DeclSink, U: UndeclSink> crate::bounded::ZeroEmpty
+    for LivelinessRegistry<D, U, crate::bounded::Region>
+{
+}
+
+impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, crate::bounded::Region> {
+    /// The description of a registry of the region policy at `at` in a region and its watchers'
+    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<LIVELINESS_REGISTRY_LINES> {
+        crate::bounded::RegionLines::EMPTY.with(
+            &DeclObserverPair::<D, U, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, observers)),
+                rows,
+            ),
+            0,
+        )
+    }
+}
+
 impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, Lent> {
     /// A registry with no observer whose two observer lists are lent from `arena`, `rows` rows
     /// each ([`DeclObserverPair::lent`]). Refused as that refuses.

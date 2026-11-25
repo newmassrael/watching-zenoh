@@ -5,7 +5,10 @@
 //! session reserves its memory at its open lays a place out for each entity its limits admit, so the
 //! ABI's object for an entity lies in that session's memory and no other's ([`PlaceLender`]).
 
+use core::alloc::Layout;
 use core::ptr::NonNull;
+
+use crate::lodge::LentBytes;
 
 /// How many kinds of entity an ABI may hold places of its own for ([`EntityKind`]).
 pub const ENTITY_KINDS: usize = 14;
@@ -117,6 +120,13 @@ pub trait PlaceLender {
     /// Give back `place`, closed or not, or hand it back untouched when it is no place this
     /// session lent. What the ABI kept at the place it lets go of first.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace>;
+
+    /// A place of at least `layout` for a value the ABI lodges by counts that may outlive the
+    /// session ([`crate::lodge::Lent::of_bytes`]), closed or not: `None` when every place the
+    /// open laid out for such values is lent, or the open laid out none as large or as aligned.
+    /// The place goes back with the last count of what is lodged there, from whatever thread lets
+    /// it go, and the session's memory stands until it has.
+    fn lend_lodging(&self, layout: Layout) -> Option<LentBytes>;
 }
 
 /// An engine that keeps, in memory its session reserved at its open, the ring its advanced

@@ -243,7 +243,11 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         None,
         "a liveliness subscriber is one row, the session core's"
     );
-    assert_eq!(count("session tables"), Some(1));
+    // A build of the region's form holds the session's one table set in its region.
+    assert_eq!(
+        count("session tables"),
+        cfg!(feature = "runtime-plan").then_some(1)
+    );
     assert_eq!(plan.tables().keyexprs, 6);
     assert_eq!(plan.tables().key_listeners, key_listeners);
     assert_eq!(
@@ -453,6 +457,32 @@ fn a_filter_that_finds_no_id_left_gives_its_row_back() {
         Err(Refusal::TableFull),
         "CONTROL: the table holds one filter"
     );
+}
+
+/// A subscriber that finds no entity id left is refused for it, its sink let go of with the
+/// refusal and no row taken, so with ids again it is declared. Turned red by a refusal that keeps
+/// the sink, or answers it as a closed session's.
+#[test]
+fn a_subscriber_that_finds_no_id_left_is_refused_and_lets_its_sink_go() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    engine.entity_ids_from(None);
+    assert_eq!(
+        declare_subscriber(&engine, "demo/n/1", &dropped),
+        Err(Refusal::NoEntityId)
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the refused sink is let go of"
+    );
+    engine.entity_ids_from(Some(7));
+    assert!(
+        declare_subscriber(&engine, "demo/n/1", &dropped).is_ok(),
+        "CONTROL: with ids again the subscriber is declared"
+    );
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "its sink is held");
 }
 
 /// The matching listeners' table at its limit refuses one more as a full table, before its Interest

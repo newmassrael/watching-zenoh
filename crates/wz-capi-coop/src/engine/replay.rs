@@ -37,8 +37,9 @@
 
 use super::CoopLinks;
 use super::LinkActions;
-use wz_runtime_coop::faces::{FacePlaces, LendsSession};
+use wz_runtime_coop::faces::{FacePlaces, FaceRecord, LendsSession};
 use wz_runtime_coop::ClockSource;
+use wz_session_core::link_life::LinkPhase;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
@@ -48,7 +49,7 @@ use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
 use wz_session_core::slot_map::Handle;
 use wz_session_core::wire_id::{EntityId, ExprId};
 
-use super::{Core, Face, Link};
+use super::{Core, Face};
 
 /// The order the session's tables of declarations are told in. A declaration names what it depends
 /// on by a mapping id, and the peer's tables are empty, so what a kind depends on comes before it.
@@ -325,58 +326,46 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             })
     }
 
-    /// A declaration takes `place` in the replay's order: tell the peer of each
-    /// face that is up of it with `send`, unless it is not to be told now, and say whether it was
-    /// taken. It is not told to a face that is not up, which declares it when it comes up, and
+    /// Tell each face that is up of the declaration `declared` names, from its row, unless it is
+    /// not to be told now, and say whether it was taken: the tables stored it before any link is
+    /// told of it. It is not told to a face that is not up, which declares it when it comes up, and
     /// when that face's replay has not reached its place, which sends it in its turn; both count
     /// as taken. A refusal is answered as `on_refusal` says: [`OnRefusal::Forget`] counts what
     /// was refused as told, and [`OnRefusal::Undo`] makes the declaration over, putting every
     /// face's replay back as it was and taking back, with `undo`, what the faces that took it
     /// were told. Call it once for each declaration.
-    fn announce_with(
+    // Out of line: every kind's declaration announces through it, and the message of each kind
+    // is built in `told` alone, whether the declaration may be undone or not.
+    #[inline(never)]
+    fn announce_row(
         &mut self,
-        place: usize,
+        declared: DeclaredRow,
         on_refusal: OnRefusal,
-        send: &(dyn SendTo<C> + Sync),
         undo: Option<Retract<'_>>,
     ) -> bool {
-        announce_on(
-            self.transport.links.places_mut(),
-            place,
-            on_refusal,
-            send,
-            undo,
-        )
-    }
-
-    /// Tell each face that is up of the declaration `declared` names, as [`Self::announce_with`]
-    /// tells one: its row is the declaration itself, so the tables stored it before any link is
-    /// told of it, each link is told from the row, and a refusal leaves it stored.
-    // Out of line: every kind's declaration announces through it.
-    #[inline(never)]
-    pub(super) fn announce(&mut self, declared: DeclaredRow) {
         let place = self.place_of(declared);
         let tell = Tell::of(super::tables(&self.session.registry), declared);
         announce_on(
             self.transport.links.places_mut(),
             place,
-            OnRefusal::Forget,
+            on_refusal,
             &|actions: &LinkActions<C>| tell.is_none_or(|tell| tell.send(actions)),
-            None,
-        );
+            undo,
+        )
     }
 
-    /// [`Self::announce_with`] for a declaration stored at `place` that is not made when a link
-    /// refuses it: whether it was made.
-    // Out of line: the key expression and entity declarations that may be undone announce through it.
+    /// Tell each face that is up of the declaration `declared` names ([`Self::announce_row`]):
+    /// a refusal leaves it stored.
+    // Out of line: one body for every caller of a declaration that is not undone.
     #[inline(never)]
-    pub(super) fn announce_or_undo_at(
-        &mut self,
-        place: usize,
-        send: &(dyn SendTo<C> + Sync),
-        undo: Retract<'_>,
-    ) -> bool {
-        self.announce_with(place, OnRefusal::Undo, send, Some(undo))
+    pub(super) fn announce(&mut self, declared: DeclaredRow) {
+        self.announce_row(declared, OnRefusal::Forget, None);
+    }
+
+    /// [`Self::announce_row`] for a declaration that is not made when a link refuses it, `undo`
+    /// taking it back from the links that took it: whether it was made.
+    pub(super) fn announce_or_undo(&mut self, declared: DeclaredRow, undo: Retract<'_>) -> bool {
+        self.announce_row(declared, OnRefusal::Undo, Some(undo))
     }
 
     /// The declaration at `index` of `table`'s slot order was removed: tell `retract`
@@ -410,7 +399,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[inline(never)]
     pub(super) fn retract_at(&mut self, place: usize, retract: Option<Retract<'_>>) {
         for face in self.transport.links.faces_mut() {
-            let Link::Up(wire) = &face.link else {
+            // The wire and the replay are fields apart: the replay's cursor moves while the wire
+            // is held.
+            if face.life.phase() != LinkPhase::Up {
+                continue;
+            }
+            let Some(wire) = face.link.wire() else {
                 continue;
             };
             // A build that reaches no pace told the peer everything when its link came up.
@@ -614,7 +608,7 @@ fn tell_retract<C: ClockSource + 'static>(
     });
 }
 
-/// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
+/// [`Core::announce_row`] over `faces` alone, so a caller can read another part of the session
 /// (a row of the session core's tables) in `send` while the faces are written. One body for every
 /// kind of declaration: `send` and `undo` are handed by reference, not as types of their own.
 ///
@@ -641,7 +635,7 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     };
     let mut refused_at = None;
     for (at, face) in faces.placed() {
-        let Link::Up(wire) = &face.link else {
+        let Some(wire) = face.up() else {
             continue;
         };
         if emits_now(face)
@@ -654,7 +648,7 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     }
     if let Some(refused) = refused_at {
         for (_, face) in faces.placed().take_while(|(at, _)| *at < refused) {
-            if let (Link::Up(wire), Some(undo)) = (&face.link, undo) {
+            if let (Some(wire), Some(undo)) = (face.up(), undo) {
                 if emits_now(face) {
                     tell_retract(wire, undo);
                 }
@@ -664,7 +658,7 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     }
     if ReplayPacing::REACHABLE {
         for face in faces.iter_mut() {
-            if matches!(face.link, Link::Up(_)) {
+            if face.up().is_some() {
                 // The face was told it above, or its replay tells it in its turn.
                 let _ = face.replay.cursor.inserted(place);
             }

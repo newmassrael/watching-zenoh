@@ -1028,6 +1028,12 @@ const _: () = assert!(
     "an outcome holds owned records exactly where the tables read them"
 );
 
+/// A record the in-place receive path lent whose lent form does not represent it (a sliced
+/// payload, a key past the room it is composed in, a timestamp stack): the caller delivers its
+/// owned projection instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwedToProjection;
+
 /// One record of an inbound `Frame` decoded where the frame lies, with the
 /// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
 /// carries.
@@ -1972,19 +1978,16 @@ pub fn reassembled_chain_outcome(
     // message it cannot read without closing the link
     // (`io/zenoh-transport/src/common/defragmentation.rs` @
     // `let res: Option<NetworkMessage> = rcodec.read(&mut reader).ok();`).
-    let decoded = match &chain {
-        ChainBytes::Borrowed(msg) => crate::network_message::parse_frame_payload_lending(msg),
+    let parsed = match &chain {
+        ChainBytes::Borrowed(msg) => crate::network_message::admit_frame_payload_lending(msg),
         #[cfg(feature = "rx-shared-bytes")]
-        ChainBytes::Lent(bytes) => crate::network_message::parse_frame_payload_in(bytes),
+        ChainBytes::Lent(bytes) => crate::network_message::admit_frame_payload_in(bytes),
         // A kept buffer is a cell of its session's table, which no message may outlive: copied
         // once, as a borrowed chain is.
         ChainBytes::Kept(kept) => {
-            crate::network_message::parse_frame_payload_lending(kept.as_slice())
+            crate::network_message::admit_frame_payload_lending(kept.as_slice())
         }
     };
-    let parsed = decoded
-        .map_err(InboundParseError::Codec)
-        .and_then(crate::network_message::refuse_unknown_mandatory_ext);
     match parsed {
         Ok(messages) => DriverLoopOutcome::FramePayload {
             reliable,
@@ -2140,6 +2143,10 @@ pub enum DriverOutcome {
     /// bound runaway loops; production callers pass `None` for
     /// unlimited iteration.
     IterationLimit,
+    /// The session was never run: what its loop is made of found no room
+    /// on the heap (the cooperative pump's own reassembly table). Nothing
+    /// was sent; a caller reads it as a session that could not open.
+    Refused,
 }
 
 // A batch put back together from fragments is judged like one that arrived whole:

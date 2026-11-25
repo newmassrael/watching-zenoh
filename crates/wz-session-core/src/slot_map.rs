@@ -42,15 +42,29 @@ use core::marker::PhantomData;
 use core::num::{NonZeroU16, NonZeroU32};
 
 use crate::bounded::{
-    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Storage, TableLender, ARENA_ALIGN,
+    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Region, SeqPlace, Storage,
+    TableLender, ZeroEmpty, ZeroSeqs, ARENA_ALIGN,
 };
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
 /// The most rows a slot map holds: a slot's index is a `u16` counted from one.
 pub const MAX_SLOTS: usize = u16::MAX as usize;
 
-/// No slot: the end of the free list.
-const NIL: u16 = u16::MAX;
+/// No slot: the end of the free list. A link names a slot counted from one, as a handle does, so
+/// a table of all zero bytes has an empty free list.
+const NIL: u16 = 0;
+
+/// The link that names the slot at `at`: its place counted from one. Every place is under
+/// [`MAX_SLOTS`], so the link fits.
+fn link(at: usize) -> u16 {
+    u16::try_from(at.wrapping_add(1)).unwrap_or(NIL)
+}
+
+/// The place `link` names, or `None` for [`NIL`].
+fn linked(link: u16) -> Option<usize> {
+    usize::from(link).checked_sub(1)
+}
 
 /// A row of a slot map whose kind is `K`, for as long as the row is in it.
 pub struct Handle<K> {
@@ -212,7 +226,7 @@ enum State {
 #[derive(Clone, Copy, Debug)]
 struct Meta {
     generation: u16,
-    /// The next free slot, or [`NIL`], while the slot is free.
+    /// The link of the next free slot ([`link`]), or [`NIL`], while the slot is free.
     next: u16,
     pins: u16,
     state: State,
@@ -256,22 +270,38 @@ enum Unpinned {
 /// rows' type.
 #[derive(Debug)]
 struct Core {
-    /// The first free slot, or [`NIL`].
+    /// The link of the first free slot ([`link`]), or [`NIL`].
     free: u16,
     /// The slots that hold a row, retired ones among them.
     held: u16,
-    /// The most slots that may hold a row at once.
-    limit: u16,
+    /// The most slots that may hold a row at once, its bits inverted: zero is no bound but the
+    /// columns' own room, so a table of all zero bytes is bound by the rows it was placed.
+    unlimit: u16,
 }
+
+// SAFETY: a core of zero bytes has no free slot, holds none and is bound only by its columns.
+unsafe impl crate::bounded::ZeroEmpty for Core {}
 
 impl Core {
     /// A core of no rows, holding at most `rows`.
     fn new(rows: usize) -> Self {
-        Self {
+        let mut core = Self {
             free: NIL,
             held: 0,
-            limit: u16::try_from(rows.min(MAX_SLOTS)).unwrap_or(u16::MAX),
-        }
+            unlimit: 0,
+        };
+        core.limit_to(rows);
+        core
+    }
+
+    /// Hold at most `rows` slots from here on.
+    fn limit_to(&mut self, rows: usize) {
+        self.unlimit = !u16::try_from(rows.min(MAX_SLOTS)).unwrap_or(u16::MAX);
+    }
+
+    /// The most slots that may hold a row at once.
+    fn limit(&self) -> u16 {
+        !self.unlimit
     }
 
     /// A live slot for a row: a free one, or else the one after every slot there is, counted
@@ -282,11 +312,10 @@ impl Core {
     /// and bound, where each insert inlined the slot's bookkeeping of its own.
     #[inline(never)]
     fn take_slot(&mut self, meta: &mut [Meta], room: bool) -> Option<Taken> {
-        if self.held >= self.limit {
+        if self.held >= self.limit() {
             return None;
         }
-        if self.free != NIL {
-            let at = usize::from(self.free);
+        if let Some(at) = linked(self.free) {
             let slot = meta.get_mut(at)?;
             self.free = slot.next;
             slot.next = NIL;
@@ -331,7 +360,7 @@ impl Core {
         slot.pins = 0;
         slot.generation = slot.generation.wrapping_add(1);
         slot.next = self.free;
-        self.free = u16::try_from(at).unwrap_or(NIL);
+        self.free = link(at);
         self.held = self.held.saturating_sub(1);
     }
 
@@ -495,13 +524,12 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// build's `N` where the policy enforces it. A bound under the rows held now refuses every
     /// insert until enough leave.
     pub fn limit_to(&mut self, rows: usize) {
-        self.core.limit =
-            u16::try_from(rows.min(Self::ceiling()).min(MAX_SLOTS)).unwrap_or(u16::MAX);
+        self.core.limit_to(rows.min(Self::ceiling()));
     }
 
     /// The most rows the table holds at once.
     pub fn capacity(&self) -> usize {
-        usize::from(self.core.limit)
+        usize::from(self.core.limit()).min(Self::ceiling())
     }
 
     /// How many slots hold a row, retired rows among them.
@@ -516,18 +544,26 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
 
     /// Whether an insert would be refused for want of a slot.
     pub fn is_full(&self) -> bool {
-        self.core.held >= self.core.limit
+        self.core.held >= self.core.limit()
             || (self.core.free == NIL
                 && (self.meta.free_slots() == 0 || self.rows.free_slots() == 0))
     }
 
     /// Keep `value` in a free slot: its handle, or `value` back when the table is full.
     pub fn insert(&mut self, value: T) -> Result<Handle<K>, CapacityFull<T>> {
+        self.insert_with(value, core::convert::identity)
+            .map_err(CapacityFull)
+    }
+
+    /// Keep the row `make` builds of `parts` in a free slot: its handle, or `parts` back, with
+    /// `make` not called, when the table is full. A caller whose row holds what the refusal hands
+    /// back builds it only once a slot was found, and so has no row to take apart on a refusal.
+    pub fn insert_with<A>(&mut self, parts: A, make: impl FnOnce(A) -> T) -> Result<Handle<K>, A> {
         // The slot is found first and the row written once, whichever way it was found: a row
         // written in each way would be written twice in every caller of every row type.
         let room = self.meta.free_slots() != 0 && self.rows.free_slots() != 0;
         let Some(taken) = self.core.take_slot(&mut self.meta, room) else {
-            return Err(CapacityFull(value));
+            return Err(parts);
         };
         if taken.grown {
             // Both columns were found to have a place, so neither push is refused; the row's is
@@ -540,14 +576,14 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             self.rows.get_mut(taken.at),
         ) {
             (Some(handle), Some(row)) => {
-                *row = Some(value);
+                *row = Some(make(parts));
                 Ok(handle)
             }
             // A place under `MAX_SLOTS` names a handle and the two columns are the same length,
-            // so this is not reached; the slot goes back, free, and the value with the refusal.
+            // so this is not reached; the slot goes back, free, and the parts with the refusal.
             _ => {
                 self.core.free(&mut self.meta, taken.at);
-                Err(CapacityFull(value))
+                Err(parts)
             }
         }
     }
@@ -820,6 +856,43 @@ struct LentColumns {
     rows: NonNull<u8>,
     room: u32,
     core: Core,
+}
+
+// SAFETY: both columns are sequences of a policy whose sequences are empty at all zero bytes
+// (`ZeroSeqs`), the core of zero bytes holds nothing and is bound by its columns, and the marker is
+// no bytes.
+unsafe impl<K, T, const N: usize, P: ZeroSeqs> ZeroEmpty for SlotMap<K, T, N, P> {}
+
+/// The rows of a [`SlotMap`] of the region policy, which a region lays out beside the table: its
+/// metadata column's and its rows' column's, `N` of each.
+#[repr(C)]
+pub struct SlotRows<T, const N: usize> {
+    meta: [MaybeUninit<Meta>; N],
+    rows: [MaybeUninit<Option<T>>; N],
+}
+
+// SAFETY: both columns are `MaybeUninit`, valid as any bytes, and hold no value until placed.
+unsafe impl<T, const N: usize> ZeroEmpty for SlotRows<T, N> {}
+
+impl<K, T, const N: usize> SlotMap<K, T, N, Region> {
+    /// The lines of a region's description ([`place_seqs`]) that place this table's two columns,
+    /// the table at `at` in the region and its [`SlotRows`] at `rows`.
+    ///
+    /// [`place_seqs`]: crate::bounded::place_seqs
+    pub const fn places(at: usize, rows: usize) -> [SeqPlace; 2] {
+        [
+            SeqPlace::of::<Meta>(
+                at.wrapping_add(core::mem::offset_of!(Self, meta)),
+                rows.wrapping_add(core::mem::offset_of!(SlotRows<T, N>, meta)),
+                N,
+            ),
+            SeqPlace::of::<Option<T>>(
+                at.wrapping_add(core::mem::offset_of!(Self, rows)),
+                rows.wrapping_add(core::mem::offset_of!(SlotRows<T, N>, rows)),
+                N,
+            ),
+        ]
+    }
 }
 
 /// Lend a table's two columns by `lend`, `rows` rows of each, at most `ceiling`: its metadata

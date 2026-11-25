@@ -122,6 +122,9 @@ fn descriptor(on: WaitOn) -> Option<c_int> {
     }
 }
 
+// The entries of a wait set are marked one bit each of a word (`poll_on`'s wakes).
+const _: () = assert!(crate::WAIT_SET_SOCKETS <= u64::BITS as usize);
+
 /// One `poll` over what `on` names, in `fds`, for at most `timeout_ms`: how many entries of
 /// `fds` it filled, in the order of `on`, and whether the poll answered. A wake the poll found
 /// ready is made quiet; one it did not look at, or found quiet, is not read.
@@ -132,9 +135,10 @@ fn poll_on(
 ) -> (usize, bool) {
     let mut count = 0;
     let mut look = false;
-    let mut wakes = false;
+    // The entries of `fds` that are wakes, a bit each by their place, so a poll that found one
+    // ready reads it without walking `on` again.
+    let mut wakes = 0u64;
     for wait in on {
-        wakes |= matches!(wait.on, WaitOn::Wake(_));
         match (descriptor(wait.on), fds.get_mut(count)) {
             (Some(fd), Some(entry)) => {
                 *entry = libc::pollfd {
@@ -142,6 +146,10 @@ fn poll_on(
                     events: wait_events(wait.room),
                     revents: 0,
                 };
+                // Below the set's length, at most the bits of the word (asserted above).
+                if matches!(wait.on, WaitOn::Wake(_)) {
+                    wakes |= 1u64 << count;
+                }
                 count += 1;
             }
             // A handle this cannot name to the kernel, or one past the set: the bounded look,
@@ -155,20 +163,15 @@ fn poll_on(
     // timeout bounds the wait. A failed or interrupted wait is a quiet link: the step that
     // follows reads and reports the error.
     let answered = unsafe { libc::poll(fds.as_mut_ptr(), count as libc::nfds_t, timeout) } >= 0;
-    // A wake found ready is made quiet, so the next wait waits for the next word. The entries are
-    // walked in the order they were filled in, so the next one named is the next of `fds`.
-    if wakes && answered {
-        let mut named = 0;
-        for wait in on {
-            let Some(fd) = descriptor(wait.on) else {
-                continue;
-            };
-            let Some(entry) = fds.get(named).filter(|_| named < count) else {
-                break;
-            };
-            named += 1;
-            if matches!(wait.on, WaitOn::Wake(_)) && entry.revents != 0 {
-                drain(fd);
+    // A wake found ready is made quiet, so the next wait waits for the next word.
+    if answered {
+        let mut left = wakes;
+        while left != 0 {
+            let at = left.trailing_zeros() as usize;
+            // The lowest bit, which the line above read, is cleared.
+            left &= left - 1;
+            if let Some(entry) = fds.get(at).filter(|entry| entry.revents != 0) {
+                drain(entry.fd);
             }
         }
     }
@@ -204,28 +207,16 @@ impl LinkWaits for PosixWaits {
             return on.len();
         }
         // The entries are walked in the order `poll_on` filled `fds` in, so the next entry it
-        // named is the next of `fds`; each ready one is swapped to the front, past every entry
-        // walked already.
+        // named is the next of `fds`.
         let mut named = 0;
-        let mut front = 0;
-        for at in 0..on.len() {
-            let Some(wait) = on.get(at) else {
-                break;
-            };
-            let ready = match descriptor(wait.on) {
-                Some(_) if named < count => {
-                    let polled = fds.get(named).is_some_and(|entry| entry.revents != 0);
-                    named += 1;
-                    polled
-                }
-                _ => true,
-            };
-            if ready {
-                on.swap(front, at);
-                front += 1;
+        crate::front_the_ready(on, |wait| match descriptor(wait.on) {
+            Some(_) if named < count => {
+                let polled = fds.get(named).is_some_and(|entry| entry.revents != 0);
+                named += 1;
+                polled
             }
-        }
-        front
+            _ => true,
+        })
     }
 
     fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
@@ -1687,6 +1678,43 @@ mod tests {
                 started.elapsed() < Duration::from_millis(1_000),
                 "the wake the first wait did not look at was left ready, took {:?}",
                 started.elapsed()
+            );
+        }
+
+        /// A wait reads the wake it found ready and no socket beside it, past an entry before the
+        /// wake that it could not name to the kernel: a socket with a datagram keeps it for its
+        /// link. Turned red by a wake looked for at the place of its entry in the wait rather than
+        /// in the set the kernel was handed (the wake left ready), or by a ready socket read as a
+        /// wake (its datagram gone).
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_wait_reads_the_ready_wake_and_no_socket_beside_it() {
+            let (_quiet, sender) = pair();
+            let ready = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
+            let on = |socket: &PosixUdpSocket| {
+                LinkWait::input(socket.input_wait().expect("a socket names its descriptor"))
+            };
+            let wake = PosixWaits.wake().expect("the host makes a wake");
+            sender.send_to(ready.local(), b"data").expect("a send");
+            // The datagram has arrived once a wait on its socket alone ends; nothing reads it.
+            PosixWaits.wait(&[on(&ready)], 5_000);
+            assert_eq!(
+                PosixWaits.wait_ready(&mut [on(&ready)], 0),
+                1,
+                "CONTROL: the datagram waits on its socket"
+            );
+            wake.waker.wake_by_ref();
+            let elsewhere = LinkWait::input(WaitOn::AppLink(7));
+            PosixWaits.wait(&[elsewhere, on(&ready), LinkWait::input(wake.on)], 5_000);
+            assert_eq!(
+                PosixWaits.wait_ready(&mut [on(&ready)], 0),
+                1,
+                "the socket keeps its datagram"
+            );
+            assert_eq!(
+                PosixWaits.wait_ready(&mut [LinkWait::input(wake.on)], 0),
+                0,
+                "the wake the wait found ready was read"
             );
         }
     }

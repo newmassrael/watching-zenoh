@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: a9da6cfea8170573f31c20898506e9bb4fdb34730e93926e2b09dab778bdbcae
+// source-hash: 93789795beabefe47d1f61e4e1e9d777025a9219fad5fa4ad90f3e48f0221326
 // source: unicast_link.scxml
 
 
@@ -72,7 +72,7 @@
 // closure; this one suspicious-category lint reads the `match` of a constant
 // default as a hand-written `unwrap_or_default`.
 
-// SCE-MAP: unicast_link.scxml:67 :: _machine
+// SCE-MAP: unicast_link.scxml:76 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -105,7 +105,8 @@ pub enum UnicastLinkState {
     Handshaking = 2,
     Up = 3,
     Backoff = 4,
-    Closed = 5,
+    Held = 5,
+    Closed = 6,
 }
 
 /// Each state's number, as the document's tables and the policy's behaviour
@@ -119,6 +120,7 @@ impl UnicastLinkState {
     pub const ID_Handshaking: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Handshaking as u16);
     pub const ID_Up: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Up as u16);
     pub const ID_Backoff: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Backoff as u16);
+    pub const ID_Held: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Held as u16);
     pub const ID_Closed: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Closed as u16);
 }
 
@@ -135,19 +137,25 @@ pub enum UnicastLinkEvent {
     BackoffOver = 0,
     DialEnded = 1,
     DialExhausted = 2,
-    DialMade = 3,
-    DialNext = 4,
-    HandshakeBegun = 5,
-    HandshakeDone = 6,
-    HandshakeEnded = 7,
-    HandshakeExhausted = 8,
-    HandshakeNext = 9,
-    LinkClose = 10,
-    LinkEnded = 11,
-    LinkLost = 12,
-    LinkOpen = 13,
+    DialGone = 3,
+    DialMade = 4,
+    DialNext = 5,
+    HandshakeBegun = 6,
+    HandshakeDone = 7,
+    HandshakeEnded = 8,
+    HandshakeExhausted = 9,
+    HandshakeGone = 10,
+    HandshakeHeld = 11,
+    HandshakeNext = 12,
+    HeldOver = 13,
+    LinkClose = 14,
+    LinkEnded = 15,
+    LinkGone = 16,
+    LinkLost = 17,
+    LinkOpen = 18,
+    LinkTaken = 19,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
-    Null = 14,
+    Null = 20,
 }
 
 /// Each event's number, as the runtime's queues and the policy's behaviour
@@ -160,17 +168,23 @@ impl UnicastLinkEvent {
     pub const ID_BackoffOver: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::BackoffOver as u16);
     pub const ID_DialEnded: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialEnded as u16);
     pub const ID_DialExhausted: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialExhausted as u16);
+    pub const ID_DialGone: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialGone as u16);
     pub const ID_DialMade: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialMade as u16);
     pub const ID_DialNext: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialNext as u16);
     pub const ID_HandshakeBegun: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HandshakeBegun as u16);
     pub const ID_HandshakeDone: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HandshakeDone as u16);
     pub const ID_HandshakeEnded: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HandshakeEnded as u16);
     pub const ID_HandshakeExhausted: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HandshakeExhausted as u16);
+    pub const ID_HandshakeGone: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HandshakeGone as u16);
+    pub const ID_HandshakeHeld: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HandshakeHeld as u16);
     pub const ID_HandshakeNext: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HandshakeNext as u16);
+    pub const ID_HeldOver: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HeldOver as u16);
     pub const ID_LinkClose: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkClose as u16);
     pub const ID_LinkEnded: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkEnded as u16);
+    pub const ID_LinkGone: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkGone as u16);
     pub const ID_LinkLost: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkLost as u16);
     pub const ID_LinkOpen: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkOpen as u16);
+    pub const ID_LinkTaken: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkTaken as u16);
     pub const ID_Null: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::Null as u16);
 }
 
@@ -238,8 +252,10 @@ pub const UNICAST_LINK_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
             StateRow::new(None, StateKind::Atomic, StateId(3), None),
             // 4: Backoff
             StateRow::new(None, StateKind::Atomic, StateId(4), None),
-            // 5: Closed
-            StateRow::new(None, StateKind::Final, StateId(5), None),
+            // 5: Held
+            StateRow::new(None, StateKind::Atomic, StateId(5), None),
+            // 6: Closed
+            StateRow::new(None, StateKind::Final, StateId(6), None),
         ],
         histories: &[
         ],
@@ -247,52 +263,66 @@ pub const UNICAST_LINK_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
             // 0: Idle, transition 0
             TransitionRow::new(Some(StateId(0)), Target::state(StateId(1)), false, false),
             // 1: Idle, transition 1
-            TransitionRow::new(Some(StateId(0)), Target::state(StateId(5)), false, true),
+            TransitionRow::new(Some(StateId(0)), Target::state(StateId(2)), false, false),
             // 2: Idle, transition 2
-            TransitionRow::new(Some(StateId(0)), Target::state(StateId(5)), false, false),
-            // 3: Dialing, transition 0
+            TransitionRow::new(Some(StateId(0)), Target::state(StateId(6)), false, true),
+            // 3: Idle, transition 3
+            TransitionRow::new(Some(StateId(0)), Target::state(StateId(6)), false, false),
+            // 4: Dialing, transition 0
             TransitionRow::new(Some(StateId(1)), Target::NONE, false, true),
-            // 4: Dialing, transition 1
+            // 5: Dialing, transition 1
             TransitionRow::new(Some(StateId(1)), Target::state(StateId(2)), false, false),
-            // 5: Dialing, transition 2
+            // 6: Dialing, transition 2
             TransitionRow::new(Some(StateId(1)), Target::state(StateId(1)), false, false),
-            // 6: Dialing, transition 3
+            // 7: Dialing, transition 3
             TransitionRow::new(Some(StateId(1)), Target::state(StateId(4)), false, false),
-            // 7: Dialing, transition 4
-            TransitionRow::new(Some(StateId(1)), Target::state(StateId(5)), false, true),
-            // 8: Dialing, transition 5
-            TransitionRow::new(Some(StateId(1)), Target::state(StateId(5)), false, true),
-            // 9: Handshaking, transition 0
+            // 8: Dialing, transition 4
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(6)), false, true),
+            // 9: Dialing, transition 5
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(6)), false, false),
+            // 10: Dialing, transition 6
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(6)), false, true),
+            // 11: Handshaking, transition 0
             TransitionRow::new(Some(StateId(2)), Target::state(StateId(3)), false, false),
-            // 10: Handshaking, transition 1
+            // 12: Handshaking, transition 1
             TransitionRow::new(Some(StateId(2)), Target::state(StateId(1)), false, true),
-            // 11: Handshaking, transition 2
+            // 13: Handshaking, transition 2
             TransitionRow::new(Some(StateId(2)), Target::state(StateId(4)), false, true),
-            // 12: Handshaking, transition 3
+            // 14: Handshaking, transition 3
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(6)), false, true),
+            // 15: Handshaking, transition 4
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(6)), false, true),
+            // 16: Handshaking, transition 5
             TransitionRow::new(Some(StateId(2)), Target::state(StateId(5)), false, true),
-            // 13: Handshaking, transition 4
-            TransitionRow::new(Some(StateId(2)), Target::state(StateId(5)), false, true),
-            // 14: Up, transition 0
+            // 17: Handshaking, transition 6
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(6)), false, true),
+            // 18: Up, transition 0
             TransitionRow::new(Some(StateId(3)), Target::state(StateId(1)), false, true),
-            // 15: Up, transition 1
-            TransitionRow::new(Some(StateId(3)), Target::state(StateId(5)), false, true),
-            // 16: Up, transition 2
-            TransitionRow::new(Some(StateId(3)), Target::state(StateId(5)), false, true),
-            // 17: Backoff, transition 0
+            // 19: Up, transition 1
+            TransitionRow::new(Some(StateId(3)), Target::state(StateId(6)), false, true),
+            // 20: Up, transition 2
+            TransitionRow::new(Some(StateId(3)), Target::state(StateId(6)), false, true),
+            // 21: Up, transition 3
+            TransitionRow::new(Some(StateId(3)), Target::state(StateId(6)), false, true),
+            // 22: Backoff, transition 0
             TransitionRow::new(Some(StateId(4)), Target::state(StateId(1)), false, false),
-            // 18: Backoff, transition 1
-            TransitionRow::new(Some(StateId(4)), Target::state(StateId(5)), false, false),
-            // 19: the document's initial transition
+            // 23: Backoff, transition 1
+            TransitionRow::new(Some(StateId(4)), Target::state(StateId(6)), false, false),
+            // 24: Held, transition 0
+            TransitionRow::new(Some(StateId(5)), Target::state(StateId(1)), false, false),
+            // 25: Held, transition 1
+            TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, false),
+            // 26: the document's initial transition
             TransitionRow::new(None, Target::state(StateId(0)), false, false),
         ],
         targets: &[],
-        initial: TransitionId(19),
+        initial: TransitionId(26),
         default_state: ::sce_rust_runtime::StateId(UnicastLinkState::Idle as u16),
-        null_event: ::sce_rust_runtime::EventId(14),
+        null_event: ::sce_rust_runtime::EventId(20),
         error_events: &[],
         walk: &::sce_rust_runtime::ROW_WALK,
-        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(2), EntryRow::NONE, EntryRow::at(4), EntryRow::at(0), EntryRow::at(6), EntryRow::at(2), EntryRow::at(2), EntryRow::at(8), EntryRow::at(0), EntryRow::at(6), EntryRow::at(2), EntryRow::at(2), EntryRow::at(0), EntryRow::at(2), EntryRow::at(2), EntryRow::at(0), EntryRow::at(2), EntryRow::at(10)],
-        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(5), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(4), false), EntryStep::count(1), EntryStep::new(StateId(3), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
+        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(4), EntryRow::NONE, EntryRow::at(2), EntryRow::at(0), EntryRow::at(6), EntryRow::at(4), EntryRow::at(4), EntryRow::at(4), EntryRow::at(8), EntryRow::at(0), EntryRow::at(6), EntryRow::at(4), EntryRow::at(4), EntryRow::at(10), EntryRow::at(4), EntryRow::at(0), EntryRow::at(4), EntryRow::at(4), EntryRow::at(4), EntryRow::at(0), EntryRow::at(4), EntryRow::at(0), EntryRow::at(4), EntryRow::at(12)],
+        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(6), false), EntryStep::count(1), EntryStep::new(StateId(4), false), EntryStep::count(1), EntryStep::new(StateId(3), false), EntryStep::count(1), EntryStep::new(StateId(5), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
         history: None,
         parallel: None,
     }
@@ -318,17 +348,23 @@ impl UnicastLinkEvent {
         UnicastLinkEvent::BackoffOver,
         UnicastLinkEvent::DialEnded,
         UnicastLinkEvent::DialExhausted,
+        UnicastLinkEvent::DialGone,
         UnicastLinkEvent::DialMade,
         UnicastLinkEvent::DialNext,
         UnicastLinkEvent::HandshakeBegun,
         UnicastLinkEvent::HandshakeDone,
         UnicastLinkEvent::HandshakeEnded,
         UnicastLinkEvent::HandshakeExhausted,
+        UnicastLinkEvent::HandshakeGone,
+        UnicastLinkEvent::HandshakeHeld,
         UnicastLinkEvent::HandshakeNext,
+        UnicastLinkEvent::HeldOver,
         UnicastLinkEvent::LinkClose,
         UnicastLinkEvent::LinkEnded,
+        UnicastLinkEvent::LinkGone,
         UnicastLinkEvent::LinkLost,
         UnicastLinkEvent::LinkOpen,
+        UnicastLinkEvent::LinkTaken,
     ];
 }
 
@@ -548,6 +584,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
         UnicastLinkState::Handshaking,
         UnicastLinkState::Up,
         UnicastLinkState::Backoff,
+        UnicastLinkState::Held,
         UnicastLinkState::Closed,
     ];
     const HISTORIES: &'static [Self::History] = &[];
@@ -555,17 +592,23 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
         UnicastLinkEvent::BackoffOver,
         UnicastLinkEvent::DialEnded,
         UnicastLinkEvent::DialExhausted,
+        UnicastLinkEvent::DialGone,
         UnicastLinkEvent::DialMade,
         UnicastLinkEvent::DialNext,
         UnicastLinkEvent::HandshakeBegun,
         UnicastLinkEvent::HandshakeDone,
         UnicastLinkEvent::HandshakeEnded,
         UnicastLinkEvent::HandshakeExhausted,
+        UnicastLinkEvent::HandshakeGone,
+        UnicastLinkEvent::HandshakeHeld,
         UnicastLinkEvent::HandshakeNext,
+        UnicastLinkEvent::HeldOver,
         UnicastLinkEvent::LinkClose,
         UnicastLinkEvent::LinkEnded,
+        UnicastLinkEvent::LinkGone,
         UnicastLinkEvent::LinkLost,
         UnicastLinkEvent::LinkOpen,
+        UnicastLinkEvent::LinkTaken,
         UnicastLinkEvent::Null,
     ];
 
@@ -585,7 +628,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
-    // the runtime keeps is a bit vector of this document's 6 state(s); a
+    // the runtime keeps is a bit vector of this document's 7 state(s); a
     // configuration holds 1 state(s) at most, the capacity of the
     // `Configuration` a host reads; a selection enables 1 transition(s) at most, one from each atomic state
     // of one configuration; a microstep owes 0 history default(s) at most;
@@ -600,7 +643,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
     // of its tables, which builds no set of states and walks no stack, so the
     // workspace holds the enabled set alone.
     type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
-    type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(6) }, { ::sce_rust_runtime::record_words(6, 0) }, 0>;
+    type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(7) }, { ::sce_rust_runtime::record_words(7, 0) }, 0>;
     type Configuration = UnicastLinkConfiguration;
     // docs/adr/0096: what refuses this machine's start. One with a script
     // engine is refused when its script session cannot be established; one
@@ -640,17 +683,23 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
             UnicastLinkEvent::BackoffOver => "backoff.over",
             UnicastLinkEvent::DialEnded => "dial.ended",
             UnicastLinkEvent::DialExhausted => "dial.exhausted",
+            UnicastLinkEvent::DialGone => "dial.gone",
             UnicastLinkEvent::DialMade => "dial.made",
             UnicastLinkEvent::DialNext => "dial.next",
             UnicastLinkEvent::HandshakeBegun => "handshake.begun",
             UnicastLinkEvent::HandshakeDone => "handshake.done",
             UnicastLinkEvent::HandshakeEnded => "handshake.ended",
             UnicastLinkEvent::HandshakeExhausted => "handshake.exhausted",
+            UnicastLinkEvent::HandshakeGone => "handshake.gone",
+            UnicastLinkEvent::HandshakeHeld => "handshake.held",
             UnicastLinkEvent::HandshakeNext => "handshake.next",
+            UnicastLinkEvent::HeldOver => "held.over",
             UnicastLinkEvent::LinkClose => "link.close",
             UnicastLinkEvent::LinkEnded => "link.ended",
+            UnicastLinkEvent::LinkGone => "link.gone",
             UnicastLinkEvent::LinkLost => "link.lost",
             UnicastLinkEvent::LinkOpen => "link.open",
+            UnicastLinkEvent::LinkTaken => "link.taken",
             UnicastLinkEvent::Null => "",
         }
     }
@@ -660,17 +709,23 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
             "backoff.over" => Some(UnicastLinkEvent::BackoffOver),
             "dial.ended" => Some(UnicastLinkEvent::DialEnded),
             "dial.exhausted" => Some(UnicastLinkEvent::DialExhausted),
+            "dial.gone" => Some(UnicastLinkEvent::DialGone),
             "dial.made" => Some(UnicastLinkEvent::DialMade),
             "dial.next" => Some(UnicastLinkEvent::DialNext),
             "handshake.begun" => Some(UnicastLinkEvent::HandshakeBegun),
             "handshake.done" => Some(UnicastLinkEvent::HandshakeDone),
             "handshake.ended" => Some(UnicastLinkEvent::HandshakeEnded),
             "handshake.exhausted" => Some(UnicastLinkEvent::HandshakeExhausted),
+            "handshake.gone" => Some(UnicastLinkEvent::HandshakeGone),
+            "handshake.held" => Some(UnicastLinkEvent::HandshakeHeld),
             "handshake.next" => Some(UnicastLinkEvent::HandshakeNext),
+            "held.over" => Some(UnicastLinkEvent::HeldOver),
             "link.close" => Some(UnicastLinkEvent::LinkClose),
             "link.ended" => Some(UnicastLinkEvent::LinkEnded),
+            "link.gone" => Some(UnicastLinkEvent::LinkGone),
             "link.lost" => Some(UnicastLinkEvent::LinkLost),
             "link.open" => Some(UnicastLinkEvent::LinkOpen),
+            "link.taken" => Some(UnicastLinkEvent::LinkTaken),
             _ => None,
         }
     }
@@ -681,6 +736,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
             UnicastLinkState::Closed => "Closed",
             UnicastLinkState::Dialing => "Dialing",
             UnicastLinkState::Handshaking => "Handshaking",
+            UnicastLinkState::Held => "Held",
             UnicastLinkState::Idle => "Idle",
             UnicastLinkState::Up => "Up",
         }
@@ -695,6 +751,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
             "Closed" => Some(UnicastLinkState::Closed),
             "Dialing" => Some(UnicastLinkState::Dialing),
             "Handshaking" => Some(UnicastLinkState::Handshaking),
+            "Held" => Some(UnicastLinkState::Held),
             "Idle" => Some(UnicastLinkState::Idle),
             "Up" => Some(UnicastLinkState::Up),
             _ => None,
@@ -715,12 +772,12 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: unicast_link.scxml:67 :: _machine"]
-// SCE-MAP: unicast_link.scxml:67 :: _machine
+    #[doc = "SCE-MAP: unicast_link.scxml:76 :: _machine"]
+// SCE-MAP: unicast_link.scxml:76 :: _machine
     fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             UnicastLinkState::ID_Backoff => {
-                // SCE-MAP: unicast_link.scxml:139 :: Backoff :: _state_body
+                // SCE-MAP: unicast_link.scxml:159 :: Backoff :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -730,7 +787,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             UnicastLinkState::ID_Dialing => {
-                // SCE-MAP: unicast_link.scxml:86 :: Dialing :: _state_body
+                // SCE-MAP: unicast_link.scxml:96 :: Dialing :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -740,7 +797,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             UnicastLinkState::ID_Up => {
-                // SCE-MAP: unicast_link.scxml:123 :: Up :: _state_body
+                // SCE-MAP: unicast_link.scxml:140 :: Up :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -760,8 +817,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
     // recorded runs nothing.
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: unicast_link.scxml:67 :: _machine"]
-// SCE-MAP: unicast_link.scxml:67 :: _machine
+    #[doc = "SCE-MAP: unicast_link.scxml:76 :: _machine"]
+// SCE-MAP: unicast_link.scxml:76 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: ::sce_rust_runtime::StateId,
@@ -786,8 +843,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
     // the ordered set. `Event::ID_Null` asks for eventless transitions. The
     // state and the event are the numbers the tables are indexed by
     // (docs/adr/0123).
-    #[doc = "SCE-MAP: unicast_link.scxml:67 :: _machine"]
-// SCE-MAP: unicast_link.scxml:67 :: _machine
+    #[doc = "SCE-MAP: unicast_link.scxml:76 :: _machine"]
+// SCE-MAP: unicast_link.scxml:76 :: _machine
     fn first_enabled_transition(
         &mut self,
         state: ::sce_rust_runtime::StateId,
@@ -800,13 +857,13 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 if event == UnicastLinkEvent::ID_BackoffOver {
                     {
                         // Backoff, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(17));
+                        return Some(::sce_rust_runtime::TransitionId(22));
                     }
                 }
                 if event == UnicastLinkEvent::ID_LinkClose {
                     {
                         // Backoff, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(18));
+                        return Some(::sce_rust_runtime::TransitionId(23));
                     }
                 }
                 None
@@ -815,37 +872,43 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 if event == UnicastLinkEvent::ID_DialMade {
                     {
                         // Dialing, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(3));
+                        return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
                 if event == UnicastLinkEvent::ID_HandshakeBegun {
                     {
                         // Dialing, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(4));
+                        return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
                 if event == UnicastLinkEvent::ID_DialNext {
                     {
                         // Dialing, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(5));
+                        return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
                 if event == UnicastLinkEvent::ID_DialExhausted {
                     {
                         // Dialing, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(6));
+                        return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
                 if event == UnicastLinkEvent::ID_DialEnded {
                     {
                         // Dialing, transition 4
-                        return Some(::sce_rust_runtime::TransitionId(7));
+                        return Some(::sce_rust_runtime::TransitionId(8));
+                    }
+                }
+                if event == UnicastLinkEvent::ID_DialGone {
+                    {
+                        // Dialing, transition 5
+                        return Some(::sce_rust_runtime::TransitionId(9));
                     }
                 }
                 if event == UnicastLinkEvent::ID_LinkClose {
                     {
-                        // Dialing, transition 5
-                        return Some(::sce_rust_runtime::TransitionId(8));
+                        // Dialing, transition 6
+                        return Some(::sce_rust_runtime::TransitionId(10));
                     }
                 }
                 None
@@ -854,31 +917,58 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 if event == UnicastLinkEvent::ID_HandshakeDone {
                     {
                         // Handshaking, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(9));
+                        return Some(::sce_rust_runtime::TransitionId(11));
                     }
                 }
                 if event == UnicastLinkEvent::ID_HandshakeNext {
                     {
                         // Handshaking, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(10));
+                        return Some(::sce_rust_runtime::TransitionId(12));
                     }
                 }
                 if event == UnicastLinkEvent::ID_HandshakeExhausted {
                     {
                         // Handshaking, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(11));
+                        return Some(::sce_rust_runtime::TransitionId(13));
                     }
                 }
                 if event == UnicastLinkEvent::ID_HandshakeEnded {
                     {
                         // Handshaking, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(12));
+                        return Some(::sce_rust_runtime::TransitionId(14));
+                    }
+                }
+                if event == UnicastLinkEvent::ID_HandshakeGone {
+                    {
+                        // Handshaking, transition 4
+                        return Some(::sce_rust_runtime::TransitionId(15));
+                    }
+                }
+                if event == UnicastLinkEvent::ID_HandshakeHeld {
+                    {
+                        // Handshaking, transition 5
+                        return Some(::sce_rust_runtime::TransitionId(16));
                     }
                 }
                 if event == UnicastLinkEvent::ID_LinkClose {
                     {
-                        // Handshaking, transition 4
-                        return Some(::sce_rust_runtime::TransitionId(13));
+                        // Handshaking, transition 6
+                        return Some(::sce_rust_runtime::TransitionId(17));
+                    }
+                }
+                None
+            }
+            UnicastLinkState::ID_Held => {
+                if event == UnicastLinkEvent::ID_HeldOver {
+                    {
+                        // Held, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(24));
+                    }
+                }
+                if event == UnicastLinkEvent::ID_LinkClose {
+                    {
+                        // Held, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(25));
                     }
                 }
                 None
@@ -890,16 +980,22 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                         return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
-                if event == UnicastLinkEvent::ID_DialEnded {
+                if event == UnicastLinkEvent::ID_LinkTaken {
                     {
                         // Idle, transition 1
                         return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
-                if event == UnicastLinkEvent::ID_LinkClose {
+                if event == UnicastLinkEvent::ID_DialEnded {
                     {
                         // Idle, transition 2
                         return Some(::sce_rust_runtime::TransitionId(2));
+                    }
+                }
+                if event == UnicastLinkEvent::ID_LinkClose {
+                    {
+                        // Idle, transition 3
+                        return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
                 None
@@ -908,19 +1004,25 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 if event == UnicastLinkEvent::ID_LinkLost {
                     {
                         // Up, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(14));
+                        return Some(::sce_rust_runtime::TransitionId(18));
                     }
                 }
                 if event == UnicastLinkEvent::ID_LinkEnded {
                     {
                         // Up, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(15));
+                        return Some(::sce_rust_runtime::TransitionId(19));
+                    }
+                }
+                if event == UnicastLinkEvent::ID_LinkGone {
+                    {
+                        // Up, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(20));
                     }
                 }
                 if event == UnicastLinkEvent::ID_LinkClose {
                     {
-                        // Up, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(16));
+                        // Up, transition 3
+                        return Some(::sce_rust_runtime::TransitionId(21));
                     }
                 }
                 None
@@ -932,8 +1034,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
-    #[doc = "SCE-MAP: unicast_link.scxml:67 :: _machine"]
-// SCE-MAP: unicast_link.scxml:67 :: _machine
+    #[doc = "SCE-MAP: unicast_link.scxml:76 :: _machine"]
+// SCE-MAP: unicast_link.scxml:76 :: _machine
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
@@ -942,8 +1044,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
     ) {
         match transition.0 {
             // Dialing, transition 0
-            3 => {
-                // SCE-MAP: unicast_link.scxml:91 :: Dialing :: _transition_0
+            4 => {
+                // SCE-MAP: unicast_link.scxml:101 :: Dialing :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -953,8 +1055,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             // Dialing, transition 4
-            7 => {
-                // SCE-MAP: unicast_link.scxml:98 :: Dialing :: _transition_4
+            8 => {
+                // SCE-MAP: unicast_link.scxml:108 :: Dialing :: _transition_4
                 // W3C SCXML 3.13: Transition 4 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -963,10 +1065,10 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
             self.actions.end_session();
                 }
             }
-            // Dialing, transition 5
-            8 => {
-                // SCE-MAP: unicast_link.scxml:101 :: Dialing :: _transition_5
-                // W3C SCXML 3.13: Transition 5 actions
+            // Dialing, transition 6
+            10 => {
+                // SCE-MAP: unicast_link.scxml:112 :: Dialing :: _transition_6
+                // W3C SCXML 3.13: Transition 6 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
 
@@ -975,8 +1077,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             // Handshaking, transition 1
-            10 => {
-                // SCE-MAP: unicast_link.scxml:108 :: Handshaking :: _transition_1
+            12 => {
+                // SCE-MAP: unicast_link.scxml:119 :: Handshaking :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -986,8 +1088,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             // Handshaking, transition 2
-            11 => {
-                // SCE-MAP: unicast_link.scxml:111 :: Handshaking :: _transition_2
+            13 => {
+                // SCE-MAP: unicast_link.scxml:122 :: Handshaking :: _transition_2
                 // W3C SCXML 3.13: Transition 2 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -997,8 +1099,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             // Handshaking, transition 3
-            12 => {
-                // SCE-MAP: unicast_link.scxml:114 :: Handshaking :: _transition_3
+            14 => {
+                // SCE-MAP: unicast_link.scxml:125 :: Handshaking :: _transition_3
                 // W3C SCXML 3.13: Transition 3 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1011,9 +1113,31 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             // Handshaking, transition 4
-            13 => {
-                // SCE-MAP: unicast_link.scxml:118 :: Handshaking :: _transition_4
+            15 => {
+                // SCE-MAP: unicast_link.scxml:129 :: Handshaking :: _transition_4
                 // W3C SCXML 3.13: Transition 4 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="end_handshake">
+            self.actions.end_handshake();
+                }
+            }
+            // Handshaking, transition 5
+            16 => {
+                // SCE-MAP: unicast_link.scxml:132 :: Handshaking :: _transition_5
+                // W3C SCXML 3.13: Transition 5 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="end_handshake">
+            self.actions.end_handshake();
+                }
+            }
+            // Handshaking, transition 6
+            17 => {
+                // SCE-MAP: unicast_link.scxml:135 :: Handshaking :: _transition_6
+                // W3C SCXML 3.13: Transition 6 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
 
@@ -1021,10 +1145,10 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
             self.actions.let_go();
                 }
             }
-            // Idle, transition 1
-            1 => {
-                // SCE-MAP: unicast_link.scxml:80 :: Idle :: _transition_1
-                // W3C SCXML 3.13: Transition 1 actions
+            // Idle, transition 2
+            2 => {
+                // SCE-MAP: unicast_link.scxml:90 :: Idle :: _transition_2
+                // W3C SCXML 3.13: Transition 2 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
 
@@ -1033,8 +1157,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             // Up, transition 0
-            14 => {
-                // SCE-MAP: unicast_link.scxml:127 :: Up :: _transition_0
+            18 => {
+                // SCE-MAP: unicast_link.scxml:144 :: Up :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1044,8 +1168,8 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             // Up, transition 1
-            15 => {
-                // SCE-MAP: unicast_link.scxml:130 :: Up :: _transition_1
+            19 => {
+                // SCE-MAP: unicast_link.scxml:147 :: Up :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -1058,9 +1182,20 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
                 }
             }
             // Up, transition 2
-            16 => {
-                // SCE-MAP: unicast_link.scxml:134 :: Up :: _transition_2
+            20 => {
+                // SCE-MAP: unicast_link.scxml:151 :: Up :: _transition_2
                 // W3C SCXML 3.13: Transition 2 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="lose_link">
+            self.actions.lose_link();
+                }
+            }
+            // Up, transition 3
+            21 => {
+                // SCE-MAP: unicast_link.scxml:154 :: Up :: _transition_3
+                // W3C SCXML 3.13: Transition 3 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
 

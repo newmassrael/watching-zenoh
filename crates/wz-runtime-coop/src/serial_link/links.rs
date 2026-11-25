@@ -114,6 +114,8 @@ pub struct SerialDriver<
     lost: Cell<Option<LostCause>>,
     /// The last failure the line reported, kept for the deploy to report.
     error: Cell<Option<D::Error>>,
+    /// The frames the copying receive let go of for want of heap room, until the loop takes them.
+    rx_drops: crate::link_storage::RxDrops,
     owner_waits: bool,
     /// When a dial writes its `INIT` again, after the peer's `RESET`.
     resend_at_us: Cell<Option<u64>>,
@@ -138,6 +140,7 @@ impl<D: SerialDevice, B: RxStore, T: TxStore, M: CountKind> SerialDriver<D, B, T
             tx: TxLender::new(tx),
             lost: Cell::new(None),
             error: Cell::new(None),
+            rx_drops: crate::link_storage::RxDrops::new(),
             owner_waits: false,
             resend_at_us: Cell::new(None),
         }
@@ -521,7 +524,11 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static, M: C
     }
 
     fn try_recv(&self) -> Option<RxFrame> {
-        crate::link_storage::copied_receive(self)
+        crate::link_storage::copied_receive(self, &self.rx_drops)
+    }
+
+    fn take_rx_dropped(&self) -> usize {
+        self.rx_drops.take()
     }
 
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
@@ -1023,8 +1030,8 @@ where
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) {
-        self.links.lend_port_rows(rows);
+    ) -> Result<(), usize> {
+        self.links.lend_port_rows(rows)
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
@@ -1046,9 +1053,12 @@ where
             at,
             shape: self.shape,
             waiting: RefCell::new(None),
-            home: CellRc::on_heap(<N::Shared as CountKind>::new_local(LineHome::new(
+            // A heap with no room for the home refuses the listener, as a stack with no line
+            // left does.
+            home: CellRc::try_on_heap(<N::Shared as CountKind>::new_local(LineHome::new(
                 !at.options.release_on_close,
-            ))),
+            )))
+            .ok_or(LinkOpenError::Exhausted)?,
         }))
     }
 
@@ -1060,7 +1070,7 @@ where
         self.links.open_group(endpoint, group)
     }
 
-    fn share_pump(pump: HeapLink<N>) -> CellRc<dyn SessionDatagramLink, N> {
+    fn share_pump(pump: HeapLink<N>) -> Option<CellRc<dyn SessionDatagramLink, N>> {
         S::share_pump(pump)
     }
 }
@@ -1415,7 +1425,8 @@ mod tests {
         let closed = Rc::new(Cell::new(0));
         for keep in [true, false] {
             let home: HomeOf<Closes, OneTask> =
-                CellRc::on_heap(OneTask::new_local(LineHome::new(keep)));
+                CellRc::try_on_heap(OneTask::new_local(LineHome::new(keep)))
+                    .expect("the heap has room");
             let before = closed.get();
             let lease = LineLease::homed(Closes(closed.clone()), home.clone());
             let lent = OneTask::with_local::<LineHome<Closes>, _>(&home, |home| home.free());

@@ -276,11 +276,14 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// Tell `sink` each time a face comes up or goes down, from now on, a row at a time: each of
     /// its links in order, or the one row of a face with none, and answer the id that stops it
     /// ([`Self::unwatch_faces`]). Where the sink runs and when the watch is refused are as for
-    /// [`Self::watch_faces`]. An engine that writes its rows in place tells them with nothing
-    /// allocated for an event; the provided answer watches the snapshots and hands each on as its
-    /// rows ([`crate::face_rows::rows_of_snapshots`]).
+    /// [`Self::watch_faces`], and [`Refusal::TableFull`] by an engine whose table of watchers is
+    /// at its bound. An engine that writes its rows in place tells them with nothing allocated for
+    /// an event; the provided answer watches the snapshots and hands each on as its rows
+    /// ([`crate::face_rows::rows_of_snapshots`]), the watcher of rows in a place of its own:
+    /// [`Refusal::NoRoom`], with `sink` let go of, when the heap has none.
     fn watch_face_rows(&self, sink: FaceRowSink) -> Result<u64, Refusal> {
-        self.watch_faces(crate::face_rows::rows_of_snapshots(sink))
+        let place = crate::lodge::Lent::try_boxed().map_err(|_| Refusal::NoRoom)?;
+        self.watch_faces(crate::face_rows::rows_of_snapshots(sink, place))
     }
 
     /// Stop the face watch `id`, of snapshots or of rows: `true` when one was registered under
@@ -419,7 +422,12 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal>;
 
-    /// Retract subscriber `id`. Retracting one already retracted does nothing.
+    /// Retract subscriber `id`, a liveliness subscriber's too. Returns once the callback the
+    /// declaration was given has been let go of, its drop run, as zenoh-pico's undeclare waits for
+    /// the callbacks in flight (`_z_sync_group_wait`), unless it is made from inside a subscriber
+    /// callback on this thread, which returns at once and leaves the callback to the call that ends
+    /// last. The engine keeps this, so every ABI over it means the same. Retracting one already
+    /// retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
 
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
@@ -831,8 +839,8 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
 
 /// What holds a session's engine for as long as it is held, and reaches it without holding it
 /// ([`Self::Handle`]): a count of an engine of the heap (`Arc`, reached by a `Weak`), or of one an
-/// engine places in its session's own memory, reached through a row of the process's table
-/// ([`crate::reach::ReachEngine`]). What keeps an engine generic over this keeps either, so an
+/// engine places in its session's own memory, reached through a row of a table of the process its
+/// own crate keeps. What keeps an engine generic over this keeps either, so an
 /// engine that takes no memory of the heap is not made to take it for its holders.
 pub trait EngineHolder: Clone + Send + Sync + 'static + Deref<Target: SessionEngine> {
     /// What reaches the engine without keeping it standing.

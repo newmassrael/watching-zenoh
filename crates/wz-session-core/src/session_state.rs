@@ -390,7 +390,43 @@ mod tests {
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     tables_only!(Rounds, (), (), TestLane);
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    tables_only!(Watched, crate::face_plane::FacePlane<CellLocks>, (), ());
+    tables_only!(Watched, WatchedPlane, (), ());
+
+    /// A plane of the faces, made in a box of its own, as the state's field of a test.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    struct WatchedPlane(alloc::boxed::Box<crate::face_plane::FacePlane<CellLocks>>);
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    impl Default for WatchedPlane {
+        fn default() -> Self {
+            // SAFETY: the box's place is valid for writes of the plane, which stays there.
+            Self(crate::plane_lock::boxed_at(|at| unsafe {
+                crate::face_plane::FacePlane::init_at(at, crate::caps::MAX_FACE_WATCH_ROWS)
+            }))
+        }
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    impl core::ops::Deref for WatchedPlane {
+        type Target = crate::face_plane::FacePlane<CellLocks>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    impl crate::face_plane::FaceReports for WatchedPlane {
+        const WATCHES: bool = true;
+
+        fn watched(&self) -> bool {
+            self.0.watched()
+        }
+
+        fn happened(&self, kind: FaceEventKind, row: FaceLinkRow) {
+            crate::face_plane::FaceReports::happened(&*self.0, kind, row);
+        }
+    }
 
     /// One block of an arena's memory, aligned as an arena's spans start.
     #[derive(Clone, Copy)]
@@ -618,8 +654,16 @@ mod tests {
     impl crate::plane_lock::LockFamily for CellLocks {
         type Lock<T> = RefCell<T>;
 
-        fn new<T>(value: T) -> RefCell<T> {
-            RefCell::new(value)
+        unsafe fn init_at<T>(
+            place: core::ptr::NonNull<RefCell<T>>,
+            make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
+        ) {
+            // SAFETY: `place` is valid for writes of the lock (the caller's contract).
+            unsafe {
+                place
+                    .as_ptr()
+                    .write(RefCell::new(crate::plane_lock::made_value(make)))
+            }
         }
 
         fn with<T, R>(lock: &RefCell<T>, f: impl FnOnce(&mut T) -> R) -> R {
@@ -664,7 +708,13 @@ mod tests {
     fn a_state_reports_a_face_row_to_its_plane_while_it_is_watched() {
         let state = new_state::<Watched>();
         assert!(!state.faces_watched(), "nothing watches yet");
-        state.watchers.watch(alloc::sync::Arc::new(|_, _| {}));
+        let watched =
+            state
+                .watchers
+                .watch(crate::face::FaceRowSink::of_arc(alloc::sync::Arc::new(
+                    |_: FaceEventKind, _: &crate::face::FaceLinkRow| {},
+                )));
+        assert!(watched.is_ok(), "a plane with room takes the watch");
         assert!(state.faces_watched());
         state.report_face_row(FaceEventKind::Down, row());
         let (kind, told) = state.watchers.next_event().unwrap();

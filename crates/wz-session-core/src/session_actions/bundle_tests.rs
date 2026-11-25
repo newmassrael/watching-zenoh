@@ -23,7 +23,7 @@ use wz_codecs::whatami::WhatAmI;
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
 
 use super::SessionLinkActions;
-use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime, ShareValues};
+use crate::link::{BoxedLinkDriver, HeapRefused, LinkSendOutcome, SessionRuntime, ShareValues};
 use crate::reliability::Reliability;
 use crate::session_init_params::{
     cookie_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
@@ -108,9 +108,36 @@ impl crate::entropy::EntropySource for NoEntropy {
     }
 }
 
+std::thread_local! {
+    /// How many of this thread's next pointers the runtime makes before it refuses the rest, as a
+    /// heap with that much room would; `None` makes every one.
+    static ROOM: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
+}
+
+/// One pointer made, or the heap's refusal when `ROOM` has run out.
+fn take_room() -> Result<(), HeapRefused> {
+    ROOM.with(|room| match room.get() {
+        None => Ok(()),
+        Some(0) => Err(HeapRefused),
+        Some(left) => {
+            room.set(Some(left - 1));
+            Ok(())
+        }
+    })
+}
+
+/// `f`'s answer with room for `pointers` pointers.
+fn with_room<A>(pointers: usize, f: impl FnOnce() -> A) -> A {
+    ROOM.with(|room| room.set(Some(pointers)));
+    let answer = f();
+    ROOM.with(|room| room.set(None));
+    answer
+}
+
 impl ShareValues for PlainRuntime {
-    fn share<U>(value: U) -> Self::Shared<U> {
-        Arc::new(value)
+    fn share<U>(value: U) -> Result<Self::Shared<U>, HeapRefused> {
+        take_room()?;
+        Ok(Arc::new(value))
     }
 }
 
@@ -135,17 +162,23 @@ impl SessionRuntime for PlainRuntime {
     }
 
     // Counted as a hold of a lock, as the threaded runtimes' local is one.
-    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    fn with_local<T, U>(
+        local: &Self::Local<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Result<U, crate::link::LocalHeld>
     where
         T: Send + 'static,
     {
-        Self::with_mutex_mut(local, f)
+        Ok(Self::with_mutex_mut(local, f))
     }
 
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 
-    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
-        Arc::new(actions)
+    fn wrap_actions<T: TimeSource>(
+        actions: SessionLinkActions<Self, T>,
+    ) -> Result<Self::ActionsHandle<T>, HeapRefused> {
+        take_room()?;
+        Ok(Arc::new(actions))
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &Self::Driver {
@@ -245,8 +278,52 @@ fn bundle() -> (
     let link = Arc::new(CountingLink::default());
     let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
     let actions =
-        SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+            .expect("the heap has room");
     (actions, link)
+}
+
+/// A bundle the heap has no room for is refused, whichever of its three pointers (the link's
+/// half, the kernel's half, the handle) is the one refused, and what it was handed is let go of.
+/// Turned red by `new_generic` answering a bundle past a refused half, or by `build` keeping
+/// the sink past the refusal.
+#[test]
+fn a_bundle_the_heap_has_no_room_for_is_refused() {
+    let link = Arc::new(CountingLink::default());
+    for room in 0..3 {
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let made = with_room(room, || {
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+        });
+        assert!(
+            matches!(made, Err(HeapRefused)),
+            "room for {room} pointers of three is a refused bundle"
+        );
+        assert_eq!(
+            Arc::strong_count(&link),
+            1,
+            "the refused bundle lets the sink go"
+        );
+    }
+    let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+    let made = with_room(3, || {
+        SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+    });
+    assert!(made.is_ok(), "room for all three pointers is the bundle");
+}
+
+/// A datagram the link let go of before the session read it is charged to the session's receive
+/// drops, once for each, and to nothing it sends. Turned red by `drive::note_rx_dropped`
+/// charging no counter, or the transmit side's.
+#[cfg(feature = "transport-stats")]
+#[test]
+fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
+    let (actions, _link) = bundle();
+    crate::drive::note_rx_dropped(&actions, 2);
+    crate::drive::note_rx_dropped(&actions, 1);
+    let report = actions.stats_report();
+    assert_eq!(report.rx.n_dropped, 3, "each dropped datagram is counted");
+    assert_eq!(report.tx.n_dropped, 0, "nothing sent was dropped");
 }
 
 /// The halves a holder writes where it keeps them are the halves the bundle is made of: the link's
@@ -758,7 +835,8 @@ mod lent_handshake {
     ) {
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params, StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params, StillClock)
+                .expect("the heap has room");
         let binding =
             SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions), NoEntropy);
         (actions, binding)
@@ -1038,7 +1116,8 @@ mod lent_frame_refusal {
         let link = DryLink::of_width(512, false);
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
         assert_eq!(
             put(&actions),
             Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
@@ -1118,7 +1197,8 @@ mod lent_frame_refusal {
         let link = DryLink::of_width(512, true);
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
         assert_eq!(put(&actions), Some(Ok(())));
         let (budget, _) = actions.negotiated_tx_limits_for(Reliability::Reliable);
         assert_eq!(
@@ -1137,7 +1217,8 @@ mod lent_frame_refusal {
         let link = DryLink::of_width(4, true);
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
         assert_eq!(
             put(&actions),
             Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
@@ -1239,7 +1320,8 @@ mod lent_control_order {
         });
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
         actions.enter_established();
         assert_eq!(actions.batch_start(), Ok(()));
         let key = crate::named_key::NamedKey::literal("home/order").expect("a key");
@@ -1747,6 +1829,44 @@ mod facts_lock {
     }
 }
 
+/// The send budget is the least of the session's own advertisement, the link's bound and the
+/// batch the peer advertised, and a peer not heard from bounds nothing.
+mod batch_budget {
+    use super::bundle;
+    use crate::peer_init_caps::PeerInitCaps;
+
+    fn caps(batch_size: u16) -> Option<PeerInitCaps> {
+        Some(PeerInitCaps {
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size,
+        })
+    }
+
+    /// Turned red by a peer not heard from read as a bound of zero, or by a peer's bound left
+    /// out of the least.
+    #[test]
+    fn the_budget_is_the_least_bound_and_an_unheard_peer_bounds_nothing() {
+        let (actions, _link) = bundle();
+        let unheard = actions.negotiated_batch_mtu();
+        assert_ne!(unheard, 0, "a peer not heard from bounds nothing");
+        assert!(unheard <= usize::from(actions.own_batch_advertisement()));
+        actions.set_peer_init_caps(caps(u16::MAX));
+        assert_eq!(
+            actions.negotiated_batch_mtu(),
+            unheard,
+            "a peer above both bounds moves nothing"
+        );
+        let below = u16::try_from(unheard - 1).expect("the own bound is a u16");
+        actions.set_peer_init_caps(caps(below));
+        assert_eq!(
+            actions.negotiated_batch_mtu(),
+            usize::from(below),
+            "a peer below both bounds is the budget"
+        );
+    }
+}
+
 /// A link's time stamps are one row under one lock: what a door writes is what the row reads, the
 /// deadlines read the two stamps they compare in one hold, and a reopen clears all three.
 mod link_stamps {
@@ -2071,5 +2191,235 @@ mod link_stamps {
             crate::drive::check_keepalive_deadline(&*actions, interval),
             K::Emitted
         );
+    }
+}
+
+/// The one value of a one-face session's transport, over a real session's machine and actions: what
+/// it raises before input is read, the order it hands a datagram and the time to the session, and
+/// when it is next due.
+mod unicast_transport {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::mem::MaybeUninit;
+
+    use super::{bundle, NoEntropy, PlainRuntime, StillClock};
+    use crate::drive::{new_session_engine, SessionEngine};
+    use crate::driver_loop::IterationEvent;
+    use crate::link_life::{LinkInput, LinkTimes};
+    use crate::session_actions::SessionLinkActions;
+    use crate::session_timeouts::SessionTimeouts;
+    use crate::unicast_transport::{MadeLink, UnicastTransport};
+
+    const TIMES: LinkTimes = LinkTimes {
+        open_timeout_ms: 1_000,
+        redial_ms: Some(500),
+        dial_look_ms: 10,
+        accept_timeout_ms: 1_000,
+    };
+
+    /// The session's machine over `actions`, entered in its initial state and given no role.
+    fn engine(
+        actions: &Arc<SessionLinkActions<PlainRuntime, StillClock>>,
+    ) -> SessionEngine<PlainRuntime, StillClock> {
+        let mut engine = new_session_engine::<PlainRuntime, StillClock>(actions, NoEntropy);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        engine
+    }
+
+    /// The application layer's deadline that came due is raised once by the time handed to the
+    /// transport, and spent: the time handed again raises nothing. Turned red by an `on_time` that
+    /// leaves the deadline out, or raises it without spending it.
+    #[test]
+    fn the_time_raises_the_application_layers_deadline_once() {
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let transport = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        actions.set_app_wake_deadline_ms(Some(0));
+        let mut wakes = 0usize;
+        let mut count = |event: IterationEvent<'_, '_>| {
+            if matches!(event, IterationEvent::AppWake) {
+                wakes += 1;
+            }
+        };
+        transport.on_time(&mut engine, &*actions, 0, &mut count);
+        transport.on_time(&mut engine, &*actions, 0, &mut count);
+        assert_eq!(wakes, 1, "the deadline is raised once");
+        assert_eq!(actions.app_wake_deadline_ms(), None, "and spent");
+    }
+
+    /// The transport is due at the first of what its link and its session have due: the session's
+    /// application deadline while the link waits on nothing, and the link's look at once when a
+    /// dial it asked for is owed. Turned red by a due instant that leaves the link's wake out.
+    #[test]
+    fn the_transport_is_due_at_the_first_of_its_links_and_its_sessions() {
+        let (actions, _link) = bundle();
+        let engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let transport = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        actions.set_app_wake_deadline_ms(Some(9));
+        assert!(
+            transport
+                .due_ms(&engine, &*actions, 0)
+                .is_some_and(|due_ms| due_ms <= 9),
+            "an idle link leaves the session's deadline to bound the look"
+        );
+        assert_eq!(transport.input(LinkInput::Open, 0).dial(), Some(0));
+        assert_eq!(
+            transport.due_ms(&engine, &*actions, 0),
+            Some(0),
+            "a dial owed a report is looked at now"
+        );
+    }
+
+    /// A datagram handed to the transport is read after the application layer's deadline is raised,
+    /// and the receive counts the path it took. Turned red by an `on_datagram` that reads the
+    /// datagram first, leaves the deadline out, or dispatches past the receive's count.
+    #[cfg(feature = "rx-in-place")]
+    #[test]
+    fn a_datagram_is_read_after_the_application_layers_deadline_and_counted() {
+        use crate::unicast_rx::RxPathCounts;
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let transport = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        actions.set_app_wake_deadline_ms(Some(0));
+        let mut wakes: Vec<bool> = Vec::new();
+        let path = transport.on_datagram(
+            &[wz_codecs::wire_const::T_MID_KEEP_ALIVE],
+            &mut engine,
+            &*actions,
+            0,
+            &mut |event: IterationEvent<'_, '_>| {
+                wakes.push(matches!(event, IterationEvent::AppWake));
+            },
+        );
+        assert_eq!(wakes.first(), Some(&true), "the deadline is raised first");
+        assert_eq!(wakes.iter().filter(|wake| **wake).count(), 1, "and once");
+        let mut counted = RxPathCounts::default();
+        counted.count(path);
+        assert_eq!(
+            transport.rx().path_counts(),
+            counted,
+            "the receive counted the one datagram on the path it took"
+        );
+    }
+
+    /// A transport over a link handed to it made is due when its session is, and a life that
+    /// asks for a look moves only the transport that holds it. Turned red by a made link that adds
+    /// a wake of its own, or a due instant that reads another transport's life.
+    #[test]
+    fn a_transport_over_a_made_link_is_due_when_its_session_is() {
+        let (actions, _link) = bundle();
+        let engine = engine(&actions);
+        let mut made_place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let made = UnicastTransport::init_made_in(
+            &mut made_place,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let dialling = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        actions.set_app_wake_deadline_ms(Some(9));
+        assert_eq!(
+            made.due_ms(&engine, &*actions, 0),
+            dialling.due_ms(&engine, &*actions, 0),
+            "an idle life adds nothing to the session's own"
+        );
+        assert_eq!(dialling.input(LinkInput::Open, 0).dial(), Some(0));
+        assert_eq!(dialling.due_ms(&engine, &*actions, 0), Some(0));
+        assert!(
+            made.due_ms(&engine, &*actions, 0)
+                .is_some_and(|due_ms| due_ms <= 9),
+            "the session's deadline still bounds the made link's transport"
+        );
+    }
+
+    /// A turn that raises nothing first leaves the application layer's deadline for the time its
+    /// owner hands apart, and a turn begun raises it. Turned red by an `input_at` that raises.
+    #[test]
+    fn a_turn_that_raises_nothing_leaves_the_deadline_for_the_time() {
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let transport =
+            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
+        actions.set_app_wake_deadline_ms(Some(0));
+        {
+            let turn = transport.input_at(0);
+            assert!(turn.ready(), "a Router of its own takes input");
+        }
+        assert_eq!(actions.app_wake_deadline_ms(), Some(0), "left for the time");
+        let mut wakes = 0usize;
+        let mut count = |event: IterationEvent<'_, '_>| {
+            if matches!(event, IterationEvent::AppWake) {
+                wakes += 1;
+            }
+        };
+        transport
+            .begin_input(&*actions, 0, &mut count)
+            .end(&mut engine, &*actions, &mut count);
+        assert_eq!(wakes, 1, "a turn begun raises it");
+        assert_eq!(actions.app_wake_deadline_ms(), None);
+    }
+
+    /// A link that is gone is told to the session's machine and reported to the owner as the
+    /// link's loss, with its cause. Turned red by a `lose` that reports another outcome or does
+    /// not reach the machine.
+    #[test]
+    fn a_lost_link_is_told_to_the_machine_and_reported_with_its_cause() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::link::LostCause;
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let transport =
+            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
+        let mut lost = Vec::new();
+        let mut seen = |event: IterationEvent<'_, '_>| {
+            if let IterationEvent::Poll(DriverLoopOutcome::LinkLost(cause)) = event {
+                lost.push(matches!(cause, LostCause::PeerClosed));
+            }
+        };
+        let turn = transport.begin_input(&*actions, 0, &mut seen);
+        turn.lose(&mut engine, LostCause::PeerClosed, &mut seen);
+        assert_eq!(lost, [true], "one loss, with the peer's close as its cause");
     }
 }

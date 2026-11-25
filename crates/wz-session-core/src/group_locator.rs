@@ -24,12 +24,13 @@ use core::net::{IpAddr, SocketAddr};
 use core::str::FromStr;
 
 use crate::caps::MAX_GROUP_ENDPOINT_LEN;
-use crate::locator_grammar::{config_values, parse_dscp_value, split_locator_parts};
+use crate::locator_grammar::{config_value, config_values, parse_dscp_value, split_locator_parts};
 
 /// The scheme of a UDP multicast group's endpoint.
 const UDP_GROUP_PREFIX: &str = "udp/";
-/// `iface=<name-or-address>` (zenoh `BIND_INTERFACE`).
-const IFACE_KEY: &str = "iface";
+/// `iface=<name-or-address>` (zenoh `BIND_INTERFACE`): the key whose presence in a `udp/`
+/// endpoint's config span makes the endpoint a group pico's listen opens.
+pub const IFACE_KEY: &str = "iface";
 /// `join=<group>` (zenoh `UDP_MULTICAST_JOIN`), read as often as it is written.
 const JOIN_KEY: &str = "join";
 /// `ttl=<n>` (zenoh `UDP_MULTICAST_TTL`).
@@ -143,7 +144,7 @@ impl UdpGroup {
 
     /// The keys of `config` for the group `group` names.
     fn read(group: SocketAddr, config: &str) -> Result<Self, GroupLocatorError> {
-        let first = |key: &'static str| config_values(config, key).next();
+        let first = |key: &'static str| config_value(config, key);
         let mut iface = heapless::String::new();
         if let Some(name) = first(IFACE_KEY) {
             iface

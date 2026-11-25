@@ -54,7 +54,7 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
-use wz_session_core::link::{BoxedLinkDriver, SessionRuntime, ShareValues};
+use wz_session_core::link::{BoxedLinkDriver, HeapRefused, LocalHeld, SessionRuntime, ShareValues};
 // `SessionLinkActions` lives behind wz-session-core's `session-unicast` gate,
 // which `transport-unicast` forwards (the only AP path that enables it); the
 // `ActionsHandle` GAT binding below is gated to match.
@@ -177,8 +177,10 @@ impl Runtime for TokioRuntime {
 /// to bind a `!Send` `Rc<dyn BoxedLinkDriver>` without an `unsafe impl
 /// Send` hack (see [`wz_session_core::link::BoxedLinkDriver`] doc).
 impl ShareValues for TokioRuntime {
-    fn share<U>(value: U) -> Self::Shared<U> {
-        Arc::new(value)
+    // The host's allocator ends the program on a refusal before `Arc::new` returns, so this
+    // profile answers every share with its pointer.
+    fn share<U>(value: U) -> Result<Self::Shared<U>, HeapRefused> {
+        Ok(Arc::new(value))
     }
 }
 
@@ -225,11 +227,13 @@ impl SessionRuntime for TokioRuntime {
         crate::sync::PlainMutex::new(value)
     }
 
-    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    // A lock, which never refuses: an access from inside another of the same value is the lock's
+    // to answer, as any second hold of it is.
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Result<U, LocalHeld>
     where
         T: Send + 'static,
     {
-        local.with(f)
+        Ok(local.with(f))
     }
 
     // R311ja — the AP action handle is `Arc`: the multi-thread runtime
@@ -247,7 +251,9 @@ impl SessionRuntime for TokioRuntime {
     type EntropyDraw = crate::session_glue::OsEntropy;
 
     #[cfg(feature = "transport-unicast")]
-    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
+    fn wrap_actions<T: TimeSource>(
+        actions: SessionLinkActions<Self, T>,
+    ) -> Result<Self::ActionsHandle<T>, HeapRefused> {
         let actions = Arc::new(actions);
         // R2952 (open-debt item 835) — the block-first hand-off, installed on
         // every binding: a block-first message whose slot the core granted is
@@ -265,7 +271,7 @@ impl SessionRuntime for TokioRuntime {
                 }
             });
         }));
-        actions
+        Ok(actions)
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &Self::Driver {

@@ -127,10 +127,8 @@ mod window {
     #[cfg(not(feature = "engine-tokio"))]
     pub(in crate::scout) mod table {
         use core::cell::UnsafeCell;
-        use core::mem::MaybeUninit;
 
         use wz_capi_port::os;
-        use wz_capi_port::sync::Lock;
         use wz_session_core::caps;
         use wz_session_core::limits::SessionLimits;
         use wz_session_core::scouting_host::HelloTable;
@@ -151,65 +149,10 @@ mod window {
 
         static BUFFER: Buffer = Buffer(UnsafeCell::new([0; caps::PICO_MULTICAST_BATCH_BYTES]));
 
-        /// Which thread holds the table, by its word, and the condition its waiters sleep on.
-        struct Holder {
-            thread: os::Mutex<Option<usize>>,
-            freed: os::Condvar,
-        }
-
-        /// Whether the holder is made yet.
-        enum Made {
-            No,
-            Making,
-            Yes,
-        }
-
-        /// The holder's place in static memory: the kernel's mutex and condition variable are made
-        /// at run time, so the first window that asks makes them, once.
-        struct HolderPlace {
-            made: Lock<Made>,
-            place: UnsafeCell<MaybeUninit<Holder>>,
-        }
-
-        // SAFETY: the place is written once, by the thread that moved `made` to `Making`, and read
-        // only once `made` reads `Yes`; the holder's own fields are a mutex and a condition
-        // variable.
-        unsafe impl Sync for HolderPlace {}
-
-        static HOLDER: HolderPlace = HolderPlace {
-            made: Lock::new(Made::No),
-            place: UnsafeCell::new(MaybeUninit::uninit()),
-        };
-
-        fn holder() -> &'static Holder {
-            loop {
-                let made = HOLDER.made.with(|made| match made {
-                    Made::No => {
-                        *made = Made::Making;
-                        None
-                    }
-                    Made::Making => Some(false),
-                    Made::Yes => Some(true),
-                });
-                match made {
-                    None => {
-                        // SAFETY: this thread alone moved `made` to `Making`, so it alone writes.
-                        unsafe {
-                            (*HOLDER.place.get()).write(Holder {
-                                thread: os::Mutex::new(None),
-                                freed: os::Condvar::new(),
-                            });
-                        }
-                        HOLDER.made.with(|made| *made = Made::Yes);
-                    }
-                    // Another thread makes the two kernel objects, once in the process's life.
-                    Some(false) => os::sleep_ms(1),
-                    // SAFETY: `Yes` is set only once the place is written, and it is never
-                    // written again.
-                    Some(true) => return unsafe { (*HOLDER.place.get()).assume_init_ref() },
-                }
-            }
-        }
+        /// Which thread holds the table, by its word, and the condition its waiters sleep on: made
+        /// where they lie when a window first reaches them, so no window is refused them.
+        static THREAD: os::StaticMutex<Option<usize>> = os::StaticMutex::new(None);
+        static FREED: os::StaticCondvar = os::StaticCondvar::new();
 
         /// Why a window has no table.
         #[derive(Debug, PartialEq, Eq)]
@@ -231,9 +174,9 @@ mod window {
                 now_ms: impl Fn() -> u64,
             ) -> Result<(Self, u64), Unclaimed> {
                 let me = os::current_word();
-                let holder = holder();
+                let freed = FREED.get();
                 let start = now_ms();
-                let mut thread = holder.thread.lock();
+                let mut thread = THREAD.get().lock();
                 loop {
                     match *thread {
                         None => {
@@ -248,7 +191,7 @@ mod window {
                     let Some(left) = budget_ms.checked_sub(waited).filter(|&left| left != 0) else {
                         return Err(Unclaimed::Expired);
                     };
-                    thread = holder.freed.wait_timeout_ms(thread, left).0;
+                    thread = freed.wait_timeout_ms(thread, left).0;
                 }
             }
 
@@ -268,9 +211,8 @@ mod window {
 
         impl Drop for Claim {
             fn drop(&mut self) {
-                let holder = holder();
-                *holder.thread.lock() = None;
-                holder.freed.notify_all();
+                *THREAD.get().lock() = None;
+                FREED.get().notify_all();
             }
         }
     }

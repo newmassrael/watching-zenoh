@@ -41,13 +41,19 @@
 //! `/// @brief Interrupts all associated GET queries. If the query callback is being executed, the call blocks until execution of callback is finished.`).
 //! `clone` still SHARES the state rather than copying it, and `drop` releases
 //! one reference.
+//!
+//! An owned token's handle IS one count of the token ([`Strong::into_raw`]), as the pico ABI's
+//! is: a clone takes one more and a drop lets one go, so neither asks the heap for anything, and
+//! a token the heap has no room for is answered with `Z_EUNAVAILABLE` rather than ending the
+//! program.
 
 use std::ffi::c_void;
-use std::sync::Arc;
 
-use crate::result::{ZResult, Z_ENULL, Z_OK};
+use wz_capi_port::lodge::Strong;
 
-/// The shared state an owned token points at. `Arc` because `clone` must SHARE.
+use crate::result::{ZResult, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
+
+/// The state an owned token's count names, shared by every clone because `clone` must SHARE.
 type TokenState = wz_capi_core::cancellation::CancellationToken;
 
 /// Owned cancellation token (zenoh-c `z_owned_cancellation_token_t`,
@@ -92,15 +98,15 @@ impl z_owned_cancellation_token_t {
 /// Borrow the state behind a loaned token.
 ///
 /// # Safety
-/// `this_` must be a valid loaned token whose handle this crate created.
+/// `handle` must be null or a count of a token this crate gave up, held for `'a`.
 #[inline]
-unsafe fn state<'a>(handle: *mut c_void) -> Option<&'a Arc<TokenState>> {
+unsafe fn state<'a>(handle: *mut c_void) -> Option<&'a TokenState> {
     if handle.is_null() {
         return None;
     }
-    // SAFETY: the caller's contract — the handle is an `Arc<TokenState>` this
-    // module leaked in `z_cancellation_token_new`.
-    Some(unsafe { &*(handle as *const Arc<TokenState>) })
+    // SAFETY: the caller's contract: the handle is a count `Strong::into_raw` gave up in
+    // `z_cancellation_token_new` or `z_cancellation_token_clone`, still held.
+    Some(unsafe { Strong::<TokenState>::value_of(handle) })
 }
 
 /// zenoh-c `z_cancellation_token_new` — construct an uncancelled token.
@@ -114,16 +120,22 @@ pub unsafe extern "C" fn z_cancellation_token_new(
     if this_.is_null() {
         return Z_ENULL;
     }
-    let state: Arc<TokenState> = TokenState::new();
-    let handle = Box::into_raw(Box::new(state)) as *mut c_void;
+    // A token with no room left is a gravestone, which every accessor answers.
+    let (owned, rc) = match TokenState::new() {
+        Ok(state) => (
+            z_owned_cancellation_token_t {
+                handle: Strong::into_raw(state),
+                _pad: [0u8; 16],
+            },
+            Z_OK,
+        ),
+        Err(_) => (z_owned_cancellation_token_t::null_value(), Z_EUNAVAILABLE),
+    };
     // SAFETY: checked non-null above.
     unsafe {
-        *this_ = z_owned_cancellation_token_t {
-            handle,
-            _pad: [0u8; 16],
-        };
+        *this_ = owned;
     }
-    Z_OK
+    rc
 }
 
 /// zenoh-c `z_cancellation_token_cancel` — stop every get registered on the
@@ -162,7 +174,7 @@ pub unsafe extern "C" fn z_cancellation_token_cancel(
 #[cfg(any(feature = "query", feature = "liveliness-get"))]
 pub(crate) unsafe fn take_moved_cancellation_token(
     moved: *mut z_moved_cancellation_token_t,
-) -> Option<Arc<TokenState>> {
+) -> Option<Strong<TokenState>> {
     if moved.is_null() {
         return None;
     }
@@ -173,8 +185,9 @@ pub(crate) unsafe fn take_moved_cancellation_token(
     if handle.is_null() {
         return None;
     }
-    // SAFETY: the handle came from `Box::into_raw` in `new` or `clone`.
-    Some(*unsafe { Box::from_raw(handle as *mut Arc<TokenState>) })
+    // SAFETY: a live handle is a count `Strong::into_raw` gave up in `new` or `clone`, taken
+    // once here: the caller's handle is a gravestone now.
+    Some(unsafe { Strong::from_raw(handle) })
 }
 
 /// zenoh-c `z_cancellation_token_is_cancelled`.
@@ -214,14 +227,18 @@ pub unsafe extern "C" fn z_cancellation_token_clone(
     } else {
         // SAFETY: the caller's contract.
         let handle = unsafe { (*this_).handle };
-        // SAFETY: the handle came from `z_cancellation_token_new`.
-        unsafe { state(handle) }.map(Arc::clone)
+        (!handle.is_null()).then(|| {
+            // SAFETY: the handle's count, read and left held: `this_` still owns it.
+            let held =
+                core::mem::ManuallyDrop::new(unsafe { Strong::<TokenState>::from_raw(handle) });
+            Strong::into_raw((*held).clone())
+        })
     };
     // SAFETY: checked non-null above.
     unsafe {
         *dst = match cloned {
-            Some(st) => z_owned_cancellation_token_t {
-                handle: Box::into_raw(Box::new(st)) as *mut c_void,
+            Some(handle) => z_owned_cancellation_token_t {
+                handle,
                 _pad: [0u8; 16],
             },
             None => z_owned_cancellation_token_t::null_value(),
@@ -263,8 +280,9 @@ pub unsafe extern "C" fn z_cancellation_token_drop(this_: *mut z_moved_cancellat
     // SAFETY: the caller's contract.
     let owned = unsafe { &mut (*this_)._this };
     if !owned.handle.is_null() {
-        // SAFETY: the handle came from `Box::into_raw` in `new` or `clone`.
-        drop(unsafe { Box::from_raw(owned.handle as *mut Arc<TokenState>) });
+        // SAFETY: a live handle is a count `Strong::into_raw` gave up in `new` or `clone`, let
+        // go of once here, before the handle is a gravestone.
+        drop(unsafe { Strong::<TokenState>::from_raw(owned.handle) });
     }
     *owned = z_owned_cancellation_token_t::null_value();
 }
@@ -364,6 +382,19 @@ mod tests {
         // Dropping a gravestone is a no-op rather than a double free.
         let mut moved = z_moved_cancellation_token_t { _this: owned };
         unsafe { z_cancellation_token_drop(&mut moved) };
+    }
+
+    /// A gravestone cloned is a gravestone: no count is read from a handle that holds none.
+    /// Turned red by a clone that takes a count of a null handle.
+    #[test]
+    fn cloning_a_gravestone_yields_a_gravestone() {
+        let grave = z_owned_cancellation_token_t::null_value();
+        let mut dst = z_owned_cancellation_token_t {
+            handle: 1 as *mut c_void,
+            _pad: [0u8; 16],
+        };
+        unsafe { z_cancellation_token_clone(&mut dst, z_cancellation_token_loan(&grave)) };
+        assert!(!unsafe { z_internal_cancellation_token_check(&dst) });
     }
 
     /// A null clone SOURCE yields a gravestone rather than a dangling handle.

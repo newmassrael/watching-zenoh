@@ -223,7 +223,8 @@ const HEADROOM: usize = 4;
 /// is compared with.
 fn heap_frame(payload: &[u8]) -> Vec<u8> {
     let link = LendingLink::new(false, 0, 0, 0);
-    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     actions
         .send_push_literal("home/lent", payload, true)
@@ -245,7 +246,8 @@ fn params_with_sn_7(batch: Option<u16>) -> wz_session_core::session_init_params:
 #[test]
 fn a_push_over_a_lending_link_is_written_into_its_slot_and_not_copied() {
     let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
-    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     actions
         .send_push_literal("home/lent", b"payload", true)
@@ -263,7 +265,8 @@ fn a_push_over_a_lending_link_is_written_into_its_slot_and_not_copied() {
 fn the_lent_frame_is_byte_for_byte_the_frame_the_heap_path_writes() {
     for payload in [&b"x"[..], &b"payload"[..], &[0xA5u8; 100][..]] {
         let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
-        let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+        let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new())
+            .expect("the heap has room");
         actions.enter_established();
         actions
             .send_push_literal("home/lent", payload, true)
@@ -280,7 +283,8 @@ fn the_lent_frame_is_byte_for_byte_the_frame_the_heap_path_writes() {
 #[test]
 fn a_link_that_lends_nothing_is_handed_the_same_frame_on_the_heap() {
     let link = LendingLink::new(false, 1, SLOT_LEN, HEADROOM);
-    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     actions
         .send_push_literal("home/lent", b"payload", true)
@@ -293,7 +297,8 @@ fn a_link_that_lends_nothing_is_handed_the_same_frame_on_the_heap() {
 #[test]
 fn a_link_with_no_free_slot_gets_the_frame_on_the_heap_and_loses_nothing() {
     let link = LendingLink::new(true, 0, SLOT_LEN, HEADROOM);
-    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     actions
         .send_push_literal("home/lent", b"payload", true)
@@ -307,7 +312,8 @@ fn a_frame_that_overflows_its_slot_goes_on_the_heap_and_the_slot_comes_back() {
     // The link grants a 24-byte slot whatever it is asked: the push's frame does
     // not fit what is left after the headroom, and the encode finds that out.
     let link = LendingLink::new(true, 1, 24, HEADROOM);
-    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     let payload = [0x3Cu8; 80];
     actions
@@ -326,7 +332,8 @@ fn a_frame_that_overflows_its_slot_goes_on_the_heap_and_the_slot_comes_back() {
 #[test]
 fn the_fallback_keeps_the_sequence_numbers_gapless() {
     let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
-    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     actions
         .send_push_literal("home/lent", b"one", true)
@@ -356,7 +363,8 @@ fn the_fallback_keeps_the_sequence_numbers_gapless() {
 #[test]
 fn a_single_frame_its_encoder_refuses_is_refused_and_spends_no_sn() {
     let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
-    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     let long_key = "k".repeat(usize::from(u16::MAX) + 1);
     let refused = actions.send_plain_put_qos(
@@ -403,7 +411,8 @@ fn lowlatency_session(
         TokioTime,
     >,
 > {
-    let actions = new_session_actions(link, params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(link, params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     assert!(
         actions.set_lowlatency_offer(true),
         "lowlatency offer applies"
@@ -492,7 +501,8 @@ type Sink = Arc<dyn BoxedLinkDriver + Send + Sync>;
 fn a_lender_behind_the_swap_seam_still_lends() {
     let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
     let seam: Sink = Arc::new(SwappableLink::<TokioRuntime>::new(link.clone()));
-    let actions = new_session_actions(seam, params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(seam, params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     actions
         .send_push_literal("home/lent", b"payload", true)
@@ -586,7 +596,8 @@ fn a_swap_to_a_link_that_lends_nothing_takes_the_heap_afterwards() {
     let old = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
     let plain = LendingLink::new(false, 0, 0, 0);
     let seam = Arc::new(SwappableLink::<TokioRuntime>::new(old.clone()));
-    let actions = new_session_actions(seam.clone(), params_with_sn_7(None), TokioTime::new());
+    let actions = new_session_actions(seam.clone(), params_with_sn_7(None), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     actions
         .send_push_literal("home/lent", b"one", true)
@@ -626,7 +637,8 @@ fn chain_over(
         link.clone(),
         params_with_sn_7(Some(FRAG_BUDGET)),
         TokioTime::new(),
-    );
+    )
+    .expect("the heap has room");
     actions.enter_established();
     actions.set_fragment_tx_budget(fragment_budget);
     let sent = actions.send_push_literal("home/lent", payload, true);
@@ -776,7 +788,8 @@ type Actions = Arc<wz_session_core::session_actions::SessionLinkActions<TokioRun
 
 #[cfg(feature = "transport-batching")]
 fn batching_session(link: Sink) -> Actions {
-    let actions = new_session_actions(link, params_with_sn_7(Some(BUDGET)), TokioTime::new());
+    let actions = new_session_actions(link, params_with_sn_7(Some(BUDGET)), TokioTime::new())
+        .expect("the heap has room");
     actions.enter_established();
     actions
 }

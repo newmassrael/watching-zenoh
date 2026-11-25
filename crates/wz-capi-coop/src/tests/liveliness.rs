@@ -244,6 +244,62 @@ fn a_history_subscriber_is_told_the_tokens_alive_when_it_asked() {
     });
 }
 
+/// A history subscriber that undeclares itself from inside its history, in a build whose read
+/// steps its one link itself, is let go of as that call ends, before its declaration returns: no
+/// delivery after the declaration is owed the row. The callback cannot be told its own id before
+/// the declaration returns, so it undeclares the id the session hands out next after the probe's,
+/// as the session numbers its entities in turn; the declaration's own id is checked to be that
+/// one. The CONTROL is the call itself: the history handed the callback the token the probe
+/// heard. Turned red by a history call whose end lets go of no row.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[test]
+fn a_history_subscriber_undeclared_from_its_history_is_let_go_of_before_its_declaration_returns() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Marks its own drop.
+    struct Dropped(Arc<AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (probe, heard) = subscribe(&engine, "demo/**", false);
+    router.send(Command::DeclareToken(1, "demo/held"));
+    until(&engine, "the probe to hear the router's token", || {
+        *heard.lock().unwrap() == [put("demo/held")]
+    });
+    let me: SubId = probe + 1;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let called = Arc::new(AtomicUsize::new(0));
+    let sink = {
+        let guard = Dropped(dropped.clone());
+        let called = called.clone();
+        let undeclaring = engine.clone();
+        LivelinessSink::shared(move |_sample: LivelinessSample<'_>| {
+            let _held = &guard;
+            called.fetch_add(1, Ordering::SeqCst);
+            undeclaring.undeclare_subscriber(me);
+        })
+    };
+    let id = engine
+        .declare_liveliness_subscriber_on_wire("demo/**", WireKey::literal(), true, sink)
+        .expect("the engine has liveliness");
+    assert_eq!(id, me, "the callback undeclared its own subscriber");
+    assert_eq!(
+        called.load(Ordering::SeqCst),
+        1,
+        "CONTROL: the history handed the callback the token the session knew"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the callback was let go of as its history's call ended"
+    );
+    SessionDrive::close(&*engine);
+}
+
 /// A router that goes takes its tokens with it, and the subscriber hears each go; a router on the
 /// same endpoint after it is told the session's token again and hears its subscriber's Interest,
 /// so its token is heard too.

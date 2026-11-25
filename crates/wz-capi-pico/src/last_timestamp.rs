@@ -29,7 +29,9 @@
 //! The lock is the port's short one ([`Lock`]) rather than the kernel's mutex: the work under it is
 //! one comparison and one store, and an MCU image then needs no kernel object per session for it.
 
-use alloc::sync::Arc;
+use alloc::boxed::Box;
+use core::ptr::NonNull;
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 use wz_capi_port::sync::Lock;
 #[cfg(any(feature = "advanced", feature = "clock-source"))]
@@ -41,7 +43,7 @@ use wz_node_time::node_clock::NodeHlc;
 /// clone is the same session's: one last time given.
 #[derive(Clone)]
 pub(crate) struct SessionTime {
-    last: Arc<LastTimestamp>,
+    last: SharedLast,
     /// The session's node clock, which learns every time given. `None` for a session whose
     /// stamps no node clock proposes.
     #[cfg(any(feature = "advanced", feature = "clock-source"))]
@@ -49,13 +51,21 @@ pub(crate) struct SessionTime {
 }
 
 impl SessionTime {
-    /// A session that has given no time yet, whose stamps no node clock learns.
+    /// [`Self::try_new`], on the test's heap.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self {
-            last: Arc::new(LastTimestamp::new()),
+        Self::try_new().expect("the test's heap")
+    }
+
+    /// A session that has given no time yet, whose stamps no node clock learns, or `None` when the
+    /// heap has no room for the last time given: what a session's open answers with its
+    /// out-of-memory code.
+    pub(crate) fn try_new() -> Option<Self> {
+        Some(Self {
+            last: SharedLast::try_new()?,
             #[cfg(any(feature = "advanced", feature = "clock-source"))]
             clock: None,
-        }
+        })
     }
 
     /// The same session, whose node clock `clock` learns every time it gives.
@@ -119,12 +129,104 @@ impl LastTimestamp {
     }
 }
 
+/// A count past which a count taken is given straight back: no program holds that many, so such
+/// a count is of holders forgotten, and the time is kept for ever rather than freed under one.
+const MOST_HOLDERS: usize = isize::MAX as usize;
+
+/// The last time a session gave and the count of the [`SessionTime`]s that hold it, in one block of
+/// the heap.
+struct Counted {
+    holders: AtomicUsize,
+    last: LastTimestamp,
+}
+
+/// One holder of a session's last time given: `Arc`'s sharing, with a making that a full heap
+/// refuses rather than ends the program (`Arc` has no such making on a stable toolchain).
+struct SharedLast(NonNull<Counted>);
+
+// SAFETY: a holder hands out only `&LastTimestamp`, whose lock makes it shareable across threads,
+// and the last holder frees the block on whichever thread lets go last, as an `Arc` does.
+unsafe impl Send for SharedLast {}
+// SAFETY: as `Send`.
+unsafe impl Sync for SharedLast {}
+
+impl Counted {
+    /// A session that has given no time yet, held once.
+    const fn first() -> Self {
+        Self {
+            holders: AtomicUsize::new(1),
+            last: LastTimestamp::new(),
+        }
+    }
+}
+
+impl SharedLast {
+    /// A session that has given no time yet, held once, or `None` when the heap has no room for
+    /// the block.
+    fn try_new() -> Option<Self> {
+        let block = crate::bytes::try_box(Counted::first()).ok()?;
+        Some(Self(NonNull::from(Box::leak(block))))
+    }
+
+    fn counted(&self) -> &Counted {
+        // SAFETY: a holder keeps the block, so it is live for as long as the holder is.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Clone for SharedLast {
+    fn clone(&self) -> Self {
+        let before = self.counted().holders.fetch_add(1, Ordering::Relaxed);
+        if before > MOST_HOLDERS {
+            self.counted().holders.fetch_sub(1, Ordering::Relaxed);
+        }
+        Self(self.0)
+    }
+}
+
+impl Drop for SharedLast {
+    fn drop(&mut self) {
+        if self.counted().holders.fetch_sub(1, Ordering::Release) == 1 {
+            // Every other holder's use of the time is ordered before the block is freed.
+            fence(Ordering::Acquire);
+            // SAFETY: the block was leaked from a `Box` by `try_new`, and no holder is
+            // left to read it.
+            drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+        }
+    }
+}
+
+impl core::ops::Deref for SharedLast {
+    type Target = LastTimestamp;
+
+    fn deref(&self) -> &LastTimestamp {
+        &self.counted().last
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
 
     use super::{LastTimestamp, SessionTime};
+
+    /// A session's time the heap has no room for is none, and one it has room for is shared by
+    /// its clones as one made by `new` is, each dropped once. Turned red by `try_new` made with
+    /// `Arc::new`, which ends the process on the refusal, or by a clone that does not count.
+    #[test]
+    fn a_sessions_time_the_heap_has_no_room_for_is_none() {
+        assert!(crate::test_heap::refused(SessionTime::try_new).is_none());
+        let program = SessionTime::try_new().expect("room for the time");
+        let publisher = program.clone();
+        assert_eq!(program.give(4), Some(4));
+        drop(program);
+        assert_eq!(
+            publisher.give(4),
+            Some(5),
+            "the clone outlives the first holder"
+        );
+    }
 
     /// A clone of a session's times is the same session's: what one gives, the other gives after.
     #[test]

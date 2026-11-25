@@ -41,6 +41,46 @@ impl<T> Lock<T> {
         }
     }
 
+    /// The value `make` writes in the place it is handed and lends back, behind the lock, made in
+    /// `place`. The host's lock is made where it stays, around the value written there. A critical
+    /// section is no object of a kernel's and moves with its value, so there the value is made
+    /// beside it and moved in once. A maker that lends back anything but the place it was handed
+    /// has not written it there, and is refused with a panic.
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The lock is not moved from `place` until it is dropped there.
+    pub unsafe fn init_at(
+        place: core::ptr::NonNull<Self>,
+        make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
+    ) {
+        #[cfg(any(feature = "std", feature = "os-sys"))]
+        {
+            // SAFETY: the caller's contract is `mutex_in`'s, for the one field.
+            unsafe {
+                crate::os::mutex_in(
+                    core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                        (*place.as_ptr()).inner
+                    )),
+                    make,
+                );
+            }
+        }
+        #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+        {
+            let mut value = core::mem::MaybeUninit::uninit();
+            let field: *const T = value.as_ptr();
+            let made: *const T = make(&mut value);
+            assert!(
+                core::ptr::eq(made, field),
+                "the value is written in the place it was handed"
+            );
+            // SAFETY: `make` lent back the place it was handed, so it wrote the value there;
+            // `place` is valid for writes of a `Self` (the caller's contract).
+            unsafe { place.as_ptr().write(Self::new(value.assume_init())) }
+        }
+    }
+
     /// Run `f` on the value with the lock held, and hand back what it returns, which is released
     /// after the lock is.
     pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {

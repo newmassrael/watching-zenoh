@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 use super::*;
-use crate::bounded::{Static, ARENA_ALIGN};
+use crate::bounded::{Region, SeqPlace, Static, ZeroEmpty, ARENA_ALIGN};
 use core::cell::Cell;
 use core::ptr::NonNull;
 
@@ -54,6 +54,31 @@ fn a_full_table_refuses_and_hands_the_value_back() {
         Err(CapacityFull(back)) => assert_eq!(back, 3),
         Ok(_) => panic!("a third row went into a table of two"),
     }
+    assert_eq!(map.len(), 2);
+}
+
+/// A row built of its parts is built only once its slot was found: a full table hands the parts
+/// back whole and never builds it; a table with room builds it once, where its handle finds it.
+/// Turned red by an `insert_with` that builds the row before it finds a slot, or hands back
+/// anything but the parts it was given.
+#[test]
+fn a_row_built_in_its_slot_is_not_built_when_the_table_is_full() {
+    let built = Cell::new(0);
+    let mut map = Map::<2>::new();
+    let make = |(a, b): (u32, u32)| {
+        built.set(built.get() + 1);
+        a + b
+    };
+    let first = map
+        .insert_with((1, 2), make)
+        .expect("a table of two takes a row");
+    assert_eq!(map.get(first), Some(&3));
+    assert_eq!(built.get(), 1);
+    map.insert_with((3, 4), make)
+        .expect("a table of two takes a second row");
+    assert!(map.is_full());
+    assert_eq!(map.insert_with((5, 6), make), Err((5, 6)));
+    assert_eq!(built.get(), 2, "a refused row is not built");
     assert_eq!(map.len(), 2);
 }
 
@@ -522,4 +547,70 @@ fn an_entry_pinned_then_removed_waits_for_its_release() {
     assert!(map.entry(a).is_none());
     assert_eq!(map.release(a), Some(7));
     assert!(map.is_empty());
+}
+
+/// A table of the region policy lies in a region of zero bytes with its rows beside it: empty
+/// there and with no slot, and placed by its two lines of the region's description it takes its
+/// `N` rows, names each, refuses the next, and gives a freed slot to the next insert. Turned red by
+/// a `Core` whose zero bytes are not an empty free list (a `NIL` other than zero, or a link not
+/// counted from one), or by `places` naming one column's rows for the other.
+#[test]
+fn a_region_table_of_zero_bytes_placed_by_its_lines_holds_n_rows() {
+    #[repr(C)]
+    struct OneTable {
+        table: SlotMap<Test, u32, 3, Region>,
+        rows: SlotRows<u32, 3>,
+    }
+    // SAFETY: both fields are `ZeroEmpty`.
+    unsafe impl ZeroEmpty for OneTable {}
+    const LINES: [SeqPlace; 2] = SlotMap::<Test, u32, 3, Region>::places(
+        core::mem::offset_of!(OneTable, table),
+        core::mem::offset_of!(OneTable, rows),
+    );
+    let layout = std::alloc::Layout::new::<OneTable>();
+    // SAFETY: the layout is of a type of some bytes.
+    let block = unsafe { std::alloc::alloc_zeroed(layout) };
+    let region = NonNull::new(block).expect("the test allocator answers");
+    // SAFETY: the zeroed block is a `OneTable`, every field of which is empty at zero bytes.
+    let one = unsafe { &mut *block.cast::<OneTable>() };
+    assert!(one.table.is_empty());
+    assert!(one.table.is_full(), "a table placed no rows has no slot");
+    // SAFETY: the lines name the table's two columns and the rows beside it, aligned, which
+    // nothing but the table reaches.
+    unsafe { crate::bounded::place_seqs(region, &LINES) };
+    assert_eq!(one.table.capacity(), 3);
+    let first = one.table.insert(10).expect("a slot");
+    let second = one.table.insert(11).expect("a slot");
+    let third = one.table.insert(12).expect("a slot");
+    assert!(
+        one.table.insert(13).is_err(),
+        "three rows are all it was placed"
+    );
+    assert_eq!(one.table.get(second), Some(&11));
+    assert!(one.table.remove(second).is_some());
+    assert_eq!(one.table.get(second), None);
+    let again = one.table.insert(14).expect("the freed slot");
+    assert_eq!(one.table.get(again), Some(&14));
+    assert_eq!(
+        (one.table.get(first), one.table.get(third)),
+        (Some(&10), Some(&12))
+    );
+    assert!(
+        one.table.insert(15).is_err(),
+        "the freed slot was the only one"
+    );
+    // SAFETY: the rows hold nothing that drops; the block goes back with its layout.
+    unsafe { std::alloc::dealloc(block, layout) };
+}
+
+/// A table keyed by a peer's ids, of all zero bytes, holds no id and takes one.
+#[test]
+fn a_fixed_id_map_of_zero_bytes_is_empty() {
+    use crate::id_map::{FixedIdMap, IdMap};
+    // SAFETY: `FixedIdMap` is `ZeroEmpty`.
+    let mut ids: FixedIdMap<u32, 2> = unsafe { core::mem::zeroed() };
+    assert!(ids.find(7).is_none());
+    assert!(matches!(ids.bind(7, 70), Ok(None)));
+    assert_eq!(ids.find(7), Some(&70));
+    assert_eq!(ids.unbind(7), Some(70));
 }

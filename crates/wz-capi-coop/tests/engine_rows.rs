@@ -13,8 +13,7 @@ use wz_capi_coop::arena::{
     admitted_faces, admitted_handshakes, ArenaMemory, ArenaRegion, HeldPlaces, OpenStorage,
     PlanFrom, PlanShape,
 };
-use wz_capi_coop::{CoopConfig, CoopEngine, EngineHold, OpenError, OpenKeyIds};
-use wz_capi_port::reach::{ReachEngine, Reachable};
+use wz_capi_coop::{CoopConfig, CoopEngine, EngineHold, OpenError, OpenKeyIds, RowClaim};
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps;
@@ -29,20 +28,6 @@ const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 /// The host's links, counted as the engine's sessions count the parts of a link.
 type PosixLinks = wz_runtime_posix::links::PosixLinks<wz_capi_coop::LinkCount>;
 type Engine = CoopEngine<PosixLinks, PosixClock>;
-
-/// What holds a row in place of a session's engine: never reached.
-struct Holder;
-
-// SAFETY: no count is ever taken, and the holder is a static, standing past every clear.
-unsafe impl Reachable for Holder {
-    fn retain_live(&self) -> bool {
-        false
-    }
-
-    unsafe fn release(&self) {}
-}
-
-static HOLDER: Holder = Holder;
 
 /// The arenas the allocator gave and was not given back.
 static OUT: AtomicUsize = AtomicUsize::new(0);
@@ -63,13 +48,6 @@ impl ArenaMemory for Counting {
         // SAFETY: the caller's: the allocator gave `base` for `layout`, given back once.
         unsafe { std::alloc::dealloc(base.as_ptr(), layout) }
     }
-}
-
-/// A row of the table held by [`HOLDER`], or `None` when every row is.
-fn hold_a_row() -> Option<ReachEngine> {
-    let holder: &(dyn Reachable + 'static) = &HOLDER;
-    // SAFETY: the holder is a static, so it stands past the row's clear.
-    unsafe { ReachEngine::put(NonNull::from(holder)) }
 }
 
 /// A client's config that dials a loopback port nothing answers a session on, given a tenth of a
@@ -130,7 +108,7 @@ fn open() -> Result<EngineHold<Engine>, OpenError> {
 /// keeps the row of an open that failed.
 #[test]
 fn a_process_whose_engine_rows_are_all_held_opens_no_more_and_reserves_nothing() {
-    let held: Vec<ReachEngine> = std::iter::from_fn(hold_a_row)
+    let mut held: Vec<RowClaim> = std::iter::from_fn(RowClaim::take)
         .take(caps::ENGINE_ROWS + 1)
         .collect();
     assert_eq!(held.len(), caps::ENGINE_ROWS, "every row is held once");
@@ -141,8 +119,7 @@ fn a_process_whose_engine_rows_are_all_held_opens_no_more_and_reserves_nothing()
         "the refused open reserved no arena"
     );
 
-    let (first, rest) = held.split_first().expect("a row at least");
-    first.clear();
+    drop(held.pop().expect("a row at least"));
     let past = open().err();
     assert!(
         past.is_some() && past != Some(OpenError::NoEngineRow),
@@ -153,9 +130,7 @@ fn a_process_whose_engine_rows_are_all_held_opens_no_more_and_reserves_nothing()
         0,
         "the failed open gave its arena back"
     );
-    let again = hold_a_row().expect("the failed open let its row go");
-    again.clear();
-    for reach in rest {
-        reach.clear();
-    }
+    let again = RowClaim::take().expect("the failed open let its row go");
+    drop(again);
+    drop(held);
 }

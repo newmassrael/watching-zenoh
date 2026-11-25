@@ -2827,7 +2827,7 @@ mod tests {
         }));
         let mut socket = Socket(Rc::clone(&wire));
         let params = params();
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let queue: RefCell<VecDeque<MulticastTxItem>> =
             RefCell::new(PAYLOADS[..3].iter().copied().map(put).collect());
@@ -2960,7 +2960,7 @@ mod tests {
         let mut socket = Socket(Rc::clone(&wire));
         let mut params = params();
         params.join_interval_ms = 1_000;
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let queue: RefCell<VecDeque<MulticastTxItem>> = RefCell::new(VecDeque::new());
         let mut next_tx = || queue.borrow_mut().pop_front();
@@ -3024,7 +3024,7 @@ mod tests {
         let wire = Rc::new(RefCell::new(Wire::default()));
         let mut socket = Socket(Rc::clone(&wire));
         let params = params();
-        let runtime = CoopRuntime::new(Frozen);
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let queue: RefCell<VecDeque<MulticastTxItem>> = RefCell::new(VecDeque::new());
         let mut next_tx = || queue.borrow_mut().pop_front();

@@ -6,9 +6,10 @@
 <!--
   Unicast link life - the one link of a session that holds one face.
 
-  A session that dials its endpoints and takes no face beside the one it dials (no listening
-  port, no group) has one link, and this machine is its life: dialled endpoint by endpoint,
-  its handshake run, up, lost and dialled again, or given up. The host is
+  Each face of a session has one link, and this machine is its life. The dial role's face is
+  dialled endpoint by endpoint, its handshake run, up, lost and dialled again, or given up. A face
+  taken beside it (a link accepted on a port, or an endpoint attached and dialled once) goes with
+  its link: whatever ends the link takes the face out, and the session goes on. The host is
   `wz_session_core::link_life::UnicastLink`, a value with no I/O: it is handed an input and the
   time, raises the one event that input comes to, and returns the duties the machine asked for.
   The I/O (the dial, the handshake's task, the pump of an established link) is its owner's,
@@ -22,8 +23,10 @@
     Up          - established: the session's sends go through the link.
     Backoff     - no endpoint answered after the link had been up once; every endpoint is
                   dialled again when the wait the host armed is over.
+    Held        - the dial role's handshake reached a node another face holds: it stands by,
+                  and dials again once no other face holds the node.
     Closed      - the session is closed, or ended because the link is gone and none is dialled
-                  again.
+                  again; for a taken face, the face is gone.
 
   Division of labour with the host (as in peer_connection.scxml):
     - Classification is the host's. Which endpoint is next, whether one is left, whether the
@@ -44,7 +47,8 @@
     let_go          - a close: let go of the dial under way or of the link.
 
   Events raised by the host:
-    link.open           - the session opens: dial the first endpoint.
+    link.open           - the session opens, or a face is attached: dial the first endpoint.
+    link.taken          - a face takes a link accepted on a port: its handshake runs.
     dial.made           - the dial made a link.
     handshake.begun     - the link's handshake is under way.
     dial.next           - the dial, or the handshake it should have begun, failed for its
@@ -58,6 +62,11 @@
     link.lost           - the established link ended, and the session dials again at once.
     link.ended          - the established link ended, and the session dials none again.
     backoff.over        - the wait is over.
+    dial.gone           - a taken face's dial failed: the face goes.
+    handshake.gone      - a taken face's handshake ended or ran out of time: the face goes.
+    link.gone           - a taken face's established link ended: the face goes.
+    handshake.held      - the dial role's handshake reached a node another face holds.
+    held.over           - no other face holds that node now: dial the first endpoint.
     link.close          - the session closes.
 -->
 <!--
@@ -76,6 +85,7 @@
 
   <state id="Idle">
     <transition event="link.open" target="Dialing"/>
+    <transition event="link.taken" target="Handshaking"/>
     <!-- A session with no endpoint to dial is refused at its open. -->
     <transition event="dial.ended" target="Closed">
       <sce:action name="end_session" effect="duty"/>
@@ -98,6 +108,7 @@
     <transition event="dial.ended" target="Closed">
       <sce:action name="end_session" effect="duty"/>
     </transition>
+    <transition event="dial.gone" target="Closed"/>
     <transition event="link.close" target="Closed">
       <sce:action name="let_go" effect="duty"/>
     </transition>
@@ -115,6 +126,12 @@
       <sce:action name="end_handshake" effect="duty"/>
       <sce:action name="end_session" effect="duty"/>
     </transition>
+    <transition event="handshake.gone" target="Closed">
+      <sce:action name="end_handshake" effect="duty"/>
+    </transition>
+    <transition event="handshake.held" target="Held">
+      <sce:action name="end_handshake" effect="duty"/>
+    </transition>
     <transition event="link.close" target="Closed">
       <sce:action name="let_go" effect="duty"/>
     </transition>
@@ -131,6 +148,9 @@
       <sce:action name="lose_link" effect="duty"/>
       <sce:action name="end_session" effect="duty"/>
     </transition>
+    <transition event="link.gone" target="Closed">
+      <sce:action name="lose_link" effect="duty"/>
+    </transition>
     <transition event="link.close" target="Closed">
       <sce:action name="let_go" effect="duty"/>
     </transition>
@@ -141,6 +161,11 @@
       <sce:action name="arm_backoff" effect="duty"/>
     </onentry>
     <transition event="backoff.over" target="Dialing"/>
+    <transition event="link.close" target="Closed"/>
+  </state>
+
+  <state id="Held">
+    <transition event="held.over" target="Dialing"/>
     <transition event="link.close" target="Closed"/>
   </state>
 

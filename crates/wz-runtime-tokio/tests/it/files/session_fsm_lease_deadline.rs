@@ -41,7 +41,8 @@ fn fresh_setup() -> (
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
@@ -487,7 +488,8 @@ async fn r311la_data_only_peer_survives_past_lease_window() {
         ..fixture_session_init_params()
     };
     let clock = TokioTime::new();
-    let actions = new_session_actions(Arc::new(NoopOutboundDriver::default()), params, clock);
+    let actions = new_session_actions(Arc::new(NoopOutboundDriver::default()), params, clock)
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     drive_to_established(&mut engine);
