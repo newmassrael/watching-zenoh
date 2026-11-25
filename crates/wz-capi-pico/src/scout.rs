@@ -629,13 +629,14 @@ pub unsafe extern "C" fn z_hello_locators(
     if out.is_null() {
         return;
     }
-    let items = hello_state(hello).map_or_else(
-        || StringArrayState::new(Vec::new()),
-        |s| s.locators().copied(),
-    );
-    *out = z_owned_string_array_t {
-        handle: Box::into_raw(items) as *mut c_void,
-        _pad: [core::ptr::null_mut(); 3],
+    let items = hello_state(hello).map_or_else(StringArrayState::empty, |s| s.locators().copied());
+    // A full heap leaves `out` null, the one answer a call with no result has.
+    *out = match items {
+        Ok(items) => z_owned_string_array_t {
+            handle: Box::into_raw(items) as *mut c_void,
+            _pad: [core::ptr::null_mut(); 3],
+        },
+        Err(_) => z_owned_string_array_t::null_value(),
     };
 }
 
@@ -845,7 +846,7 @@ unsafe fn drop_kept(handle: *mut c_void) {
 /// process pools keeps every locator, as its engine's sessions keep theirs.
 #[cfg(not(wz_process_pools))]
 fn keep(hello: &HelloState) -> Option<*mut c_void> {
-    let kept = HelloState::owning(hello.zid, hello.whatami, hello.locators().copied());
+    let kept = HelloState::owning(hello.zid, hello.whatami, hello.locators().copied().ok()?);
     Some(Box::into_raw(kept).cast::<c_void>())
 }
 

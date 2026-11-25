@@ -108,23 +108,34 @@ use wz_runtime_core::RuntimeError;
 #[cfg(feature = "session-slot")]
 use crate::executor::TaskTable;
 use crate::executor::{ExecutorState, TaskJoin};
+#[cfg(not(feature = "session-slot"))]
+use crate::executor::{StoreLayout, TaskStore};
 use crate::join_handle::CoopJoinHandle;
+#[cfg(not(feature = "session-slot"))]
+use crate::kept::{self, Kept};
 use crate::sync::{Confined, ConfinedOwner, LockKind, Shared};
 use crate::time::ClockSource;
 use crate::timer::TimerQueue;
+#[cfg(not(feature = "session-slot"))]
+use crate::timer::TimerSlot;
 #[cfg(feature = "session-slot")]
 use crate::timer::TimerTable;
+#[cfg(not(feature = "session-slot"))]
+use core::alloc::Layout;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
 #[cfg(feature = "session-slot")]
 use core::mem::MaybeUninit;
-
-/// How a runtime handle and a time source hold the runtime's state: an `Arc` of it,
-/// or under `session-slot` a reference to the `static` cell that holds it
-/// ([`RuntimeCell`]). Both are cheap to clone; the second allocates nothing.
 #[cfg(not(feature = "session-slot"))]
-pub(crate) type InnerRef<C> = Arc<RuntimeInner<C>>;
-/// See the `Arc` form of this alias.
+use core::ptr::{self, NonNull};
+
+/// How a runtime handle and a time source hold the runtime's state: a count of it, on the heap
+/// or placed in a span of counted memory ([`CoopRuntime::placed`]), or under `session-slot` a
+/// reference to the `static` cell that holds it ([`RuntimeCell`]). Both are cheap to clone; the
+/// second allocates nothing.
+#[cfg(not(feature = "session-slot"))]
+pub(crate) type InnerRef<C> = kept::Shared<RuntimeInner<C>>;
+/// See the counted form of this alias.
 #[cfg(feature = "session-slot")]
 pub(crate) type InnerRef<C> = &'static RuntimeInner<C>;
 
@@ -136,7 +147,7 @@ pub(crate) fn share_inner<C: ClockSource>(inner: &InnerRef<C>) -> InnerRef<C> {
     inner.clone()
 }
 
-/// See the `Arc` form of this function.
+/// See the counted form of this function.
 #[cfg(feature = "session-slot")]
 pub(crate) fn share_inner<C: ClockSource>(inner: &InnerRef<C>) -> InnerRef<C> {
     inner
@@ -165,7 +176,7 @@ pub type DefaultDriver = dyn wz_session_core::link::BoxedLinkDriver;
 pub type DefaultDriver = ();
 
 /// `impl Runtime` for the MCU profile. Cheap to clone — the entire
-/// state lives in `Arc<RuntimeInner<C>>`. Multiple clones share the
+/// state lives behind one count of it (`InnerRef`). Multiple clones share the
 /// same task pool, timer queue, and clock; task closures may capture
 /// a `CoopRuntime` clone and call nested `spawn` (R311av-pre
 /// Decision 5).
@@ -275,13 +286,175 @@ impl<C: ClockSource> CoopRuntime<C> {
     #[cfg(not(feature = "session-slot"))]
     fn over(clock: C, executor: ExecutorState, timers: TimerQueue) -> Self {
         Self {
-            inner: Arc::new(RuntimeInner {
+            inner: kept::Shared::boxed(RuntimeInner {
                 executor,
                 timers,
                 clock,
             }),
             driver: PhantomData,
         }
+    }
+}
+
+/// Which table a runtime placed in a span holds ([`CoopRuntime::placed`]): the one
+/// [`CoopRuntime::reserved`] holds, the one cell [`CoopRuntime::reserved_for_one`] holds, or the
+/// cells [`CoopRuntime::opening`] holds with its count of cells added while the open lasts, which
+/// take their bytes of the heap.
+#[cfg(not(feature = "session-slot"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeForm {
+    /// Every cell reserved, a table of any count of them.
+    Reserved,
+    /// One cell at most.
+    ForOne,
+    /// The cells reserved and `added` bare cells beside them while the open lasts.
+    Opening {
+        /// The bare cells.
+        added: usize,
+    },
+}
+
+/// A span a runtime's state is placed in ([`CoopRuntime::placed`]), and the count that keeps the
+/// memory it lies in: the runtime holds a count of that memory until its last holder (a handle, a
+/// waker or a join handle of one of its tasks) lets go, and gives it back then.
+#[cfg(not(feature = "session-slot"))]
+pub struct RuntimePlace {
+    at: NonNull<u8>,
+    bytes: usize,
+    memory: NonNull<Kept>,
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl RuntimePlace {
+    /// The `bytes` bytes at `at`, in the memory `memory` keeps.
+    ///
+    /// # Safety
+    /// `at` is valid for reads and writes of `bytes` bytes, which nothing else uses while a count
+    /// of `memory` is held; `memory` is a live count of the memory that holds them, which the
+    /// caller holds one of until the place is used.
+    pub unsafe fn new(at: NonNull<u8>, bytes: usize, memory: NonNull<Kept>) -> Self {
+        Self { at, bytes, memory }
+    }
+}
+
+/// Where each part of a placed runtime's state lies from the start of its span: its own state, the
+/// count and fields of its task table, the table's cells and their bytes, and its timer entries.
+#[cfg(not(feature = "session-slot"))]
+struct PlacedParts {
+    inner: usize,
+    store: usize,
+    block: usize,
+    timers: usize,
+    laid: StoreLayout,
+    /// The span: its bytes, and the alignment it starts on.
+    layout: Layout,
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl PlacedParts {
+    /// The parts of a runtime of `rows` and `form` on the clock `C`, one after another; `None`
+    /// past the address space. The one reckoning of the span, for its size and for its placing.
+    #[inline(always)]
+    fn of<C: ClockSource>(rows: RuntimeRows, form: RuntimeForm) -> Option<Self> {
+        let laid = match form {
+            RuntimeForm::ForOne => StoreLayout::of::<true>(rows.tasks, Some(rows.task_bytes)),
+            RuntimeForm::Reserved | RuntimeForm::Opening { .. } => {
+                StoreLayout::of::<false>(rows.tasks, Some(rows.task_bytes))
+            }
+        };
+        let layout = kept::Shared::<RuntimeInner<C>>::layout();
+        let (layout, store) = layout.extend(kept::Shared::<TaskStore>::layout()).ok()?;
+        let (layout, block) = layout.extend(laid.layout()).ok()?;
+        let timer_entries = Layout::array::<TimerSlot>(rows.timers).ok()?;
+        let (layout, timers) = layout.extend(timer_entries).ok()?;
+        Some(Self {
+            inner: 0,
+            store,
+            block,
+            timers,
+            laid,
+            layout: layout.pad_to_align(),
+        })
+    }
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl<C: ClockSource> CoopRuntime<C> {
+    /// The bytes of the span [`Self::placed`] places a runtime of `rows` and `form` in, and the
+    /// alignment it starts on; `None` past the address space.
+    #[inline(always)]
+    pub fn placed_layout(rows: RuntimeRows, form: RuntimeForm) -> Option<Layout> {
+        PlacedParts::of::<C>(rows, form).map(|parts| parts.layout)
+    }
+
+    /// The runtime [`Self::reserved`], [`Self::reserved_for_one`] or [`Self::opening`] makes,
+    /// as `form` says, with its state, its task table and its timer table placed in `place`
+    /// rather than on the heap: nothing allocates, and the memory of the span is kept until the
+    /// runtime's last holder lets go. `None`, having placed nothing, for a span shorter than
+    /// [`Self::placed_layout`] or not on its alignment. Always inlined, as the other makings: a
+    /// maker that states its form and its timers as constants links only the making of those.
+    #[inline(always)]
+    pub fn placed(
+        clock: C,
+        rows: RuntimeRows,
+        form: RuntimeForm,
+        place: RuntimePlace,
+    ) -> Option<Self> {
+        let parts = PlacedParts::of::<C>(rows, form)?;
+        let at = place.at.as_ptr();
+        // A layout's alignment is a power of two, so a start on it has none of the bits below it.
+        let off_alignment = ((at as usize) & (parts.layout.align() - 1)) != 0;
+        if place.bytes < parts.layout.size() || off_alignment {
+            return None;
+        }
+        let store_block = if parts.laid.layout().size() == 0 {
+            ptr::null_mut()
+        } else {
+            at.wrapping_add(parts.block)
+        };
+        // SAFETY: the span holds every part at its offset, on the alignment the parts were laid
+        // out for, the parts apart; nothing else uses the span while a count of its memory is
+        // held, and each part takes one (`RuntimePlace::new`).
+        let store = unsafe {
+            TaskStore::placed(
+                parts.laid,
+                NonNull::new_unchecked(at.wrapping_add(parts.store)),
+                store_block,
+                place.memory,
+            )
+        };
+        let executor = match form {
+            RuntimeForm::Reserved => ExecutorState::reserved_in(store),
+            RuntimeForm::ForOne => ExecutorState::reserved_one_in(store),
+            RuntimeForm::Opening { added } => ExecutorState::opening_in(store, added),
+        };
+        let timers = if rows.timers == 0 {
+            TimerQueue::of_rows(0)
+        } else {
+            // SAFETY: as above: the entries' part of the span.
+            unsafe {
+                TimerQueue::placed(
+                    NonNull::new_unchecked(at.wrapping_add(parts.timers).cast::<TimerSlot>()),
+                    rows.timers,
+                )
+            }
+        };
+        let inner = RuntimeInner {
+            executor,
+            timers,
+            clock,
+        };
+        Some(Self {
+            // SAFETY: as above: the state's part of the span.
+            inner: unsafe {
+                kept::Shared::placed(
+                    NonNull::new_unchecked(at.wrapping_add(parts.inner)),
+                    inner,
+                    place.memory,
+                )
+            },
+            driver: PhantomData,
+        })
     }
 }
 
