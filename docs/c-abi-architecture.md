@@ -168,7 +168,8 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
 
 1. **Ledger gate (P9).** `scripts/lib/size_ledger_gate.py`: area classification of both
    libraries, address-deduplicated, a ratio ratchet per area in `deploy/size_ledger.json`, run in
-   Layer C1cs beside the total.
+   Layer C1cs beside the total. Its `--explain` says what holds an area's bytes (wz modules,
+   bodies and generic copies, zenoh-pico files) and keeps the whole lists as JSON to diff.
 2. **Totality lints (P6)** on `wz-session-core`, `wz-capi-coop`, `wz-capi-pico`,
    `wz-runtime-coop` in non-test code, debt rows for the sites that remain, paid largest first.
    The lints are denied at each crate root; the modules that remain are the register of
