@@ -546,7 +546,7 @@ impl<K: HoldKind, P: SendParts> FaceSite<K, P> {
         let held = match unsafe { self.place.at_seat_of::<P::Tx>() } {
             AtSeat::Taken(taken) => SendHeld::Seat(taken),
             AtSeat::InUse => return None,
-            AtSeat::None => SendHeld::Lent(ManuallyDrop::new(self.place.hold()?)),
+            AtSeat::None => SendHeld::Lent(ManuallyDrop::new(self.place.hold_lent()?)),
         };
         Some(SiteSend { site: self, held })
     }

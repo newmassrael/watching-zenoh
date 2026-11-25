@@ -345,8 +345,8 @@ impl<O: ConfinedOwner> LockKind for Confined<O> {
 
 /// A kind whose hold of a value can be a value of its own, let go of as it drops, beside the
 /// closure [`LockKind::with`] runs the value in: what a holder that keeps the value across
-/// calls of its own takes ([`FacePlace::hold`]). A kind whose hold is a section of the whole
-/// program, entered and left around a closure, has none.
+/// calls of its own takes ([`FacePlace::hold_lent`]). A kind whose hold is a section of the
+/// whole program, entered and left around a closure, has none.
 #[cfg(feature = "runtime")]
 pub trait HoldKind: LockKind {
     /// A hold of a value of `T`, which reaches it until it drops.
@@ -669,7 +669,7 @@ impl<K: HoldKind, X: Send + 'static> FacePlace<K, X> {
     /// whatever holds the face now; `None`, let go of at once, while the place holds none. A
     /// debug build fails a wait made under a lock that bars one, as [`Self::lend`] does.
     #[inline]
-    pub fn hold(&self) -> Option<K::Hold<'_, Option<X>>> {
+    pub fn hold_lent(&self) -> Option<K::Hold<'_, Option<X>>> {
         debug_assert!(
             !(K::WAITS && NoFaceWait::any_here()),
             "a face's place is waited on under a lock that bars it"
