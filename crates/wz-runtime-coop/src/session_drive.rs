@@ -2761,7 +2761,7 @@ mod wake_budget_tests {
             &local,
             PumpFields {
                 link: Rc::clone(&link),
-                actions: actions,
+                actions,
                 entropy,
                 clock,
                 config: SessionDriveConfig {
@@ -2820,7 +2820,7 @@ mod wake_budget_tests {
                 &local,
                 PumpFields {
                     link: Rc::new(Recording::default()),
-                    actions: actions,
+                    actions,
                     entropy,
                     clock,
                     config: SessionDriveConfig {
@@ -2958,7 +2958,7 @@ mod wake_budget_tests {
             &local,
             PumpFields {
                 link: Rc::new(Recording::default()),
-                actions: actions,
+                actions,
                 entropy,
                 clock,
                 config: SessionDriveConfig {

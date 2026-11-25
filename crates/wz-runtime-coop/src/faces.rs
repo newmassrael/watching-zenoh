@@ -1577,17 +1577,27 @@ mod tests {
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(4)
         ));
-        faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, 0));
+        // A dial under way is looked at again on the next look, its deadline being later.
+        faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, u64::MAX));
         assert!(matches!(
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(1)
+        ));
+        // A dial past its deadline is looked at now, which gives it up.
+        faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, 0));
+        assert!(matches!(
+            faces.idle_wait(10, &mut now, [], None),
+            IdleWait::None
         ));
         faces.put_link(0, Link::Held { zid: held_node() });
         assert!(matches!(
             faces.idle_wait(10, &mut now, [], None),
             IdleWait::None
         ));
-        assert_eq!(clock_reads, 1, "only the waiting face read the clock");
+        assert_eq!(
+            clock_reads, 3,
+            "a read of a face waiting or dialling reads the clock once, of one standing by none"
+        );
 
         let runtime = CoopRuntime::new(Still);
         let local = CoopLocalSet::new(&runtime);
