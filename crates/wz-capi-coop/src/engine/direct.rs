@@ -327,6 +327,10 @@ pub(super) type DirectWire<L, C> = FaceAt<DirectLock, DirectParts<L, C>, DirectE
 /// The place of the one link's parts.
 type DirectSite<L, C> = FaceSite<DirectLock, DirectParts<L, C>>;
 
+/// An operation run on the session's state with the one link's wire, inside the link's place
+/// (`CoopEngine::live_in_place`), borrowing what it captures for `'f`.
+type OnLink<'f, L, C> = dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>) + 'f;
+
 /// The parts of the one link's session, held in the face's place apart from the session's state:
 /// the link's wire, which a send writes, the pump, written while `records` is held, and what each
 /// step of the pump is handed. Made in the place, and dropped with it.
@@ -1171,7 +1175,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// [`Self::live_on_link`] over `f` by reference.
     // Out of line and over `dyn`: one body takes the place and the lock for every operation.
     #[inline(never)]
-    fn live_in_place(&self, f: &mut dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>)) {
+    fn live_in_place(&self, f: &mut OnLink<'_, L, C>) {
         let carried = OnThisThread((self, &mut *f));
         let lent = self.direct.site.send(move |tx| {
             let (engine, f) = carried.get();
