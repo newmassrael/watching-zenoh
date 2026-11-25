@@ -5282,7 +5282,7 @@ impl SharedSession {
     /// the wire. Refused, taking none, for a count that holds as many as it can
     /// ([`HoldRefused::Full`]) or a row that went ([`HoldRefused::Gone`]).
     pub fn retain_keyexpr(&self, row: KeyexprHandle) -> Result<(), HoldRefused> {
-        let mut guard = self.lock();
+        let guard = self.lock();
         if guard.tables.retain_keyexpr(row) {
             Ok(())
         } else if guard.tables.keyexprs().get(row).is_some() {
