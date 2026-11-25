@@ -1489,7 +1489,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         not(feature = "multicast-declarations"),
         not(feature = "multicast-ingress-gate")
     ))]
-    pub(crate) fn from_sender(mut self, sender: u64) -> Self {
+    pub(crate) fn sent_by(mut self, sender: u64) -> Self {
         self.sender = sender;
         self
     }
