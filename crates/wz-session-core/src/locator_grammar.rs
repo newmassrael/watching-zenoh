@@ -27,15 +27,25 @@ fn find_byte(text: &str, byte: u8) -> Option<usize> {
     text.bytes().position(|at| at == byte)
 }
 
-/// `text` before and after its first `byte`, an ASCII byte; `None` when it holds none.
-fn split_once_byte(text: &str, byte: u8) -> Option<(&str, &str)> {
+/// `text` before and after its first `byte`, an ASCII byte, which neither half keeps; `None`
+/// when it holds none. The one cut of every reader of a locator's text: the halves are taken
+/// without asking again whether the cut lies between two characters, since an ASCII byte is a
+/// whole character, and that question would be a copy of its own at each inlined cut.
+pub fn split_once_byte(text: &str, byte: u8) -> Option<(&str, &str)> {
+    debug_assert!(byte.is_ascii());
     let at = find_byte(text, byte)?;
-    Some((text.get(..at)?, text.get(at.saturating_add(1)..)?))
+    // SAFETY: the byte at `at` is the ASCII `byte`, a whole character, so `at` lies on a character
+    // boundary of `text`, and so does the end of that byte, the start of what follows it in
+    // `rest`, at most at its end.
+    unsafe {
+        let rest = text.get_unchecked(at..);
+        Some((text.get_unchecked(..at), rest.get_unchecked(1..)))
+    }
 }
 
 /// The pieces of `text` between each `byte`, an ASCII byte, as `str::split` gives them: one empty
 /// piece for an empty text.
-fn split_byte(text: &str, byte: u8) -> BytePieces<'_> {
+pub fn split_byte(text: &str, byte: u8) -> BytePieces<'_> {
     BytePieces {
         rest: Some(text),
         byte,
@@ -43,7 +53,7 @@ fn split_byte(text: &str, byte: u8) -> BytePieces<'_> {
 }
 
 /// The iterator [`split_byte`] answers.
-struct BytePieces<'a> {
+pub struct BytePieces<'a> {
     /// What is left to split; `None` once the last piece is given.
     rest: Option<&'a str>,
     byte: u8,
