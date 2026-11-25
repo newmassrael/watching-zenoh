@@ -128,8 +128,8 @@
 //! declares — observably different on the wire for anything watching matching
 //! status. That is a real seam, not a cost, and it is a follow-up round.
 
-use alloc::sync::Arc;
 use core::ffi::c_void;
+use wz_capi_port::lodge::Strong;
 
 use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::{Refusal, ReplyCallback};
@@ -747,12 +747,12 @@ impl z_get_options_t {
     /// # Safety
     /// The field must be null or a moved token this crate produced.
     #[cfg(feature = "unstable-api")]
-    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Strong<CancellationToken>> {
         crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
     }
 
     #[cfg(not(feature = "unstable-api"))]
-    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Strong<CancellationToken>> {
         None
     }
 }
@@ -1136,7 +1136,7 @@ pub(crate) struct GetMoved {
     attachment: Result<Option<crate::bytes::ByteBuf>, crate::bytes::NoRoom>,
     encoding: Option<crate::encoding::OwnedEncoding>,
     source_info: Option<wz_session_core::sample::SourceInfo>,
-    token: Option<Arc<CancellationToken>>,
+    token: Option<Strong<CancellationToken>>,
 }
 
 impl GetMoved {
@@ -1160,7 +1160,7 @@ impl GetMoved {
         encoding: *mut c_void,
         attachment: *mut z_moved_bytes_t,
         source_info: *const crate::pubsub::z_source_info_t,
-        token: Option<Arc<CancellationToken>>,
+        token: Option<Strong<CancellationToken>>,
     ) -> Self {
         Self {
             payload: crate::pubsub::take_moved_bytes(payload),
@@ -1210,7 +1210,7 @@ pub(crate) struct GetHeld {
     encoding: Option<crate::encoding::OwnedEncoding>,
     source_info: Option<wz_session_core::sample::SourceInfo>,
     /// The token the program handed the get, which the door takes before it asks.
-    pub(crate) token: Option<Arc<CancellationToken>>,
+    pub(crate) token: Option<Strong<CancellationToken>>,
 }
 
 impl GetHeld {
@@ -2651,14 +2651,14 @@ mod tests {
 
         // A get with a token: its fan, registered on the token where it lies in the place, is
         // the one the engine is handed, and goes with the last leg.
-        let token = CancellationToken::new();
+        let token = CancellationToken::new().expect("a token place is free");
         let mut legs = Vec::new();
         let code = fan_get(
             &engine,
             Kind::Get,
             closure(),
             gate(),
-            Some(TokenRef::shared(Arc::clone(&token))),
+            Some(TokenRef::shared(token.clone())),
             |_, fan, leg| {
                 assert!(fan.is_some(), "a get with a token hands its fan");
                 legs.push(leg());
@@ -2679,7 +2679,7 @@ mod tests {
             Kind::Get,
             closure(),
             gate(),
-            Some(TokenRef::shared(Arc::clone(&token))),
+            Some(TokenRef::shared(token.clone())),
             |_, _, _| panic!("a cancelled get issues no leg"),
         );
         assert_eq!(code, crate::result::Z_ERR_CANCELLED);

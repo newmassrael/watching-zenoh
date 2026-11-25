@@ -39,9 +39,9 @@
 //! not the contents, because every field is reached through an exported
 //! accessor.
 
-use alloc::sync::Arc;
 use core::ffi::{c_char, c_void};
 use core::ptr::{addr_of_mut, NonNull};
+use wz_capi_port::lodge::Strong;
 
 use wz_capi_port::cancellation::{CancellationToken, TokenRef};
 use wz_capi_port::FilterPlane;
@@ -138,12 +138,12 @@ impl z_querier_get_options_t {
     /// # Safety
     /// The field must be null or a moved token this crate produced.
     #[cfg(feature = "unstable-api")]
-    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Strong<CancellationToken>> {
         crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
     }
 
     #[cfg(not(feature = "unstable-api"))]
-    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Strong<CancellationToken>> {
         None
     }
 }

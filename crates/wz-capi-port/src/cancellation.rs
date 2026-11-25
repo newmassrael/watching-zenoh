@@ -63,6 +63,9 @@ use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ptr::{addr_of_mut, NonNull};
 
+#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+use crate::lodge::StaticPlaces;
+use crate::lodge::{NoPlace, Strong};
 use crate::os::{Condvar, Mutex, MutexGuard};
 use crate::reach::ReachEngine;
 use crate::sync::Lock;
@@ -117,14 +120,16 @@ impl CancellationToken {
         }
     }
 
-    /// A fresh, uncancelled token, shared.
-    pub fn new() -> Arc<Self> {
+    /// A fresh, uncancelled token, shared by counts: in a place of the process's table of tokens
+    /// in a kernel's build, which asks nothing of a heap, and in a box of its own on a host;
+    /// [`NoPlace`] when every place is held or the heap refuses the box.
+    pub fn new() -> Result<Strong<Self>, NoPlace> {
         let make = |place: NonNull<Self>| {
-            // SAFETY: the place is its `Arc`'s, valid for one token, holding none, never moved.
+            // SAFETY: the place is its lodging's, valid for one token, holding none, never moved.
             unsafe { Self::init_in(place) }
         };
         // SAFETY: `make` makes the whole token in the place it is handed.
-        unsafe { crate::os::arc_with_lock_in(make) }
+        unsafe { lodge_token(make) }
     }
 
     /// Lock. The port's lock treats a poisoned one as usable: every critical
@@ -196,13 +201,13 @@ impl CancellationToken {
 pub struct TokenRef(Held);
 
 enum Held {
-    Shared(Arc<CancellationToken>),
+    Shared(Strong<CancellationToken>),
     Placed(NonNull<CancellationToken>),
 }
 
 impl TokenRef {
     /// A token the program's handles share; the fan holds one more of them.
-    pub fn shared(token: Arc<CancellationToken>) -> Self {
+    pub fn shared(token: Strong<CancellationToken>) -> Self {
         Self(Held::Shared(token))
     }
 
@@ -503,11 +508,45 @@ impl Drop for CancellableFan {
 /// A fan of its own allocation registered on `token`, for a caller that shares the fan among the
 /// legs it issues. `None` when the token has already started cancelling: the caller then fails
 /// the get without issuing it.
-pub fn register_fan(token: &Arc<CancellationToken>) -> Option<Arc<CancellableFan>> {
+pub fn register_fan(token: &Strong<CancellationToken>) -> Option<Arc<CancellableFan>> {
     let fan = Arc::new(CancellableFan::new());
     // SAFETY: the fan is its allocation's own, which does not move until it is dropped, and no
     // engine has it yet.
-    unsafe { fan.register(TokenRef::shared(Arc::clone(token))) }.then_some(fan)
+    unsafe { fan.register(TokenRef::shared(token.clone())) }.then_some(fan)
+}
+
+/// How many tokens a kernel's build holds at once: a program that cancels its gets holds one per
+/// group of gets it cancels together, and one more is refused, as a full heap refuses pico's.
+#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+pub const TOKEN_PLACES: usize = 4;
+
+/// The process's places for tokens in a kernel's build.
+#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+static TOKENS: StaticPlaces<CancellationToken, TOKEN_PLACES> = StaticPlaces::new();
+
+/// The token `make` writes, in a place of [`TOKENS`], or [`NoPlace`] when every one is held.
+///
+/// # Safety
+/// `make` leaves a whole token in the place it is handed, which is valid for writes of one.
+#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+unsafe fn lodge_token(
+    make: impl FnOnce(NonNull<CancellationToken>),
+) -> Result<Strong<CancellationToken>, NoPlace> {
+    let lent = TOKENS.lend().ok_or(NoPlace)?;
+    // SAFETY: the caller's.
+    Ok(unsafe { Strong::lodge_at(lent, make) })
+}
+
+/// The token `make` writes, in a box of its own, or [`NoPlace`] when the heap refuses it.
+///
+/// # Safety
+/// As the kernel's form.
+#[cfg(any(feature = "std", feature = "os-sys"))]
+unsafe fn lodge_token(
+    make: impl FnOnce(NonNull<CancellationToken>),
+) -> Result<Strong<CancellationToken>, NoPlace> {
+    // SAFETY: the caller's.
+    unsafe { Strong::try_boxed_in(make) }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -551,7 +590,7 @@ mod tests {
     /// does not reach the fan's engine.
     #[test]
     fn a_registered_fan_is_cancelled_through_its_engine_and_waited_for() {
-        let token = CancellationToken::new();
+        let token = CancellationToken::new().expect("a token place is free");
         let engine = engine();
         let fan = register_fan(&token).expect("a fresh token registers");
         assert!(fan.attach(canceller_of(engine)));
@@ -606,7 +645,7 @@ mod tests {
     /// an unlink that leaves the dropped fan on the list.
     #[test]
     fn a_fan_dropped_from_the_middle_is_off_its_tokens_list() {
-        let token = CancellationToken::new();
+        let token = CancellationToken::new().expect("a token place is free");
         let engine = engine();
         let canceller = canceller_of(engine);
         let mut fans: Vec<Box<CancellableFan>> = (0..3).map(|_| Box::default()).collect();

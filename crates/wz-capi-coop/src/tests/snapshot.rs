@@ -203,7 +203,7 @@ fn a_cancelled_snapshot_ends_without_a_step() {
     until(&engine, "the router to go quiet", || {
         router.seen(|s| s.settled)
     });
-    let token = CancellationToken::new();
+    let token = CancellationToken::new().expect("a token place is free");
     let fan = register_fan(&token).expect("a fresh token registers");
     let (issued, leg) = ask(&engine, "demo/snap/a", 0, Some(&fan), Some(fan.clone()));
     drop(fan);
