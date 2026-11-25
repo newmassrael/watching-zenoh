@@ -1857,10 +1857,11 @@ impl z_owned_subscriber_t {
 unsafe fn free_publisher(h: *mut c_void) {
     crate::object_slot::release_entity(h as *mut PublisherState);
 }
-/// Let go of a subscriber: its subscription is retracted, which lets its row's callback go after
-/// its last call, the release waits for the closure to be let go of (pico's
-/// `_z_sync_group_wait`) unless it is made from inside a callback, and the key goes after. The
-/// place goes back with the last of the handle and the closure.
+/// Let go of a subscriber: its subscription is retracted, which returns once its row's callback
+/// has been let go of after its last call (pico's `_z_sync_group_wait`), unless it is made from
+/// inside a callback, as the engine keeps the port's contract
+/// ([`wz_capi_port::SessionEngine::undeclare_subscriber`]); the key goes after. The place goes
+/// back with the last of the handle and the closure.
 ///
 /// # Safety
 /// `h` must be a live `SubscriberState` handle, let go of once.
@@ -1869,7 +1870,6 @@ unsafe fn free_subscriber(h: *mut c_void) {
     if let Some(id) = (*state).id() {
         (*state).shared.undeclare_subscriber(id);
     }
-    crate::object_slot::closures_of::<SubscriberState, SubscriberKept>(state).wait_none();
     crate::object_slot::retire_entity::<SubscriberState, SubscriberKept>(state);
 }
 
