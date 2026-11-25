@@ -54,7 +54,7 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
-use wz_session_core::link::{BoxedLinkDriver, SessionRuntime, ShareValues};
+use wz_session_core::link::{BoxedLinkDriver, LocalHeld, SessionRuntime, ShareValues};
 // `SessionLinkActions` lives behind wz-session-core's `session-unicast` gate,
 // which `transport-unicast` forwards (the only AP path that enables it); the
 // `ActionsHandle` GAT binding below is gated to match.
@@ -225,11 +225,13 @@ impl SessionRuntime for TokioRuntime {
         crate::sync::PlainMutex::new(value)
     }
 
-    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    // A lock, which never refuses: an access from inside another of the same value is the lock's
+    // to answer, as any second hold of it is.
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Result<U, LocalHeld>
     where
         T: Send + 'static,
     {
-        local.with(f)
+        Ok(local.with(f))
     }
 
     // R311ja — the AP action handle is `Arc`: the multi-thread runtime

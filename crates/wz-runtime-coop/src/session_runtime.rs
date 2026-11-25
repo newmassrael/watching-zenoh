@@ -48,7 +48,7 @@ use wz_session_core::entropy::EntropySource;
 use wz_session_core::entropy::EntropyUnavailable;
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::link::ShareValues;
-use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
+use wz_session_core::link::{BoxedLinkDriver, LocalHeld, SessionRuntime};
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::session_actions::SessionLinkActions;
 #[cfg(feature = "session-slot")]
@@ -162,13 +162,15 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
         core::cell::RefCell::new(value)
     }
 
-    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    // The cell's own refusal is dropped for the trait's, so the library carries no formatting
+    // code for it.
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Result<U, LocalHeld>
     where
         T: Send + 'static,
     {
         match local.try_borrow_mut() {
-            Ok(mut value) => f(&mut value),
-            Err(_) => local_reentered(),
+            Ok(mut value) => Ok(f(&mut value)),
+            Err(_) => Err(LocalHeld),
         }
     }
 
@@ -209,15 +211,6 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
             sink.driver()
         }
     }
-}
-
-/// A session's local value reached again from inside the access that holds it, which the contract
-/// of [`SessionRuntime::with_local`] rules out. Stopped with a message that formats nothing, so a
-/// library carries no formatting code for it, as it would for the cell's own refusal.
-#[cold]
-#[inline(never)]
-fn local_reentered() -> ! {
-    panic!("a session's local value was reached again from inside its own access")
 }
 
 /// The handle to a session, as this profile holds it: a counted handle on the bundle, or
@@ -599,22 +592,28 @@ mod local_access_tests {
             *value += 1;
             *value
         });
-        assert_eq!(seen, 2);
+        assert_eq!(seen, Ok(2));
         assert_eq!(
             <Runtime as SessionRuntime>::with_local(&local, |value| *value),
-            2
+            Ok(2)
         );
     }
 
-    /// An access made from inside another of the same value stops the program with this
-    /// runtime's message, which formats nothing. Turned red by an access that borrows the cell
-    /// with its own refusal, whose message is the cell's.
+    /// An access made from inside another of the same value is refused and its closure not run;
+    /// the outer access goes on and what it wrote is kept. Turned red by an access that borrows
+    /// the cell unchecked, which stops the program instead.
     #[test]
-    #[should_panic(expected = "reached again from inside its own access")]
-    fn an_access_from_inside_another_stops() {
+    fn an_access_from_inside_another_is_refused() {
         let local = <Runtime as SessionRuntime>::new_local(0u32);
-        <Runtime as SessionRuntime>::with_local(&local, |_| {
-            <Runtime as SessionRuntime>::with_local(&local, |_| {});
+        let outer = <Runtime as SessionRuntime>::with_local(&local, |value| {
+            *value = 1;
+            <Runtime as SessionRuntime>::with_local(&local, |inner| *inner = 2)
         });
+        assert_eq!(outer, Ok(Err(LocalHeld)));
+        assert_eq!(
+            <Runtime as SessionRuntime>::with_local(&local, |value| *value),
+            Ok(1),
+            "the refused access wrote nothing"
+        );
     }
 }

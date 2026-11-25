@@ -1887,6 +1887,11 @@ pub trait ShareValues: SessionRuntime {
     fn share<U>(value: U) -> Self::Shared<U>;
 }
 
+/// Why [`SessionRuntime::with_local`] did not run its closure: the value was reached again from
+/// inside its own access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalHeld;
+
 /// Runtime-tier extension that owns the per-profile *storage* of a
 /// [`BoxedLinkDriver`]. A session-tier trait (rather than a method on
 /// `wz_runtime_core::Runtime`) because `BoxedLinkDriver` lives in
@@ -2004,9 +2009,13 @@ pub trait SessionRuntime: Runtime + Sized {
     where
         T: Send + 'static;
 
-    /// Run `f` on the value of `local`, which no other holder reaches meanwhile. `f` must
-    /// not reach the same value again.
-    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    /// Run `f` on the value of `local`, which no other holder reaches meanwhile. Refused, `f` not
+    /// run, when the access is made from inside another of the same value: a profile whose local
+    /// is a cell finds it held and answers so, as no access can wait for its own end.
+    fn with_local<T, U>(
+        local: &Self::Local<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Result<U, LocalHeld>
     where
         T: Send + 'static;
 

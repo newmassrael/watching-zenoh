@@ -135,11 +135,14 @@ impl SessionRuntime for PlainRuntime {
     }
 
     // Counted as a hold of a lock, as the threaded runtimes' local is one.
-    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    fn with_local<T, U>(
+        local: &Self::Local<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Result<U, crate::link::LocalHeld>
     where
         T: Send + 'static,
     {
-        Self::with_mutex_mut(local, f)
+        Ok(Self::with_mutex_mut(local, f))
     }
 
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;

@@ -945,13 +945,17 @@ impl<R: SessionRuntime> OutOfBand<R> {
         }
     }
 
-    /// Stage a request (`set` marks it) and wake the loops parked on it.
+    /// Stage a request (`set` marks it) and wake the loops parked on it. An access of the state
+    /// refused for being made from inside another of it stages nothing; none of these accesses
+    /// makes one.
     fn raise(&self, set: impl FnOnce(&mut OutOfBandState)) {
-        let parked = R::with_local(&self.state, |s| {
+        let staged = R::with_local(&self.state, |s| {
             set(s);
             core::mem::take(&mut s.parked)
         });
-        parked.wake();
+        if let Ok(parked) = staged {
+            parked.wake();
+        }
     }
 
     /// Wake every parked loop with nothing staged: each asks again and parks
@@ -959,17 +963,19 @@ impl<R: SessionRuntime> OutOfBand<R> {
     /// stay, so the wakers of loops that have ended do not pile up in the set.
     #[cfg(feature = "transport-multilink")]
     fn wake_parked(&self) {
-        R::with_local(&self.state, |s| core::mem::take(&mut s.parked)).wake();
+        if let Ok(parked) = R::with_local(&self.state, |s| core::mem::take(&mut s.parked)) {
+            parked.wake();
+        }
     }
 
-    /// Take a request (`take` reads and clears it).
-    fn take<U>(&self, take: impl FnOnce(&mut OutOfBandState) -> U) -> U {
-        R::with_local(&self.state, take)
+    /// Take a request (`take` reads and clears it); a refused access takes nothing.
+    fn take<U: Default>(&self, take: impl FnOnce(&mut OutOfBandState) -> U) -> U {
+        R::with_local(&self.state, take).unwrap_or_default()
     }
 
     /// Whether any request is staged, read and left for the drive loop to take.
     fn staged(&self) -> bool {
-        R::with_local(&self.state, |s| s.any())
+        R::with_local(&self.state, |s| s.any()).unwrap_or(false)
     }
 
     /// Resolves once any request is staged — the branch a parked drive loop
@@ -1006,6 +1012,8 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
     ) -> core::task::Poll<()> {
         #[cfg(feature = "transport-multilink")]
         let deletion_owed = self.deletion_owed;
+        // A refused access parks nothing, so the loop is let go to ask again rather than left
+        // with no waker to wake it.
         R::with_local(&self.slot.state, |s| {
             #[cfg(feature = "transport-multilink")]
             if deletion_owed && s.transport_deleted {
@@ -1018,6 +1026,7 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
                 core::task::Poll::Pending
             }
         })
+        .unwrap_or(core::task::Poll::Ready(()))
     }
 }
 
