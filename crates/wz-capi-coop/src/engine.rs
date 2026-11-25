@@ -137,7 +137,7 @@ use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 #[cfg(feature = "listen")]
-use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
+use wz_session_core::link_admission::{LinkAdmission, LinkBook, LinkRegistry};
 use wz_session_core::locality::Locality;
 
 use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
@@ -4391,16 +4391,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
         // after its open is admitted in place. The admission lies in the row the plan laid out for
-        // it (`ArenaPlan::holding_admission`).
+        // it (`ArenaPlan::holding_admission`); its rows are the heap's, and a heap that refuses them
+        // refuses the open.
+        #[cfg(feature = "listen")]
+        let admission = Admission::<C>::try_with_order(&wire, policy.link_tie_order(), lent.links)
+            .ok_or(OpenError::Arena(ArenaRefused::NoMemory {
+                bytes: lent.links.saturating_mul(LinkBook::row_bytes()),
+            }))?;
         #[cfg(feature = "listen")]
         let admission = lent
             .arena
             .arena_mut()
-            .place(Admission::<C>::with_order(
-                &wire,
-                policy.link_tie_order(),
-                lent.links,
-            ))
+            .place(admission)
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         // SAFETY: the handle is held by the transport and by each link's lease, in the link's
         // actions, which the faces, the tasks and the transport hold: the engine's drop drops the

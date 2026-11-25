@@ -385,29 +385,56 @@ impl LinkBook {
     /// `link-tie-order` of the node's snapshot, with a row reserved for each of the `rows` links
     /// the node may hold at once.
     pub fn with_order(local_zid: &[u8], order: LinkTieOrder, rows: usize) -> Self {
+        let mut book = Self::unreserved(local_zid, order, rows);
+        book.links.reserve_exact(rows);
+        book
+    }
+
+    /// [`Self::with_order`], or `None` when the heap refuses the rows: what an engine that answers
+    /// a full heap at its open with a refusal makes.
+    pub fn try_with_order(local_zid: &[u8], order: LinkTieOrder, rows: usize) -> Option<Self> {
+        let mut book = Self::unreserved(local_zid, order, rows);
+        book.links.try_reserve_exact(rows).ok()?;
+        Some(book)
+    }
+
+    /// The table with none of its rows reserved yet.
+    fn unreserved(local_zid: &[u8], order: LinkTieOrder, rows: usize) -> Self {
         Self {
             local_zid: zid_from_wire(local_zid).unwrap_or([0; CREDENTIAL_ZID_BYTES]),
             order,
             next_token: 1,
             rows,
-            links: Vec::with_capacity(rows),
+            links: Vec::new(),
         }
     }
 
+    /// The bytes each row the table reserves takes.
+    pub const fn row_bytes() -> usize {
+        core::mem::size_of::<LinkRow>()
+    }
+
     /// See [`LinkAdmission::open`]. A link opened while every row is held is given a token of no
-    /// row, which [`Self::reserve`] and [`Self::confirm`] refuse.
+    /// row, which [`Self::reserve`] and [`Self::confirm`] refuse. A row is written in the room the
+    /// table reserved, never past it: the table is not grown here.
     pub fn open(&mut self, dialled: bool) -> u64 {
-        if self.links.len() >= self.rows {
+        let held = self.links.len();
+        if held >= self.rows {
             return NO_ROW;
         }
+        let Some(row) = self.links.spare_capacity_mut().first_mut() else {
+            return NO_ROW;
+        };
         let token = self.next_token;
         self.next_token = self.next_token.wrapping_add(1).max(1);
-        self.links.push(LinkRow {
+        row.write(LinkRow {
             token,
             dialled,
             zid: None,
             state: LinkState::Handshaking,
         });
+        // SAFETY: the row past the last one was written just above, within the capacity.
+        unsafe { self.links.set_len(held + 1) };
         token
     }
 
@@ -526,6 +553,14 @@ impl<R: Runtime> LinkRegistry<R> {
         Self {
             book: R::new_mutex(LinkBook::with_order(local_zid, order, rows)),
         }
+    }
+
+    /// [`Self::with_order`], or `None` when the heap refuses the rows
+    /// ([`LinkBook::try_with_order`]).
+    pub fn try_with_order(local_zid: &[u8], order: LinkTieOrder, rows: usize) -> Option<Self> {
+        LinkBook::try_with_order(local_zid, order, rows).map(|book| Self {
+            book: R::new_mutex(book),
+        })
     }
 
     /// How many links the table holds, in every state.
@@ -985,6 +1020,24 @@ mod book_tests {
         assert_eq!(lease.node(), Some(high));
         assert!(!lease.reserve(None));
         assert_eq!(lease.node(), None, "a question naming no zid names no node");
+    }
+
+    /// A table made with its rows reserved takes links in them and none past them, never growing;
+    /// one whose rows no allocation can hold is not made. Turned red by an open that grows the
+    /// rows, or a try that ends the program on rows past the address space.
+    #[test]
+    fn a_book_takes_links_in_the_rows_it_reserved_and_none_past_them() {
+        let order = SessionPolicy::defaults().link_tie_order();
+        assert!(
+            LinkBook::try_with_order(&LOW, order, usize::MAX).is_none(),
+            "rows past the address space are refused"
+        );
+        let mut book = LinkBook::try_with_order(&LOW, order, 2).expect("two rows");
+        let room = book.links.capacity();
+        assert_ne!(book.open(true), NO_ROW);
+        assert_ne!(book.open(false), NO_ROW);
+        assert_eq!(book.open(true), NO_ROW, "past its rows");
+        assert_eq!(book.links.capacity(), room, "never grown");
     }
 
     /// An admission that admits every link and counts what it is asked.
