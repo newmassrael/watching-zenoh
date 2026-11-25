@@ -1149,7 +1149,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// One turn of the face `face`, its read slot held as `slot`, the open's and, where the dial
     /// role's face is the only face, the read's: the wait for the
     /// link's input or the next deadline, then the face's turn (`Self::face_turn`). `None`
-    /// once the session closed.
+    /// once the session closed. Where the dial role's face is the only face this is the one body
+    /// the open and each read turn it through, the face's turn inlined into it.
+    #[cfg_attr(not(any(feature = "listen", feature = "group")), inline(never))]
     fn link_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
         let wait = self.wait_on_faces(self.wait_due(slot))?;
         self.face_turn(face, slot, Some(wait))
@@ -1185,9 +1187,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// A turn of `face`, its read slot held as `slot`, after the wait `wait` when this turn
     /// hands it back: a look at the link's life, and a step of the pump unless the look ended the
-    /// session. `None` once the session closed. Out of line: the open and each read turn a face
-    /// through one body.
-    #[inline(never)]
+    /// session. `None` once the session closed. Out of line where a read turns several faces:
+    /// the open and each read turn a face through one body. Where the dial role's face is the only
+    /// face its one caller is that body (`Self::link_turn`), which holds it inline.
+    #[cfg_attr(any(feature = "listen", feature = "group"), inline(never))]
+    #[cfg_attr(not(any(feature = "listen", feature = "group")), inline(always))]
     fn face_turn(
         &self,
         face: &DirectFace<L, C>,
@@ -1820,8 +1824,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &self,
         f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
     ) -> Option<U> {
-        let mut held = self.hold_dial()?;
-        let (core, tx) = held.parts();
+        // Matched where `Self::hold_dial` wrote it, not moved out of its `Option`: each
+        // operation's body would otherwise copy the whole hold into a frame of its own.
+        let mut held = self.hold_dial();
+        let (core, tx) = held.as_mut()?.parts();
         Some(f(core, tx))
     }
 
@@ -1863,7 +1869,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         leg: impl FnOnce(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
         // SAFETY: as in `Self::hold_dial`: `leg` reaches the send part only as `LinkTx`.
-        let Some(mut send) = (unsafe { self.direct.dial.site.hold_send() }) else {
+        let mut send = unsafe { self.direct.dial.site.hold_send() };
+        // Matched where it lies, as an operation's hold is (`Self::live_on_link`): the send is
+        // not moved out of its `Option` on a publish's path.
+        let Some(send) = send.as_mut() else {
             return Ok(0);
         };
         let wire = send.tx().and_then(|tx| tx.as_ref());
