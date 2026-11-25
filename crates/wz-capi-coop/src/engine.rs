@@ -2238,6 +2238,10 @@ pub(crate) struct MatchingCall {
     sink: Option<MatchingSink>,
 }
 
+/// What the tables answer a matching listener's declaration: the row and the Interest it opened,
+/// or the refusal, which hands its callback back.
+type MatchingDeclared = Result<Watching<kind::MatchingListener>, Refused<MatchingCall>>;
+
 impl RowCallback for MatchingCall {
     type Call = core::convert::Infallible;
 
@@ -4933,34 +4937,35 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// at the next event of the link's session, a record or a keep-alive, up to a keep-alive
     /// interval later, and not at all while the program does not step the session.
     ///
-    /// `holding` is what the caller holds of the one link, taken with its place before the
-    /// session's lock (`CoopEngine::live_on_link`), through which the link is settled; `None`
-    /// where the caller holds no link's place, and each link is tried.
+    /// `tx` is what the caller holds of the one link, taken with its place before the session's
+    /// lock (`CoopEngine::live_on_link`), through which that link is settled.
     #[cfg(feature = "interest-answer")]
-    fn settle_faces(&mut self, holding: Option<LinkTx<'_, C>>) {
+    fn settle_faces(&mut self, tx: LinkTx<'_, C>) {
         #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-        let _ = holding;
+        let _ = tx;
         for at in 0..self.transport.links.places() {
             let Some(face) = self.transport.links.face(at) else {
                 continue;
             };
-            if let Some(wire) = face.up() {
-                let carried =
-                    OnThisThread((HeldFace::new(at, face.id), &mut self.session.registry));
-                let settle = move |actions: &LinkActions<C>| {
-                    let (held, registry) = carried.get();
-                    registry.settle(held, actions);
-                };
-                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-                if let Some(tx) = holding {
-                    if let Some(link) = tx {
-                        settle(&*link.actions);
-                    }
-                    continue;
+            let Some(wire) = face.up() else {
+                continue;
+            };
+            let carried = OnThisThread((HeldFace::new(at, face.id), &mut self.session.registry));
+            let settle = move |actions: &LinkActions<C>| {
+                let (held, registry) = carried.get();
+                registry.settle(held, actions);
+            };
+            // The one link's record names the wire the caller holds, which is written.
+            #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+            {
+                let _ = wire;
+                if let Some(link) = tx {
+                    settle(&*link.actions);
                 }
-                // A link another holder has now is settled at its next event, as before this.
-                let _ = wire.try_session(move |session| settle(&*session.actions));
             }
+            // A link another holder has now is settled at its next event.
+            #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+            let _ = wire.try_session(move |session| settle(&*session.actions));
         }
         // A group's stage is written by the thread that put on it outside the group's own step.
         #[cfg(feature = "group")]
@@ -5228,6 +5233,33 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "group")]
         for group in &self.transport.groups {
             group.retract_keyexpr(mapping_id);
+        }
+    }
+
+    /// Ask each link, through `tx`, and each group the session joined for the tokens of the
+    /// liveliness subscriber `handle`, from its row as it stands now. A subscriber its own
+    /// history's callback undeclared asks nothing: its row is gone, and so is its place in the
+    /// replay's order.
+    #[cfg(feature = "liveliness")]
+    fn ask_liveliness_subscriber(&mut self, handle: LivelinessSubscriberHandle, tx: LinkTx<'_, C>) {
+        let stands = tables(&self.session.registry)
+            .liveliness_subscribers()
+            .get(handle)
+            .is_some();
+        if !stands {
+            return;
+        }
+        self.announce(DeclaredRow::of(handle), tx);
+        // Each group is asked as its declarations say.
+        #[cfg(feature = "group")]
+        {
+            let tables = tables(&self.session.registry);
+            if let Some(row) = tables.liveliness_subscribers().get(handle) {
+                let wire = group::wire_key_of(tables.wire_of(row.key()));
+                for group in &self.transport.groups {
+                    group.ask_liveliness(row.id(), row.key().as_str(), &wire, row.history());
+                }
+            }
         }
     }
 
@@ -8409,35 +8441,38 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// The end of a matching listener's declaration the tables answered under `guard`: its new
-    /// Interest asked of each link and its first verdict delivered once the lock is let go, or the
-    /// refusal, its callback let go of with no lock held.
+    /// A matching listener's declaration, `declare`, made in the tables under the session's lock
+    /// taken inside the one link's place (`Self::live_on_link`): its new Interest asked of each
+    /// link and its first verdict delivered once both are let go, or the refusal, its callback
+    /// let go of with neither held.
     fn matching_declared(
         &self,
-        mut guard: LiveCore<'_, L, C>,
-        declared: Result<Watching<kind::MatchingListener>, Refused<MatchingCall>>,
+        declare: impl FnOnce(&mut Core<L, C>) -> MatchingDeclared,
     ) -> Result<MatchId, Declined> {
-        let core = &mut guard.0;
-        let watching = match declared {
-            Ok(watching) => watching,
-            Err(refused) => {
-                drop(guard);
+        let declared = self.live_on_link(|core, tx| -> Result<MatchId, Refused<MatchingCall>> {
+            let watching = declare(core)?;
+            // A listener on a key asks its own Interest of each link from its row; one on a
+            // filter asks nothing.
+            if let Some(opened) = watching.interest {
+                core.announce(DeclaredRow::of(opened.handle), tx);
+            }
+            // A listener that matches already is told so as it is declared, as zenoh-pico tells
+            // it (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
+            self.read_matching(core);
+            Ok(row_id(watching.handle))
+        });
+        match declared {
+            Some(Ok(id)) => {
+                self.deliver();
+                Ok(id)
+            }
+            Some(Err(refused)) => {
                 let why = Declined::from(refused.why);
                 drop(refused.callback);
-                return Err(why);
+                Err(why)
             }
-        };
-        // A listener on a key asks its own Interest of each link from its row; one on a filter
-        // asks nothing.
-        if let Some(opened) = watching.interest {
-            core.announce(DeclaredRow::of(opened.handle));
+            None => Err(Declined::Closed),
         }
-        // A listener that matches already is told so as it is declared, as zenoh-pico tells it
-        // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
-        self.read_matching(core);
-        drop(guard);
-        self.deliver();
-        Ok(row_id(watching.handle))
     }
 
     /// Read the verdict of every matching listener off what the peers and the session itself
@@ -9112,87 +9147,86 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // sent. What the key holds and the sink go back with either refusal, let go of after the
         // session in the one place both are. The row holds the key expression declaration its
         // key is named by for as long as it stands.
-        let live = self.live().map(|guard| {
-            let next = tables(&guard.0.session.registry).next_entity_id();
-            (guard, next)
-        });
-        let (mut guard, id) = match live {
-            Some((guard, Some(id))) => (guard, id),
-            refused => {
-                let why = match refused {
-                    Some(_) => Declined::NoEntityId,
-                    None => Declined::Closed,
-                };
-                drop(refused);
-                drop(wire);
-                drop(sink);
-                return Err(why);
-            }
-        };
-        let core = &mut guard.0;
-        let form = core
-            .session
-            .key_form(
-                wire.declared(),
-                retraction.map_or(Retraction::ById, Retraction::Named),
-            )
-            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
-        // The tables' row holds the declarations the key and the retraction name, once each, in
-        // the session's one count; the row keeps what else the key kept.
-        // The declaration states no choice about the timestamp, so it takes the session's
-        // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let row = SubscriberRow::new(wire.into_anchor(), sink, exposed_by(&core.policy));
-        let declared = tables_mut(&mut core.session.registry).declare_subscriber(
-            keyexpr,
-            allowed_origin,
-            form,
-            row,
-        );
-        let declared = match declared {
-            Ok(declared) => declared,
-            Err(refused) => {
+        // Taken by the declaration once it has an id; let go of, with the session and the link's
+        // place, after it, whether it was declared or not.
+        let mut unmade = Some((wire, sink));
+        let declared = self.live_on_link(|core, tx| {
+            let next = tables(&core.session.registry).next_entity_id();
+            let Some(id) = next else {
+                return Err((Declined::NoEntityId, None));
+            };
+            // Taken once: the declaration runs once.
+            let Some((wire, sink)) = unmade.take() else {
+                return Err((Declined::NoEntityId, None));
+            };
+            let form = core
+                .session
+                .key_form(
+                    wire.declared(),
+                    retraction.map_or(Retraction::ById, Retraction::Named),
+                )
+                .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
+            // The tables' row holds the declarations the key and the retraction name, once each,
+            // in the session's one count; the row keeps what else the key kept.
+            // The declaration states no choice about the timestamp, so it takes the session's
+            // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
+            let row = SubscriberRow::new(wire.into_anchor(), sink, exposed_by(&core.policy));
+            let declared = tables_mut(&mut core.session.registry).declare_subscriber(
+                keyexpr,
+                allowed_origin,
+                form,
+                row,
+            );
+            let declared = match declared {
+                Ok(declared) => declared,
                 // The program's callback goes with the refusal, let go of with no lock held, and
                 // what the key kept with it.
-                drop(guard);
-                let why = Declined::from(refused.why);
-                drop(refused.callback);
-                return Err(why);
+                Err(refused) => return Err((Declined::from(refused.why), Some(refused.callback))),
+            };
+            debug_assert_eq!(
+                declared.id, id,
+                "the tables number a row as they said they would"
+            );
+            // Each link is told it from the row, which names the key as the tables keep it.
+            core.announce(DeclaredRow::of(declared.handle), tx);
+            // So is each group.
+            #[cfg(feature = "group")]
+            {
+                let tables = tables(&core.session.registry);
+                if let Some(row) = tables.subscribers().get(declared.handle) {
+                    let wire = group::wire_key_of(tables.wire_of(row.key()));
+                    let retraction = tables.retraction_of(row.key());
+                    core.transport.announce_to_groups(GroupEntity {
+                        what: GroupDeclaration::Subscriber,
+                        entity: id,
+                        keyexpr: row.key().as_str(),
+                        wire: &wire,
+                        retraction: retraction.as_ref(),
+                        allowed_origin,
+                    });
+                }
             }
-        };
-        debug_assert_eq!(
-            declared.id, id,
-            "the tables number a row as they said they would"
-        );
-        // Each link is told it from the row, which names the key as the tables keep it.
-        core.announce(DeclaredRow::of(declared.handle));
-        // So is each group.
-        #[cfg(feature = "group")]
-        {
-            let tables = tables(&core.session.registry);
-            if let Some(row) = tables.subscribers().get(declared.handle) {
-                let wire = group::wire_key_of(tables.wire_of(row.key()));
-                let retraction = tables.retraction_of(row.key());
-                core.transport.announce_to_groups(GroupEntity {
-                    what: GroupDeclaration::Subscriber,
-                    entity: id,
-                    keyexpr: row.key().as_str(),
-                    wire: &wire,
-                    retraction: retraction.as_ref(),
-                    allowed_origin,
-                });
+            // What it owes the Interests the peers asked goes now, after the declaration itself.
+            #[cfg(feature = "interest-answer")]
+            core.settle_faces(tx);
+            // A matching listener that counts the session's own subscribers may now match: it is
+            // told, outside the lock.
+            #[cfg(feature = "local-subscriber")]
+            self.read_matching(core);
+            Ok(id)
+        });
+        match declared {
+            Some(Ok(id)) => {
+                #[cfg(feature = "local-subscriber")]
+                self.deliver();
+                Ok(id)
             }
+            Some(Err((why, row))) => {
+                drop(row);
+                Err(why)
+            }
+            None => Err(Declined::Closed),
         }
-        // What it owes the Interests the peers asked goes now, after the declaration itself.
-        #[cfg(feature = "interest-answer")]
-        core.settle_faces(None);
-        // A matching listener that counts the session's own subscribers may now match: it is
-        // told, outside the lock.
-        #[cfg(feature = "local-subscriber")]
-        self.read_matching(core);
-        drop(guard);
-        #[cfg(feature = "local-subscriber")]
-        self.deliver();
-        Ok(id)
     }
 
     #[inline(never)]
@@ -9282,7 +9316,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 core.retract_keyexpr(named_place, undeclared.named, tx);
                 // An aggregate answer it alone stood for is retracted now, as it was declared.
                 #[cfg(feature = "interest-answer")]
-                core.settle_faces(Some(tx));
+                core.settle_faces(tx);
                 // One that counted it may now match no more.
                 #[cfg(feature = "local-subscriber")]
                 self.read_matching(core);
@@ -9302,52 +9336,54 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
 
     #[inline(never)]
     fn acquire_keyexpr(&self, keyexpr: &str) -> Result<KeyHold, Declined> {
-        let mut core = self.live().ok_or(Declined::Closed)?;
-        let core = &mut core.0;
-        // A key the session declared already is held once more; any other takes a row and an id.
-        // The table refuses it, before an id is taken or anything is sent, when it is full, when
-        // the key cannot be held, or when every id is taken. An id of the shared dictionary names
-        // its key in this session's space too, so no key expression is declared under one.
-        // One declaration, whatever ids the session shares: the table's declaration is one body
-        // for both.
-        #[cfg(feature = "shared-key-ids")]
-        let shared = core.session.key_ids.as_ref();
-        let usable = |id: ExprId| -> bool {
+        self.live_on_link(|core, tx| -> Result<KeyHold, Declined> {
+            // A key the session declared already is held once more; any other takes a row and an
+            // id. The table refuses it, before an id is taken or anything is sent, when it is full,
+            // when the key cannot be held, or when every id is taken. An id of the shared
+            // dictionary names its key in this session's space too, so no key expression is
+            // declared under one. One declaration, whatever ids the session shares: the table's
+            // declaration is one body for both.
             #[cfg(feature = "shared-key-ids")]
-            {
-                shared.is_none_or(|ids| ids.next_free_id(id) == Some(id))
+            let shared = core.session.key_ids.as_ref();
+            let usable = |id: ExprId| -> bool {
+                #[cfg(feature = "shared-key-ids")]
+                {
+                    shared.is_none_or(|ids| ids.next_free_id(id) == Some(id))
+                }
+                #[cfg(not(feature = "shared-key-ids"))]
+                {
+                    let _ = id;
+                    true
+                }
+            };
+            let declared = tables_mut(&mut core.session.registry)
+                .declare_keyexpr_where(keyexpr, false, usable)?;
+            let id = declared.id;
+            if !declared.new {
+                #[cfg(test)]
+                self.takes.holds.fetch_add(1, Ordering::Relaxed);
+                return Ok(KeyHold::taken(id, declared.handle));
             }
-            #[cfg(not(feature = "shared-key-ids"))]
-            {
-                let _ = id;
-                true
+            // A declaration a link refuses is not made, and the links that took it take it back;
+            // one made while a link is down, or that a replay has not reached, is sent in its turn.
+            // A link refuses one it cannot carry. Each link is told it from the row, as every
+            // declaration is.
+            let taken =
+                core.announce_or_undo(DeclaredRow::of(declared.handle), Retract::Keyexpr(id), tx);
+            if !taken {
+                tables_mut(&mut core.session.registry).undeclare_keyexpr(declared.handle);
+                return Err(Declined::ExceedsCapacity);
             }
-        };
-        let declared =
-            tables_mut(&mut core.session.registry).declare_keyexpr_where(keyexpr, false, usable)?;
-        let id = declared.id;
-        if !declared.new {
+            // And each group told the session's keyexprs, as a link is.
+            #[cfg(feature = "group")]
+            for group in &core.transport.groups {
+                group.announce_keyexpr(id, keyexpr);
+            }
             #[cfg(test)]
             self.takes.holds.fetch_add(1, Ordering::Relaxed);
-            return Ok(KeyHold::taken(id, declared.handle));
-        }
-        // A declaration a link refuses is not made, and the links that took it take it back; one
-        // made while a link is down, or that a replay has not reached, is sent in its turn. A link
-        // refuses one it cannot carry.
-        // Each link is told it from the row, as every declaration is.
-        let taken = core.announce_or_undo(DeclaredRow::of(declared.handle), Retract::Keyexpr(id));
-        if !taken {
-            tables_mut(&mut core.session.registry).undeclare_keyexpr(declared.handle);
-            return Err(Declined::ExceedsCapacity);
-        }
-        // And each group told the session's keyexprs, as a link is.
-        #[cfg(feature = "group")]
-        for group in &core.transport.groups {
-            group.announce_keyexpr(id, keyexpr);
-        }
-        #[cfg(test)]
-        self.takes.holds.fetch_add(1, Ordering::Relaxed);
-        Ok(KeyHold::taken(id, declared.handle))
+            Ok(KeyHold::taken(id, declared.handle))
+        })
+        .unwrap_or(Err(Declined::Closed))
     }
 
     fn key_arena(&self) -> Option<&dyn SessionKeys> {
@@ -9383,18 +9419,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         if !counts(plane) {
             return Err(Declined::NotBuilt);
         }
-        let mut guard = self.live().ok_or(Declined::Closed)?;
         // The listener is a row of the session's tables on a write filter of its own, which holds
         // an Interest: a full table, a key the session cannot hold or an Interest it cannot hold or
         // number refuses it before anything is asked, as a listener that could ask no peer would
         // never hear one.
-        let declared = tables_mut(&mut guard.0.session.registry).declare_matching_listener_on(
-            plane_of(plane),
-            keyexpr,
-            counts_own(plane, count_local),
-            MatchingCall { sink: Some(sink) },
-        );
-        self.matching_declared(guard, declared)
+        self.matching_declared(|core| {
+            tables_mut(&mut core.session.registry).declare_matching_listener_on(
+                plane_of(plane),
+                keyexpr,
+                counts_own(plane, count_local),
+                MatchingCall { sink: Some(sink) },
+            )
+        })
     }
 
     #[inline(never)]
@@ -9404,16 +9440,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         sink: MatchingSink,
     ) -> Result<MatchId, Declined> {
         let handle = row_of(filter).ok_or(Declined::Closed)?;
-        let mut guard = self.live().ok_or(Declined::Closed)?;
         // The listener is a callback of the filter's row, which it reads and goes with, and asks
         // nothing of its own, as zenoh-pico's is a callback of its entity's filter.
-        let declared = tables_mut(&mut guard.0.session.registry)
-            .declare_matching_listener(handle, MatchingCall { sink: Some(sink) })
-            .map(|handle| Watching {
-                handle,
-                interest: None,
-            });
-        self.matching_declared(guard, declared)
+        self.matching_declared(|core| {
+            tables_mut(&mut core.session.registry)
+                .declare_matching_listener(handle, MatchingCall { sink: Some(sink) })
+                .map(|handle| Watching {
+                    handle,
+                    interest: None,
+                })
+        })
     }
 
     fn undeclare_matching_listener(&self, id: MatchId) {
@@ -9456,60 +9492,62 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         if !counts(plane) {
             return Err(Declined::NotBuilt);
         }
-        let mut core = self.live().ok_or(Declined::Closed)?;
-        let core = &mut core.0;
-        // A full table, a plane at its own bound (a publisher's MAX_PUBLISHERS, a querier's
-        // MAX_QUERIERS, in the one table lent for both), a key the session cannot hold, or an
-        // Interest it cannot hold or number refuses the filter, with nothing held, asked or
-        // numbered.
-        let name = ask.map(|form| InterestName {
-            mapping_id: form.mapping_id,
-            suffix: form.suffix,
-            aggregate: form.aggregate,
-        });
-        let watching = tables_mut(&mut core.session.registry)
-            .declare_write_filter_as(
-                plane_of(plane),
-                keyexpr,
-                counts_own(plane, count_local),
-                name,
-            )
-            .map_err(Declined::from)?;
-        let id = row_id(watching.handle);
-        // The id this filter spent of its own: its Interest's, or the one taken for a filter that
-        // sends none.
-        let spent = match watching.interest {
-            Some(opened) => {
-                core.announce(DeclaredRow::of(opened.handle));
-                u64::from(opened.id)
+        self.live_on_link(|core, tx| -> Result<FilterId, Declined> {
+            // A full table, a plane at its own bound (a publisher's MAX_PUBLISHERS, a querier's
+            // MAX_QUERIERS, in the one table lent for both), a key the session cannot hold, or an
+            // Interest it cannot hold or number refuses the filter, with nothing held, asked or
+            // numbered.
+            let name = ask.map(|form| InterestName {
+                mapping_id: form.mapping_id,
+                suffix: form.suffix,
+                aggregate: form.aggregate,
+            });
+            let watching = tables_mut(&mut core.session.registry)
+                .declare_write_filter_as(
+                    plane_of(plane),
+                    keyexpr,
+                    counts_own(plane, count_local),
+                    name,
+                )
+                .map_err(Declined::from)?;
+            let id = row_id(watching.handle);
+            // The id this filter spent of its own: its Interest's, or the one taken for a filter
+            // that sends none.
+            let spent = match watching.interest {
+                Some(opened) => {
+                    core.announce(DeclaredRow::of(opened.handle), tx);
+                    u64::from(opened.id)
+                }
+                None => {
+                    // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
+                    // `_z_add_interest` takes it before it decides: a filter that finds none left
+                    // is refused, its row given back.
+                    let Some(taken) = core.session.take_entity_id() else {
+                        let _ =
+                            unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
+                        return Err(Declined::NoEntityId);
+                    };
+                    u64::from(taken)
+                }
+            };
+            // Each group a write filter asks (`asks_for_filters`) is asked for its members'
+            // declarations by the id the filter spent, as the tokio engine's group is.
+            #[cfg(feature = "group")]
+            if core
+                .transport
+                .groups
+                .iter()
+                .any(|group| group.declarations().asks_for_filters())
+            {
+                for group in &core.transport.groups {
+                    group.ask_filter(id, spent, plane, keyexpr, wire);
+                }
             }
-            None => {
-                // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
-                // `_z_add_interest` takes it before it decides: a filter that finds none left is
-                // refused, its row given back.
-                let Some(taken) = core.session.take_entity_id() else {
-                    let _ = unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
-                    return Err(Declined::NoEntityId);
-                };
-                u64::from(taken)
-            }
-        };
-        // Each group a write filter asks (`asks_for_filters`) is asked for its members'
-        // declarations by the id the filter spent, as the tokio engine's group is.
-        #[cfg(feature = "group")]
-        if core
-            .transport
-            .groups
-            .iter()
-            .any(|group| group.declarations().asks_for_filters())
-        {
-            for group in &core.transport.groups {
-                group.ask_filter(id, spent, plane, keyexpr, wire);
-            }
-        }
-        #[cfg(not(feature = "group"))]
-        let _ = (spent, wire);
-        Ok(id)
+            #[cfg(not(feature = "group"))]
+            let _ = (spent, wire);
+            Ok(id)
+        })
+        .unwrap_or(Err(Declined::Closed))
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {
@@ -9647,82 +9685,88 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> Result<QblId, Declined> {
-        let Some(mut guard) = self.live() else {
-            drop(wire);
-            return Err(Declined::Closed);
-        };
-        let core = &mut guard.0;
-        // The queryable is one row of the session's tables, numbered by the id they hand out
-        // next: a full table, a key the session cannot hold or no id left refuses it before
-        // anything is sent, and before its callback is minted. The row holds the key expression
-        // declaration its key is named by for as long as it stands.
-        let next = tables(&core.session.registry).next_entity_id();
-        let Some(id) = next else {
-            drop(guard);
-            drop(wire);
-            return Err(Declined::NoEntityId);
-        };
-        let form = core
-            .session
-            .key_form(
-                wire.declared(),
-                retraction.map_or(Retraction::ById, Retraction::Named),
-            )
-            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
-        // The tables' row holds the declarations the key and the retraction name, once each, in
-        // the session's one count; the row keeps what else the key kept.
-        let row = QueryableRow::new(wire.into_anchor(), sink);
-        let declared = tables_mut(&mut core.session.registry).declare_queryable(
-            keyexpr,
-            allowed_origin,
-            complete,
-            form,
-            row,
-        );
-        let declared = match declared {
-            Ok(declared) => declared,
-            Err(refused) => {
+        // Taken by the declaration once it has an id; let go of, with the session and the link's
+        // place, after it, whether it was declared or not.
+        let mut unmade = Some((wire, sink));
+        let declared = self.live_on_link(|core, tx| {
+            // The queryable is one row of the session's tables, numbered by the id they hand out
+            // next: a full table, a key the session cannot hold or no id left refuses it before
+            // anything is sent, and before its callback is minted. The row holds the key
+            // expression declaration its key is named by for as long as it stands.
+            let next = tables(&core.session.registry).next_entity_id();
+            let Some(id) = next else {
+                return Err((Declined::NoEntityId, None));
+            };
+            // Taken once: the declaration runs once.
+            let Some((wire, sink)) = unmade.take() else {
+                return Err((Declined::NoEntityId, None));
+            };
+            let form = core
+                .session
+                .key_form(
+                    wire.declared(),
+                    retraction.map_or(Retraction::ById, Retraction::Named),
+                )
+                .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
+            // The tables' row holds the declarations the key and the retraction name, once each,
+            // in the session's one count; the row keeps what else the key kept.
+            let row = QueryableRow::new(wire.into_anchor(), sink);
+            let declared = tables_mut(&mut core.session.registry).declare_queryable(
+                keyexpr,
+                allowed_origin,
+                complete,
+                form,
+                row,
+            );
+            let declared = match declared {
+                Ok(declared) => declared,
                 // The row goes with the refusal, let go of with no lock held, and what its key
                 // kept with it.
-                drop(guard);
-                let why = Declined::from(refused.why);
-                drop(refused.callback);
-                return Err(why);
+                Err(refused) => return Err((Declined::from(refused.why), Some(refused.callback))),
+            };
+            debug_assert_eq!(
+                declared.id, id,
+                "the tables number a row as they said they would"
+            );
+            // Each link is told it from the row, which names the key as the tables keep it.
+            core.announce(DeclaredRow::of(declared.handle), tx);
+            // So is each group.
+            #[cfg(feature = "group")]
+            {
+                let tables = tables(&core.session.registry);
+                if let Some(row) = tables.queryables().get(declared.handle) {
+                    let wire = group::wire_key_of(tables.wire_of(row.key()));
+                    let retraction = tables.retraction_of(row.key());
+                    core.transport.announce_to_groups(GroupEntity {
+                        what: GroupDeclaration::Queryable {
+                            complete: row.complete(),
+                        },
+                        entity: id,
+                        keyexpr: row.key().as_str(),
+                        wire: &wire,
+                        retraction: retraction.as_ref(),
+                        allowed_origin,
+                    });
+                }
             }
-        };
-        debug_assert_eq!(
-            declared.id, id,
-            "the tables number a row as they said they would"
-        );
-        // Each link is told it from the row, which names the key as the tables keep it.
-        core.announce(DeclaredRow::of(declared.handle));
-        // So is each group.
-        #[cfg(feature = "group")]
-        {
-            let tables = tables(&core.session.registry);
-            if let Some(row) = tables.queryables().get(declared.handle) {
-                let wire = group::wire_key_of(tables.wire_of(row.key()));
-                let retraction = tables.retraction_of(row.key());
-                core.transport.announce_to_groups(GroupEntity {
-                    what: GroupDeclaration::Queryable {
-                        complete: row.complete(),
-                    },
-                    entity: id,
-                    keyexpr: row.key().as_str(),
-                    wire: &wire,
-                    retraction: retraction.as_ref(),
-                    allowed_origin,
-                });
+            // A matching listener that counts the session's own queryables may now match: it is
+            // told, outside the lock.
+            #[cfg(feature = "local-queryable")]
+            self.read_matching(core);
+            Ok(id)
+        });
+        match declared {
+            Some(Ok(id)) => {
+                #[cfg(feature = "local-queryable")]
+                self.deliver();
+                Ok(id)
             }
+            Some(Err((why, row))) => {
+                drop(row);
+                Err(why)
+            }
+            None => Err(Declined::Closed),
         }
-        // A matching listener that counts the session's own queryables may now match: it is told,
-        // outside the lock.
-        #[cfg(feature = "local-queryable")]
-        self.read_matching(core);
-        drop(guard);
-        #[cfg(feature = "local-queryable")]
-        self.deliver();
-        Ok(id)
     }
 
     #[cfg(feature = "query")]
@@ -10231,32 +10275,34 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     ) -> Result<TokenId, Declined> {
         // zenoh-pico's token takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
-        let declared = self.live().ok_or(Declined::Closed).and_then(|mut core| {
-            let core = &mut core.0;
-            // The token is a row of the session's tables, which takes its id: a full table, a key
-            // the session cannot hold or no id left refuses it before anything is registered or
-            // sent. It holds the key expression declaration its key is named by for as long as it
-            // stands.
-            // A token's retraction names its key as its announcement does.
-            let named = if retraction.is_some() {
-                Retraction::AsAnnounced
-            } else {
-                Retraction::ById
-            };
-            let form = core
-                .session
-                .key_form(wire.declared(), named)
-                .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
-            let declared = tables_mut(&mut core.session.registry).declare_token(keyexpr, form)?;
-            core.announce(DeclaredRow::of(declared.handle));
-            // A token takes no traffic of its own, so every group that is told tokens is told it.
-            // It is held before it is announced (its row, which a peer's and a group member's
-            // Interest are answered from), so a member that asks right after it hears the
-            // announcement finds it held: the tokio engine's group holds it the same way.
-            #[cfg(feature = "group")]
-            core.announce_token_to_groups(declared.handle);
-            Ok(declared.id)
-        });
+        let declared = self
+            .live_on_link(|core, tx| -> Result<TokenId, Declined> {
+                // The token is a row of the session's tables, which takes its id: a full table, a
+                // key the session cannot hold or no id left refuses it before anything is
+                // registered or sent. It holds the key expression declaration its key is named by
+                // for as long as it stands. A token's retraction names its key as its announcement
+                // does.
+                let named = if retraction.is_some() {
+                    Retraction::AsAnnounced
+                } else {
+                    Retraction::ById
+                };
+                let form = core
+                    .session
+                    .key_form(wire.declared(), named)
+                    .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
+                let declared =
+                    tables_mut(&mut core.session.registry).declare_token(keyexpr, form)?;
+                core.announce(DeclaredRow::of(declared.handle), tx);
+                // A token takes no traffic of its own, so every group that is told tokens is told
+                // it. It is held before it is announced (its row, which a peer's and a group
+                // member's Interest are answered from), so a member that asks right after it hears
+                // the announcement finds it held: the tokio engine's group holds it the same way.
+                #[cfg(feature = "group")]
+                core.announce_token_to_groups(declared.handle);
+                Ok(declared.id)
+            })
+            .unwrap_or(Err(Declined::Closed));
         // The row holds the declaration its key is named by, so the key the ABI named it by is
         // not kept: what it kept goes, declared or refused, with no lock held.
         drop(wire);
@@ -10311,84 +10357,67 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         sink: LivelinessSink,
     ) -> Result<SubId, Declined> {
         // A closed session declares nothing, and takes no id for what it does not declare; what
-        // the key holds goes back with the refusal.
-        let Some(mut guard) = self.live() else {
-            drop(wire);
-            return Err(Declined::Closed);
-        };
-        let core = &mut guard.0;
-        // The subscriber is one row of the session's tables, numbered by the id they hand out
-        // next, which its Interest carries: a full table, a key the session cannot hold or no id
-        // left refuses it before anything is asked, and the sink goes with the refusal. The row
-        // holds the key expression declaration its Interest names the key by for as long as it
-        // stands.
-        let next = tables(&core.session.registry).next_entity_id();
-        let Some(id) = next else {
-            drop(guard);
-            drop(wire);
-            return Err(Declined::NoEntityId);
-        };
-        let form = core
-            .session
-            .key_form(wire.declared(), Retraction::ById)
-            .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
-        let declared = tables_mut(&mut core.session.registry).declare_liveliness_subscriber(
-            keyexpr,
-            history,
-            form,
-            LivelinessRow::new(wire.into_anchor(), sink),
-        );
-        let declared = match declared {
-            Ok(declared) => declared,
-            Err(refused) => {
+        // the key holds goes back with the refusal, let go of, with the session and the link's
+        // place, after the declaration.
+        let mut unmade = Some((wire, sink));
+        let declared = self.live_on_link(|core, tx| {
+            // The subscriber is one row of the session's tables, numbered by the id they hand out
+            // next, which its Interest carries: a full table, a key the session cannot hold or no
+            // id left refuses it before anything is asked, and the sink goes with the refusal. The
+            // row holds the key expression declaration its Interest names the key by for as long
+            // as it stands.
+            let next = tables(&core.session.registry).next_entity_id();
+            let Some(id) = next else {
+                return Err((Declined::NoEntityId, None));
+            };
+            // Taken once: the declaration runs once.
+            let Some((wire, sink)) = unmade.take() else {
+                return Err((Declined::NoEntityId, None));
+            };
+            let form = core
+                .session
+                .key_form(wire.declared(), Retraction::ById)
+                .owning(tables(&core.session.registry).keyexpr_by_id(wire.own_declaration()));
+            let declared = tables_mut(&mut core.session.registry).declare_liveliness_subscriber(
+                keyexpr,
+                history,
+                form,
+                LivelinessRow::new(wire.into_anchor(), sink),
+            );
+            let declared = match declared {
+                Ok(declared) => declared,
                 // The program's callback goes with the refusal, let go of with no lock held, and
                 // what the key kept with it.
-                drop(guard);
-                let why = Declined::from(refused.why);
-                drop(refused.callback);
+                Err(refused) => return Err((Declined::from(refused.why), Some(refused.callback))),
+            };
+            debug_assert_eq!(
+                declared.id, id,
+                "the tables number a row as they said they would"
+            );
+            // One with no history asks the links as it is declared.
+            if !history {
+                core.ask_liveliness_subscriber(declared.handle, tx);
+            }
+            Ok((id, declared.handle))
+        });
+        let (id, handle) = match declared {
+            Some(Ok(declared)) => declared,
+            Some(Err((why, row))) => {
+                drop(row);
                 return Err(why);
             }
+            None => return Err(Declined::Closed),
         };
-        debug_assert_eq!(
-            declared.id, id,
-            "the tables number a row as they said they would"
-        );
         // With `history`, the subscriber is handed the tokens the session already knows before
         // the peers are asked for the rest, as zenoh-pico's is
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_subscription_trigger_history`):
         // on this thread, one at a time, with the session let go of while each is handed. A token
         // a peer's answer repeats is not handed again: the first declaration of an id wins.
         if history {
-            drop(guard);
-            self.hand_history(declared.handle);
-            guard = match self.live() {
-                Some(guard) => guard,
-                None => return Err(Declined::Closed),
-            };
+            self.hand_history(handle);
+            self.live_on_link(|core, tx| core.ask_liveliness_subscriber(handle, tx))
+                .ok_or(Declined::Closed)?;
         }
-        let core = &mut guard.0;
-        // A subscriber its own history's callback undeclared asks nothing: its row is gone, and so
-        // is its place in the replay's order.
-        let stands = tables(&core.session.registry)
-            .liveliness_subscribers()
-            .get(declared.handle)
-            .is_some();
-        if stands {
-            // Each link is asked from the row, as it stands now.
-            core.announce(DeclaredRow::of(declared.handle));
-            // And each group the session joined is asked, as its declarations say.
-            #[cfg(feature = "group")]
-            {
-                let tables = tables(&core.session.registry);
-                if let Some(row) = tables.liveliness_subscribers().get(declared.handle) {
-                    let wire = group::wire_key_of(tables.wire_of(row.key()));
-                    for group in &core.transport.groups {
-                        group.ask_liveliness(id, row.key().as_str(), &wire, row.history());
-                    }
-                }
-            }
-        }
-        drop(guard);
         self.deliver();
         Ok(id)
     }

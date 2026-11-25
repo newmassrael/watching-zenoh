@@ -342,6 +342,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         declared: DeclaredRow,
         on_refusal: OnRefusal,
         undo: Option<Retract<'_>>,
+        tx: super::LinkTx<'_, C>,
     ) -> bool {
         let place = self.place_of(declared);
         let tell = Tell::of(super::tables(&self.session.registry), declared);
@@ -351,21 +352,28 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             on_refusal,
             &|actions: &LinkActions<C>| tell.is_none_or(|tell| tell.send(actions)),
             undo,
+            tx,
         )
     }
 
-    /// Tell each face that is up of the declaration `declared` names ([`Self::announce_row`]):
-    /// a refusal leaves it stored.
+    /// Tell each face that is up of the declaration `declared` names ([`Self::announce_row`]),
+    /// through `tx`, which the caller took with the one link's place before the session's lock
+    /// (`CoopEngine::live_on_link`): a refusal leaves it stored.
     // Out of line: one body for every caller of a declaration that is not undone.
     #[inline(never)]
-    pub(super) fn announce(&mut self, declared: DeclaredRow) {
-        self.announce_row(declared, OnRefusal::Forget, None);
+    pub(super) fn announce(&mut self, declared: DeclaredRow, tx: super::LinkTx<'_, C>) {
+        self.announce_row(declared, OnRefusal::Forget, None, tx);
     }
 
     /// [`Self::announce_row`] for a declaration that is not made when a link refuses it, `undo`
     /// taking it back from the links that took it: whether it was made.
-    pub(super) fn announce_or_undo(&mut self, declared: DeclaredRow, undo: Retract<'_>) -> bool {
-        self.announce_row(declared, OnRefusal::Undo, Some(undo))
+    pub(super) fn announce_or_undo(
+        &mut self,
+        declared: DeclaredRow,
+        undo: Retract<'_>,
+        tx: super::LinkTx<'_, C>,
+    ) -> bool {
+        self.announce_row(declared, OnRefusal::Undo, Some(undo), tx)
     }
 
     /// The declaration at `index` of `table`'s slot order was removed: tell `retract`
@@ -574,7 +582,7 @@ impl<'a> Tell<'a> {
 /// A retraction as a link is told it: the id of what went and, for an entity whose declaration
 /// asked to be retracted by its key, the declaration and the rest of the key it names, read before
 /// its row went. It borrows nothing of the session's tables, so it is told once the rows went,
-/// over a link lent apart from the session's state ([`tell_retract`]).
+/// over a link lent apart from the session's state ([`tell_on`]).
 #[derive(Clone, Copy)]
 pub(super) enum Retract<'a> {
     /// The key expression declaration of this mapping id.
@@ -628,27 +636,43 @@ fn tell_on<C: ClockSource + 'static>(
 }
 
 /// Tell `retract` over the link `wire` holds, through the face's record, which the session's
-/// lock alone reaches where each record holds its link ([`tell_retract`]).
+/// lock alone reaches where each record holds its link, as every send of the session on a face
+/// is made there ([`super::send_on`]). It leaves the face owed nothing: a replay tells only
+/// declarations that stand, so a retraction is told as it is made or not at all.
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 fn tell_on<C: ClockSource + 'static>(
     wire: &impl LendsSession<Session = super::LinkSession<C>>,
     _tx: super::LinkTx<'_, C>,
     retract: Retract<'_>,
 ) {
-    tell_retract(wire, retract);
-}
-
-/// Tell `retract` over the link `wire` holds, as every send of the session on a face is made
-/// ([`super::send_on`]). It leaves the face owed nothing: a replay tells only declarations that
-/// stand, so a retraction is told as it is made or not at all.
-fn tell_retract<C: ClockSource + 'static>(
-    wire: &impl LendsSession<Session = super::LinkSession<C>>,
-    retract: Retract<'_>,
-) {
     let _ = super::send_on(wire, 0, &|actions: &LinkActions<C>| {
         retract.tell(actions);
         true
     });
+}
+
+/// Send `send` to the peer of the one link, whose record names it by `_wire`, through its wire
+/// `tx`, which the caller holds with the link's place, taken before the session's lock
+/// (`CoopEngine::live_on_link`): whether the link took it, `None` while the place holds no
+/// wire. The send neither waits nor is owed.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+fn send_through<C: ClockSource + 'static>(
+    _wire: &impl LendsSession<Session = super::LinkSession<C>>,
+    tx: super::LinkTx<'_, C>,
+    send: &(dyn SendTo<C> + Sync),
+) -> Option<bool> {
+    tx.map(|wire| send.send_to(&wire.actions))
+}
+
+/// Send `send` over the link `wire` holds, through the face's record, which the session's lock
+/// alone reaches where each record holds its link ([`super::send_on`]).
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+fn send_through<C: ClockSource + 'static>(
+    wire: &impl LendsSession<Session = super::LinkSession<C>>,
+    _tx: super::LinkTx<'_, C>,
+    send: &(dyn SendTo<C> + Sync),
+) -> Option<bool> {
+    super::send_on(wire, 0, send)
 }
 
 /// [`Core::announce_row`] over `faces` alone, so a caller can read another part of the session
@@ -666,6 +690,7 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     on_refusal: OnRefusal,
     send: &(dyn SendTo<C> + Sync),
     undo: Option<Retract<'_>>,
+    tx: super::LinkTx<'_, C>,
 ) -> bool {
     // Whether the replay of `face` is past the declaration, so its link is told it now: always,
     // in a build that reaches no pace, whose replay ended with the lap its link came up with.
@@ -682,7 +707,7 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
             continue;
         };
         if emits_now(face)
-            && super::send_on(wire, 0, send) == Some(false)
+            && send_through(wire, tx, send) == Some(false)
             && on_refusal == OnRefusal::Undo
         {
             refused_at = Some(at);
@@ -693,7 +718,7 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
         for (_, face) in faces.placed().take_while(|(at, _)| *at < refused) {
             if let (Some(wire), Some(undo)) = (face.up(), undo) {
                 if emits_now(face) {
-                    tell_retract(wire, undo);
+                    tell_on(wire, tx, undo);
                 }
             }
         }
