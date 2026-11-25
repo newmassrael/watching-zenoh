@@ -299,6 +299,86 @@ impl Drop for Inside<'_> {
     }
 }
 
+/// The transport of one face of a session that keeps one for each face, behind a lock of kind
+/// `K`: the place the face policy keeps for a face, lent under the lock
+/// ([`TransportPlace`](wz_session_core::transport_place::TransportPlace)). A face whose link is
+/// not up holds none. The lock is the face's own, so a face's receive and a send on another face
+/// do not wait for each other, and a send on this face waits only for what holds this face.
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+pub struct FacePlace<K: LockKind, X: Send + 'static> {
+    place: K::Mutex<Option<X>>,
+}
+
+/// What a lend of a [`FacePlace`] that does not wait came to ([`FacePlace::try_lend`]).
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lend<U> {
+    /// The face's transport was lent, and the call answered this.
+    Lent(U),
+    /// The face holds no transport: its link is not up. Nothing ran.
+    Empty,
+    /// Another thread holds the face now. Nothing ran, and nothing waited.
+    Held,
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
+    /// A place that holds no transport yet.
+    pub fn empty() -> Self {
+        Self {
+            place: K::wrap(None),
+        }
+    }
+
+    /// Put `transport` in the place, as the face's link comes up, and answer the one it held.
+    pub fn hold(&self, transport: X) -> Option<X> {
+        K::with(&self.place, |place| place.replace(transport))
+    }
+
+    /// Take the transport out of the place, as the face goes; `None` when it held none.
+    pub fn take(&self) -> Option<X> {
+        K::with(&self.place, Option::take)
+    }
+
+    /// Lend the transport to `f` when no other thread holds the face now, and wait for nothing:
+    /// a droppable send that finds the face held is dropped on this face alone, as zenoh-pico
+    /// drops one that finds its transmit lock held
+    /// (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+    /// `return _z_mutex_try_lock(&ztc->_mutex_tx);`).
+    pub fn try_lend<U>(&self, f: impl FnOnce(&mut X) -> U) -> Lend<U> {
+        match K::try_with(&self.place, |place| place.as_mut().map(f)) {
+            None => Lend::Held,
+            Some(None) => Lend::Empty,
+            Some(Some(answer)) => Lend::Lent(answer),
+        }
+    }
+}
+
+/// A face's place lends its transport under the face's lock, waiting for whatever holds it.
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: LockKind, X: Send + 'static> wz_session_core::transport_place::TransportPlace
+    for &FacePlace<K, X>
+{
+    type Transport = X;
+
+    #[inline]
+    fn lend<U>(&mut self, f: impl FnOnce(&mut X) -> U) -> Option<U> {
+        K::with(&self.place, |place| place.as_mut().map(f))
+    }
+}
+
 /// MCU-profile reader-writer lock alias (R311w option (a)).
 ///
 /// Aliased to the same `critical_section::Mutex<RefCell<T>>` as
@@ -372,5 +452,70 @@ pub(crate) mod tests {
         }));
         assert!(unwound.is_err());
         assert_eq!(Held::with(&value, |held| *held), 3);
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "runtime",
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+mod face_place_tests {
+    use super::tests::TestOwner;
+    use super::{Confined, FacePlace, Lend};
+    use wz_session_core::transport_place::TransportPlace;
+
+    type Place = FacePlace<Confined<TestOwner>, u32>;
+
+    /// A place lends nothing before its link is up, lends what it holds after, and keeps what a
+    /// lend did; taken out, it lends nothing again. Turned red by a lend that runs on an empty
+    /// place, or a place that loses what a lend wrote.
+    #[test]
+    fn a_face_place_lends_what_it_holds_and_nothing_once_emptied() {
+        let place = Place::empty();
+        let mut ran = false;
+        assert_eq!((&place).lend(|_| ran = true), None);
+        assert!(!ran, "no transport, no call");
+        assert_eq!(place.try_lend(|_| ()), Lend::Empty);
+        assert_eq!(place.hold(7), None, "the place held nothing before");
+        assert_eq!(
+            (&place).lend(|transport| {
+                *transport += 1;
+                *transport
+            }),
+            Some(8)
+        );
+        assert_eq!(place.try_lend(|transport| *transport), Lend::Lent(8));
+        assert_eq!(place.hold(1), Some(8), "a second link answers the first");
+        assert_eq!(place.take(), Some(1));
+        assert_eq!(place.try_lend(|_| ()), Lend::Empty);
+    }
+
+    /// A send that does not wait finds a face another thread holds and runs nothing, and finds
+    /// it again once that thread lets go. Turned red by a try that waits, or one that lends a
+    /// held face.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_try_on_a_face_another_thread_holds_runs_nothing() {
+        extern crate std;
+        let place = FacePlace::<super::Shared, u32>::empty();
+        place.hold(3);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let shared = &place;
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let mut face = shared;
+                face.lend(|_| {
+                    held_tx.send(()).ok();
+                    go_rx.recv().ok();
+                });
+            });
+            held_rx.recv().ok();
+            assert_eq!(place.try_lend(|transport| *transport), Lend::Held);
+            go_tx.send(()).ok();
+        });
+        assert_eq!(place.try_lend(|transport| *transport), Lend::Lent(3));
     }
 }
