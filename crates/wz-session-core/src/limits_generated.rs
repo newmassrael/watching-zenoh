@@ -17,8 +17,8 @@
 
 use crate::caps;
 use crate::limit_binding::{
-    limit_defaults_only, LimitDomain, LimitEntry, LimitField, LimitSpec, LimitValue, Limited,
-    OutsideLimitDomain, Quota,
+    limit_defaults_only, word_after, LimitDomain, LimitEntry, LimitField, LimitSpec, LimitValue,
+    Limited, OutsideLimitDomain, Quota,
 };
 use crate::policy_binding::Driven;
 
@@ -1753,220 +1753,95 @@ pub type PicoKeepalivesPerLeaseHeld =
 /// field, never from the build. Each value lies inside the build's domain of its limit, and
 /// a limit whose domain is one value reads as that value whatever was selected
 /// ([`Limited::get`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The values lie in one array of words, a word for each limit whose domain is more than
+/// one value ([`LimitField::WORD`]) and none for the rest, so two snapshots compare as one
+/// slice.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(transparent)]
 pub struct SessionLimits {
-    /// `MAX_KEYEXPR_BYTES`.
-    max_keyexpr_bytes: MaxKeyexprBytesHeld,
-    /// `KEY_ARENA_BYTES`.
-    key_arena_bytes: KeyArenaBytesHeld,
-    /// `MAX_SUBSCRIPTIONS`.
-    max_subscriptions: MaxSubscriptionsHeld,
-    /// `MATCH_MEMO_SLOTS`.
-    match_memo_slots: MatchMemoSlotsHeld,
-    /// `DELIVERY_LANE_EVENTS`.
-    delivery_lane_events: DeliveryLaneEventsHeld,
-    /// `DELIVERY_LANE_BYTES`.
-    delivery_lane_bytes: DeliveryLaneBytesHeld,
-    /// `DELIVERY_LANE_CALLBACKS`.
-    delivery_lane_callbacks: DeliveryLaneCallbacksHeld,
-    /// `MAX_QUERYABLES`.
-    max_queryables: MaxQueryablesHeld,
-    /// `MAX_PENDING_QUERIES`.
-    max_pending_queries: MaxPendingQueriesHeld,
-    /// `LINK_NOTED_REQUESTS`.
-    link_noted_requests: LinkNotedRequestsHeld,
-    /// `MAX_DECL_OBSERVERS`.
-    max_decl_observers: MaxDeclObserversHeld,
-    /// `MAX_LIVELINESS_SUBSCRIPTIONS`.
-    max_liveliness_subscriptions: MaxLivelinessSubscriptionsHeld,
-    /// `MAX_LOCAL_TOKENS`.
-    max_local_tokens: MaxLocalTokensHeld,
-    /// `MAX_PUBLISHERS`.
-    max_publishers: MaxPublishersHeld,
-    /// `MAX_QUERIERS`.
-    max_queriers: MaxQueriersHeld,
-    /// `MAX_MATCHING_LISTENERS`.
-    max_matching_listeners: MaxMatchingListenersHeld,
-    /// `MAX_DECL_WATCHES`.
-    max_decl_watches: MaxDeclWatchesHeld,
-    /// `MAX_TRANSPORT_EVENTS_LISTENERS`.
-    max_transport_events_listeners: MaxTransportEventsListenersHeld,
-    /// `MAX_LINK_EVENTS_LISTENERS`.
-    max_link_events_listeners: MaxLinkEventsListenersHeld,
-    /// `MAX_DECLARED_KEYEXPRS`.
-    max_declared_keyexprs: MaxDeclaredKeyexprsHeld,
-    /// `MAX_PENDING_LIVELINESS_GETS`.
-    max_pending_liveliness_gets: MaxPendingLivelinessGetsHeld,
-    /// `MAX_PENDING_DECLARES`.
-    max_pending_declares: MaxPendingDeclaresHeld,
-    /// `MAX_INBOUND_SUB_INTERESTS`.
-    max_inbound_sub_interests: MaxInboundSubInterestsHeld,
-    /// `MAX_PEER_KEYEXPR_ALIASES`.
-    max_peer_keyexpr_aliases: MaxPeerKeyexprAliasesHeld,
-    /// `MAX_SHARED_KEY_IDS`.
-    max_shared_key_ids: MaxSharedKeyIdsHeld,
-    /// `MAX_REMOTE_DECLS`.
-    max_remote_decls: MaxRemoteDeclsHeld,
-    /// `MAX_PENDING_REPLIES`.
-    max_pending_replies: MaxPendingRepliesHeld,
-    /// `MAX_PENDING_FINALS`.
-    max_pending_finals: MaxPendingFinalsHeld,
-    /// `MAX_REPLY_PAYLOAD_BYTES`.
-    max_reply_payload_bytes: MaxReplyPayloadBytesHeld,
-    /// `MAX_MULTICAST_REPLIES`.
-    max_multicast_replies: MaxMulticastRepliesHeld,
-    /// `MAX_ADVANCED_PUBLISHERS`.
-    max_advanced_publishers: MaxAdvancedPublishersHeld,
-    /// `MAX_ADVANCED_SUBSCRIBERS`.
-    max_advanced_subscribers: MaxAdvancedSubscribersHeld,
-    /// `MAX_FACES`.
-    max_faces: MaxFacesHeld,
-    /// `MAX_ACCEPT_PENDING`.
-    max_accept_pending: MaxAcceptPendingHeld,
-    /// `RX_POOL_BUFFERS`.
-    rx_pool_buffers: RxPoolBuffersHeld,
-    /// `TX_POOL_SLOTS`.
-    tx_pool_slots: TxPoolSlotsHeld,
-    /// `SESSION_MAX_PEER_KEYEXPR_ALIASES`.
-    session_max_peer_keyexpr_aliases: SessionMaxPeerKeyexprAliasesHeld,
-    /// `SESSION_MAX_REMOTE_DECLS`.
-    session_max_remote_decls: SessionMaxRemoteDeclsHeld,
-    /// `SESSION_MAX_INBOUND_SUB_INTERESTS`.
-    session_max_inbound_sub_interests: SessionMaxInboundSubInterestsHeld,
-    /// `QUERIER_MAX_PENDING_QUERIES`.
-    querier_max_pending_queries: QuerierMaxPendingQueriesHeld,
-    /// `TX_NO_PROGRESS_WINDOW_US`.
-    tx_no_progress_window_us: TxNoProgressWindowUsHeld,
-    /// `TX_EXPIRY_CLOSE_AFTER`.
-    tx_expiry_close_after: TxExpiryCloseAfterHeld,
-    /// `DATAGRAM_FRAGMENT_BURST`.
-    datagram_fragment_burst: DatagramFragmentBurstHeld,
-    /// `DATAGRAM_FRAGMENT_GAP_US`.
-    datagram_fragment_gap_us: DatagramFragmentGapUsHeld,
-    /// `QUERY_PARAMETERS_MAX_BYTES`.
-    query_parameters_max_bytes: QueryParametersMaxBytesHeld,
-    /// `QUERY_ATTACHMENT_MAX_BYTES`.
-    query_attachment_max_bytes: QueryAttachmentMaxBytesHeld,
-    /// `PICO_TX_QUEUE_SIZE`.
-    pico_tx_queue_size: PicoTxQueueSizeHeld,
-    /// `APP_LINK_QUEUE_BYTES`.
-    app_link_queue_bytes: AppLinkQueueBytesHeld,
-    /// `E2E_SENDER_SLOTS`.
-    e2e_sender_slots: E2eSenderSlotsHeld,
-    /// `REPLAY_DEPTH_MAX`.
-    replay_depth_max: ReplayDepthMaxHeld,
-    /// `INSTANCE_KEY_FIELDS`.
-    instance_key_fields: InstanceKeyFieldsHeld,
-    /// `INSTANCES_PER_MESSAGE`.
-    instances_per_message: InstancesPerMessageHeld,
-    /// `DECLARATION_SYNC_BURST_MESSAGES`.
-    declaration_sync_burst_messages: DeclarationSyncBurstMessagesHeld,
-    /// `DECLARATION_SYNC_FINAL_TIMEOUT_MS`.
-    declaration_sync_final_timeout_ms: DeclarationSyncFinalTimeoutMsHeld,
-    /// `DECLARATION_SYNC_INTERVAL_MS`.
-    declaration_sync_interval_ms: DeclarationSyncIntervalMsHeld,
-    /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS`.
-    declaration_sync_rx_no_progress_ms: DeclarationSyncRxNoProgressMsHeld,
-    /// `DECLARATION_SYNC_RETRY_INTERVAL_MS`.
-    declaration_sync_retry_interval_ms: DeclarationSyncRetryIntervalMsHeld,
-    /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS`.
-    declaration_sync_tx_no_progress_ms: DeclarationSyncTxNoProgressMsHeld,
-    /// `HANDED_LEG_BYTES`.
-    handed_leg_bytes: HandedLegBytesHeld,
-    /// `UDP_PORT_SLOTS`.
-    udp_port_slots: UdpPortSlotsHeld,
-    /// `PICO_UNICAST_BATCH_BYTES`.
-    pico_unicast_batch_bytes: PicoUnicastBatchBytesHeld,
-    /// `PICO_MULTICAST_BATCH_BYTES`.
-    pico_multicast_batch_bytes: PicoMulticastBatchBytesHeld,
-    /// `PICO_LEASE_MS`.
-    pico_lease_ms: PicoLeaseMsHeld,
-    /// `PICO_SOCKET_TIMEOUT_MS`.
-    pico_socket_timeout_ms: PicoSocketTimeoutMsHeld,
-    /// `PICO_CONNECT_TIMEOUT_MS`.
-    pico_connect_timeout_ms: PicoConnectTimeoutMsHeld,
-    /// `PICO_FRAG_MAX_BYTES`.
-    pico_frag_max_bytes: PicoFragMaxBytesHeld,
-    /// `PICO_ACCEPT_TIMEOUT_MS`.
-    pico_accept_timeout_ms: PicoAcceptTimeoutMsHeld,
-    /// `PICO_KEEPALIVES_PER_LEASE`.
-    pico_keepalives_per_lease: PicoKeepalivesPerLeaseHeld,
+    words: [usize; SESSION_LIMIT_WORDS],
 }
+
+/// How many words [`SessionLimits`] keeps its values in.
+const SESSION_LIMIT_WORDS: usize = word_after::<PicoKeepalivesPerLease, SessionLimits>();
 
 impl SessionLimits {
     /// The build defaults: each limit's value as the build states it ([`LimitSpec::DEFAULT`]).
     pub const fn from_build() -> Self {
-        Self {
-            max_keyexpr_bytes: Limited::build_default(),
-            key_arena_bytes: Limited::build_default(),
-            max_subscriptions: Limited::build_default(),
-            match_memo_slots: Limited::build_default(),
-            delivery_lane_events: Limited::build_default(),
-            delivery_lane_bytes: Limited::build_default(),
-            delivery_lane_callbacks: Limited::build_default(),
-            max_queryables: Limited::build_default(),
-            max_pending_queries: Limited::build_default(),
-            link_noted_requests: Limited::build_default(),
-            max_decl_observers: Limited::build_default(),
-            max_liveliness_subscriptions: Limited::build_default(),
-            max_local_tokens: Limited::build_default(),
-            max_publishers: Limited::build_default(),
-            max_queriers: Limited::build_default(),
-            max_matching_listeners: Limited::build_default(),
-            max_decl_watches: Limited::build_default(),
-            max_transport_events_listeners: Limited::build_default(),
-            max_link_events_listeners: Limited::build_default(),
-            max_declared_keyexprs: Limited::build_default(),
-            max_pending_liveliness_gets: Limited::build_default(),
-            max_pending_declares: Limited::build_default(),
-            max_inbound_sub_interests: Limited::build_default(),
-            max_peer_keyexpr_aliases: Limited::build_default(),
-            max_shared_key_ids: Limited::build_default(),
-            max_remote_decls: Limited::build_default(),
-            max_pending_replies: Limited::build_default(),
-            max_pending_finals: Limited::build_default(),
-            max_reply_payload_bytes: Limited::build_default(),
-            max_multicast_replies: Limited::build_default(),
-            max_advanced_publishers: Limited::build_default(),
-            max_advanced_subscribers: Limited::build_default(),
-            max_faces: Limited::build_default(),
-            max_accept_pending: Limited::build_default(),
-            rx_pool_buffers: Limited::build_default(),
-            tx_pool_slots: Limited::build_default(),
-            session_max_peer_keyexpr_aliases: Limited::build_default(),
-            session_max_remote_decls: Limited::build_default(),
-            session_max_inbound_sub_interests: Limited::build_default(),
-            querier_max_pending_queries: Limited::build_default(),
-            tx_no_progress_window_us: Limited::build_default(),
-            tx_expiry_close_after: Limited::build_default(),
-            datagram_fragment_burst: Limited::build_default(),
-            datagram_fragment_gap_us: Limited::build_default(),
-            query_parameters_max_bytes: Limited::build_default(),
-            query_attachment_max_bytes: Limited::build_default(),
-            pico_tx_queue_size: Limited::build_default(),
-            app_link_queue_bytes: Limited::build_default(),
-            e2e_sender_slots: Limited::build_default(),
-            replay_depth_max: Limited::build_default(),
-            instance_key_fields: Limited::build_default(),
-            instances_per_message: Limited::build_default(),
-            declaration_sync_burst_messages: Limited::build_default(),
-            declaration_sync_final_timeout_ms: Limited::build_default(),
-            declaration_sync_interval_ms: Limited::build_default(),
-            declaration_sync_rx_no_progress_ms: Limited::build_default(),
-            declaration_sync_retry_interval_ms: Limited::build_default(),
-            declaration_sync_tx_no_progress_ms: Limited::build_default(),
-            handed_leg_bytes: Limited::build_default(),
-            udp_port_slots: Limited::build_default(),
-            pico_unicast_batch_bytes: Limited::build_default(),
-            pico_multicast_batch_bytes: Limited::build_default(),
-            pico_lease_ms: Limited::build_default(),
-            pico_socket_timeout_ms: Limited::build_default(),
-            pico_connect_timeout_ms: Limited::build_default(),
-            pico_frag_max_bytes: Limited::build_default(),
-            pico_accept_timeout_ms: Limited::build_default(),
-            pico_keepalives_per_lease: Limited::build_default(),
-        }
+        let mut limits = Self {
+            words: [0; SESSION_LIMIT_WORDS],
+        };
+        limits.keep(&MaxKeyexprBytesHeld::build_default());
+        limits.keep(&KeyArenaBytesHeld::build_default());
+        limits.keep(&MaxSubscriptionsHeld::build_default());
+        limits.keep(&MatchMemoSlotsHeld::build_default());
+        limits.keep(&DeliveryLaneEventsHeld::build_default());
+        limits.keep(&DeliveryLaneBytesHeld::build_default());
+        limits.keep(&DeliveryLaneCallbacksHeld::build_default());
+        limits.keep(&MaxQueryablesHeld::build_default());
+        limits.keep(&MaxPendingQueriesHeld::build_default());
+        limits.keep(&LinkNotedRequestsHeld::build_default());
+        limits.keep(&MaxDeclObserversHeld::build_default());
+        limits.keep(&MaxLivelinessSubscriptionsHeld::build_default());
+        limits.keep(&MaxLocalTokensHeld::build_default());
+        limits.keep(&MaxPublishersHeld::build_default());
+        limits.keep(&MaxQueriersHeld::build_default());
+        limits.keep(&MaxMatchingListenersHeld::build_default());
+        limits.keep(&MaxDeclWatchesHeld::build_default());
+        limits.keep(&MaxTransportEventsListenersHeld::build_default());
+        limits.keep(&MaxLinkEventsListenersHeld::build_default());
+        limits.keep(&MaxDeclaredKeyexprsHeld::build_default());
+        limits.keep(&MaxPendingLivelinessGetsHeld::build_default());
+        limits.keep(&MaxPendingDeclaresHeld::build_default());
+        limits.keep(&MaxInboundSubInterestsHeld::build_default());
+        limits.keep(&MaxPeerKeyexprAliasesHeld::build_default());
+        limits.keep(&MaxSharedKeyIdsHeld::build_default());
+        limits.keep(&MaxRemoteDeclsHeld::build_default());
+        limits.keep(&MaxPendingRepliesHeld::build_default());
+        limits.keep(&MaxPendingFinalsHeld::build_default());
+        limits.keep(&MaxReplyPayloadBytesHeld::build_default());
+        limits.keep(&MaxMulticastRepliesHeld::build_default());
+        limits.keep(&MaxAdvancedPublishersHeld::build_default());
+        limits.keep(&MaxAdvancedSubscribersHeld::build_default());
+        limits.keep(&MaxFacesHeld::build_default());
+        limits.keep(&MaxAcceptPendingHeld::build_default());
+        limits.keep(&RxPoolBuffersHeld::build_default());
+        limits.keep(&TxPoolSlotsHeld::build_default());
+        limits.keep(&SessionMaxPeerKeyexprAliasesHeld::build_default());
+        limits.keep(&SessionMaxRemoteDeclsHeld::build_default());
+        limits.keep(&SessionMaxInboundSubInterestsHeld::build_default());
+        limits.keep(&QuerierMaxPendingQueriesHeld::build_default());
+        limits.keep(&TxNoProgressWindowUsHeld::build_default());
+        limits.keep(&TxExpiryCloseAfterHeld::build_default());
+        limits.keep(&DatagramFragmentBurstHeld::build_default());
+        limits.keep(&DatagramFragmentGapUsHeld::build_default());
+        limits.keep(&QueryParametersMaxBytesHeld::build_default());
+        limits.keep(&QueryAttachmentMaxBytesHeld::build_default());
+        limits.keep(&PicoTxQueueSizeHeld::build_default());
+        limits.keep(&AppLinkQueueBytesHeld::build_default());
+        limits.keep(&E2eSenderSlotsHeld::build_default());
+        limits.keep(&ReplayDepthMaxHeld::build_default());
+        limits.keep(&InstanceKeyFieldsHeld::build_default());
+        limits.keep(&InstancesPerMessageHeld::build_default());
+        limits.keep(&DeclarationSyncBurstMessagesHeld::build_default());
+        limits.keep(&DeclarationSyncFinalTimeoutMsHeld::build_default());
+        limits.keep(&DeclarationSyncIntervalMsHeld::build_default());
+        limits.keep(&DeclarationSyncRxNoProgressMsHeld::build_default());
+        limits.keep(&DeclarationSyncRetryIntervalMsHeld::build_default());
+        limits.keep(&DeclarationSyncTxNoProgressMsHeld::build_default());
+        limits.keep(&HandedLegBytesHeld::build_default());
+        limits.keep(&UdpPortSlotsHeld::build_default());
+        limits.keep(&PicoUnicastBatchBytesHeld::build_default());
+        limits.keep(&PicoMulticastBatchBytesHeld::build_default());
+        limits.keep(&PicoLeaseMsHeld::build_default());
+        limits.keep(&PicoSocketTimeoutMsHeld::build_default());
+        limits.keep(&PicoConnectTimeoutMsHeld::build_default());
+        limits.keep(&PicoFragMaxBytesHeld::build_default());
+        limits.keep(&PicoAcceptTimeoutMsHeld::build_default());
+        limits.keep(&PicoKeepalivesPerLeaseHeld::build_default());
+        limits
     }
 
     /// The build defaults, evaluated when the build is compiled: one value every creator
@@ -1983,224 +1858,229 @@ impl SessionLimits {
     /// build's domain holds it, and the rest at the build's. What an ABI that follows
     /// zenoh-pico opens a session under before its config states otherwise; laid out when the
     /// build is compiled, from the declaration and not from the build's environment.
-    pub const PICO_PRESET: Self = Self {
-        max_keyexpr_bytes: Limited::build_default(),
-        key_arena_bytes: Limited::preset_or_build(4320, LimitValue::Integer(4320)),
-        max_subscriptions: Limited::build_default(),
-        match_memo_slots: Limited::build_default(),
-        delivery_lane_events: Limited::build_default(),
-        delivery_lane_bytes: Limited::preset_or_build(4768, LimitValue::Integer(4768)),
-        delivery_lane_callbacks: Limited::preset_or_build(
+    pub const PICO_PRESET: Self = {
+        let mut limits = Self::BUILD;
+        limits.keep(&KeyArenaBytesHeld::preset_or_build(
+            4320,
+            LimitValue::Integer(4320),
+        ));
+        limits.keep(&DeliveryLaneBytesHeld::preset_or_build(
+            4768,
+            LimitValue::Integer(4768),
+        ));
+        limits.keep(&DeliveryLaneCallbacksHeld::preset_or_build(
             Quota::at_most(64),
             LimitValue::Integer(64),
-        ),
-        max_queryables: Limited::build_default(),
-        max_pending_queries: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
-        link_noted_requests: Limited::build_default(),
-        max_decl_observers: Limited::build_default(),
-        max_liveliness_subscriptions: Limited::preset_or_build(
+        ));
+        limits.keep(&MaxPendingQueriesHeld::preset_or_build(
             Quota::at_most(2),
             LimitValue::Integer(2),
-        ),
-        max_local_tokens: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
-        max_publishers: Limited::build_default(),
-        max_queriers: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
-        max_matching_listeners: Limited::preset_or_build(Quota::at_most(1), LimitValue::Integer(1)),
-        max_decl_watches: Limited::build_default(),
-        max_transport_events_listeners: Limited::preset_or_build(
+        ));
+        limits.keep(&MaxLivelinessSubscriptionsHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxLocalTokensHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxQueriersHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxMatchingListenersHeld::preset_or_build(
             Quota::at_most(1),
             LimitValue::Integer(1),
-        ),
-        max_link_events_listeners: Limited::preset_or_build(
+        ));
+        limits.keep(&MaxTransportEventsListenersHeld::preset_or_build(
             Quota::at_most(1),
             LimitValue::Integer(1),
-        ),
-        max_declared_keyexprs: Limited::preset_or_build(
+        ));
+        limits.keep(&MaxLinkEventsListenersHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&MaxDeclaredKeyexprsHeld::preset_or_build(
             Quota::at_most(306),
             LimitValue::Integer(306),
-        ),
-        max_pending_liveliness_gets: Limited::preset_or_build(
+        ));
+        limits.keep(&MaxPendingLivelinessGetsHeld::preset_or_build(
             Quota::at_most(1),
             LimitValue::Integer(1),
-        ),
-        max_pending_declares: Limited::build_default(),
-        max_inbound_sub_interests: Limited::build_default(),
-        max_peer_keyexpr_aliases: Limited::build_default(),
-        max_shared_key_ids: Limited::build_default(),
-        max_remote_decls: Limited::build_default(),
-        max_pending_replies: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
-        max_pending_finals: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
-        max_reply_payload_bytes: Limited::build_default(),
-        max_multicast_replies: Limited::build_default(),
-        max_advanced_publishers: Limited::preset_or_build(
+        ));
+        limits.keep(&MaxPendingRepliesHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxPendingFinalsHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxAdvancedPublishersHeld::preset_or_build(
             Quota::at_most(1),
             LimitValue::Integer(1),
-        ),
-        max_advanced_subscribers: Limited::preset_or_build(
+        ));
+        limits.keep(&MaxAdvancedSubscribersHeld::preset_or_build(
             Quota::at_most(1),
             LimitValue::Integer(1),
-        ),
-        max_faces: Limited::preset_or_build(Quota::at_most(10), LimitValue::Integer(10)),
-        max_accept_pending: Limited::preset_or_build(Quota::at_most(1), LimitValue::Integer(1)),
-        rx_pool_buffers: Limited::preset_or_build(2, LimitValue::Integer(2)),
-        tx_pool_slots: Limited::preset_or_build(2, LimitValue::Integer(2)),
-        session_max_peer_keyexpr_aliases: Limited::preset_or_build(
+        ));
+        limits.keep(&MaxFacesHeld::preset_or_build(
+            Quota::at_most(10),
+            LimitValue::Integer(10),
+        ));
+        limits.keep(&MaxAcceptPendingHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&RxPoolBuffersHeld::preset_or_build(
+            2,
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&TxPoolSlotsHeld::preset_or_build(2, LimitValue::Integer(2)));
+        limits.keep(&SessionMaxPeerKeyexprAliasesHeld::preset_or_build(
             Quota::at_most(32),
             LimitValue::Integer(32),
-        ),
-        session_max_remote_decls: Limited::preset_or_build(
+        ));
+        limits.keep(&SessionMaxRemoteDeclsHeld::preset_or_build(
             Quota::at_most(32),
             LimitValue::Integer(32),
-        ),
-        session_max_inbound_sub_interests: Limited::preset_or_build(
+        ));
+        limits.keep(&SessionMaxInboundSubInterestsHeld::preset_or_build(
             Quota::at_most(16),
             LimitValue::Integer(16),
-        ),
-        querier_max_pending_queries: Limited::build_default(),
-        tx_no_progress_window_us: Limited::build_default(),
-        tx_expiry_close_after: Limited::build_default(),
-        datagram_fragment_burst: Limited::build_default(),
-        datagram_fragment_gap_us: Limited::build_default(),
-        query_parameters_max_bytes: Limited::build_default(),
-        query_attachment_max_bytes: Limited::build_default(),
-        pico_tx_queue_size: Limited::build_default(),
-        app_link_queue_bytes: Limited::preset_or_build(
+        ));
+        limits.keep(&AppLinkQueueBytesHeld::preset_or_build(
             Quota::at_most(2050),
             LimitValue::Integer(2050),
-        ),
-        e2e_sender_slots: Limited::build_default(),
-        replay_depth_max: Limited::build_default(),
-        instance_key_fields: Limited::build_default(),
-        instances_per_message: Limited::build_default(),
-        declaration_sync_burst_messages: Limited::build_default(),
-        declaration_sync_final_timeout_ms: Limited::build_default(),
-        declaration_sync_interval_ms: Limited::build_default(),
-        declaration_sync_rx_no_progress_ms: Limited::build_default(),
-        declaration_sync_retry_interval_ms: Limited::build_default(),
-        declaration_sync_tx_no_progress_ms: Limited::build_default(),
-        handed_leg_bytes: Limited::build_default(),
-        udp_port_slots: Limited::preset_or_build(10, LimitValue::Integer(10)),
-        pico_unicast_batch_bytes: Limited::build_default(),
-        pico_multicast_batch_bytes: Limited::build_default(),
-        pico_lease_ms: Limited::build_default(),
-        pico_socket_timeout_ms: Limited::build_default(),
-        pico_connect_timeout_ms: Limited::build_default(),
-        pico_frag_max_bytes: Limited::build_default(),
-        pico_accept_timeout_ms: Limited::build_default(),
-        pico_keepalives_per_lease: Limited::build_default(),
+        ));
+        limits.keep(&UdpPortSlotsHeld::preset_or_build(
+            10,
+            LimitValue::Integer(10),
+        ));
+        limits
     };
+
+    /// The limit `L` as the snapshot's words keep it ([`LimitField::WORD`]).
+    const fn limit<L: LimitField<Self>, const HELD: usize>(&self) -> Limited<L, HELD> {
+        Limited::in_words(&self.words, L::WORD)
+    }
+
+    /// Keeps `held` in the snapshot's words, in the word of its limit.
+    const fn keep<L: LimitField<Self>, const HELD: usize>(&mut self, held: &Limited<L, HELD>) {
+        held.keep_in(&mut self.words, L::WORD);
+    }
 
     /// `MAX_KEYEXPR_BYTES` as this snapshot holds it.
     pub const fn max_keyexpr_bytes(&self) -> Quota {
-        self.max_keyexpr_bytes.get()
+        self.max_keyexpr_bytes_held().get()
     }
 
     /// `MAX_KEYEXPR_BYTES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_keyexpr_bytes_held(&self) -> MaxKeyexprBytesHeld {
-        self.max_keyexpr_bytes
+        self.limit()
     }
 
     /// Selects `MAX_KEYEXPR_BYTES`, when the build's domain holds `value`.
     pub fn select_max_keyexpr_bytes(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_keyexpr_bytes = Limited::select(value)?;
+        self.keep(&MaxKeyexprBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `KEY_ARENA_BYTES` as this snapshot holds it.
     pub const fn key_arena_bytes(&self) -> usize {
-        self.key_arena_bytes.get()
+        self.key_arena_bytes_held().get()
     }
 
     /// `KEY_ARENA_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn key_arena_bytes_held(&self) -> KeyArenaBytesHeld {
-        self.key_arena_bytes
+        self.limit()
     }
 
     /// Selects `KEY_ARENA_BYTES`, when the build's domain holds `value`.
     pub fn select_key_arena_bytes(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.key_arena_bytes = Limited::select(value)?;
+        self.keep(&KeyArenaBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_SUBSCRIPTIONS` as this snapshot holds it.
     pub const fn max_subscriptions(&self) -> Quota {
-        self.max_subscriptions.get()
+        self.max_subscriptions_held().get()
     }
 
     /// `MAX_SUBSCRIPTIONS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_subscriptions_held(&self) -> MaxSubscriptionsHeld {
-        self.max_subscriptions
+        self.limit()
     }
 
     /// Selects `MAX_SUBSCRIPTIONS`, when the build's domain holds `value`.
     pub fn select_max_subscriptions(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_subscriptions = Limited::select(value)?;
+        self.keep(&MaxSubscriptionsHeld::select(value)?);
         Ok(())
     }
 
     /// `MATCH_MEMO_SLOTS` as this snapshot holds it.
     pub const fn match_memo_slots(&self) -> usize {
-        self.match_memo_slots.get()
+        self.match_memo_slots_held().get()
     }
 
     /// `MATCH_MEMO_SLOTS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn match_memo_slots_held(&self) -> MatchMemoSlotsHeld {
-        self.match_memo_slots
+        self.limit()
     }
 
     /// Selects `MATCH_MEMO_SLOTS`, when the build's domain holds `value`.
     pub fn select_match_memo_slots(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.match_memo_slots = Limited::select(value)?;
+        self.keep(&MatchMemoSlotsHeld::select(value)?);
         Ok(())
     }
 
     /// `DELIVERY_LANE_EVENTS` as this snapshot holds it.
     pub const fn delivery_lane_events(&self) -> Quota {
-        self.delivery_lane_events.get()
+        self.delivery_lane_events_held().get()
     }
 
     /// `DELIVERY_LANE_EVENTS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn delivery_lane_events_held(&self) -> DeliveryLaneEventsHeld {
-        self.delivery_lane_events
+        self.limit()
     }
 
     /// Selects `DELIVERY_LANE_EVENTS`, when the build's domain holds `value`.
     pub fn select_delivery_lane_events(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.delivery_lane_events = Limited::select(value)?;
+        self.keep(&DeliveryLaneEventsHeld::select(value)?);
         Ok(())
     }
 
     /// `DELIVERY_LANE_BYTES` as this snapshot holds it.
     pub const fn delivery_lane_bytes(&self) -> usize {
-        self.delivery_lane_bytes.get()
+        self.delivery_lane_bytes_held().get()
     }
 
     /// `DELIVERY_LANE_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn delivery_lane_bytes_held(&self) -> DeliveryLaneBytesHeld {
-        self.delivery_lane_bytes
+        self.limit()
     }
 
     /// Selects `DELIVERY_LANE_BYTES`, when the build's domain holds `value`.
     pub fn select_delivery_lane_bytes(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.delivery_lane_bytes = Limited::select(value)?;
+        self.keep(&DeliveryLaneBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `DELIVERY_LANE_CALLBACKS` as this snapshot holds it.
     pub const fn delivery_lane_callbacks(&self) -> Quota {
-        self.delivery_lane_callbacks.get()
+        self.delivery_lane_callbacks_held().get()
     }
 
     /// `DELIVERY_LANE_CALLBACKS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn delivery_lane_callbacks_held(&self) -> DeliveryLaneCallbacksHeld {
-        self.delivery_lane_callbacks
+        self.limit()
     }
 
     /// Selects `DELIVERY_LANE_CALLBACKS`, when the build's domain holds `value`.
@@ -2208,87 +2088,87 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.delivery_lane_callbacks = Limited::select(value)?;
+        self.keep(&DeliveryLaneCallbacksHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_QUERYABLES` as this snapshot holds it.
     pub const fn max_queryables(&self) -> Quota {
-        self.max_queryables.get()
+        self.max_queryables_held().get()
     }
 
     /// `MAX_QUERYABLES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_queryables_held(&self) -> MaxQueryablesHeld {
-        self.max_queryables
+        self.limit()
     }
 
     /// Selects `MAX_QUERYABLES`, when the build's domain holds `value`.
     pub fn select_max_queryables(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_queryables = Limited::select(value)?;
+        self.keep(&MaxQueryablesHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_PENDING_QUERIES` as this snapshot holds it.
     pub const fn max_pending_queries(&self) -> Quota {
-        self.max_pending_queries.get()
+        self.max_pending_queries_held().get()
     }
 
     /// `MAX_PENDING_QUERIES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_pending_queries_held(&self) -> MaxPendingQueriesHeld {
-        self.max_pending_queries
+        self.limit()
     }
 
     /// Selects `MAX_PENDING_QUERIES`, when the build's domain holds `value`.
     pub fn select_max_pending_queries(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_pending_queries = Limited::select(value)?;
+        self.keep(&MaxPendingQueriesHeld::select(value)?);
         Ok(())
     }
 
     /// `LINK_NOTED_REQUESTS` as this snapshot holds it.
     pub const fn link_noted_requests(&self) -> usize {
-        self.link_noted_requests.get()
+        self.link_noted_requests_held().get()
     }
 
     /// `LINK_NOTED_REQUESTS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn link_noted_requests_held(&self) -> LinkNotedRequestsHeld {
-        self.link_noted_requests
+        self.limit()
     }
 
     /// Selects `LINK_NOTED_REQUESTS`, when the build's domain holds `value`.
     pub fn select_link_noted_requests(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.link_noted_requests = Limited::select(value)?;
+        self.keep(&LinkNotedRequestsHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_DECL_OBSERVERS` as this snapshot holds it.
     pub const fn max_decl_observers(&self) -> Quota {
-        self.max_decl_observers.get()
+        self.max_decl_observers_held().get()
     }
 
     /// `MAX_DECL_OBSERVERS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_decl_observers_held(&self) -> MaxDeclObserversHeld {
-        self.max_decl_observers
+        self.limit()
     }
 
     /// Selects `MAX_DECL_OBSERVERS`, when the build's domain holds `value`.
     pub fn select_max_decl_observers(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_decl_observers = Limited::select(value)?;
+        self.keep(&MaxDeclObserversHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_LIVELINESS_SUBSCRIPTIONS` as this snapshot holds it.
     pub const fn max_liveliness_subscriptions(&self) -> Quota {
-        self.max_liveliness_subscriptions.get()
+        self.max_liveliness_subscriptions_held().get()
     }
 
     /// `MAX_LIVELINESS_SUBSCRIPTIONS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_liveliness_subscriptions_held(&self) -> MaxLivelinessSubscriptionsHeld {
-        self.max_liveliness_subscriptions
+        self.limit()
     }
 
     /// Selects `MAX_LIVELINESS_SUBSCRIPTIONS`, when the build's domain holds `value`.
@@ -2296,70 +2176,70 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_liveliness_subscriptions = Limited::select(value)?;
+        self.keep(&MaxLivelinessSubscriptionsHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_LOCAL_TOKENS` as this snapshot holds it.
     pub const fn max_local_tokens(&self) -> Quota {
-        self.max_local_tokens.get()
+        self.max_local_tokens_held().get()
     }
 
     /// `MAX_LOCAL_TOKENS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_local_tokens_held(&self) -> MaxLocalTokensHeld {
-        self.max_local_tokens
+        self.limit()
     }
 
     /// Selects `MAX_LOCAL_TOKENS`, when the build's domain holds `value`.
     pub fn select_max_local_tokens(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_local_tokens = Limited::select(value)?;
+        self.keep(&MaxLocalTokensHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_PUBLISHERS` as this snapshot holds it.
     pub const fn max_publishers(&self) -> Quota {
-        self.max_publishers.get()
+        self.max_publishers_held().get()
     }
 
     /// `MAX_PUBLISHERS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_publishers_held(&self) -> MaxPublishersHeld {
-        self.max_publishers
+        self.limit()
     }
 
     /// Selects `MAX_PUBLISHERS`, when the build's domain holds `value`.
     pub fn select_max_publishers(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_publishers = Limited::select(value)?;
+        self.keep(&MaxPublishersHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_QUERIERS` as this snapshot holds it.
     pub const fn max_queriers(&self) -> Quota {
-        self.max_queriers.get()
+        self.max_queriers_held().get()
     }
 
     /// `MAX_QUERIERS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_queriers_held(&self) -> MaxQueriersHeld {
-        self.max_queriers
+        self.limit()
     }
 
     /// Selects `MAX_QUERIERS`, when the build's domain holds `value`.
     pub fn select_max_queriers(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_queriers = Limited::select(value)?;
+        self.keep(&MaxQueriersHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_MATCHING_LISTENERS` as this snapshot holds it.
     pub const fn max_matching_listeners(&self) -> Quota {
-        self.max_matching_listeners.get()
+        self.max_matching_listeners_held().get()
     }
 
     /// `MAX_MATCHING_LISTENERS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_matching_listeners_held(&self) -> MaxMatchingListenersHeld {
-        self.max_matching_listeners
+        self.limit()
     }
 
     /// Selects `MAX_MATCHING_LISTENERS`, when the build's domain holds `value`.
@@ -2367,36 +2247,36 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_matching_listeners = Limited::select(value)?;
+        self.keep(&MaxMatchingListenersHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_DECL_WATCHES` as this snapshot holds it.
     pub const fn max_decl_watches(&self) -> Quota {
-        self.max_decl_watches.get()
+        self.max_decl_watches_held().get()
     }
 
     /// `MAX_DECL_WATCHES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_decl_watches_held(&self) -> MaxDeclWatchesHeld {
-        self.max_decl_watches
+        self.limit()
     }
 
     /// Selects `MAX_DECL_WATCHES`, when the build's domain holds `value`.
     pub fn select_max_decl_watches(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_decl_watches = Limited::select(value)?;
+        self.keep(&MaxDeclWatchesHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_TRANSPORT_EVENTS_LISTENERS` as this snapshot holds it.
     pub const fn max_transport_events_listeners(&self) -> Quota {
-        self.max_transport_events_listeners.get()
+        self.max_transport_events_listeners_held().get()
     }
 
     /// `MAX_TRANSPORT_EVENTS_LISTENERS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_transport_events_listeners_held(&self) -> MaxTransportEventsListenersHeld {
-        self.max_transport_events_listeners
+        self.limit()
     }
 
     /// Selects `MAX_TRANSPORT_EVENTS_LISTENERS`, when the build's domain holds `value`.
@@ -2404,19 +2284,19 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_transport_events_listeners = Limited::select(value)?;
+        self.keep(&MaxTransportEventsListenersHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_LINK_EVENTS_LISTENERS` as this snapshot holds it.
     pub const fn max_link_events_listeners(&self) -> Quota {
-        self.max_link_events_listeners.get()
+        self.max_link_events_listeners_held().get()
     }
 
     /// `MAX_LINK_EVENTS_LISTENERS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_link_events_listeners_held(&self) -> MaxLinkEventsListenersHeld {
-        self.max_link_events_listeners
+        self.limit()
     }
 
     /// Selects `MAX_LINK_EVENTS_LISTENERS`, when the build's domain holds `value`.
@@ -2424,36 +2304,36 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_link_events_listeners = Limited::select(value)?;
+        self.keep(&MaxLinkEventsListenersHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_DECLARED_KEYEXPRS` as this snapshot holds it.
     pub const fn max_declared_keyexprs(&self) -> Quota {
-        self.max_declared_keyexprs.get()
+        self.max_declared_keyexprs_held().get()
     }
 
     /// `MAX_DECLARED_KEYEXPRS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_declared_keyexprs_held(&self) -> MaxDeclaredKeyexprsHeld {
-        self.max_declared_keyexprs
+        self.limit()
     }
 
     /// Selects `MAX_DECLARED_KEYEXPRS`, when the build's domain holds `value`.
     pub fn select_max_declared_keyexprs(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_declared_keyexprs = Limited::select(value)?;
+        self.keep(&MaxDeclaredKeyexprsHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_PENDING_LIVELINESS_GETS` as this snapshot holds it.
     pub const fn max_pending_liveliness_gets(&self) -> Quota {
-        self.max_pending_liveliness_gets.get()
+        self.max_pending_liveliness_gets_held().get()
     }
 
     /// `MAX_PENDING_LIVELINESS_GETS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_pending_liveliness_gets_held(&self) -> MaxPendingLivelinessGetsHeld {
-        self.max_pending_liveliness_gets
+        self.limit()
     }
 
     /// Selects `MAX_PENDING_LIVELINESS_GETS`, when the build's domain holds `value`.
@@ -2461,36 +2341,36 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_pending_liveliness_gets = Limited::select(value)?;
+        self.keep(&MaxPendingLivelinessGetsHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_PENDING_DECLARES` as this snapshot holds it.
     pub const fn max_pending_declares(&self) -> Quota {
-        self.max_pending_declares.get()
+        self.max_pending_declares_held().get()
     }
 
     /// `MAX_PENDING_DECLARES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_pending_declares_held(&self) -> MaxPendingDeclaresHeld {
-        self.max_pending_declares
+        self.limit()
     }
 
     /// Selects `MAX_PENDING_DECLARES`, when the build's domain holds `value`.
     pub fn select_max_pending_declares(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_pending_declares = Limited::select(value)?;
+        self.keep(&MaxPendingDeclaresHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_INBOUND_SUB_INTERESTS` as this snapshot holds it.
     pub const fn max_inbound_sub_interests(&self) -> Quota {
-        self.max_inbound_sub_interests.get()
+        self.max_inbound_sub_interests_held().get()
     }
 
     /// `MAX_INBOUND_SUB_INTERESTS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_inbound_sub_interests_held(&self) -> MaxInboundSubInterestsHeld {
-        self.max_inbound_sub_interests
+        self.limit()
     }
 
     /// Selects `MAX_INBOUND_SUB_INTERESTS`, when the build's domain holds `value`.
@@ -2498,19 +2378,19 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_inbound_sub_interests = Limited::select(value)?;
+        self.keep(&MaxInboundSubInterestsHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_PEER_KEYEXPR_ALIASES` as this snapshot holds it.
     pub const fn max_peer_keyexpr_aliases(&self) -> Quota {
-        self.max_peer_keyexpr_aliases.get()
+        self.max_peer_keyexpr_aliases_held().get()
     }
 
     /// `MAX_PEER_KEYEXPR_ALIASES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_peer_keyexpr_aliases_held(&self) -> MaxPeerKeyexprAliasesHeld {
-        self.max_peer_keyexpr_aliases
+        self.limit()
     }
 
     /// Selects `MAX_PEER_KEYEXPR_ALIASES`, when the build's domain holds `value`.
@@ -2518,87 +2398,87 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_peer_keyexpr_aliases = Limited::select(value)?;
+        self.keep(&MaxPeerKeyexprAliasesHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_SHARED_KEY_IDS` as this snapshot holds it.
     pub const fn max_shared_key_ids(&self) -> Quota {
-        self.max_shared_key_ids.get()
+        self.max_shared_key_ids_held().get()
     }
 
     /// `MAX_SHARED_KEY_IDS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_shared_key_ids_held(&self) -> MaxSharedKeyIdsHeld {
-        self.max_shared_key_ids
+        self.limit()
     }
 
     /// Selects `MAX_SHARED_KEY_IDS`, when the build's domain holds `value`.
     pub fn select_max_shared_key_ids(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_shared_key_ids = Limited::select(value)?;
+        self.keep(&MaxSharedKeyIdsHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_REMOTE_DECLS` as this snapshot holds it.
     pub const fn max_remote_decls(&self) -> Quota {
-        self.max_remote_decls.get()
+        self.max_remote_decls_held().get()
     }
 
     /// `MAX_REMOTE_DECLS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_remote_decls_held(&self) -> MaxRemoteDeclsHeld {
-        self.max_remote_decls
+        self.limit()
     }
 
     /// Selects `MAX_REMOTE_DECLS`, when the build's domain holds `value`.
     pub fn select_max_remote_decls(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_remote_decls = Limited::select(value)?;
+        self.keep(&MaxRemoteDeclsHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_PENDING_REPLIES` as this snapshot holds it.
     pub const fn max_pending_replies(&self) -> Quota {
-        self.max_pending_replies.get()
+        self.max_pending_replies_held().get()
     }
 
     /// `MAX_PENDING_REPLIES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_pending_replies_held(&self) -> MaxPendingRepliesHeld {
-        self.max_pending_replies
+        self.limit()
     }
 
     /// Selects `MAX_PENDING_REPLIES`, when the build's domain holds `value`.
     pub fn select_max_pending_replies(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_pending_replies = Limited::select(value)?;
+        self.keep(&MaxPendingRepliesHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_PENDING_FINALS` as this snapshot holds it.
     pub const fn max_pending_finals(&self) -> Quota {
-        self.max_pending_finals.get()
+        self.max_pending_finals_held().get()
     }
 
     /// `MAX_PENDING_FINALS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_pending_finals_held(&self) -> MaxPendingFinalsHeld {
-        self.max_pending_finals
+        self.limit()
     }
 
     /// Selects `MAX_PENDING_FINALS`, when the build's domain holds `value`.
     pub fn select_max_pending_finals(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_pending_finals = Limited::select(value)?;
+        self.keep(&MaxPendingFinalsHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_REPLY_PAYLOAD_BYTES` as this snapshot holds it.
     pub const fn max_reply_payload_bytes(&self) -> Quota {
-        self.max_reply_payload_bytes.get()
+        self.max_reply_payload_bytes_held().get()
     }
 
     /// `MAX_REPLY_PAYLOAD_BYTES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_reply_payload_bytes_held(&self) -> MaxReplyPayloadBytesHeld {
-        self.max_reply_payload_bytes
+        self.limit()
     }
 
     /// Selects `MAX_REPLY_PAYLOAD_BYTES`, when the build's domain holds `value`.
@@ -2606,36 +2486,36 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_reply_payload_bytes = Limited::select(value)?;
+        self.keep(&MaxReplyPayloadBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_MULTICAST_REPLIES` as this snapshot holds it.
     pub const fn max_multicast_replies(&self) -> Quota {
-        self.max_multicast_replies.get()
+        self.max_multicast_replies_held().get()
     }
 
     /// `MAX_MULTICAST_REPLIES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_multicast_replies_held(&self) -> MaxMulticastRepliesHeld {
-        self.max_multicast_replies
+        self.limit()
     }
 
     /// Selects `MAX_MULTICAST_REPLIES`, when the build's domain holds `value`.
     pub fn select_max_multicast_replies(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_multicast_replies = Limited::select(value)?;
+        self.keep(&MaxMulticastRepliesHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_ADVANCED_PUBLISHERS` as this snapshot holds it.
     pub const fn max_advanced_publishers(&self) -> Quota {
-        self.max_advanced_publishers.get()
+        self.max_advanced_publishers_held().get()
     }
 
     /// `MAX_ADVANCED_PUBLISHERS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_advanced_publishers_held(&self) -> MaxAdvancedPublishersHeld {
-        self.max_advanced_publishers
+        self.limit()
     }
 
     /// Selects `MAX_ADVANCED_PUBLISHERS`, when the build's domain holds `value`.
@@ -2643,19 +2523,19 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_advanced_publishers = Limited::select(value)?;
+        self.keep(&MaxAdvancedPublishersHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_ADVANCED_SUBSCRIBERS` as this snapshot holds it.
     pub const fn max_advanced_subscribers(&self) -> Quota {
-        self.max_advanced_subscribers.get()
+        self.max_advanced_subscribers_held().get()
     }
 
     /// `MAX_ADVANCED_SUBSCRIBERS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_advanced_subscribers_held(&self) -> MaxAdvancedSubscribersHeld {
-        self.max_advanced_subscribers
+        self.limit()
     }
 
     /// Selects `MAX_ADVANCED_SUBSCRIBERS`, when the build's domain holds `value`.
@@ -2663,87 +2543,87 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.max_advanced_subscribers = Limited::select(value)?;
+        self.keep(&MaxAdvancedSubscribersHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_FACES` as this snapshot holds it.
     pub const fn max_faces(&self) -> Quota {
-        self.max_faces.get()
+        self.max_faces_held().get()
     }
 
     /// `MAX_FACES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_faces_held(&self) -> MaxFacesHeld {
-        self.max_faces
+        self.limit()
     }
 
     /// Selects `MAX_FACES`, when the build's domain holds `value`.
     pub fn select_max_faces(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_faces = Limited::select(value)?;
+        self.keep(&MaxFacesHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_ACCEPT_PENDING` as this snapshot holds it.
     pub const fn max_accept_pending(&self) -> Quota {
-        self.max_accept_pending.get()
+        self.max_accept_pending_held().get()
     }
 
     /// `MAX_ACCEPT_PENDING` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_accept_pending_held(&self) -> MaxAcceptPendingHeld {
-        self.max_accept_pending
+        self.limit()
     }
 
     /// Selects `MAX_ACCEPT_PENDING`, when the build's domain holds `value`.
     pub fn select_max_accept_pending(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_accept_pending = Limited::select(value)?;
+        self.keep(&MaxAcceptPendingHeld::select(value)?);
         Ok(())
     }
 
     /// `RX_POOL_BUFFERS` as this snapshot holds it.
     pub const fn rx_pool_buffers(&self) -> usize {
-        self.rx_pool_buffers.get()
+        self.rx_pool_buffers_held().get()
     }
 
     /// `RX_POOL_BUFFERS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn rx_pool_buffers_held(&self) -> RxPoolBuffersHeld {
-        self.rx_pool_buffers
+        self.limit()
     }
 
     /// Selects `RX_POOL_BUFFERS`, when the build's domain holds `value`.
     pub fn select_rx_pool_buffers(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.rx_pool_buffers = Limited::select(value)?;
+        self.keep(&RxPoolBuffersHeld::select(value)?);
         Ok(())
     }
 
     /// `TX_POOL_SLOTS` as this snapshot holds it.
     pub const fn tx_pool_slots(&self) -> usize {
-        self.tx_pool_slots.get()
+        self.tx_pool_slots_held().get()
     }
 
     /// `TX_POOL_SLOTS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn tx_pool_slots_held(&self) -> TxPoolSlotsHeld {
-        self.tx_pool_slots
+        self.limit()
     }
 
     /// Selects `TX_POOL_SLOTS`, when the build's domain holds `value`.
     pub fn select_tx_pool_slots(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.tx_pool_slots = Limited::select(value)?;
+        self.keep(&TxPoolSlotsHeld::select(value)?);
         Ok(())
     }
 
     /// `SESSION_MAX_PEER_KEYEXPR_ALIASES` as this snapshot holds it.
     pub const fn session_max_peer_keyexpr_aliases(&self) -> Quota {
-        self.session_max_peer_keyexpr_aliases.get()
+        self.session_max_peer_keyexpr_aliases_held().get()
     }
 
     /// `SESSION_MAX_PEER_KEYEXPR_ALIASES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn session_max_peer_keyexpr_aliases_held(&self) -> SessionMaxPeerKeyexprAliasesHeld {
-        self.session_max_peer_keyexpr_aliases
+        self.limit()
     }
 
     /// Selects `SESSION_MAX_PEER_KEYEXPR_ALIASES`, when the build's domain holds `value`.
@@ -2751,19 +2631,19 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.session_max_peer_keyexpr_aliases = Limited::select(value)?;
+        self.keep(&SessionMaxPeerKeyexprAliasesHeld::select(value)?);
         Ok(())
     }
 
     /// `SESSION_MAX_REMOTE_DECLS` as this snapshot holds it.
     pub const fn session_max_remote_decls(&self) -> Quota {
-        self.session_max_remote_decls.get()
+        self.session_max_remote_decls_held().get()
     }
 
     /// `SESSION_MAX_REMOTE_DECLS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn session_max_remote_decls_held(&self) -> SessionMaxRemoteDeclsHeld {
-        self.session_max_remote_decls
+        self.limit()
     }
 
     /// Selects `SESSION_MAX_REMOTE_DECLS`, when the build's domain holds `value`.
@@ -2771,13 +2651,13 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.session_max_remote_decls = Limited::select(value)?;
+        self.keep(&SessionMaxRemoteDeclsHeld::select(value)?);
         Ok(())
     }
 
     /// `SESSION_MAX_INBOUND_SUB_INTERESTS` as this snapshot holds it.
     pub const fn session_max_inbound_sub_interests(&self) -> Quota {
-        self.session_max_inbound_sub_interests.get()
+        self.session_max_inbound_sub_interests_held().get()
     }
 
     /// `SESSION_MAX_INBOUND_SUB_INTERESTS` as the snapshot keeps it, for the table the bound limits to keep
@@ -2785,7 +2665,7 @@ impl SessionLimits {
     pub const fn session_max_inbound_sub_interests_held(
         &self,
     ) -> SessionMaxInboundSubInterestsHeld {
-        self.session_max_inbound_sub_interests
+        self.limit()
     }
 
     /// Selects `SESSION_MAX_INBOUND_SUB_INTERESTS`, when the build's domain holds `value`.
@@ -2793,19 +2673,19 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.session_max_inbound_sub_interests = Limited::select(value)?;
+        self.keep(&SessionMaxInboundSubInterestsHeld::select(value)?);
         Ok(())
     }
 
     /// `QUERIER_MAX_PENDING_QUERIES` as this snapshot holds it.
     pub const fn querier_max_pending_queries(&self) -> Quota {
-        self.querier_max_pending_queries.get()
+        self.querier_max_pending_queries_held().get()
     }
 
     /// `QUERIER_MAX_PENDING_QUERIES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn querier_max_pending_queries_held(&self) -> QuerierMaxPendingQueriesHeld {
-        self.querier_max_pending_queries
+        self.limit()
     }
 
     /// Selects `QUERIER_MAX_PENDING_QUERIES`, when the build's domain holds `value`.
@@ -2813,19 +2693,19 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.querier_max_pending_queries = Limited::select(value)?;
+        self.keep(&QuerierMaxPendingQueriesHeld::select(value)?);
         Ok(())
     }
 
     /// `TX_NO_PROGRESS_WINDOW_US` as this snapshot holds it.
     pub const fn tx_no_progress_window_us(&self) -> usize {
-        self.tx_no_progress_window_us.get()
+        self.tx_no_progress_window_us_held().get()
     }
 
     /// `TX_NO_PROGRESS_WINDOW_US` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn tx_no_progress_window_us_held(&self) -> TxNoProgressWindowUsHeld {
-        self.tx_no_progress_window_us
+        self.limit()
     }
 
     /// Selects `TX_NO_PROGRESS_WINDOW_US`, when the build's domain holds `value`.
@@ -2833,36 +2713,36 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.tx_no_progress_window_us = Limited::select(value)?;
+        self.keep(&TxNoProgressWindowUsHeld::select(value)?);
         Ok(())
     }
 
     /// `TX_EXPIRY_CLOSE_AFTER` as this snapshot holds it.
     pub const fn tx_expiry_close_after(&self) -> Quota {
-        self.tx_expiry_close_after.get()
+        self.tx_expiry_close_after_held().get()
     }
 
     /// `TX_EXPIRY_CLOSE_AFTER` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn tx_expiry_close_after_held(&self) -> TxExpiryCloseAfterHeld {
-        self.tx_expiry_close_after
+        self.limit()
     }
 
     /// Selects `TX_EXPIRY_CLOSE_AFTER`, when the build's domain holds `value`.
     pub fn select_tx_expiry_close_after(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.tx_expiry_close_after = Limited::select(value)?;
+        self.keep(&TxExpiryCloseAfterHeld::select(value)?);
         Ok(())
     }
 
     /// `DATAGRAM_FRAGMENT_BURST` as this snapshot holds it.
     pub const fn datagram_fragment_burst(&self) -> usize {
-        self.datagram_fragment_burst.get()
+        self.datagram_fragment_burst_held().get()
     }
 
     /// `DATAGRAM_FRAGMENT_BURST` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn datagram_fragment_burst_held(&self) -> DatagramFragmentBurstHeld {
-        self.datagram_fragment_burst
+        self.limit()
     }
 
     /// Selects `DATAGRAM_FRAGMENT_BURST`, when the build's domain holds `value`.
@@ -2870,19 +2750,19 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.datagram_fragment_burst = Limited::select(value)?;
+        self.keep(&DatagramFragmentBurstHeld::select(value)?);
         Ok(())
     }
 
     /// `DATAGRAM_FRAGMENT_GAP_US` as this snapshot holds it.
     pub const fn datagram_fragment_gap_us(&self) -> usize {
-        self.datagram_fragment_gap_us.get()
+        self.datagram_fragment_gap_us_held().get()
     }
 
     /// `DATAGRAM_FRAGMENT_GAP_US` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn datagram_fragment_gap_us_held(&self) -> DatagramFragmentGapUsHeld {
-        self.datagram_fragment_gap_us
+        self.limit()
     }
 
     /// Selects `DATAGRAM_FRAGMENT_GAP_US`, when the build's domain holds `value`.
@@ -2890,19 +2770,19 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.datagram_fragment_gap_us = Limited::select(value)?;
+        self.keep(&DatagramFragmentGapUsHeld::select(value)?);
         Ok(())
     }
 
     /// `QUERY_PARAMETERS_MAX_BYTES` as this snapshot holds it.
     pub const fn query_parameters_max_bytes(&self) -> Quota {
-        self.query_parameters_max_bytes.get()
+        self.query_parameters_max_bytes_held().get()
     }
 
     /// `QUERY_PARAMETERS_MAX_BYTES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn query_parameters_max_bytes_held(&self) -> QueryParametersMaxBytesHeld {
-        self.query_parameters_max_bytes
+        self.limit()
     }
 
     /// Selects `QUERY_PARAMETERS_MAX_BYTES`, when the build's domain holds `value`.
@@ -2910,19 +2790,19 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.query_parameters_max_bytes = Limited::select(value)?;
+        self.keep(&QueryParametersMaxBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `QUERY_ATTACHMENT_MAX_BYTES` as this snapshot holds it.
     pub const fn query_attachment_max_bytes(&self) -> Quota {
-        self.query_attachment_max_bytes.get()
+        self.query_attachment_max_bytes_held().get()
     }
 
     /// `QUERY_ATTACHMENT_MAX_BYTES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn query_attachment_max_bytes_held(&self) -> QueryAttachmentMaxBytesHeld {
-        self.query_attachment_max_bytes
+        self.limit()
     }
 
     /// Selects `QUERY_ATTACHMENT_MAX_BYTES`, when the build's domain holds `value`.
@@ -2930,121 +2810,121 @@ impl SessionLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.query_attachment_max_bytes = Limited::select(value)?;
+        self.keep(&QueryAttachmentMaxBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_TX_QUEUE_SIZE` as this snapshot holds it.
     pub const fn pico_tx_queue_size(&self) -> usize {
-        self.pico_tx_queue_size.get()
+        self.pico_tx_queue_size_held().get()
     }
 
     /// `PICO_TX_QUEUE_SIZE` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn pico_tx_queue_size_held(&self) -> PicoTxQueueSizeHeld {
-        self.pico_tx_queue_size
+        self.limit()
     }
 
     /// Selects `PICO_TX_QUEUE_SIZE`, when the build's domain holds `value`.
     pub fn select_pico_tx_queue_size(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.pico_tx_queue_size = Limited::select(value)?;
+        self.keep(&PicoTxQueueSizeHeld::select(value)?);
         Ok(())
     }
 
     /// `APP_LINK_QUEUE_BYTES` as this snapshot holds it.
     pub const fn app_link_queue_bytes(&self) -> Quota {
-        self.app_link_queue_bytes.get()
+        self.app_link_queue_bytes_held().get()
     }
 
     /// `APP_LINK_QUEUE_BYTES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn app_link_queue_bytes_held(&self) -> AppLinkQueueBytesHeld {
-        self.app_link_queue_bytes
+        self.limit()
     }
 
     /// Selects `APP_LINK_QUEUE_BYTES`, when the build's domain holds `value`.
     pub fn select_app_link_queue_bytes(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.app_link_queue_bytes = Limited::select(value)?;
+        self.keep(&AppLinkQueueBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `E2E_SENDER_SLOTS` as this snapshot holds it.
     pub const fn e2e_sender_slots(&self) -> Quota {
-        self.e2e_sender_slots.get()
+        self.e2e_sender_slots_held().get()
     }
 
     /// `E2E_SENDER_SLOTS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn e2e_sender_slots_held(&self) -> E2eSenderSlotsHeld {
-        self.e2e_sender_slots
+        self.limit()
     }
 
     /// Selects `E2E_SENDER_SLOTS`, when the build's domain holds `value`.
     pub fn select_e2e_sender_slots(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.e2e_sender_slots = Limited::select(value)?;
+        self.keep(&E2eSenderSlotsHeld::select(value)?);
         Ok(())
     }
 
     /// `REPLAY_DEPTH_MAX` as this snapshot holds it.
     pub const fn replay_depth_max(&self) -> Quota {
-        self.replay_depth_max.get()
+        self.replay_depth_max_held().get()
     }
 
     /// `REPLAY_DEPTH_MAX` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn replay_depth_max_held(&self) -> ReplayDepthMaxHeld {
-        self.replay_depth_max
+        self.limit()
     }
 
     /// Selects `REPLAY_DEPTH_MAX`, when the build's domain holds `value`.
     pub fn select_replay_depth_max(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.replay_depth_max = Limited::select(value)?;
+        self.keep(&ReplayDepthMaxHeld::select(value)?);
         Ok(())
     }
 
     /// `INSTANCE_KEY_FIELDS` as this snapshot holds it.
     pub const fn instance_key_fields(&self) -> Quota {
-        self.instance_key_fields.get()
+        self.instance_key_fields_held().get()
     }
 
     /// `INSTANCE_KEY_FIELDS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn instance_key_fields_held(&self) -> InstanceKeyFieldsHeld {
-        self.instance_key_fields
+        self.limit()
     }
 
     /// Selects `INSTANCE_KEY_FIELDS`, when the build's domain holds `value`.
     pub fn select_instance_key_fields(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.instance_key_fields = Limited::select(value)?;
+        self.keep(&InstanceKeyFieldsHeld::select(value)?);
         Ok(())
     }
 
     /// `INSTANCES_PER_MESSAGE` as this snapshot holds it.
     pub const fn instances_per_message(&self) -> Quota {
-        self.instances_per_message.get()
+        self.instances_per_message_held().get()
     }
 
     /// `INSTANCES_PER_MESSAGE` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn instances_per_message_held(&self) -> InstancesPerMessageHeld {
-        self.instances_per_message
+        self.limit()
     }
 
     /// Selects `INSTANCES_PER_MESSAGE`, when the build's domain holds `value`.
     pub fn select_instances_per_message(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.instances_per_message = Limited::select(value)?;
+        self.keep(&InstancesPerMessageHeld::select(value)?);
         Ok(())
     }
 
     /// `DECLARATION_SYNC_BURST_MESSAGES` as this snapshot holds it.
     pub const fn declaration_sync_burst_messages(&self) -> usize {
-        self.declaration_sync_burst_messages.get()
+        self.declaration_sync_burst_messages_held().get()
     }
 
     /// `DECLARATION_SYNC_BURST_MESSAGES` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn declaration_sync_burst_messages_held(&self) -> DeclarationSyncBurstMessagesHeld {
-        self.declaration_sync_burst_messages
+        self.limit()
     }
 
     /// Selects `DECLARATION_SYNC_BURST_MESSAGES`, when the build's domain holds `value`.
@@ -3052,13 +2932,13 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.declaration_sync_burst_messages = Limited::select(value)?;
+        self.keep(&DeclarationSyncBurstMessagesHeld::select(value)?);
         Ok(())
     }
 
     /// `DECLARATION_SYNC_FINAL_TIMEOUT_MS` as this snapshot holds it.
     pub const fn declaration_sync_final_timeout_ms(&self) -> usize {
-        self.declaration_sync_final_timeout_ms.get()
+        self.declaration_sync_final_timeout_ms_held().get()
     }
 
     /// `DECLARATION_SYNC_FINAL_TIMEOUT_MS` as the snapshot keeps it, for a machine that keeps the value beside
@@ -3066,7 +2946,7 @@ impl SessionLimits {
     pub const fn declaration_sync_final_timeout_ms_held(
         &self,
     ) -> DeclarationSyncFinalTimeoutMsHeld {
-        self.declaration_sync_final_timeout_ms
+        self.limit()
     }
 
     /// Selects `DECLARATION_SYNC_FINAL_TIMEOUT_MS`, when the build's domain holds `value`.
@@ -3074,19 +2954,19 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.declaration_sync_final_timeout_ms = Limited::select(value)?;
+        self.keep(&DeclarationSyncFinalTimeoutMsHeld::select(value)?);
         Ok(())
     }
 
     /// `DECLARATION_SYNC_INTERVAL_MS` as this snapshot holds it.
     pub const fn declaration_sync_interval_ms(&self) -> usize {
-        self.declaration_sync_interval_ms.get()
+        self.declaration_sync_interval_ms_held().get()
     }
 
     /// `DECLARATION_SYNC_INTERVAL_MS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn declaration_sync_interval_ms_held(&self) -> DeclarationSyncIntervalMsHeld {
-        self.declaration_sync_interval_ms
+        self.limit()
     }
 
     /// Selects `DECLARATION_SYNC_INTERVAL_MS`, when the build's domain holds `value`.
@@ -3094,13 +2974,13 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.declaration_sync_interval_ms = Limited::select(value)?;
+        self.keep(&DeclarationSyncIntervalMsHeld::select(value)?);
         Ok(())
     }
 
     /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` as this snapshot holds it.
     pub const fn declaration_sync_rx_no_progress_ms(&self) -> usize {
-        self.declaration_sync_rx_no_progress_ms.get()
+        self.declaration_sync_rx_no_progress_ms_held().get()
     }
 
     /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` as the snapshot keeps it, for a machine that keeps the value beside
@@ -3108,7 +2988,7 @@ impl SessionLimits {
     pub const fn declaration_sync_rx_no_progress_ms_held(
         &self,
     ) -> DeclarationSyncRxNoProgressMsHeld {
-        self.declaration_sync_rx_no_progress_ms
+        self.limit()
     }
 
     /// Selects `DECLARATION_SYNC_RX_NO_PROGRESS_MS`, when the build's domain holds `value`.
@@ -3116,13 +2996,13 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.declaration_sync_rx_no_progress_ms = Limited::select(value)?;
+        self.keep(&DeclarationSyncRxNoProgressMsHeld::select(value)?);
         Ok(())
     }
 
     /// `DECLARATION_SYNC_RETRY_INTERVAL_MS` as this snapshot holds it.
     pub const fn declaration_sync_retry_interval_ms(&self) -> usize {
-        self.declaration_sync_retry_interval_ms.get()
+        self.declaration_sync_retry_interval_ms_held().get()
     }
 
     /// `DECLARATION_SYNC_RETRY_INTERVAL_MS` as the snapshot keeps it, for a machine that keeps the value beside
@@ -3130,7 +3010,7 @@ impl SessionLimits {
     pub const fn declaration_sync_retry_interval_ms_held(
         &self,
     ) -> DeclarationSyncRetryIntervalMsHeld {
-        self.declaration_sync_retry_interval_ms
+        self.limit()
     }
 
     /// Selects `DECLARATION_SYNC_RETRY_INTERVAL_MS`, when the build's domain holds `value`.
@@ -3138,13 +3018,13 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.declaration_sync_retry_interval_ms = Limited::select(value)?;
+        self.keep(&DeclarationSyncRetryIntervalMsHeld::select(value)?);
         Ok(())
     }
 
     /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS` as this snapshot holds it.
     pub const fn declaration_sync_tx_no_progress_ms(&self) -> usize {
-        self.declaration_sync_tx_no_progress_ms.get()
+        self.declaration_sync_tx_no_progress_ms_held().get()
     }
 
     /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS` as the snapshot keeps it, for a machine that keeps the value beside
@@ -3152,7 +3032,7 @@ impl SessionLimits {
     pub const fn declaration_sync_tx_no_progress_ms_held(
         &self,
     ) -> DeclarationSyncTxNoProgressMsHeld {
-        self.declaration_sync_tx_no_progress_ms
+        self.limit()
     }
 
     /// Selects `DECLARATION_SYNC_TX_NO_PROGRESS_MS`, when the build's domain holds `value`.
@@ -3160,53 +3040,53 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.declaration_sync_tx_no_progress_ms = Limited::select(value)?;
+        self.keep(&DeclarationSyncTxNoProgressMsHeld::select(value)?);
         Ok(())
     }
 
     /// `HANDED_LEG_BYTES` as this snapshot holds it.
     pub const fn handed_leg_bytes(&self) -> usize {
-        self.handed_leg_bytes.get()
+        self.handed_leg_bytes_held().get()
     }
 
     /// `HANDED_LEG_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn handed_leg_bytes_held(&self) -> HandedLegBytesHeld {
-        self.handed_leg_bytes
+        self.limit()
     }
 
     /// Selects `HANDED_LEG_BYTES`, when the build's domain holds `value`.
     pub fn select_handed_leg_bytes(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.handed_leg_bytes = Limited::select(value)?;
+        self.keep(&HandedLegBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `UDP_PORT_SLOTS` as this snapshot holds it.
     pub const fn udp_port_slots(&self) -> usize {
-        self.udp_port_slots.get()
+        self.udp_port_slots_held().get()
     }
 
     /// `UDP_PORT_SLOTS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn udp_port_slots_held(&self) -> UdpPortSlotsHeld {
-        self.udp_port_slots
+        self.limit()
     }
 
     /// Selects `UDP_PORT_SLOTS`, when the build's domain holds `value`.
     pub fn select_udp_port_slots(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.udp_port_slots = Limited::select(value)?;
+        self.keep(&UdpPortSlotsHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_UNICAST_BATCH_BYTES` as this snapshot holds it.
     pub const fn pico_unicast_batch_bytes(&self) -> usize {
-        self.pico_unicast_batch_bytes.get()
+        self.pico_unicast_batch_bytes_held().get()
     }
 
     /// `PICO_UNICAST_BATCH_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn pico_unicast_batch_bytes_held(&self) -> PicoUnicastBatchBytesHeld {
-        self.pico_unicast_batch_bytes
+        self.limit()
     }
 
     /// Selects `PICO_UNICAST_BATCH_BYTES`, when the build's domain holds `value`.
@@ -3214,19 +3094,19 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.pico_unicast_batch_bytes = Limited::select(value)?;
+        self.keep(&PicoUnicastBatchBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_MULTICAST_BATCH_BYTES` as this snapshot holds it.
     pub const fn pico_multicast_batch_bytes(&self) -> usize {
-        self.pico_multicast_batch_bytes.get()
+        self.pico_multicast_batch_bytes_held().get()
     }
 
     /// `PICO_MULTICAST_BATCH_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn pico_multicast_batch_bytes_held(&self) -> PicoMulticastBatchBytesHeld {
-        self.pico_multicast_batch_bytes
+        self.limit()
     }
 
     /// Selects `PICO_MULTICAST_BATCH_BYTES`, when the build's domain holds `value`.
@@ -3234,36 +3114,36 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.pico_multicast_batch_bytes = Limited::select(value)?;
+        self.keep(&PicoMulticastBatchBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_LEASE_MS` as this snapshot holds it.
     pub const fn pico_lease_ms(&self) -> usize {
-        self.pico_lease_ms.get()
+        self.pico_lease_ms_held().get()
     }
 
     /// `PICO_LEASE_MS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn pico_lease_ms_held(&self) -> PicoLeaseMsHeld {
-        self.pico_lease_ms
+        self.limit()
     }
 
     /// Selects `PICO_LEASE_MS`, when the build's domain holds `value`.
     pub fn select_pico_lease_ms(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.pico_lease_ms = Limited::select(value)?;
+        self.keep(&PicoLeaseMsHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_SOCKET_TIMEOUT_MS` as this snapshot holds it.
     pub const fn pico_socket_timeout_ms(&self) -> usize {
-        self.pico_socket_timeout_ms.get()
+        self.pico_socket_timeout_ms_held().get()
     }
 
     /// `PICO_SOCKET_TIMEOUT_MS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn pico_socket_timeout_ms_held(&self) -> PicoSocketTimeoutMsHeld {
-        self.pico_socket_timeout_ms
+        self.limit()
     }
 
     /// Selects `PICO_SOCKET_TIMEOUT_MS`, when the build's domain holds `value`.
@@ -3271,19 +3151,19 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.pico_socket_timeout_ms = Limited::select(value)?;
+        self.keep(&PicoSocketTimeoutMsHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_CONNECT_TIMEOUT_MS` as this snapshot holds it.
     pub const fn pico_connect_timeout_ms(&self) -> usize {
-        self.pico_connect_timeout_ms.get()
+        self.pico_connect_timeout_ms_held().get()
     }
 
     /// `PICO_CONNECT_TIMEOUT_MS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn pico_connect_timeout_ms_held(&self) -> PicoConnectTimeoutMsHeld {
-        self.pico_connect_timeout_ms
+        self.limit()
     }
 
     /// Selects `PICO_CONNECT_TIMEOUT_MS`, when the build's domain holds `value`.
@@ -3291,36 +3171,36 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.pico_connect_timeout_ms = Limited::select(value)?;
+        self.keep(&PicoConnectTimeoutMsHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_FRAG_MAX_BYTES` as this snapshot holds it.
     pub const fn pico_frag_max_bytes(&self) -> Quota {
-        self.pico_frag_max_bytes.get()
+        self.pico_frag_max_bytes_held().get()
     }
 
     /// `PICO_FRAG_MAX_BYTES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn pico_frag_max_bytes_held(&self) -> PicoFragMaxBytesHeld {
-        self.pico_frag_max_bytes
+        self.limit()
     }
 
     /// Selects `PICO_FRAG_MAX_BYTES`, when the build's domain holds `value`.
     pub fn select_pico_frag_max_bytes(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.pico_frag_max_bytes = Limited::select(value)?;
+        self.keep(&PicoFragMaxBytesHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_ACCEPT_TIMEOUT_MS` as this snapshot holds it.
     pub const fn pico_accept_timeout_ms(&self) -> usize {
-        self.pico_accept_timeout_ms.get()
+        self.pico_accept_timeout_ms_held().get()
     }
 
     /// `PICO_ACCEPT_TIMEOUT_MS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn pico_accept_timeout_ms_held(&self) -> PicoAcceptTimeoutMsHeld {
-        self.pico_accept_timeout_ms
+        self.limit()
     }
 
     /// Selects `PICO_ACCEPT_TIMEOUT_MS`, when the build's domain holds `value`.
@@ -3328,19 +3208,19 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.pico_accept_timeout_ms = Limited::select(value)?;
+        self.keep(&PicoAcceptTimeoutMsHeld::select(value)?);
         Ok(())
     }
 
     /// `PICO_KEEPALIVES_PER_LEASE` as this snapshot holds it.
     pub const fn pico_keepalives_per_lease(&self) -> usize {
-        self.pico_keepalives_per_lease.get()
+        self.pico_keepalives_per_lease_held().get()
     }
 
     /// `PICO_KEEPALIVES_PER_LEASE` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn pico_keepalives_per_lease_held(&self) -> PicoKeepalivesPerLeaseHeld {
-        self.pico_keepalives_per_lease
+        self.limit()
     }
 
     /// Selects `PICO_KEEPALIVES_PER_LEASE`, when the build's domain holds `value`.
@@ -3348,7 +3228,7 @@ impl SessionLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.pico_keepalives_per_lease = Limited::select(value)?;
+        self.keep(&PicoKeepalivesPerLeaseHeld::select(value)?);
         Ok(())
     }
 }
@@ -3359,496 +3239,426 @@ impl Default for SessionLimits {
     }
 }
 
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+impl core::fmt::Debug for SessionLimits {
+    /// Each limit by its id, with the value the snapshot holds.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        LimitEntry::fmt_snapshot(&SESSION_LIMITS, "SessionLimits", self, f)
+    }
+}
+
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxKeyexprBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_keyexpr_bytes);
+    const WORD: usize = 0;
 }
 
-const _: fn(&SessionLimits) -> &MaxKeyexprBytesHeld = |s| &s.max_keyexpr_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for KeyArenaBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, key_arena_bytes);
+    const WORD: usize = word_after::<MaxKeyexprBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &KeyArenaBytesHeld = |s| &s.key_arena_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxSubscriptions {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_subscriptions);
+    const WORD: usize = word_after::<KeyArenaBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxSubscriptionsHeld = |s| &s.max_subscriptions;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MatchMemoSlots {
-    const AT: usize = core::mem::offset_of!(SessionLimits, match_memo_slots);
+    const WORD: usize = word_after::<MaxSubscriptions, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MatchMemoSlotsHeld = |s| &s.match_memo_slots;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneEvents {
-    const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_events);
+    const WORD: usize = word_after::<MatchMemoSlots, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeliveryLaneEventsHeld = |s| &s.delivery_lane_events;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_bytes);
+    const WORD: usize = word_after::<DeliveryLaneEvents, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeliveryLaneBytesHeld = |s| &s.delivery_lane_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneCallbacks {
-    const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_callbacks);
+    const WORD: usize = word_after::<DeliveryLaneBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeliveryLaneCallbacksHeld = |s| &s.delivery_lane_callbacks;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxQueryables {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_queryables);
+    const WORD: usize = word_after::<DeliveryLaneCallbacks, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxQueryablesHeld = |s| &s.max_queryables;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingQueries {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_queries);
+    const WORD: usize = word_after::<MaxQueryables, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxPendingQueriesHeld = |s| &s.max_pending_queries;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for LinkNotedRequests {
-    const AT: usize = core::mem::offset_of!(SessionLimits, link_noted_requests);
+    const WORD: usize = word_after::<MaxPendingQueries, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &LinkNotedRequestsHeld = |s| &s.link_noted_requests;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxDeclObservers {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_decl_observers);
+    const WORD: usize = word_after::<LinkNotedRequests, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxDeclObserversHeld = |s| &s.max_decl_observers;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxLivelinessSubscriptions {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_liveliness_subscriptions);
+    const WORD: usize = word_after::<MaxDeclObservers, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxLivelinessSubscriptionsHeld =
-    |s| &s.max_liveliness_subscriptions;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxLocalTokens {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_local_tokens);
+    const WORD: usize = word_after::<MaxLivelinessSubscriptions, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxLocalTokensHeld = |s| &s.max_local_tokens;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPublishers {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_publishers);
+    const WORD: usize = word_after::<MaxLocalTokens, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxPublishersHeld = |s| &s.max_publishers;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxQueriers {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_queriers);
+    const WORD: usize = word_after::<MaxPublishers, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxQueriersHeld = |s| &s.max_queriers;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxMatchingListeners {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_matching_listeners);
+    const WORD: usize = word_after::<MaxQueriers, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxMatchingListenersHeld = |s| &s.max_matching_listeners;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxDeclWatches {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_decl_watches);
+    const WORD: usize = word_after::<MaxMatchingListeners, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxDeclWatchesHeld = |s| &s.max_decl_watches;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxTransportEventsListeners {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_transport_events_listeners);
+    const WORD: usize = word_after::<MaxDeclWatches, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxTransportEventsListenersHeld =
-    |s| &s.max_transport_events_listeners;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxLinkEventsListeners {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_link_events_listeners);
+    const WORD: usize = word_after::<MaxTransportEventsListeners, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxLinkEventsListenersHeld = |s| &s.max_link_events_listeners;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxDeclaredKeyexprs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_declared_keyexprs);
+    const WORD: usize = word_after::<MaxLinkEventsListeners, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxDeclaredKeyexprsHeld = |s| &s.max_declared_keyexprs;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingLivelinessGets {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_liveliness_gets);
+    const WORD: usize = word_after::<MaxDeclaredKeyexprs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxPendingLivelinessGetsHeld = |s| &s.max_pending_liveliness_gets;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingDeclares {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_declares);
+    const WORD: usize = word_after::<MaxPendingLivelinessGets, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxPendingDeclaresHeld = |s| &s.max_pending_declares;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxInboundSubInterests {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_inbound_sub_interests);
+    const WORD: usize = word_after::<MaxPendingDeclares, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxInboundSubInterestsHeld = |s| &s.max_inbound_sub_interests;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPeerKeyexprAliases {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_peer_keyexpr_aliases);
+    const WORD: usize = word_after::<MaxInboundSubInterests, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxPeerKeyexprAliasesHeld = |s| &s.max_peer_keyexpr_aliases;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxSharedKeyIds {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_shared_key_ids);
+    const WORD: usize = word_after::<MaxPeerKeyexprAliases, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxSharedKeyIdsHeld = |s| &s.max_shared_key_ids;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxRemoteDecls {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_remote_decls);
+    const WORD: usize = word_after::<MaxSharedKeyIds, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxRemoteDeclsHeld = |s| &s.max_remote_decls;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingReplies {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_replies);
+    const WORD: usize = word_after::<MaxRemoteDecls, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxPendingRepliesHeld = |s| &s.max_pending_replies;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingFinals {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_finals);
+    const WORD: usize = word_after::<MaxPendingReplies, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxPendingFinalsHeld = |s| &s.max_pending_finals;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxReplyPayloadBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_reply_payload_bytes);
+    const WORD: usize = word_after::<MaxPendingFinals, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxReplyPayloadBytesHeld = |s| &s.max_reply_payload_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxMulticastReplies {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_multicast_replies);
+    const WORD: usize = word_after::<MaxReplyPayloadBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxMulticastRepliesHeld = |s| &s.max_multicast_replies;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxAdvancedPublishers {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_advanced_publishers);
+    const WORD: usize = word_after::<MaxMulticastReplies, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxAdvancedPublishersHeld = |s| &s.max_advanced_publishers;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxAdvancedSubscribers {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_advanced_subscribers);
+    const WORD: usize = word_after::<MaxAdvancedPublishers, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxAdvancedSubscribersHeld = |s| &s.max_advanced_subscribers;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxFaces {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_faces);
+    const WORD: usize = word_after::<MaxAdvancedSubscribers, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxFacesHeld = |s| &s.max_faces;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxAcceptPending {
-    const AT: usize = core::mem::offset_of!(SessionLimits, max_accept_pending);
+    const WORD: usize = word_after::<MaxFaces, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &MaxAcceptPendingHeld = |s| &s.max_accept_pending;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for RxPoolBuffers {
-    const AT: usize = core::mem::offset_of!(SessionLimits, rx_pool_buffers);
+    const WORD: usize = word_after::<MaxAcceptPending, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &RxPoolBuffersHeld = |s| &s.rx_pool_buffers;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for TxPoolSlots {
-    const AT: usize = core::mem::offset_of!(SessionLimits, tx_pool_slots);
+    const WORD: usize = word_after::<RxPoolBuffers, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &TxPoolSlotsHeld = |s| &s.tx_pool_slots;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
-    const AT: usize = core::mem::offset_of!(SessionLimits, session_max_peer_keyexpr_aliases);
+    const WORD: usize = word_after::<TxPoolSlots, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &SessionMaxPeerKeyexprAliasesHeld =
-    |s| &s.session_max_peer_keyexpr_aliases;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for SessionMaxRemoteDecls {
-    const AT: usize = core::mem::offset_of!(SessionLimits, session_max_remote_decls);
+    const WORD: usize = word_after::<SessionMaxPeerKeyexprAliases, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &SessionMaxRemoteDeclsHeld = |s| &s.session_max_remote_decls;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for SessionMaxInboundSubInterests {
-    const AT: usize = core::mem::offset_of!(SessionLimits, session_max_inbound_sub_interests);
+    const WORD: usize = word_after::<SessionMaxRemoteDecls, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &SessionMaxInboundSubInterestsHeld =
-    |s| &s.session_max_inbound_sub_interests;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for QuerierMaxPendingQueries {
-    const AT: usize = core::mem::offset_of!(SessionLimits, querier_max_pending_queries);
+    const WORD: usize = word_after::<SessionMaxInboundSubInterests, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &QuerierMaxPendingQueriesHeld = |s| &s.querier_max_pending_queries;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for TxNoProgressWindowUs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, tx_no_progress_window_us);
+    const WORD: usize = word_after::<QuerierMaxPendingQueries, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &TxNoProgressWindowUsHeld = |s| &s.tx_no_progress_window_us;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for TxExpiryCloseAfter {
-    const AT: usize = core::mem::offset_of!(SessionLimits, tx_expiry_close_after);
+    const WORD: usize = word_after::<TxNoProgressWindowUs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &TxExpiryCloseAfterHeld = |s| &s.tx_expiry_close_after;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DatagramFragmentBurst {
-    const AT: usize = core::mem::offset_of!(SessionLimits, datagram_fragment_burst);
+    const WORD: usize = word_after::<TxExpiryCloseAfter, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DatagramFragmentBurstHeld = |s| &s.datagram_fragment_burst;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DatagramFragmentGapUs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, datagram_fragment_gap_us);
+    const WORD: usize = word_after::<DatagramFragmentBurst, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DatagramFragmentGapUsHeld = |s| &s.datagram_fragment_gap_us;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for QueryParametersMaxBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, query_parameters_max_bytes);
+    const WORD: usize = word_after::<DatagramFragmentGapUs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &QueryParametersMaxBytesHeld = |s| &s.query_parameters_max_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for QueryAttachmentMaxBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, query_attachment_max_bytes);
+    const WORD: usize = word_after::<QueryParametersMaxBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &QueryAttachmentMaxBytesHeld = |s| &s.query_attachment_max_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoTxQueueSize {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_tx_queue_size);
+    const WORD: usize = word_after::<QueryAttachmentMaxBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &PicoTxQueueSizeHeld = |s| &s.pico_tx_queue_size;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for AppLinkQueueBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, app_link_queue_bytes);
+    const WORD: usize = word_after::<PicoTxQueueSize, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &AppLinkQueueBytesHeld = |s| &s.app_link_queue_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for E2eSenderSlots {
-    const AT: usize = core::mem::offset_of!(SessionLimits, e2e_sender_slots);
+    const WORD: usize = word_after::<AppLinkQueueBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &E2eSenderSlotsHeld = |s| &s.e2e_sender_slots;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for ReplayDepthMax {
-    const AT: usize = core::mem::offset_of!(SessionLimits, replay_depth_max);
+    const WORD: usize = word_after::<E2eSenderSlots, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &ReplayDepthMaxHeld = |s| &s.replay_depth_max;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for InstanceKeyFields {
-    const AT: usize = core::mem::offset_of!(SessionLimits, instance_key_fields);
+    const WORD: usize = word_after::<ReplayDepthMax, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &InstanceKeyFieldsHeld = |s| &s.instance_key_fields;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for InstancesPerMessage {
-    const AT: usize = core::mem::offset_of!(SessionLimits, instances_per_message);
+    const WORD: usize = word_after::<InstanceKeyFields, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &InstancesPerMessageHeld = |s| &s.instances_per_message;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncBurstMessages {
-    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_burst_messages);
+    const WORD: usize = word_after::<InstancesPerMessage, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeclarationSyncBurstMessagesHeld =
-    |s| &s.declaration_sync_burst_messages;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncFinalTimeoutMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_final_timeout_ms);
+    const WORD: usize = word_after::<DeclarationSyncBurstMessages, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeclarationSyncFinalTimeoutMsHeld =
-    |s| &s.declaration_sync_final_timeout_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncIntervalMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_interval_ms);
+    const WORD: usize = word_after::<DeclarationSyncFinalTimeoutMs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeclarationSyncIntervalMsHeld = |s| &s.declaration_sync_interval_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncRxNoProgressMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_rx_no_progress_ms);
+    const WORD: usize = word_after::<DeclarationSyncIntervalMs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeclarationSyncRxNoProgressMsHeld =
-    |s| &s.declaration_sync_rx_no_progress_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncRetryIntervalMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_retry_interval_ms);
+    const WORD: usize = word_after::<DeclarationSyncRxNoProgressMs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeclarationSyncRetryIntervalMsHeld =
-    |s| &s.declaration_sync_retry_interval_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncTxNoProgressMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_tx_no_progress_ms);
+    const WORD: usize = word_after::<DeclarationSyncRetryIntervalMs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &DeclarationSyncTxNoProgressMsHeld =
-    |s| &s.declaration_sync_tx_no_progress_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for HandedLegBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, handed_leg_bytes);
+    const WORD: usize = word_after::<DeclarationSyncTxNoProgressMs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &HandedLegBytesHeld = |s| &s.handed_leg_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for UdpPortSlots {
-    const AT: usize = core::mem::offset_of!(SessionLimits, udp_port_slots);
+    const WORD: usize = word_after::<HandedLegBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &UdpPortSlotsHeld = |s| &s.udp_port_slots;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoUnicastBatchBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_unicast_batch_bytes);
+    const WORD: usize = word_after::<UdpPortSlots, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &PicoUnicastBatchBytesHeld = |s| &s.pico_unicast_batch_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoMulticastBatchBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_multicast_batch_bytes);
+    const WORD: usize = word_after::<PicoUnicastBatchBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &PicoMulticastBatchBytesHeld = |s| &s.pico_multicast_batch_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoLeaseMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_lease_ms);
+    const WORD: usize = word_after::<PicoMulticastBatchBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &PicoLeaseMsHeld = |s| &s.pico_lease_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoSocketTimeoutMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_socket_timeout_ms);
+    const WORD: usize = word_after::<PicoLeaseMs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &PicoSocketTimeoutMsHeld = |s| &s.pico_socket_timeout_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoConnectTimeoutMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_connect_timeout_ms);
+    const WORD: usize = word_after::<PicoSocketTimeoutMs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &PicoConnectTimeoutMsHeld = |s| &s.pico_connect_timeout_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoFragMaxBytes {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_frag_max_bytes);
+    const WORD: usize = word_after::<PicoConnectTimeoutMs, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &PicoFragMaxBytesHeld = |s| &s.pico_frag_max_bytes;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoAcceptTimeoutMs {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_accept_timeout_ms);
+    const WORD: usize = word_after::<PicoFragMaxBytes, SessionLimits>();
 }
 
-const _: fn(&SessionLimits) -> &PicoAcceptTimeoutMsHeld = |s| &s.pico_accept_timeout_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
-    const AT: usize = core::mem::offset_of!(SessionLimits, pico_keepalives_per_lease);
+    const WORD: usize = word_after::<PicoAcceptTimeoutMs, SessionLimits>();
 }
-
-const _: fn(&SessionLimits) -> &PicoKeepalivesPerLeaseHeld = |s| &s.pico_keepalives_per_lease;
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
 pub const SESSION_LIMIT_COUNT: usize = 68;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
-/// its fields.
+/// its words.
 pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxKeyexprBytes>(),
     LimitEntry::of::<KeyArenaBytes>(),
@@ -3925,46 +3735,37 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
 /// accessor of its field, never from the build. Each value lies inside the build's domain
 /// of its limit, and a limit whose domain is one value reads as that value whatever was
 /// selected ([`Limited::get`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The values lie in one array of words, a word for each limit whose domain is more than
+/// one value ([`LimitField::WORD`]) and none for the rest, so two snapshots compare as one
+/// slice.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(transparent)]
 pub struct RuntimeLimits {
-    /// `MAX_LOCATOR_LEN`.
-    max_locator_len: MaxLocatorLenHeld,
-    /// `MAX_STATIC_CONNECT`.
-    max_static_connect: MaxStaticConnectHeld,
-    /// `SNAPSHOT_PERIOD_MS`.
-    snapshot_period_ms: SnapshotPeriodMsHeld,
-    /// `SNAPSHOT_HISTOGRAM_BUCKETS`.
-    snapshot_histogram_buckets: SnapshotHistogramBucketsHeld,
-    /// `SUPERVISION_CHECKPOINTS`.
-    supervision_checkpoints: SupervisionCheckpointsHeld,
-    /// `E2E_SUPERVISED_STREAMS`.
-    e2e_supervised_streams: E2eSupervisedStreamsHeld,
-    /// `EVENT_RING_SLOTS`.
-    event_ring_slots: EventRingSlotsHeld,
-    /// `CLOCK_SOURCES`.
-    clock_sources: ClockSourcesHeld,
-    /// `MESSAGE_CATALOG_ENTRIES`.
-    message_catalog_entries: MessageCatalogEntriesHeld,
-    /// `CLOCK_MAX_FORWARD_STEP_MS`.
-    clock_max_forward_step_ms: ClockMaxForwardStepMsHeld,
+    words: [usize; RUNTIME_LIMIT_WORDS],
 }
+
+/// How many words [`RuntimeLimits`] keeps its values in.
+const RUNTIME_LIMIT_WORDS: usize = word_after::<ClockMaxForwardStepMs, RuntimeLimits>();
 
 impl RuntimeLimits {
     /// The build defaults: each limit's value as the build states it ([`LimitSpec::DEFAULT`]).
     pub const fn from_build() -> Self {
-        Self {
-            max_locator_len: Limited::build_default(),
-            max_static_connect: Limited::build_default(),
-            snapshot_period_ms: Limited::build_default(),
-            snapshot_histogram_buckets: Limited::build_default(),
-            supervision_checkpoints: Limited::build_default(),
-            e2e_supervised_streams: Limited::build_default(),
-            event_ring_slots: Limited::build_default(),
-            clock_sources: Limited::build_default(),
-            message_catalog_entries: Limited::build_default(),
-            clock_max_forward_step_ms: Limited::build_default(),
-        }
+        let mut limits = Self {
+            words: [0; RUNTIME_LIMIT_WORDS],
+        };
+        limits.keep(&MaxLocatorLenHeld::build_default());
+        limits.keep(&MaxStaticConnectHeld::build_default());
+        limits.keep(&SnapshotPeriodMsHeld::build_default());
+        limits.keep(&SnapshotHistogramBucketsHeld::build_default());
+        limits.keep(&SupervisionCheckpointsHeld::build_default());
+        limits.keep(&E2eSupervisedStreamsHeld::build_default());
+        limits.keep(&EventRingSlotsHeld::build_default());
+        limits.keep(&ClockSourcesHeld::build_default());
+        limits.keep(&MessageCatalogEntriesHeld::build_default());
+        limits.keep(&ClockMaxForwardStepMsHeld::build_default());
+        limits
     }
 
     /// The build defaults, evaluated when the build is compiled: one value every creator
@@ -3977,66 +3778,76 @@ impl RuntimeLimits {
         Self::BUILD
     }
 
+    /// The limit `L` as the snapshot's words keep it ([`LimitField::WORD`]).
+    const fn limit<L: LimitField<Self>, const HELD: usize>(&self) -> Limited<L, HELD> {
+        Limited::in_words(&self.words, L::WORD)
+    }
+
+    /// Keeps `held` in the snapshot's words, in the word of its limit.
+    const fn keep<L: LimitField<Self>, const HELD: usize>(&mut self, held: &Limited<L, HELD>) {
+        held.keep_in(&mut self.words, L::WORD);
+    }
+
     /// `MAX_LOCATOR_LEN` as this snapshot holds it.
     pub const fn max_locator_len(&self) -> Quota {
-        self.max_locator_len.get()
+        self.max_locator_len_held().get()
     }
 
     /// `MAX_LOCATOR_LEN` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_locator_len_held(&self) -> MaxLocatorLenHeld {
-        self.max_locator_len
+        self.limit()
     }
 
     /// Selects `MAX_LOCATOR_LEN`, when the build's domain holds `value`.
     pub fn select_max_locator_len(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_locator_len = Limited::select(value)?;
+        self.keep(&MaxLocatorLenHeld::select(value)?);
         Ok(())
     }
 
     /// `MAX_STATIC_CONNECT` as this snapshot holds it.
     pub const fn max_static_connect(&self) -> Quota {
-        self.max_static_connect.get()
+        self.max_static_connect_held().get()
     }
 
     /// `MAX_STATIC_CONNECT` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn max_static_connect_held(&self) -> MaxStaticConnectHeld {
-        self.max_static_connect
+        self.limit()
     }
 
     /// Selects `MAX_STATIC_CONNECT`, when the build's domain holds `value`.
     pub fn select_max_static_connect(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.max_static_connect = Limited::select(value)?;
+        self.keep(&MaxStaticConnectHeld::select(value)?);
         Ok(())
     }
 
     /// `SNAPSHOT_PERIOD_MS` as this snapshot holds it.
     pub const fn snapshot_period_ms(&self) -> usize {
-        self.snapshot_period_ms.get()
+        self.snapshot_period_ms_held().get()
     }
 
     /// `SNAPSHOT_PERIOD_MS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn snapshot_period_ms_held(&self) -> SnapshotPeriodMsHeld {
-        self.snapshot_period_ms
+        self.limit()
     }
 
     /// Selects `SNAPSHOT_PERIOD_MS`, when the build's domain holds `value`.
     pub fn select_snapshot_period_ms(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.snapshot_period_ms = Limited::select(value)?;
+        self.keep(&SnapshotPeriodMsHeld::select(value)?);
         Ok(())
     }
 
     /// `SNAPSHOT_HISTOGRAM_BUCKETS` as this snapshot holds it.
     pub const fn snapshot_histogram_buckets(&self) -> usize {
-        self.snapshot_histogram_buckets.get()
+        self.snapshot_histogram_buckets_held().get()
     }
 
     /// `SNAPSHOT_HISTOGRAM_BUCKETS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn snapshot_histogram_buckets_held(&self) -> SnapshotHistogramBucketsHeld {
-        self.snapshot_histogram_buckets
+        self.limit()
     }
 
     /// Selects `SNAPSHOT_HISTOGRAM_BUCKETS`, when the build's domain holds `value`.
@@ -4044,19 +3855,19 @@ impl RuntimeLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.snapshot_histogram_buckets = Limited::select(value)?;
+        self.keep(&SnapshotHistogramBucketsHeld::select(value)?);
         Ok(())
     }
 
     /// `SUPERVISION_CHECKPOINTS` as this snapshot holds it.
     pub const fn supervision_checkpoints(&self) -> usize {
-        self.supervision_checkpoints.get()
+        self.supervision_checkpoints_held().get()
     }
 
     /// `SUPERVISION_CHECKPOINTS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn supervision_checkpoints_held(&self) -> SupervisionCheckpointsHeld {
-        self.supervision_checkpoints
+        self.limit()
     }
 
     /// Selects `SUPERVISION_CHECKPOINTS`, when the build's domain holds `value`.
@@ -4064,19 +3875,19 @@ impl RuntimeLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.supervision_checkpoints = Limited::select(value)?;
+        self.keep(&SupervisionCheckpointsHeld::select(value)?);
         Ok(())
     }
 
     /// `E2E_SUPERVISED_STREAMS` as this snapshot holds it.
     pub const fn e2e_supervised_streams(&self) -> Quota {
-        self.e2e_supervised_streams.get()
+        self.e2e_supervised_streams_held().get()
     }
 
     /// `E2E_SUPERVISED_STREAMS` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn e2e_supervised_streams_held(&self) -> E2eSupervisedStreamsHeld {
-        self.e2e_supervised_streams
+        self.limit()
     }
 
     /// Selects `E2E_SUPERVISED_STREAMS`, when the build's domain holds `value`.
@@ -4084,53 +3895,53 @@ impl RuntimeLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.e2e_supervised_streams = Limited::select(value)?;
+        self.keep(&E2eSupervisedStreamsHeld::select(value)?);
         Ok(())
     }
 
     /// `EVENT_RING_SLOTS` as this snapshot holds it.
     pub const fn event_ring_slots(&self) -> usize {
-        self.event_ring_slots.get()
+        self.event_ring_slots_held().get()
     }
 
     /// `EVENT_RING_SLOTS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn event_ring_slots_held(&self) -> EventRingSlotsHeld {
-        self.event_ring_slots
+        self.limit()
     }
 
     /// Selects `EVENT_RING_SLOTS`, when the build's domain holds `value`.
     pub fn select_event_ring_slots(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
-        self.event_ring_slots = Limited::select(value)?;
+        self.keep(&EventRingSlotsHeld::select(value)?);
         Ok(())
     }
 
     /// `CLOCK_SOURCES` as this snapshot holds it.
     pub const fn clock_sources(&self) -> Quota {
-        self.clock_sources.get()
+        self.clock_sources_held().get()
     }
 
     /// `CLOCK_SOURCES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn clock_sources_held(&self) -> ClockSourcesHeld {
-        self.clock_sources
+        self.limit()
     }
 
     /// Selects `CLOCK_SOURCES`, when the build's domain holds `value`.
     pub fn select_clock_sources(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
-        self.clock_sources = Limited::select(value)?;
+        self.keep(&ClockSourcesHeld::select(value)?);
         Ok(())
     }
 
     /// `MESSAGE_CATALOG_ENTRIES` as this snapshot holds it.
     pub const fn message_catalog_entries(&self) -> Quota {
-        self.message_catalog_entries.get()
+        self.message_catalog_entries_held().get()
     }
 
     /// `MESSAGE_CATALOG_ENTRIES` as the snapshot keeps it, for the table the bound limits to keep
     /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
     pub const fn message_catalog_entries_held(&self) -> MessageCatalogEntriesHeld {
-        self.message_catalog_entries
+        self.limit()
     }
 
     /// Selects `MESSAGE_CATALOG_ENTRIES`, when the build's domain holds `value`.
@@ -4138,19 +3949,19 @@ impl RuntimeLimits {
         &mut self,
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
-        self.message_catalog_entries = Limited::select(value)?;
+        self.keep(&MessageCatalogEntriesHeld::select(value)?);
         Ok(())
     }
 
     /// `CLOCK_MAX_FORWARD_STEP_MS` as this snapshot holds it.
     pub const fn clock_max_forward_step_ms(&self) -> usize {
-        self.clock_max_forward_step_ms.get()
+        self.clock_max_forward_step_ms_held().get()
     }
 
     /// `CLOCK_MAX_FORWARD_STEP_MS` as the snapshot keeps it, for a machine that keeps the value beside
     /// its own state: in no byte where the build allows one value.
     pub const fn clock_max_forward_step_ms_held(&self) -> ClockMaxForwardStepMsHeld {
-        self.clock_max_forward_step_ms
+        self.limit()
     }
 
     /// Selects `CLOCK_MAX_FORWARD_STEP_MS`, when the build's domain holds `value`.
@@ -4158,7 +3969,7 @@ impl RuntimeLimits {
         &mut self,
         value: usize,
     ) -> Result<(), OutsideLimitDomain> {
-        self.clock_max_forward_step_ms = Limited::select(value)?;
+        self.keep(&ClockMaxForwardStepMsHeld::select(value)?);
         Ok(())
     }
 }
@@ -4169,81 +3980,78 @@ impl Default for RuntimeLimits {
     }
 }
 
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+impl core::fmt::Debug for RuntimeLimits {
+    /// Each limit by its id, with the value the snapshot holds.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        LimitEntry::fmt_snapshot(&RUNTIME_LIMITS, "RuntimeLimits", self, f)
+    }
+}
+
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for MaxLocatorLen {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, max_locator_len);
+    const WORD: usize = 0;
 }
 
-const _: fn(&RuntimeLimits) -> &MaxLocatorLenHeld = |s| &s.max_locator_len;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for MaxStaticConnect {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, max_static_connect);
+    const WORD: usize = word_after::<MaxLocatorLen, RuntimeLimits>();
 }
 
-const _: fn(&RuntimeLimits) -> &MaxStaticConnectHeld = |s| &s.max_static_connect;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for SnapshotPeriodMs {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, snapshot_period_ms);
+    const WORD: usize = word_after::<MaxStaticConnect, RuntimeLimits>();
 }
 
-const _: fn(&RuntimeLimits) -> &SnapshotPeriodMsHeld = |s| &s.snapshot_period_ms;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for SnapshotHistogramBuckets {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, snapshot_histogram_buckets);
+    const WORD: usize = word_after::<SnapshotPeriodMs, RuntimeLimits>();
 }
 
-const _: fn(&RuntimeLimits) -> &SnapshotHistogramBucketsHeld = |s| &s.snapshot_histogram_buckets;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for SupervisionCheckpoints {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, supervision_checkpoints);
+    const WORD: usize = word_after::<SnapshotHistogramBuckets, RuntimeLimits>();
 }
 
-const _: fn(&RuntimeLimits) -> &SupervisionCheckpointsHeld = |s| &s.supervision_checkpoints;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for E2eSupervisedStreams {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, e2e_supervised_streams);
+    const WORD: usize = word_after::<SupervisionCheckpoints, RuntimeLimits>();
 }
 
-const _: fn(&RuntimeLimits) -> &E2eSupervisedStreamsHeld = |s| &s.e2e_supervised_streams;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for EventRingSlots {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, event_ring_slots);
+    const WORD: usize = word_after::<E2eSupervisedStreams, RuntimeLimits>();
 }
 
-const _: fn(&RuntimeLimits) -> &EventRingSlotsHeld = |s| &s.event_ring_slots;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for ClockSources {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, clock_sources);
+    const WORD: usize = word_after::<EventRingSlots, RuntimeLimits>();
 }
 
-const _: fn(&RuntimeLimits) -> &ClockSourcesHeld = |s| &s.clock_sources;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for MessageCatalogEntries {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, message_catalog_entries);
+    const WORD: usize = word_after::<ClockSources, RuntimeLimits>();
 }
 
-const _: fn(&RuntimeLimits) -> &MessageCatalogEntriesHeld = |s| &s.message_catalog_entries;
-
-// SAFETY: `AT` is the offset of this limit's field, whose type the constant below pins.
+// SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for ClockMaxForwardStepMs {
-    const AT: usize = core::mem::offset_of!(RuntimeLimits, clock_max_forward_step_ms);
+    const WORD: usize = word_after::<MessageCatalogEntries, RuntimeLimits>();
 }
-
-const _: fn(&RuntimeLimits) -> &ClockMaxForwardStepMsHeld = |s| &s.clock_max_forward_step_ms;
 
 /// How many limits [`RuntimeLimits`] holds: the length of [`RUNTIME_LIMITS`].
 pub const RUNTIME_LIMIT_COUNT: usize = 10;
 
 /// Every limit of [`RuntimeLimits`] as a reader that names it by its id sees it, in the order of
-/// its fields.
+/// its words.
 pub static RUNTIME_LIMITS: [LimitEntry<RuntimeLimits>; RUNTIME_LIMIT_COUNT] = [
     LimitEntry::of::<MaxLocatorLen>(),
     LimitEntry::of::<MaxStaticConnect>(),
