@@ -7751,6 +7751,25 @@
       "carry_forward_bullets": [
         "Open: Layer C1st's facility drivers call a requirement door the defconfig packages leave out (fixed on its lane, with the deny scenarios to be judged on a package that builds the door). The Windows build of the shared sleep body is judged by the hosted Platform job. The doors area still owes the session counts the first open states about 300 bytes before that lane lands."
       ]
+    },
+    "Round 4651": {
+      "decision_summary": "An integration toward the receive Ir budget of docs/win-budget/ir-receive.md and the measurement the remaining LOSS rows need. An in-place receipt is stamped at its turn's time instead of reading the clock per datagram, and a declared peer key keeps its subscriber set so a repeated push skips the subscriber scan; ship W per received message went 5,133.7 to 5,090.5 and 5,092.7 on the two lanes. The shipped wz arm gains a per-operation Ir count (opprofile) and throughput is graded by each arm's no-drop rate, so get and declare stages can be measured on the form that ships.\n\nThe staged handshake extension chains are held by one build cfg the build script derives, instead of features repeated at each item. Layer C1st calls the requirement door only in libraries that build it and judges the denied runs on a second package that turns the doors on.",
+      "changes_bullets": [
+        "crates/wz-session-core: unicast receipt stamped at the turn's time (rx-in-place); match_set.rs, a remembered subscriber set per declared peer key, invalidated by subscriber epoch, alias and class; ext_chains_cfg.rs, the one cfg wz_ext_chains for the staged chains.",
+        "scripts/pico-compare.sh, scripts/host-bench: opprofile per operation on the shipped arm, parity throughput by no-drop rate. scripts/lib/abi_stamp_gate.py at revision 6.",
+        "scripts/lib/facility_trace.py, facility_drivers, wz_package.py --capability, wz_config.py with_capabilities, run-ci.sh C1st: a door-held package and --judge-doors.",
+        "docs/zenoh-logic-as-sce-kinds: S1, S2 and files.md place ext_chains_cfg.rs and match_set.rs."
+      ],
+      "verification_bullets": [
+        "Run through bx from the integration worktree on f3fa44603: each changed crate checked alone, the changed crates' tests and clippy with -D warnings, the coop, pico, threads and direct combinations, wz_config.py --check, size_ledger_gate --check and the capability cost check, every step exit 0 except the logic census coverage gate, which lacked rows for the two new files and passes after 300539529. Each lane was measured on its own: receive subprofile (callgrind, ship form) and its tests. The facility lane ran its selftests and Layer C1st, whose only red lines are the host-name dials the coop engine cannot resolve yet. Locally on the tip: wz_config --check and --selftest, wz_package and facility_trace selftests, runci_plan, logic_census_coverage_gate (rc=0)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open: Layer C1st stays red on the host-name dial scenarios until the coop resolver lane lands. A remembered set for a key named by text, so the harness's literal keys use it, is measured on its lane. The receive keepalive deadline cache is judged on the nostd shipped cell, which this round's opprofile tool now builds. The SH2 artifact split is rebased on this round, its pico-compare library path matched to the shipped arm."
+      ]
     }
   },
   "inventory_entries": {
