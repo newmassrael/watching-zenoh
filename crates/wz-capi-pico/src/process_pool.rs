@@ -1261,7 +1261,7 @@ impl Reserved {
         let fixed = self.fixed;
         let held = self.stages.get_mut(at as usize)?;
         if held.is_none() && !fixed {
-            return lay_stage(held, &first_plan()?, at).ok();
+            return lay_stage(held, first_plan()?, at).ok();
         }
         held.as_mut()
     }
@@ -1423,7 +1423,7 @@ fn open_reservation(limits: &SessionLimits, held: &Held) -> Option<Plan> {
 #[cfg(test)]
 fn open_reservation(limits: &SessionLimits, held: &Held) -> Option<Plan> {
     open_plan(limits, held).ok()?;
-    first_plan()
+    first_plan().copied()
 }
 
 /// The counts of the build's pools: [`counts_of`] the limits the library opens a session under
@@ -1688,15 +1688,19 @@ const BUILT_PLAN: Result<Plan, Unplanned> = match open_plan(&session_limits(), &
 
 /// The plan an object taken before any open reserves its stage's pools from: the build's
 /// ([`BUILT_PLAN`]).
+/// Read where it lies, not copied out for each stage that is laid of it.
 #[cfg(not(test))]
-fn first_plan() -> Option<Plan> {
-    BUILT_PLAN.ok()
+fn first_plan() -> Option<&'static Plan> {
+    const BUILT: &Result<Plan, Unplanned> = &BUILT_PLAN;
+    BUILT.as_ref().ok()
 }
 
 /// The plan this crate's unit-test binary reserves its stages from ([`test_counts`]).
 #[cfg(test)]
-fn first_plan() -> Option<Plan> {
-    Plan::of(&test_counts()?).ok()
+fn first_plan() -> Option<&'static Plan> {
+    extern crate std;
+    static PLAN: std::sync::OnceLock<Option<Plan>> = std::sync::OnceLock::new();
+    PLAN.get_or_init(|| Plan::of(&test_counts()?).ok()).as_ref()
 }
 
 /// The counts of this crate's unit-test binary: the build's once for each test the runner runs
