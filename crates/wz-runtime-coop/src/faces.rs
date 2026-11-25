@@ -60,6 +60,16 @@ pub trait FaceSession {
 
     /// The reason of the Close the link's peer sent, once it sent one.
     fn close_reason(&self) -> Option<CloseReason>;
+
+    /// What a wait over the link's input found in its stack, `ready` or not, or, `true`, that the
+    /// session's links moved since ([`LinkSupervisor::links_moved`]). Told only of a link its
+    /// owner waits on. A link whose step passes over a stack that gave nothing reads it again once
+    /// told `true`, so a step reads only the stacks a wait found input in. The provided form
+    /// keeps nothing: the link is read at every step.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    fn input_seen(&self, ready: bool) {
+        let _ = ready;
+    }
 }
 
 /// One face as the session keeps it: the face's number and its link, beside whatever else the
@@ -1216,13 +1226,25 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         }
     }
 
-    /// Take back a read's wait, once made ([`IdleWait::wait`]), and mark each port it found
-    /// ready: the session's buffer of its waits, which the wait took whole ([`Self::idle_wait`]).
+    /// Take back a read's wait, once made ([`IdleWait::wait`]), mark each port it found ready, and
+    /// tell each link its owner waits on whether it found input in its stack
+    /// (`FaceSession::input_seen`, with `listen` or `group`): the session's buffer of its
+    /// waits, which the wait took whole ([`Self::idle_wait`]).
     /// Out of line: the open's steps and each read hand their wait back.
     #[inline(never)]
     pub fn waited(&mut self, wait: IdleWait) {
         if let IdleWait::Input { mut on, .. } = wait {
             // What the wait left in the buffer is what it found ready (`IdleWait::wait`).
+            // A link the wait did not look at (one that held input, or waited for a buffer) is
+            // told it found nothing all the same: what it holds is read whatever it is told,
+            // and the next wait or move reads its stack.
+            #[cfg(any(feature = "listen", feature = "group"))]
+            for wire in self.faces().filter_map(|face| face.link().wire()) {
+                if let Some(port) = wire.input {
+                    wire.session
+                        .input_seen(on.iter().any(|ready| ready.on == port));
+                }
+            }
             for listening in &mut self.listeners {
                 if listening
                     .on
@@ -1233,6 +1255,19 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             }
             on.clear();
             self.waits = Some(on);
+        }
+    }
+
+    /// The session's links moved: each link its owner waits on reads its stack at its next step,
+    /// whatever a wait found there before. A run of steps that makes no wait (a group's burst,
+    /// what a link took in one receive) passes over a stack that gave nothing until the move
+    /// that ends it, so no link waits longer than a move for its input to be read.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    pub fn links_moved(&self) {
+        for wire in self.faces().filter_map(|face| face.link().wire()) {
+            if wire.input.is_some() {
+                wire.session.input_seen(true);
+            }
         }
     }
 
@@ -1284,13 +1319,15 @@ mod tests {
         }
     }
 
-    /// A session's half of a link: whether it is established, the node it reached, and how often
-    /// it was ended.
+    /// A session's half of a link: whether it is established, the node it reached, how often it
+    /// was ended, and what it was last told of its stack.
     struct Session {
         established: bool,
         node: Option<SessionZid>,
         ended: Rc<Cell<u32>>,
         closed: Option<CloseReason>,
+        #[cfg(any(feature = "listen", feature = "group"))]
+        seen: Rc<Cell<Option<bool>>>,
     }
 
     impl FaceSession for Session {
@@ -1308,6 +1345,11 @@ mod tests {
 
         fn close_reason(&self) -> Option<CloseReason> {
             self.closed
+        }
+
+        #[cfg(any(feature = "listen", feature = "group"))]
+        fn input_seen(&self, ready: bool) {
+            self.seen.set(Some(ready));
         }
     }
 
@@ -1503,6 +1545,8 @@ mod tests {
             node: node.map(|zid| SessionZid::new(zid).expect("a zid")),
             ended: Rc::new(Cell::new(0)),
             closed: None,
+            #[cfg(any(feature = "listen", feature = "group"))]
+            seen: Rc::new(Cell::new(None)),
         }
     }
 
@@ -2073,6 +2117,68 @@ mod tests {
                 _ => panic!("a wait on the link and the group"),
             }
         }
+    }
+
+    /// A wait tells each link its owner waits on whether it found input in the link's stack, and a
+    /// move tells each that its stack is read again; a link that waits in its own loop is told
+    /// nothing, nor is any link by a read that made no wait. Turned red by a wait that tells a link
+    /// it found nothing in that it found input (each link read at every step again), by one that
+    /// tells a link it found input in that it found none (its input not read until a move), by a
+    /// move that leaves a link quiet (a stack a run of steps without a wait passed over not read
+    /// again), or by a link of its own loop told it is quiet.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    #[test]
+    fn a_wait_tells_each_waited_link_what_it_found_and_a_move_reads_them_all() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let waited = |session: Session, on: WaitOn| -> TestLink {
+            let task = local.spawn_local(async { DriverOutcome::Terminated });
+            let link = CellRc::boxed(Waited { on, owes: false }).into_link();
+            let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
+            Link::Up(Wire::new(session, task, link, input_wait, room_wait))
+        };
+        let (found, empty, own) = (
+            session(true, None),
+            session(true, None),
+            session(true, None),
+        );
+        let (found_seen, empty_seen, own_seen) =
+            (found.seen.clone(), empty.seen.clone(), own.seen.clone());
+        let mut faces = supervisor(waited(found, WaitOn::Socket(3)), 3);
+        let empty = TestFace {
+            id: 1,
+            link: waited(empty, WaitOn::Socket(4)),
+        };
+        assert!(faces.place_face(1, empty).is_ok());
+        let own = TestFace {
+            id: 2,
+            link: Link::Up(wire(&local, own, false, false)),
+        };
+        assert!(faces.place_face(2, own).is_ok());
+        let seen = || (found_seen.get(), empty_seen.get(), own_seen.get());
+
+        faces.waited(IdleWait::None);
+        faces.waited(IdleWait::Sleep(1));
+        assert_eq!(
+            seen(),
+            (None, None, None),
+            "a read that made no wait tells nothing"
+        );
+        faces.waited(IdleWait::Input {
+            on: vec![LinkWait::input(WaitOn::Socket(3))],
+            ms: 10,
+        });
+        assert_eq!(
+            seen(),
+            (Some(true), Some(false), None),
+            "the link found ready reads its stack, the other not, and the own loop's is not told"
+        );
+        faces.links_moved();
+        assert_eq!(
+            seen(),
+            (Some(true), Some(true), None),
+            "a move reads every waited link's stack again"
+        );
     }
 
     /// A read with more to wait on than the open reserved room for waits on what fits and looks

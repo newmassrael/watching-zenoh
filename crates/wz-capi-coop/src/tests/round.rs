@@ -1507,3 +1507,90 @@ fn a_round_reading_a_rejoined_message_is_handed_out_with_its_gate_shut() {
     assert_eq!(reads.get(), 1, "the gate reads the link again");
     assert_eq!(CHAINS.in_use(), 0, "and let go of the buffer first");
 }
+
+/// A link that gives a datagram while `input` says so, holds input it took while `holds` says
+/// so, and counts how often its stack is asked.
+#[cfg(any(feature = "listen", feature = "group"))]
+#[derive(Default)]
+struct Stacked {
+    input: Cell<bool>,
+    holds: Cell<bool>,
+    reads: Cell<usize>,
+}
+
+#[cfg(any(feature = "listen", feature = "group"))]
+impl wz_runtime_coop::session_drive::SessionDatagramLink for Stacked {
+    fn service(&self) {}
+
+    fn try_recv(&self) -> Option<wz_session_core::link::RxFrame> {
+        self.reads.set(self.reads.get() + 1);
+        None
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        self.reads.set(self.reads.get() + 1);
+        if self.input.get() {
+            f(&[1]);
+        }
+        self.input.get()
+    }
+
+    fn holds_input(&self) -> bool {
+        self.holds.get()
+    }
+}
+
+/// The gate of a link its owner waits on passes over the link's stack once it gave nothing, until
+/// a wait finds input there or the session's links move; a wait that finds nothing passes over it
+/// too, and input the link took already is read all the same. A link no wait looked at, which
+/// waits in its own loop, is read at every step. Turned red by a gate that reads a stack that gave
+/// nothing (each link of the session asked at every step), by one that passes over a stack a wait
+/// found input in or the links moved since, by one that passes over input the link holds, or by
+/// one that passes over a link of its own loop.
+#[cfg(any(feature = "listen", feature = "group"))]
+#[test]
+fn the_gate_passes_over_a_quiet_stack_until_a_wait_finds_input_or_the_links_move() {
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    // SAFETY: this thread is the round's one writer, as a session's step is under its lock, and
+    // the round outlives the gate.
+    let stack = Rc::new(Stacked::default());
+    let gate = unsafe { RoundGate::new(stack.clone(), round(4), ONE) };
+    let take = || gate.recv_with(&mut |_: &[u8]| {});
+    let reads = || stack.reads.get();
+
+    assert!(!take());
+    assert!(!take());
+    assert_eq!(reads(), 2, "a link no wait looked at is read at every step");
+
+    gate.input_seen(true);
+    stack.input.set(true);
+    assert!(take(), "a stack a wait found input in is read");
+    stack.input.set(false);
+    assert!(!take());
+    assert_eq!(reads(), 4);
+    assert!(!take());
+    assert!(gate.try_recv().is_none());
+    assert_eq!(reads(), 4, "a stack that gave nothing is passed over");
+
+    stack.holds.set(true);
+    assert!(!take());
+    assert_eq!(reads(), 5, "input the link took already is read");
+    stack.holds.set(false);
+
+    gate.input_seen(true);
+    assert!(!take());
+    assert_eq!(reads(), 6, "the links moved: the stack is read again");
+
+    stack.input.set(true);
+    gate.input_seen(false);
+    assert!(!take());
+    assert_eq!(reads(), 6, "a stack a wait found nothing in is passed over");
+    gate.input_seen(true);
+    assert!(take());
+    assert_eq!(
+        reads(),
+        7,
+        "CONTROL: the next wait that finds input reads it"
+    );
+}
