@@ -55,11 +55,12 @@ use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_session_core::app_link_table::{
-    kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, LinkInterest,
-    OpenProgress, SendGate, SendStep, StreamRead, DATAGRAM_MAX,
+    AcceptRead, AppLinkKind, DatagramRead, LinkHandle, LinkInterest, OpenProgress, SendGate,
+    SendStep, StreamRead, DATAGRAM_MAX,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
 use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
+use wz_session_core::group_locator::{GroupLocator, UdpGroup};
 
 use crate::group_transport::{GroupRx, GroupSend, GroupTransport};
 use crate::ip_stack::{heap_link, HeapLink};
@@ -1488,8 +1489,14 @@ impl SessionLinks for AppLinks {
         self.cells = Some(cells);
     }
 
-    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        if kind_for_locator(endpoint, true) != Some(AppLinkKind::Group) {
+    // A group the program joins names the interface it is joined on, as a listen on a group's
+    // address that names none is a datagram listen (`kind_for_locator`).
+    fn open_group(
+        &self,
+        endpoint: &str,
+        group: &GroupLocator,
+    ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        if group.udp().and_then(UdpGroup::iface).is_none() {
             return Err(LinkOpenError::Unsupported);
         }
         // A session that lent a table of group buffers gives the group one of them, and a group
@@ -1602,6 +1609,11 @@ mod tests {
 
     use super::*;
     use alloc::vec::Vec;
+
+    /// The group `endpoint` names, read as the transport reads it before it asks the links.
+    fn group_of(endpoint: &str) -> GroupLocator {
+        wz_session_core::group_locator::parse_group_locator(endpoint).expect("a group endpoint")
+    }
 
     /// What `link` holds for the program, read through the offer a writer makes, with nothing
     /// taken: the front run, which is all of it while it has not wrapped.
@@ -2333,13 +2345,17 @@ mod tests {
         let (script, transport) = transport();
         let mut links = AppLinks::new(session(&transport, 64));
         links.lend_buffers(LinkTables::new(rx, tx, slot_len).with_group_rx(groups));
+        let group = group_of(GROUP);
         let mut first = links
-            .open_group(GROUP)
+            .open_group(GROUP, &group)
             .expect("a group in the table's buffer");
         assert!(first.lends_until_next_receive());
         assert_eq!(groups.in_use(), 1, "the group took the table's buffer");
         assert!(
-            matches!(links.open_group(GROUP), Err(LinkOpenError::Exhausted)),
+            matches!(
+                links.open_group(GROUP, &group),
+                Err(LinkOpenError::Exhausted)
+            ),
             "a second group finds the table held"
         );
         assert_eq!(
@@ -2356,17 +2372,17 @@ mod tests {
     fn the_links_join_a_group_through_the_program_and_refuse_what_names_none() {
         let (script, transport) = transport();
         let links = AppLinks::new(session(&transport, 64));
-        // Neither a datagram listen nor another scheme names a group: refused, with nothing asked
-        // of the program.
-        for endpoint in ["udp/192.0.2.9:7447", "tcp/239.7.7.7:7447#iface=lan7"] {
-            assert!(
-                matches!(links.open_group(endpoint), Err(LinkOpenError::Unsupported)),
-                "{endpoint}"
-            );
-        }
+        // A group that names no interface is a datagram listen on the group's address, not a
+        // group the program joins: refused, with nothing asked of the program.
+        let unpinned = "udp/239.7.7.7:7447";
+        assert!(matches!(
+            links.open_group(unpinned, &group_of(unpinned)),
+            Err(LinkOpenError::Unsupported)
+        ));
         assert!(script.opens.lock().unwrap().is_empty());
+        let pinned = "udp/239.7.7.7:7447#iface=lan7";
         let mut group = links
-            .open_group("udp/239.7.7.7:7447#iface=lan7")
+            .open_group(pinned, &group_of(pinned))
             .expect("a group the program joins");
         let (handle, kind, locator) = script.opens.lock().unwrap()[0].clone();
         assert_eq!(
@@ -2537,7 +2553,12 @@ mod tests {
             let refused = if listen {
                 links.open_listener(Locator::udp(PEER)).is_err()
             } else {
-                links.open_group("udp/239.7.7.7:7447#iface=lan7").is_err()
+                links
+                    .open_group(
+                        "udp/239.7.7.7:7447#iface=lan7",
+                        &group_of("udp/239.7.7.7:7447#iface=lan7"),
+                    )
+                    .is_err()
             };
             let took = started.elapsed();
             ended.store(true, std::sync::atomic::Ordering::SeqCst);

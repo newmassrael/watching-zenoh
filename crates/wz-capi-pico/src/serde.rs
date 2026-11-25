@@ -192,8 +192,13 @@ pub unsafe extern "C" fn z_bytes_writer_empty(writer: *mut z_owned_bytes_writer_
         if writer.is_null() {
             return Z_ERR_NULL;
         }
+        *writer = z_owned_bytes_writer_t::null_value();
+        let state = match crate::bytes::try_box(WriterState::new()) {
+            Ok(state) => state,
+            Err(no_room) => return no_room.code(),
+        };
         *writer = z_owned_bytes_writer_t {
-            handle: Box::into_raw(Box::new(WriterState::new())) as *mut c_void,
+            handle: Box::into_raw(state) as *mut c_void,
             _pad: [core::ptr::null_mut(); 4],
         };
         Z_OK
@@ -324,8 +329,13 @@ pub unsafe extern "C" fn ze_serializer_empty(serializer: *mut ze_owned_serialize
         if serializer.is_null() {
             return Z_ERR_NULL;
         }
+        *serializer = ze_owned_serializer_t::null_value();
+        let state = match crate::bytes::try_box(WriterState::new()) {
+            Ok(state) => state,
+            Err(no_room) => return no_room.code(),
+        };
         *serializer = ze_owned_serializer_t {
-            handle: Box::into_raw(Box::new(WriterState::new())) as *mut c_void,
+            handle: Box::into_raw(state) as *mut c_void,
             _pad: [core::ptr::null_mut(); 4],
         };
         Z_OK

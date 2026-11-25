@@ -7,13 +7,29 @@
 //! (`RUNTIME_TIMERS`): none in a build none of whose tasks sleeps.
 
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::CoopLocalSet;
+use wz_runtime_coop::{CoopLocalSet, CoopRuntime};
 use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
 
 use super::client_config;
+use crate::arena::{AllocatorMemory, ArenaPlan, SessionArena};
 use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables, RUNTIME_TIMERS};
 use crate::CoopConfig;
+
+/// The runtime `tables` are for, placed as an open places it: in a span of an arena that holds
+/// that span alone, which the runtime keeps until its last holder lets go.
+fn placed_runtime(tables: RuntimeTables) -> CoopRuntime<PosixClock> {
+    let bytes = tables
+        .placed_bytes::<PosixClock>()
+        .expect("a span of the tables' rows");
+    let mut plan = ArenaPlan::vacant();
+    plan.holding_runtime(bytes).expect("the span fits");
+    let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has it");
+    let place = arena.runtime_place(bytes).expect("the plan holds the span");
+    tables
+        .runtime(PosixClock, place)
+        .expect("the span fits the runtime")
+}
 
 /// A read's waits are reserved at the open for every link the session may wait on at once: each
 /// face's (the dial role's and each `max_faces` admits), each port's, each group's and the
@@ -71,7 +87,7 @@ fn a_sessions_runtime_reserves_timers_only_for_a_task_that_sleeps() {
         max_faces: 0,
         ..client_config()
     });
-    let runtime = tables.runtime(PosixClock);
+    let runtime = placed_runtime(tables);
     assert_eq!(runtime.timers().capacity(), RUNTIME_TIMERS);
     assert_eq!(runtime.timers().next_deadline_us(), None);
     assert_eq!(
@@ -120,7 +136,7 @@ fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
         ..client_config()
     });
     assert_eq!(dialling.rows.tasks, 11, "the dial role's and ten faces");
-    let runtime = tables.runtime(PosixClock);
+    let runtime = placed_runtime(tables);
     let local = CoopLocalSet::new(&runtime);
     let sessions: Vec<_> = (0..10u8)
         .map(|at| {
@@ -156,7 +172,7 @@ fn a_dial_only_runtime_runs_one_task_at_a_time_whatever_faces_the_config_states(
         max_faces: 3,
         ..client_config()
     });
-    let runtime = tables.runtime(PosixClock);
+    let runtime = placed_runtime(tables);
     let local = CoopLocalSet::new(&runtime);
     let first = local
         .try_spawn_local(async { 1u8 })
@@ -201,7 +217,7 @@ fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger
         max_faces: 0,
         ..client_config()
     });
-    let runtime = tables.runtime(PosixClock);
+    let runtime = placed_runtime(tables);
     let local = CoopLocalSet::new(&runtime);
     let large = [7u8; LARGER];
     let refused = local

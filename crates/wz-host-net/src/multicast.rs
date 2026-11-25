@@ -50,13 +50,13 @@ pub struct SocketConfig<'a> {
     pub iface: Option<&'a str>,
     /// `#ttl=<n>`: the multicast hop limit. `None` leaves the OS default, which is 1 — one subnet.
     pub ttl: Option<u32>,
-    /// `#join=<group>` values, joined in addition to the locator's own group.
-    pub extra_joins: &'a [String],
+    /// `#join=<group>` groups, joined in addition to the locator's own group, each of its family.
+    pub extra_joins: &'a [IpAddr],
     /// R2791 — `#bind=<host:port>` (zenoh `BIND_SOCKET`): the LOCAL address the SENDING socket
     /// binds. Read by [`bind_sender`] only; the joined socket binds its family's wildcard or it
     /// cannot receive the group at all, which is the split upstream makes between the `ucast_sock`
     /// it binds here and the `mcast_sock` it does not.
-    pub bind: Option<&'a str>,
+    pub bind: Option<SocketAddr>,
     /// The `multicast-loopback` policy.
     pub loopback: Loopback,
     /// The `multicast-link-requires-iface` policy: a multicast LINK (the joined socket of
@@ -67,20 +67,20 @@ pub struct SocketConfig<'a> {
 }
 
 impl SocketConfig<'_> {
-    /// Parse every `#join=` value into a group address of the locator group's own family,
+    /// Every `#join=` group as an address of the locator group's own family (`of_family`),
     /// `family` naming it for the refusal.
     ///
-    /// Refused rather than skipped on a bad value, and refused BEFORE any membership is
-    /// installed: a partially-joined receiver is subscribed to some of what it was told and silent
-    /// about the rest, which is the shape that looks configured and is not. A group of the OTHER
-    /// family is refused the same way, as upstream does: it parses each `join` as the group's own
-    /// address type (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+    /// Refused rather than skipped, and refused BEFORE any membership is installed: a
+    /// partially-joined receiver is subscribed to some of what it was told and silent about the
+    /// rest, which is the shape that looks configured and is not. A group of the OTHER family is
+    /// refused as upstream refuses it: it parses each `join` as the group's own address type
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
     /// `let g: Ipv6Addr = g.parse().map_err(|e| zerror!("{}: {}", mcast_addr, e))?;`).
-    fn parsed_joins<A: core::str::FromStr>(&self, family: &str) -> io::Result<Vec<A>> {
+    fn joins_of<A>(&self, family: &str, of_family: fn(IpAddr) -> Option<A>) -> io::Result<Vec<A>> {
         self.extra_joins
             .iter()
             .map(|g| {
-                g.parse::<A>().map_err(|_| {
+                of_family(*g).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
@@ -91,6 +91,22 @@ impl SocketConfig<'_> {
                 })
             })
             .collect()
+    }
+}
+
+/// `address` when it is an IPv4 one.
+fn v4_of(address: IpAddr) -> Option<std::net::Ipv4Addr> {
+    match address {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(_) => None,
+    }
+}
+
+/// `address` when it is an IPv6 one.
+fn v6_of(address: IpAddr) -> Option<std::net::Ipv6Addr> {
+    match address {
+        IpAddr::V6(v6) => Some(v6),
+        IpAddr::V4(_) => None,
     }
 }
 
@@ -182,7 +198,7 @@ impl Plan {
                     .transpose()?
                     .flatten(),
                 joins: match joins {
-                    JoinsRead::Yes => cfg.parsed_joins("IPv4")?,
+                    JoinsRead::Yes => cfg.joins_of("IPv4", v4_of)?,
                     JoinsRead::No => Vec::new(),
                 },
             },
@@ -194,7 +210,7 @@ impl Plan {
                     .transpose()?
                     .flatten(),
                 joins: match joins {
-                    JoinsRead::Yes => cfg.parsed_joins("IPv6")?,
+                    JoinsRead::Yes => cfg.joins_of("IPv6", v6_of)?,
                     JoinsRead::No => Vec::new(),
                 },
             },
@@ -306,10 +322,9 @@ impl Plan {
     /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `let bind_addr = SocketAddr::from_str(bind_socket)?;`),
     /// and two of its properties are deliberate rather than incidental:
     ///
-    /// - The value is parsed as a LITERAL `host:port`, never resolved. Upstream uses
-    ///   `SocketAddr::from_str` here while the unicast dial path resolves the same key through a
-    ///   name lookup, so mirroring the dial path's resolver would accept hostnames zenoh refuses
-    ///   on this one.
+    /// - The value is a LITERAL `host:port`, never resolved: the endpoint's reader parses it with
+    ///   `SocketAddr::from_str` as upstream does here, while the unicast dial path resolves the
+    ///   same key through a name lookup that would accept hostnames zenoh refuses on this one.
     /// - A `bind` of the other family is REFUSED rather than ignored, in upstream's own words.
     ///   Binding IPv4 and joining IPv6 cannot work, and silently falling back to the wildcard
     ///   would egress from an address the operator did not ask for -- the same posture as the
@@ -322,19 +337,13 @@ impl Plan {
     /// `udp/0.0.0.0:<port>` would differ from upstream's interface address.
     fn egress_local_addr(
         &self,
-        bind: Option<&str>,
+        bind: Option<SocketAddr>,
         iface: Option<&str>,
         group_port: u16,
     ) -> io::Result<SocketAddr> {
-        let Some(bind) = bind else {
+        let Some(bind_addr) = bind else {
             return Ok(self.fill_unspecified(self.wildcard(0), iface));
         };
-        let bind_addr: SocketAddr = bind.parse().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Couldn't parse UDP multicast bind address: {bind}"),
-            )
-        })?;
         let group = self.peer(group_port);
         match (bind_addr, group) {
             (SocketAddr::V6(local), SocketAddr::V4(dest)) => Err(io::Error::new(

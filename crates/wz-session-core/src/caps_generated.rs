@@ -112,6 +112,8 @@ pub(super) const ADVANCED_SUBSCRIBER_PENDING_BYTES: usize = limit(
 pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
 pub(super) const MAX_GROUP_ENDPOINT_LEN: usize =
     limit(option_env!("WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN"), 96);
+pub(super) const MAX_RAWETH_ENDPOINT_LEN: usize =
+    limit(option_env!("WZ_LIMIT_MAX_RAWETH_ENDPOINT_LEN"), 160);
 pub(super) const MAX_GROUP_MEMBERS: usize = limit(option_env!("WZ_LIMIT_MAX_GROUP_MEMBERS"), 32);
 pub(super) const MAX_MEMBER_KEYEXPRS: usize =
     limit(option_env!("WZ_LIMIT_MAX_MEMBER_KEYEXPRS"), 16);

@@ -138,25 +138,71 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
     );
 }
 
-/// [`GROUP`] with keys after it, `len` bytes in all.
+/// An endpoint that names no group a session joins is refused by the reading of it, by its
+/// reason, before the stack is asked: no multicast address, metadata a group does not keep, an
+/// extra group of the other family. The CONTROL is [`GROUP`], which is joined. Turned red by a
+/// join that asks the stack before it reads the endpoint, or reads it under another reason.
+#[test]
+fn a_group_endpoint_read_as_no_group_is_refused_by_its_reason() {
+    use crate::Refusal;
+    use wz_session_core::group_locator::GroupLocatorError;
+
+    let network = Arc::new(Network::default());
+    for (endpoint, why) in [
+        (
+            "udp/192.0.2.9:7447#iface=lan7",
+            GroupLocatorError::NotAGroup,
+        ),
+        (
+            "udp/239.7.7.7:7447?rel=1#iface=lan7",
+            GroupLocatorError::MetadataNotKept,
+        ),
+        (
+            "udp/239.7.7.7:7447#iface=lan7;join=ff02::1",
+            GroupLocatorError::BadValue("join"),
+        ),
+    ] {
+        match open_member(&network, 1, member_config(1, endpoint)) {
+            Err(OpenError::Group(refused)) => {
+                assert_eq!(refused.why, Refusal::GroupEndpoint(why), "{endpoint}")
+            }
+            Err(other) => panic!("{endpoint}: refused as {other:?}"),
+            Ok(_) => panic!("{endpoint}: opened"),
+        }
+    }
+    assert!(
+        network.joins.lock().unwrap().is_empty(),
+        "the stack was not asked"
+    );
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("CONTROL: the group");
+    assert_eq!(network.joins_of(1), 1, "the stack was asked once");
+    SessionDrive::close(&*member);
+}
+
+/// [`GROUP`] with a key no group reads after it, `len` bytes in all.
 fn padded(len: usize) -> String {
-    format!("{GROUP};ttl={}", "1".repeat(len - GROUP.len() - 5))
+    format!("{GROUP};pad={}", "1".repeat(len - GROUP.len() - 5))
 }
 
 /// A group whose endpoint is one byte past `MAX_GROUP_ENDPOINT_LEN` is refused by that name before
 /// the stack is asked to join it: a member's link is reported by the endpoint in a row of that
 /// length, and this engine holds no row on the heap. The CONTROL is an endpoint of the bound, which
-/// is joined. Turned red by a join that asks the stack before it measures the endpoint.
+/// is joined. Turned red by a join that asks the stack before it reads the endpoint.
 #[test]
 fn a_group_endpoint_past_its_row_is_refused_before_the_stack_is_asked() {
     use crate::Refusal;
     use wz_session_core::caps::MAX_GROUP_ENDPOINT_LEN;
+    use wz_session_core::group_locator::GroupLocatorError;
 
     let network = Arc::new(Network::default());
     let past = padded(MAX_GROUP_ENDPOINT_LEN + 1);
     assert_eq!(past.len(), MAX_GROUP_ENDPOINT_LEN + 1);
     match open_member(&network, 1, member_config(1, &past)) {
-        Err(OpenError::Group(why)) => assert_eq!(why.why, Refusal::GroupEndpointTooLong, "{why}"),
+        Err(OpenError::Group(why)) => assert_eq!(
+            why.why,
+            Refusal::GroupEndpoint(GroupLocatorError::TooLong),
+            "{why}"
+        ),
         Err(other) => panic!("refused as {other:?}"),
         Ok(_) => panic!("opened"),
     }

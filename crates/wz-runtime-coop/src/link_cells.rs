@@ -123,9 +123,9 @@ pub struct CellRc<T: ?Sized> {
 
 /// A cell for a slot of `layout`, its head written with one handle, `whole` and `place`, its
 /// value not yet: a claimed cell of `cells` when a table is lent, `None` when every cell is taken
-/// or a cell is too small or not aligned for the slot; a block of the heap when no table is. Out of
-/// line: the one body of every kind of value a cell holds, which tells them apart by the slot's
-/// layout, the drop of its value and where the value lies alone.
+/// or a cell is too small or not aligned for the slot; a block of the heap when no table is, `None`
+/// when the heap refuses it. Out of line: the one body of every kind of value a cell holds, which
+/// tells them apart by the slot's layout, the drop of its value and where the value lies alone.
 #[inline(never)]
 fn head_in(
     cells: Option<&LentByteCells>,
@@ -135,7 +135,7 @@ fn head_in(
 ) -> Option<NonNull<CellHead>> {
     match cells {
         Some(cells) => table_head(cells, layout, whole, place),
-        None => Some(heap_head(layout, whole, place)),
+        None => heap_head(layout, whole, place),
     }
 }
 
@@ -166,16 +166,15 @@ fn table_head(
 }
 
 /// A block of the heap for a slot of `layout`, its head written with `whole` and `place`: the
-/// cell of a value no table is lent for, given back to the heap with the same layout.
+/// cell of a value no table is lent for, given back to the heap with the same layout. `None` when
+/// the heap refuses the block: a link made then is refused as one past a table's cells is, and the
+/// program goes on.
 #[inline(never)]
-fn heap_head(layout: Layout, whole: DropWhole, place: usize) -> NonNull<CellHead> {
+fn heap_head(layout: Layout, whole: DropWhole, place: usize) -> Option<NonNull<CellHead>> {
     // SAFETY: a slot's layout is never of no bytes: it holds a head.
-    let base = unsafe { alloc(layout) };
-    let Some(base) = NonNull::new(base) else {
-        handle_alloc_error(layout)
-    };
+    let base = NonNull::new(unsafe { alloc(layout) })?;
     // SAFETY: the block is the heap's, of the slot's layout, and this call's alone.
-    unsafe { write_head(base, Owner::Heap(layout), whole, place) }
+    Some(unsafe { write_head(base, Owner::Heap(layout), whole, place) })
 }
 
 /// The head of a cell at `base`, written with one handle, `owner`, `whole` and `place`.
@@ -269,7 +268,7 @@ impl<K> CellRc<K> {
 
     /// `value` in a cell of `cells` when a table is lent, or `value` back when none of its cells
     /// takes it ([`Self::place`]); in a cell of its own on the heap when no table is
-    /// ([`Self::boxed`]). What every maker of a link's part asks, whichever memory the session
+    /// ([`Self::boxed`]), or `value` back when the heap refuses the cell. What every maker of a link's part asks, whichever memory the session
     /// lends. The cell is made by `head_in`, out of line; what is left here, for each kind of
     /// value, is moving the value into it.
     pub fn in_cells(cells: Option<&LentByteCells>, value: K) -> Result<Self, K> {
@@ -289,7 +288,8 @@ impl<K> CellRc<K> {
     /// A cell for a value of `K`, claimed and not yet written: one of `cells` when a table is
     /// lent, `None` when every cell is taken or a cell is too small or not aligned for it, and one
     /// of its own on the heap when none is ([`Self::in_cells`]). Its value is written in it where
-    /// it stays ([`CellClaim::made`]); one let go of unwritten goes back.
+    /// it stays ([`CellClaim::made`]); one let go of unwritten goes back. `None` too when the
+    /// heap refuses the cell.
     pub fn claim(cells: Option<&LentByteCells>) -> Option<CellClaim<K>> {
         let head = head_in(
             cells,
@@ -303,9 +303,13 @@ impl<K> CellRc<K> {
         })
     }
 
-    /// `value` in a cell of its own on the heap: the handle of a link lent no table.
+    /// `value` in a cell of its own on the heap: the handle of a link lent no table. A heap that
+    /// refuses the cell ends the program, as a `Box` of the value would.
     pub fn boxed(value: K) -> Self {
-        let head = heap_head(Layout::new::<Slot<K>>(), Slot::<K>::WHOLE, Slot::<K>::PLACE);
+        let layout = Layout::new::<Slot<K>>();
+        let Some(head) = heap_head(layout, Slot::<K>::WHOLE, Slot::<K>::PLACE) else {
+            handle_alloc_error(layout)
+        };
         // SAFETY: as in `Self::in_cells`.
         unsafe { Self::fill(head, value) }
     }
@@ -397,7 +401,7 @@ impl<A, B> CellRc<(A, B)> {
     /// `first` and `second` together in one cell of `cells` ([`Self::in_cells`], or one of the
     /// heap when no table is lent), and a handle on each: two values that are made together and
     /// shared apart, the cell given back with the last handle on either, which drops both. Both
-    /// back when no cell takes them.
+    /// back when no cell takes them or the heap refuses one.
     pub fn halves(
         cells: Option<&LentByteCells>,
         first: A,
@@ -410,7 +414,7 @@ impl<A, B> CellRc<(A, B)> {
     /// Two values `write` writes together in one cell of `cells` ([`Self::in_cells`], or one of
     /// the heap when no table is lent), where they stay, and a handle on each, as [`Self::halves`]
     /// answers: neither value is made in a frame and moved into the cell. `None` when no cell
-    /// takes them, `write` not called and let go of with what it holds.
+    /// takes them or the heap refuses one, `write` not called and let go of with what it holds.
     ///
     /// # Safety
     /// `write` leaves a whole `A` at the first place it is handed and a whole `B` at the second
@@ -834,6 +838,35 @@ mod tests {
         assert!(!CellRc::<[u64; 4]>::fits(ARENA_ALIGN));
         assert!(CellRc::place(&cells, [7u64; 4]).is_err());
         assert_eq!(cells.in_use(), 0);
+    }
+
+    /// A value lent no table whose cell the heap refuses is handed back, a claim of such a cell
+    /// is none and halves are both handed back: the refusal is the caller's to answer, and the
+    /// program goes on. Turned red by a heap cell that ends the program when the heap refuses it.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_cell_the_heap_refuses_hands_its_value_back() {
+        let drops = Rc::new(Cell::new(0));
+        let (one, claimed, pair) = crate::table_tests::refused(|| {
+            (
+                CellRc::in_cells(None, Counted(drops.clone())),
+                CellRc::<Counted>::claim(None).is_some(),
+                CellRc::halves(None, Counted(drops.clone()), 7u32),
+            )
+        });
+        let one = one.err().expect("the value handed back");
+        let (first, second) = pair.err().expect("both halves handed back");
+        assert_eq!((claimed, second, drops.get()), (false, 7, 0));
+        drop((one, first));
+        assert_eq!(
+            drops.get(),
+            2,
+            "each value is the caller's again, dropped once"
+        );
+        let placed = CellRc::in_cells(None, Counted(drops.clone()))
+            .ok()
+            .expect("a cell of the heap once it gives one");
+        assert_eq!(placed.name(), 7);
     }
 
     /// A handle seen as a trait object names the same value, and its last handle drops the value

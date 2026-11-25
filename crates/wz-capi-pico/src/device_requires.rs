@@ -230,18 +230,19 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
     }))
 }
 
-/// A group as the cooperative engine's host joiner reads it (`host_group::group_of`): a UDP
-/// multicast group, or a group the open cannot join.
+/// A group as the cooperative engine reads it before its host joiner is asked
+/// (`wz_session_core::group_locator::parse_group_locator`): a UDP multicast group, or a group the
+/// open cannot join.
 #[cfg(all(not(feature = "engine-tokio"), feature = "multicast-transport"))]
 fn read_group(endpoint: &str) -> Result<EndpointReading, Refused> {
     use wz_session_core::facilities::Endpoint;
     use wz_session_core::locator::Proto;
-    match wz_capi_coop::host_group::group_of(endpoint) {
-        Some(_) => Ok(Ok(Endpoint::Ip {
+    match wz_session_core::group_locator::parse_group_locator(endpoint) {
+        Ok(group) if group.udp().is_some() => Ok(Ok(Endpoint::Ip {
             proto: Proto::Udp,
             named: false,
         })),
-        None => Err((
+        _ => Err((
             crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
             "the open refuses this config: its group is not one the host joins",
         )),

@@ -30,6 +30,7 @@ use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
 
 use wz_session_core::byte_cells::LentByteCells;
+use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEnds, LinkKind, LinkRoom, LinkSendOutcome, LinkSubject,
     LostCause, RoomAnswer, RoomWait, RxFrame, TxSlot, TxSlotGrant,
@@ -882,8 +883,12 @@ where
         }))
     }
 
-    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        self.links.open_group(endpoint)
+    fn open_group(
+        &self,
+        endpoint: &str,
+        group: &GroupLocator,
+    ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        self.links.open_group(endpoint, group)
     }
 
     fn share_pump(pump: HeapLink) -> CellRc<dyn SessionDatagramLink> {

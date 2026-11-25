@@ -587,6 +587,10 @@ pub use wz_session_core::locality;
 /// so naming it never depends on a `transport-link-*` feature.
 pub use wz_session_core::locator;
 
+/// The group endpoint reader every engine opens a multicast group from, for a facade consumer
+/// that joins a group named by an endpoint (wz-ap-demo's `--multicast-locator`).
+pub use wz_session_core::group_locator;
+
 /// What an open of a configuration asks of the operating system (docs/target-build-contract.md
 /// T9), for the readers of a configuration this runtime runs: the zenoh-c open plan and the demo's
 /// sessions document.
@@ -4512,14 +4516,15 @@ pub struct McastSocketConfig<'a> {
     /// `#ttl=<n>`: the multicast hop limit. `None` leaves the OS default, which
     /// is 1 — one subnet.
     pub ttl: Option<u32>,
-    /// `#join=<group>` values, joined in addition to the locator's own group.
-    pub extra_joins: &'a [String],
+    /// `#join=<group>` groups, joined in addition to the locator's own group, each of its
+    /// family.
+    pub extra_joins: &'a [std::net::IpAddr],
     /// R2791 — `#bind=<host:port>` (zenoh `BIND_SOCKET`): the LOCAL address the
-    /// SENDING socket binds. Read by the egress constructor only; the joined
-    /// socket binds its family's wildcard or it cannot receive the group at
+    /// SENDING socket binds, of the group's family. Read by the egress constructor only; the
+    /// joined socket binds its family's wildcard or it cannot receive the group at
     /// all, which is the split upstream makes between the `ucast_sock` it binds
     /// here and the `mcast_sock` it does not.
-    pub bind: Option<&'a str>,
+    pub bind: Option<SocketAddr>,
     /// R2791 — `#dscp=<value>` (zenoh `DSCP`): written to `IP_TOS` /
     /// `IPV6_TCLASS` on whichever socket SENDS, keyed to the group's family as
     /// upstream keys it.
@@ -4600,8 +4605,13 @@ use wz_host_net::multicast::RxBind;
 /// R311y832 — the owned form of [`McastSocketConfig`], for the seams that cross
 /// a `tokio::spawn` and so cannot borrow. Same keys, same meaning; the
 /// borrowed view is taken back with [`as_socket_config`](Self::as_socket_config)
-/// at the socket. R2791 carried `bind` and `dscp` across with the rest — an
-/// owned form that dropped them would put the gap back one seam later.
+/// at the socket.
+///
+/// The keys are the group endpoint as
+/// [`parse_group_locator`](wz_session_core::group_locator::parse_group_locator) read it, the
+/// reader every engine opens a group from, so this runtime refuses what the others refuse
+/// (an endpoint past `MAX_GROUP_ENDPOINT_LEN`, a `join` or `bind` of the other family)
+/// before any socket exists, and holds every key, `bind` and `dscp` among them.
 #[derive(Debug, Clone)]
 #[cfg(any(
     feature = "scouting-active",
@@ -4609,16 +4619,9 @@ use wz_host_net::multicast::RxBind;
     feature = "transport-multicast"
 ))]
 pub struct McastGroupOptions {
-    /// `#iface=<name-or-ip>`.
-    pub iface: Option<String>,
-    /// `#ttl=<n>`.
-    pub ttl: Option<u32>,
-    /// `#join=<group>` values.
-    pub joins: Vec<String>,
-    /// R2791 — `#bind=<host:port>`, the sending socket's local address.
-    pub bind: Option<String>,
-    /// R2791 — `#dscp=<value>`, the sending socket's traffic class.
-    pub dscp: Option<u32>,
+    /// The socket keys of the group's endpoint; `None` for a group no endpoint named, which
+    /// states none.
+    pub keys: Option<wz_session_core::group_locator::UdpGroup>,
     /// The `multicast-loopback` policy, as [`McastSocketConfig::loopback`].
     pub loopback: MulticastLoopback,
     /// The `multicast-link-requires-iface` policy, as
@@ -4636,11 +4639,7 @@ impl McastGroupOptions {
     /// joins the group, holds them ([`McastSocketConfig::of_policy`]).
     pub const fn of_policy(policy: &wz_session_core::policy::SessionPolicy) -> Self {
         Self {
-            iface: None,
-            ttl: None,
-            joins: Vec::new(),
-            bind: None,
-            dscp: None,
+            keys: None,
             loopback: policy.multicast_loopback(),
             link_requires_iface: policy.multicast_link_requires_iface(),
         }
@@ -4648,12 +4647,15 @@ impl McastGroupOptions {
 
     /// Borrow this as the socket-facing config.
     pub fn as_socket_config(&self) -> McastSocketConfig<'_> {
+        use wz_session_core::group_locator::UdpGroup;
+
+        let keys = self.keys.as_ref();
         McastSocketConfig {
-            iface: self.iface.as_deref(),
-            ttl: self.ttl,
-            extra_joins: &self.joins,
-            bind: self.bind.as_deref(),
-            dscp: self.dscp,
+            iface: keys.and_then(UdpGroup::iface),
+            ttl: keys.and_then(UdpGroup::ttl),
+            extra_joins: keys.map(UdpGroup::joins).unwrap_or_default(),
+            bind: keys.and_then(UdpGroup::bind),
+            dscp: keys.and_then(UdpGroup::dscp),
             loopback: self.loopback,
             link_requires_iface: self.link_requires_iface,
         }
@@ -4756,6 +4758,45 @@ mod udp_multicast_config_tests {
                 on
             );
         }
+    }
+
+    /// A group endpoint's keys, as the group reader read them, reach the socket-facing config
+    /// each in its field, and a group named by no endpoint states none of them.
+    #[test]
+    fn a_group_endpoints_keys_reach_the_socket_config() {
+        use wz_session_core::group_locator::{parse_group_locator, GroupLocator};
+
+        let Ok(GroupLocator::Udp(group)) = parse_group_locator(
+            "udp/239.255.91.32:0#iface=lo;ttl=4;join=239.255.91.33;bind=127.0.0.1:0;dscp=0x28",
+        ) else {
+            panic!("a udp group endpoint");
+        };
+        let options = McastGroupOptions {
+            keys: Some(group),
+            ..McastGroupOptions::of_policy(&crate::policy::SessionPolicy::defaults())
+        };
+        let cfg = options.as_socket_config();
+        assert_eq!(cfg.iface, Some("lo"));
+        assert_eq!(cfg.ttl, Some(4));
+        assert_eq!(
+            cfg.extra_joins,
+            [std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                239, 255, 91, 33
+            ))]
+        );
+        assert_eq!(
+            cfg.bind,
+            Some(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)))
+        );
+        assert_eq!(cfg.dscp, Some(0x28));
+
+        let none = McastGroupOptions::of_policy(&crate::policy::SessionPolicy::defaults());
+        let cfg = none.as_socket_config();
+        assert_eq!(
+            (cfg.iface, cfg.ttl, cfg.bind, cfg.dscp),
+            (None, None, None, None)
+        );
+        assert!(cfg.extra_joins.is_empty());
     }
 
     /// The `multicast-link-requires-iface` value a link's config carries reaches the link this
@@ -4915,8 +4956,8 @@ mod udp_multicast_config_tests {
             .expect("the limit is a number");
         // The group itself and one more than the limit: past it by two.
         let first = u32::from(std::net::Ipv4Addr::new(239, 1, 0, 1));
-        let extra: Vec<String> = (0..=limit)
-            .map(|n| std::net::Ipv4Addr::from(first + n as u32).to_string())
+        let extra: Vec<std::net::IpAddr> = (0..=limit)
+            .map(|n| std::net::IpAddr::V4(std::net::Ipv4Addr::from(first + n as u32)))
             .collect();
         let crowded = || McastSocketConfig {
             extra_joins: &extra,
@@ -5028,7 +5069,7 @@ mod udp_multicast_config_tests {
             GROUP,
             7446,
             McastSocketConfig {
-                bind: Some("127.0.0.1:0"),
+                bind: Some(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0))),
                 ..defaults()
             },
         )
@@ -5101,7 +5142,7 @@ mod udp_multicast_config_tests {
             GROUP,
             7446,
             McastSocketConfig {
-                bind: Some("[::1]:0"),
+                bind: Some(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0))),
                 ..defaults()
             },
         )
@@ -5245,8 +5286,12 @@ mod udp_multicast_config_tests {
     async fn an_extra_join_of_the_other_family_is_refused_before_any_membership() {
         const GROUP_V6: std::net::Ipv6Addr =
             std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e11);
-        let v4_join = vec!["239.255.91.33".to_string()];
-        let v6_join = vec!["ff02::7a7a:4e12".to_string()];
+        let v4_join = [std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            239, 255, 91, 33,
+        ))];
+        let v6_join = [std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+            0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e12,
+        ))];
 
         for (group, joins, family) in [
             (std::net::IpAddr::V6(GROUP_V6), &v4_join, "IPv6"),
@@ -5275,11 +5320,15 @@ mod udp_multicast_config_tests {
     }
 
     #[tokio::test]
-    async fn a_malformed_extra_join_installs_no_membership_at_all() {
-        // The refusal is BEFORE the first join, so a typo in the second of two
-        // groups does not leave the first installed and the caller believing it
-        // has both.
-        let joins = vec!["239.255.91.33".to_string(), "not-an-address".to_string()];
+    async fn a_refused_extra_join_installs_no_membership_at_all() {
+        // The refusal is BEFORE the first join, so a refused second group does
+        // not leave the first installed and the caller believing it has both.
+        let joins = [
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(239, 255, 91, 33)),
+            std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+                0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e14,
+            )),
+        ];
         // `expect_err` would need `UdpDriver: Debug`, which it is not.
         let e = match UdpDriver::bind_multicast(
             GROUP,
@@ -5291,12 +5340,12 @@ mod udp_multicast_config_tests {
         )
         .await
         {
-            Ok(_) => panic!("a malformed #join= was accepted"),
+            Ok(_) => panic!("a #join= of the other family was accepted"),
             Err(e) => e,
         };
         assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
         assert!(
-            e.to_string().contains("not-an-address"),
+            e.to_string().contains("ff02::7a7a:4e14"),
             "the message names the value: {e}"
         );
     }
@@ -5308,7 +5357,7 @@ mod udp_multicast_config_tests {
         // off the socket bound for the locator's own.
         const EXTRA: std::net::Ipv4Addr = std::net::Ipv4Addr::new(239, 255, 91, 33);
         let port = 47_446u16;
-        let joins = vec![EXTRA.to_string()];
+        let joins = [std::net::IpAddr::V4(EXTRA)];
         let rx = UdpDriver::bind_multicast(
             GROUP,
             port,

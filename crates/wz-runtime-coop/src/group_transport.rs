@@ -344,13 +344,12 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
     not(feature = "session-slot")
 ))]
 pub trait GroupJoiner {
-    /// The group `endpoint` names, joined: the transport a group session runs over. The endpoint
-    /// is the text the config states (a `udp/` locator naming an interface). `rx` is the buffer
-    /// the transport receives into when its session lent one (`LinkTables::group_rx`); `None`
-    /// and the transport makes its own.
+    /// The group `group` names, joined: the transport a group session runs over. `rx` is the
+    /// buffer the transport receives into when its session lent one (`LinkTables::group_rx`);
+    /// `None` and the transport makes its own.
     fn join(
         &self,
-        endpoint: &str,
+        group: &wz_session_core::group_locator::GroupLocator,
         rx: Option<ByteBuf>,
     ) -> Result<alloc::boxed::Box<dyn GroupTransport>, crate::session_drive::LinkOpenError>;
 }
@@ -374,10 +373,10 @@ pub struct NoGroups;
 impl GroupJoiner for NoGroups {
     fn join(
         &self,
-        endpoint: &str,
+        group: &wz_session_core::group_locator::GroupLocator,
         rx: Option<ByteBuf>,
     ) -> Result<alloc::boxed::Box<dyn GroupTransport>, crate::session_drive::LinkOpenError> {
-        let _ = (endpoint, rx);
+        let _ = (group, rx);
         Err(crate::session_drive::LinkOpenError::Unsupported)
     }
 }
