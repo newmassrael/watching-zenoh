@@ -42,6 +42,9 @@ impl<T> OneThreadLock<T> {
     }
 
     /// The value, held until the guard drops. A take while it is held waits until it is not.
+    /// Out of line: each door of the session takes it, as each called the host's lock it stands
+    /// in for, and its guard is let go out of line too (`CoreGuard`'s drop).
+    #[inline(never)]
     pub(super) fn lock(&self) -> OneThreadGuard<'_, T> {
         debug_assert!(
             !self.held.load(Ordering::Relaxed),
