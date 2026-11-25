@@ -598,12 +598,10 @@ mod callback_table {
             let Some(entry) = self.entries.get(at) else {
                 return;
             };
-            let depth = entry.depth.load(Ordering::Relaxed);
-            if depth > 1 {
-                entry.depth.store(depth - 1, Ordering::Relaxed);
-            } else {
+            match entry.depth.load(Ordering::Relaxed).checked_sub(1) {
+                Some(rest) if rest > 0 => entry.depth.store(rest, Ordering::Relaxed),
                 // Release: the thread that claims the entry next writes its depth after this one.
-                entry.thread.store(NO_THREAD, Ordering::Release);
+                _ => entry.thread.store(NO_THREAD, Ordering::Release),
             }
         }
     }
