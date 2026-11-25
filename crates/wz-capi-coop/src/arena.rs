@@ -3109,16 +3109,6 @@ pub trait ArenaMemory: Sync {
     /// Never asked for zero bytes.
     fn reserve(&self, layout: Layout) -> Option<NonNull<u8>>;
 
-    /// [`Self::reserve`], every byte of it zero: what a session's region is reserved by, whose
-    /// fields are empty at zero bytes. Given back by [`Self::release`]. A memory that has its
-    /// own zeroed reservation (the allocator's) answers with it instead of writing the bytes.
-    fn reserve_zeroed(&self, layout: Layout) -> Option<NonNull<u8>> {
-        let base = self.reserve(layout)?;
-        // SAFETY: `reserve` gave `layout.size()` bytes at `base` to the caller alone.
-        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, layout.size()) };
-        Some(base)
-    }
-
     /// Give back what [`Self::reserve`] gave.
     ///
     /// # Safety
@@ -3137,11 +3127,6 @@ impl ArenaMemory for AllocatorMemory {
     fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
         // SAFETY: the layout is not of zero bytes, which the trait's contract rules out.
         NonNull::new(unsafe { alloc::alloc::alloc(layout) })
-    }
-
-    fn reserve_zeroed(&self, layout: Layout) -> Option<NonNull<u8>> {
-        // SAFETY: as for `reserve`.
-        NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
     }
 
     unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
@@ -3499,13 +3484,15 @@ mod tests {
         ArenaPlan::vacant()
     }
 
-    /// The allocator, its reservations written over with a byte that is not zero: a memory with no
-    /// zeroed reservation of its own.
+    /// The allocator, its reservations written over with a byte that is not zero.
+    #[cfg(not(feature = "runtime-plan"))]
     struct Dirty;
 
     /// The byte [`Dirty`] writes over what it reserves.
+    #[cfg(not(feature = "runtime-plan"))]
     const DIRTY: u8 = 0xa5;
 
+    #[cfg(not(feature = "runtime-plan"))]
     impl ArenaMemory for Dirty {
         fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
             let base = AllocatorMemory.reserve(layout)?;
@@ -3518,34 +3505,6 @@ mod tests {
             // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
             unsafe { AllocatorMemory.release(base, layout) }
         }
-    }
-
-    /// A zeroed reservation is zero in every byte, from a memory whose own reservations are not
-    /// and from the allocator's own zeroed one. Turned red by a zeroed reservation that leaves a
-    /// byte as the memory gave it.
-    #[test]
-    fn a_zeroed_reservation_is_zero_in_every_byte() {
-        let layout = Layout::from_size_align(256, ARENA_ALIGN).expect("a small layout");
-        let read = |memory: &dyn ArenaMemory, zeroed: bool| {
-            let base = if zeroed {
-                memory.reserve_zeroed(layout)
-            } else {
-                memory.reserve(layout)
-            }
-            .expect("the allocator answers");
-            // SAFETY: the memory gave `layout.size()` bytes at `base`, read once and given back.
-            unsafe {
-                let bytes = core::slice::from_raw_parts(base.as_ptr(), layout.size()).to_vec();
-                memory.release(base, layout);
-                bytes
-            }
-        };
-        assert!(
-            read(&Dirty, false).iter().all(|byte| *byte == DIRTY),
-            "CONTROL: the memory's own reservation is not zero"
-        );
-        assert!(read(&Dirty, true).iter().all(|byte| *byte == 0));
-        assert!(read(&AllocatorMemory, true).iter().all(|byte| *byte == 0));
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.
@@ -3980,6 +3939,18 @@ mod tests {
         struct Head([u8; 41]);
         // SAFETY: a head of zero bytes is one of zeros, which holds nothing to drop.
         unsafe impl ZeroEmpty for Head {}
+
+        let control = Layout::new::<Head>();
+        let base = Dirty.reserve(control).expect("the allocator answers");
+        // SAFETY: the memory gave `control.size()` bytes at `base`, read once and given back.
+        let dirty = unsafe {
+            let read = core::slice::from_raw_parts(base.as_ptr(), control.size())
+                .iter()
+                .all(|byte| *byte == DIRTY);
+            Dirty.release(base, control);
+            read
+        };
+        assert!(dirty, "CONTROL: the memory's own reservation is not zero");
 
         let mut plan = ArenaPlan::vacant();
         plan.holding_runtime(64).expect("the span fits");

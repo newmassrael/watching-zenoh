@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The state of a session whose shape the build fixes, opened as one zeroed reservation: a config
-//! the region admits takes one reservation of the struct's own size, given back once when the
-//! state is let go, and a config it refuses, or a memory with none to give, takes nothing.
+//! The state of a session whose shape the build fixes, opened as the head of the one block its
+//! open reserves: a config the region admits takes one reservation, the region zeroed at its start
+//! and the arena after it, given back once when both are let go, and a config it refuses, or a
+//! memory with none to give, takes nothing.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use wz_session_core::bounded::Arena;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 
 use super::client_config;
 use crate::arena::{
-    AllocatorMemory, ArenaLimit, ArenaMemory, ArenaRefused, ArenaRegion, PlanShape,
+    AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, ArenaRegion, PlanShape,
+    SessionArena,
 };
-use crate::region::StateRegion;
+use crate::region::{RegionBlock, StateRegion};
 use crate::CoopConfig;
 
-/// The allocator, counting its plain reservations, its zeroed ones and what it is given back.
+/// The allocator, counting its reservations and what it is given back.
 struct Counted {
     reserves: AtomicUsize,
-    zeroed: AtomicUsize,
-    zeroed_bytes: AtomicUsize,
     releases: AtomicUsize,
 }
 
@@ -28,17 +29,14 @@ impl Counted {
     const fn new() -> Self {
         Self {
             reserves: AtomicUsize::new(0),
-            zeroed: AtomicUsize::new(0),
-            zeroed_bytes: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
         }
     }
 
-    /// The plain reservations, the zeroed ones and the releases so far.
-    fn counts(&self) -> (usize, usize, usize) {
+    /// The reservations and the releases so far.
+    fn counts(&self) -> (usize, usize) {
         (
             self.reserves.load(Ordering::SeqCst),
-            self.zeroed.load(Ordering::SeqCst),
             self.releases.load(Ordering::SeqCst),
         )
     }
@@ -48,12 +46,6 @@ impl ArenaMemory for Counted {
     fn reserve(&self, layout: core::alloc::Layout) -> Option<core::ptr::NonNull<u8>> {
         self.reserves.fetch_add(1, Ordering::SeqCst);
         AllocatorMemory.reserve(layout)
-    }
-
-    fn reserve_zeroed(&self, layout: core::alloc::Layout) -> Option<core::ptr::NonNull<u8>> {
-        self.zeroed.fetch_add(1, Ordering::SeqCst);
-        self.zeroed_bytes.fetch_add(layout.size(), Ordering::SeqCst);
-        AllocatorMemory.reserve_zeroed(layout)
     }
 
     unsafe fn release(&self, base: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
@@ -82,29 +74,54 @@ fn region_of(config: &CoopConfig) -> ArenaRegion {
         .expect("the client's limits lay a region out")
 }
 
-/// The open of a config its region admits reserves the state once, zeroed, at the struct's own
-/// size and by no plain reservation, and its drop gives it back once. Turned red by an open that
-/// reserves the state twice, or by a plan's arena, or by a drop that keeps it or gives it back
-/// twice.
+/// The plan `region` lays out for `config`, or the limit it refuses the config under.
+fn plan_of(region: &ArenaRegion, config: &CoopConfig) -> Result<ArenaPlan, ArenaRefused> {
+    let mut plan = ArenaPlan::vacant();
+    region.lay_out_on(&mut plan, config)?;
+    Ok(plan)
+}
+
+/// The state of a config its region admits lies at the head of one reservation, placed over its
+/// rows there, and is given back once, with the arena after it, when both are let go: the region
+/// first, dropped in place, then the arena. Turned red by an open that reserves the state apart
+/// from its arena, or by a region's drop that gives the block back too.
 #[test]
-fn a_state_opens_by_one_zeroed_reservation_given_back_once() {
+fn a_state_opens_at_the_head_of_one_reservation_given_back_once() {
     static OPENED: Counted = Counted::new();
     let config = client_config();
     let region = region_of(&config);
-    let state = StateRegion::open(&region, &config, &OPENED).expect("the region admits its own");
-    assert_eq!(OPENED.counts(), (0, 1, 0));
+    let plan = plan_of(&region, &config).expect("the region admits its own");
+    let (arena, at) =
+        SessionArena::reserve_after::<StateRegion>(&plan, &OPENED).expect("the host has it");
+    // SAFETY: the head is a zeroed `StateRegion` this test alone reaches, held before the arena
+    // and dropped first.
+    let state = unsafe { RegionBlock::within(at) };
+    // SAFETY: as above; no key or table of the region outlives the block.
+    let _keys = unsafe { StateRegion::place(state.as_ptr(), region.limits()) };
     assert_eq!(
-        OPENED.zeroed_bytes.load(Ordering::SeqCst),
-        core::mem::size_of::<StateRegion>()
+        OPENED.counts(),
+        (1, 0),
+        "one block, the region's and the arena's"
     );
     drop(state);
-    assert_eq!(OPENED.counts(), (0, 1, 1));
+    assert_eq!(
+        OPENED.counts(),
+        (1, 0),
+        "the region gives nothing back itself"
+    );
+    drop(arena);
+    assert_eq!(
+        OPENED.counts(),
+        (1, 1),
+        "the arena gives the block back once"
+    );
 }
 
 /// A config that dials more endpoints than the region holds rows for, or holds limits it was not
 /// laid out for, is refused under the limit that differs before anything is reserved; a memory
-/// with none to give refuses the open with the bytes it was asked for. Turned red by an open that
-/// reserves before it admits the config, or admits one its region was not laid out for.
+/// with none to give refuses the open with the bytes of the whole block, the region's and the
+/// arena's. Turned red by a region that lays a plan out for a config it was not laid out for, or by
+/// a refusal that names the arena's bytes alone.
 #[test]
 fn a_state_refused_by_its_region_or_its_memory_reserves_nothing() {
     static REFUSED: Counted = Counted::new();
@@ -116,7 +133,7 @@ fn a_state_refused_by_its_region_or_its_memory_reserves_nothing() {
         ..client_config()
     };
     assert_eq!(
-        StateRegion::open(&region, &more, &REFUSED).err(),
+        plan_of(&region, &more).err(),
         Some(ArenaRefused::Limit {
             limit: ArenaLimit::MaxStaticConnect,
             why: UnlentRows::OverCeiling {
@@ -140,17 +157,20 @@ fn a_state_refused_by_its_region_or_its_memory_reserves_nothing() {
         ..client_config()
     };
     assert_eq!(
-        StateRegion::open(&region, &other, &REFUSED).err(),
+        plan_of(&region, &other).err(),
         Some(ArenaRefused::Limit {
             limit: ArenaLimit::LimitsDifferFromBuild,
             why: UnlentRows::NoCeiling,
         })
     );
-    assert_eq!(REFUSED.counts(), (0, 0, 0));
+    assert_eq!(REFUSED.counts(), (0, 0));
+    let plan = plan_of(&region, &config).expect("the region admits its own");
+    let bytes = plan.reserved_bytes().expect("within the address space");
+    let head = Arena::span(core::mem::size_of::<StateRegion>()).expect("a region in the space");
     assert_eq!(
-        StateRegion::open(&region, &config, &NoMemory).err(),
+        SessionArena::reserve_after::<StateRegion>(&plan, &NoMemory).err(),
         Some(ArenaRefused::NoMemory {
-            bytes: core::mem::size_of::<StateRegion>(),
+            bytes: head + bytes,
         })
     );
 }

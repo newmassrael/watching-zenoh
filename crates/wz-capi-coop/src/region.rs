@@ -4,15 +4,15 @@
 //! The state of a session whose shape the build fixes, as one struct: the session's registry (the
 //! application's tables and its one face's), the rows each lays out beside it and the key arena
 //! their keys lie in. Its
-//! size is its `size_of` and its layout its fields' offsets; the allocator hands it zeroed, every
-//! table of it empty (`ZeroEmpty`), and [`StateRegion::open`] joins each table to its rows and its
-//! keys by one walk of the description the type states, so nothing is planned or lent at the open.
+//! size is its `size_of` and its layout its fields' offsets; the open reserves it zeroed, the head
+//! of the session's one block (`SessionArena::reserve_after`), every table of it empty
+//! (`ZeroEmpty`), and `StateRegion::place` joins each table to its rows and its keys by one walk
+//! of the description the type states, so nothing is planned or lent for the state at the open.
 //!
 //! A region is reached through a pointer to it, never by a reference to the whole: the tables'
 //! rows and the key arena lie in it beside the tables, reached through the tables, and a unique
 //! reference to the whole would cover them too. Each field is projected from the pointer alone.
 
-use core::alloc::Layout;
 use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of_mut, NonNull};
 
@@ -21,53 +21,25 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::{place_region, KeyArena, KeySpace};
 use wz_session_core::limits::SessionLimits;
 
-use crate::arena::{ArenaMemory, ArenaRefused, ArenaRegion};
 use crate::engine::{RegistryRegion, StatePlaces, REGISTRY_REGION_LINES};
-use crate::open_source::EndpointList;
-use crate::CoopConfig;
 
-/// A `T` reserved with every byte zero, so every field of it is empty (`ZeroEmpty`) until its
-/// owner binds it, and dropped in place when the block is let go: a reservation of its own from an
-/// [`ArenaMemory`] ([`Self::reserve`]), given back then too, or the head of the one block an
-/// open reserves for its arena as well ([`Self::within`]), which the arena gives back. The block
+/// The zeroed `T` at the head of the one block an open reserves for its arena as well
+/// (`SessionArena::reserve_after`), every field of it empty (`ZeroEmpty`) until its owner binds
+/// it, and dropped in place when the block is let go; the arena gives the memory back. The block
 /// holds the pointer and never a reference to the whole `T`: what lies in it is reached by fields
 /// projected from [`Self::as_ptr`].
 pub struct RegionBlock<T: ZeroEmpty> {
     at: NonNull<T>,
-    /// The memory the block gives itself back to: `None` for a block another owner gives back.
-    memory: Option<&'static dyn ArenaMemory>,
 }
 
 impl<T: ZeroEmpty> RegionBlock<T> {
-    /// A zeroed `T` reserved from `memory`, refused as [`ArenaRefused::NoMemory`], having taken
-    /// nothing, when the memory has none to give.
-    pub fn reserve(memory: &'static dyn ArenaMemory) -> Result<Self, ArenaRefused> {
-        const {
-            assert!(
-                core::mem::size_of::<T>() != 0,
-                "a memory is never asked for nothing"
-            )
-        };
-        let layout = Layout::new::<T>();
-        let base = memory
-            .reserve_zeroed(layout)
-            .ok_or(ArenaRefused::NoMemory {
-                bytes: layout.size(),
-            })?;
-        Ok(Self {
-            at: base.cast::<T>(),
-            memory: Some(memory),
-        })
-    }
-
-    /// The zeroed `T` at `at`, the head of a block another owner reserved and gives back
-    /// (`SessionArena::reserve_after`): the block drops the `T` in place and gives back nothing.
+    /// The zeroed `T` at `at`, the head of a block another owner reserved and gives back.
     ///
     /// # Safety
     /// `at` is an aligned `T` of all zero bytes that nothing else reaches, and its memory stays,
     /// unmoved, until after the block is dropped.
     pub(crate) unsafe fn within(at: NonNull<T>) -> Self {
-        Self { at, memory: None }
+        Self { at }
     }
 
     /// Where the `T` lies, aligned and of all zero bytes until its owner writes it.
@@ -76,8 +48,8 @@ impl<T: ZeroEmpty> RegionBlock<T> {
     }
 }
 
-// SAFETY: the block owns the `T` it reserved, which nothing else reaches, as a `Box` owns its
-// value; the memory it gives it back to is `Sync` (`ArenaMemory`).
+// SAFETY: the block owns the `T` at its pointer, which nothing else reaches, as a `Box` owns its
+// value.
 unsafe impl<T: ZeroEmpty + Send> Send for RegionBlock<T> {}
 // SAFETY: a shared block hands out nothing but its pointer, as above.
 unsafe impl<T: ZeroEmpty + Sync> Sync for RegionBlock<T> {}
@@ -85,15 +57,9 @@ unsafe impl<T: ZeroEmpty + Sync> Sync for RegionBlock<T> {}
 impl<T: ZeroEmpty> Drop for RegionBlock<T> {
     fn drop(&mut self) {
         // SAFETY: the block holds a `T` (zero bytes are one, and every write since kept one),
-        // dropped once, here, in place; then a block reserved alone goes back with the layout it
-        // was reserved by, once, and nothing reaches it after. A block within another's
-        // reservation leaves it to that owner, which outlives it (`Self::within`).
-        unsafe {
-            core::ptr::drop_in_place(self.at.as_ptr());
-            if let Some(memory) = self.memory {
-                memory.release(self.at.cast::<u8>(), Layout::new::<T>());
-            }
-        }
+        // dropped once, here, in place; the memory is the arena's, which outlives the block
+        // (`Self::within`).
+        unsafe { core::ptr::drop_in_place(self.at.as_ptr()) }
     }
 }
 
@@ -169,23 +135,6 @@ impl StateRegion {
     /// and hand each the key arena, read as the region is placed.
     pub const DESCRIPTION: RegionLines<STATE_REGION_LINES> =
         RegistryRegion::places(core::mem::offset_of!(Self, registry));
-
-    /// The state of a session of `config` in `build`, the region the build lays out: refused as
-    /// [`ArenaRegion::admit`] refuses the config, having reserved nothing, or as
-    /// [`RegionBlock::reserve`] refuses the memory; else reserved once, zeroed, from `memory`
-    /// and placed over its rows. Nothing is planned or lent: the type is the layout.
-    pub fn open<E: EndpointList>(
-        build: &ArenaRegion,
-        config: &CoopConfig<E>,
-        memory: &'static dyn ArenaMemory,
-    ) -> Result<RegionBlock<Self>, ArenaRefused> {
-        build.admit(config)?;
-        let block = RegionBlock::<Self>::reserve(memory)?;
-        // SAFETY: the block is a zeroed `StateRegion` it alone reaches; it neither moves nor goes
-        // back before its drop.
-        unsafe { Self::place(block.as_ptr(), build.limits()) };
-        Ok(block)
-    }
 
     /// Place each table of the zeroed region at `region` over its rows and hand it the key arena,
     /// its keys at most `limits` long and together at most the bytes `limits` state (a lowered
