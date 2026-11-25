@@ -3361,7 +3361,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .map_err(OpenError::from)
     }
 
-    /// The times the life of each of the session's links is counted in.
+    /// The times the life of each of the session's links is counted in: asked of a face taken
+    /// beside the dial role's, and of a departed face's tomb, which only these builds hold.
+    #[cfg(any(feature = "listen", feature = "connectivity"))]
     fn link_times(&self) -> LinkTimes {
         link_times(&self.config)
     }
