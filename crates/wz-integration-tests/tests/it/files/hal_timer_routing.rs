@@ -35,7 +35,7 @@ use sce_rust_runtime::helpers::hierarchy::BoundedVec;
 use sce_rust_runtime::{
     state_scratch, state_words, CurrentEventData, DocumentTables, Engine, EventId, Hal, HistoryId,
     NoHistory, RunStore, StateId, StateKind, StatePolicy, StateRow, Target, TransitionId,
-    TransitionRow, Workspace,
+    TransitionRow, Workspace, GENERAL_WALK,
 };
 use wz_runtime_tokio_test_support::{
     test_hal_advance_ticks, test_hal_now_ticks, test_hal_set_ticks, TestHal,
@@ -149,6 +149,11 @@ impl StatePolicy for TimerProbePolicy {
         default_state: StateId(0),
         null_event: EventId(0),
         error_events: &[],
+        // Appendix D's sets computed as the appendix writes them, which serves any
+        // document, so the probe carries no entry rows.
+        walk: &GENERAL_WALK,
+        entry_rows: &[],
+        entry_paths: &[],
         history: None,
         parallel: None,
     };
