@@ -203,7 +203,7 @@ impl MemberDeclarations {
             #[cfg(all(
                 feature = "session-unicast",
                 feature = "rx-lent-control",
-                not(feature = "transport-stats"),
+                any(not(feature = "transport-stats"), feature = "reassembly"),
                 not(feature = "routing-namespace"),
                 not(feature = "multicast-declarations"),
                 not(feature = "multicast-ingress-gate")

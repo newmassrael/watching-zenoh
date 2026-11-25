@@ -189,14 +189,20 @@ fn a_client_masks_each_frame_with_a_fresh_key_and_a_server_does_not() {
     expected.extend_from_slice(&masked);
     assert_eq!(wire.written(), expected);
     wire.writes.borrow_mut().clear();
-    client.send_blocking(&[1, 2, 3], Reliability::Reliable);
+    assert_eq!(
+        client.send_blocking(&[1, 2, 3], Reliability::Reliable),
+        wz_session_core::link::LinkSendOutcome::Sent
+    );
     let second = wire.written();
     assert_eq!(second.get(..2), Some(&[0x82, 0x83][..]));
     assert_ne!(second.get(2..6), Some(&first[..]), "a fresh key");
 
     let (server, wire) = open(WsFraming::server());
     let batch = [7u8; 200];
-    server.send_blocking(&batch, Reliability::Reliable);
+    assert_eq!(
+        server.send_blocking(&batch, Reliability::Reliable),
+        wz_session_core::link::LinkSendOutcome::Sent
+    );
     let written = wire.written();
     assert_eq!(written.get(..4), Some(&[0x82, 126, 0, 200][..]));
     assert_eq!(written.get(4..), Some(&batch[..]));

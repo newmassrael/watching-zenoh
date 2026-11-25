@@ -883,7 +883,9 @@ const PASSIVE_READS_EVERY_OFFER: bool = cfg!(all(
         feature = "codec-init-body",
         feature = "codec-open-body",
         feature = "codec-close",
-        feature = "codec-keep-alive"
+        feature = "codec-keep-alive",
+        // The chain of a frame read where it lies (`inbound::ReadEntries`).
+        all(feature = "alloc", feature = "codec-frame", feature = "session-unicast")
     )
 ))]
 pub(crate) const fn reads_received_ext(id: u8) -> bool {
