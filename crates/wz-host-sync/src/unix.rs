@@ -35,6 +35,7 @@ mod futex {
     /// Sleep while `word` reads `expected`, until a wake on it or, with a deadline, until the
     /// monotonic clock reads `deadline_ns`. It may end sooner (a signal, or a wake meant for a
     /// value the word no longer holds): the caller reads the word again.
+    #[inline(never)]
     pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
         match deadline_ns {
             None => {
@@ -156,6 +157,7 @@ mod futex {
         wake(word, i32::MAX);
     }
 
+    #[inline(never)]
     fn wake(word: &AtomicU32, count: i32) {
         // SAFETY: a wake reads no memory; the address only names the threads asleep on it.
         unsafe {
@@ -191,6 +193,7 @@ mod ulock {
     /// As Linux's (`futex::wait`). The wait takes microseconds left, 0 for no timeout: the
     /// time left is rounded up and is at least 1, so a deadline never reads as none, and a
     /// longer one than the count holds is waited in parts by the caller's loop.
+    #[inline(never)]
     pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
         let timeout_us = deadline_ns.map_or(0, |deadline| {
             let left = deadline
@@ -219,6 +222,7 @@ mod ulock {
         wake(word, ULF_WAKE_ALL);
     }
 
+    #[inline(never)]
     fn wake(word: &AtomicU32, flags: u32) {
         // SAFETY: a wake reads no memory; the address only names the threads asleep on it.
         unsafe {
@@ -297,6 +301,7 @@ mod pairs {
     /// As Linux's (`futex::wait`): the word is read with its pair's lock held, and a waker
     /// changes the word before it takes that lock to wake, so either this thread reads the
     /// change and does not sleep, or it sleeps before the wake and the wake reaches it.
+    #[inline(never)]
     pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
         let pair = Pair::of(word);
         // SAFETY: the pair's objects are initialised and never move; `cond` is reached with
@@ -323,6 +328,7 @@ mod pairs {
     }
 
     /// Wake every thread asleep on `word`'s pair.
+    #[inline(never)]
     pub(crate) fn wake_all(word: &AtomicU32) {
         let pair = Pair::of(word);
         // SAFETY: as in `wait`.

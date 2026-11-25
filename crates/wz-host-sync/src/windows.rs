@@ -18,6 +18,7 @@ use windows_sys::Win32::System::Threading::{
 /// Sleep while `word` reads `expected`, until a wake on it or, with a deadline, until the
 /// performance counter reads `deadline_ns`. It may end sooner: the caller reads the word again.
 /// The wait takes the milliseconds left, rounded up so that it does not end before the deadline.
+#[inline(never)]
 pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
     let ms = deadline_ns.map_or(INFINITE, |deadline| {
         deadline
@@ -37,12 +38,14 @@ pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
 }
 
 /// Wake one thread asleep on `word`.
+#[inline(never)]
 pub(crate) fn wake_one(word: &AtomicU32) {
     // SAFETY: a wake reads no memory; the address only names the threads asleep on it.
     unsafe { WakeByAddressSingle(core::ptr::from_ref(word).cast()) };
 }
 
 /// Wake every thread asleep on `word`.
+#[inline(never)]
 pub(crate) fn wake_all(word: &AtomicU32) {
     // SAFETY: as in `wake_one`.
     unsafe { WakeByAddressAll(core::ptr::from_ref(word).cast()) };
