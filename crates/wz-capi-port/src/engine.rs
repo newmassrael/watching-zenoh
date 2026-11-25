@@ -419,7 +419,12 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal>;
 
-    /// Retract subscriber `id`. Retracting one already retracted does nothing.
+    /// Retract subscriber `id`, a liveliness subscriber's too. Returns once the callback the
+    /// declaration was given has been let go of, its drop run, as zenoh-pico's undeclare waits for
+    /// the callbacks in flight (`_z_sync_group_wait`), unless it is made from inside a subscriber
+    /// callback on this thread, which returns at once and leaves the callback to the call that ends
+    /// last. The engine keeps this, so every ABI over it means the same. Retracting one already
+    /// retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
 
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
