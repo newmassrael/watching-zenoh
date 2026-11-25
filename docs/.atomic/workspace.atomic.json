@@ -7674,6 +7674,26 @@
       "carry_forward_bullets": [
         "Open: the f4 line (one-link direct read for threads) adds about 9 KB in total and does not land until that is taken back. The GOT removal (a measured C library compiled as nothing but a cdylib) cuts 13.6 KB in total, and its doors growth waits for the size ledger to attribute bytes by the DWARF line table, as the owner ruled. The delivery path lane removes an O(S^2) walk of the pinned subscribers. The SCE pin move to b88d18ebdc and its regenerated machines are verified next. The ABI performance matrix and subscriber profile are being read for the next lanes."
       ]
+    },
+    "Round 4647": {
+      "decision_summary": "An integration of the pico C ABI release toward docs/c-abi-architecture.md section 9 (the win budget): the receive and walk lanes (perf-rx, perf-walk, perf-cs, perf-ka), the configuration red repair, and the size ledger measured by DWARF line tables, every area re-baselined on that ruler (owner ruling of 2026-11-25).\n\nReceive path: a lent body's extensions, a frame head's chain and a query's and reply's extensions are read in one walk; the inbound SN gates, a link's stamps and the peer's Open lease are kept in words of their own; link deadlines are read when one falls due; each get table keeps its earliest deadline exact and a read's wait is bounded by the ledger.\n\nSize ledger: one build with line tables is measured and shipped stripped; inlined core code counts in its caller's area; line-0 code goes to its frame or, frameless, to its body's symbol; heapless counts as language, as pico's collections do. Unattributed bytes are held at zero and every ratio is re-baselined on this ruler.\n\nThe machine regeneration at the b88d18ebdc SCE pin is reverted from this integration: it costs the codec area its win (the generated decoders inline their arms) and waits for the generator change requested of SCE.\n\nThe configuration resolver resolves every build through one path, and the selftest arms that fail on origin/main (the cooperative list and the tokio-only capabilities) pass here: gossip is named as the tokio-only pico capability.",
+      "changes_bullets": [
+        "crates/wz-session-core, wz-runtime-coop, wz-runtime-posix, wz-capi-coop, wz-capi-port, wz-capi-pico, wz-capi-core and their tests: the receive, walk and key-hold lanes merged into the integration branch.",
+        "scripts/lib/size_ledger and deploy/size_ledger.json: attribution by DWARF line tables, inlined code to its caller, line-0 code to its frame or body, heapless as language; unattributed held at 0, every area re-baselined.",
+        "scripts/lib/wz_config.py, deploy/wz-config.toml: one resolver for every build, gossip named tokio-only, the parity arm built under its defconfig's limits.",
+        "scripts/pico-compare and the parity harness: the parity image built as the release ships it; a silent throughput pair named.",
+        "docs/zenoh-logic-as-sce-kinds census: the delivery mark files placed in slice S7."
+      ],
+      "verification_bullets": [
+        "Run through bx from the integration worktree on 20d183e56: each changed crate checked alone, the changed crates' tests and clippy with -D warnings, the coop, pico (std and no_std), threads and direct feature combinations, Layer C1nh, wz_config.py --check and --selftest (507 of 507 arms; origin/main fails four), all with exit 0. On fcb126373 (the re-baseline): size_ledger --measure, --dump, --check and the ceiling check all exit 0. Ratios against zenoh-pico on the line-table ruler: sessions 2.5675, doors 2.2219, transport 2.3556, driver 1.8346, keyexpr 0.7478, codec 0.8972, language 0.3987, total 1.3795, unattributed 0 bytes. Locally: mnemosyne-cli validate-workspace (T1 orphan new +0), upstream_citation_anchor_gate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open, measured on the shipped no_std preset against zenoh-pico (opprofile, Ir per operation): get as querier 1.80, get as queryable 1.40, declare subscriber 1.11, declare queryable 1.12, receive 2.07 per message; heap 21 times and RSS 1.18 times. Put (0.91), declare publisher (0.85) and open (0.90) win. The heap loss is the session arena (290 KB) and the process pools (78 KB); the counts the open states (DDS resource limits, owner ruling of 2026-11-25) land with the next integration. The size debt is sessions 2.57, transport 2.36, doors 2.22, driver 1.83. The SCE pin move waits for the generator to keep decoder arms out of line."
+      ]
     }
   },
   "inventory_entries": {
