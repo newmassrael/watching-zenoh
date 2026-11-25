@@ -2322,6 +2322,8 @@ impl<C: ClockSource + 'static, L: CoopLinks> Face<C, L> {
 struct UpFacts {
     /// The zid the link's peer announced.
     peer: Option<SessionZid>,
+    /// The role the link's peer announced, as the wire numbers it.
+    whatami: Option<u8>,
     /// The link's generation, which the queries it carries are answered under: how an answer
     /// finds its link without a lend of it.
     #[cfg(feature = "queryable")]
@@ -2349,6 +2351,7 @@ impl UpFacts {
         };
         Self {
             peer: session.actions.peer_session_zid(),
+            whatami: session.actions.peer_whatami_wire(),
             #[cfg(feature = "queryable")]
             generation: session.generation,
             ended: false,
@@ -2471,7 +2474,9 @@ mod face_debts {
 /// the session's state under its lock and reads only what may be shared across threads (text and
 /// ids read off the session's rows), so it holds no handle on a cell of the link or of the
 /// session. `Some` with whether the link took it; `None` while the link holds no session, and,
-/// with `debt` owed to the face, while another holder has the link.
+/// with `debt` owed to the face, while another holder has the link. A step of the link that
+/// answers yes or no (a batch's, or how the link names a key) is lent through it too, owing
+/// nothing.
 // Out of line and over `dyn`: one body lends a link for every send of the session.
 #[inline(never)]
 fn send_on<C: ClockSource + 'static>(
@@ -2822,7 +2827,11 @@ fn get_key_on_link<C: ClockSource + 'static, U>(
 /// `f` on the actions of the link `wire` holds, lent as [`send_on`] lends them: what a send
 /// reads of the link before it is made (an id the link allocates). `None` while the link is not
 /// lent.
-#[cfg(feature = "query")]
+#[cfg(any(
+    feature = "query",
+    feature = "transport-stats",
+    all(test, feature = "std")
+))]
 fn lend_actions<C: ClockSource + 'static, U: Send>(
     wire: &Wire<C>,
     f: impl FnOnce(&LinkActions<C>) -> U + Send,
@@ -5828,11 +5837,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         wz_session_core::session_actions::FrameLendCounts,
     )> {
         self.live().and_then(|core| {
-            core.0
-                .transport
-                .ups()
-                .next()
-                .map(|actions| (actions.batch_lend_counts(), actions.frame_lend_counts()))
+            let (_, wire) = core.0.up_wires_at().next()?;
+            lend_actions(wire, |actions: &LinkActions<C>| {
+                (actions.batch_lend_counts(), actions.frame_lend_counts())
+            })
         })
     }
 
@@ -6125,8 +6133,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     pub fn transport_stats(&self) -> wz_session_core::stats::TransportStatsReport {
         let mut report = wz_session_core::stats::TransportStatsReport::default();
         if let Some(core) = self.live() {
-            for actions in core.0.transport.ups() {
-                report.absorb(&actions.stats_report());
+            for (_, wire) in core.0.up_wires_at() {
+                lend_actions(wire, |actions: &LinkActions<C>| {
+                    report.absorb(&actions.stats_report());
+                });
             }
             // A group charges what its queue dropped, for want of room or past the reply limit,
             // where the tokio engine's group charges it, the transport's dropped messages; it
@@ -7938,14 +7948,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // `next_group_member` answers them, whatever role they announced.
         core.0
             .transport
-            .ups_at()
-            .filter(|(_, id, actions)| *id >= from && actions.is_established())
-            .filter_map(|(_, id, actions)| {
+            .links
+            .faces()
+            .filter(|face| face.id >= from)
+            .filter_map(|face| {
+                // What the face's link said of its peer as it came up, read with no lend of it.
+                let facts = face.facts()?;
                 Some((
-                    id,
+                    face.id,
                     PeerIdentity {
-                        zid: actions.peer_session_zid()?,
-                        whatami: actions.peer_whatami_wire()?,
+                        zid: facts.peer?,
+                        whatami: facts.whatami?,
                     },
                 ))
             })
@@ -8121,8 +8134,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         self.live().is_some_and(|core| {
             core.0
                 .transport
-                .ups()
-                .any(|actions| actions.peer_whatami_wire() == Some(0))
+                .links
+                .faces()
+                .filter_map(|face| face.facts())
+                .any(|facts| facts.whatami == Some(0))
         })
     }
 
@@ -8652,9 +8667,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         self.live().map_or(0, |core| {
             let links = core
                 .0
-                .transport
-                .ups()
-                .filter(|&actions| batch_link(actions, step))
+                .up_wires_at()
+                .filter(|(_, wire)| {
+                    send_on(wire, 0, &|actions: &LinkActions<C>| {
+                        batch_link(actions, step)
+                    }) == Some(true)
+                })
                 .count();
             #[cfg(feature = "group")]
             let groups = core
@@ -9719,8 +9737,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
     fn send_keep_alive(&self) -> Result<(), SessionClosed> {
         let core = self.live().ok_or(SessionClosed)?;
         // A link that is down has no lease to keep; the session is not closed.
-        for actions in core.0.transport.ups() {
-            actions.send_keep_alive();
+        for (_, wire) in core.0.up_wires_at() {
+            // Owed nothing when the link is held: its own step keeps its lease.
+            send_on(wire, 0, &|actions: &LinkActions<C>| {
+                actions.send_keep_alive();
+                true
+            });
         }
         Ok(())
     }
@@ -9830,11 +9852,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if let (true, Some(row), FilteredPut::Sent(_)) = (planning, row, sent) {
             if row.plane() == Plane::Subscribers && params.destination.allows_remote() {
                 if let Some(named) = tables(registry).named_at(row.key(), key) {
-                    if core
-                        .transport
-                        .ups()
-                        .all(|actions| key_on_link(actions, named).wire() == named.wire())
-                    {
+                    if core.up_wires_at().all(|(_, wire)| {
+                        send_on(wire, 0, &|actions: &LinkActions<C>| {
+                            key_on_link(actions, named).wire() == named.wire()
+                        }) == Some(true)
+                    }) {
                         row.keep_plan(epoch, named);
                     }
                 }

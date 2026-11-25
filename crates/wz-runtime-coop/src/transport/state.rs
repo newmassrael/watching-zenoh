@@ -1030,32 +1030,3 @@ impl<T: TransportFaces> TransportState<T> {
         !self.groups.is_empty()
     }
 }
-
-/// What the session reads of a link's session in place, where the face's record holds that
-/// session itself (its [`TransportFaces::Wire`] dereferences to it). A record that holds a handle
-/// on a place apart from the session's state reaches the link through a lend of that place alone.
-impl<T: TransportFaces> TransportState<T>
-where
-    T::Wire: Deref<Target = T::Session>,
-{
-    /// The actions of every face whose link is up, which is what the session sends through. A
-    /// face whose link is dialled or waits to be is not among them: what is declared then is
-    /// declared when it comes up.
-    pub fn ups(&self) -> impl Iterator<Item = &LinkHandle<T>> {
-        self.links.faces().filter_map(|face| match face.link() {
-            Link::Up(wire) => Some(wire.actions()),
-            _ => None,
-        })
-    }
-
-    /// [`Self::ups`], each with its face's place, which the session's other tables of the face
-    /// keep too, and its id.
-    pub fn ups_at(&self) -> impl Iterator<Item = (usize, FaceId, &LinkHandle<T>)> {
-        self.links
-            .placed()
-            .filter_map(|(at, face)| match face.link() {
-                Link::Up(wire) => Some((at, face.id(), wire.actions())),
-                _ => None,
-            })
-    }
-}
