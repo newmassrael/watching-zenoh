@@ -303,6 +303,34 @@ impl<S: FaceSession, E: LinkEnd, N: CountKind> FaceWire for Wire<S, E, N> {
     }
 }
 
+/// A face's link through which the session's half of the link is lent to a send: the session
+/// itself where the face's record holds it ([`Wire`]), or a try of the place that holds it apart
+/// from the session's state ([`FaceAt`]). The send is `Send`, since the place may be one another
+/// thread lent last, and it is never waited for: what it could not send is owed ([`Self::owe`]).
+pub trait LendsSession: FaceWire {
+    /// The session's half of the link.
+    type Session;
+
+    /// `f` on the session when it is reached now; [`Lend::Held`], with `f` not run, while
+    /// another holder has the link's place, and [`Lend::Empty`] while the place holds no session.
+    fn try_session<U: Send>(&self, f: impl FnOnce(&Self::Session) -> U + Send) -> Lend<U>;
+
+    /// Owe the link's parts `debts` ([`FaceSite::owe`]): what a send found held.
+    fn owe(&self, debts: u32);
+}
+
+impl<S: FaceSession, E: LinkEnd, N: CountKind> LendsSession for Wire<S, E, N> {
+    type Session = S;
+
+    fn try_session<U: Send>(&self, f: impl FnOnce(&S) -> U + Send) -> Lend<U> {
+        Lend::Lent(f(&self.session))
+    }
+
+    // The session lies in the record, under the session's lock with the caller: never held by
+    // another, so a send never owes it anything.
+    fn owe(&self, _debts: u32) {}
+}
+
 /// The parts of one face's link that the face's place holds ([`FaceSite`]), read as the link's
 /// wire while the link is up or in its handshake, and paid what handles on the link owed them.
 pub trait WireParts: FaceParts {
@@ -572,6 +600,28 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceWire for FaceAt<K, P, E> {
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         self.read((), |wire| wire.write_owed_now());
+    }
+}
+
+impl<K: LockKind, P: WireParts, E: LinkEnd> LendsSession for FaceAt<K, P, E>
+where
+    P::Wire: LendsSession,
+{
+    type Session = <P::Wire as LendsSession>::Session;
+
+    fn try_session<U: Send>(&self, f: impl FnOnce(&Self::Session) -> U + Send) -> Lend<U> {
+        match self
+            .site()
+            .try_lend(|held| held.lend(|parts| parts.wire().map(|wire| wire.try_session(f))))
+        {
+            Lend::Lent(Some(lent)) => lent,
+            Lend::Lent(None) | Lend::Empty => Lend::Empty,
+            Lend::Held => Lend::Held,
+        }
+    }
+
+    fn owe(&self, debts: u32) {
+        self.site().owe(debts);
     }
 }
 
@@ -2378,6 +2428,45 @@ mod tests {
             next.load(Ordering::SeqCst),
             0,
             "a debt owed to an empty place is not the next link's"
+        );
+    }
+
+    impl LendsSession for ApartWire {
+        type Session = Self;
+
+        fn try_session<U: Send>(&self, f: impl FnOnce(&Self) -> U + Send) -> Lend<U> {
+            Lend::Lent(f(self))
+        }
+
+        fn owe(&self, _debts: u32) {}
+    }
+
+    /// A send reaches the session of a link whose parts lie in a face's place through a try of
+    /// the place: lent while the place is free, held inside the place's own lend, where what it
+    /// could not send is owed and paid as that lend lets go, and empty once the place holds no
+    /// parts. Turned red by a send that waits for the place, reads a held place as lent, or an
+    /// `owe` that does not reach the site.
+    #[test]
+    fn a_send_tries_the_place_of_its_link_and_owes_what_it_found_held() {
+        let (aborted, ended, paid) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        // SAFETY: the site outlives the handle, in this frame.
+        let at = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) };
+        assert_eq!(at.try_session(|wire| wire.holds), Lend::Empty);
+        assert!(site.hold(paying_parts(&aborted, &ended, &paid)).is_none());
+        assert_eq!(at.try_session(|wire| wire.holds), Lend::Lent(true));
+        let inside = site.lend(|_| {
+            let found = at.try_session(|wire| wire.holds);
+            if found == Lend::Held {
+                at.owe(2);
+            }
+            found
+        });
+        assert_eq!(inside, Some(Lend::Held));
+        assert_eq!(
+            paid.load(Ordering::SeqCst),
+            2,
+            "what the send found held paid as the lend let go"
         );
     }
 
