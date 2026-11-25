@@ -127,7 +127,7 @@ on:
       - "vendor/sce"
       - "crates/Cargo.toml"
       - "crates/Cargo.lock"
-      # The pico library without `std` (`os-windows`): its host's locks, threads and clocks, and
+      # The pico library without `std` (`os-host`): its host's locks, threads and clocks, and
       # the configuration its profile is built with.
       - "crates/wz-host-sync/**"
       - "crates/.cargo/capi-nostd.toml"
@@ -1029,7 +1029,7 @@ jobs:
           cat "$heap_log"
           verdict "the global allocator of the library without std (os::no_std_host):" "$heap"
           [ "$heap" = PASS ] || overall=FAIL
-          for features in engine-coop engine-coop,app-transport; do
+          for features in os-host os-host,app-transport; do
             built=FAIL
             (cd crates && cargo build -p wz-capi-pico --no-default-features --features "$features") && built=PASS
             verdict "wz-capi-pico builds with ${features}:" "$built"
@@ -1050,7 +1050,7 @@ jobs:
           # filter that selects nothing passes.
           rc=0
           out="$(cd crates && cargo test -p wz-capi-pico --no-default-features \
-            --features engine-coop,peer,multi-thread --test it files::coop_tcp_teardown:: 2>&1)" || rc=$?
+            --features os-host,peer,multi-thread --test it files::coop_tcp_teardown:: 2>&1)" || rc=$?
           echo "$out"
           verdict=FAIL
           if [ "$rc" = 0 ] && grep -q '^test result: ok\. 2 passed' <<<"$out"; then verdict=PASS; fi
@@ -1068,8 +1068,8 @@ jobs:
           WZ_PICO_PROGRAM_ROLES: listen dial
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_coop_single_thread.c "a single-threaded pico C program on the cooperative engine" peer,query,queryable
 
-      # The same program against the library without `std` (`WZ_PICO_FORM=nostd`: `os-posix` on
-      # Linux, `os-windows` on Windows, the `capi-nostd` profile for the host's own target), in a
+      # The same program against the library without `std` (`WZ_PICO_FORM=nostd`: `os-host` on
+      # Linux and on Windows, the `capi-nostd` profile for the host's own target), in a
       # target directory of its own, so it replaces no library of the steps above. Not on macOS:
       # the library without `std` there is a form of its own (its profile's flags, a Darwin dynamic
       # library linked without `std`), which nothing in this repository has built yet.
@@ -1099,7 +1099,7 @@ jobs:
   # (`package-windows`), so every example builds the library the package ships: the profile
   # `host-peer-ext` resolved by the pinned Kconfig interpreter, on the engine it chooses (the
   # cooperative one, `WZ_PICO_ENGINE`), in the form a release ships, without `std`
-  # (`WZ_PICO_FORM`: `os-posix` on Linux, `os-windows` on Windows, the `capi-nostd` profile;
+  # (`WZ_PICO_FORM`: `os-host` on Linux and on Windows, the `capi-nostd` profile;
   # owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7), as ONE feature list
   # (`WZ_EXAMPLE_FEATURES`), so the library is built once; the profile example's second run builds
   # it again with the policy's build default on, last, because that build replaces the first. Both
@@ -1181,11 +1181,11 @@ jobs:
         shell: bash
         run: python -m pip install --quiet --no-deps --require-hashes -r scripts/requirements-kconfig.txt
 
-      # The profile's list without `engine-coop` and `std`: scripts/pico-c-program.sh names the
-      # host's layer without `std` in the place of the engine itself, and the library a release
-      # ships carries no `std` (`nostd_features` of scripts/lib/pico_windows_package.py drops it
-      # from the same list). A profile that no longer resolves to that engine fails here, and not as
-      # an example that ran against another build.
+      # The profile's list without `os-host`: scripts/pico-c-program.sh names the engine itself
+      # (`WZ_PICO_ENGINE=coop` puts `os-host` in front of the program's capabilities), and the
+      # library a release ships is built from the same list (`library_features` of
+      # scripts/lib/pico_windows_package.py). A profile that no longer resolves to that engine fails
+      # here, and not as an example that ran against another build.
       - name: the package's feature list
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         shell: bash
@@ -1193,11 +1193,10 @@ jobs:
           args="$(python scripts/lib/wz_config.py --resolve-features pico configs/profiles/host-peer-ext.conf)"
           features=",${args#--no-default-features --features },"
           case "$features" in
-            *,engine-coop,*) ;;
+            *,os-host,*) ;;
             *) echo "host-peer-ext does not resolve to the cooperative engine: $args" >&2; exit 1 ;;
           esac
-          features="${features//,engine-coop,/,}"
-          features="${features//,std,/,}"
+          features="${features//,os-host,/,}"
           features="${features#,}"
           features="${features%,}"
           echo "the package's features: $features"
