@@ -31,6 +31,8 @@ use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::AtomicBool;
 
+#[cfg(feature = "resource-snapshot")]
+use wz_runtime_coop::faces::MessageCount;
 #[cfg(not(any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::faces::SiteSend;
 use wz_runtime_coop::faces::{Dial, FaceAt, FaceSite, LinkEnd, SendParts, WireParts};
@@ -515,11 +517,12 @@ pub(super) struct DirectParts<L: CoopLinks + 'static, C: ClockSource + 'static> 
 // the link's making (`CoopEngine::place_link_session`), under the session's lock with the read's
 // slot held, and dropped by the read with its slot held too (`DirectSlot::drop_link`): the
 // session's record of the face holds a handle on the place, none on the parts, and a send reaches
-// the wire only through a hold of the place. The receive part's handles on the same cells (the
-// pump's link, the records' actions) are made and dropped by the read alone, under its slot; the
-// cells they share are reached through the link's own cells, of the session's lock kind. Nothing of
-// the parts is bound to a thread, and their place is reached by the one thread of the session's
-// form (`DirectOwner`).
+// the wire only through a hold of the place; the one handle the record keeps on a cell of the link
+// (`resource-snapshot`, the kernel's, `KernelCount`) is made and dropped under the session's lock.
+// The receive part's handles on the same cells (the pump's link, the records' actions) are made
+// and dropped by the read alone, under its slot; the cells they share are reached through the
+// link's own cells, of the session's lock kind. Nothing of the parts is bound to a thread, and
+// their place is reached by the one thread of the session's form (`DirectOwner`).
 unsafe impl<L: CoopLinks + 'static, C: ClockSource + 'static> FaceParts for DirectParts<L, C> {}
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectParts<L, C> {
@@ -535,6 +538,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectParts<L, C> {
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> WireParts for DirectParts<L, C> {
     type Wire = Wire<C>;
 
+    #[cfg(feature = "resource-snapshot")]
+    type Count = KernelCount<C>;
+
     fn wire(&self) -> Option<&Wire<C>> {
         self.wire.as_ref()
     }
@@ -543,6 +549,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> WireParts for DirectParts
     /// the link's place, taken before the session's lock, and waits for its holder, so none is
     /// owed.
     fn pay(&mut self, _owed: u32) {}
+}
+
+/// `resource-snapshot` — what the session's record of the one link keeps of what the link's
+/// receive path counts: a handle on the link's kernel, whose meter that path counts into, apart
+/// from the place of the link's parts, so the record reads and retires the link with no lend of
+/// that place.
+/// Made with the link's wire, before the wire goes into its place, and dropped with the record's
+/// handle on the place, both under the session's lock; the kernel's cell is given back once the
+/// parts' handles go too.
+#[cfg(feature = "resource-snapshot")]
+pub(super) struct KernelCount<C: ClockSource + 'static>(
+    CellRc<SessionCore<LinkRuntime<C>, CoopTime<C>>, LinkCount>,
+);
+
+#[cfg(feature = "resource-snapshot")]
+impl<C: ClockSource + 'static> MessageCount for KernelCount<C> {
+    fn reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
+        self.0.rx_intervals.reading()
+    }
 }
 
 /// A send writes the link's wire, through a hold of its place.
@@ -1585,6 +1610,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         slot.records = Some(dispatch);
         // The face's record holds the wire's waits, read once here, and no handle.
         let (input, room) = (wire.input_wait(), wire.room_wait());
+        #[cfg(feature = "resource-snapshot")]
+        let count = KernelCount(CellRc::clone(&wire.actions.core));
         // The wire goes into its place by a try alone, under the session's lock: a send that holds
         // the place waits for that lock, so the place is never waited for here.
         let carried = OnThisThread(wire);
@@ -1604,8 +1631,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // dial role's at the engine's fixed place, each past it in its row of the session's arena
         // (`TakenFaces`). The session's state, which holds this handle, reaches the site only while
         // the engine stands (its drop ends the links before the face goes), and the handle does
-        // nothing in its own drop.
+        // nothing in its own drop but let go of the count it keeps.
         let wire = unsafe { FaceAt::new(&face.site, face.end_handle(), input, room) };
+        #[cfg(feature = "resource-snapshot")]
+        let wire = wire.counted_by(count);
         core.transport.links.put_link(slot.at(), Link::Wire(wire));
         Ok(())
     }

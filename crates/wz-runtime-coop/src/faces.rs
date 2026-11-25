@@ -83,6 +83,17 @@ pub trait FaceSession {
     fn message_reading(&self) -> BuildMessageReading;
 }
 
+/// `resource-snapshot` — a handle on what one link's receive path counts, which a handle on the
+/// place of the link's parts keeps apart from that place ([`FaceAt::counted_by`]): read with no
+/// lend of the place, so a place another holder has, or one already emptied, still reads what the
+/// link counted, and the session's reading neither falls for a moment nor loses a link it lets go
+/// of.
+#[cfg(feature = "resource-snapshot")]
+pub trait MessageCount {
+    /// What the link's receive path has counted, cumulative.
+    fn reading(&self) -> BuildMessageReading;
+}
+
 /// `resource-snapshot` — what the session of the link `link` holds has counted, while it holds
 /// one: a link counts from the moment it is put in, its handshake included, until it is let go of.
 #[cfg(feature = "resource-snapshot")]
@@ -404,6 +415,11 @@ pub trait WireParts: FaceParts {
     /// The parts' wire, while they hold one.
     fn wire(&self) -> Option<&Self::Wire>;
 
+    /// `resource-snapshot` — what a handle on the parts' place keeps of what their link counts
+    /// ([`FaceAt::counted_by`]).
+    #[cfg(feature = "resource-snapshot")]
+    type Count: MessageCount;
+
     /// Pay `owed`, debts the parts define (bits within [`PARTS_DEBTS`], never none) that were
     /// owed to the place while it was held ([`FaceSite::owe`]), with the parts lent. Takes no
     /// lock of the session: the place's holder may hold that lock, or wait for it while it holds
@@ -690,12 +706,16 @@ fn pay_parts<P: WireParts>(parts: &mut P, owed: u32) {
 /// and no Close, and is told nothing; its next look reads it again. A close it cannot tell then is
 /// owed to the place's holder, which tells it before letting go. A wait on the link's input and
 /// room is read off the link once, when it is made, and how its session ends is read and asked
-/// through its end (`E`), with no lend of the place.
+/// through its end (`E`), with no lend of the place. What the link counted is read through the
+/// count the handle keeps (`resource-snapshot`), with no lend of the place either.
 pub struct FaceAt<K: LockKind, P: WireParts, E: LinkEnd> {
     site: core::ptr::NonNull<FaceSite<K, P>>,
     end: E,
     input: Option<WaitOn>,
     room: Option<WaitOn>,
+    /// `resource-snapshot` — what the link counts, kept with the handle ([`Self::counted_by`]).
+    #[cfg(feature = "resource-snapshot")]
+    count: Option<P::Count>,
 }
 
 impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
@@ -718,7 +738,20 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
             end,
             input,
             room,
+            #[cfg(feature = "resource-snapshot")]
+            count: None,
         }
+    }
+
+    /// `resource-snapshot` — the handle, reading what its link counted through `count`, which it
+    /// keeps until it goes: the session retires a link it lets go of by this reading, which a
+    /// place held by another holder, or emptied before the handle goes, would read as nothing. A
+    /// handle made with no count reads nothing counted.
+    #[cfg(feature = "resource-snapshot")]
+    #[must_use]
+    pub fn counted_by(mut self, count: P::Count) -> Self {
+        self.count = Some(count);
+        self
     }
 
     /// The end the link's session is ended by: where each face's end lies in its face, what
@@ -778,12 +811,12 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceSession for FaceAt<K, P, E> {
         self.read((), seen);
     }
 
-    /// Read through the place, as every other fact: a place another thread holds, or that holds
-    /// no wire, reads as nothing counted, so its owner reads a link it lets go of before the
-    /// parts go.
+    /// Read through the count the handle keeps ([`Self::counted_by`]), with no lend of the place.
     #[cfg(feature = "resource-snapshot")]
     fn message_reading(&self) -> BuildMessageReading {
-        self.read(BuildMessageReading::empty(), |wire| wire.message_reading())
+        self.count
+            .as_ref()
+            .map_or_else(BuildMessageReading::empty, MessageCount::reading)
     }
 }
 
@@ -2905,6 +2938,9 @@ mod tests {
     impl WireParts for ApartParts {
         type Wire = ApartWire;
 
+        #[cfg(feature = "resource-snapshot")]
+        type Count = Ended;
+
         fn wire(&self) -> Option<&ApartWire> {
             self.0.as_ref()
         }
@@ -2942,6 +2978,9 @@ mod tests {
     impl WireParts for SeatedParts {
         type Wire = ApartWire;
 
+        #[cfg(feature = "resource-snapshot")]
+        type Count = Ended;
+
         fn wire(&self) -> Option<&ApartWire> {
             self.0.as_ref()
         }
@@ -2964,6 +3003,49 @@ mod tests {
 
     /// The count of the ends a test's link was told.
     type Ended = alloc::sync::Arc<core::sync::atomic::AtomicU32>;
+
+    /// A count a test bumps as a link's receive path would, read as the messages it counted.
+    #[cfg(feature = "resource-snapshot")]
+    impl MessageCount for Ended {
+        fn reading(&self) -> BuildMessageReading {
+            BuildMessageReading {
+                messages: u64::from(self.load(Ordering::SeqCst)),
+                ..BuildMessageReading::empty()
+            }
+        }
+    }
+
+    /// `resource-snapshot` — a handle on a face's place reads what its link counted through the
+    /// count it keeps, with no lend of the place: while the place is held, the reading's own
+    /// thread's lend included, and once the place was emptied, it reads the link's count, never
+    /// nothing; a handle made with no count reads nothing. Turned red by a reading made through a
+    /// lend of the place (`FaceAt::message_reading`), which reads nothing in both cases, so a
+    /// link let go of then would be retired as having counted nothing.
+    #[cfg(feature = "resource-snapshot")]
+    #[test]
+    fn a_faces_count_is_read_with_no_lend_of_its_place() {
+        let (aborted, ended) = (Rc::new(Cell::new(0)), Ended::default());
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        assert!(site.hold(held_parts(&aborted, &ended)).is_none());
+        // SAFETY: the site outlives both handles, in this frame.
+        let bare = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) };
+        let counted = Ended::default();
+        // SAFETY: as above.
+        let at = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) }
+            .counted_by(Ended::clone(&counted));
+        counted.store(3, Ordering::SeqCst);
+        assert_eq!(bare.message_reading().messages, 0, "CONTROL: no count kept");
+        assert_eq!(at.message_reading().messages, 3, "the place free");
+        let inside = site.lend(|_| at.message_reading().messages);
+        assert_eq!(
+            inside,
+            Some(3),
+            "the place held by the reading's own thread"
+        );
+        assert!(site.take().is_some());
+        counted.store(5, Ordering::SeqCst);
+        assert_eq!(at.message_reading().messages, 5, "the place emptied");
+    }
 
     /// Parts holding an established wire that holds input, its aborts counted in `aborted` and
     /// its ends in `ended`.
