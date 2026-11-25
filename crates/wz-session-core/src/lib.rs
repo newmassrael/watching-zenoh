@@ -2256,6 +2256,17 @@ pub mod transport_timers;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod unicast_rx;
 
+/// Where a session's unicast transport lies and how its driver, its machine's binding and its
+/// send reach it: by `&mut`, lent by its one owner. Gated like [`unicast_rx`].
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+pub mod transport_place;
+
+/// The unicast transport of a session that holds one face as one value: its link's life, its
+/// receive and its timers, handed the link's reports, its datagrams and the time. Gated like
+/// [`unicast_rx`].
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+pub mod unicast_transport;
+
 /// The words of the session lifecycle that need no allocator: the open verdict, the
 /// refusals, the open key and the capability document. Unconditional, so a node of the
 /// fixed-memory profile answers an open in the words the heap profile does;
@@ -2594,6 +2605,36 @@ pub mod app_transport;
 /// is.
 #[cfg(feature = "session-unicast")]
 pub mod peer_table;
+
+/// SCE-generated life of the one link of a session that holds one face, from
+/// `sources/session/unicast_link.scxml`, COMMITTED at `out/wz-session-core/unicast_link_sm.rs` and
+/// `include!`-ed from there. Exposes `UnicastLinkState` / `UnicastLinkEvent`, the
+/// `UnicastLinkActions` host trait and the `UnicastLinkPolicy<A>` policy, driven by
+/// [`link_life`]. Engine-free and allocation-free; gated on `session-unicast`, which brings the
+/// SCE runtime in. The lint allows are restored as outer attributes, as for the other generated
+/// machines.
+#[cfg(feature = "session-unicast")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod unicast_link {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/unicast_link_sm.rs"
+    ));
+}
+
+/// The one link of a session that holds one face as a value with no I/O, with its
+/// [`unicast_link`] machine. Gated as the machine is.
+#[cfg(feature = "session-unicast")]
+pub mod link_life;
 
 /// The host of the peer machines, written once for every profile (decision D5 of
 /// `docs/session-lifecycle-intent.md`): the bookkeeping of which face a dial

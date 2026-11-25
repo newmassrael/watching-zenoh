@@ -1914,3 +1914,136 @@ mod link_stamps {
         assert_eq!(actions.link.stamps(), LinkStamps::default());
     }
 }
+
+/// The one value of a one-face session's transport, over a real session's machine and actions: what
+/// it raises before input is read, the order it hands a datagram and the time to the session, and
+/// when it is next due.
+mod unicast_transport {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::mem::MaybeUninit;
+
+    use super::{bundle, NoEntropy, PlainRuntime, StillClock};
+    use crate::drive::{new_session_engine, SessionEngine};
+    use crate::driver_loop::IterationEvent;
+    use crate::link_life::{LinkInput, LinkTimes};
+    use crate::session_actions::SessionLinkActions;
+    use crate::session_timeouts::SessionTimeouts;
+    use crate::unicast_transport::UnicastTransport;
+
+    const TIMES: LinkTimes = LinkTimes {
+        open_timeout_ms: 1_000,
+        redial_ms: Some(500),
+        dial_look_ms: 10,
+    };
+
+    /// The session's machine over `actions`, entered in its initial state and given no role.
+    fn engine(
+        actions: &Arc<SessionLinkActions<PlainRuntime, StillClock>>,
+    ) -> SessionEngine<PlainRuntime, StillClock> {
+        let mut engine = new_session_engine::<PlainRuntime, StillClock>(actions, NoEntropy);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        engine
+    }
+
+    /// The application layer's deadline that came due is raised once by the time handed to the
+    /// transport, and spent: the time handed again raises nothing. Turned red by an `on_time` that
+    /// leaves the deadline out, or raises it without spending it.
+    #[test]
+    fn the_time_raises_the_application_layers_deadline_once() {
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let transport = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        actions.set_app_wake_deadline_ms(Some(0));
+        let mut wakes = 0usize;
+        let mut count = |event: IterationEvent<'_, '_>| {
+            if matches!(event, IterationEvent::AppWake) {
+                wakes += 1;
+            }
+        };
+        transport.on_time(&mut engine, &*actions, 0, &mut count);
+        transport.on_time(&mut engine, &*actions, 0, &mut count);
+        assert_eq!(wakes, 1, "the deadline is raised once");
+        assert_eq!(actions.app_wake_deadline_ms(), None, "and spent");
+    }
+
+    /// The transport is due at the first of what its link and its session have due: the session's
+    /// application deadline while the link waits on nothing, and the link's look at once when a
+    /// dial it asked for is owed. Turned red by a due instant that leaves the link's wake out.
+    #[test]
+    fn the_transport_is_due_at_the_first_of_its_links_and_its_sessions() {
+        let (actions, _link) = bundle();
+        let engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let transport = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        actions.set_app_wake_deadline_ms(Some(9));
+        assert!(
+            transport
+                .due_ms(&engine, &*actions, 0)
+                .is_some_and(|due_ms| due_ms <= 9),
+            "an idle link leaves the session's deadline to bound the look"
+        );
+        assert_eq!(transport.input(LinkInput::Open, 0).dial(), Some(0));
+        assert_eq!(
+            transport.due_ms(&engine, &*actions, 0),
+            Some(0),
+            "a dial owed a report is looked at now"
+        );
+    }
+
+    /// A datagram handed to the transport is read after the application layer's deadline is raised,
+    /// and the receive counts the path it took. Turned red by an `on_datagram` that reads the
+    /// datagram first, leaves the deadline out, or dispatches past the receive's count.
+    #[cfg(feature = "rx-in-place")]
+    #[test]
+    fn a_datagram_is_read_after_the_application_layers_deadline_and_counted() {
+        use crate::unicast_rx::RxPathCounts;
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
+        let transport = UnicastTransport::init_in(
+            &mut place,
+            TIMES,
+            1,
+            SessionTimeouts::from_build(),
+            |slot| slot.write(()),
+        )
+        .expect("built");
+        actions.set_app_wake_deadline_ms(Some(0));
+        let mut wakes: Vec<bool> = Vec::new();
+        let path = transport.on_datagram(
+            &[wz_codecs::wire_const::T_MID_KEEP_ALIVE],
+            &mut engine,
+            &*actions,
+            0,
+            &mut |event: IterationEvent<'_, '_>| {
+                wakes.push(matches!(event, IterationEvent::AppWake));
+            },
+        );
+        assert_eq!(wakes.first(), Some(&true), "the deadline is raised first");
+        assert_eq!(wakes.iter().filter(|wake| **wake).count(), 1, "and once");
+        let mut counted = RxPathCounts::default();
+        counted.count(path);
+        assert_eq!(
+            transport.rx().path_counts(),
+            counted,
+            "the receive counted the one datagram on the path it took"
+        );
+    }
+}

@@ -1659,8 +1659,12 @@ impl IterationEvent<'_, '_> {
 /// timer) is raised with no frame lent. A layer that sends work of its own (a query it was
 /// asked to make, a put that came due) does it in [`Self::event`] and not in
 /// [`Self::record`], and the call graph of the image says so: the walk calls `record`
-/// through this trait's own slot, so what `record` reaches is what a stack bound adds to
-/// the frame of the receive, and what only `event` reaches is not.
+/// of the sink it was handed, so what `record` reaches is what a stack bound adds to the
+/// frame of the receive, and what only `event` reaches is not.
+///
+/// The unicast receive (`drive`, `unicast_rx`, `transport_timers`) takes its sink as a type
+/// parameter and not as a trait object: a build drives its sessions through one sink, so the
+/// receive calls that sink's methods directly and is one body for it.
 ///
 /// Every `FnMut(IterationEvent)` is a sink whose `record` is the in-place event, which is
 /// what the heap profile and the tests pass.
@@ -1741,12 +1745,12 @@ impl<F: FnMut(IterationEvent<'_, '_>) + ?Sized> EventSink for F {
 ))]
 // Its arguments are read by the arm of a kind the build reads; a slot build that reads none has no arm.
 #[allow(unused_variables)]
-pub(crate) fn report_lent_record(
+pub(crate) fn report_lent_record<S: EventSink + ?Sized>(
     one: crate::network_message::WalkedRecord<'_, '_>,
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
-    sink: &mut dyn EventSink,
+    sink: &mut S,
 ) {
     use crate::network_message::WalkedRecord;
     match one {
