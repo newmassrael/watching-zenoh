@@ -991,7 +991,10 @@ impl<H: Holders> RegistryOf<H> {
 
     /// Fan one iteration's event of face `id` into the application layer, against that face's
     /// tables. A face the session no longer holds hears nothing.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(all(
+        feature = "queryable",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(super) fn dispatch_event(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
         self.dispatch_event_to(face, event, Planes::All);
     }

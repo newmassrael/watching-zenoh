@@ -185,7 +185,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             while let Some(call) = next.take() {
                 let call = SubscriberCall::new(call);
                 call.hand(sample);
-                reached += 1;
+                reached = reached.saturating_add(1);
                 if call.end() {
                     self.let_go_of_drained(|tables, cursor| {
                         tables
