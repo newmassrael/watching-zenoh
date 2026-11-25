@@ -284,7 +284,7 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "pubsub-congestion-control",
             # `rx-push` and `rx-response` select what the slot profile's lent walk decodes, in
             # private items (`lend_push`, `lend_response`, the helpers that judge them, the arms
-            # of `lend_any_record` and of `report_lent_record`) and in the variants of the
+            # of `read_record` and of `report_lent_record`) and in the variants of the
             # crate-private `WalkedRecord` and `LentRecord`. The public surface they touch is
             # `InPlaceRecord::push`, `response` and `response_final`, and those exist in every
             # build (their gate is the codec's): without the feature they answer `None`.

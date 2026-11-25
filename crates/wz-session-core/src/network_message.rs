@@ -188,7 +188,7 @@ macro_rules! own_wire {
         feature = "alloc",
         all(
             feature = "rx-lent-control",
-            // Named by the arms of `lend_any_record`, each of which is a kind the build reads.
+            // Named by the arms of `read_record`, each of which is a kind the build reads.
             any(
                 feature = "codec-request",
                 all(feature = "codec-push", feature = "rx-push"),
@@ -1715,7 +1715,9 @@ where
     }
 }
 
-/// The walk of [`try_for_each_record_while`], with the consumer behind a trait object.
+/// The walk of [`try_for_each_record_while`], with the consumer behind a trait object: the pull of
+/// the payload's records ([`Records`]) on the form that lends every kind, and the walk that owns
+/// or lends by kind on the others.
 // One body for every consumer: generic over it, the walk and each kind's reader (and the codec's
 // decode of that kind) were compiled again for each closure, and in the crate of each generic
 // caller as well, while what differs between consumers is only the call that hands a record over.
@@ -1735,11 +1737,101 @@ fn walk_records<'f>(
     form: RecordForm,
     each: &mut dyn EachRecord<'f>,
 ) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
-    let mut stopped = false;
-    // What the consumer said when it took the last record: whether it takes another.
-    let mut go_on = true;
-    // Without a lendable codec there is nothing to lend, and every form is owned.
-    #[cfg(not(any(
+    match form {
+        #[cfg(feature = "rx-lent-control")]
+        RecordForm::LentControl => {
+            record.clear();
+            hand_pulled_records(payload, each)
+        }
+        #[cfg(all(
+            feature = "alloc",
+            any(
+                test,
+                all(
+                    not(feature = "rx-lent-control"),
+                    not(any(
+                        feature = "codec-push",
+                        feature = "codec-request",
+                        feature = "codec-response"
+                    ))
+                ),
+                all(feature = "reassembly", feature = "routing-namespace")
+            )
+        ))]
+        RecordForm::Owned => walk_kept_records(payload, record, form, each),
+        #[cfg(all(
+            all(
+                feature = "alloc",
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+            ),
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response"
+            )
+        ))]
+        RecordForm::Lent => walk_kept_records(payload, record, form, each),
+    }
+}
+
+/// The form that lends every kind ([`RecordForm::LentControl`]): each record pulled off the
+/// payload is handed to `each` until it takes no more, a transport message begins, a record does
+/// not decode, or the payload ends. How far the pull read, and whether `each` ended it with
+/// records still unread.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "rx-lent-control",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+fn hand_pulled_records<'f>(
+    payload: &'f [u8],
+    each: &mut dyn EachRecord<'f>,
+) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
+    let mut records = Records::new(payload);
+    while records.holds_record() {
+        // Lent by reference where `next` gave it, so the record is not moved again under the call.
+        match records.next() {
+            Some(Ok(ref view)) => {
+                if !each.take_record(view.walked())? {
+                    return Ok((records.consumed(), records.holds_record()));
+                }
+            }
+            Some(Err(stop)) => return Err(stop),
+            None => break,
+        }
+    }
+    Ok((records.consumed(), false))
+}
+
+/// The walk of the forms that keep a record they do not lend as its owned message
+/// ([`RecordForm::Owned`], [`RecordForm::Lent`]).
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    ),
+    any(
+        all(
+            feature = "alloc",
+            any(
+                test,
+                all(
+                    not(feature = "rx-lent-control"),
+                    not(any(
+                        feature = "codec-push",
+                        feature = "codec-request",
+                        feature = "codec-response"
+                    ))
+                ),
+                all(feature = "reassembly", feature = "routing-namespace")
+            )
+        ),
         all(
             all(
                 feature = "alloc",
@@ -1750,17 +1842,36 @@ fn walk_records<'f>(
                 feature = "codec-request",
                 feature = "codec-response"
             )
+        )
+    )
+))]
+fn walk_kept_records<'f>(
+    payload: &'f [u8],
+    record: &mut RecordBuf,
+    form: RecordForm,
+    each: &mut dyn EachRecord<'f>,
+) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
+    use crate::parse_error::InboundParseError;
+    let mut stopped = false;
+    // What the consumer said when it took the last record: whether it takes another.
+    let mut go_on = true;
+    // Without a lendable codec there is nothing to lend, and every form is owned.
+    #[cfg(not(all(
+        all(
+            feature = "alloc",
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
-        feature = "rx-lent-control"
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response"
+        )
     )))]
     let _ = form;
     let mut cursor = SceCursor::new(payload);
     while cursor.remaining() > 0 {
         // The one read of the record's id, which every reader below is handed.
-        let mid = cursor
-            .peek_u8()
-            .map_err(crate::parse_error::InboundParseError::Codec)?
-            & 0x1F;
+        let mid = cursor.peek_u8().map_err(InboundParseError::Codec)? & 0x1F;
         // A transport message is not a record of this frame: the walk ends before it, and the
         // caller, who is told how far the walk got, goes on from there.
         if is_transport_mid(mid) {
@@ -1770,81 +1881,201 @@ fn walk_records<'f>(
             stopped = true;
             break;
         }
-        // The form that lends every kind leaves no owned decode for the rest of the
-        // loop to do on its behalf.
         #[cfg(all(
-            feature = "rx-lent-control",
             all(
                 feature = "alloc",
                 any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-            )
-        ))]
-        if form == RecordForm::LentControl {
-            match lend_any_record(mid, &mut cursor, each)? {
-                Some(more) => {
-                    go_on = more;
-                    continue;
-                }
-                None => break,
-            }
-        }
-        // A build with no owned record (no allocator, or control records lent and no
-        // owned reader kept) has the one form: this is the whole walk.
-        #[cfg(not(all(
-            feature = "alloc",
-            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-        )))]
-        {
-            let RecordForm::LentControl = form;
-            match lend_any_record(mid, &mut cursor, each)? {
-                Some(more) => go_on = more,
-                None => break,
-            }
-        }
-        #[cfg(all(
-            feature = "alloc",
-            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-        ))]
-        {
-            use crate::parse_error::InboundParseError;
-            #[cfg(any(
+            ),
+            any(
                 feature = "codec-push",
                 feature = "codec-request",
                 feature = "codec-response"
-            ))]
-            if form == RecordForm::Lent {
-                if let Some(more) = lend_record(mid, &mut cursor, each)? {
-                    go_on = more;
-                    continue;
-                }
+            )
+        ))]
+        if form == RecordForm::Lent {
+            if let Some(more) = lend_record(mid, &mut cursor, each)? {
+                go_on = more;
+                continue;
             }
-            // Only an owned record is decoded into the buffer, so only it clears it first.
+        }
+        // Only an owned record is decoded into the buffer, so only it clears it first.
+        record.clear();
+        let decoded =
+            decode_one_record(&mut cursor, record, NO_ORIGIN).map_err(InboundParseError::Codec)?;
+        if decoded == Decoded::Unknown {
+            absorb_unknown(&mut cursor, record).map_err(InboundParseError::Codec)?;
+        }
+        if let Some(refusal) = decoded.refusal(record.last()) {
             record.clear();
-            let decoded = decode_one_record(&mut cursor, record, NO_ORIGIN)
-                .map_err(InboundParseError::Codec)?;
-            if decoded == Decoded::Unknown {
-                absorb_unknown(&mut cursor, record).map_err(InboundParseError::Codec)?;
-            }
-            if let Some(refusal) = decoded.refusal(record.last()) {
+            return Err(refusal);
+        }
+        match each.take_record(WalkedRecord::Owned(record)) {
+            Ok(more) => go_on = more,
+            Err(stop) => {
                 record.clear();
-                return Err(refusal);
+                return Err(stop);
             }
-            match each.take_record(WalkedRecord::Owned(record)) {
-                Ok(more) => go_on = more,
-                Err(stop) => {
-                    record.clear();
-                    return Err(stop);
-                }
-            }
-            if !known {
-                break;
-            }
+        }
+        if decoded == Decoded::Unknown {
+            break;
         }
     }
     record.clear();
     // How much of the payload the walk read: all of it, or up to the transport message that
     // ended it, or up to the record the consumer took no more after.
     Ok((payload.len().saturating_sub(cursor.remaining()), stopped))
+}
+
+/// The records of a frame's payload, pulled one at a time where the payload lies
+/// ([`RecordForm::LentControl`]): each `next` decodes the record at the cursor, judges it by the
+/// owned rule and gives its view by value, with nothing to hand it to. The pull ends before a
+/// transport message, which begins where the last record ends and is the batch's to read
+/// ([`Self::consumed`] says where), after a record that does not decode, and at the end of the
+/// payload. The shape is the codec's pull of a frame's messages (a view enum by value), so the
+/// reader the codec generates can take its place.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "rx-lent-control",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+pub(crate) struct Records<'f> {
+    cursor: SceCursor<'f>,
+    len: usize,
+    /// A record failed to decode: what follows it has no known start.
+    failed: bool,
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "rx-lent-control",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+impl<'f> Records<'f> {
+    /// The records of `payload`, a frame's.
+    pub(crate) fn new(payload: &'f [u8]) -> Self {
+        Self {
+            cursor: SceCursor::new(payload),
+            len: payload.len(),
+            failed: false,
+        }
+    }
+
+    /// How many bytes of the payload the records pulled so far took.
+    pub(crate) fn consumed(&self) -> usize {
+        self.len.saturating_sub(self.cursor.remaining())
+    }
+
+    /// Whether a record lies at the cursor: the payload goes on, no transport message begins
+    /// there, and no record before failed to decode.
+    pub(crate) fn holds_record(&self) -> bool {
+        !self.failed
+            && self.cursor.remaining() > 0
+            && self
+                .cursor
+                .peek_u8()
+                .is_ok_and(|header| !is_transport_mid(header & 0x1F))
+    }
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "rx-lent-control",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+impl<'f> Iterator for Records<'f> {
+    type Item = Result<RecordView<'f>, crate::parse_error::InboundParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.holds_record() {
+            return None;
+        }
+        let mid = self.cursor.peek_u8().ok()? & 0x1F;
+        let record = read_record(mid, &mut self.cursor);
+        self.failed = record.is_err();
+        Some(record)
+    }
+}
+
+/// One record [`Records`] pulled, read where the payload lies: the view of each kind this build
+/// reads off the wire, by value.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "rx-lent-control",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+pub(crate) enum RecordView<'f> {
+    /// A Push.
+    #[cfg(all(feature = "codec-push", feature = "rx-push"))]
+    Push(wz_codecs::push::PushView<'f>),
+    /// A Request.
+    #[cfg(feature = "codec-request")]
+    Request(wz_codecs::request::RequestView<'f>),
+    /// A Response.
+    #[cfg(all(feature = "codec-response", feature = "rx-response"))]
+    Response(wz_codecs::response::ResponseView<'f>),
+    /// A ResponseFinal.
+    #[cfg(all(feature = "codec-response-final", feature = "rx-response"))]
+    ResponseFinal(wz_codecs::lent::ResponseFinal<'f>),
+    /// A Declare.
+    #[cfg(all(feature = "codec-declare", feature = "rx-control"))]
+    Declare(wz_codecs::lent::Declare<'f>),
+    /// An Interest.
+    #[cfg(feature = "rx-control")]
+    Interest(wz_codecs::lent::Interest<'f>),
+    /// An Oam, kept for the transport counters, which read its band.
+    #[cfg(all(feature = "rx-control", feature = "transport-stats", feature = "alloc"))]
+    Oam(wz_codecs::lent::Oam<'f>),
+    /// A record no consumer reads further: an Oam in a build without the counters, or the tail of
+    /// a payload that opens with a MID this build has no decoder for.
+    Skipped(core::marker::PhantomData<&'f ()>),
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "rx-lent-control",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+impl<'f> RecordView<'f> {
+    /// The record as the walk hands it over, lent for the call.
+    pub(crate) fn walked(&self) -> WalkedRecord<'_, 'f> {
+        match self {
+            #[cfg(all(feature = "codec-push", feature = "rx-push"))]
+            Self::Push(push) => WalkedRecord::Push(push),
+            #[cfg(feature = "codec-request")]
+            Self::Request(request) => WalkedRecord::Request(request),
+            #[cfg(all(feature = "codec-response", feature = "rx-response"))]
+            Self::Response(response) => WalkedRecord::Response(response),
+            #[cfg(all(feature = "codec-response-final", feature = "rx-response"))]
+            Self::ResponseFinal(response_final) => WalkedRecord::ResponseFinal(response_final),
+            #[cfg(all(feature = "codec-declare", feature = "rx-control"))]
+            Self::Declare(declare) => WalkedRecord::Declare(declare),
+            #[cfg(feature = "rx-control")]
+            Self::Interest(interest) => WalkedRecord::Interest(interest),
+            #[cfg(all(feature = "rx-control", feature = "transport-stats", feature = "alloc"))]
+            Self::Oam(oam) => WalkedRecord::Oam(oam),
+            Self::Skipped(_) => WalkedRecord::Skipped,
+        }
+    }
 }
 
 /// The lent half of [`try_for_each_record`]: when the record at the cursor is of
@@ -1970,6 +2201,11 @@ fn admit_lent(
 ))]
 pub(crate) mod push_read;
 
+// Each kind is read by a function of its own, never inlined, into a binding its caller holds: a
+// decoded record is a wide value (inline extension chains), and kept out of line its decode
+// occupies the stack only while that one record is read. Each reader refuses what the owned
+// decode of its kind refuses, with the same error, and judges the record by the owned rule.
+
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
@@ -1987,21 +2223,17 @@ pub(crate) mod push_read;
     )
 ))]
 #[inline(never)]
-fn lend_push<'f>(
+fn read_push<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    // Read as its view, as `lend_request` reads its record: a few words and the bytes its chains
-    // occupy. The lent record holds each chain inline at the node's capacity, so it was filled from
-    // a template of that size for every record and refused a chain past it, which the protocol
-    // bounds by nothing. The reader refuses what `Push::decode` refuses, with the same error, and
-    // judges the chains as it reads them. It reads into the binding that lends it, at the frame's
-    // lifetime, in which a view is invariant.
-    let mut push = wz_codecs::push::PushView::<'f>::default();
-    let admission = push_read::read_push_view(cursor, &mut push, &mut push_read::Lending)
+    push: &mut wz_codecs::push::PushView<'f>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    // Read as its view: a few words and the bytes its chains occupy. The lent record held each
+    // chain inline at the node's capacity, so it was filled from a template of that size for every
+    // record and refused a chain past it, which the protocol bounds by nothing. The reader judges
+    // the chains as it reads them.
+    let admission = push_read::read_push_view(cursor, push, &mut push_read::Lending)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(admission)?;
-    each.take_record(WalkedRecord::Push(&push))
+    admit_lent(admission)
 }
 
 #[cfg(all(
@@ -2014,21 +2246,15 @@ fn lend_push<'f>(
     )
 ))]
 #[inline(never)]
-fn lend_request<'f>(
+fn read_request<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    // The record is read as its view: a few words and the bytes its chains occupy, where the eager
-    // record is over a kilobyte (its extension vectors are inline, sized for their declared
-    // maximum). `decode` refuses what `Request::decode` refuses, with the same error, so the
-    // walk of a chain afterwards cannot fail. It is decoded into the binding that lends it, at the
-    // frame's lifetime, in which a view is invariant (its lists hold functions that take a cursor
-    // over those bytes).
-    let mut request = wz_codecs::request::RequestView::<'f>::default();
-    wz_codecs::request::RequestView::decode_into(cursor, &mut request)
+    request: &mut wz_codecs::request::RequestView<'f>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    // Read as its view, where the eager record is over a kilobyte (its extension vectors are
+    // inline, sized for their declared maximum), so the walk of a chain afterwards cannot fail.
+    wz_codecs::request::RequestView::decode_into(cursor, request)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(request_view_admission(&request))?;
-    each.take_record(WalkedRecord::Request(&request))
+    admit_lent(request_view_admission(request))
 }
 
 #[cfg(all(
@@ -2048,97 +2274,13 @@ fn lend_request<'f>(
     )
 ))]
 #[inline(never)]
-fn lend_response<'f>(
+fn read_response<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    // Read as its view, as `lend_request` reads its record: a few words and the bytes its chains
-    // occupy, where the lent record is over a kilobyte (its extension lists are inline, sized for
-    // their declared maximum). `decode` refuses what `Response::decode` refuses, with the same
-    // error. It is decoded into the binding that lends it, at the frame's lifetime, in which a
-    // view is invariant.
-    let mut response = wz_codecs::response::ResponseView::<'f>::default();
-    wz_codecs::response::ResponseView::decode_into(cursor, &mut response)
+    response: &mut wz_codecs::response::ResponseView<'f>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    wz_codecs::response::ResponseView::decode_into(cursor, response)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(response_view_admission(&response))?;
-    each.take_record(WalkedRecord::Response(&response))
-}
-
-/// The slot profile's walk of ONE record ([`RecordForm::LentControl`]): decode the
-/// record at the cursor where the payload lies, judge it by the owned rule, and
-/// hand it over, whatever kind it is.
-///
-/// The kinds this build has a decoder for are lent as their own variant of
-/// [`WalkedRecord`], an Oam among them (nothing reads its body, and the counters read its
-/// band); and a MID this build
-/// has no decoder for, whose length is unknowable, takes the rest of the payload
-/// as one skipped record and ends the walk, as the owned walk's `Unknown` does.
-/// A kind whose codec is not selected is that last case, as it is in the owned
-/// walk.
-///
-/// `mid` is the record's id, read by the walk. What `each` said of taking another record, or
-/// `None` when the record ended the payload and so the walk.
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "rx-lent-control",
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    )
-))]
-fn lend_any_record<'f>(
-    mid: u8,
-    cursor: &mut SceCursor<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<Option<bool>, crate::parse_error::InboundParseError> {
-    match mid {
-        // What the build reads off the wire (`rx-push`, `rx-response`, `rx-control`): a kind it did
-        // not ask for is a MID with no decoder here, and ends the walk of its frame.
-        #[cfg(all(feature = "codec-push", feature = "rx-push"))]
-        wire_const::N_MID_PUSH => lend_push(cursor, each).map(Some),
-        #[cfg(feature = "codec-request")]
-        wire_const::N_MID_REQUEST => lend_request(cursor, each).map(Some),
-        #[cfg(all(feature = "codec-response", feature = "rx-response"))]
-        wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(Some),
-        #[cfg(all(feature = "codec-response-final", feature = "rx-response"))]
-        wire_const::N_MID_RESPONSE_FINAL => lend_response_final(cursor, each).map(Some),
-        // The control records of a peer (`rx-control`): the declarations it makes, the interests it
-        // takes in ours and its OAM.
-        #[cfg(all(feature = "codec-declare", feature = "rx-control"))]
-        wire_const::N_MID_DECLARE => lend_declare(cursor, each).map(Some),
-        #[cfg(feature = "rx-control")]
-        wire_const::N_MID_INTEREST => lend_interest(cursor, each).map(Some),
-        #[cfg(feature = "rx-control")]
-        wire_const::N_MID_OAM => lend_oam(cursor, each).map(Some),
-        _ => lend_unknown(cursor, each),
-    }
-}
-
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "codec-declare",
-    feature = "rx-control",
-    feature = "rx-lent-control",
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    )
-))]
-#[inline(never)]
-fn lend_declare<'f>(
-    cursor: &mut SceCursor<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    // Decoded into the binding that lends it (see `lend_response`): `Declare::decode` builds a
-    // default, decodes into it, and returns it by value, and the `?` that unwraps it moves it again,
-    // so three copies of the largest message a record can be were in this frame.
-    let mut declare = wz_codecs::lent::Declare::<'f>::default();
-    wz_codecs::lent::Declare::decode_into(cursor, &mut declare)
-        .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(declare_view_admission(&declare))?;
-    each.take_record(WalkedRecord::Declare(&declare))
+    admit_lent(response_view_admission(response))
 }
 
 #[cfg(all(
@@ -2153,16 +2295,36 @@ fn lend_declare<'f>(
     )
 ))]
 #[inline(never)]
-fn lend_response_final<'f>(
+fn read_response_final<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    // Decoded into the binding that lends it (see `lend_declare`).
-    let mut response_final = wz_codecs::lent::ResponseFinal::<'f>::default();
-    wz_codecs::lent::ResponseFinal::decode_into(cursor, &mut response_final)
+    response_final: &mut wz_codecs::lent::ResponseFinal<'f>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    wz_codecs::lent::ResponseFinal::decode_into(cursor, response_final)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(response_final_view_admission(&response_final))?;
-    each.take_record(WalkedRecord::ResponseFinal(&response_final))
+    admit_lent(response_final_view_admission(response_final))
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-declare",
+    feature = "rx-control",
+    feature = "rx-lent-control",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+#[inline(never)]
+fn read_declare<'f>(
+    cursor: &mut SceCursor<'f>,
+    declare: &mut wz_codecs::lent::Declare<'f>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    // Into the caller's binding: `Declare::decode` builds a default, decodes into it, and returns
+    // it by value, which is a copy of the largest message a record can be.
+    wz_codecs::lent::Declare::decode_into(cursor, declare)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(declare_view_admission(declare))
 }
 
 #[cfg(all(
@@ -2176,16 +2338,13 @@ fn lend_response_final<'f>(
     )
 ))]
 #[inline(never)]
-fn lend_interest<'f>(
+fn read_interest<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    // Decoded into the binding that lends it (see `lend_declare`).
-    let mut interest = wz_codecs::lent::Interest::<'f>::default();
-    wz_codecs::lent::Interest::decode_into(cursor, &mut interest)
+    interest: &mut wz_codecs::lent::Interest<'f>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    wz_codecs::lent::Interest::decode_into(cursor, interest)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(interest_view_admission(&interest))?;
-    each.take_record(WalkedRecord::Interest(&interest))
+    admit_lent(interest_view_admission(interest))
 }
 
 #[cfg(all(
@@ -2199,26 +2358,18 @@ fn lend_interest<'f>(
     )
 ))]
 #[inline(never)]
-fn lend_oam<'f>(
+fn read_oam<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut dyn EachRecord<'f>,
-) -> Result<bool, crate::parse_error::InboundParseError> {
-    // Decoded into the binding that holds it (see `lend_declare`).
-    let mut oam = wz_codecs::lent::Oam::default();
-    wz_codecs::lent::Oam::decode_into(cursor, &mut oam)
+    oam: &mut wz_codecs::lent::Oam<'f>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    wz_codecs::lent::Oam::decode_into(cursor, oam)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(oam_view_admission(&oam))?;
-    // The counters read its band (`RecordClass`); nothing else reads it.
-    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
-    let walked = WalkedRecord::Oam(&oam);
-    #[cfg(not(all(feature = "transport-stats", feature = "alloc")))]
-    let walked = WalkedRecord::Skipped;
-    each.take_record(walked)
+    admit_lent(oam_view_admission(oam))
 }
 
-/// The tail of a payload that opens with a MID this build has no decoder for: its
-/// length is unknowable, so the rest of the payload is one skipped record and the
-/// walk ends.
+/// The record at the cursor, whose id is `mid`, read where the payload lies ([`Records`]). A MID
+/// this build has no decoder for takes the rest of the payload as one skipped record, as the owned
+/// walk's `Unknown` does: its length is unknowable.
 #[cfg(all(
     feature = "codec-frame",
     feature = "rx-lent-control",
@@ -2228,15 +2379,137 @@ fn lend_oam<'f>(
         all(feature = "session-multicast", not(feature = "alloc"))
     )
 ))]
-fn lend_unknown<'f>(
+fn read_record<'f>(
+    mid: u8,
+    cursor: &mut SceCursor<'f>,
+) -> Result<RecordView<'f>, crate::parse_error::InboundParseError> {
+    match mid {
+        // What the build reads off the wire (`rx-push`, `rx-response`, `rx-control`): a kind it did
+        // not ask for is a MID with no decoder here, and ends the pull of its frame.
+        #[cfg(all(feature = "codec-push", feature = "rx-push"))]
+        wire_const::N_MID_PUSH => {
+            let mut push = wz_codecs::push::PushView::<'f>::default();
+            read_push(cursor, &mut push).map(|()| RecordView::Push(push))
+        }
+        #[cfg(feature = "codec-request")]
+        wire_const::N_MID_REQUEST => {
+            let mut request = wz_codecs::request::RequestView::<'f>::default();
+            read_request(cursor, &mut request).map(|()| RecordView::Request(request))
+        }
+        #[cfg(all(feature = "codec-response", feature = "rx-response"))]
+        wire_const::N_MID_RESPONSE => {
+            let mut response = wz_codecs::response::ResponseView::<'f>::default();
+            read_response(cursor, &mut response).map(|()| RecordView::Response(response))
+        }
+        #[cfg(all(feature = "codec-response-final", feature = "rx-response"))]
+        wire_const::N_MID_RESPONSE_FINAL => {
+            let mut response_final = wz_codecs::lent::ResponseFinal::<'f>::default();
+            read_response_final(cursor, &mut response_final)
+                .map(|()| RecordView::ResponseFinal(response_final))
+        }
+        // The control records of a peer (`rx-control`): the declarations it makes, the interests it
+        // takes in ours and its OAM.
+        #[cfg(all(feature = "codec-declare", feature = "rx-control"))]
+        wire_const::N_MID_DECLARE => {
+            let mut declare = wz_codecs::lent::Declare::<'f>::default();
+            read_declare(cursor, &mut declare).map(|()| RecordView::Declare(declare))
+        }
+        #[cfg(feature = "rx-control")]
+        wire_const::N_MID_INTEREST => {
+            let mut interest = wz_codecs::lent::Interest::<'f>::default();
+            read_interest(cursor, &mut interest).map(|()| RecordView::Interest(interest))
+        }
+        #[cfg(feature = "rx-control")]
+        wire_const::N_MID_OAM => {
+            let mut oam = wz_codecs::lent::Oam::<'f>::default();
+            read_oam(cursor, &mut oam)?;
+            // The counters read its band (`RecordClass`); nothing else reads it.
+            #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+            let view = RecordView::Oam(oam);
+            #[cfg(not(all(feature = "transport-stats", feature = "alloc")))]
+            let view = RecordView::Skipped(core::marker::PhantomData);
+            Ok(view)
+        }
+        _ => {
+            let rest = cursor.remaining();
+            cursor
+                .advance(rest)
+                .map_err(crate::parse_error::InboundParseError::Codec)?;
+            Ok(RecordView::Skipped(core::marker::PhantomData))
+        }
+    }
+}
+
+// The kinds the walk that keeps its other records lends ([`RecordForm::Lent`]), each into a binding
+// of its own frame, held only while its record is handed over.
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-push",
+    all(
+        feature = "alloc",
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+    ),
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+#[inline(never)]
+fn lend_push<'f>(
     cursor: &mut SceCursor<'f>,
     each: &mut dyn EachRecord<'f>,
-) -> Result<Option<bool>, crate::parse_error::InboundParseError> {
-    let rest = cursor.remaining();
-    cursor
-        .advance(rest)
-        .map_err(crate::parse_error::InboundParseError::Codec)?;
-    each.take_record(WalkedRecord::Skipped).map(|_| None)
+) -> Result<bool, crate::parse_error::InboundParseError> {
+    let mut push = wz_codecs::push::PushView::<'f>::default();
+    read_push(cursor, &mut push)?;
+    each.take_record(WalkedRecord::Push(&push))
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-request",
+    all(
+        feature = "alloc",
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+    ),
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+#[inline(never)]
+fn lend_request<'f>(
+    cursor: &mut SceCursor<'f>,
+    each: &mut dyn EachRecord<'f>,
+) -> Result<bool, crate::parse_error::InboundParseError> {
+    let mut request = wz_codecs::request::RequestView::<'f>::default();
+    read_request(cursor, &mut request)?;
+    each.take_record(WalkedRecord::Request(&request))
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-response",
+    all(
+        feature = "alloc",
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+    ),
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+#[inline(never)]
+fn lend_response<'f>(
+    cursor: &mut SceCursor<'f>,
+    each: &mut dyn EachRecord<'f>,
+) -> Result<bool, crate::parse_error::InboundParseError> {
+    let mut response = wz_codecs::response::ResponseView::<'f>::default();
+    read_response(cursor, &mut response)?;
+    each.take_record(WalkedRecord::Response(&response))
 }
 
 /// R311y578 — why a batch parse stopped short of the payload's end.
@@ -4944,6 +5217,41 @@ mod record_walk_tests {
             let (owned, result) = walk(&payload, RecordForm::Owned);
             assert!(result.is_ok());
             assert_eq!(owned, lent, "the owned walk reads the same records");
+        }
+
+        /// The records the control walk hands over are the ones pulled off the payload, read alike
+        /// and in the same order, and the pull stops where the walk stops: before a transport
+        /// message, having taken the bytes up to it, and for good after a record that does not
+        /// decode. Turned red by a pull that reads into the transport message, or that reads on
+        /// after a record it could not read.
+        #[test]
+        fn the_pulled_records_are_the_ones_the_control_walk_hands_over() {
+            let records = every_kind();
+            // A KeepAlive behind the records: a transport message, the batch's to read.
+            let payload = [records.clone(), alloc::vec![wire_const::T_MID_KEEP_ALIVE]].concat();
+            let mut pulled = Records::new(&payload);
+            let mut seen = Vec::new();
+            for one in pulled.by_ref() {
+                seen.push(tag(one.expect("every record decodes").walked()));
+            }
+            let (walked, result) = walk(&payload, RecordForm::LentControl);
+            assert!(result.is_ok());
+            assert_eq!(seen, walked, "the walk hands over what the pull reads");
+            assert_eq!(pulled.consumed(), records.len(), "up to the KeepAlive");
+            assert!(!pulled.holds_record(), "which is no record of the frame");
+
+            let mut broken = subscriber(7);
+            broken.push(wire_const::N_MID_DECLARE);
+            let mut pulled = Records::new(&broken);
+            assert!(matches!(pulled.next(), Some(Ok(RecordView::Declare(_)))));
+            assert!(matches!(
+                pulled.next(),
+                Some(Err(InboundParseError::Codec(_)))
+            ));
+            assert!(
+                pulled.next().is_none(),
+                "nothing is read after a record that did not decode"
+            );
         }
 
         #[test]
