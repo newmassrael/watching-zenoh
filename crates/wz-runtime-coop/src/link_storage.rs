@@ -926,21 +926,49 @@ impl<T: TxStore> TxLender<T> {
     }
 }
 
+/// The datagrams a link's copying receive let go of because the heap had no room for the copy
+/// ([`copied_receive`]), held by the link until its loop takes them for the session's receive
+/// drops ([`SessionDatagramLink::take_rx_dropped`]).
+#[cfg(feature = "alloc")]
+#[derive(Debug, Default)]
+pub struct RxDrops(Cell<usize>);
+
+#[cfg(feature = "alloc")]
+impl RxDrops {
+    /// None dropped.
+    pub const fn new() -> Self {
+        Self(Cell::new(0))
+    }
+
+    /// How many were dropped since the last take; none from here on.
+    pub fn take(&self) -> usize {
+        self.0.replace(0)
+    }
+
+    fn note(&self) {
+        self.0.set(self.0.get().saturating_add(1));
+    }
+}
+
 /// The next datagram `link` lends ([`SessionDatagramLink::recv_with`]) from where it holds it,
 /// copied out as a frame ([`SessionDatagramLink::try_recv`]): the copying receive of both links of
 /// this crate, written once over the link's table, so each kind of link carries a call here and
-/// not a second copy of its whole receive.
+/// not a second copy of its whole receive. A datagram the heap has no room to copy is counted in
+/// `drops`, the link's own.
 // Out of line: inlined into a link's own entry, the call through the table below would be made
 // directly and that link's receive copied in with it.
 #[cfg(feature = "alloc")]
 #[inline(never)]
-pub fn copied_receive(link: &dyn SessionDatagramLink) -> Option<RxFrame> {
+pub fn copied_receive(link: &dyn SessionDatagramLink, drops: &RxDrops) -> Option<RxFrame> {
     let mut frame = None;
     // A datagram the heap has no room to copy is dropped as a socket drops one it has no buffer
     // for: lent once, it is gone, and the next receive reads the next one.
-    link.recv_with(&mut |datagram| {
-        frame = wz_session_core::bounded::heap_copy(datagram).map(RxFrame::new)
-    });
+    link.recv_with(
+        &mut |datagram| match wz_session_core::bounded::heap_copy(datagram) {
+            Some(copy) => frame = Some(RxFrame::new(copy)),
+            None => drops.note(),
+        },
+    );
     frame
 }
 
@@ -1278,7 +1306,7 @@ mod tests {
 
 #[cfg(all(test, feature = "alloc"))]
 mod copied_receive_tests {
-    use super::copied_receive;
+    use super::{copied_receive, RxDrops};
     use crate::session_drive::SessionDatagramLink;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -1289,13 +1317,18 @@ mod copied_receive_tests {
     struct Lending {
         queued: RefCell<Vec<Vec<u8>>>,
         lends: Cell<u32>,
+        drops: RxDrops,
     }
 
     impl SessionDatagramLink for Lending {
         fn service(&self) {}
 
         fn try_recv(&self) -> Option<RxFrame> {
-            copied_receive(self)
+            copied_receive(self, &self.drops)
+        }
+
+        fn take_rx_dropped(&self) -> usize {
+            self.drops.take()
         }
 
         fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
@@ -1318,6 +1351,7 @@ mod copied_receive_tests {
         let link = Lending {
             queued: RefCell::new(vec![b"first".to_vec(), b"second".to_vec()]),
             lends: Cell::new(0),
+            drops: RxDrops::new(),
         };
         let first = link.try_recv().expect("the first datagram");
         assert_eq!(&first.bytes[..], b"first");
@@ -1329,21 +1363,34 @@ mod copied_receive_tests {
         assert_eq!(&second.bytes[..], b"second");
         assert!(link.try_recv().is_none(), "nothing is queued");
         assert_eq!(link.lends.get(), 2, "one lend for each datagram");
+        assert_eq!(
+            link.take_rx_dropped(),
+            0,
+            "a datagram copied is not dropped"
+        );
     }
 
-    /// A datagram the heap has no room to copy is lent once and dropped, and the next one is
-    /// copied when the heap has room again. Turned red by a copy made with `to_vec`, which ends the
-    /// process on the refusal.
+    /// A datagram the heap has no room to copy is lent once, dropped and counted once, and the next
+    /// one is copied when the heap has room again. Turned red by a copy made with `to_vec`, which
+    /// ends the process on the refusal, or by the refusal arm of `copied_receive` not counting.
     #[cfg(not(feature = "session-slot"))]
     #[test]
     fn a_datagram_the_heap_has_no_room_to_copy_is_dropped() {
         let link = Lending {
             queued: RefCell::new(vec![b"dropped".to_vec(), b"kept".to_vec()]),
             lends: Cell::new(0),
+            drops: RxDrops::new(),
         };
         assert!(crate::table_tests::refused(|| link.try_recv()).is_none());
         assert_eq!(link.lends.get(), 1, "the datagram was lent");
+        assert_eq!(link.take_rx_dropped(), 1, "the dropped datagram is counted");
+        assert_eq!(link.take_rx_dropped(), 0, "a take empties the count");
         let kept = link.try_recv().expect("the next datagram");
         assert_eq!(&kept.bytes[..], b"kept");
+        assert_eq!(
+            link.take_rx_dropped(),
+            0,
+            "the copied datagram is not counted"
+        );
     }
 }

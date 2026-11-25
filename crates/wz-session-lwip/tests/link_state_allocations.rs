@@ -236,7 +236,7 @@ type Actions = SessionLinkActions<CoopRuntime<Frozen>, CoopTime<Frozen>>;
 /// carried to Established by the drive loop, and dropped.
 fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
     let links = links_over(link);
-    let runtime = CoopRuntime::new(Frozen);
+    let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
     let local = CoopLocalSet::new(&runtime);
     let config = |role| SessionDriveConfig {
         timeouts: SessionTimeouts::spec_defaults(),

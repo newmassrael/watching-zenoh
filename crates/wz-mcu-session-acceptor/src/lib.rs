@@ -699,7 +699,10 @@ where
     // ── The session machinery (shared SSOT). The actions' clock MUST share
     //    an epoch with the loop clock (R263): build one CoopTime, clone it
     //    into the actions, hand the original to the pump.
-    let runtime = CoopRuntime::new(clock_source);
+    // A runtime the heap has no room for runs no session: the acceptor is never established.
+    let Some(runtime) = CoopRuntime::try_new(clock_source) else {
+        return Run::new(data_mode).report(false, 0, 0);
+    };
     let clock = CoopTime::new(&runtime);
     // R311y819 — through the MCU CONSTRUCTION SEAM, which draws the cookie
     // nonce from the supplied `EntropySource`, the way the AP's
@@ -723,7 +726,8 @@ where
 
     // The same sequence `run_session` runs — one executor pass, then one
     // `step` — with the peer given its turn after every iteration.
-    let mut pump = SessionPump::new(
+    // A pump the heap has no room for runs no session: the acceptor is never established.
+    let Some(mut pump) = SessionPump::try_new(
         runtime.clone(),
         topology.acceptor_link(),
         actions.clone(),
@@ -734,7 +738,9 @@ where
             role: SessionRole::Acceptor,
             max_iters: Some(MAX_ITERS),
         },
-    );
+    ) else {
+        return run.report(false, 0, 0);
+    };
     loop {
         pump.runtime().run_until_idle();
         let finished = pump.step(&mut |event: IterationEvent<'_, '_>| {

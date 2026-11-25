@@ -67,7 +67,7 @@ impl<const TICK_HZ: u32> ClockSource for FreertosClock<TICK_HZ> {
 
 /// The FreeRTOS profile's runtime: the wz-runtime-coop cooperative executor
 /// (the SSOT) parameterised by [`FreertosClock`]. Construct with
-/// `CoopRuntime::new(FreertosClock::<TICK_HZ>)`. NOT a reimplementation — the
+/// `CoopRuntime::try_new(FreertosClock::<TICK_HZ>)`. NOT a reimplementation — the
 /// task pool / waker / timer queue are wz-runtime-coop's, only the clock seam
 /// is FreeRTOS-specific.
 pub type FreertosRuntime<const TICK_HZ: u32> = CoopRuntime<FreertosClock<TICK_HZ>>;

@@ -43,7 +43,7 @@
 //!   `runtime_impl.rs` test module).
 //!
 //! The deploy passes its `ClockSource` instance to
-//! `CoopRuntime::new`; both `CoopTime` and the timer
+//! `CoopRuntime::try_new`; both `CoopTime` and the timer
 //! queue read from that one instance via the shared `Arc`.
 //!
 //! ## Wake-on-deadline (R311bc) vs self-wake (R311av retired)

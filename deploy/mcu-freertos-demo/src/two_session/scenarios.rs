@@ -256,7 +256,8 @@ impl TwoSessions {
         group_port: u16,
     ) -> Result<Self, String> {
         let clock = Clock::default();
-        let runtime = CoopRuntime::new(clock);
+        let runtime = CoopRuntime::try_new(clock)
+            .ok_or_else(|| String::from("the heap has no room for the runtime"))?;
         let local = CoopLocalSet::new(&runtime);
         let links = LwipLinks::new(link.clone());
         let policy = resolve_policy();

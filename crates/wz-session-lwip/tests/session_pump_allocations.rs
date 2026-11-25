@@ -508,7 +508,7 @@ mod placing_on_the_heap {
 
     /// A runtime as every image makes one: an `Arc` of its pools.
     pub fn runtime() -> Rt {
-        CoopRuntime::new(Clk)
+        CoopRuntime::try_new(Clk).expect("the heap has room")
     }
 
     pub fn session(
@@ -544,7 +544,7 @@ mod placing_on_the_heap {
         entropy: SessionEntropy,
         role: SessionRole,
     ) -> Pump {
-        SessionPump::new(
+        SessionPump::try_new(
             runtime.clone(),
             link,
             actions.clone(),
@@ -552,6 +552,7 @@ mod placing_on_the_heap {
             CoopTime::new(runtime),
             config(role),
         )
+        .expect("the heap has room")
     }
 
     /// The task a pump is hosted as on every profile but the slot's: the pump

@@ -127,6 +127,46 @@ impl wz_runtime_coop::session_drive::SessionDatagramLink for Counting {
     }
 }
 
+/// A link that reports the datagrams it dropped and whether the bytes it lends stay where they lie.
+struct Dropping {
+    dropped: Cell<usize>,
+    lends: bool,
+}
+
+impl wz_runtime_coop::session_drive::SessionDatagramLink for Dropping {
+    fn service(&self) {}
+
+    fn try_recv(&self) -> Option<wz_session_core::link::RxFrame> {
+        None
+    }
+
+    fn take_rx_dropped(&self) -> usize {
+        self.dropped.replace(0)
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.lends
+    }
+}
+
+/// A gate answers what its link dropped and whether its link's lent bytes stay where they lie by
+/// asking the link. Turned red by a gate that answers either itself (the trait's provided form)
+/// instead of passing the question on.
+#[test]
+fn a_gate_answers_what_its_link_dropped_and_how_it_lends() {
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    let link = Dropping {
+        dropped: Cell::new(3),
+        lends: true,
+    };
+    // SAFETY: this thread is the round's one writer, as a session's step is.
+    let gate = unsafe { RoundGate::new(link, round(4), ONE) };
+    assert!(gate.lends_until_next_receive());
+    assert_eq!(gate.take_rx_dropped(), 3, "the link's drops");
+    assert_eq!(gate.take_rx_dropped(), 0, "a take empties the count");
+}
+
 /// What [`noting`] callbacks write: the tag, the payload's first byte and where it lies.
 type Noted = Arc<Mutex<Vec<(u8, u8, usize)>>>;
 

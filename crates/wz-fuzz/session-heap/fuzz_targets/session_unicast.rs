@@ -146,7 +146,9 @@ fuzz_target!(|data: &[u8]| {
         None => (0, data),
     };
     reset_clock();
-    let runtime = CoopRuntime::new(Clock);
+    let Some(runtime) = CoopRuntime::try_new(Clock) else {
+        return;
+    };
     let clock = CoopTime::new(&runtime);
     let sink = wz_runtime_coop::link_cells::heap_sink(Nowhere);
     let actions = new_session_actions(sink, params(), clock.clone());
@@ -157,14 +159,16 @@ fuzz_target!(|data: &[u8]| {
         max_iters: None,
     };
     let entropy = wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0));
-    let mut pump = SessionPump::new(
+    let Some(mut pump) = SessionPump::try_new(
         runtime,
         feed.clone(),
         actions.clone(),
         entropy,
         clock,
         config,
-    );
+    ) else {
+        return;
+    };
     let mut observer = ApplicationLayerObserver::new();
     let _ = observer.subscribe("**", |_| {});
     let _ = observer.with_app(|app_half| app_half.queryables.register("**", |_, _| {}));

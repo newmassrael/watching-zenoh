@@ -285,7 +285,7 @@ impl TwoSessions {
         seeded: bool,
     ) -> Self {
         let clock = StepClock::default();
-        let runtime = CoopRuntime::new(clock.clone());
+        let runtime = CoopRuntime::try_new(clock.clone()).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         let links = test_links(link.clone());
 

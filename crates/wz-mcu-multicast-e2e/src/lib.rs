@@ -324,7 +324,11 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
 
     let mut driver = LwipMulticastDriver::new(socket, group, MEMBER_PORT);
     let mut dispatcher = MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000));
-    let runtime = CoopRuntime::new(clock_source);
+    // A runtime the heap has no room for runs no loop, as a group the node could not join.
+    let Some(runtime) = CoopRuntime::try_new(clock_source) else {
+        let _ = link.leave_multicast_group(group);
+        return MulticastE2eReport::no_join();
+    };
     let mut self_params = params(SELF_ZID, &policy);
     self_params.batch_size = BATCH_SIZE;
 

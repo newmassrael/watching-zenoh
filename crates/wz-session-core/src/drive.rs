@@ -288,6 +288,22 @@ pub fn dispatch_link_lost<R: SessionRuntime, T: TimeSource>(
     DriverLoopOutcome::LinkLost(cause)
 }
 
+/// Charge `datagrams` the link under a session let go of before the session read them (a
+/// copying receive that found no heap room for the copy) to the session's receive drops. The
+/// session never saw them, so nothing else of it moves; a build without `transport-stats` has
+/// no counter to charge.
+pub fn note_rx_dropped<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    datagrams: usize,
+) {
+    #[cfg(feature = "transport-stats")]
+    actions
+        .stats
+        .inc_rx_drop(crate::stats::StatDrop::Transport, datagrams, 0);
+    #[cfg(not(feature = "transport-stats"))]
+    let _ = (actions, datagrams);
+}
+
 /// Drive one already-polled `LinkEvent` through the inbound chain so the
 /// engine-free session FSM advances. The synchronous core of
 /// `wz-runtime-tokio::poll_and_dispatch_one` (whose sole `.await` —

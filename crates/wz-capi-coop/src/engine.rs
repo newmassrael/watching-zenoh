@@ -3086,7 +3086,7 @@ impl RuntimeTables {
     /// reserves every cell for a link, and its runtime takes no memory after it is made: a config
     /// that names a group is refused by name there, so the groups' cells are none. A build that
     /// neither joins groups nor listens takes no face beside its dial role's, so its runtime hosts
-    /// that one link's task and is made for one (`CoopRuntime::reserved_for_one`), which links no
+    /// that one link's task and is made for one (`CoopRuntime::try_reserved_for_one`), which links no
     /// walk of a table of many cells.
     ///
     /// The runtime is placed in `place`, the span of the session's arena the open lent it

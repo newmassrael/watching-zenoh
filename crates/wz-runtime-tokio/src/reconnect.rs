@@ -678,7 +678,10 @@ impl ReconnectingSession {
             };
             match outcome {
                 DriverOutcome::IterationLimit => return ReconnectDriveOutcome::IterationLimit,
-                DriverOutcome::Terminated => {
+                // This drive builds no part of its loop on the heap and never answers
+                // `Refused`; were it to, the session ended unrun and is reopened as one
+                // whose link was lost.
+                DriverOutcome::Terminated | DriverOutcome::Refused => {
                     // R311y525 — the flush runs BEFORE the stop check, and the
                     // ordering is the faithful one: pico fires
                     // `_z_liveliness_subscription_undeclare_all` from TRANSPORT

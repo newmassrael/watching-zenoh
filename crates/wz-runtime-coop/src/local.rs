@@ -395,7 +395,7 @@ mod tests {
     /// the other, and it no longer counts as running after.
     #[test]
     fn a_clone_runs_the_tasks_of_the_set_it_was_cloned_from() {
-        let runtime = CoopRuntime::new(Still);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         let other = local.clone();
         let task = local.spawn_local(async { 7u8 });
@@ -422,7 +422,7 @@ mod tests {
     /// tasks of every set.
     #[test]
     fn a_set_told_to_drop_its_tasks_drops_one_that_holds_the_set() {
-        let runtime = CoopRuntime::new(Still);
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
         let local = CoopLocalSet::new(&runtime);
         let other = CoopLocalSet::new(&runtime);
         let mine = alloc::rc::Rc::new(core::cell::Cell::new(false));

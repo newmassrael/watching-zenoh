@@ -171,5 +171,11 @@ tcp = ["lwip-sys/tcp"]
 name = "link_storage_allocations"
 required-features = ["test-support"]
 
+# A socket whose state the heap has no room for is refused, not the end of the program: its own
+# executable, for the allocator that refuses the calling thread's allocations.
+[[test]]
+name = "heap_refused_sockets"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

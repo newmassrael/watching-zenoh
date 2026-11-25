@@ -21,7 +21,7 @@
 
 // Only a build with no allocator takes the walk this file is about; with `alloc` the file is empty
 // (the heap form of the same datagrams is `slot_control_records`'). Not with `reassembly`, where
-// `SessionPump::new` does not exist (`slot_control_records` says why).
+// `SessionPump::try_new` does not exist (`slot_control_records` says why).
 #![cfg(all(
     feature = "session-slot",
     not(feature = "alloc"),
@@ -294,22 +294,24 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
         Some(([127, 0, 0, 1], port)),
         0xb1,
     );
-    let mut acceptor: Pump = SessionPump::new(
+    let mut acceptor: Pump = SessionPump::try_new(
         runtime.clone(),
         a_link,
         a_actions.clone(),
         a_entropy,
         CoopTime::new(&runtime),
         config(SessionRole::Acceptor),
-    );
-    let mut initiator: Pump = SessionPump::new(
+    )
+    .expect("the heap has room");
+    let mut initiator: Pump = SessionPump::try_new(
         runtime.clone(),
         i_link,
         i_actions.clone(),
         i_entropy,
         CoopTime::new(&runtime),
         config(SessionRole::Initiator),
-    );
+    )
+    .expect("the heap has room");
 
     // The acceptor's application layer: the process-wide observer over this session's slot, and
     // beside it the record of what the receive handed over, by Frame.

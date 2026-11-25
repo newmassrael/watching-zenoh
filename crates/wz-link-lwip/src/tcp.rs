@@ -57,6 +57,8 @@ pub enum TcpError {
     /// `static-link-storage`: every cell of the pool the socket is made in is taken, counted by
     /// the pool; nothing is allocated instead.
     SlotsExhausted,
+    /// The heap had no room for a connection's state; nothing was made.
+    HeapRefused,
     /// `tcp_connect` refused the request with this lwIP error.
     ConnectFailed(i8),
     /// The receive buffer is smaller than the receive window the port advertises, so a segment
@@ -286,16 +288,18 @@ impl<const RX: usize> LwipTcpSocket<RX> {
     /// # Errors
     ///
     /// [`TcpError::RxBelowWindow`] when `RX` is less than the port's receive window,
-    /// [`TcpError::PcbExhausted`], and [`TcpError::ConnectFailed`].
+    /// [`TcpError::HeapRefused`], [`TcpError::PcbExhausted`], and [`TcpError::ConnectFailed`].
     #[cfg(not(feature = "static-link-storage"))]
     pub fn connect(link: &LwipLink, addr: [u8; 4], port: u16) -> Result<Self, TcpError> {
         Self::check_window()?;
-        Self::attach(link, Self::boxed_inner(), addr, port)
+        let inner = Self::try_boxed_inner().ok_or(TcpError::HeapRefused)?;
+        Self::attach(link, inner, addr, port)
     }
 
-    /// A connection's state on the heap, pinned, written in place.
+    /// A connection's state on the heap, pinned, written in place; `None` when the heap has no
+    /// room.
     #[cfg(not(feature = "static-link-storage"))]
-    fn boxed_inner() -> Pin<InnerBox<RX>> {
+    fn try_boxed_inner() -> Option<Pin<InnerBox<RX>>> {
         let layout = core::alloc::Layout::new::<TcpInner<RX>>();
         // SAFETY: the layout is not zero-sized; `init_in_place` writes every field but the
         // receive buffer (read only after it is written), and an allocation from the global
@@ -303,10 +307,10 @@ impl<const RX: usize> LwipTcpSocket<RX> {
         unsafe {
             let at = alloc::alloc::alloc(layout).cast::<TcpInner<RX>>();
             if at.is_null() {
-                alloc::alloc::handle_alloc_error(layout);
+                return None;
             }
             TcpInner::init_in_place(at);
-            Box::into_pin(Box::from_raw(at))
+            Some(Box::into_pin(Box::from_raw(at)))
         }
     }
 
@@ -585,7 +589,8 @@ impl<const RX: usize> Drop for LwipTcpSocket<RX> {
 /// ```
 ///
 /// `Q` is how many connections may wait to be taken. A connection that arrives with no room for it
-/// (the queue is full, or on `static-link-storage` every cell of the pool is taken) is refused: lwIP
+/// (the queue is full, the heap has no room for its state, or on `static-link-storage` every cell of
+/// the pool is taken) is refused: lwIP
 /// abandons it (its dialler reads a reset when it first sends), nothing is allocated instead, and
 /// the refusal is counted ([`refused`](Self::refused)).
 pub struct LwipTcpListener<const RX: usize, const Q: usize, const S: usize = 0> {
@@ -718,11 +723,12 @@ impl<const RX: usize, const Q: usize, const S: usize> LwipTcpListener<RX, Q, S> 
         self.refused.get()
     }
 
-    /// A connection's state for an arrival: a heap box, or a cell of the pool.
+    /// A connection's state for an arrival: a heap box, or a cell of the pool; `None` when the
+    /// heap or the pool has no room.
     fn make_inner(&self) -> Option<Pin<InnerBox<RX>>> {
         #[cfg(not(feature = "static-link-storage"))]
         {
-            Some(LwipTcpSocket::<RX>::boxed_inner())
+            LwipTcpSocket::<RX>::try_boxed_inner()
         }
         #[cfg(feature = "static-link-storage")]
         {
