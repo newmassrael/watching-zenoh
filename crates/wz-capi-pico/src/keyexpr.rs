@@ -1625,6 +1625,9 @@ unsafe fn owned_keyexpr_input<'a>(
 /// # Safety
 /// `dst` must be valid and writable; `src` must be null or a live loaned
 /// keyexpr.
+// Out of line: `z_keyexpr_take_from_loaned` is a clone that empties its source, and carried a
+// copy of this body.
+#[inline(never)]
 #[no_mangle]
 pub unsafe extern "C" fn z_keyexpr_clone(
     dst: *mut z_owned_keyexpr_t,
