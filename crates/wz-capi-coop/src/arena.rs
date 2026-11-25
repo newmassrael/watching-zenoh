@@ -558,12 +558,12 @@ const RUNTIME_ROWS: usize = 2;
 /// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
 const ENGINE_STATE_ROWS: usize = 1;
 /// The planes the session's queryables, gets and watchers of its faces share, each where its
-/// feature is ([`ArenaPlan::holding_planes`]).
+/// feature is ([`ArenaPlan::lay_planes`]).
 const PLANE_ROWS: usize = cfg!(feature = "queryable") as usize
     + cfg!(feature = "query") as usize
     + cfg!(feature = "connectivity") as usize;
 /// The admission the links of a session that listens ask while their handshakes run
-/// (`ArenaPlan::holding_admission`).
+/// (`ArenaPlan::lay_admission`).
 const ADMISSION_ROWS: usize = cfg!(feature = "listen") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
@@ -2187,7 +2187,7 @@ impl ArenaPlan {
     /// or refused as past the address space when the rows' spans together are. Read where the
     /// plan lies, which stays there.
     #[inline(never)]
-    const fn settled(&self) -> Result<(), ArenaRefused> {
+    pub(crate) const fn settled(&self) -> Result<(), ArenaRefused> {
         if let Some(refused) = self.refused {
             return Err(refused);
         }
@@ -2206,6 +2206,13 @@ impl ArenaPlan {
     /// alignment than a span of the arena starts on ([`ARENA_ALIGN`]), or the arena with the
     /// places is. The plan is laid out where it lies; a refused one is no plan to open by.
     pub fn holding(&mut self, held: &HeldPlaces) -> Result<(), ArenaRefused> {
+        self.lay_held(held)?;
+        self.settled()
+    }
+
+    /// The places of `Self::holding`, the plan not settled: refused here only for a place that
+    /// asks for more alignment than a span starts on, and otherwise as the plan keeps it.
+    pub(crate) fn lay_held(&mut self, held: &HeldPlaces) -> Result<(), ArenaRefused> {
         if let Some(handle) = held.handle {
             if handle.align() > ARENA_ALIGN {
                 return Err(ArenaRefused::TooLarge);
@@ -2240,7 +2247,7 @@ impl ArenaPlan {
                 self.places.held = self.places.held.with(at);
             }
         }
-        self.settled()
+        Ok(())
     }
 
     /// Lay out a table of a cell for each link of each kind `bytes` sizes: the links'
@@ -2251,6 +2258,12 @@ impl ArenaPlan {
     /// adds no table, as a stack that places its links on the heap asks. The plan is laid out
     /// where it lies; a refused one is no plan to open by.
     pub fn holding_cells(&mut self, bytes: LinkCells<usize>) -> Result<(), ArenaRefused> {
+        self.lay_cells(bytes);
+        self.settled()
+    }
+
+    /// The tables of `Self::holding_cells`, the plan not settled.
+    pub(crate) fn lay_cells(&mut self, bytes: LinkCells<usize>) {
         let mut laid = self.transport.cell_bytes.into_array();
         let mut held = self.transport.cells_held;
         for (at, ((laid, asked), parts)) in laid
@@ -2267,7 +2280,6 @@ impl ArenaPlan {
         }
         self.transport.cell_bytes = LinkCells::from_array(laid);
         self.transport.cells_held = held;
-        self.settled()
     }
 
     /// Lay out the place of the faces' rooms, `bytes` large: what each face that is up names for a
@@ -2276,8 +2288,13 @@ impl ArenaPlan {
     /// laid out at the open, once, as the links' cells are ([`Self::holding_cells`]). The plan is
     /// laid out where it lies; a refused one is no plan to open by.
     pub fn holding_rooms(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
-        self.put(ArenaPart::LinkRooms, 1, bytes);
+        self.lay_rooms(bytes);
         self.settled()
+    }
+
+    /// The place of `Self::holding_rooms`, the plan not settled.
+    pub(crate) fn lay_rooms(&mut self, bytes: usize) {
+        self.put(ArenaPart::LinkRooms, 1, bytes);
     }
 
     /// Lay out the span of `bytes` the session's runtime is placed in, and the count its arena is
@@ -2287,12 +2304,17 @@ impl ArenaPlan {
     /// go. Laid out after every other row, once; a size of `0` adds none. The plan is laid out
     /// where it lies; a refused one is no plan to open by.
     pub fn holding_runtime(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
+        self.lay_runtime(bytes);
+        self.settled()
+    }
+
+    /// The span and the count of `Self::holding_runtime`, the plan not settled.
+    pub(crate) fn lay_runtime(&mut self, bytes: usize) {
         if bytes != 0 && self.runtime_bytes == 0 {
             self.runtime_bytes = bytes;
             self.put(ArenaPart::ArenaKeep, 1, core::mem::size_of::<ArenaKept>());
             self.put(ArenaPart::RuntimeState, 1, bytes);
         }
-        self.settled()
     }
 
     /// Lay out the place of `bytes` the session's engine lies in, counted by its holders, which
@@ -2300,18 +2322,20 @@ impl ArenaPlan {
     /// Laid out after every other row, once, at the open. The plan is laid out where it lies; a
     /// refused one is no plan to open by.
     pub fn holding_engine(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
-        self.put(ArenaPart::EngineState, 1, bytes);
+        self.lay_engine(bytes);
         self.settled()
+    }
+
+    /// The place of `Self::holding_engine`, the plan not settled.
+    pub(crate) fn lay_engine(&mut self, bytes: usize) {
+        self.put(ArenaPart::EngineState, 1, bytes);
     }
 
     /// Lay out the place of each plane the session's state owns and its tasks and its engine
     /// reach by handles that count nothing (`crate::engine::SessionPlanes`): the queryables',
     /// the gets' and the watchers' of the faces, each where its feature is. Laid out once, at the
-    /// open. The plan is laid out where it lies; a refused one is no plan to open by.
-    pub(crate) fn holding_planes(
-        &mut self,
-        planes: crate::engine::SessionPlanes,
-    ) -> Result<(), ArenaRefused> {
+    /// open, the plan not settled: a refusal is kept for `Self::settled`.
+    pub(crate) fn lay_planes(&mut self, planes: crate::engine::SessionPlanes) {
         #[cfg(feature = "queryable")]
         self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
         #[cfg(feature = "query")]
@@ -2319,16 +2343,14 @@ impl ArenaPlan {
         #[cfg(feature = "connectivity")]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
         let _ = planes;
-        self.settled()
     }
 
     /// Lay out the place of `bytes` the admission of a session that listens lies in, which the
     /// session's state owns and its links' leases reach by handles that count nothing. Laid out
-    /// once, at the open. The plan is laid out where it lies; a refused one is no plan to open by.
+    /// once, at the open, the plan not settled: a refusal is kept for `Self::settled`.
     #[cfg(feature = "listen")]
-    pub(crate) fn holding_admission(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
+    pub(crate) fn lay_admission(&mut self, bytes: usize) {
         self.put(ArenaPart::LinkAdmissionState, 1, bytes);
-        self.settled()
     }
 
     /// The bytes of the place the plan holds for the ABI's handle, `0` for none.
@@ -3279,8 +3301,7 @@ impl SessionArena {
     /// back once the session lets the arena go and the runtime's last holder lets go, whichever
     /// is last. Refused past what the arena has left.
     pub(crate) fn runtime_place(&mut self, bytes: usize) -> Result<RuntimePlace, LendRefused> {
-        let memory = self.keep()?;
-        let at = self.arena.lend_span(Some(bytes))?;
+        let (at, memory) = self.kept_span(bytes)?;
         // SAFETY: the span is `bytes` of the arena's memory, lent to the runtime alone, and the
         // memory stands while a count of `memory` is held, which the session holds until it lets
         // the arena go, after the runtime is made.
@@ -3292,9 +3313,19 @@ impl SessionArena {
     /// its own when it is written there, so the memory goes back once the engine's last holder
     /// lets go, whichever of them is last. Refused past what the arena has left.
     pub(crate) fn engine_place(&mut self, bytes: usize) -> Result<EnginePlace, LendRefused> {
+        let (at, memory) = self.kept_span(bytes)?;
+        Ok(EnginePlace { at, memory })
+    }
+
+    /// A span of `bytes` of the arena, on its alignment, and the count that keeps the arena's
+    /// memory for what is placed there. Refused past what the arena has left. Out of line: the
+    /// runtime's place and the engine's are both lent by it, and a copy in each would carry the
+    /// placing of the count twice.
+    #[inline(never)]
+    fn kept_span(&mut self, bytes: usize) -> Result<(NonNull<u8>, NonNull<Kept>), LendRefused> {
         let memory = self.keep()?;
         let at = self.arena.lend_span(Some(bytes))?;
-        Ok(EnginePlace { at, memory })
+        Ok((at, memory))
     }
 
     /// The bytes reserved: the plan's.
