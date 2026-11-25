@@ -753,7 +753,10 @@ where
     }
 
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+    fn lend_port_rows(
+        &mut self,
+        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+    ) {
         self.links.lend_port_rows(rows);
     }
 

@@ -1100,7 +1100,10 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     /// room for is dropped and counted, and none is kept on the heap. The default ignores them, as
     /// a stack that opens no udp port does.
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+    fn lend_port_rows(
+        &mut self,
+        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+    ) {
         let _ = rows;
     }
 

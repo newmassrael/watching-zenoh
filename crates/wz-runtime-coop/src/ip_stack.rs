@@ -19,9 +19,6 @@
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
-// The port a stack listens on is shared by its links.
-#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-use alloc::rc::Rc;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use core::net::{IpAddr, SocketAddr};
 
@@ -373,7 +370,7 @@ pub struct IpLinks<U, D, L = NoDial, G = NoGroups, N: CountKind = OneTask> {
     /// The rows every udp port of these links keeps its peers in, when the session lent some
     /// ([`SessionLinks::lend_port_rows`]); a port of links lent none keeps rows of its own.
     #[cfg(feature = "udp-listen")]
-    ports: Option<Rc<core::cell::RefCell<crate::udp_link::PortBook>>>,
+    ports: Option<crate::udp_link::SharedBook<N>>,
     datagrams: core::marker::PhantomData<fn() -> U>,
 }
 
@@ -567,6 +564,11 @@ where
     /// ([`SessionLinks`]'s `N`): asked before a session is opened over them, which is when it
     /// lends them its cells.
     pub fn counted_by<M: CountKind>(self) -> IpLinks<U, D, L, G, M> {
+        #[cfg(feature = "udp-listen")]
+        debug_assert!(
+            self.ports.is_none(),
+            "a port's rows are lent after the links are made"
+        );
         IpLinks {
             local: self.local,
             dial: self.dial,
@@ -574,7 +576,7 @@ where
             groups: self.groups,
             shape: self.shape.counted_by(),
             #[cfg(feature = "udp-listen")]
-            ports: self.ports,
+            ports: None,
             datagrams: self.datagrams,
         }
     }
@@ -732,7 +734,7 @@ where
         let datagram = CellRc::<UdpDriver<U, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes();
         #[cfg(feature = "udp-listen")]
         let datagram = datagram.max(CellRc::<
-            UdpDriver<PortPeer<U>, RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
+            UdpDriver<PortPeer<U, N>, RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
         >::cell_bytes());
         datagram
             .max(CellRc::<
@@ -752,10 +754,11 @@ where
     /// Every udp port these links listen on from now on keeps its peers and their datagrams in
     /// `rows`, which the ports share.
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
-        self.ports = Some(Rc::new(core::cell::RefCell::new(
-            crate::udp_link::PortBook::of(Some(rows)),
-        )));
+    fn lend_port_rows(
+        &mut self,
+        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+    ) {
+        self.ports = Some(crate::udp_link::shared_book::<N>(Some(rows)));
     }
 
     /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
@@ -808,18 +811,17 @@ where
                 // A session that lent its ports a table of datagram slots has the port read into
                 // them, and a port that finds none free to read into is not opened; without the
                 // table the port reads into memory of its own.
-                let book = self.ports.clone().unwrap_or_else(|| {
-                    Rc::new(core::cell::RefCell::new(crate::udp_link::PortBook::of(
-                        None,
-                    )))
-                });
+                let book = self
+                    .ports
+                    .clone()
+                    .unwrap_or_else(|| crate::udp_link::shared_book::<N>(None));
                 let port = match self.shape.lent.and_then(|tables| tables.port_rx()) {
                     Some(table) => UdpPort::lent_in_book(socket, table, &book)
                         .ok_or(LinkOpenError::Exhausted)?,
                     None => UdpPort::in_book(socket, self.shape.datagram_rx, &book),
                 };
                 Ok(Box::new(IpUdpListener {
-                    port: Rc::new(port),
+                    port: CellRc::on_heap(port),
                     shape: self.shape,
                 }))
             }
@@ -954,7 +956,7 @@ impl<P: StreamSocket + 'static, N: CountKind> PendingDial<HeapLink<N>, N> for Pe
 /// each peer are the heap's either way.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 struct IpUdpListener<U: DatagramSocket, N: CountKind> {
-    port: Rc<UdpPort<U>>,
+    port: CellRc<UdpPort<U, N>, N>,
     shape: LinkShape<N>,
 }
 
@@ -2854,6 +2856,7 @@ mod tests {
     mod udp_listener {
         use super::*;
         use alloc::collections::VecDeque;
+        use alloc::rc::Rc;
         use alloc::vec;
         use alloc::vec::Vec;
         use core::cell::RefCell;
@@ -2914,7 +2917,7 @@ mod tests {
                 sent: Rc::clone(&sent),
             };
             let listener = IpUdpListener {
-                port: Rc::new(UdpPort::new(socket, 2048)),
+                port: CellRc::on_heap(UdpPort::new(socket, 2048)),
                 shape: LinkShape::default(),
             };
             (listener, queued, sent)

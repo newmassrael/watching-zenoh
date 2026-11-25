@@ -267,7 +267,10 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     }
 
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+    fn lend_port_rows(
+        &mut self,
+        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+    ) {
         on_side!(EitherLinks, self, links => links.lend_port_rows(rows))
     }
 

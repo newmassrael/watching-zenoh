@@ -72,6 +72,21 @@ pub trait CountKind: 'static {
     /// Write `f`'s answer over the word it is handed, when it answers one, and answer the word
     /// `f` was handed.
     fn update(word: &CountWord, f: impl FnMut(usize) -> Option<usize>) -> usize;
+
+    /// A value that handles of this kind share and reach one holder at a time: a `RefCell` where
+    /// one task holds them, the profile's lock ([`crate::sync::Mutex`]) where threads do.
+    type Local<T>;
+
+    /// `value`, in a new [`Self::Local`].
+    fn new_local<T>(value: T) -> Self::Local<T>;
+
+    /// Run `f` on the value of `local`. A hold inside another hold of the same value is the
+    /// caller's fault, as a `RefCell`'s second borrow is.
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U;
+
+    /// [`Self::with_local`] unless a holder has the value now (this task, inside a hold, or
+    /// another thread): `None` then, and `f` has not run.
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>;
 }
 
 /// Counted as an `Rc` is: the handles of a cell are held by one task at a time, so the word is
@@ -94,6 +109,23 @@ impl CountKind for OneTask {
             word.store(now, Ordering::Relaxed);
         }
         was
+    }
+
+    type Local<T> = core::cell::RefCell<T>;
+
+    #[inline]
+    fn new_local<T>(value: T) -> Self::Local<T> {
+        core::cell::RefCell::new(value)
+    }
+
+    #[inline]
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        f(&mut local.borrow_mut())
+    }
+
+    #[inline]
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        local.try_borrow_mut().ok().map(|mut value| f(&mut value))
     }
 }
 
@@ -118,6 +150,50 @@ impl CountKind for Atomic {
     fn update(word: &CountWord, f: impl FnMut(usize) -> Option<usize>) -> usize {
         match word.fetch_update(Ordering::AcqRel, Ordering::Acquire, f) {
             Ok(was) | Err(was) => was,
+        }
+    }
+
+    type Local<T> = crate::sync::Mutex<T>;
+
+    #[inline]
+    fn new_local<T>(value: T) -> Self::Local<T> {
+        #[cfg(feature = "host-lock")]
+        {
+            crate::cs::HostMutex::new(value)
+        }
+        #[cfg(not(feature = "host-lock"))]
+        {
+            critical_section::Mutex::new(core::cell::RefCell::new(value))
+        }
+    }
+
+    #[inline]
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        #[cfg(feature = "host-lock")]
+        {
+            local.with(f)
+        }
+        #[cfg(not(feature = "host-lock"))]
+        {
+            crate::cs::with(|cs| f(&mut local.borrow(cs).borrow_mut()))
+        }
+    }
+
+    #[inline]
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        #[cfg(feature = "host-lock")]
+        {
+            local.try_with(f)
+        }
+        #[cfg(not(feature = "host-lock"))]
+        {
+            crate::cs::with(|cs| {
+                local
+                    .borrow(cs)
+                    .try_borrow_mut()
+                    .ok()
+                    .map(|mut value| f(&mut value))
+            })
         }
     }
 }
@@ -1147,6 +1223,31 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// A value either kind of count shares is reached by one holder at a time: a try inside a
+    /// hold finds it held and does not run, and runs once the hold is let go. Turned red by a try
+    /// that runs inside a hold, a second `&mut` of the value.
+    #[test]
+    fn a_shared_value_is_reached_by_one_holder_at_a_time() {
+        fn one_at_a_time<N: CountKind>() {
+            let local = N::new_local(0u32);
+            N::with_local::<u32, ()>(&local, |value| {
+                *value += 1;
+                assert_eq!(
+                    N::try_with_local::<u32, ()>(&local, |_| ()),
+                    None,
+                    "the value is held"
+                );
+            });
+            assert_eq!(
+                N::try_with_local::<u32, u32>(&local, |value| *value),
+                Some(1)
+            );
+        }
+        one_at_a_time::<OneTask>();
+        #[cfg(target_has_atomic = "8")]
+        one_at_a_time::<Atomic>();
     }
 
     /// Handles counted as an `Arc`'s are may cross threads, as handles counted for one task may

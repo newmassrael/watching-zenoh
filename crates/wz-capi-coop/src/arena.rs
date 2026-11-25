@@ -1150,7 +1150,7 @@ pub(crate) struct TransportTables {
     pub(crate) handed: HandedTable,
     /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
     #[cfg(feature = "listen")]
-    pub(crate) port_rows: PortRows,
+    pub(crate) port_rows: PortRows<Lent, LinkCellFlag>,
 }
 
 impl TransportRows {
@@ -1238,7 +1238,7 @@ impl TransportRows {
         lend: &mut TableLender<'_>,
     ) -> LinkTables<LinkCellFlag> {
         let (slots, bytes) = self.port_rx;
-        tables.with_port_rx(lend.byte_cells(bytes, slots))
+        tables.with_port_rx(lend.byte_cells_of(bytes, slots))
     }
 
     /// A build that listens on no port lends no port a slot.
