@@ -2071,9 +2071,9 @@ impl<
                 };
                 turn.datagram(unit, engine, actions, &mut sink);
                 // The dispatch stopped where the session had no room: the link keeps the
-                // datagram, and a later step reads on from there.
+                // datagram, and a later step reads on from there, where the receive noted.
                 #[cfg(feature = "alloc")]
-                if actions.resumes_datagram() {
+                if turn.resumes_datagram() {
                     link.keep();
                 }
             });

@@ -344,6 +344,13 @@ impl<Router: RxReassembly, Life> InputTurn<'_, Router, Life> {
             .dispatch_datagram(unit, actions, engine, self.now_ms, on_event)
     }
 
+    /// Whether the dispatch of the datagram this turn was lent stopped before its end
+    /// ([`UnicastRx::resumes_datagram`]), so its link is to keep it for a later turn.
+    #[cfg(feature = "rx-in-place")]
+    pub fn resumes_datagram(&self) -> bool {
+        self.transport.rx.resumes_datagram()
+    }
+
     /// One datagram the copying receive read into a frame of its own
     /// ([`UnicastRx::dispatch_frame`]).
     #[cfg(feature = "alloc")]

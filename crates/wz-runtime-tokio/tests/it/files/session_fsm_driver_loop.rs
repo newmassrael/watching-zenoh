@@ -1454,9 +1454,9 @@ async fn a_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_in_place_frame_followed_by_a_second_frame_reads_it_as_the_next_unit() {
     use wz_codecs::lent::Push;
+    use wz_session_core::drive::DatagramReader;
     use wz_session_core::drive::{dispatch_datagram, dispatch_pending, DatagramPath};
     use wz_session_core::driver_loop::IterationEvent;
-    use wz_session_core::network_message::new_record_buf;
 
     let (actions, mut engine) = fresh_setup();
     drive_to_sent_init_syn(&mut engine);
@@ -1476,7 +1476,7 @@ async fn an_in_place_frame_followed_by_a_second_frame_reads_it_as_the_next_unit(
     unit.extend([0x25, 0x02]);
     unit.extend(push());
 
-    let mut record = new_record_buf();
+    let mut reader = DatagramReader::new();
     let mut seen: Vec<(bool, u64)> = Vec::new();
     let mut sink = |event: IterationEvent<'_, '_>| match event {
         IterationEvent::InPlace(rec) => seen.push((rec.reliable(), rec.sn())),
@@ -1488,7 +1488,7 @@ async fn an_in_place_frame_followed_by_a_second_frame_reads_it_as_the_next_unit(
         }) if !messages.is_empty() => seen.push((*reliable, *sn)),
         _ => {}
     };
-    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut record, &mut sink);
+    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, &mut sink);
     assert!(
         matches!(path, DatagramPath::InPlace),
         "the datagram begins with an admissible Frame; got {path:?}"
@@ -1512,9 +1512,9 @@ async fn an_in_place_frame_followed_by_a_second_frame_reads_it_as_the_next_unit(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kept_datagram_is_read_on_from_where_it_stopped() {
     use wz_codecs::lent::Push;
+    use wz_session_core::drive::DatagramReader;
     use wz_session_core::drive::{dispatch_datagram, dispatch_pending};
     use wz_session_core::driver_loop::{EventSink, IterationEvent};
-    use wz_session_core::network_message::new_record_buf;
 
     /// A host with room for one record each time the datagram is lent.
     #[derive(Default)]
@@ -1572,14 +1572,14 @@ async fn a_kept_datagram_is_read_on_from_where_it_stopped() {
     unit.extend([0x05, 0x00]);
     unit.extend(push());
 
-    let mut record = new_record_buf();
+    let mut reader = DatagramReader::new();
     let mut sink = OneAtATime::default();
     let mut lends = 0;
     loop {
         sink.handed = 0;
-        dispatch_datagram(&unit, &actions, &mut engine, &mut record, &mut sink);
+        dispatch_datagram(&unit, &actions, &mut engine, &mut reader, &mut sink);
         lends += 1;
-        if !actions.resumes_datagram() {
+        if !reader.resumes() {
             break;
         }
         assert!(lends < 8, "each lend moves the dispatch on");
@@ -1681,9 +1681,9 @@ async fn a_refused_frame_leaves_the_frame_behind_it_for_the_next_unit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_in_place_refused_frame_leaves_the_frame_behind_it_for_the_next_unit() {
     use wz_codecs::lent::Push;
+    use wz_session_core::drive::DatagramReader;
     use wz_session_core::drive::{dispatch_datagram, dispatch_pending};
     use wz_session_core::driver_loop::IterationEvent;
-    use wz_session_core::network_message::new_record_buf;
 
     let (actions, mut engine) = fresh_setup();
     drive_to_sent_init_syn(&mut engine);
@@ -1701,7 +1701,7 @@ async fn an_in_place_refused_frame_leaves_the_frame_behind_it_for_the_next_unit(
     batch.extend([0x05, 0x00]);
     batch.extend(push());
 
-    let mut record = new_record_buf();
+    let mut reader = DatagramReader::new();
     let mut seen: Vec<(bool, u64)> = Vec::new();
     let mut refused: Vec<(bool, u64)> = Vec::new();
     let mut sink = |event: IterationEvent<'_, '_>| match event {
@@ -1717,8 +1717,8 @@ async fn an_in_place_refused_frame_leaves_the_frame_behind_it_for_the_next_unit(
         }
         _ => {}
     };
-    dispatch_datagram(&first, &actions, &mut engine, &mut record, &mut sink);
-    dispatch_datagram(&batch, &actions, &mut engine, &mut record, &mut sink);
+    dispatch_datagram(&first, &actions, &mut engine, &mut reader, &mut sink);
+    dispatch_datagram(&batch, &actions, &mut engine, &mut reader, &mut sink);
     // What follows the refused frame is read on where the datagram lies, in the same call.
     assert!(
         dispatch_pending(&actions, &mut engine).is_none(),
@@ -1740,9 +1740,9 @@ async fn an_in_place_refused_frame_leaves_the_frame_behind_it_for_the_next_unit(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_message_that_is_not_a_frame_is_read_where_it_lies_and_the_datagram_read_on() {
     use wz_codecs::lent::Push;
+    use wz_session_core::drive::DatagramReader;
     use wz_session_core::drive::{dispatch_datagram, dispatch_pending, CopyReason, DatagramPath};
     use wz_session_core::driver_loop::IterationEvent;
-    use wz_session_core::network_message::new_record_buf;
 
     let (actions, mut engine) = fresh_setup();
     drive_to_sent_init_syn(&mut engine);
@@ -1758,7 +1758,7 @@ async fn a_message_that_is_not_a_frame_is_read_where_it_lies_and_the_datagram_re
     let mut unit = vec![0x04, 0x25, 0x01];
     unit.extend(push);
 
-    let mut record = new_record_buf();
+    let mut reader = DatagramReader::new();
     let mut seen: Vec<(bool, u64)> = Vec::new();
     let mut sink = |event: IterationEvent<'_, '_>| match event {
         IterationEvent::InPlace(rec) => seen.push((rec.reliable(), rec.sn())),
@@ -1770,7 +1770,7 @@ async fn a_message_that_is_not_a_frame_is_read_where_it_lies_and_the_datagram_re
         }) if !messages.is_empty() => seen.push((*reliable, *sn)),
         _ => {}
     };
-    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut record, &mut sink);
+    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, &mut sink);
     assert_eq!(
         path,
         DatagramPath::Copied(CopyReason::NotAFrame),
@@ -1792,9 +1792,9 @@ async fn a_message_that_is_not_a_frame_is_read_where_it_lies_and_the_datagram_re
 /// nothing is dispatched or reported and no step is noted to go on from.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_datagram_is_read_once_when_lent_and_not_at_all_when_kept() {
+    use wz_session_core::drive::DatagramReader;
     use wz_session_core::drive::{dispatch_datagram, CopyReason, DatagramPath};
     use wz_session_core::driver_loop::{EventSink, IterationEvent};
-    use wz_session_core::network_message::new_record_buf;
 
     /// A host whose link keeps the datagram, counting what it is told.
     #[derive(Default)]
@@ -1812,13 +1812,13 @@ async fn an_empty_datagram_is_read_once_when_lent_and_not_at_all_when_kept() {
         }
     }
 
-    let mut record = new_record_buf();
+    let mut reader = DatagramReader::new();
 
     let (actions, mut engine) = fresh_setup();
     drive_to_sent_init_syn(&mut engine);
     let mut reported = 0usize;
     let mut lends = |_event: IterationEvent<'_, '_>| reported += 1;
-    let path = dispatch_datagram(&[], &actions, &mut engine, &mut record, &mut lends);
+    let path = dispatch_datagram(&[], &actions, &mut engine, &mut reader, &mut lends);
     assert_eq!(
         path,
         DatagramPath::Copied(CopyReason::NotAFrame),
@@ -1829,14 +1829,14 @@ async fn an_empty_datagram_is_read_once_when_lent_and_not_at_all_when_kept() {
     let (actions, mut engine) = fresh_setup();
     drive_to_sent_init_syn(&mut engine);
     let mut keeps = Keeps::default();
-    let path = dispatch_datagram(&[], &actions, &mut engine, &mut record, &mut keeps);
+    let path = dispatch_datagram(&[], &actions, &mut engine, &mut reader, &mut keeps);
     assert_eq!(
         path,
         DatagramPath::InPlace,
         "a kept empty datagram has no unit"
     );
     assert_eq!(keeps.events, 0, "nothing is dispatched");
-    assert!(!actions.resumes_datagram(), "and no step is noted");
+    assert!(!reader.resumes(), "and no step is noted");
 }
 
 /// A Frame the in-place reader refuses is refused as the copying path refuses it, and read no
@@ -1845,9 +1845,9 @@ async fn an_empty_datagram_is_read_once_when_lent_and_not_at_all_when_kept() {
 /// with nothing to report; either is a framing error, which takes the session to Closing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_frame_the_in_place_reader_refuses_is_a_framing_error_read_no_further_than_its_head() {
+    use wz_session_core::drive::DatagramReader;
     use wz_session_core::drive::{dispatch_datagram, CopyReason, DatagramPath};
     use wz_session_core::driver_loop::IterationEvent;
-    use wz_session_core::network_message::new_record_buf;
 
     // [Frame(reliable)] with no sequence number; [Frame(reliable, Z, sn 1)] whose one extension
     // is a unit of id 0xF with the M bit, which no Frame defines.
@@ -1857,14 +1857,14 @@ async fn a_frame_the_in_place_reader_refuses_is_a_framing_error_read_no_further_
     ] {
         let (actions, mut engine) = fresh_setup();
         drive_to_sent_init_syn(&mut engine);
-        let mut record = new_record_buf();
+        let mut reader = DatagramReader::new();
         let mut parse_errors = Vec::new();
         let mut sink = |event: IterationEvent<'_, '_>| {
             if let IterationEvent::Poll(outcome) = event {
                 parse_errors.push(matches!(outcome, DriverLoopOutcome::ParseError(_)));
             }
         };
-        let path = dispatch_datagram(&unit, &actions, &mut engine, &mut record, &mut sink);
+        let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, &mut sink);
         assert_eq!(path, DatagramPath::Copied(reason), "{unit:?}");
         assert_eq!(parse_errors, [parse_error], "{unit:?}: one outcome");
         assert_eq!(
@@ -2265,7 +2265,7 @@ async fn a_replayed_open_ack_after_established_is_not_admitted() {
             "frame {sn} is delivered; got {outcome:?}"
         );
     }
-    let rx_before = actions.fact_rx_sn(|slot| slot.clone());
+    let rx_before = actions.rx_sn();
 
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_openack_wire(1)))]);
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -2283,7 +2283,7 @@ async fn a_replayed_open_ack_after_established_is_not_admitted() {
         "the already-delivered frame 1 is a duplicate and stays one; got {outcome:?}"
     );
     assert_eq!(
-        actions.fact_rx_sn(|slot| slot.clone()),
+        actions.rx_sn(),
         rx_before,
         "the replay did not move the RX baseline"
     );

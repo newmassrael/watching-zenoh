@@ -352,7 +352,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
     let actions = pair.resp_actions;
     assert!(actions.is_lowlatency() && actions.is_established());
     let mut engine = wz_runtime_tokio::session_glue::new_session_engine(&actions);
-    let mut record = wz_session_core::network_message::new_record_buf();
+    let mut reader = wz_session_core::drive::DatagramReader::new();
 
     let push = |payload: &[u8]| {
         wz_session_core::push_build::build_push_literal(KEYEXPR, payload)
@@ -396,7 +396,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
                 unit,
                 &actions,
                 &mut engine,
-                &mut record,
+                &mut reader,
                 &mut |event: IterationEvent<'_, '_>| match event {
                     IterationEvent::InPlace(_) => {
                         handed += 1;
@@ -448,7 +448,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             unit,
             &actions,
             &mut engine,
-            &mut record,
+            &mut reader,
             &mut |event: IterationEvent<'_, '_>| match event {
                 IterationEvent::InPlace(lent) => got.push(
                     lent.push()
@@ -477,7 +477,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
         &keep_alive,
         &actions,
         &mut engine,
-        &mut record,
+        &mut reader,
         &mut |_: IterationEvent<'_, '_>| {},
     );
     assert_eq!(

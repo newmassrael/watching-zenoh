@@ -2309,6 +2309,129 @@ mod link_stamps {
     }
 }
 
+/// The inbound SN gates, kept in words of the runtime's: a frame is judged with no hold of a lock,
+/// on the ring the peer's capabilities give.
+mod rx_sn_gate {
+    use alloc::vec::Vec;
+
+    use super::{bundle, holds_in};
+    use crate::peer_init_caps::PeerInitCaps;
+    use crate::qos::Priority;
+    use crate::sn::{mask_from_res, RxAdmit, RxConduits};
+
+    /// The peer's capabilities with the sequence-number resolution `seq_num_res`.
+    fn caps(seq_num_res: u8) -> Option<PeerInitCaps> {
+        Some(PeerInitCaps {
+            seq_num_res,
+            req_id_res: 2,
+            batch_size: 1024,
+        })
+    }
+
+    /// Every frame of a walk is judged under no lock: the first taken as the baseline, the next
+    /// one accepted, its duplicate stale, a skip a gap. Turned red by a judgement that takes a
+    /// lock to read the baseline or the ring.
+    #[test]
+    fn a_frame_is_judged_under_no_lock() {
+        let (actions, _link) = bundle();
+        let mut verdicts = Vec::new();
+        let holds = holds_in(|| {
+            for sn in [5, 6, 6, 9] {
+                verdicts.push(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, sn));
+            }
+        });
+        assert_eq!(
+            verdicts,
+            [
+                RxAdmit::Accept,
+                RxAdmit::Accept,
+                RxAdmit::Stale,
+                RxAdmit::Gap { missing: 2 }
+            ]
+        );
+        assert_eq!(
+            holds, 0,
+            "the baseline and the ring are words, read under no lock"
+        );
+    }
+
+    /// The gate judges on the ring the peer's capabilities give, followed as they are written:
+    /// a jump of 64 is stale on the seven-bit ring a peer names and a gap on the session's own
+    /// once the capabilities are withdrawn. Turned red by a ring the gate reads once, or one a
+    /// write of the capabilities does not move.
+    #[test]
+    fn the_gate_judges_on_the_ring_the_peers_capabilities_give() {
+        let (actions, _link) = bundle();
+        actions.set_peer_init_caps(caps(0x00));
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 0),
+            RxAdmit::Accept
+        );
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 64),
+            RxAdmit::Stale,
+            "past half the seven-bit ring"
+        );
+        actions.set_peer_init_caps(None);
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 64),
+            RxAdmit::Gap { missing: 63 },
+            "within half the session's own 28-bit ring"
+        );
+    }
+
+    /// An admitted OpenAck seeds every channel one before the peer's initial SN, on the ring the
+    /// peer's capabilities give. Turned red by a seed on another ring or of one channel.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn an_admitted_open_ack_seeds_the_gate_on_the_peers_ring() {
+        use crate::session_actions::OpenAckAdmission;
+        let (actions, _link) = bundle();
+        actions.set_peer_init_caps(caps(0x00));
+        actions.fact_awaiting_open_ack(|slot| *slot = true);
+        assert_eq!(
+            actions.admit_open_ack(5, 0, Ok(None)),
+            OpenAckAdmission::Taken
+        );
+        let mut expected = RxConduits::default();
+        expected.seed(mask_from_res(0x00), 0);
+        assert_eq!(
+            actions.rx_sn(),
+            expected,
+            "one before 0 on the seven-bit ring is 127"
+        );
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, false, 0),
+            RxAdmit::Accept,
+            "the first frame at the initial SN passes"
+        );
+    }
+
+    /// A reopen clears every channel and puts the gate back on the session's own ring, with the
+    /// capabilities it clears. Turned red by a reopen that leaves a baseline or the peer's ring.
+    #[cfg(feature = "session-reconnect")]
+    #[test]
+    fn a_reopen_clears_the_gate_and_its_ring() {
+        let (actions, _link) = bundle();
+        actions.set_peer_init_caps(caps(0x00));
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 0),
+            RxAdmit::Accept
+        );
+        actions.reset_for_reopen();
+        assert_eq!(actions.rx_sn(), RxConduits::default(), "no baseline left");
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 0),
+            RxAdmit::Accept
+        );
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 64),
+            RxAdmit::Gap { missing: 63 },
+            "judged on the session's own ring again"
+        );
+    }
+}
+
 /// The one value of a one-face session's transport, over a real session's machine and actions: what
 /// it raises before input is read, the order it hands a datagram and the time to the session, and
 /// when it is next due.
@@ -2439,6 +2562,81 @@ mod unicast_transport {
             transport.rx().path_counts(),
             counted,
             "the receive counted the one datagram on the path it took"
+        );
+    }
+
+    /// A datagram its link keeps is read on from where the last turn stopped, which the receive
+    /// notes beside its record: two KeepAlives in one datagram are read over two lends of the same
+    /// bytes, one a lend, and the turn between says the link is to keep it. A kept datagram read
+    /// to its end has nothing left, and finding so takes no lock. Turned red by a receive that
+    /// reads a kept datagram from its start again, that does not say the link is to keep it, or
+    /// that notes where it stopped under a lock.
+    #[cfg(all(feature = "rx-in-place", feature = "alloc"))]
+    #[test]
+    fn a_kept_datagram_is_read_on_from_where_its_receive_noted_it_stopped() {
+        use super::holds_in;
+        use crate::driver_loop::EventSink;
+
+        /// A host whose link keeps its datagram and that takes one message a lend.
+        #[derive(Default)]
+        struct OneALend {
+            events: usize,
+        }
+
+        impl EventSink for OneALend {
+            fn event(&mut self, _event: IterationEvent<'_, '_>) {
+                self.events += 1;
+            }
+
+            fn takes_another(&mut self) -> bool {
+                false
+            }
+
+            fn holds_datagram(&self) -> bool {
+                true
+            }
+        }
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let transport =
+            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
+        let keep_alive = wz_codecs::wire_const::T_MID_KEEP_ALIVE;
+        let datagram = [keep_alive, keep_alive];
+        let mut host = OneALend::default();
+
+        let mut first = transport.input_at(0);
+        first.datagram(&datagram, &mut engine, &*actions, &mut host);
+        assert_eq!(
+            host.events, 1,
+            "the first message, and no other in this lend"
+        );
+        assert!(first.resumes_datagram(), "the link is to keep the datagram");
+
+        let mut second = transport.input_at(0);
+        second.datagram(&datagram, &mut engine, &*actions, &mut host);
+        assert_eq!(
+            host.events, 2,
+            "the second message, read on from where the first lend stopped"
+        );
+        assert!(!second.resumes_datagram(), "read to its end");
+
+        let mut third = transport.input_at(0);
+        let holds = holds_in(|| {
+            third.datagram(&[], &mut engine, &*actions, &mut host);
+        });
+        assert_eq!(
+            host.events, 2,
+            "a kept datagram with nothing left reads nothing"
+        );
+        assert!(!third.resumes_datagram());
+        assert_eq!(
+            holds, 0,
+            "where the receive stands is its own, under no lock"
         );
     }
 
