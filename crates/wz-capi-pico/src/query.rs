@@ -979,10 +979,7 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> Result<*mut c_voi
             return Err(crate::result::Z_ERR_GENERIC);
         };
         match holder.keep_query(marshal) {
-            Ok(Some(id)) => Deferred {
-                engine: engine.clone(),
-                id,
-            },
+            Ok(Some(id)) => Deferred { engine, id },
             Ok(None) => return Err(crate::result::Z_ERR_GENERIC),
             Err(wz_capi_port::Refusal::Closed) => return Err(Z_ERR_SESSION_CLOSED),
             Err(_) => return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
