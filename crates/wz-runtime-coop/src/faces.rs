@@ -736,7 +736,9 @@ pub struct LinkSupervisor<L: SessionLinks, F, P = ManyFaces<F>> {
     listeners: Vec<Listening<L::Pump>>,
     /// The one buffer a read's waits are gathered in, reserved at the open for every link, port
     /// and wake a read waits on at once; `None` while a read waits with it, so that a read on
-    /// another thread then makes no buffer of its own after the open.
+    /// another thread then makes no buffer of its own after the open. Empty whenever it is here:
+    /// each way it comes back empties it ([`Self::idle_wait`], [`Self::waited`]), so a read
+    /// gathers into it what it waits on now and nothing a read before it waited on.
     waits: Option<Vec<LinkWait>>,
     next_face: FaceId,
     /// The record each face is kept as: the table `P` holds it, the supervisor names it.
@@ -1079,6 +1081,10 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
                 IdleWait::None
             };
         };
+        debug_assert!(
+            waits.is_empty(),
+            "the session's buffer of waits came back emptied"
+        );
         // Past the room the open reserved, a push would grow the buffer after the open.
         let room = waits.capacity();
         let mut holds = false;
@@ -1168,12 +1174,14 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         }
     }
 
-    /// Take back a read's wait, once made ([`IdleWait::wait`]): the session's buffer of its
-    /// waits, which the wait took whole ([`Self::idle_wait`]). Out of line: the open's steps and
-    /// each read hand their wait back.
+    /// Take back a read's wait ([`IdleWait::wait`]): the session's buffer of its waits, which
+    /// the wait took whole ([`Self::idle_wait`]), emptied here whether the wait was made or not,
+    /// so the next read waits on what it gathers alone. Out of line: the open's steps and each
+    /// read hand their wait back.
     #[inline(never)]
     pub fn waited(&mut self, wait: IdleWait) {
-        if let IdleWait::Input { on, .. } = wait {
+        if let IdleWait::Input { mut on, .. } = wait {
+            on.clear();
             self.waits = Some(on);
         }
     }
@@ -1887,42 +1895,57 @@ mod tests {
         ));
     }
 
+    /// A read sleeps to the next dial and reads the clock once at most, however often its faces
+    /// need the time: a face waiting to dial again for its time, a dial under way for its next
+    /// look and for the wait left to it, once for both. A dial past its deadline is looked at
+    /// now. A face standing by and a link up read none, and a link that holds input makes no
+    /// wait. The reads are counted for each read alone. Turned red by a read that asks the clock
+    /// again at each use of the time, or asks it for a face that has no time.
     #[test]
     fn a_read_sleeps_to_the_next_dial_and_does_not_wait_on_held_input() {
-        let mut clock_reads = 0;
+        let reads = Cell::new(0u32);
         let mut now = || {
-            clock_reads += 1;
+            reads.set(reads.get() + 1);
             1_000u64
         };
+        // The wait one read makes, and how often that read asked the clock.
+        let mut read = |faces: &mut LinkSupervisor<Net, TestFace>| {
+            reads.set(0);
+            let wait = faces.idle_wait(10, &mut now, [], None);
+            (wait, reads.get())
+        };
         let mut faces = supervisor(Link::Waiting { at_us: 5_000 }, 1);
-        assert!(matches!(
-            faces.idle_wait(10, &mut now, [], None),
-            IdleWait::Sleep(4)
-        ));
-        // A dial under way is looked at again on the next look, its deadline being later.
+        assert!(
+            matches!(read(&mut faces), (IdleWait::Sleep(4), 1)),
+            "a face waiting to dial again"
+        );
         faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, u64::MAX));
-        assert!(matches!(
-            faces.idle_wait(10, &mut now, [], None),
-            IdleWait::Sleep(1)
-        ));
+        assert!(
+            matches!(read(&mut faces), (IdleWait::Sleep(1), 1)),
+            "a dial under way is looked at again on the next look, its deadline being later"
+        );
+        faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, 0));
+        assert!(
+            matches!(read(&mut faces), (IdleWait::None, 1)),
+            "a dial past its deadline is looked at now, which gives it up"
+        );
         #[cfg(feature = "listen")]
         {
             faces.put_link(0, Link::Held { zid: held_node() });
-            assert!(matches!(
-                faces.idle_wait(10, &mut now, [], None),
-                IdleWait::None
-            ));
+            assert!(
+                matches!(read(&mut faces), (IdleWait::None, 0)),
+                "a face standing by"
+            );
         }
-        assert_eq!(clock_reads, 1, "only the waiting face read the clock");
 
         let runtime = CoopRuntime::new(Still);
         let local = CoopLocalSet::new(&runtime);
         faces.put_link(0, Link::Up(wire(&local, session(true, None), true, false)));
         assert!(faces.holds_input());
-        assert!(matches!(
-            faces.idle_wait(10, &mut || 0u64, [], None),
-            IdleWait::None
-        ));
+        assert!(
+            matches!(read(&mut faces), (IdleWait::None, 0)),
+            "a link that holds input"
+        );
     }
 
     /// A read waits on each link's handle, for its input, and for its room as well while it owes
@@ -2038,6 +2061,8 @@ mod tests {
             IdleWait::Input { on, ms } => {
                 assert_eq!(on, [wake]);
                 assert_eq!(ms, 4, "the sleep's time");
+                // The wait is handed back, as a read does, so the next read has the buffer.
+                faces.waited(IdleWait::Input { on, ms });
             }
             _ => panic!("a sleep beside a wake waits on it"),
         }
