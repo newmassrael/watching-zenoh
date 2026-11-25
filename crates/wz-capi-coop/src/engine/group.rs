@@ -467,6 +467,10 @@ impl GroupTransport for Watched {
     fn keep(&mut self) {
         self.inner.keep();
     }
+
+    fn frame_budget(&self) -> Option<u16> {
+        self.inner.frame_budget()
+    }
 }
 
 /// What a message of the session waits with when the group's stage has no room for it: a pass of
@@ -619,8 +623,11 @@ impl<W: LinkWaits> GroupFace<W> {
         });
         // Bounded as the tokio engine bounds its group's pipeline: the queue's sizes, in batches
         // of the group's batch, one lane when it runs no QoS. The replies it holds are bounded by
-        // the session's limits.
-        let tx = GroupTxStage::with_limits(&params, &limits);
+        // the session's limits. A transport whose datagram carries less than the group's batch (a
+        // raw Ethernet frame) has the group's frames cut to it, and the group's JOIN still states
+        // its batch, as the tokio engine's group pipeline frames to its link's budget.
+        let framed = params.framed_to(transport.frame_budget());
+        let tx = GroupTxStage::with_limits(framed.as_ref().unwrap_or(&params), &limits);
         let room = transport.room_wait();
         let input = transport.input_wait();
         let due = GroupDue::default();
