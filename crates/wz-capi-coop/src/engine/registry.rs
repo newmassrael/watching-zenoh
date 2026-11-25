@@ -1202,6 +1202,16 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
+    /// The row of the image's allowance the session found for face `face`'s peer
+    /// (`SubscriberPeer::class`): what the key gate is asked with of a message that peer sent, as
+    /// the face's own dispatch asks it. `None` for a peer the image does not declare, and for a
+    /// face the session no longer holds.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn peer_class(&self, face: HeldFace) -> Option<wz_session_core::key_gate::ClassId> {
+        let at = self.place(face)?;
+        self.sets.get(at)?.peer.subscribers.class()
+    }
+
     /// The subscribers' side of `message`, one owned record of a frame of face `face`, taken
     /// ahead of the frame's other planes (`Planes::BesideSubscribers`): a Push's projection, which
     /// the caller hands out one subscriber at a time, and any other record taken as the frame's

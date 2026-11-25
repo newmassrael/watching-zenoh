@@ -63,12 +63,13 @@ use crate::bounded::{
 use crate::caps;
 use crate::declare_form::RetractionKey;
 use crate::key_arena::{KeySpace, LentKeys};
+use crate::key_gate::{ClassId, KeyGate};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
 use crate::named_key::{NamedKey, Prefix};
 use crate::pubsub::{
-    any_local_match, fire_into_memoized, past_matcher_depth, row_reaches, scan_subscribers,
-    MatchMemo, RowRef, SubscriberRows,
+    admit_from_peer, any_local_match, fire_into_memoized, past_matcher_depth, row_reaches,
+    scan_subscribers, Admission, MatchMemo, RowRef, SubscriberRows,
 };
 #[cfg(feature = "storage-profile")]
 use crate::query::any_local_queryable;
@@ -1285,6 +1286,9 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     /// Which subscribers the keys delivered lately reached, valid at one `subscriber_epoch`: the
     /// subscriber table's receive match cache, over these rows' places.
     memo: MatchMemo<P>,
+    /// What decides which keys a peer's message may be on, asked before any subscriber is looked
+    /// up ([`Self::set_key_gate`]).
+    key_gate: KeyGate<'static>,
     keyexprs: Keyexprs<P>,
     subscribers: Subscribers<F, P>,
     queryables: QueryablesKept<F, P>,
@@ -1633,6 +1637,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             memo: MatchMemo::new(
                 <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
             ),
+            key_gate: KeyGate::of_build(),
             keyexprs: SlotMap::new(),
             subscribers: SlotMap::new(),
             queryables: <F::QueryablePresence as Presence>::empty::<Queryables<F, P>>(),
@@ -1663,6 +1668,20 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// How many distinct keys the subscribers' receive match cache remembers at once.
     pub fn memo_slot_count(&self) -> usize {
         self.memo.slot_count()
+    }
+
+    /// Replace the gate that decides which keys a message from a peer may be on, which starts as
+    /// what the build's `key-set` policy states, as
+    /// [`crate::pubsub::SubscriberTable::set_key_gate`] does: a closed image hands it the gate over
+    /// its generated table. The counts of the gate it replaces are not carried over. The rows hold
+    /// no entity of the image's, so a key of the set reaches the rows its pattern meets.
+    pub fn set_key_gate(&mut self, gate: KeyGate<'static>) {
+        self.key_gate = gate;
+    }
+
+    /// How many messages from a peer the key gate dropped, by reason: all zero for an open gate.
+    pub const fn key_gate_refused(&self) -> crate::key_gate::Refused {
+        self.key_gate.refused()
     }
 
     /// Hold each table to the rows `rows` gives it, under the build's bound.
@@ -2899,20 +2918,31 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     /// The next subscriber `fan` reaches, with a call begun on its row, with the tables held: what
     /// the call is made with once they are let go, `None` when no row at or after `fan`'s place is
-    /// reached. The rows are walked in the table's order from the place after the last one pinned,
-    /// matched by the rule every walk of the subscribers keeps (`row_reaches`), so a message is
-    /// handed to the rows a fan-out from its origin reaches, in its order, one call at a time; a row
-    /// undeclared while an earlier call ran is retired and begins no call. End each call with
-    /// [`RowCallback::end`]; when it was the last call of a row undeclared meanwhile, let the row go
-    /// with [`Self::release_drained_subscriber`].
+    /// reached. A peer's message is first put to the key gate, once, at the walk's first pin, by
+    /// the rule [`crate::pubsub::LocalSubscribers::deliver_from_peer`] keeps, and a refused one
+    /// reaches no row. The rows are walked in the table's order from the place after the last one
+    /// pinned, matched by the rule every walk of the subscribers keeps (`row_reaches`), so a
+    /// message is handed to the rows a fan-out from its origin reaches, in its order, one call at a
+    /// time; a row undeclared while an earlier call ran is retired and begins no call. End each
+    /// call with [`RowCallback::end`]; when it was the last call of a row undeclared meanwhile, let
+    /// the row go with [`Self::release_drained_subscriber`].
     pub fn pin_next_subscriber(
-        &self,
+        &mut self,
         fan: &mut PinnedFanOut<'_>,
     ) -> Option<<F::Subscriber as RowCallback>::Call> {
         const {
             assert!(row_may_lie_in::<F::Subscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
-        if fan.past_depth {
+        if fan.ungated {
+            fan.ungated = false;
+            if matches!(
+                admit_from_peer(&mut self.key_gate, fan.key, fan.class),
+                Admission::Refused
+            ) {
+                fan.reaches_none = true;
+            }
+        }
+        if fan.reaches_none {
             return None;
         }
         let from = fan.next;
@@ -3255,6 +3285,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             // A table whose rows are lent at open remembers no key: each slot of the cache would
             // be rows of its own, which only the arena could give it.
             memo: MatchMemo::new(0),
+            key_gate: KeyGate::of_build(),
             keyexprs: SlotMap::lent_from(&mut lend, rows.keyexprs),
             subscribers: SlotMap::lent_from(&mut lend, rows.subscribers),
             queryables: <F::QueryablePresence as Presence>::lent_from::<Queryables<F, Lent>>(
@@ -3473,15 +3504,21 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
         )
     }
 
-    /// The table set holds no key gate yet: a peer's message on any key is matched against
-    /// every subscription that hears peers.
+    /// A key of a closed set is matched by its pattern like any other: the rows hold no entity of
+    /// the image's to select by.
     fn deliver_from_peer<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
-        _class: Option<crate::key_gate::ClassId>,
+        class: Option<ClassId>,
         how: crate::pubsub::PeerDelivery,
         deliver: D,
     ) -> usize {
+        if matches!(
+            admit_from_peer(&mut self.key_gate, key, class),
+            Admission::Refused
+        ) {
+            return 0;
+        }
         if how.no_allocation && !P::ENFORCES_CAPACITY {
             return scan_subscribers(&mut self.subscribers, key, true, deliver, |_| {})
                 .unwrap_or(0);
@@ -3524,31 +3561,41 @@ pub struct PinnedFanOut<'k> {
     facts: KeyFacts,
     /// The message is a peer's, not the session's own: which origins of the rows admit it.
     remote: bool,
-    /// Deeper than the matcher's bound: the message reaches no row.
-    past_depth: bool,
+    /// The row of the image's allowance the session found for the peer the message came from.
+    class: Option<ClassId>,
+    /// A peer's message the key gate has not been asked of yet: asked at the first pin, so that a
+    /// refusal is counted once for the message and not once for each row.
+    ungated: bool,
+    /// Deeper than the matcher's bound, or refused by the key gate: the message reaches no row.
+    reaches_none: bool,
     /// The place the next row is looked for from: the one after the row pinned last.
     next: usize,
 }
 
 impl<'k> PinnedFanOut<'k> {
-    /// The walk of the subscribers a peer's message on `key` reaches, from the table's first row.
-    pub fn new(key: &'k str) -> Self {
-        Self::from_origin(key, true)
+    /// The walk of the subscribers a peer's message on `key` reaches, from the table's first row:
+    /// `class` is the row of the image's allowance the session found for the peer, which the key
+    /// gate is asked with.
+    pub fn new(key: &'k str, class: Option<ClassId>) -> Self {
+        Self::from_origin(key, true, class)
     }
 
     /// The walk of the subscribers a message the session itself published on `key` reaches, from
-    /// the table's first row: the rows whose origin admits the session's own messages.
+    /// the table's first row: the rows whose origin admits the session's own messages. The
+    /// application's own message is not put to the key gate.
     pub fn local(key: &'k str) -> Self {
-        Self::from_origin(key, false)
+        Self::from_origin(key, false, None)
     }
 
-    fn from_origin(key: &'k str, remote: bool) -> Self {
+    fn from_origin(key: &'k str, remote: bool, class: Option<ClassId>) -> Self {
         let facts = KeyFacts::of(key);
         Self {
             key,
             facts,
             remote,
-            past_depth: past_matcher_depth(key, facts),
+            class,
+            ungated: remote,
+            reaches_none: past_matcher_depth(key, facts),
             next: 0,
         }
     }
