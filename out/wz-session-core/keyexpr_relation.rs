@@ -36,7 +36,7 @@ pub fn keyexpr_relation(a: &[u8], b: &[u8], relation: u8, wild_single: bool, wil
         return false;
     }
     if !sa.star && !sb.star {
-        return keyexpr_range_equal::keyexpr_range_equal(a, 0, (a).len() as u32, b, 0, (b).len() as u32);
+        return keyexpr_range_equal::keyexpr_range_equal(a, 0, a.len() as u32, b, 0, b.len() as u32);
     }
     let includes: bool = relation == 2;
     let da: bool = wild_double && sa.double_star;

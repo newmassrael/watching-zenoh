@@ -16,7 +16,7 @@ use super::keyexpr_shape_schema;
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn keyexpr_shape(k: &[u8]) -> keyexpr_shape_schema::KeyexprShapeSchemaPayload {
-    let n: u32 = (k).len() as u32;
+    let n: u32 = k.len() as u32;
     let mut chunks: u32 = 1;
     let mut empty: bool = n == 0;
     let mut star: bool = false;
