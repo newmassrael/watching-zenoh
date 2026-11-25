@@ -208,15 +208,15 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
     let parsed = match role {
         Role::Dial => crate::endpoint::with_engine_text(endpoint, |text: &str| {
             read_dial_target(text).map(|target| match target {
-                DialTarget::At(at) => (at, false),
+                DialTarget::At(at) => (at, None),
                 DialTarget::Named(name) => (
                     name.locator(core::net::SocketAddr::from(([0, 0, 0, 0], name.port()))),
-                    true,
+                    Some(name.link()),
                 ),
             })
         }),
         Role::Listen => crate::endpoint::with_engine_text(endpoint, |text: &str| {
-            parse_listen_locator(text).map(|at| (at, false))
+            parse_listen_locator(text).map(|at| (at, None))
         }),
         Role::Group => return read_group(endpoint),
     };
@@ -227,6 +227,7 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
         )
     })?;
     admit_name(named, resolves::<crate::coop_host::Links>())?;
+    let named = named.is_some();
     // A link of another kind, a serial line or a pair of named FIFOs, is a request no facility of
     // the vocabulary names: the vocabulary's own reading says so, in its words.
     let Some(ip) = locator.as_ip() else {
@@ -247,18 +248,28 @@ fn resolves<L: wz_capi_coop::CoopLinks>() -> bool {
     L::RESOLVES
 }
 
-/// A host name in an endpoint, over a network that `resolves` names or not: the open dials the
-/// addresses its resolver answers where it does, and refuses the name before any dial where it
-/// does not, with the code it answers a link it could not open with.
+/// A host name in an endpoint, of the link `named` opens at its addresses (`None` for an
+/// address), over a network that `resolves` names or not: the open dials the addresses its
+/// resolver answers where it does, and refuses the name before any dial where it does not, or
+/// where the link names its peer by the address it dials (`NamedLink::names_peer_by_address`),
+/// with the code it answers a link it could not open with.
 #[cfg(not(feature = "engine-tokio"))]
-fn admit_name(named: bool, resolves: bool) -> Result<(), Refused> {
-    if named && !resolves {
-        return Err((
+fn admit_name(
+    named: Option<wz_capi_coop::locator_text::NamedLink>,
+    resolves: bool,
+) -> Result<(), Refused> {
+    match named {
+        Some(link) if link.names_peer_by_address() => Err((
+            crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+            "the open refuses this config: a tls/ or ws/ link names its peer by the address it \
+             dials, so no host name is dialled over it",
+        )),
+        Some(_) if !resolves => Err((
             crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
             "the open refuses this config: the build's network has no resolver for a host name",
-        ));
+        )),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// A group as the cooperative engine reads it before its host joiner is asked
@@ -451,12 +462,19 @@ mod tests {
     #[cfg(not(feature = "engine-tokio"))]
     #[test]
     fn a_host_name_is_admitted_only_where_the_network_resolves_it() {
-        assert_eq!(admit_name(true, true), Ok(()));
-        assert_eq!(admit_name(false, false), Ok(()));
-        assert_eq!(admit_name(false, true), Ok(()));
-        let (code, reason) = admit_name(true, false).unwrap_err();
+        use wz_capi_coop::locator_text::NamedLink;
+        use wz_capi_coop::LinkProto;
+
+        let tcp = Some(NamedLink::Ip(LinkProto::Tcp));
+        assert_eq!(admit_name(tcp, true), Ok(()));
+        assert_eq!(admit_name(None, false), Ok(()));
+        assert_eq!(admit_name(None, true), Ok(()));
+        let (code, reason) = admit_name(tcp, false).unwrap_err();
         assert_eq!(code, crate::result::Z_ERR_TRANSPORT_OPEN_FAILED);
         assert!(reason.contains("resolver"), "{reason}");
+        let (code, reason) = admit_name(Some(NamedLink::Ip(LinkProto::Tls)), true).unwrap_err();
+        assert_eq!(code, crate::result::Z_ERR_TRANSPORT_OPEN_FAILED);
+        assert!(reason.contains("by the address"), "{reason}");
         assert!(
             resolves::<crate::coop_host::Links>(),
             "a host build resolves"
