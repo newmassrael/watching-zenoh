@@ -121,6 +121,7 @@ where a checkout of the pinned zenoh is reachable, and SAYS so when it is not;
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -2724,8 +2725,12 @@ def main(argv: list[str]) -> int:
         return check(args.require)[2]
     if args.promoted:
         # The list a gating step runs. The tree is graded first, so a table that no longer
-        # matches the crate prints nothing instead of a list that is wrong.
-        tree, _legs, rc = check(require=False, quiet=True)
+        # matches the crate prints nothing instead of a list that is wrong. Stdout is that
+        # list and nothing else -- the step redirects it into the file it reads -- so the
+        # grading's own lines go to stderr: a failed grade then names its findings in the
+        # job log instead of leaving them in a file nobody prints.
+        with contextlib.redirect_stdout(sys.stderr):
+            tree, _legs, rc = check(require=False, quiet=True)
         if rc != 0 or tree is None:
             return rc or 2
         _on_host, _every, target_of, _got = host_interop_tests(tree.cache)
