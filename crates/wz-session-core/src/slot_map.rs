@@ -85,7 +85,7 @@ impl<K> Handle<K> {
     }
 
     /// The place of the row in its table.
-    fn place(self) -> usize {
+    pub(crate) fn place(self) -> usize {
         usize::from(self.index.get()).saturating_sub(1)
     }
 

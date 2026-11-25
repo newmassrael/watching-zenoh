@@ -3475,24 +3475,23 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if fan.reaches_none {
             return None;
         }
-        let from = fan.next;
-        let (place, call) = self
-            .subscribers
-            .live_handles()
-            .skip_while(|(place, _, _)| *place < from)
-            .find_map(|(place, _, row)| {
-                let found = RowRef {
-                    pattern: text(&row.key.key),
-                    facts: row.facts,
-                    origin: row.origin,
-                };
-                if !row_reaches(&found, fan.key, fan.facts, fan.remote) {
-                    return None;
-                }
-                row.callback.begin().map(|call| (place, call))
-            })?;
-        fan.next = place.saturating_add(1);
-        Some(call)
+        // Taken up at the place after the last row reached: the rows before it are not read again.
+        let mut cursor = fan.next;
+        while let Some((_, row)) = self.subscribers.next_from(&mut cursor) {
+            let found = RowRef {
+                pattern: text(&row.key.key),
+                facts: row.facts,
+                origin: row.origin,
+            };
+            if !row_reaches(&found, fan.key, fan.facts, fan.remote) {
+                continue;
+            }
+            if let Some(call) = row.callback.begin() {
+                fan.next = cursor;
+                return Some(call);
+            }
+        }
+        None
     }
 
     /// Let go of the subscriber `handle` named, undeclared while a call of it ran, once that call
@@ -3547,24 +3546,23 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         const {
             assert!(row_may_lie_in::<F::Queryable, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
-        let from = query.reached_from();
-        let (place, row) = self
-            .kept_queryables()?
-            .live_handles()
-            .skip_while(|(place, _, _)| *place < from)
-            .find_map(|(place, _, row)| {
-                let found = QueryableRef {
-                    #[cfg(feature = "alloc")]
-                    id: u64::from(row.id),
-                    pattern: text(&row.key.key),
-                    facts: row.facts,
-                    origin: row.origin,
-                    complete: row.complete,
-                };
-                query.reaches(found).then_some((place, row))
-            })?;
-        query.passed(place);
-        Some(&row.callback)
+        let queryables = self.kept_queryables()?;
+        let mut cursor = query.reached_from();
+        while let Some((handle, row)) = queryables.next_from(&mut cursor) {
+            let found = QueryableRef {
+                #[cfg(feature = "alloc")]
+                id: u64::from(row.id),
+                pattern: text(&row.key.key),
+                facts: row.facts,
+                origin: row.origin,
+                complete: row.complete,
+            };
+            if query.reaches(found) {
+                query.passed(handle.place());
+                return Some(&row.callback);
+            }
+        }
+        None
     }
 
     /// Begin a call of the liveliness subscriber `handle` names, with the tables held: what the call is made
@@ -3611,19 +3609,18 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         const {
             assert!(row_may_lie_in::<F::LivelinessSubscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
-        let from = fan.next;
-        let (place, call) = self
-            .kept_liveliness_subscribers()?
-            .live_handles()
-            .skip_while(|(place, _, _)| *place < from)
-            .find_map(|(place, _, row)| {
-                if !token_reaches(row, fan.key, fan.historical) {
-                    return None;
-                }
-                row.callback.begin().map(|call| (place, call))
-            })?;
-        fan.next = place.saturating_add(1);
-        Some(call)
+        let subscribers = self.kept_liveliness_subscribers()?;
+        let mut cursor = fan.next;
+        while let Some((_, row)) = subscribers.next_from(&mut cursor) {
+            if !token_reaches(row, fan.key, fan.historical) {
+                continue;
+            }
+            if let Some(call) = row.callback.begin() {
+                fan.next = cursor;
+                return Some(call);
+            }
+        }
+        None
     }
 
     /// Begin a call of the matching listener `handle` names, with the tables held: what the call is made
