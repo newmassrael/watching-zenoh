@@ -99,9 +99,9 @@
       "debt": null
     },
     "matching-listener": {
-      "allocs_per_round": 0.01,
-      "locked": false,
-      "debt": "debt-c-abi-heap-after-open"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "message-payload": {
       "allocs_per_round": 0,
@@ -109,14 +109,14 @@
       "debt": null
     },
     "nostd-put": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-TBD"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "nostd-subscriber": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-TBD"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "publisher-declare": {
       "allocs_per_round": 0,
