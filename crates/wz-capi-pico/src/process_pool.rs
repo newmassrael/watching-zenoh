@@ -3211,8 +3211,10 @@ mod tests {
     /// Turned red by a stage reserved over no slot, or bytes that wrap past the address space.
     #[test]
     fn a_stage_of_no_slot_or_too_many_bytes_is_not_reserved() {
-        let mut configs_only = Counts::default();
-        configs_only.configs = 1;
+        let configs_only = Counts {
+            configs: 1,
+            ..Counts::default()
+        };
         let plan = Plan::laid(&configs_only);
         let mut held = None;
         assert_eq!(
@@ -3223,8 +3225,10 @@ mod tests {
         assert!(lay_stage(&mut held, &plan, Stage::Config).is_ok());
         assert!(held.is_some());
 
-        let mut too_many = Counts::default();
-        too_many.samples = usize::MAX / 2;
+        let too_many = Counts {
+            samples: usize::MAX / 2,
+            ..Counts::default()
+        };
         let plan = Plan::laid(&too_many);
         let mut held = None;
         assert_eq!(
