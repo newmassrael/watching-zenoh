@@ -553,7 +553,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         issue_get(
             engine,
             state.key.literal(),
-            state.key.wire(Arc::as_ref(engine)),
+            state.key.wire(crate::session::EngineHold::as_ref(engine)),
             &ask,
             closure,
             token,

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchSink, Refusal, SessionEngine};
 
 use super::{open, CatchAll, Router};
+use crate::EngineHold;
 
 /// A Rust closure a watch's sink shares, so a test reads from its count whether the engine still
 /// holds the sink.
@@ -423,7 +424,7 @@ mod watched {
         let late = Arc::new(Log::new());
         let declared_inside: Arc<Mutex<Option<Result<u64, Refusal>>>> = Arc::default();
         let trigger: SharedCall = {
-            let session = Arc::downgrade(&engine);
+            let session = EngineHold::downgrade(&engine);
             let late = Arc::clone(&late);
             let into = Arc::clone(&declared_inside);
             Arc::new(move |event: DeclWatchEvent<'_>| {

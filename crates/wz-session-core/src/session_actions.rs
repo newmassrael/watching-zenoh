@@ -12267,6 +12267,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.link.link_lease, |slot| *slot = Some(lease));
     }
 
+    /// [`Self::install_link_admission`] with an admission the session lends from where it owns
+    /// it: its owner is dropped after this link's actions, as the handle's maker answered for
+    /// ([`crate::link_admission::LinkLease::placed`]).
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    pub fn install_placed_link_admission(
+        &self,
+        authority: crate::placed::PlacedRef<dyn crate::link_admission::LinkAdmission>,
+        dialled: bool,
+    ) {
+        let lease = crate::link_admission::LinkLease::placed(authority, dialled);
+        R::with_mutex_mut(&self.link.link_lease, |slot| *slot = Some(lease));
+    }
+
     /// The node's answer to the remote's zid, once known; `true` for a link the node does not
     /// guard. See [`crate::link_admission::LinkAdmission::reserve`].
     #[cfg(all(

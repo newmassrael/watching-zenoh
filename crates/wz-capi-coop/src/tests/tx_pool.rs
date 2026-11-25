@@ -7,6 +7,7 @@
 //! with nothing of the session held, woken by the slow link's room and not by a clock, and is
 //! sent, not lost, once the slow stream takes the rest.
 
+use crate::EngineHold;
 #[cfg(feature = "threads")]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -59,7 +60,7 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 
 /// A session stepped by its read task.
 #[cfg(feature = "threads")]
-fn stepped(config: CoopConfig) -> Arc<Engine> {
+fn stepped(config: CoopConfig) -> EngineHold<Engine> {
     let engine = open_with(config);
     SessionDrive::start_read_task(&*engine).expect("the read task starts");
     engine

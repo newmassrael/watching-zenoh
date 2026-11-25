@@ -467,7 +467,7 @@ fn a_listener_undeclared_from_its_own_callback_is_let_go_of_after_the_call() {
     let calls = Arc::new(AtomicUsize::new(0));
     let id_at = Arc::new(std::sync::OnceLock::new());
     let sink = {
-        let engine = Arc::clone(&engine);
+        let engine = engine.clone();
         let calls = Arc::clone(&calls);
         let id_at = Arc::clone(&id_at);
         MatchingSink::shared(move |_matching: bool| {
@@ -503,7 +503,7 @@ fn a_listener_gone_during_its_call_leaves_the_next_one_told_once() {
     let first_calls = Arc::new(AtomicUsize::new(0));
     let id_at = Arc::new(std::sync::OnceLock::new());
     let first = {
-        let engine = Arc::clone(&engine);
+        let engine = engine.clone();
         let calls = Arc::clone(&first_calls);
         let id_at = Arc::clone(&id_at);
         MatchingSink::shared(move |_matching: bool| {

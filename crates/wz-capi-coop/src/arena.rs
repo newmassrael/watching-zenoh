@@ -296,6 +296,11 @@ pub enum ArenaPart {
     LinkEventsListenerPlaces,
     ArenaKeep,
     RuntimeState,
+    EngineState,
+    QueryPlaneState,
+    GetPlaneState,
+    FacePlaneState,
+    LinkAdmissionState,
 }
 
 impl ArenaPart {
@@ -435,6 +440,11 @@ impl ArenaPart {
             }
             Self::ArenaKeep => ("arena keep", ""),
             Self::RuntimeState => ("runtime state", "MAX_TASKS + MAX_TIMERS"),
+            Self::EngineState => ("engine state", ""),
+            Self::QueryPlaneState => ("query plane", ""),
+            Self::GetPlaneState => ("get plane", ""),
+            Self::FacePlaneState => ("face plane", ""),
+            Self::LinkAdmissionState => ("link admission", ""),
         }
     }
 }
@@ -532,7 +542,10 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + ENTITY_PLACE_ROWS
     + CACHE_RING_ROWS
     + FINAL_ROWS
-    + RUNTIME_ROWS;
+    + RUNTIME_ROWS
+    + ENGINE_STATE_ROWS
+    + PLANE_ROWS
+    + ADMISSION_ROWS;
 
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
@@ -542,6 +555,16 @@ const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
 /// The count the arena is kept by and the span the session's runtime is placed in
 /// ([`ArenaPlan::holding_runtime`]).
 const RUNTIME_ROWS: usize = 2;
+/// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
+const ENGINE_STATE_ROWS: usize = 1;
+/// The planes the session's queryables, gets and watchers of its faces share, each where its
+/// feature is ([`ArenaPlan::holding_planes`]).
+const PLANE_ROWS: usize = cfg!(feature = "queryable") as usize
+    + cfg!(feature = "query") as usize
+    + cfg!(feature = "connectivity") as usize;
+/// The admission the links of a session that listens ask while their handshakes run
+/// (`ArenaPlan::holding_admission`).
+const ADMISSION_ROWS: usize = cfg!(feature = "listen") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -2272,6 +2295,42 @@ impl ArenaPlan {
         self.settled()
     }
 
+    /// Lay out the place of `bytes` the session's engine lies in, counted by its holders, which
+    /// keeps the arena's memory until the last of them lets go (`SessionArena::engine_place`).
+    /// Laid out after every other row, once, at the open. The plan is laid out where it lies; a
+    /// refused one is no plan to open by.
+    pub fn holding_engine(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
+        self.put(ArenaPart::EngineState, 1, bytes);
+        self.settled()
+    }
+
+    /// Lay out the place of each plane the session's state owns and its tasks and its engine
+    /// reach by handles that count nothing (`crate::engine::SessionPlanes`): the queryables',
+    /// the gets' and the watchers' of the faces, each where its feature is. Laid out once, at the
+    /// open. The plan is laid out where it lies; a refused one is no plan to open by.
+    pub(crate) fn holding_planes(
+        &mut self,
+        planes: crate::engine::SessionPlanes,
+    ) -> Result<(), ArenaRefused> {
+        #[cfg(feature = "queryable")]
+        self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
+        #[cfg(feature = "query")]
+        self.put(ArenaPart::GetPlaneState, 1, planes.gets);
+        #[cfg(feature = "connectivity")]
+        self.put(ArenaPart::FacePlaneState, 1, planes.faces);
+        let _ = planes;
+        self.settled()
+    }
+
+    /// Lay out the place of `bytes` the admission of a session that listens lies in, which the
+    /// session's state owns and its links' leases reach by handles that count nothing. Laid out
+    /// once, at the open. The plan is laid out where it lies; a refused one is no plan to open by.
+    #[cfg(feature = "listen")]
+    pub(crate) fn holding_admission(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
+        self.put(ArenaPart::LinkAdmissionState, 1, bytes);
+        self.settled()
+    }
+
     /// The bytes of the place the plan holds for the ABI's handle, `0` for none.
     pub fn handle_bytes(&self) -> usize {
         self.places.handle_bytes
@@ -3128,6 +3187,14 @@ pub(crate) struct SessionArena {
     kept: Option<NonNull<Kept>>,
 }
 
+/// Where a session's engine is written at its open ([`SessionArena::engine_place`]): a place of
+/// the arena lent to the engine alone, and the count of the arena's memory it takes one of.
+#[derive(Clone, Copy)]
+pub(crate) struct EnginePlace {
+    pub(crate) at: NonNull<u8>,
+    pub(crate) memory: NonNull<Kept>,
+}
+
 /// The count a session's arena is kept by, and what its last holder gives back: lent from the arena
 /// itself, the count first, so a pointer to the count is a pointer to the whole.
 #[repr(C)]
@@ -3218,6 +3285,16 @@ impl SessionArena {
         // memory stands while a count of `memory` is held, which the session holds until it lets
         // the arena go, after the runtime is made.
         Ok(unsafe { RuntimePlace::new(at, bytes, memory) })
+    }
+
+    /// The place of `bytes` a session's engine lies in ([`ArenaPlan::holding_engine`]), on the
+    /// arena's alignment, and the count that keeps the arena's memory: the engine takes one of
+    /// its own when it is written there, so the memory goes back once the engine's last holder
+    /// lets go, whichever of them is last. Refused past what the arena has left.
+    pub(crate) fn engine_place(&mut self, bytes: usize) -> Result<EnginePlace, LendRefused> {
+        let memory = self.keep()?;
+        let at = self.arena.lend_span(Some(bytes))?;
+        Ok(EnginePlace { at, memory })
     }
 
     /// The bytes reserved: the plan's.
@@ -3695,7 +3772,7 @@ mod tests {
         assert_eq!(plan.rows().count(), 2, "the count and the span, once");
         let mut arena = SessionArena::reserve(&plan, &CountedReleases).expect("the host has it");
         let place = arena.runtime_place(bytes).expect("the plan holds the span");
-        let runtime =
+        let (runtime, local) =
             CoopRuntime::placed(Still, rows, RuntimeForm::Reserved, place).expect("the span fits");
         let before = RELEASES.load(core::sync::atomic::Ordering::SeqCst);
         drop(arena);
@@ -3705,6 +3782,12 @@ mod tests {
             "the runtime keeps the arena"
         );
         drop(runtime);
+        assert_eq!(
+            RELEASES.load(core::sync::atomic::Ordering::SeqCst),
+            before,
+            "the local set's owner, placed in it, keeps the arena too"
+        );
+        drop(local);
         assert_eq!(
             RELEASES.load(core::sync::atomic::Ordering::SeqCst),
             before + 1,

@@ -59,11 +59,12 @@
 //! `std`'s on a host, the host's own calls' in a host library without `std`,
 //! an MCU kernel's in an image. The fan only takes a lock ([`crate::sync::Lock`]).
 
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 
 use crate::os::{Condvar, Mutex, MutexGuard};
+use crate::reach::ReachEngine;
 use crate::sync::Lock;
 
 /// The token's state, under one lock so "cancel has started", "the fans are off the list" and
@@ -233,17 +234,46 @@ pub trait FanCanceller: Send + Sync {
     }
 }
 
+/// The engine end a fan is attached to: one that stands for the whole process, or a session's
+/// engine reached through its row ([`ReachEngine`]), which keeps nothing of the engine standing
+/// and reaches nothing once its session closed.
+#[derive(Clone, Copy)]
+pub enum Canceller {
+    /// A canceller of the process's, which every engine of a kind shares.
+    Static(&'static dyn FanCanceller),
+    /// The engine in the row the reach names, ended through [`crate::reach::Reachable::canceller`].
+    Engine(ReachEngine),
+}
+
+impl Canceller {
+    /// Run `with` on the canceller while it can be reached: at once for a static one, under a
+    /// count of the engine taken for the call for an engine's, and not at all for an engine whose
+    /// session closed.
+    fn reached(self, with: impl FnOnce(&dyn FanCanceller)) {
+        match self {
+            Self::Static(canceller) => with(canceller),
+            Self::Engine(reach) => {
+                if let Some(engine) = reach.reach() {
+                    if let Some(canceller) = engine.canceller() {
+                        with(canceller);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// What cancels a fan's legs, taken from it as it is cancelled.
 #[derive(Default)]
 struct Cancelling {
     key: Option<FanKey>,
-    canceller: Option<Weak<dyn FanCanceller>>,
+    canceller: Option<Canceller>,
 }
 
 impl Cancelling {
     fn run(self) {
-        if let (Some(key), Some(canceller)) = (self.key, self.canceller.and_then(|c| c.upgrade())) {
-            canceller.cancel_fan(key);
+        if let (Some(key), Some(canceller)) = (self.key, self.canceller) {
+            canceller.reached(|canceller| canceller.cancel_fan(key));
         }
     }
 }
@@ -253,7 +283,7 @@ struct FanState {
     /// Cancelled: by its token, or by its owner. Nothing further is issued.
     cancelled: bool,
     /// The engine that ends the legs tagged with the fan's key.
-    canceller: Option<Weak<dyn FanCanceller>>,
+    canceller: Option<Canceller>,
     /// The fan's key, named where the fan lies the first time it is asked, so a fan moved after
     /// it was named is still told apart by the key its engine tagged its legs with.
     key: Option<FanKey>,
@@ -372,13 +402,13 @@ impl CancellableFan {
     /// already been cancelled: the engine then ends what it tagged with [`Self::key`] itself
     /// and issues nothing further. A fan's legs are issued by one engine, so a second attachment
     /// keeps the first.
-    pub fn attach(&self, canceller: &Weak<dyn FanCanceller>) -> bool {
+    pub fn attach(&self, canceller: Canceller) -> bool {
         self.state.with(|state| {
             if state.cancelled {
                 return false;
             }
             if state.canceller.is_none() {
-                state.canceller = Some(Weak::clone(canceller));
+                state.canceller = Some(canceller);
             }
             true
         })
@@ -420,8 +450,8 @@ impl Drop for CancellableFan {
         let (canceller, key) = self
             .state
             .with(|state| (state.canceller.take(), state.key_at(at)));
-        if let Some(canceller) = canceller.and_then(|c| c.upgrade()) {
-            canceller.fan_over(key);
+        if let Some(canceller) = canceller {
+            canceller.reached(|canceller| canceller.fan_over(key));
         }
         let Some(token) = self.token.get_mut().take() else {
             return;
@@ -492,9 +522,13 @@ mod tests {
         }
     }
 
-    fn canceller_of(engine: &Arc<Seen>) -> Weak<dyn FanCanceller> {
-        // Downgraded as the stand-in's own type, then unsized where it is returned.
-        Arc::<Seen>::downgrade(engine)
+    /// A stand-in engine for the whole test process, as a static canceller is: each test's own.
+    fn engine() -> &'static Seen {
+        Box::leak(Box::default())
+    }
+
+    fn canceller_of(engine: &'static Seen) -> Canceller {
+        Canceller::Static(engine)
     }
 
     /// A registered fan is cancelled through the engine attached to it, by its key, and the
@@ -504,9 +538,9 @@ mod tests {
     #[test]
     fn a_registered_fan_is_cancelled_through_its_engine_and_waited_for() {
         let token = CancellationToken::new();
-        let engine = Arc::new(Seen::default());
+        let engine = engine();
         let fan = register_fan(&token).expect("a fresh token registers");
-        assert!(fan.attach(&canceller_of(&engine)));
+        assert!(fan.attach(canceller_of(engine)));
         assert_eq!(token.active(), 1);
         let key = fan.key();
         let order = Mutex::new(Vec::new());
@@ -537,17 +571,17 @@ mod tests {
     /// accepts, which would issue legs nothing cancels.
     #[test]
     fn a_cancelled_fan_refuses_its_engine_and_an_uncancelled_one_says_it_is_over() {
-        let engine = Arc::new(Seen::default());
-        let canceller = canceller_of(&engine);
+        let engine = engine();
+        let canceller = canceller_of(engine);
         let fan = CancellableFan::new();
         fan.cancel();
         assert!(fan.is_cancelled());
-        assert!(!fan.attach(&canceller));
+        assert!(!fan.attach(canceller));
         drop(fan);
         assert!(engine.taken().is_empty(), "no engine was attached");
 
         let fan = CancellableFan::new();
-        assert!(fan.attach(&canceller));
+        assert!(fan.attach(canceller));
         let key = fan.key();
         drop(fan);
         assert_eq!(engine.taken(), vec![(key, "over")]);
@@ -559,13 +593,13 @@ mod tests {
     #[test]
     fn a_fan_dropped_from_the_middle_is_off_its_tokens_list() {
         let token = CancellationToken::default();
-        let engine = Arc::new(Seen::default());
-        let canceller = canceller_of(&engine);
+        let engine = engine();
+        let canceller = canceller_of(engine);
         let mut fans: Vec<Box<CancellableFan>> = (0..3).map(|_| Box::default()).collect();
         for fan in &fans {
             // SAFETY: each fan is its box's and is not moved; the token is dropped after them.
             assert!(unsafe { fan.register(TokenRef::placed(&token)) });
-            assert!(fan.attach(&canceller));
+            assert!(fan.attach(canceller));
         }
         assert_eq!(token.active(), 3);
         let keys: Vec<FanKey> = fans.iter().map(|fan| fan.key()).collect();
@@ -590,9 +624,9 @@ mod tests {
     /// by its key. Turned red by a second cancel that reaches the engine again.
     #[test]
     fn a_fan_cancelled_twice_asks_its_engine_once() {
-        let engine = Arc::new(Seen::default());
+        let engine = engine();
         let fan = CancellableFan::new();
-        assert!(fan.attach(&canceller_of(&engine)));
+        assert!(fan.attach(canceller_of(engine)));
         let key = fan.key();
         fan.cancel();
         fan.cancel();

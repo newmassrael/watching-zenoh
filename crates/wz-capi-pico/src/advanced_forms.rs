@@ -35,7 +35,8 @@
 //! declaration stands for as long as some face still holds an entity on it and
 //! is retracted with the last — which is when pico lets go of a key it counted.
 
-use alloc::sync::{Arc, Weak};
+#[cfg(test)]
+use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
@@ -49,7 +50,7 @@ use wz_session_core::WhatAmI;
 
 use crate::ffi::{CountIn, KeptIn};
 use crate::keyexpr::DeclaredKeyexpr;
-use crate::session::Engine;
+use crate::session::EngineHandle;
 use crate::write_filter::PicoSession;
 
 /// How many entities an advanced subscriber declares ([`Entity`]).
@@ -150,7 +151,7 @@ unsafe fn vacate(context: *mut c_void) {
 pub(crate) struct PicoSubscriberForms {
     /// Weak, because the registry holds these forms (they are in the entry it
     /// replays) and a strong reference back is a session that can never end.
-    shared: Weak<Engine>,
+    shared: EngineHandle,
     mode: WhatAmI,
     /// The caller's key: declared when the caller's is, a literal otherwise.
     base: DeclaredKeyexpr,
@@ -189,7 +190,7 @@ impl PicoSubscriberForms {
         place: Option<CountIn>,
     ) -> Self {
         Self {
-            shared: Arc::downgrade(&session.engine),
+            shared: crate::session::EngineHold::downgrade(&session.engine),
             mode: session.mode,
             base,
             answered: Mutex::new([None, None, None, None]),
@@ -204,7 +205,7 @@ impl PicoSubscriberForms {
     /// when the last holder of the previous one is letting go of its room on another thread.
     fn anchor(
         &self,
-        shared: &Arc<Engine>,
+        shared: &crate::session::EngineHold,
         entity: Entity,
         keyexpr: &str,
     ) -> Option<Strong<Anchor>> {
@@ -272,7 +273,10 @@ impl PicoSubscriberForms {
             return EntityForm::literal();
         };
         let kept = Kept::lodged(anchor.clone());
-        let form = match anchor.announced.aliased_parts(Arc::as_ref(&shared)) {
+        let form = match anchor
+            .announced
+            .aliased_parts(crate::session::EngineHold::as_ref(&shared))
+        {
             // SAFETY: the rest lies in the anchor's announced key, which the anchor keeps,
             // unchanged, for as long as a count of it is held, and `kept` is one.
             Some((mapping_id, rest)) => unsafe { EntityForm::aliased_in(mapping_id, rest, kept) },
@@ -282,7 +286,7 @@ impl PicoSubscriberForms {
             Entity::Subscriber | Entity::Heartbeat => form.with_retraction_naming(
                 anchor
                     .key
-                    .retraction_naming_in(self.mode, Arc::as_ref(&shared)),
+                    .retraction_naming_in(self.mode, crate::session::EngineHold::as_ref(&shared)),
             ),
             Entity::LatePublishers => form,
             Entity::Token => form.with_token_retraction_naming_the_key(true),

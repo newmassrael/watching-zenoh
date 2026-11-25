@@ -21,6 +21,7 @@ use wz_session_core::sink::SampleView;
 use super::{client_config, config, open_with, until, CatchAll, Engine, Router};
 use crate::arena::{ArenaPlan, EntityKind};
 use crate::CoopConfig;
+use crate::EngineHold;
 
 /// The build's limits with `select` applied. Every build these tests run in lets a test lower a
 /// limit; one that keeps a limit to its own value (`WZ_LIMIT_DOMAINS=defaults`, a target with no
@@ -37,7 +38,7 @@ pub(super) fn lowered(
 }
 
 /// A session open to `router` under `limits`.
-pub(super) fn open_under(router: &Router, limits: SessionLimits) -> Arc<Engine> {
+pub(super) fn open_under(router: &Router, limits: SessionLimits) -> EngineHold<Engine> {
     open_with(CoopConfig {
         limits,
         ..config(router)

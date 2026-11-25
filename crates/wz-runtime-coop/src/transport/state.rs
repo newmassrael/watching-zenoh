@@ -13,8 +13,6 @@
 
 #[cfg(feature = "group")]
 use alloc::boxed::Box;
-#[cfg(feature = "listen")]
-use alloc::sync::Arc;
 #[cfg(any(feature = "group", feature = "connectivity"))]
 use alloc::vec::Vec;
 use core::ops::Deref;
@@ -28,6 +26,8 @@ use wz_session_core::group_locator::parse_group_locator;
 use wz_session_core::link::BoxedLinkDriver;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::LinkAdmission;
+#[cfg(feature = "listen")]
+use wz_session_core::placed::PlacedRef;
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
 use wz_session_core::session_actions::{HalvesMaking, LinkState, SessionCore, SessionLinkActions};
@@ -147,9 +147,10 @@ pub struct TransportState<T: TransportFaces> {
     /// The zid in its wire form, which every handshake of the session announces.
     pub wire_zid: SessionZid,
     /// The session's say on a link to a node it holds a link to, asked while the link's handshake
-    /// runs (`install_link_admission`, `listen`).
+    /// runs (`install_placed_link_admission`, `listen`): a handle of the admission the engine
+    /// owns, which it drops after every link's actions and task.
     #[cfg(feature = "listen")]
-    pub admission: Arc<dyn LinkAdmission>,
+    pub admission: PlacedRef<dyn LinkAdmission>,
     /// The cells each link's gates are placed in when the session makes the link (`LinkGate`),
     /// lent from the arena; none for a plan that laid out none.
     pub gate_cells: Option<LentByteCells>,
@@ -405,10 +406,8 @@ impl<T: TransportFaces> TransportState<T> {
         let actions: LinkHandle<T> = CellRc::in_cells(self.actions_cells.as_ref(), actions)
             .map_err(|_| self.cells_exhausted(endpoint))?;
         #[cfg(feature = "listen")]
-        actions.install_link_admission(
-            Arc::clone(&self.admission),
-            matches!(role, SessionRole::Initiator),
-        );
+        actions
+            .install_placed_link_admission(self.admission, matches!(role, SessionRole::Initiator));
         #[cfg(not(feature = "listen"))]
         let _ = role;
         Ok(actions)

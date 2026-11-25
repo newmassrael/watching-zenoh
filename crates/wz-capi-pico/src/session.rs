@@ -577,9 +577,9 @@ fn memory_basis(
 
 /// The session as the handle holds it. The tokio engine boxes its session out of line so that the
 /// session's drop glue stays in that engine's crate, and hands out its engine beside it
-/// (`SessionState::into_drive`); the cooperative engine hands its own `Arc`, which the handle
-/// keeps by value, so its open makes no box for it, and it is the engine's own type over the
-/// links of the build ([`PicoLinks`]).
+/// (`SessionState::into_drive`); the cooperative engine hands one of its engine's holders, which
+/// the handle keeps by value, so its open makes no box for it, and it is the engine's own type
+/// over the links of the build ([`PicoLinks`]).
 #[cfg(feature = "engine-tokio")]
 pub(crate) type HeldDrive = wz_capi_core::CoreDrive;
 #[cfg(not(feature = "engine-tokio"))]
@@ -752,7 +752,7 @@ pub(crate) type SessionPlace = crate::session_place::HeldPlace<PicoSessionHandle
 pub(crate) struct SessionTail {
     open: crate::ffi::OpenClosures,
     #[cfg(not(feature = "engine-tokio"))]
-    arena: core::mem::ManuallyDrop<alloc::sync::Arc<Engine>>,
+    arena: core::mem::ManuallyDrop<EngineHold>,
 }
 
 impl SessionTail {
@@ -909,10 +909,29 @@ pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) type Engine = wz_capi_coop::CoopEngine<PicoLinks, SessionClockOf>;
 
+/// A count of the session's engine: what an entity whose object lies in the session's arena holds,
+/// so the arena stands while the object does, and what reaches the engine as `&Engine` by
+/// `Deref`. The one name every module holds the engine by, whichever engine the build runs.
+#[cfg(feature = "engine-tokio")]
+pub(crate) type EngineHold = alloc::sync::Arc<Engine>;
+/// The cooperative engine lies in its session's arena, counted there by its holders.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) type EngineHold = wz_capi_coop::EngineHold<Engine>;
+
+/// A reach of the session's engine that keeps nothing of it standing: what a holder that must not
+/// keep the session open holds (a key expression the program keeps, a query kept past its
+/// callback), and `upgrade`s to an [`EngineHold`] for the length of a use, while it can.
+#[cfg(feature = "engine-tokio")]
+pub(crate) type EngineHandle = alloc::sync::Weak<Engine>;
+/// The cooperative engine is reached through its row of the process's table, which its session's
+/// close vacates: a handle kept past the close reaches nothing.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) type EngineHandle = wz_capi_coop::EngineHandle<Engine>;
+
 /// The engine behind a session handle as the session holds it, for the length of one call: a door
 /// that only passes it on, or keeps it in an object that clones it, takes no count of its own, and
 /// so has none to let go of on each of its ways out.
-pub(crate) fn engine_held(handle: &PicoSessionHandle) -> &alloc::sync::Arc<Engine> {
+pub(crate) fn engine_held(handle: &PicoSessionHandle) -> &EngineHold {
     handle.drive.engine_hold()
 }
 
@@ -2297,8 +2316,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
 /// The code a refused open of the cooperative engine answers, as pico answers the same refusal.
 /// An arena the memory cannot give is pico's out of memory, and so is a runtime whose task cells,
 /// reserved at the open, have none for the session's link or group; a limit over the build's value
-/// is a value the build refuses. Either way the engine bound and dialled nothing, and reserved no
-/// place for the handle, which its arena holds.
+/// is a value the build refuses. A process whose table of engines has no row left for one more is
+/// out of memory too, as zenoh-pico's `z_open` answers a session it cannot allocate
+/// (`vendor/zenoh-pico/src/api/api.c` @ `(_z_session_t *)z_malloc(sizeof(_z_session_t));`).
+/// Either way the engine
+/// bound and dialled nothing, and reserved no place for the handle, which its arena holds.
 #[cfg(not(feature = "engine-tokio"))]
 fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
     use wz_capi_coop::arena::ArenaRefused;
@@ -2314,7 +2336,8 @@ fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
         OpenError::Arena(
             ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. } | ArenaRefused::Lend(_),
         )
-        | OpenError::NoTask(_) => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        | OpenError::NoTask(_)
+        | OpenError::NoEngineRow => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
         _ => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     }
 }
@@ -2363,6 +2386,17 @@ mod coop_open_refusal_tests {
         );
         assert_eq!(
             coop_open_refusal(&OpenError::NoTask(SpawnRefusal::TooLarge)),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+    }
+
+    /// A process whose every row of engines holds an open session's answers one more open with
+    /// pico's out of memory: the rows are what the process reserved for its sessions. Turned red by
+    /// a full table answered as a failed transport.
+    #[test]
+    fn a_full_table_of_engines_is_out_of_memory() {
+        assert_eq!(
+            coop_open_refusal(&OpenError::NoEngineRow),
             Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
     }
@@ -3938,7 +3972,7 @@ mod session_place_tests {
                 session_handle(z_session_loan(&session)).expect("an open session has its handle");
             let kept = engine_held(handle).clone();
             assert!(
-                alloc::sync::Arc::ptr_eq(&kept, engine_held(handle)),
+                EngineHold::ptr_eq(&kept, engine_held(handle)),
                 "the engine kept is the one held"
             );
             assert!(
@@ -3967,13 +4001,11 @@ mod session_place_tests {
         // SAFETY: every pointer is to a live owned value of this frame.
         unsafe {
             let mut session = listening_on_loopback();
-            let engine = alloc::sync::Arc::downgrade(
-                &engine_held(
-                    session_handle(z_session_loan(&session))
-                        .expect("an open session has its handle"),
-                )
-                .clone(),
-            );
+            // A holder of the test's own, through which it reads how many the engine has.
+            let engine = engine_held(
+                session_handle(z_session_loan(&session)).expect("an open session has its handle"),
+            )
+            .clone();
             let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
                 core::ptr::from_ref(&dropped).cast_mut().cast(),
                 None,
@@ -3982,16 +4014,18 @@ mod session_place_tests {
             count_in_session(z_session_loan(&session), &mut closure);
             z_session_drop(z_session_move(&mut session));
             assert!(
-                engine.upgrade().is_some(),
-                "the closure keeps the session's place"
+                crate::session::EngineHold::holders(&engine) > 1,
+                "the closure keeps the session's place, which holds the engine"
             );
             assert_eq!(dropped.load(Ordering::SeqCst), 0);
             drop(closure);
             assert_eq!(dropped.load(Ordering::SeqCst), 1);
-            assert!(
-                engine.upgrade().is_none(),
+            assert_eq!(
+                crate::session::EngineHold::holders(&engine),
+                1,
                 "the last closure gave the place back"
             );
+            drop(engine);
         }
     }
 

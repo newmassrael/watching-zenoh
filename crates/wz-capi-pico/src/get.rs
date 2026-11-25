@@ -148,7 +148,7 @@ use crate::pubsub::{
 use crate::refusal::{refusal_code, Door};
 use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
-use crate::session::{z_loaned_session_t, Engine};
+use crate::session::{z_loaned_session_t, EngineHold};
 use wz_capi_port::WireKey;
 
 // --- pico enum-typed option fields -----------------------------------------
@@ -1376,7 +1376,7 @@ pub(crate) unsafe fn get_inner(
     // The query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
     let engine = crate::session::engine_held(handle);
-    let wire = wire_key_of(keyexpr, Arc::as_ref(engine));
+    let wire = wire_key_of(keyexpr, crate::session::EngineHold::as_ref(engine));
     let token = held.token.take().map(TokenRef::shared);
     let ask = held.ask(params_in, shape, None);
     issue_get(engine, ke, wire, &ask, cclosure, token, target_peer)
@@ -1493,7 +1493,7 @@ impl PicoQueryQos {
 /// asks no link and the get answers `WZ_EXT_ERR_UNSUPPORTED`, completed with no
 /// reply.
 pub(crate) fn issue_get(
-    engine: &Arc<Engine>,
+    engine: &EngineHold,
     keyexpr: &str,
     wire: WireKey,
     ask: &GetAsk<'_>,
@@ -1578,7 +1578,7 @@ pub(crate) fn issue_get(
 /// place, the cancellation, the leg's ownership and the order they are dropped in are stated
 /// once.
 pub(crate) fn fan_get(
-    engine: &Arc<Engine>,
+    engine: &EngineHold,
     kind: crate::object_slot::Kind,
     closure: CReplyClosure,
     gate: ReplyGate,
@@ -2597,7 +2597,7 @@ mod tests {
         let handle = unsafe { session_handle(z_session_loan(&session)) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many get places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Get)).collect();
             claimed.len()

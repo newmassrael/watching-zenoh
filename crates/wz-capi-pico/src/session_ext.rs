@@ -37,7 +37,7 @@ use wz_session_core::WhatAmI;
 #[cfg(feature = "connectivity")]
 use crate::connectivity::Connectivity;
 #[cfg(feature = "connectivity")]
-use crate::session::Engine;
+use crate::session::EngineHold;
 
 /// This session's pico-side state; see the module doc.
 pub(crate) struct PicoSessionExt {
@@ -57,7 +57,7 @@ pub(crate) struct PicoSessionExt {
     /// watches under, so the watch can be dropped with the session; the engine's refusal when it
     /// would not watch, which the open answers by refusing the session.
     #[cfg(feature = "connectivity")]
-    watch: (Arc<Engine>, Result<u64, wz_capi_port::Refusal>),
+    watch: (EngineHold, Result<u64, wz_capi_port::Refusal>),
     /// Whether the admin space runs, and what it reports as the transport's link.
     #[cfg(feature = "admin-space")]
     pub(crate) admin_space: crate::admin_space::AdminSpaceSlot,
@@ -108,7 +108,7 @@ impl PicoSessionExt {
         zid: &[u8],
         policy: SessionPolicy,
         limits: SessionLimits,
-        #[cfg(feature = "connectivity")] engine: &Arc<Engine>,
+        #[cfg(feature = "connectivity")] engine: &EngineHold,
     ) -> Self {
         // The snapshot is read by the clock and by a door a policy governs: a build with neither
         // a clock nor `query` reads none of it.
@@ -134,13 +134,13 @@ impl PicoSessionExt {
             let sink = Arc::clone(&connectivity);
             // Weak: the engine holds the watch, and a strong hold in it would keep the engine
             // alive through its own watcher.
-            let faces = Arc::downgrade(engine);
+            let faces = crate::session::EngineHold::downgrade(engine);
             SessionEngine::watch_face_rows(
-                Arc::as_ref(engine),
+                crate::session::EngineHold::as_ref(engine),
                 Arc::new(move |kind, row| {
                     sink.on_face_row(kind, row, |at| {
                         let engine = faces.upgrade()?;
-                        SessionEngine::face_link_at(Arc::as_ref(&engine), at)
+                        SessionEngine::face_link_at(crate::session::EngineHold::as_ref(&engine), at)
                     });
                 }),
             )
@@ -171,7 +171,7 @@ impl PicoSessionExt {
             #[cfg(feature = "connectivity")]
             connectivity,
             #[cfg(feature = "connectivity")]
-            watch: (Arc::clone(engine), watch_id),
+            watch: (crate::session::EngineHold::clone(engine), watch_id),
             #[cfg(feature = "admin-space")]
             admin_space: crate::admin_space::AdminSpaceSlot::new(None),
             #[cfg(feature = "query")]
@@ -232,7 +232,7 @@ impl Drop for PicoSessionExt {
     fn drop(&mut self) {
         let (engine, id) = &self.watch;
         if let Ok(id) = id {
-            SessionEngine::unwatch_faces(Arc::as_ref(engine), *id);
+            SessionEngine::unwatch_faces(crate::session::EngineHold::as_ref(engine), *id);
         }
         self.connectivity.shutdown();
     }

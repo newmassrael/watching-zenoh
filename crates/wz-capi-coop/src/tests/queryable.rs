@@ -13,6 +13,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 
 use super::{open, until, CatchAll, Command, Engine, Router};
+use crate::EngineHold;
 
 /// Declare a queryable on `keyexpr` whose callback is `answer`, given what the session holds
 /// queries through.
@@ -229,10 +230,11 @@ fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
 }
 
 /// A kept query holds nothing of its session but its id: the session's last handle lets the
-/// engine go with a query still kept, the rows of its held Finals before its arena, and a reply to
-/// it once the session is closed answers nothing. The CONTROL is the session standing while its
-/// handle is held. Turned red by a closed session that still answers a kept query, or by a keep
-/// that keeps the engine, and so its arena, alive.
+/// engine go with a query still kept, the rows of its held Finals before its arena, a reply to it
+/// once the session is closed answers nothing, and the close leaves the session reached by
+/// nothing. The CONTROL is the session standing while its handle is held. Turned red by a closed
+/// session that still answers a kept query or is still reached, or by a keep that holds the
+/// engine, and so its arena, alive.
 #[test]
 fn a_query_kept_past_its_session_holds_none_of_it() {
     let router = Router::start(CatchAll::None);
@@ -255,17 +257,22 @@ fn a_query_kept_past_its_session_holds_none_of_it() {
         "CONTROL: the session stands while its handle is held"
     );
 
-    let gone = Arc::downgrade(&engine);
+    let gone = EngineHold::downgrade(&engine);
     SessionDrive::close(&*engine);
+    assert!(
+        gone.upgrade().is_none(),
+        "closed, the session is reached by nothing"
+    );
     let mut answered = false;
     engine.reply_held(held, "demo/p/a", &mut |_out| answered = true);
     assert!(!answered, "a query of a closed session answers nothing");
-    engine.release_held(held);
-    drop(engine);
-    assert!(
-        gone.upgrade().is_none(),
+    assert_eq!(
+        EngineHold::holders(&engine),
+        1,
         "the kept query keeps nothing of the engine alive"
     );
+    engine.release_held(held);
+    drop(engine);
 }
 
 /// Keeping a query, answering it later and letting it go take no memory of the heap: the hold is a

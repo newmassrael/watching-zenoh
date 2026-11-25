@@ -28,13 +28,14 @@ use wz_session_core::WhatAmI;
 use super::get::remote_get;
 use super::{client_config, config_zid, open_with, Engine};
 use crate::CoopConfig;
+use crate::EngineHold;
 
 /// A session whose read task is running, closed when it is let go of: a test's session is stepped
 /// by a thread of its own, and one never closed would keep its port and its task.
-pub(super) struct Stepped(Arc<Engine>);
+pub(super) struct Stepped(EngineHold<Engine>);
 
 impl Stepped {
-    pub(super) fn new(engine: Arc<Engine>) -> Self {
+    pub(super) fn new(engine: EngineHold<Engine>) -> Self {
         SessionDrive::start_read_task(&*engine).expect("the read task starts");
         Self(engine)
     }

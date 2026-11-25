@@ -39,10 +39,9 @@
 //! ([`RoundCounts`]): apart when its congestion control holds its sender, which a record the gate
 //! let through never does (a debug build stops there).
 
-use alloc::sync::{Arc, Weak};
 use core::cell::{OnceCell, UnsafeCell};
 use core::convert::Infallible;
-use core::ptr::{self, addr_of_mut};
+use core::ptr::{self, addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 // The split `hlc` and `session_actions` use: the host profile has the native atomics, the
 // `no_std` profile gets the critical-section ones for the cores that have none.
@@ -1067,8 +1066,9 @@ pub trait LegHolders<C: RoundCalls>: Send + Sync {
     fn release(&self, leg: C::Leg) -> Option<C::ReplyCallback>;
 }
 
-/// The holders of the legs' callbacks, once the session told the round of them.
-type Legs<C> = Option<Arc<dyn LegHolders<C>>>;
+/// The holders of the legs' callbacks, once the session told the round of them, which outlive
+/// every use the round makes of them ([`Round::calls_legs_of`]).
+type Legs<C> = Option<NonNull<dyn LegHolders<C>>>;
 
 /// The datagram of a group a record of the round reads, its first byte and its length.
 type GroupRead = Option<(*const u8, usize)>;
@@ -1132,7 +1132,9 @@ impl<C: RoundCalls> Released<C> {
 
     /// The holders of the legs' callbacks, once the session told the round of them.
     fn legs(&self) -> Option<&dyn LegHolders<C>> {
-        <C::Replies as Presence>::get::<Legs<C>>(&self.legs).and_then(Option::as_deref)
+        let legs = <C::Replies as Presence>::get::<Legs<C>>(&self.legs).and_then(|legs| *legs)?;
+        // SAFETY: the holders outlive every use the round makes of them (`Round::calls_legs_of`).
+        Some(unsafe { legs.as_ref() })
     }
 
     /// Say that a row waits: set after the row's latch said its last call ended, so a session that
@@ -1225,9 +1227,11 @@ pub struct Round<C: RoundCalls> {
 }
 
 /// What answers the queries a round hands their queryables, once it is told
-/// ([`Round::answer_queries_with`]), under a lock of the engine's.
+/// ([`Round::answer_queries_with`]) and until it is told no more ([`Round::answer_no_queries`]),
+/// under a lock of the engine's. The engine owns the round, so it names itself without a count:
+/// a count would keep it standing from inside what it owns.
 struct Answering<C: RoundCalls>(
-    <C::Locks as LockFamily>::Lock<Option<Weak<dyn AnswersQueries<C>>>>,
+    <C::Locks as LockFamily>::Lock<Option<NonNull<dyn AnswersQueries<C>>>>,
 );
 
 impl<C: RoundCalls> Default for Answering<C> {
@@ -1361,7 +1365,12 @@ impl<C: RoundCalls> Round<C> {
 
     /// Hold the replies offered from here on for the callbacks `legs` holds, by a count of each
     /// leg's row. Told once, before the round is shared.
-    pub fn calls_legs_of(&mut self, legs: Arc<dyn LegHolders<C>>) {
+    ///
+    /// # Safety
+    /// `legs` stands for as long as the round reaches it: until the round's calls are ended
+    /// ([`Self::let_go`]) or the round is dropped, whichever is first, and it is reached from any
+    /// thread a delivery runs on.
+    pub unsafe fn calls_legs_of(&mut self, legs: NonNull<dyn LegHolders<C>>) {
         if let Some(held) = <C::Replies as Presence>::get_mut::<Legs<C>>(&mut self.released.legs) {
             *held = Some(legs);
         }
@@ -2060,10 +2069,29 @@ impl<C: RoundCalls> Round<C> {
 
     /// Answer the queries the round hands their queryables through `answering`, the engine the
     /// round is the session's of: told once, when the engine is made.
-    pub fn answer_queries_with(&self, answering: Weak<dyn AnswersQueries<C>>) {
+    ///
+    /// # Safety
+    /// `answering` stands, and is reached from any thread a delivery runs on, until
+    /// [`Self::answer_no_queries`] is called, which its owner does first in its drop: the round
+    /// does not outlive the engine that owns it.
+    pub unsafe fn answer_queries_with(&self, answering: NonNull<dyn AnswersQueries<C>>) {
         if let Some(slot) = <C::Queries as Presence>::get::<Answering<C>>(&self.answering) {
             <C::Locks as LockFamily>::with(&slot.0, |held| *held = Some(answering));
         }
+    }
+
+    /// Answer no query from here on: what the engine that answered them tells the round first
+    /// in its drop, so a query held after is handed to none and its call ended all the same.
+    pub fn answer_no_queries(&self) {
+        if let Some(slot) = <C::Queries as Presence>::get::<Answering<C>>(&self.answering) {
+            <C::Locks as LockFamily>::with(&slot.0, |held| *held = None);
+        }
+    }
+
+    /// Whether the round still answers its queries through an engine.
+    fn answers_queries(&self) -> bool {
+        <C::Queries as Presence>::get::<Answering<C>>(&self.answering)
+            .is_some_and(|slot| <C::Locks as LockFamily>::with(&slot.0, |held| held.is_some()))
     }
 
     /// Hold `view`, a query of the link of `generation`, for `call`, the call begun on the
@@ -2311,6 +2339,10 @@ impl<C: RoundCalls> Round<C> {
     /// # Safety
     /// No delivery runs and none starts: the session's last handle is being let go of.
     pub unsafe fn let_go(&self) {
+        debug_assert!(
+            !self.answers_queries(),
+            "the engine that answers the round's queries is let go of before the round"
+        );
         // SAFETY: the caller's contract: nothing else reaches the table now.
         let table = unsafe { &mut *self.table.get() };
         table.end_calls(&self.released);
@@ -2462,10 +2494,12 @@ impl<C: RoundCalls> Round<C> {
                     // The engine that sends the answers, once it is made; a query handed out
                     // before, or after it went, is answered by none, its calls ended all the same.
                     let answering = <C::Queries as Presence>::get::<Answering<C>>(&self.answering)
-                        .and_then(|slot| {
-                            <C::Locks as LockFamily>::with(&slot.0, |held| held.as_ref()?.upgrade())
-                        });
+                        .and_then(|slot| <C::Locks as LockFamily>::with(&slot.0, |held| *held));
                     if let Some(answering) = answering {
+                        // SAFETY: the engine stands until it tells the round to answer no more,
+                        // first in its drop, and no delivery runs past its drop's start
+                        // (`Self::answer_queries_with`).
+                        let answering = unsafe { answering.as_ref() };
                         let view = RoundQuery {
                             query,
                             table,

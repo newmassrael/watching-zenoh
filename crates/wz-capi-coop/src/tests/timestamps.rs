@@ -17,6 +17,7 @@ use wz_session_core::policy::{EntityTimestampOptIn, SessionPolicy};
 use wz_session_core::sink::SampleView;
 
 use super::{config, until, CatchAll, Command, Engine, Router, LOOPBACK};
+use crate::EngineHold;
 
 /// What the session is opened under, and whether an entity that states nothing sees a timestamp
 /// under it: hidden when taking part is opt-in, shown when it is not.
@@ -27,7 +28,7 @@ const CASES: [(EntityTimestampOptIn, bool); 2] = [
 
 /// A session to `router` opened under the build's policies with `entity-timestamp-opt-in` set
 /// to `opt_in`; `None` when the build's domain excludes that value.
-fn opened_under(router: &Router, opt_in: EntityTimestampOptIn) -> Option<Arc<Engine>> {
+fn opened_under(router: &Router, opt_in: EntityTimestampOptIn) -> Option<EngineHold<Engine>> {
     let mut policy = SessionPolicy::defaults();
     policy.select_entity_timestamp_opt_in(opt_in).ok()?;
     Some(

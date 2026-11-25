@@ -9,7 +9,8 @@
 //! must keep alive while the keyexpr is used (the pico contract). `z_put` /
 //! `z_declare_*` read the borrowed UTF-8 back via `keyexpr_str`.
 
-use alloc::sync::{Arc, Weak};
+#[cfg(test)]
+use alloc::sync::Arc;
 use core::ffi::{c_char, c_void, CStr};
 use core::mem::ManuallyDrop;
 
@@ -166,7 +167,7 @@ pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine)
 pub(crate) struct WireDeclaration {
     /// The session the declaration was made on. Let go of only by the drop, so a holder's drop
     /// glue is the one call to it.
-    session: ManuallyDrop<Weak<Engine>>,
+    session: ManuallyDrop<crate::session::EngineHandle>,
     /// Taken only by the drop.
     hold: ManuallyDrop<KeyHold>,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
@@ -175,9 +176,9 @@ pub(crate) struct WireDeclaration {
 
 impl WireDeclaration {
     /// The hold the caller took of `shared`, covering `prefix_len` bytes of the key.
-    fn taken(shared: &Arc<Engine>, hold: KeyHold, prefix_len: usize) -> Self {
+    fn taken(shared: &crate::session::EngineHold, hold: KeyHold, prefix_len: usize) -> Self {
         Self {
-            session: ManuallyDrop::new(Arc::downgrade(shared)),
+            session: ManuallyDrop::new(crate::session::EngineHold::downgrade(shared)),
             hold: ManuallyDrop::new(hold),
             prefix_len,
         }
@@ -192,7 +193,15 @@ impl WireDeclaration {
     /// fat pointers to one engine, and their vtable halves are not guaranteed to be one copy, so
     /// comparing them whole could say a session is not itself.
     fn is_on(&self, shared: &Engine) -> bool {
-        core::ptr::addr_eq(self.session.as_ptr(), shared as *const Engine)
+        #[cfg(feature = "engine-tokio")]
+        {
+            core::ptr::addr_eq(self.session.as_ptr(), shared as *const Engine)
+        }
+        // The cooperative engine's handle names its row, which the engine knows.
+        #[cfg(not(feature = "engine-tokio"))]
+        {
+            self.session.is_of(shared)
+        }
     }
 }
 
@@ -206,7 +215,7 @@ impl WireDeclaration {
         let hold = match self.session.upgrade() {
             Some(engine) => self
                 .hold
-                .share(Arc::as_ref(&engine))
+                .share(crate::session::EngineHold::as_ref(&engine))
                 .ok_or(crate::result::Z_ERR_OVERFLOW)?,
             // A session that is gone counts nothing: the copy gives nothing back either.
             None => self.hold.unheld(),
@@ -227,7 +236,7 @@ impl Drop for WireDeclaration {
         // SAFETY: the hold is taken here, once, and the field is not read again.
         let hold = unsafe { ManuallyDrop::take(&mut self.hold) };
         match self.session.upgrade() {
-            Some(engine) => hold.release(Arc::as_ref(&engine)),
+            Some(engine) => hold.release(crate::session::EngineHold::as_ref(&engine)),
             None => hold.outlived_its_session(),
         }
         // SAFETY: the session is let go of here, once, after its last read.
@@ -248,7 +257,7 @@ pub(crate) struct KeyText {
     key: ManuallyDrop<HeldKey>,
     /// The engine whose key arena holds `key`, kept for as long as it does; `None` for a copy
     /// of its own. Let go of only by the drop, so a holder's drop glue is the one call to it.
-    engine: ManuallyDrop<Option<Arc<Engine>>>,
+    engine: ManuallyDrop<Option<crate::session::EngineHold>>,
 }
 
 impl KeyText {
@@ -267,7 +276,10 @@ impl KeyText {
     /// the arena has no room or the key is longer than the session's
     /// `MAX_KEYEXPR_BYTES`; a copy of its own for a session with no key arena or a closed one,
     /// which keeps nothing more.
-    pub(crate) fn of_session(shared: &Arc<Engine>, text: &str) -> Result<Self, ZResult> {
+    pub(crate) fn of_session(
+        shared: &crate::session::EngineHold,
+        text: &str,
+    ) -> Result<Self, ZResult> {
         Self::kept(shared, KeyAsk::Hold(text), text)
     }
 
@@ -275,7 +287,11 @@ impl KeyText {
     /// as [`refusal_of`] answers why the arena kept none, and a copy of its own when the session
     /// keeps no arena or is closed. One body for holding and sharing, which differ only in the ask.
     #[inline(never)]
-    fn kept(engine: &Arc<Engine>, ask: KeyAsk<'_>, text: &str) -> Result<Self, ZResult> {
+    fn kept(
+        engine: &crate::session::EngineHold,
+        ask: KeyAsk<'_>,
+        text: &str,
+    ) -> Result<Self, ZResult> {
         let refused = match key_arena(engine).map(|keys| SessionKeys::key(keys, ask)) {
             Some(Ok(Some(key))) => {
                 return Ok(Self {
@@ -345,16 +361,16 @@ impl Drop for KeyText {
 /// The key arena of `engine`'s session: the cooperative engine always keeps one and is reached as
 /// its own type, so a key's hold, share and release are calls resolved when the build is made.
 ///
-/// Both arms take the `Arc` a holder keeps: on the tokio engine `Engine` is a trait object, and an
-/// `&Arc<Engine>` handed where an `&Engine` is asked would be unsized, not dereferenced.
+/// Both arms take the hold a holder keeps ([`EngineHold`](crate::session::EngineHold)): on the tokio engine `Engine` is a trait object, and an
+/// `&crate::session::EngineHold` handed where an `&Engine` is asked would be unsized, not dereferenced.
 #[cfg(not(feature = "engine-tokio"))]
-fn key_arena(engine: &Arc<Engine>) -> Option<&Engine> {
-    Some(Arc::as_ref(engine))
+fn key_arena(engine: &crate::session::EngineHold) -> Option<&Engine> {
+    Some(crate::session::EngineHold::as_ref(engine))
 }
 
 /// The key arena of the session behind the port, when its engine keeps one.
 #[cfg(feature = "engine-tokio")]
-fn key_arena(engine: &Arc<Engine>) -> Option<&dyn SessionKeys> {
+fn key_arena(engine: &crate::session::EngineHold) -> Option<&dyn SessionKeys> {
     engine.key_arena()
 }
 
@@ -404,7 +420,10 @@ impl DeclaredKeyexpr {
         feature = "advanced",
         all(test, not(feature = "engine-tokio"), feature = "peer")
     ))]
-    pub(crate) fn literal_of_session(shared: &Arc<Engine>, literal: &str) -> Result<Self, ZResult> {
+    pub(crate) fn literal_of_session(
+        shared: &crate::session::EngineHold,
+        literal: &str,
+    ) -> Result<Self, ZResult> {
         Ok(Self {
             literal: KeyText::of_session(shared, literal)?,
             declaration: None,
@@ -561,7 +580,7 @@ impl DeclaredKeyexpr {
     /// pico `_z_declared_keyexpr_declare`: a key whose declaration covers ALL
     /// of it on `shared`, sharing the caller's when it already does.
     pub(crate) fn declare(
-        shared: &Arc<Engine>,
+        shared: &crate::session::EngineHold,
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
@@ -571,7 +590,7 @@ impl DeclaredKeyexpr {
     /// pico `_z_declared_keyexpr_declare_non_wild_prefix`: the same, covering
     /// only the part of the key before its first wild chunk.
     pub(crate) fn declare_non_wild_prefix(
-        shared: &Arc<Engine>,
+        shared: &crate::session::EngineHold,
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
@@ -581,7 +600,7 @@ impl DeclaredKeyexpr {
     /// `literal` declared on `shared` up to `prefix`, a prefix of it (the whole key or its
     /// non-wild prefix), named as text so that no length is cut out of the key by index.
     fn declare_up_to(
-        shared: &Arc<Engine>,
+        shared: &crate::session::EngineHold,
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
         prefix: &str,
@@ -596,7 +615,7 @@ impl DeclaredKeyexpr {
         // `_is_non_wild_prefix_optimized` arm).
         if let Some(existing) = existing {
             if existing
-                .declared_on(Arc::as_ref(shared))
+                .declared_on(crate::session::EngineHold::as_ref(shared))
                 .is_some_and(|d| d.prefix_len == prefix_len)
             {
                 return existing.share();
@@ -2679,7 +2698,7 @@ mod arena_key_tests {
 
     /// A session that listens on a port of the loopback, opened as a program opens one, and the
     /// engine it runs on.
-    fn listening() -> (z_owned_session_t, Arc<Engine>) {
+    fn listening() -> (z_owned_session_t, crate::session::EngineHold) {
         let session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
@@ -2694,7 +2713,7 @@ mod arena_key_tests {
     }
 
     /// The session's key arena, which the cooperative engine always keeps.
-    fn keys(engine: &Arc<Engine>) -> &dyn SessionKeys {
+    fn keys(engine: &crate::session::EngineHold) -> &dyn SessionKeys {
         super::key_arena(engine).expect("the cooperative engine keeps a key arena")
     }
 
@@ -2704,26 +2723,29 @@ mod arena_key_tests {
     fn the_key_arena_is_the_engine_itself() {
         let (session, engine) = listening();
         let arena: *const Engine = super::key_arena(&engine).expect("the engine keeps a key arena");
-        assert!(core::ptr::eq(arena, Arc::as_ptr(&engine)));
+        assert!(core::ptr::eq(
+            arena,
+            crate::session::EngineHold::as_ptr(&engine)
+        ));
         drop(engine);
         close(session);
     }
 
     /// `text` held in the session's key arena, or why not.
-    fn hold(engine: &Arc<Engine>, text: &str) -> Result<HeldKey, KeyNotHeld> {
+    fn hold(engine: &crate::session::EngineHold, text: &str) -> Result<HeldKey, KeyNotHeld> {
         keys(engine)
             .key(KeyAsk::Hold(text))
             .map(|key| key.expect("a hold answers its key"))
     }
 
     /// Let go of `key`.
-    fn release(engine: &Arc<Engine>, key: HeldKey) {
+    fn release(engine: &crate::session::EngineHold, key: HeldKey) {
         assert!(matches!(keys(engine).key(KeyAsk::Release(key)), Ok(None)));
     }
 
     /// Keys of `len` bytes, each a text of its own and so a block of its own (a text the arena
     /// keeps already is that block shared), held until the arena has no room for one more.
-    fn fill_with(engine: &Arc<Engine>, len: usize) -> Vec<HeldKey> {
+    fn fill_with(engine: &crate::session::EngineHold, len: usize) -> Vec<HeldKey> {
         let mut held = Vec::new();
         loop {
             match hold(engine, &format!("{:0>len$}", held.len())) {
@@ -2744,7 +2766,7 @@ mod arena_key_tests {
     /// byte, the shortest block, until no key at all has room; then give back the `room` keys of
     /// `len` bytes held last. The arena is left with the room of `room` such keys and none for any
     /// other: a key no longer than `len` takes one of those blocks or is refused.
-    fn fill_leaving(engine: &Arc<Engine>, len: usize, room: usize) -> Vec<HeldKey> {
+    fn fill_leaving(engine: &crate::session::EngineHold, len: usize, room: usize) -> Vec<HeldKey> {
         let mut held = fill_with(engine, len);
         assert!(
             held.len() >= room,
@@ -2759,14 +2781,14 @@ mod arena_key_tests {
     }
 
     /// Give back every key [`fill_leaving`] held.
-    fn give_back(engine: &Arc<Engine>, held: Vec<HeldKey>) {
+    fn give_back(engine: &crate::session::EngineHold, held: Vec<HeldKey>) {
         for key in held {
             release(engine, key);
         }
     }
 
     /// Whether the session's key arena has room for one more key of `len` bytes, asked and let go.
-    fn room_for(engine: &Arc<Engine>, len: usize) -> bool {
+    fn room_for(engine: &crate::session::EngineHold, len: usize) -> bool {
         match hold(engine, &"k".repeat(len)) {
             Ok(key) => {
                 release(engine, key);
@@ -2817,7 +2839,7 @@ mod arena_key_tests {
             "the declaration takes the last block"
         );
         let shared = key.share().expect("a share");
-        let wire = key.wire(Arc::as_ref(&engine));
+        let wire = key.wire(crate::session::EngineHold::as_ref(&engine));
         assert_ne!(wire.mapping_id, 0, "the wire names the declaration");
         drop(key);
         assert!(!room_for(&engine, text.len()), "the share holds it");
@@ -2832,28 +2854,41 @@ mod arena_key_tests {
     }
 
     /// A declared key holds its session's engine through its text and names it through its
-    /// declaration, and lets both go when it is dropped: the counts of the engine are back where
-    /// they were. Turned red by a drop that leaves the text's engine or the declaration's session
-    /// held.
+    /// declaration: its drop gives the text's hold back, the declaration reaches the session while
+    /// it is open and nothing once it is closed, and a key dropped after the close lets go of the
+    /// engine all the same. Turned red by a drop that keeps the text's hold, or by a close that
+    /// leaves the session reached.
     #[test]
-    fn a_dropped_key_lets_its_engine_go() {
+    fn a_declared_key_names_its_session_until_the_close_and_lets_its_engine_go() {
+        use crate::session::EngineHold;
         let (session, engine) = listening();
-        let strong = Arc::strong_count(&engine);
-        let weak = Arc::weak_count(&engine);
+        let before = EngineHold::holders(&engine);
         let key = DeclaredKeyexpr::declare(&engine, "demo/counts/a", None).expect("declared");
         assert!(key.literal.is_session());
         assert!(
-            Arc::strong_count(&engine) > strong,
+            EngineHold::holders(&engine) > before,
             "the text holds the engine"
         );
+        drop(key);
+        assert_eq!(
+            EngineHold::holders(&engine),
+            before,
+            "the drop gave it back"
+        );
+        let key = DeclaredKeyexpr::declare(&engine, "demo/counts/a", None).expect("declared");
+        let named = EngineHold::downgrade(&engine);
+        assert!(named.upgrade().is_some(), "open, the session is reached");
+        close(session);
         assert!(
-            Arc::weak_count(&engine) > weak,
-            "the declaration names the session"
+            named.upgrade().is_none(),
+            "closed, it is reached by nothing"
         );
         drop(key);
-        assert_eq!(Arc::strong_count(&engine), strong);
-        assert_eq!(Arc::weak_count(&engine), weak);
-        close(session);
+        assert_eq!(
+            EngineHold::holders(&engine),
+            1,
+            "the key let go of the engine its text held"
+        );
     }
 
     /// A key named for a message sent once holds nothing: the declaration goes with the last key
@@ -2865,7 +2900,7 @@ mod arena_key_tests {
         let text = "demo/hold/named";
         let held = fill_leaving(&engine, text.len(), 1);
         let key = DeclaredKeyexpr::declare(&engine, text, None).expect("declared");
-        let named = key.wire(Arc::as_ref(&engine));
+        let named = key.wire(crate::session::EngineHold::as_ref(&engine));
         assert_ne!(named.mapping_id, 0, "the key names the declaration");
         drop(key);
         assert!(
@@ -2924,7 +2959,8 @@ mod arena_key_tests {
         let key = DeclaredKeyexpr::literal_of_session(&engine, "demo/adv/base").expect("room");
         assert!(key.literal.is_session(), "the text is a block of the arena");
         assert!(
-            key.wire(Arc::as_ref(&engine)).is_literal(),
+            key.wire(crate::session::EngineHold::as_ref(&engine))
+                .is_literal(),
             "nothing is declared"
         );
         let shared = key.share().expect("a share");
@@ -2958,7 +2994,9 @@ mod arena_key_tests {
         );
         assert_eq!(extended.literal(), "demo/ext/**/x");
         assert!(
-            !extended.wire(Arc::as_ref(&engine)).is_literal(),
+            !extended
+                .wire(crate::session::EngineHold::as_ref(&engine))
+                .is_literal(),
             "the declared prefix still begins the key"
         );
         let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;

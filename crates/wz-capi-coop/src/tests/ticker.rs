@@ -14,6 +14,7 @@ use wz_capi_port::{SessionDrive, SessionEngine, Tick, Tickers, WireKey};
 use wz_session_core::publish_options::PublishOptions;
 
 use super::{open, until, CatchAll, Router};
+use crate::EngineHold;
 
 /// A job that counts its runs and goes on.
 fn counting(runs: &Arc<AtomicUsize>) -> Tick {
@@ -183,7 +184,7 @@ fn a_stopped_job_does_not_run_again() {
 fn a_job_may_publish_on_the_session_it_runs_on() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
-    let on = Arc::downgrade(&engine);
+    let on = EngineHold::downgrade(&engine);
     let id = engine
         .start_ticker(
             10,

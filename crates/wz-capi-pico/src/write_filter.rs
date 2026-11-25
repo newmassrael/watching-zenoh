@@ -45,8 +45,6 @@
 //! the key they were held on, which a client's do not
 //! (`DeclaredKeyexpr::retraction_naming_in`).
 
-use alloc::sync::Arc;
-
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
@@ -60,7 +58,7 @@ use crate::matching::FilterListeners;
 use crate::prelude::*;
 use crate::refusal::{refusal_code, Door};
 use crate::result::{ZResult, Z_ERR_GENERIC};
-use crate::session::{Engine, PicoSessionHandle};
+use crate::session::{EngineHold, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
 /// ([`crate::session_ext::PicoSessionExt`]) because nothing downstream of the
@@ -85,7 +83,7 @@ pub(crate) fn session_mode(handle: &PicoSessionHandle) -> WhatAmI {
 /// name (`docs/capi-pico-on-coop-engine.md`).
 #[derive(Clone)]
 pub(crate) struct PicoSession {
-    pub(crate) engine: Arc<Engine>,
+    pub(crate) engine: EngineHold,
     pub(crate) mode: WhatAmI,
     /// The session's clock — `NodeHlc::disabled()` for a session this ABI did
     /// not open, which no C entry point can hand it. Read by the advanced plane alone, whose
@@ -106,7 +104,7 @@ impl PicoSession {
     }
 
     /// The session running on `engine` whose pico-side state is `ext`: made once, by the open.
-    pub(crate) fn over(engine: Arc<Engine>, ext: &crate::session_ext::PicoSessionExt) -> Self {
+    pub(crate) fn over(engine: EngineHold, ext: &crate::session_ext::PicoSessionExt) -> Self {
         Self {
             engine,
             mode: ext.mode,
@@ -132,7 +130,7 @@ impl PicoSession {
 /// retracted while the declaration it names still stands — upstream's order
 /// (`_z_undeclare_publisher` clears the filter, then the key).
 pub(crate) struct WriteFilter {
-    shared: Arc<Engine>,
+    shared: EngineHold,
     /// What the filter counts, on which key and whether the session's own entities count are the
     /// engine's, kept with this id, and its listeners count the same.
     id: FilterId,
@@ -186,7 +184,7 @@ impl WriteFilter {
     }
 
     /// The session the filter is declared in, where its listeners are declared too.
-    pub(crate) fn engine(&self) -> &Arc<Engine> {
+    pub(crate) fn engine(&self) -> &EngineHold {
         &self.shared
     }
 
@@ -306,7 +304,7 @@ impl FilteredKey {
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // The entity keeps its key, which holds the declaration: its wire form holds nothing.
-        let wire = key.wire(Arc::as_ref(&session.engine));
+        let wire = key.wire(crate::session::EngineHold::as_ref(&session.engine));
         let filter = WriteFilter::declare(session, plane, &key, &wire, count_local)?;
         // SAFETY: the caller's: `at` is room for one, written field by field, once each.
         unsafe {
@@ -326,7 +324,8 @@ impl FilteredKey {
 /// another thread is waited for, as zenoh-pico's undeclare waits for it.
 impl Drop for WriteFilter {
     fn drop(&mut self) {
-        self.listeners.retract_all(Arc::as_ref(&self.shared));
+        self.listeners
+            .retract_all(crate::session::EngineHold::as_ref(&self.shared));
         self.shared.undeclare_write_filter(self.id);
     }
 }
@@ -334,7 +333,7 @@ impl Drop for WriteFilter {
 /// How the entity's Interest is put, or `None` for none — pico's rules, see the
 /// module doc. The key is lent from the entity's own declaration and wire form.
 fn interest_ask<'a>(
-    shared: &Arc<Engine>,
+    shared: &EngineHold,
     mode: WhatAmI,
     key: &'a DeclaredKeyexpr,
     wire: &'a WireKey,
@@ -374,7 +373,7 @@ mod tests {
         );
         let kept = engine_held(handle).clone();
         assert!(
-            Arc::ptr_eq(&PicoSession::of(handle).engine, &kept),
+            crate::session::EngineHold::ptr_eq(&PicoSession::of(handle).engine, &kept),
             "over the session's engine"
         );
         assert!(PicoSession::of(handle).mode == session_mode(handle));

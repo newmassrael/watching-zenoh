@@ -72,6 +72,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::sync::Arc;
+use core::ops::Deref;
 
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::link_restriction::LinkRestriction;
@@ -102,6 +103,9 @@ pub mod observation;
 pub mod os;
 mod peers;
 mod query;
+// The reach of a session's engine that keeps nothing of it standing, through one table of the
+// process.
+pub mod reach;
 mod refusal;
 // The limits of the process's runtime, which the machines it makes apart from any session read.
 pub mod runtime_limits;
@@ -115,7 +119,9 @@ pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
-pub use engine::{DeclarationReach, KeyHolds, RedeclareRefusal, SessionEngine, Tickers};
+pub use engine::{
+    DeclarationReach, EngineHolder, KeyHolds, RedeclareRefusal, SessionEngine, Tickers,
+};
 pub use entity_place::{CacheBytes, EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use held_slab::HeldSlab;
@@ -261,12 +267,13 @@ pub type Tick = Arc<dyn Fn() -> bool + Send + Sync>;
 /// It holds the engine, so the engine lives as long as the job can be asked to stop; a job whose
 /// owner is gone does not outlive it. It names the engine by its periodic jobs alone
 /// ([`Tickers`]), so a build that reaches its engine as its own type makes no table of every
-/// operation of the session for it. `T` is the engine as its holder names it: the port's object
-/// by default, or an engine's own type, which a holder generic over its engine keeps, since an
-/// engine it names only as `?Sized` cannot be turned into the object.
-pub struct Ticker<T: Tickers + ?Sized = dyn Tickers> {
+/// operation of the session for it. `H` is what holds the engine: the port's object by count by
+/// default, or a holder of an engine's own type, which a holder generic over its engine keeps,
+/// since an engine it names only as `?Sized` cannot be turned into the object, and an engine
+/// placed in its session's memory is held by no `Arc`.
+pub struct Ticker<H: Deref<Target: Tickers> = Arc<dyn Tickers>> {
     /// `None` once [`Self::detach`] let the job go on without this handle.
-    engine: Option<Arc<T>>,
+    engine: Option<H>,
     id: TickerId,
 }
 
@@ -278,9 +285,9 @@ impl Ticker {
     }
 }
 
-impl<T: Tickers + ?Sized> Ticker<T> {
-    /// [`Ticker::start`] on an engine of the holder's own type `T`.
-    pub fn start_on(engine: Arc<T>, period_ms: u64, tick: Tick) -> Result<Self, Refusal> {
+impl<H: Deref<Target: Tickers>> Ticker<H> {
+    /// [`Ticker::start`] on an engine held by `H`.
+    pub fn start_on(engine: H, period_ms: u64, tick: Tick) -> Result<Self, Refusal> {
         let id = engine.start_ticker(period_ms, tick)?;
         Ok(Self {
             engine: Some(engine),
@@ -295,7 +302,7 @@ impl<T: Tickers + ?Sized> Ticker<T> {
     }
 }
 
-impl<T: Tickers + ?Sized> Drop for Ticker<T> {
+impl<H: Deref<Target: Tickers>> Drop for Ticker<H> {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.take() {
             engine.stop_ticker(self.id);
@@ -1523,7 +1530,7 @@ mod tests {
         use core::sync::atomic::Ordering;
         let jobs = Arc::new(CountedJobs::default());
         let tick: Tick = Arc::new(|| true);
-        let held: Ticker<CountedJobs> =
+        let held: Ticker<Arc<CountedJobs>> =
             Ticker::start_on(Arc::clone(&jobs), 5, Arc::clone(&tick)).expect("started");
         assert_eq!(Arc::strong_count(&jobs), 2, "the handle keeps the engine");
         drop(held);

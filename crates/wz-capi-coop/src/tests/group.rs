@@ -29,6 +29,7 @@ use super::group_stack::{
     member_config, open_member, profile, source, Engine, MemberStack, Network, Table, GROUP,
 };
 use crate::app_link::AppLinks;
+use crate::EngineHold;
 use crate::{CoopConfig, CoopEngine, OpenError};
 
 /// Wait, for at most five seconds, until `done`: each session is stepped by its read task.
@@ -888,7 +889,7 @@ mod mapped {
     };
 
     /// A member of the group, told the session's keyexprs.
-    fn open_mapped(network: &Arc<Network>, member: u8) -> Result<Arc<Engine>, OpenError> {
+    fn open_mapped(network: &Arc<Network>, member: u8) -> Result<EngineHold<Engine>, OpenError> {
         let mut config: CoopConfig = member_config(member, GROUP);
         config.groups[0].declarations = GroupDeclarations::Mapped;
         open_member(network, member, config)
@@ -1095,7 +1096,7 @@ mod congested {
     }
 
     /// A member over a filling stack whose lanes hold one batch each, with the two waits above.
-    fn open_filling() -> (Arc<Engine>, Arc<Filling>, Arc<AppTransport>) {
+    fn open_filling() -> (EngineHold<Engine>, Arc<Filling>, Arc<AppTransport>) {
         let stack = Arc::new(Filling::default());
         let transport = Arc::new(AppTransport::new(
             Box::new(Table(Mutex::new(AppLinkTable::new()))),
@@ -1275,7 +1276,7 @@ mod congested {
             put_with(&member, CongestionControl::Drop);
         }
         let blocking = {
-            let member = Arc::clone(&member);
+            let member = member.clone();
             std::thread::spawn(move || put_with(&member, CongestionControl::Block))
         };
         // Long enough for the blocking put to take the session, well inside its wait.
@@ -1395,7 +1396,7 @@ mod cut {
 
     /// A member over a [`Gated`] stack, whose lanes hold one batch each.
     struct GatedMember {
-        engine: Arc<Engine>,
+        engine: EngineHold<Engine>,
         transport: Arc<AppTransport>,
         full: Arc<AtomicBool>,
         wire: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -1655,7 +1656,11 @@ mod woken {
     fn open_alone<C: ClockSource + Clone + 'static>(
         clock: C,
         idle_wait_ms: u32,
-    ) -> (Arc<CoopEngine<AppLinks, C>>, Arc<Alone>, Arc<AppTransport>) {
+    ) -> (
+        EngineHold<CoopEngine<AppLinks, C>>,
+        Arc<Alone>,
+        Arc<AppTransport>,
+    ) {
         let mut config = member_config(1, GROUP);
         config.groups[0].profile.lease_ms = 180_000;
         config.groups[0].profile.join_interval_ms = 60_000;
@@ -1701,7 +1706,7 @@ mod woken {
         let (member, stack, transport) = open_alone(PosixClock, 5_000);
         let link = stack.link.lock().unwrap().expect("the group was joined");
         let reading = {
-            let member = Arc::clone(&member);
+            let member = member.clone();
             std::thread::spawn(move || {
                 SessionDrive::read(&*member, false).expect("the session is open");
                 Instant::now()
@@ -1771,7 +1776,7 @@ mod woken {
         let (member, stack, transport) = open_alone(PosixClock, 5_000);
         let link = stack.link.lock().unwrap().expect("the group was joined");
         let reading = {
-            let member = Arc::clone(&member);
+            let member = member.clone();
             std::thread::spawn(move || {
                 SessionDrive::read(&*member, false).expect("the session is open");
             })

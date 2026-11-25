@@ -49,7 +49,6 @@
 //! the marshal for the callback's call alone (`QueryMarshal::answer_with`),
 //! the one place a lifetime is erased, and taken back before the borrow ends.
 
-use alloc::sync::Arc;
 use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr::NonNull;
@@ -68,7 +67,7 @@ use crate::prelude::*;
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{z_loaned_session_t, Engine};
+use crate::session::{z_loaned_session_t, EngineHandle};
 
 // The enum-typed option fields (`z_congestion_control_t`, `z_priority_t`) are in
 // `crate::qos`. Both are documented "Deprecated: ignored, taken from query" on the
@@ -353,7 +352,7 @@ impl QueryText<[u8]> {
 /// session holds none of the session's memory. The query's key and parameters are the copy's own
 /// ([`QueryMarshal::kept_texts`]).
 struct Deferred {
-    engine: alloc::sync::Weak<Engine>,
+    engine: EngineHandle,
     id: wz_capi_port::HeldQueryId,
 }
 
@@ -447,7 +446,7 @@ pub(crate) struct QueryMarshal {
     /// The session a query is kept on, lent with [`Self::holder`] for the callback's call by the
     /// queryable's place, which keeps it weakly ([`QueryableKept`]), as an escape keeps it
     /// ([`Deferred`]).
-    session: Option<NonNull<alloc::sync::Weak<Engine>>>,
+    session: Option<NonNull<EngineHandle>>,
     /// R2953 — whether the session asked this query of itself: the half of
     /// the query's route the rid alone does not name.
     is_local: bool,
@@ -549,13 +548,13 @@ impl QueryMarshal {
     ///
     /// # Safety
     /// The marshal is dropped before the borrow of `session` ends.
-    unsafe fn with_session(mut self, session: &alloc::sync::Weak<Engine>) -> Self {
+    unsafe fn with_session(mut self, session: &EngineHandle) -> Self {
         self.session = Some(NonNull::from(session));
         self
     }
 
     /// The session the face's queries are kept on, while the dispatch lends it.
-    fn session(&self) -> Option<&alloc::sync::Weak<Engine>> {
+    fn session(&self) -> Option<&EngineHandle> {
         // SAFETY: `Self::with_session`'s contract: the pointer is live for as long as this marshal.
         self.session.map(|session| unsafe { &*session.as_ptr() })
     }
@@ -838,7 +837,7 @@ fn hand_query(
     view: &dyn QueryView,
     out: &mut dyn ReplyOut,
     holder: &dyn QueryHolder,
-    session: &alloc::sync::Weak<Engine>,
+    session: &EngineHandle,
 ) {
     let call = match closure.call {
         Some(f) => f,
@@ -1328,7 +1327,7 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 /// (→ the C `drop(context)`). It lies in its place ([`QueryablePlace`]) beside the C
 /// closure the row calls, which outlives it until the row lets go of it.
 pub(crate) struct QueryableState {
-    engine: Arc<Engine>,
+    engine: crate::session::EngineHold,
     /// The declaration, once made: the place is filled before the queryable is declared, as the
     /// closure its row calls lies in it, and one whose declaration was refused is let go of with
     /// none.
@@ -1356,7 +1355,7 @@ pub(crate) struct QueryableKept {
     _session: Option<crate::ffi::HeldIn>,
     /// The session the queryable is declared on, which a query its callback keeps holds while the
     /// program does: weakly here, so the row the session keeps this in holds no count of it.
-    engine: alloc::sync::Weak<Engine>,
+    engine: EngineHandle,
 }
 
 /// A queryable's place: its state, which its owner lets go of, and what its row keeps past it; the
@@ -1466,14 +1465,14 @@ unsafe fn declare_queryable_in(
     let state = slot
         .fill(crate::object_slot::Answering::keeping(
             QueryableState {
-                engine: Arc::clone(&session.engine),
+                engine: crate::session::EngineHold::clone(&session.engine),
                 declared: None,
                 loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             },
             QueryableKept {
                 closure,
                 _session: background.then(|| crate::session::session_count(zs).hold()),
-                engine: Arc::downgrade(&session.engine),
+                engine: crate::session::EngineHold::downgrade(&session.engine),
             },
         ))
         .cast::<QueryableState>();
@@ -1536,12 +1535,15 @@ pub(crate) fn declare_queryable_on(
         .engine
         .declare_queryable_on_wire(
             keyexpr,
-            key.wire(Arc::as_ref(&session.engine)),
+            key.wire(crate::session::EngineHold::as_ref(&session.engine)),
             complete,
             allowed_origin,
             // A peer or router-hat session retracts the queryable naming its key
             // (`_z_undeclare_queryable`) — the announced one, for a queryable.
-            key.retraction_naming_in(session.mode, Arc::as_ref(&session.engine)),
+            key.retraction_naming_in(
+                session.mode,
+                crate::session::EngineHold::as_ref(&session.engine),
+            ),
             sink,
         )
         .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
@@ -1553,7 +1555,7 @@ pub(crate) fn declare_queryable_on(
 /// than a C closure (an advanced publisher's cache, the admin space).
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 pub(crate) struct PlainQueryable {
-    engine: Arc<Engine>,
+    engine: crate::session::EngineHold,
     id: QblId,
     /// Dropped after the queryable, so the retraction follows.
     _key: DeclaredKeyexpr,
@@ -2564,14 +2566,14 @@ mod tests {
     /// A session that is gone, as a copy made by a test holds it: a reply on the copy is refused as
     /// on a closed session, and its drop releases nothing.
     #[cfg(feature = "engine-tokio")]
-    fn no_session() -> alloc::sync::Weak<Engine> {
+    fn no_session() -> EngineHandle {
         alloc::sync::Weak::<wz_capi_core::faces::SharedSession>::new()
     }
 
     /// As the tokio engine's: the cooperative engine's session is a type of its own.
     #[cfg(not(feature = "engine-tokio"))]
-    fn no_session() -> alloc::sync::Weak<Engine> {
-        alloc::sync::Weak::new()
+    fn no_session() -> EngineHandle {
+        EngineHandle::vacant()
     }
 
     /// A keep of a query held by a session that is gone.
@@ -2772,7 +2774,7 @@ mod tests {
     fn clone_in_callback(
         view: &FakeQuery,
         holder: &dyn QueryHolder,
-        session: Option<&alloc::sync::Weak<Engine>>,
+        session: Option<&EngineHandle>,
     ) -> (ZResult, z_owned_query_t) {
         // SAFETY: the marshal is dropped before `view`, `holder` and `session`.
         let mut marshal = unsafe { QueryMarshal::new(view).with_holder(holder) };
@@ -2950,7 +2952,7 @@ mod tests {
         let handle = unsafe { session_handle(z_session_loan(&session)) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many queryable places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Queryable)).collect();
             claimed.len()
@@ -2962,7 +2964,7 @@ mod tests {
             .expect("a queryable's place")
             .fill(Answering::keeping(
                 QueryableState {
-                    engine: Arc::clone(&engine),
+                    engine: crate::session::EngineHold::clone(&engine),
                     declared: None,
                     loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 },
@@ -2973,7 +2975,7 @@ mod tests {
                         Some(counted_drop),
                     ),
                     _session: None,
-                    engine: Arc::downgrade(&engine),
+                    engine: crate::session::EngineHold::downgrade(&engine),
                 },
             ))
             .cast::<QueryableState>();
@@ -3136,12 +3138,14 @@ mod kept_query_tests {
     }
 
     /// A query cloned inside its callback is answered while its session is open, and outlives the
-    /// session: once the session is closed and let go of, the copy still reads its key and its
-    /// parameters, a reply on it is refused as on a closed session, and the session's engine,
-    /// with the arena it lies in, is gone though the copy is still held. Cloning, replying and
-    /// letting the copy go allocate nothing. The CONTROL is the reply that reaches the asking
-    /// session while the listener is open. Turned red by a copy that holds its session strongly
-    /// (the engine stays), or that reads its texts where the session kept them.
+    /// session: the close leaves the copy's reach of its session reaching nothing at once; once
+    /// the session is let go of, the test's own hold of the engine is the last, so the engine,
+    /// with the arena it lies in, goes with it though the copy is still held; the copy still reads
+    /// its key and its parameters, and a reply on it is refused as on a closed session. Cloning,
+    /// replying and letting the copy go allocate nothing. The CONTROL is the reply that reaches
+    /// the asking session while the listener is open. Turned red by a copy that holds its session
+    /// strongly (a second holder stays), a close that leaves the session reached, or a copy that
+    /// reads its texts where the session kept them.
     #[test]
     fn a_kept_query_owns_its_texts_and_holds_none_of_its_session() {
         let seen = Seen::default();
@@ -3154,14 +3158,13 @@ mod kept_query_tests {
                 session_handle(z_session_loan(&listener)).expect("an open session has its handle"),
             )
             .clone();
-            let session = Arc::downgrade(&engine);
+            let session = crate::session::EngineHold::downgrade(&engine);
             let locator = engine
                 .listening()
                 .into_iter()
                 .next()
                 .expect("the listener is bound");
             let locator = CString::new(locator).expect("a locator");
-            drop(engine);
 
             let mut key: z_view_keyexpr_t = core::mem::zeroed();
             assert_eq!(z_view_keyexpr_from_str(&mut key, KEY.as_ptr()), Z_OK);
@@ -3257,11 +3260,16 @@ mod kept_query_tests {
                 z_close(z_session_loan_mut(&mut listener), core::ptr::null()),
                 Z_OK
             );
+            assert!(
+                session.upgrade().is_none(),
+                "closed, the session is reached by nothing"
+            );
             z_session_drop(z_session_move(&mut listener));
             assert!(
-                within_ten_seconds(|| session.upgrade().is_none()),
+                within_ten_seconds(|| crate::session::EngineHold::holders(&engine) == 1),
                 "the copy holds nothing of its session"
             );
+            drop(engine);
 
             assert_eq!(
                 keyexpr_str(z_query_keyexpr(query)),

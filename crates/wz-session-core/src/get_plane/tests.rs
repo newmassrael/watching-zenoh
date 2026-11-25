@@ -12,6 +12,7 @@ use crate::plane_lock::StdLocks;
 use crate::reply_sink::ReplyKind;
 use crate::round::{RoundCalls, RoundRowCounts, RoundRows};
 use crate::session_tables::{Absent, Present};
+use alloc::sync::Arc;
 use core::convert::Infallible;
 use core::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::AtomicUsize;
@@ -130,16 +131,18 @@ fn arena(bytes: usize) -> Arena {
 }
 
 /// A plane whose legs' callbacks and ends have `rows` rows and whose gets hold `held` replies.
-fn plane<C: GetCalls>(rows: usize, held: usize) -> Arc<GetPlane<C>> {
+fn plane<C: GetCalls>(rows: usize, held: usize) -> Placed<GetPlane<C>> {
     let mut arena = arena(1 << 17);
     let ends = arena.lend(rows).expect("the arena has the rows");
     let legs = arena.lend(rows).expect("the arena has the rows");
     let replies = HeldReplies::lent(&mut arena, held).expect("the arena has the rows");
-    Arc::new(GetPlane::new(
-        EndedLegs::over(ends),
-        replies,
-        LegRows::over(legs),
-    ))
+    arena
+        .place(GetPlane::new(
+            EndedLegs::over(ends),
+            replies,
+            LegRows::over(legs),
+        ))
+        .expect("the arena has the plane's place")
 }
 
 /// A round of a few records, placed with its tables in an arena over leaked memory.
@@ -229,7 +232,9 @@ fn ends(rows: usize) -> EndedLegs {
 #[test]
 fn a_legs_hold_keeps_its_replies_in_the_planes_rows() {
     let plane = plane::<Remote>(4, 2);
-    let (mut one, mut two) = (LegHold::new(1, &plane), LegHold::new(2, &plane));
+    // SAFETY: the holds, declared after the plane, are dropped before it.
+    let shared = unsafe { plane.share() };
+    let (mut one, mut two) = (LegHold::new(1, shared), LegHold::new(2, shared));
     let first = Answer {
         key: "demo/a",
         payload: b"first",
@@ -356,14 +361,16 @@ fn a_plane_let_go_drops_the_callbacks_its_rows_and_ends_still_hold() {
 fn a_captured_leg_keeps_a_count_of_its_row_for_the_capturing_thread() {
     let plane = plane::<Asking>(2, 1);
     let mut round = round::<Asking>();
-    round.get_mut().calls_legs_of(plane.clone());
+    let legs: NonNull<dyn LegHolders<Asking>> = NonNull::from(&*plane);
+    // SAFETY: the plane is dropped after the round, which is declared after it.
+    unsafe { round.get_mut().calls_legs_of(legs) };
     let seen = Arc::new(Seen::default());
     let row = plane
         .open_leg(&mut || Counted(seen.clone()), true)
         .expect("a row");
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
     // sink, made after the round, is dropped before it.
-    let mut sink = unsafe { LegSink::new(3, row, &plane, round.share()) };
+    let mut sink = unsafe { LegSink::new(3, row, plane.share(), round.share()) };
     lend_reply(&round);
     plane.capture();
     sink.on_reply(&REPLY);
@@ -390,14 +397,16 @@ fn a_captured_leg_keeps_a_count_of_its_row_for_the_capturing_thread() {
 fn a_plane_whose_session_answers_none_of_its_gets_captures_nothing() {
     let plane = plane::<Remote>(2, 1);
     let mut round = round::<Remote>();
-    round.get_mut().calls_legs_of(plane.clone());
+    let legs: NonNull<dyn LegHolders<Remote>> = NonNull::from(&*plane);
+    // SAFETY: the plane is dropped after the round, which is declared after it.
+    unsafe { round.get_mut().calls_legs_of(legs) };
     let seen = Arc::new(Seen::default());
     let row = plane
         .open_leg(&mut || Counted(seen.clone()), true)
         .expect("a row");
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
     // sink, made after the round, is dropped before it.
-    let mut sink = unsafe { LegSink::new(3, row, &plane, round.share()) };
+    let mut sink = unsafe { LegSink::new(3, row, plane.share(), round.share()) };
     lend_reply(&round);
     plane.capture();
     sink.on_reply(&REPLY);
@@ -425,7 +434,7 @@ fn a_sinks_drop_is_its_legs_end_with_the_timeout_it_was_told() {
         .expect("a row");
     // SAFETY: the test hands the sink nothing; it is the round's one writer, and the sink, made
     // after the round, is dropped before it.
-    let mut sink = unsafe { LegSink::new(7, row, &plane, round.share()) };
+    let mut sink = unsafe { LegSink::new(7, row, plane.share(), round.share()) };
     sink.on_final(5);
     sink.on_timeout(9);
     assert!(!plane.ends_pending(), "no end while the sink lives");

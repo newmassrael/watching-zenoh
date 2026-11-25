@@ -4,9 +4,11 @@
 //! An advanced subscriber hosted on an engine's port: what declares its entities, asks its gets,
 //! runs its two periodic jobs and takes it down, written over [`SessionEngine`] and nothing else.
 //!
-//! The host is generic over the engine `E`: the port's object by default, or an engine's own type,
-//! which an ABI built with one engine names so that every call is resolved when the build is made
-//! and no table of all the session's operations is made for the subscriber.
+//! The host is generic over what holds the engine, `E` ([`EngineHolder`]): the port's object by
+//! count by default, or a holder of an engine's own type, which an ABI built with one engine names
+//! so that every call is resolved when the build is made and no table of all the session's
+//! operations is made for the subscriber; an engine placed in its session's own memory is held by
+//! its own holder, not by an `Arc`.
 //!
 //! The ordering machine ([`super::state`]) and the plans ([`super::plans`]) decide; this module
 //! does what they ask. It names no runtime: the subscription, the liveliness subscriptions and the
@@ -38,7 +40,7 @@
 //! This is the widest form (history, which implies recovery), the one a C ABI's option struct
 //! asks for. A build that wants less links the machine and the plans alone.
 
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::fmt::Write as _;
@@ -48,8 +50,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::{
-    LivelinessSink, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker, TokenId,
-    WireKey,
+    EngineHolder, LivelinessSink, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink,
+    Ticker, TokenId, WireKey,
 };
 use wz_session_core::caps;
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -135,9 +137,9 @@ impl core::error::Error for HostError {}
 const GETS_IN_FLIGHT: usize = caps::MAX_PENDING_QUERIES;
 
 /// What every callback and job of one subscriber shares.
-struct Shared<E: SessionEngine + ?Sized> {
+struct Shared<E: EngineHolder> {
     /// Held weakly: the engine holds the callbacks that hold this.
-    engine: Weak<E>,
+    engine: E::Handle,
     /// The gets in flight. Before the token, so a fan is never dropped after the token it is
     /// registered on.
     gets: [GetSlot<E>; GETS_IN_FLIGHT],
@@ -157,10 +159,10 @@ struct Shared<E: SessionEngine + ?Sized> {
     late: (Option<usize>, Option<core::time::Duration>),
 }
 
-impl<E: SessionEngine + ?Sized> Shared<E> {
+impl<E: EngineHolder> Shared<E> {
     /// A subscriber of `engine` on `base_keyexpr` with no get in flight.
     fn new(
-        engine: Weak<E>,
+        engine: E::Handle,
         state: State,
         base_keyexpr: FixedKey,
         dest: Locality,
@@ -190,7 +192,7 @@ impl<E: SessionEngine + ?Sized> Shared<E> {
 
     /// The engine's clock, or zero when the engine is gone (and then nothing is asked of it).
     fn now_ms(&self) -> u64 {
-        self.engine.upgrade().map_or(0, |engine| engine.now_ms())
+        E::upgrade(&self.engine).map_or(0, |engine| engine.now_ms())
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -230,7 +232,7 @@ impl Finish {
 /// One get in flight, in its subscriber's table. Taken by the issuer of a get, held by the issuer
 /// while it issues and by each leg's callback, and given back by the last of them, which ends the
 /// get. See the module doc.
-struct GetSlot<E: SessionEngine + ?Sized> {
+struct GetSlot<E: EngineHolder> {
     /// The slot holds a get.
     taken: AtomicBool,
     /// The holders of the get: its issuer while it issues, and each leg not yet ended.
@@ -249,11 +251,11 @@ struct GetSlot<E: SessionEngine + ?Sized> {
 // SAFETY: `owner`, `finish` and `fan` are written only by the one that took the slot, before it
 // hands out a leg, and by the last holder as it ends the get; in between they are read through
 // shared borrows only, and the fan is `Sync`. The subscriber `owner` names is `Sync`.
-unsafe impl<E: SessionEngine + ?Sized> Send for GetSlot<E> {}
+unsafe impl<E: EngineHolder> Send for GetSlot<E> {}
 // SAFETY: as `Send`.
-unsafe impl<E: SessionEngine + ?Sized> Sync for GetSlot<E> {}
+unsafe impl<E: EngineHolder> Sync for GetSlot<E> {}
 
-impl<E: SessionEngine + ?Sized> GetSlot<E> {
+impl<E: EngineHolder> GetSlot<E> {
     fn new() -> Self {
         Self {
             taken: AtomicBool::new(false),
@@ -335,7 +337,7 @@ impl<E: SessionEngine + ?Sized> GetSlot<E> {
 ///
 /// # Safety
 /// `context` is a slot whose get the leg holds ([`GetSlot::leg`]).
-unsafe fn on_reply<E: SessionEngine + ?Sized>(context: *mut c_void, reply: &dyn ReplyView) {
+unsafe fn on_reply<E: EngineHolder>(context: *mut c_void, reply: &dyn ReplyView) {
     // SAFETY: the caller's: the leg holds the get, which holds the subscriber.
     let shared = unsafe { (*context.cast_const().cast::<GetSlot<E>>()).owner() };
     if shared.is_closing() {
@@ -358,7 +360,7 @@ unsafe fn on_reply<E: SessionEngine + ?Sized>(context: *mut c_void, reply: &dyn 
 ///
 /// # Safety
 /// `context` is a slot whose get the leg holds ([`GetSlot::leg`]), let go of once, here.
-unsafe fn end_leg<E: SessionEngine + ?Sized>(context: *mut c_void) {
+unsafe fn end_leg<E: EngineHolder>(context: *mut c_void) {
     // SAFETY: the caller's. The subscriber is read before the get is let go of, since the slot may
     // hold the next get right after, and the leg's count of it is let go of last, so it stands
     // while the get ends.
@@ -374,7 +376,7 @@ unsafe fn end_leg<E: SessionEngine + ?Sized>(context: *mut c_void) {
 
 /// A subscription callback of the subscriber's own, in the engine's raw form over a count of the
 /// subscriber, which the engine lets go of with the callback: no memory is taken for it.
-fn own_sink<E: SessionEngine + ?Sized>(
+fn own_sink<E: EngineHolder>(
     shared: &Strong<Shared<E>>,
     call: unsafe fn(context: *mut c_void, sample: &SampleRef<'_>),
 ) -> SubscriberSink {
@@ -388,7 +390,7 @@ fn own_sink<E: SessionEngine + ?Sized>(
 ///
 /// # Safety
 /// `context` is a count of a subscriber ([`own_sink`]) not yet let go of.
-unsafe fn held<E: SessionEngine + ?Sized>(context: *mut c_void) -> ManuallyDrop<Strong<Shared<E>>> {
+unsafe fn held<E: EngineHolder>(context: *mut c_void) -> ManuallyDrop<Strong<Shared<E>>> {
     // SAFETY: the caller's; the count is not let go of here, as the value is never dropped.
     ManuallyDrop::new(unsafe { Strong::from_raw(context) })
 }
@@ -397,7 +399,7 @@ unsafe fn held<E: SessionEngine + ?Sized>(context: *mut c_void) -> ManuallyDrop<
 ///
 /// # Safety
 /// As [`held`]'s, called once, after the callback's last call.
-unsafe fn let_go<E: SessionEngine + ?Sized>(context: *mut c_void) {
+unsafe fn let_go<E: EngineHolder>(context: *mut c_void) {
     // SAFETY: the caller's.
     drop(ManuallyDrop::into_inner(unsafe { held::<E>(context) }));
 }
@@ -407,7 +409,7 @@ unsafe fn let_go<E: SessionEngine + ?Sized>(context: *mut c_void) {
 ///
 /// # Safety
 /// As [`held`]'s.
-unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &SampleRef<'_>) {
+unsafe fn on_live<E: EngineHolder>(context: *mut c_void, view: &SampleRef<'_>) {
     // SAFETY: the caller's.
     let shared = unsafe { held::<E>(context) };
     if shared.is_closing() {
@@ -427,7 +429,7 @@ unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &Sample
 ///
 /// # Safety
 /// As [`held`]'s.
-unsafe fn on_heartbeat<E: SessionEngine + ?Sized>(context: *mut c_void, view: &SampleRef<'_>) {
+unsafe fn on_heartbeat<E: EngineHolder>(context: *mut c_void, view: &SampleRef<'_>) {
     // SAFETY: the caller's.
     let shared = unsafe { held::<E>(context) };
     if shared.is_closing() || view.kind != SampleKind::Put {
@@ -453,10 +455,7 @@ unsafe fn on_heartbeat<E: SessionEngine + ?Sized>(context: *mut c_void, view: &S
 ///
 /// # Safety
 /// As [`held`]'s.
-unsafe fn on_late_publisher<E: SessionEngine + ?Sized>(
-    context: *mut c_void,
-    sample: LivelinessSample<'_>,
-) {
+unsafe fn on_late_publisher<E: EngineHolder>(context: *mut c_void, sample: LivelinessSample<'_>) {
     // SAFETY: the caller's.
     let shared = unsafe { held::<E>(context) };
     if shared.is_closing() {
@@ -471,7 +470,7 @@ unsafe fn on_late_publisher<E: SessionEngine + ?Sized>(
 ///
 /// # Safety
 /// `context` is a weak count of a subscriber ([`WeakRef::into_raw`]) not yet let go of.
-unsafe fn unregister_miss<E: SessionEngine + ?Sized>(context: *mut c_void, id: usize) {
+unsafe fn unregister_miss<E: EngineHolder>(context: *mut c_void, id: usize) {
     // SAFETY: the caller's; the count is not let go of here.
     let weak = ManuallyDrop::new(unsafe { WeakRef::<Shared<E>>::from_raw(context) });
     if let Some(shared) = weak.upgrade() {
@@ -483,19 +482,19 @@ unsafe fn unregister_miss<E: SessionEngine + ?Sized>(context: *mut c_void, id: u
 ///
 /// # Safety
 /// As [`unregister_miss`]'s, called once, last.
-unsafe fn let_go_weak<E: SessionEngine + ?Sized>(context: *mut c_void) {
+unsafe fn let_go_weak<E: EngineHolder>(context: *mut c_void) {
     // SAFETY: the caller's.
     drop(unsafe { WeakRef::<Shared<E>>::from_raw(context) });
 }
 
 /// A subscription (or liveliness subscription) the engine holds, retracted when this is dropped.
-struct Subscription<E: SessionEngine + ?Sized> {
-    engine: Arc<E>,
+struct Subscription<E: EngineHolder> {
+    engine: E,
     id: SubId,
     retract: bool,
 }
 
-impl<E: SessionEngine + ?Sized> Drop for Subscription<E> {
+impl<E: EngineHolder> Drop for Subscription<E> {
     fn drop(&mut self) {
         if self.retract {
             self.engine.undeclare_subscriber(self.id);
@@ -504,13 +503,13 @@ impl<E: SessionEngine + ?Sized> Drop for Subscription<E> {
 }
 
 /// A liveliness token the engine holds, retracted when this is dropped.
-struct Token<E: SessionEngine + ?Sized> {
-    engine: Arc<E>,
+struct Token<E: EngineHolder> {
+    engine: E,
     id: TokenId,
     retract: bool,
 }
 
-impl<E: SessionEngine + ?Sized> Drop for Token<E> {
+impl<E: EngineHolder> Drop for Token<E> {
     fn drop(&mut self) {
         if self.retract {
             self.engine.undeclare_liveliness_token(self.id);
@@ -528,12 +527,12 @@ struct Held<T> {
 
 /// The teardown of the gets in flight. Armed until the subscriber goes to the background, which
 /// leaves them running to their Final.
-struct GetCancel<E: SessionEngine + ?Sized> {
+struct GetCancel<E: EngineHolder> {
     shared: Strong<Shared<E>>,
     armed: bool,
 }
 
-impl<E: SessionEngine + ?Sized> Drop for GetCancel<E> {
+impl<E: EngineHolder> Drop for GetCancel<E> {
     fn drop(&mut self) {
         if self.armed {
             self.shared.closing.store(true, Ordering::Release);
@@ -546,9 +545,9 @@ impl<E: SessionEngine + ?Sized> Drop for GetCancel<E> {
 /// its objects in places of its own lends [`EngineSubscriber::declare_in`]: sized for it, and
 /// holding nothing until a declaration lodges the part there.
 #[repr(transparent)]
-pub struct SubscriberCore<E: SessionEngine + ?Sized>(MaybeUninit<Lodging<Shared<E>>>);
+pub struct SubscriberCore<E: EngineHolder>(MaybeUninit<Lodging<Shared<E>>>);
 
-impl<E: SessionEngine + ?Sized> SubscriberCore<E> {
+impl<E: EngineHolder> SubscriberCore<E> {
     /// A place holding no subscriber's part.
     pub const fn vacant() -> Self {
         Self(Lodging::vacant())
@@ -556,13 +555,13 @@ impl<E: SessionEngine + ?Sized> SubscriberCore<E> {
 }
 
 /// A [`SubscriberCore`] its host lends one declaration, and how the host takes it back.
-pub struct LentCore<E: SessionEngine + ?Sized> {
+pub struct LentCore<E: EngineHolder> {
     core: NonNull<SubscriberCore<E>>,
     give_back: unsafe fn(*mut c_void),
     context: *mut c_void,
 }
 
-impl<E: SessionEngine + ?Sized> LentCore<E> {
+impl<E: EngineHolder> LentCore<E> {
     /// `core`, given back by `give_back(context)`.
     ///
     /// # Safety
@@ -585,7 +584,7 @@ impl<E: SessionEngine + ?Sized> LentCore<E> {
 
 /// A live advanced subscriber on an engine's port, named by the engine's type `E` (the port's
 /// object unless the holder names its engine's own).
-pub struct EngineSubscriber<E: SessionEngine + ?Sized = dyn SessionEngine> {
+pub struct EngineSubscriber<E: EngineHolder = Arc<dyn SessionEngine>> {
     // THE FIELD ORDER IS THE RETRACTION ORDER, the tokio runtime's: the subscription, the two
     // jobs, the gets in flight, the late-publisher subscription, the heartbeat subscription and
     // the detection token.
@@ -634,7 +633,7 @@ fn form_of(
     forms.map(|f| ask(f.forms())).unwrap_or_default()
 }
 
-impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
+impl<E: EngineHolder> EngineSubscriber<E> {
     /// Declare an advanced subscriber on `keyexpr` over `engine`, delivering to `on_sample`.
     ///
     /// What `options` asks for is declared and refused if the engine cannot carry it: a
@@ -642,7 +641,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
     /// them; the startup get and the late-publisher subscription when history asks for them; the
     /// detection token when detection does. The order is the tokio runtime's.
     pub fn declare(
-        engine: &Arc<E>,
+        engine: &E,
         keyexpr: impl AsRef<str>,
         options: AdvancedSubscriberOptions,
         on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
@@ -658,7 +657,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
 
     /// [`Self::declare`] with one miss listener registered from the start, which never leaves.
     pub fn declare_with_miss_listener(
-        engine: &Arc<E>,
+        engine: &E,
         keyexpr: impl AsRef<str>,
         options: AdvancedSubscriberOptions,
         on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
@@ -679,7 +678,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
     /// `misses` holds from the start, in whichever form each was made: a host whose callbacks are
     /// lent ([`OnSample::lent`], [`MissHandlers::lent`]) declares with no memory taken for them.
     pub fn declare_with(
-        engine: &Arc<E>,
+        engine: &E,
         keyexpr: impl AsRef<str>,
         options: AdvancedSubscriberOptions,
         on_sample: OnSample,
@@ -697,7 +696,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
     /// The place is given back once ([`LentCore::new`]): at once when the declaration is refused
     /// before the part is made, and otherwise with the last of what holds the part.
     pub fn declare_in(
-        engine: &Arc<E>,
+        engine: &E,
         keyexpr: impl AsRef<str>,
         options: AdvancedSubscriberOptions,
         on_sample: OnSample,
@@ -729,7 +728,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
 
     /// Declare what `options` asks for over `shared`, the subscriber's shared part, made.
     fn declare_over(
-        engine: &Arc<E>,
+        engine: &E,
         shared: Strong<Shared<E>>,
         options: AdvancedSubscriberOptions,
     ) -> Result<Self, HostError> {
@@ -757,7 +756,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
                 let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
                 Some(
                     Ticker::start_on(
-                        Arc::clone(engine),
+                        E::clone(engine),
                         period_ms,
                         Arc::new(move || {
                             let Some(shared) = weak.upgrade() else {
@@ -782,7 +781,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
                 let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
                 Some(
                     Ticker::start_on(
-                        Arc::clone(engine),
+                        E::clone(engine),
                         period_ms,
                         Arc::new(move || {
                             let Some(shared) = weak.upgrade() else {
@@ -956,8 +955,8 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
 /// The checks a declaration makes before anything is made for it: the history bounds, as
 /// upstream's builder checks them, a session still open, and a key a session stores, which it
 /// answers kept inline.
-fn admitted<E: SessionEngine + ?Sized>(
-    engine: &Arc<E>,
+fn admitted<E: EngineHolder>(
+    engine: &E,
     keyexpr: &str,
     options: &AdvancedSubscriberOptions,
 ) -> Result<FixedKey, HostError> {
@@ -981,8 +980,8 @@ fn admitted<E: SessionEngine + ?Sized>(
 
 /// What a subscriber of `engine` on `base_keyexpr` shares among its callbacks and jobs, with the
 /// machine `options` asks for delivering to `on_sample` and `misses`.
-fn shared_part<E: SessionEngine + ?Sized>(
-    engine: &Arc<E>,
+fn shared_part<E: EngineHolder>(
+    engine: &E,
     base_keyexpr: FixedKey,
     options: &AdvancedSubscriberOptions,
     on_sample: OnSample,
@@ -999,7 +998,7 @@ fn shared_part<E: SessionEngine + ?Sized>(
                 .unwrap_or(usize::MAX),
         );
     let mut part = Shared::new(
-        Arc::downgrade(engine),
+        E::downgrade(engine),
         state,
         base_keyexpr,
         options.get_locality,
@@ -1025,8 +1024,8 @@ fn identity_of(
 }
 
 /// Declare a plain subscription on `keyexpr` in `form`.
-fn declare_subscription<E: SessionEngine + ?Sized>(
-    engine: &Arc<E>,
+fn declare_subscription<E: EngineHolder>(
+    engine: &E,
     keyexpr: &str,
     form: &EntityForm,
     origin: Locality,
@@ -1043,7 +1042,7 @@ fn declare_subscription<E: SessionEngine + ?Sized>(
         .map_err(HostError::of("the engine has no subscribers"))?;
     Ok(Held {
         entity: Subscription {
-            engine: Arc::clone(engine),
+            engine: E::clone(engine),
             id,
             retract: true,
         },
@@ -1052,8 +1051,8 @@ fn declare_subscription<E: SessionEngine + ?Sized>(
 }
 
 /// Declare a liveliness subscription on `keyexpr` in `form`.
-fn declare_liveliness_subscription<E: SessionEngine + ?Sized>(
-    engine: &Arc<E>,
+fn declare_liveliness_subscription<E: EngineHolder>(
+    engine: &E,
     keyexpr: &str,
     form: &EntityForm,
     history: bool,
@@ -1064,7 +1063,7 @@ fn declare_liveliness_subscription<E: SessionEngine + ?Sized>(
         .map_err(HostError::of("the engine has no liveliness plane"))?;
     Ok(Held {
         entity: Subscription {
-            engine: Arc::clone(engine),
+            engine: E::clone(engine),
             id,
             retract: true,
         },
@@ -1073,8 +1072,8 @@ fn declare_liveliness_subscription<E: SessionEngine + ?Sized>(
 }
 
 /// Declare the `@adv/sub` detection token when the caller asked for it, else `None`.
-fn declare_detection_token<E: SessionEngine + ?Sized>(
-    engine: &Arc<E>,
+fn declare_detection_token<E: EngineHolder>(
+    engine: &E,
     keyexpr: &str,
     options: &AdvancedSubscriberOptions,
     id: EntityGlobalId,
@@ -1102,7 +1101,7 @@ fn declare_detection_token<E: SessionEngine + ?Sized>(
         .map_err(HostError::of("the engine has no liveliness plane"))?;
     Ok(Some(Held {
         entity: Token {
-            engine: Arc::clone(engine),
+            engine: E::clone(engine),
             id: token,
             retract: true,
         },
@@ -1114,7 +1113,7 @@ fn declare_detection_token<E: SessionEngine + ?Sized>(
 /// runtime's own query, not an entity of the application), goes where the subscriber was told to,
 /// is bounded by the timeout so a get nobody answers ends, asks every queryable and not the best
 /// match, and takes every sample of a range and not the latest of each key.
-fn get_options<'a, E: SessionEngine + ?Sized>(
+fn get_options<'a, E: EngineHolder>(
     shared: &Shared<E>,
     parameters: &'a GetParameters,
 ) -> QueryOptionsOf<'a> {
@@ -1135,13 +1134,13 @@ fn get_options<'a, E: SessionEngine + ?Sized>(
 /// The get takes a slot of the subscriber's table of gets in flight; with every slot taken the
 /// session holds as many gets pending as it can, and the get is over before it starts, as one no
 /// leg was issued for.
-fn issue_get<E: SessionEngine + ?Sized>(
+fn issue_get<E: EngineHolder>(
     shared: &Strong<Shared<E>>,
     keyexpr: &str,
     opts: &QueryOptionsOf<'_>,
     finish: Finish,
 ) {
-    let Some(engine) = shared.engine.upgrade() else {
+    let Some(engine) = E::upgrade(&shared.engine) else {
         return;
     };
     let Some(slot) = shared.claim() else {
@@ -1171,7 +1170,7 @@ fn issue_get<E: SessionEngine + ?Sized>(
 
 /// A get that is not asked is over at once: its end runs as a get's end does, unless the
 /// subscriber is closing.
-fn end_unasked<E: SessionEngine + ?Sized>(shared: &Shared<E>, finish: Finish) {
+fn end_unasked<E: EngineHolder>(shared: &Shared<E>, finish: Finish) {
     if !shared.is_closing() {
         finish.run(&mut shared.lock());
     }
@@ -1203,7 +1202,7 @@ fn recovery_key(base: &str, zid: &[u8], eid: u32) -> FixedKey {
 
 /// Issue one get on the key written in `key`, as [`issue_get`] does; a key too long to write is
 /// a get no session sends, and it is over before it starts.
-fn issue_get_on<E: SessionEngine + ?Sized>(
+fn issue_get_on<E: EngineHolder>(
     shared: &Strong<Shared<E>>,
     key: &FixedKey,
     opts: &QueryOptionsOf<'_>,
@@ -1217,10 +1216,7 @@ fn issue_get_on<E: SessionEngine + ?Sized>(
 
 /// Issue a `_sn` recovery get against the gapped source's `@adv` cache: the open range from the
 /// next sequence number, or the bounded one a heartbeat asks for.
-fn issue_recovery_query<E: SessionEngine + ?Sized>(
-    shared: &Strong<Shared<E>>,
-    request: RecoveryRequest,
-) {
+fn issue_recovery_query<E: EngineHolder>(shared: &Strong<Shared<E>>, request: RecoveryRequest) {
     let key = recovery_key(shared.base(), &request.zid, request.eid);
     let parameters = GetParameters::recovery(request.from_sn, request.to_sn);
     let opts = get_options(shared, &parameters);
@@ -1233,7 +1229,7 @@ fn issue_recovery_query<E: SessionEngine + ?Sized>(
 }
 
 /// Issue the startup get over `<base>/@adv/**`, capped and bounded as the history config says.
-fn issue_history_query<E: SessionEngine + ?Sized>(
+fn issue_history_query<E: EngineHolder>(
     shared: &Strong<Shared<E>>,
     depth: Option<usize>,
     age: Option<core::time::Duration>,
@@ -1249,7 +1245,7 @@ fn issue_history_query<E: SessionEngine + ?Sized>(
 }
 
 /// Issue the history get of one detected late publisher `(zid, eid)`.
-fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
+fn issue_late_publisher_query<E: EngineHolder>(
     shared: &Strong<Shared<E>>,
     zid: Vec<u8>,
     eid: u32,
@@ -1264,7 +1260,7 @@ fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
 
 /// The timestamped twin: the target is the token's own key expression, which is the one the
 /// publisher declared its cache queryable on.
-fn issue_timestamped_late_publisher_query<E: SessionEngine + ?Sized>(
+fn issue_timestamped_late_publisher_query<E: EngineHolder>(
     shared: &Strong<Shared<E>>,
     token_keyexpr: &str,
     zid: Vec<u8>,
@@ -1278,7 +1274,7 @@ fn issue_timestamped_late_publisher_query<E: SessionEngine + ?Sized>(
 
 /// The get for a publisher whose token's zid does not decode: counted globally, since there is no
 /// source to count it against.
-fn issue_unidentified_late_publisher_query<E: SessionEngine + ?Sized>(
+fn issue_unidentified_late_publisher_query<E: EngineHolder>(
     shared: &Strong<Shared<E>>,
     token_keyexpr: &str,
     depth: Option<usize>,
@@ -1291,7 +1287,7 @@ fn issue_unidentified_late_publisher_query<E: SessionEngine + ?Sized>(
 
 /// The late-publisher liveliness callback: on a `Put`, open a slot for the detected publisher and
 /// issue its history get (outside the lock); on a `Delete`, only mark it gone.
-fn on_late_publisher_detected<E: SessionEngine + ?Sized>(
+fn on_late_publisher_detected<E: EngineHolder>(
     shared: &Strong<Shared<E>>,
     kind: LivelinessSampleKind,
     token_keyexpr: &str,
@@ -1346,7 +1342,7 @@ fn on_late_publisher_detected<E: SessionEngine + ?Sized>(
 
 /// One periodic recovery tick: collect each source's `_sn=last+1..` request under the state lock,
 /// then issue the gets with it released.
-fn run_periodic_tick<E: SessionEngine + ?Sized>(shared: &Strong<Shared<E>>) {
+fn run_periodic_tick<E: EngineHolder>(shared: &Strong<Shared<E>>) {
     let requests = shared.lock().periodic_requests();
     for request in requests {
         issue_recovery_query(shared, request);

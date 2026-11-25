@@ -11,6 +11,7 @@ use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::EngineHold;
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
 #[cfg(feature = "threads")]
 use wz_capi_port::SessionDrive;
@@ -57,7 +58,7 @@ fn profile() -> GroupProfile {
 
 /// A peer of id `member` that dials nothing and joins `endpoint`, under `policy`, on the host's
 /// sockets.
-fn open_member(member: u8, endpoint: &str, policy: SessionPolicy) -> Arc<Engine> {
+fn open_member(member: u8, endpoint: &str, policy: SessionPolicy) -> EngineHold<Engine> {
     let config = CoopConfig {
         whatami: WhatAmI::Peer,
         zid: config_zid(member),

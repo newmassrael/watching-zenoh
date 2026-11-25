@@ -186,6 +186,19 @@ impl<T: FaceReports> FaceReports for Arc<T> {
     }
 }
 
+/// The owner of a plane placed in a session's arena, which the session's state holds.
+impl<T: FaceReports> FaceReports for crate::placed::Placed<T> {
+    const WATCHES: bool = T::WATCHES;
+
+    fn watched(&self) -> bool {
+        T::watched(self)
+    }
+
+    fn happened(&self, kind: FaceEventKind, row: FaceLinkRow) {
+        T::happened(self, kind, row);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

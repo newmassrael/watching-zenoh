@@ -55,7 +55,6 @@ use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherSt
 use crate::refusal::{refusal_code, Door};
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 use crate::write_filter::WriteFilter;
-use alloc::sync::Arc;
 
 /// pico `z_matching_status_t` — `{ bool matching }`, 1 B measured, field at
 /// offset 0. Passed to the callback BY POINTER, so its layout is read by C.
@@ -121,7 +120,7 @@ type MatchingCClosure = CClosure<z_closure_matching_status_callback_t>;
 /// listener's undeclare retracts. It lies in the listener's place, a place of the session's own
 /// for the kind (`crate::object_slot::Kind::MatchingListener`).
 pub(crate) struct MatchingListenerState {
-    shared: Arc<Engine>,
+    shared: crate::session::EngineHold,
     id: MatchId,
 }
 
@@ -686,7 +685,7 @@ pub(crate) unsafe fn declare_on_filter(
     let object = place
         .fill(Answering::keeping(
             MatchingListenerState {
-                shared: Arc::clone(filter.engine()),
+                shared: crate::session::EngineHold::clone(filter.engine()),
                 id: 0,
             },
             MatchingKept {
@@ -944,7 +943,7 @@ mod tests {
 
     /// How many listener places `engine` has free: each claimed, then all given back.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
-    fn free_places(engine: &Arc<Engine>) -> usize {
+    fn free_places(engine: &crate::session::EngineHold) -> usize {
         let claimed: crate::prelude::Vec<Slot<u64>> =
             core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::MatchingListener))
                 .collect();
@@ -953,12 +952,12 @@ mod tests {
 
     /// A listener's place taken from `engine` and filled as a declare fills it, on no list.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
-    fn placed(engine: &Arc<Engine>) -> *mut MatchingListenerState {
+    fn placed(engine: &crate::session::EngineHold) -> *mut MatchingListenerState {
         Slot::<MatchingPlace>::take_entity(engine, Kind::MatchingListener)
             .expect("a listener's place")
             .fill(Answering::keeping(
                 MatchingListenerState {
-                    shared: Arc::clone(engine),
+                    shared: crate::session::EngineHold::clone(engine),
                     id: 0,
                 },
                 MatchingKept {
@@ -1003,7 +1002,7 @@ mod tests {
             places - 1,
             "the list holds the background one"
         );
-        list.retract_all(Arc::as_ref(&engine));
+        list.retract_all(crate::session::EngineHold::as_ref(&engine));
         assert_eq!(
             free_places(&engine),
             places,
@@ -1106,7 +1105,7 @@ mod tests {
             background,
             "the background listener is left on the list"
         );
-        list.retract_all(Arc::as_ref(&engine));
+        list.retract_all(crate::session::EngineHold::as_ref(&engine));
         assert_eq!(
             free_places(&engine),
             places,

@@ -13,15 +13,14 @@
 //! forgotten), so a key, which is a fan's address, is never found standing for a later fan.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+use std::sync::{Mutex, PoisonError};
 
-use wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey};
+use wz_capi_port::cancellation::{CancellableFan, Canceller, FanCanceller, FanKey};
 
 /// A one-shot undo of one issued leg.
 pub type Undo = Box<dyn FnOnce() + Send>;
 
 /// The undos of the legs issued so far, by fan.
-#[derive(Default)]
 struct Undos(Mutex<BTreeMap<FanKey, Vec<Undo>>>);
 
 impl Undos {
@@ -47,34 +46,25 @@ impl FanCanceller for Undos {
     }
 }
 
-/// The process's table, and the canceller a fan holds of it.
-fn undos() -> &'static (Arc<Undos>, Weak<dyn FanCanceller>) {
-    static UNDOS: OnceLock<(Arc<Undos>, Weak<dyn FanCanceller>)> = OnceLock::new();
-    UNDOS.get_or_init(|| {
-        let undos = Arc::new(Undos::default());
-        // Downgraded as the table's own type, then unsized where it is bound.
-        let canceller: Weak<dyn FanCanceller> = Arc::<Undos>::downgrade(&undos);
-        (undos, canceller)
-    })
-}
+/// The process's table, the canceller every fan of these engines is attached to.
+static UNDOS: Undos = Undos(Mutex::new(BTreeMap::new()));
 
 /// Record the undo of one leg issued under `fan`, or report that the fan was cancelled while it
 /// was being issued: then every undo recorded under it, `undo` among them, runs HERE, since the
 /// cancel that already ran could not have seen them, and the caller issues nothing further.
 pub fn record(fan: &CancellableFan, undo: Undo) -> bool {
-    let (table, canceller) = undos();
     let key = fan.key();
-    table
+    UNDOS
         .0
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(key)
         .or_default()
         .push(undo);
-    if fan.attach(canceller) {
+    if fan.attach(Canceller::Static(&UNDOS)) {
         true
     } else {
-        table.cancel_fan(key);
+        UNDOS.cancel_fan(key);
         false
     }
 }
@@ -83,6 +73,7 @@ pub fn record(fan: &CancellableFan, undo: Undo) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn counting(undone: &Arc<AtomicUsize>) -> Undo {
         let undone = Arc::clone(undone);
@@ -92,8 +83,7 @@ mod tests {
     }
 
     fn kept(key: FanKey) -> Option<usize> {
-        let (table, _) = undos();
-        let kept = table.0.lock().unwrap();
+        let kept = UNDOS.0.lock().unwrap();
         kept.get(&key).map(Vec::len)
     }
 

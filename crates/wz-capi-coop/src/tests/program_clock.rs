@@ -17,6 +17,7 @@ use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 
 use super::{config, CatchAll, Command, Router, LOOPBACK, ROUTER_ZID};
+use crate::EngineHold;
 use crate::{CoopConfig, CoopEngine};
 
 /// The session's lease, in milliseconds: short, so the wall clock passes it several times over
@@ -35,7 +36,10 @@ impl ClockSource for SetClock {
 
 /// A session of [`LEASE_MS`] dialled to `router` on `clock`; it redials none, so it ends with
 /// its link.
-fn open_on<C: ClockSource + Clone>(router: &Router, clock: C) -> Arc<CoopEngine<PosixLinks, C>> {
+fn open_on<C: ClockSource + Clone>(
+    router: &Router,
+    clock: C,
+) -> EngineHold<CoopEngine<PosixLinks, C>> {
     CoopEngine::open(
         PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
         clock,

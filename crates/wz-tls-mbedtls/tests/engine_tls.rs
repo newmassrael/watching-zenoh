@@ -23,6 +23,7 @@ use rcgen::ExtendedKeyUsagePurpose;
 
 use common::{library, Authority, End};
 use wz_capi_coop::arena::{admitted_faces, admitted_handshakes};
+use wz_capi_coop::EngineHold;
 use wz_capi_coop::{CoopConfig, CoopEngine, OpenError};
 use wz_capi_port::{SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
@@ -83,7 +84,7 @@ fn base_config() -> CoopConfig {
     }
 }
 
-fn open(dial: TlsDial<PosixTcpDial>, config: CoopConfig) -> Result<Arc<Engine>, OpenError> {
+fn open(dial: TlsDial<PosixTcpDial>, config: CoopConfig) -> Result<EngineHold<Engine>, OpenError> {
     Engine::open(
         IpLinks::new(LOOPBACK, PosixTcpDial)
             .with_tls(dial)
@@ -95,10 +96,10 @@ fn open(dial: TlsDial<PosixTcpDial>, config: CoopConfig) -> Result<Arc<Engine>, 
 }
 
 /// A session whose read task is running, closed when it is let go of.
-struct Stepped(Arc<Engine>);
+struct Stepped(EngineHold<Engine>);
 
 impl Stepped {
-    fn new(engine: Arc<Engine>) -> Self {
+    fn new(engine: EngineHold<Engine>) -> Self {
         SessionDrive::start_read_task(&*engine).expect("the read task starts");
         Self(engine)
     }

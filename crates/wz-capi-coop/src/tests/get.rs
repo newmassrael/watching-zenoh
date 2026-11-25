@@ -16,6 +16,7 @@ use wz_session_core::query_options::QueryOptions;
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
 use super::{open, until, CatchAll, Command, Engine, Router};
+use crate::EngineHold;
 
 /// What the callbacks of a get's legs saw: each reply as its kind, key and payload, and whether
 /// every callback has been dropped, which is when the get is over.
@@ -62,7 +63,7 @@ pub(super) fn ask(
     opts: &QueryOptions,
     fan: Option<&CancellableFan>,
     registration: Option<Arc<CancellableFan>>,
-    step: Option<Arc<Engine>>,
+    step: Option<EngineHold<Engine>>,
 ) -> (Result<usize, Refusal>, Arc<Mutex<Leg>>) {
     let leg = Arc::new(Mutex::new(Leg::default()));
     let seen = leg.clone();

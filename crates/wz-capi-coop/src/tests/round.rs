@@ -1209,7 +1209,14 @@ fn holding_legs(
     round: &'static mut Placed<Round>,
     legs: &Arc<OneLeg>,
 ) -> &'static mut Placed<Round> {
-    round.get_mut().calls_legs_of(legs.clone());
+    // The round reaches the legs for as long as it stands, which is past the test's frame: a
+    // count of them is left to it for good.
+    let leaked: &'static Arc<OneLeg> =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(Arc::clone(legs)));
+    let held: core::ptr::NonNull<dyn wz_session_core::round::LegHolders<crate::round::CoopCalls>> =
+        core::ptr::NonNull::from(&**leaked);
+    // SAFETY: the legs are leaked, so they stand for as long as the round reaches them.
+    unsafe { round.get_mut().calls_legs_of(held) };
     round
 }
 

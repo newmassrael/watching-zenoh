@@ -358,7 +358,7 @@ impl GroupLabel {
 /// group admits came up, and one it lost went down (`connectivity`).
 #[cfg(feature = "connectivity")]
 struct MemberEvents {
-    watchers: alloc::sync::Arc<FacePlane>,
+    watchers: PlacedRef<FacePlane>,
     label: GroupLabel,
 }
 
@@ -526,7 +526,7 @@ pub(super) struct GroupJoining {
     pub(super) generation: u64,
     /// The session's watchers of its faces, told of each member (`connectivity`).
     #[cfg(feature = "connectivity")]
-    pub(super) watchers: alloc::sync::Arc<FacePlane>,
+    pub(super) watchers: PlacedRef<FacePlane>,
 }
 
 /// One group of the session: its face, its task, its queue, its members and its stop, the group's
@@ -1559,7 +1559,7 @@ pub(super) struct GroupPut<'a> {
 pub(super) fn dispatch(
     registry: super::RegistryLend,
     face: HeldFace,
-    plane: alloc::sync::Arc<super::query::QueryPlane>,
+    plane: PlacedRef<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
     use wz_session_core::response_sink::ResponseSink;

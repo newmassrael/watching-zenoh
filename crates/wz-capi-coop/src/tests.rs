@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::EngineHold;
 use wz_capi_port::{
     FilterPlane, FilteredPut, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey,
 };
@@ -928,11 +929,11 @@ fn client_config() -> CoopConfig {
     }
 }
 
-fn open(router: &Router) -> Arc<Engine> {
+fn open(router: &Router) -> EngineHold<Engine> {
     open_with(config(router))
 }
 
-fn open_with(config: CoopConfig) -> Arc<Engine> {
+fn open_with(config: CoopConfig) -> EngineHold<Engine> {
     Engine::open(
         PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
@@ -1115,7 +1116,7 @@ fn an_operation_lets_the_session_go_for_the_next_one_on_another_thread() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let _ = engine.declarations_synced();
-    let other = Arc::clone(&engine);
+    let other = engine.clone();
     let (done, finished) = channel();
     std::thread::spawn(move || {
         let _ = other.declarations_synced();
@@ -1316,7 +1317,7 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
     let count = received.clone();
     let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::new(Mutex::new(None));
     let own_id = own.clone();
-    let session = Arc::downgrade(&engine);
+    let session = EngineHold::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
     let id = engine
         .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
@@ -1390,7 +1391,7 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
         !engine.write_filter_active(filter)
     });
     let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
-    let session = Arc::downgrade(&engine);
+    let session = EngineHold::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
     engine
         .declare_subscriber_on_wire("demo/o", WireKey::literal(), Locality::Any, None, {
@@ -1548,7 +1549,7 @@ fn a_sample_for_three_subscribers_is_handed_to_each_in_order_with_the_session_fr
     type Handed = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
     let handed: Handed = Arc::default();
     let published: Arc<Mutex<Vec<bool>>> = Arc::default();
-    let session = Arc::downgrade(&engine);
+    let session = EngineHold::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
     for tag in 1..=3u8 {
         let handed = handed.clone();
@@ -1649,7 +1650,7 @@ fn a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent() {
     let spins = engine.takes.spins.load(Ordering::SeqCst);
     let (holds, held) = channel();
     let step = {
-        let engine = Arc::clone(&engine);
+        let engine = engine.clone();
         std::thread::spawn(move || {
             engine.holding_as_a_step(|| {
                 holds.send(()).expect("the test waits for the hold");
@@ -1698,7 +1699,7 @@ fn a_droppable_publish_behind_a_read_working_out_its_wait_spins_and_is_sent() {
     let spins = engine.takes.spins.load(Ordering::SeqCst);
     let (holds, held) = channel();
     let wait = {
-        let engine = Arc::clone(&engine);
+        let engine = engine.clone();
         std::thread::spawn(move || {
             engine.holding_as_a_read_wait(|| {
                 holds.send(()).expect("the test waits for the hold");
@@ -2437,7 +2438,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         "the place is two spans of the arena"
     );
 
-    let drive = holding.clone().into_drive();
+    let drive = Engine::into_drive(holding.clone());
     let place = drive
         .handle_place()
         .expect("the open was asked for a place");
@@ -2457,7 +2458,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
     }
     drop(drive);
     assert!(
-        without.clone().into_drive().handle_place().is_none(),
+        Engine::into_drive(without.clone()).handle_place().is_none(),
         "an open asked for none lends none"
     );
 
@@ -2642,9 +2643,12 @@ fn an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches() {
 fn a_drive_is_the_engines_own_allocation_and_its_drop_closes_the_session() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let drive: crate::CoopDrive<PosixLinks, PosixClock> = engine.clone().into_drive();
+    let drive: crate::CoopDrive<PosixLinks, PosixClock> = Engine::into_drive(engine.clone());
     assert!(
-        core::ptr::addr_eq(Arc::as_ptr(&drive.engine()), Arc::as_ptr(&engine)),
+        core::ptr::addr_eq(
+            EngineHold::as_ptr(&drive.engine()),
+            EngineHold::as_ptr(&engine)
+        ),
         "the drive hands out the engine it holds, no copy of it"
     );
     assert!(!drive.is_closed());

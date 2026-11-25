@@ -1330,7 +1330,7 @@ impl Connectivity {
     /// row of the hub is held; the closure is let go of then, which runs its `drop(context)`.
     fn declare_transport(
         self: &Arc<Self>,
-        engine: &Arc<Engine>,
+        engine: &crate::session::EngineHold,
         history: bool,
         closure: CClosure<Callback<z_loaned_transport_event_t>>,
     ) -> Result<*mut TransportListenerState, ZResult> {
@@ -1368,7 +1368,7 @@ impl Connectivity {
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
             let delivery = unsafe { &*kept_at::<TransportListenerState, TransportKept>(object) };
-            let engine = Arc::as_ref(engine);
+            let engine = crate::session::EngineHold::as_ref(engine);
             let plane = ToldPlane::Transports;
             for row in rows(engine).filter(|row| row.link == 0) {
                 if SessionEngine::tell_came(engine, plane, slot, &ToldKey::of_row(&row)) {
@@ -1394,7 +1394,7 @@ impl Connectivity {
     /// [`Self::declare_transport`] is, by the session's `MAX_LINK_EVENTS_LISTENERS`.
     fn declare_link(
         self: &Arc<Self>,
-        engine: &Arc<Engine>,
+        engine: &crate::session::EngineHold,
         history: bool,
         filter: Option<([u8; 16], bool)>,
         closure: CClosure<Callback<z_loaned_link_event_t>>,
@@ -1431,7 +1431,7 @@ impl Connectivity {
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
             let listener = unsafe { &*kept_at::<LinkListenerState, LinkListener>(object) };
-            let engine = Arc::as_ref(engine);
+            let engine = crate::session::EngineHold::as_ref(engine);
             let plane = ToldPlane::Links;
             for row in rows(engine) {
                 if listener.wants(&transport_of_row(&row))
@@ -3643,7 +3643,7 @@ mod place_tests {
     unsafe extern "C" fn on_event(_: *mut z_loaned_transport_event_t, _: *mut c_void) {}
 
     /// How many places of `kind` `engine` has free: each claimed, then all given back.
-    fn free(engine: &Arc<Engine>, kind: Kind) -> usize {
+    fn free(engine: &crate::session::EngineHold, kind: Kind) -> usize {
         let claimed: Vec<Slot<u64>> =
             core::iter::from_fn(|| Slot::<u64>::take_entity(engine, kind)).collect();
         claimed.len()
@@ -3672,7 +3672,7 @@ mod place_tests {
 
     /// Run `declare`, a declare of one transport listener on `engine`'s session, and check that it
     /// took one of the session's places.
-    fn taking_a_place(engine: &Arc<Engine>, declare: impl FnOnce() -> ZResult) {
+    fn taking_a_place(engine: &crate::session::EngineHold, declare: impl FnOnce() -> ZResult) {
         let places = free(engine, Kind::TransportEventsListener);
         assert_eq!(declare(), Z_OK);
         assert_eq!(
@@ -3685,7 +3685,7 @@ mod place_tests {
     /// A background listener on a session of `engine`'s, in a place of its own.
     fn declare_background(
         session: &z_owned_session_t,
-        engine: &Arc<Engine>,
+        engine: &crate::session::EngineHold,
         drops: &'static AtomicUsize,
     ) {
         let mut closure = counting(drops);
@@ -3704,7 +3704,7 @@ mod place_tests {
     /// A listener with a handle on a session of `engine`'s, in a place of its own: the handle.
     fn declare_handled(
         session: &z_owned_session_t,
-        engine: &Arc<Engine>,
+        engine: &crate::session::EngineHold,
         drops: &'static AtomicUsize,
     ) -> z_owned_transport_events_listener_t {
         let mut closure = counting(drops);
@@ -3724,7 +3724,7 @@ mod place_tests {
     }
 
     /// The engine of the session `session` holds.
-    fn engine_of_session(session: &z_owned_session_t) -> Arc<Engine> {
+    fn engine_of_session(session: &z_owned_session_t) -> crate::session::EngineHold {
         // SAFETY: a live session of this frame's caller.
         let handle = unsafe { session_handle(z_session_loan(session)) };
         engine_held(handle.expect("an open session has its handle")).clone()

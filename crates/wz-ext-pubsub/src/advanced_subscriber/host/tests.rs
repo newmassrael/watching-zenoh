@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey, TokenRef};
+use wz_capi_port::cancellation::{CancellableFan, Canceller, FanCanceller, FanKey, TokenRef};
 use wz_capi_port::{
     BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
     MatchingSink, QblId, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
@@ -64,8 +64,8 @@ struct GetRecord {
 /// An engine that records and hands over.
 #[derive(Default)]
 struct Script {
-    /// The script itself, as the fans it is attached to reach it.
-    this: Weak<Script>,
+    /// What the fans it is attached to reach the script by.
+    canceller: Option<&'static ScriptCanceller>,
     next: AtomicU64,
     now: AtomicU64,
     closed: AtomicBool,
@@ -87,7 +87,9 @@ impl Script {
     fn new(legs: usize) -> Arc<Self> {
         Arc::new_cyclic(|this| {
             let script = Self {
-                this: Weak::clone(this),
+                // One for the script's life, left to the process: a fan's canceller stands for
+                // the whole process, and this one reaches nothing once the script is gone.
+                canceller: Some(Box::leak(Box::new(ScriptCanceller(Weak::clone(this))))),
                 ..Self::default()
             };
             *script.legs.lock().unwrap() = legs;
@@ -160,6 +162,17 @@ impl wz_capi_port::Tickers for Script {
     }
     fn stop_ticker(&self, _id: TickerId) {
         self.event("stop ticker");
+    }
+}
+
+/// The script as a fan's canceller reaches it: while it stands.
+struct ScriptCanceller(Weak<Script>);
+
+impl FanCanceller for ScriptCanceller {
+    fn cancel_fan(&self, key: FanKey) {
+        if let Some(script) = self.0.upgrade() {
+            script.cancel_fan(key);
+        }
     }
 }
 
@@ -356,8 +369,8 @@ impl SessionEngine for Script {
         // The script is what ends the legs a cancelled fan tagged, as an engine is.
         let tag = match fan {
             Some(fan) => {
-                let canceller: Weak<dyn FanCanceller> = Weak::<Script>::clone(&self.this);
-                if !fan.attach(&canceller) {
+                let canceller = self.canceller.expect("made by `Script::new`");
+                if !fan.attach(Canceller::Static(canceller)) {
                     return Ok(0);
                 }
                 Some(fan.key())
@@ -691,7 +704,7 @@ fn an_engine_of_its_own_type_hosts_the_subscriber_as_the_port_object_does() {
         )
     };
     let concrete = Script::new(1);
-    let subscriber: EngineSubscriber<Script> =
+    let subscriber: EngineSubscriber<Arc<Script>> =
         EngineSubscriber::declare(&concrete, "demo/data", options(), |_| {})
             .expect("the subscriber declares on the scripted engine as its own type");
     drop(subscriber);
@@ -976,7 +989,7 @@ fn a_subscriber_is_named_by_its_engines_session_zid() {
 fn shared_on(
     script: &Arc<Script>,
     delivered: &Arc<Mutex<Vec<u8>>>,
-) -> Strong<super::Shared<dyn SessionEngine>> {
+) -> Strong<super::Shared<Arc<dyn SessionEngine>>> {
     shared_on_key(script, delivered, "demo/data")
 }
 
@@ -985,7 +998,7 @@ fn shared_on_key(
     script: &Arc<Script>,
     delivered: &Arc<Mutex<Vec<u8>>>,
     base: &str,
-) -> Strong<super::Shared<dyn SessionEngine>> {
+) -> Strong<super::Shared<Arc<dyn SessionEngine>>> {
     let d = Arc::clone(delivered);
     let state = State::new(
         Box::new(move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0])),
@@ -1063,7 +1076,7 @@ fn the_subscribers_own_callback_takes_no_memory_and_holds_it() {
     let shared = shared_on(&script, &delivered);
 
     let before = allocations();
-    let sink = super::own_sink(&shared, super::on_live::<dyn SessionEngine>);
+    let sink = super::own_sink(&shared, super::on_live::<Arc<dyn SessionEngine>>);
     let during = allocations() - before;
 
     assert_eq!(during, 0, "the callback allocates nothing");
@@ -1499,7 +1512,7 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
             )
     };
     let given = AtomicU64::new(0);
-    let mut core = SubscriberCore::<dyn SessionEngine>::vacant();
+    let mut core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
     let script = Script::new(1);
     // SAFETY: `core` is free and outlives the subscriber and every holder of its part; `given`
     // outlives the give-back.
@@ -1536,7 +1549,7 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
     assert_eq!(given.load(Ordering::SeqCst), 1, "the place goes back once");
 
     let refused_back = AtomicU64::new(0);
-    let mut refused_core = SubscriberCore::<dyn SessionEngine>::vacant();
+    let mut refused_core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
     let script = Script::new(1);
     // SAFETY: as above.
     let lent = unsafe {

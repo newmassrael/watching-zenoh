@@ -20,6 +20,25 @@ use crate::atomic::{AtomicUsize, Ordering};
 /// rather than wrapped to no holder while one is still held.
 const MOST_HOLDERS: usize = isize::MAX as usize;
 
+/// `value` in memory of the heap, or `value` handed back when the heap refuses it: a `Box` whose
+/// making a full heap does not end the program.
+pub(crate) fn try_box<T>(value: T) -> Result<Box<T>, T> {
+    let layout = Layout::new::<T>();
+    if layout.size() == 0 {
+        return Ok(Box::new(value));
+    }
+    // SAFETY: the layout's size is not zero.
+    let Some(at) = NonNull::new(unsafe { alloc::alloc::alloc(layout) }.cast::<T>()) else {
+        return Err(value);
+    };
+    // SAFETY: `at` was allocated for a `T` by the global allocator, as a `Box<T>`'s memory is,
+    // and is written once here before the box owns it.
+    unsafe {
+        at.as_ptr().write(value);
+        Ok(Box::from_raw(at.as_ptr()))
+    }
+}
+
 /// A count of the holders of something, and what the last of them does when it lets go.
 pub struct Kept {
     count: AtomicUsize,
@@ -41,6 +60,18 @@ impl Kept {
         if before > MOST_HOLDERS {
             self.count.fetch_sub(1, Ordering::Relaxed);
         }
+    }
+
+    /// Take a count for another holder while one is left, and say whether it was taken: a count
+    /// that reached no holder stays there, so what its last holder dropped is not held again.
+    pub fn retain_live(&self) -> bool {
+        self.count
+            .fetch_update(Ordering::Acquire, Ordering::Relaxed, |held| match held {
+                0 => None,
+                held if held > MOST_HOLDERS => Some(held),
+                held => Some(held + 1),
+            })
+            .is_ok()
     }
 
     /// Give back a count; the last one runs what the count was made with.
@@ -73,7 +104,7 @@ struct Held<T> {
 /// A value shared by a count of its holders: one of them. Cloning takes a count, dropping gives it
 /// back, and the last drops the value and gives its memory back ([`Self::boxed`],
 /// [`Self::placed`]).
-pub(crate) struct Shared<T> {
+pub struct Shared<T> {
     at: NonNull<Held<T>>,
 }
 
@@ -85,7 +116,7 @@ unsafe impl<T: Send + Sync> Sync for Shared<T> {}
 
 impl<T> Shared<T> {
     /// `value` in memory of the heap, freed with it.
-    pub(crate) fn boxed(value: T) -> Self {
+    pub fn boxed(value: T) -> Self {
         let held = Box::new(Held {
             kept: Kept::new(Self::last_boxed),
             memory: None,
@@ -96,8 +127,23 @@ impl<T> Shared<T> {
         }
     }
 
+    /// [`Self::boxed`], or `value` handed back when the heap refuses its memory.
+    pub(crate) fn try_boxed(value: T) -> Result<Self, T> {
+        let held = Held {
+            kept: Kept::new(Self::last_boxed),
+            memory: None,
+            value,
+        };
+        match try_box(held) {
+            Ok(held) => Ok(Self {
+                at: NonNull::from(Box::leak(held)),
+            }),
+            Err(held) => Err(held.value),
+        }
+    }
+
     /// The bytes and alignment [`Self::placed`] writes.
-    pub(crate) const fn layout() -> Layout {
+    pub const fn layout() -> Layout {
         Layout::new::<Held<T>>()
     }
 
@@ -107,7 +153,7 @@ impl<T> Shared<T> {
     /// # Safety
     /// `at` is aligned and valid for a write of [`Self::layout`], and nothing else uses those
     /// bytes while a count of `memory` is held; `memory` is live and its memory holds `at`.
-    pub(crate) unsafe fn placed(at: NonNull<u8>, value: T, memory: NonNull<Kept>) -> Self {
+    pub unsafe fn placed(at: NonNull<u8>, value: T, memory: NonNull<Kept>) -> Self {
         // SAFETY: the caller's: the count is live.
         unsafe { memory.as_ref() }.retain();
         let at = at.cast::<Held<T>>();
@@ -122,10 +168,93 @@ impl<T> Shared<T> {
         Self { at }
     }
 
+    /// [`Self::placed`], the value made by `make` from the place it is written at, as a value
+    /// that names itself is made.
+    ///
+    /// # Safety
+    /// As [`Self::placed`]'s; nothing is read through the place `make` is handed until this
+    /// returns, as it holds no value before.
+    pub unsafe fn placed_with(
+        at: NonNull<u8>,
+        memory: NonNull<Kept>,
+        make: impl FnOnce(NonNull<T>) -> T,
+    ) -> Self {
+        let held = at.cast::<Held<T>>().as_ptr();
+        // SAFETY: the caller's: `at` is valid for a `Held<T>`, so the place of its value lies
+        // inside it and is not null; no reference to the unwritten value is made.
+        let value_at = unsafe { NonNull::new_unchecked(ptr::addr_of_mut!((*held).value)) };
+        let value = make(value_at);
+        // SAFETY: the caller's.
+        unsafe { Self::placed(at, value, memory) }
+    }
+
     /// The count this value is held by: what a holder that keeps only a pointer to it retains and
     /// releases ([`Kept::retain`], [`Kept::release`]).
-    pub(crate) fn kept(this: &Self) -> NonNull<Kept> {
+    pub fn kept(this: &Self) -> NonNull<Kept> {
         this.at.cast()
+    }
+
+    /// The value, where it lies: what a holder that keeps no count names it by, and what
+    /// [`Self::retain_live`] and [`Self::from_counted`] are handed back.
+    pub fn as_ptr(this: &Self) -> NonNull<T> {
+        // SAFETY: `at` is a live `Held<T>`, so the place of its value is not null.
+        unsafe { NonNull::new_unchecked(ptr::addr_of_mut!((*this.at.as_ptr()).value)) }
+    }
+
+    /// Whether the two hold the same value.
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        this.at == other.at
+    }
+
+    /// How many holders the value has now, `this` among them.
+    pub fn holders(this: &Self) -> usize {
+        // SAFETY: this holder keeps the count alive.
+        unsafe { this.at.as_ref() }
+            .kept
+            .count
+            .load(Ordering::Relaxed)
+    }
+
+    /// The count of the value at `value`, which lies in a `Held<T>` after it.
+    ///
+    /// # Safety
+    /// `value` is what [`Self::as_ptr`] answered of a holder of this type.
+    unsafe fn held_of(value: NonNull<T>) -> NonNull<Held<T>> {
+        let at = value
+            .as_ptr()
+            .cast::<u8>()
+            .wrapping_sub(core::mem::offset_of!(Held<T>, value));
+        // SAFETY: the caller's: the value lies at that offset of its `Held<T>`, which is not null.
+        unsafe { NonNull::new_unchecked(at.cast::<Held<T>>()) }
+    }
+
+    /// A holder of the value at `value`, taken while one of its holders is left; `None` once
+    /// its last holder let go, though its place still stands.
+    ///
+    /// # Safety
+    /// `value` is what [`Self::as_ptr`] answered of a holder of this type, and the place of its
+    /// `Held<T>` stands: the memory it lies in was not given back.
+    pub unsafe fn retain_live(value: NonNull<T>) -> Option<Self> {
+        // SAFETY: the caller's.
+        let at = unsafe { Self::held_of(value) };
+        // SAFETY: the caller's: the count's place stands, whatever it counts.
+        unsafe { at.as_ref() }
+            .kept
+            .retain_live()
+            .then_some(Self { at })
+    }
+
+    /// A holder of the value at `value` that takes over a count already taken of it (by
+    /// [`Kept::retain_live`] on [`Self::kept`], say), and gives it back when dropped.
+    ///
+    /// # Safety
+    /// `value` is what [`Self::as_ptr`] answered of a holder of this type, and the caller hands
+    /// over one count it holds of it, used by nothing else after.
+    pub unsafe fn from_counted(value: NonNull<T>) -> Self {
+        Self {
+            // SAFETY: the caller's.
+            at: unsafe { Self::held_of(value) },
+        }
     }
 
     /// The last holder of a value of the heap let go: the value and its memory go.
@@ -214,7 +343,9 @@ mod tests {
         let drops = Cell::new(0);
         let first = Shared::boxed(Counted(&drops));
         let second = first.clone();
+        assert_eq!(Shared::holders(&second), 2, "the clone took a count");
         drop(first);
+        assert_eq!(Shared::holders(&second), 1, "the drop gave its count back");
         assert_eq!(drops.get(), 0, "a holder is left");
         assert!(core::ptr::eq(second.0, &drops));
         drop(second);
@@ -257,4 +388,72 @@ mod tests {
         // SAFETY: the count gave its place up; the box is taken back once, here.
         drop(unsafe { Box::from_raw(memory.as_ptr()) });
     }
+
+    /// A holder reached by the value's place alone takes a count while a holder is left, and the
+    /// value is dropped by the last of them; once it was, its place, which still stands, is not
+    /// held again. Turned red by a `retain_live` that takes a count from no holder, or by a
+    /// value found at another offset than the one `placed` wrote it at.
+    #[test]
+    fn a_value_reached_by_its_place_is_held_only_while_a_holder_is_left() {
+        let drops = Cell::new(0);
+        let mut room = MaybeUninit::<[u64; 16]>::uninit();
+        let memory = NonNull::from(Box::leak(Box::new(Kept::new(given_back_unseen))));
+        // SAFETY: as in `a_placed_value_keeps_its_memory_until_its_last_holder`.
+        let first =
+            unsafe { Shared::placed(NonNull::from(&mut room).cast(), Counted(&drops), memory) };
+        let at = Shared::as_ptr(&first);
+        // SAFETY: `at` is the value's place, whose room stands for the whole test.
+        let reached = unsafe { Shared::<Counted<'_>>::retain_live(at) }.expect("a holder is left");
+        assert!(Shared::ptr_eq(&first, &reached));
+        assert!(
+            core::ptr::eq(reached.0, &drops),
+            "the value read where it lies"
+        );
+        // SAFETY: a holder is left, so the count's place is live.
+        assert!(unsafe { Shared::kept(&first).as_ref() }.retain_live());
+        // SAFETY: the count taken just above is handed over, once.
+        let counted = unsafe { Shared::<Counted<'_>>::from_counted(at) };
+        drop(first);
+        drop(reached);
+        assert_eq!(drops.get(), 0, "the counted holder is left");
+        drop(counted);
+        assert_eq!(drops.get(), 1, "dropped once, by the last");
+        // SAFETY: the room still stands, though no holder is left.
+        assert!(unsafe { Shared::<Counted<'_>>::retain_live(at) }.is_none());
+        // SAFETY: the memory's own holder lets go, its last.
+        unsafe { Kept::release(memory) };
+        // SAFETY: the count gave its place up; the box is taken back once, here.
+        drop(unsafe { Box::from_raw(memory.as_ptr()) });
+    }
+
+    /// A value made from the place it is written at lies at the place it was handed. Turned red by
+    /// a place handed to the maker other than the one the value is read at.
+    #[test]
+    fn a_value_made_from_its_place_lies_there() {
+        let drops = Cell::new(0);
+        let mut room = MaybeUninit::<[u64; 16]>::uninit();
+        let memory = NonNull::from(Box::leak(Box::new(Kept::new(given_back_unseen))));
+        let handed = Cell::new(None);
+        // SAFETY: as in `a_placed_value_keeps_its_memory_until_its_last_holder`.
+        let made = unsafe {
+            Shared::placed_with(NonNull::from(&mut room).cast(), memory, |at| {
+                handed.set(Some(at));
+                Counted(&drops)
+            })
+        };
+        assert_eq!(
+            handed.get(),
+            Some(Shared::as_ptr(&made)),
+            "made where it lies"
+        );
+        drop(made);
+        assert_eq!(drops.get(), 1);
+        // SAFETY: the memory's own holder lets go, its last.
+        unsafe { Kept::release(memory) };
+        // SAFETY: the count gave its place up; the box is taken back once, here.
+        drop(unsafe { Box::from_raw(memory.as_ptr()) });
+    }
+
+    /// What the memory's last count does where another test reads `GIVEN_BACK`: nothing.
+    unsafe fn given_back_unseen(_kept: NonNull<Kept>) {}
 }

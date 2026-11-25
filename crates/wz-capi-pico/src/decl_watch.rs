@@ -35,7 +35,6 @@
 //! callback reads once `wz_ext_decl_watch_drop` returns, as after an undeclare of pico's own
 //! entities; dropped from inside the callback, the drop runs when the callback returns.
 
-use alloc::sync::Arc;
 use core::ffi::{c_char, c_void};
 
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
@@ -49,7 +48,7 @@ use crate::refusal::{refusal_code, Door};
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
-use crate::session::{engine_held, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, session_handle, z_loaned_session_t, EngineHold};
 
 /// The peer declared an entity.
 pub const WZ_EXT_DECL_DECLARED: u8 = 0;
@@ -121,7 +120,7 @@ type WatchClosure = CClosure<Option<wz_ext_decl_watch_fn>>;
 /// which the watch's drop retracts. It lies in the watch's place, a place of the session's own for
 /// the kind (`crate::object_slot::Kind::DeclWatch`).
 pub(crate) struct WatchState {
-    engine: Arc<Engine>,
+    engine: EngineHold,
     id: DeclWatchId,
 }
 
@@ -243,7 +242,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
         let object = place
             .fill(Answering::keeping(
                 WatchState {
-                    engine: Arc::clone(engine),
+                    engine: crate::session::EngineHold::clone(engine),
                     id: 0,
                 },
                 WatchKept { closure, entity },
@@ -254,7 +253,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
         let kept = kept_at::<WatchState, WatchKept>(object);
         count_in_entity::<WatchState, WatchKept, _>(object, &mut (*kept).closure);
         match wz_capi_port::SessionEngine::declare_decl_watch(
-            Arc::as_ref(engine),
+            crate::session::EngineHold::as_ref(engine),
             plane,
             watch_sink_at(object),
         ) {
@@ -294,7 +293,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_drop(watch: *mut wz_ext_owned_decl_wa
         // slot is null from the line above.
         let object = val.cast::<WatchState>();
         wz_capi_port::SessionEngine::undeclare_decl_watch(
-            Arc::as_ref(&(*object).engine),
+            crate::session::EngineHold::as_ref(&(*object).engine),
             (*object).id,
         );
         closures_of::<WatchState, WatchKept>(object).wait_none();
@@ -510,7 +509,7 @@ mod tests {
         let handle = unsafe { session_handle(loaned) }.expect("an open session has its handle");
         let engine = engine_held(handle).clone();
         // How many watch places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &EngineHold| {
             let claimed: alloc::vec::Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::DeclWatch)).collect();
             claimed.len()

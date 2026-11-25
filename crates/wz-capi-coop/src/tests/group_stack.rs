@@ -22,6 +22,7 @@ use wz_session_core::WhatAmI;
 
 use super::{client_config, config_zid};
 use crate::app_link::AppLinks;
+use crate::EngineHold;
 use crate::{CoopConfig, CoopEngine, OpenError};
 
 pub(super) type Engine = CoopEngine<AppLinks, PosixClock>;
@@ -208,7 +209,7 @@ pub(super) fn open_member(
     network: &Arc<Network>,
     member: u8,
     config: CoopConfig,
-) -> Result<Arc<Engine>, OpenError> {
+) -> Result<EngineHold<Engine>, OpenError> {
     let own = Arc::new(Mutex::new(Weak::new()));
     let transport = Arc::new(AppTransport::new(
         Box::new(Table(Mutex::new(AppLinkTable::new()))),

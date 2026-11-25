@@ -2798,6 +2798,34 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the threads inside callbacks at once, and zenoh-pico keeps no record of them. Eight is the read task of each of the HELD_SESSIONS default four sessions, the threads that deliver on their own, and one program thread beside each that delivers in place (a put to its own subscriber, a get of its own queryable)."
 
 [[limit]]
+id = "ENGINE_ROWS"
+kconfig = "WZ_LIMIT_ENGINE_ROWS"
+kind = "bound"
+driven = "local"
+default = 256
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The sessions open at once in a process: the rows of the one table a reach
+of a session's engine names it by. A holder that must not keep the session
+open (a key expression the program keeps, a query kept past its callback,
+a cancellation token) holds a row and its generation. The close of a
+session vacates its row and moves the generation on, so a reach kept past
+the close reaches nothing. The open of one more session is refused.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the sessions a process opens, and zenoh-pico reaches a session from a weak handle of the heap. Two hundred fifty-six rows hold the sessions a host program opens at once, and the parallel run of a test suite, whose tests open their sessions side by side in one process, stays under them; the table lies in static memory, three words a row under one lock (6 KiB on a 64-bit host), and takes nothing of the heap."
+
+[limit.pico_preset]
+value = 2
+reason = "As HELD_SESSIONS's preset: a program of the pico C ABI holds two sessions at once, and each open session holds one row."
+
+[[limit]]
 id = "HELD_SAMPLES"
 kconfig = "WZ_LIMIT_HELD_SAMPLES"
 kind = "bound"

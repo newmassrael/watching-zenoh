@@ -42,7 +42,6 @@ std::thread_local! {
 
 /// `f`'s answer, every allocation this thread asks for while it runs refused: what a caller of
 /// the heap does when the heap is full, with nothing taken from it.
-#[cfg(feature = "session-unicast")]
 pub(crate) fn refused<R>(f: impl FnOnce() -> R) -> R {
     REFUSING.with(|refusing| refusing.set(true));
     let answer = f();
@@ -688,6 +687,7 @@ fn an_opening_runtime_places_what_its_open_spawns_and_nothing_once_sealed() {
         Refusals {
             no_task_cell: 1,
             too_large: 1,
+            heap_refused: 0,
         }
     );
     small.abort();
@@ -733,6 +733,7 @@ fn an_opening_runtime_adds_no_cell_past_the_ones_it_may_add() {
         Refusals {
             no_task_cell: 1,
             too_large: 0,
+            heap_refused: 0,
         }
     );
     small.abort();
@@ -908,9 +909,9 @@ fn a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_h
     let ((), allocated) = allocations(|| {
         // SAFETY: as above; the span is freed only after its memory's count was given back.
         let place = unsafe { RuntimePlace::new(span, layout.size(), memory) };
-        let runtime = CoopRuntime::placed(Hand(&NOW), rows, form, place).expect("the span fits");
+        let (runtime, local) =
+            CoopRuntime::placed(Hand(&NOW), rows, form, place).expect("the span fits");
         assert_eq!(runtime.timers().capacity(), 1, "the entries are the span's");
-        let local = CoopLocalSet::new(&runtime);
         let handle = local.spawn_local(core::future::poll_fn(move |cx| {
             *stash.borrow_mut() = Some(cx.waker().clone());
             Poll::<()>::Pending
@@ -941,6 +942,103 @@ fn a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_h
         std::alloc::dealloc(span.as_ptr(), layout);
         drop(std::boxed::Box::from_raw(memory.as_ptr()));
     }
+}
+
+/// How many times the memory of a placed runtime's span was given back, in
+/// `a_runtime_placed_for_an_open_that_adds_cells_is_refused_by_a_full_heap`.
+static OPENING_GIVEN_BACK: AtomicU32 = AtomicU32::new(0);
+
+/// What the last count of that span's memory does: it records that it ran.
+unsafe fn opening_given_back(_kept: NonNull<Kept>) {
+    OPENING_GIVEN_BACK.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A runtime placed for an open that adds cells takes the table of the added cells of the heap: a
+/// heap that refuses it places no runtime, ends nothing and keeps no count of the span, and the
+/// same span with the heap's memory places one. Turned red by added cells whose refusal ends the
+/// program, or by a refusal that keeps a count of the span.
+#[test]
+fn a_runtime_placed_for_an_open_that_adds_cells_is_refused_by_a_full_heap() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    let rows = RuntimeRows {
+        tasks: 1,
+        task_bytes: 256,
+        timers: 0,
+    };
+    let form = RuntimeForm::Opening { added: 1 };
+    let layout = CoopRuntime::<Hand>::placed_layout(rows, form).expect("a span of these rows");
+    // SAFETY: the layout is not of zero bytes: it holds the runtime's state.
+    let span = NonNull::new(unsafe { std::alloc::alloc(layout) }).expect("the host has the memory");
+    let memory = NonNull::from(std::boxed::Box::leak(std::boxed::Box::new(Kept::new(
+        opening_given_back,
+    ))));
+    // SAFETY: the span is the layout's bytes, used by nothing else while a count of its memory is
+    // held; the memory's count is live until it is given back below.
+    let place = || unsafe { RuntimePlace::new(span, layout.size(), memory) };
+    let placed_none = refused(|| CoopRuntime::placed(Hand(&NOW), rows, form, place()).is_none());
+    assert!(placed_none, "a full heap places no runtime");
+    let opened = CoopRuntime::placed(Hand(&NOW), rows, form, place());
+    assert!(
+        opened.is_some(),
+        "CONTROL: with the heap's memory the same span places one"
+    );
+    drop(opened);
+    // SAFETY: the memory's own holder lets go of its count, once.
+    unsafe { Kept::release(memory) };
+    assert_eq!(
+        OPENING_GIVEN_BACK.load(Ordering::SeqCst),
+        1,
+        "neither the refusal nor the runtime keeps a count of the span"
+    );
+    // SAFETY: the memory's last count ran; the span and the count are freed once, here.
+    unsafe {
+        std::alloc::dealloc(span.as_ptr(), layout);
+        drop(std::boxed::Box::from_raw(memory.as_ptr()));
+    }
+}
+
+/// A spawn during an open whose added cell the heap refuses its bytes is refused as the heap's,
+/// counted apart from a task too large, and ends nothing; the same spawn with the heap's memory
+/// takes the cell. Turned red by a refusal that ends the program, or one named or counted as a
+/// task too large.
+#[test]
+fn a_spawn_whose_cell_bytes_the_heap_refuses_is_refused_as_the_heaps() {
+    let rows = RuntimeRows {
+        tasks: 0,
+        task_bytes: 0,
+        timers: 0,
+    };
+    let runtime = CoopRuntime::opening(Still, rows, 1);
+    let local = CoopLocalSet::new(&runtime);
+    let spawned = refused(|| {
+        local
+            .try_spawn_local(async { 1u8 })
+            .map(drop)
+            .map_err(|refused| refused.why)
+    });
+    assert_eq!(spawned, Err(SpawnRefusal::HeapRefused));
+    assert_eq!(
+        runtime.task_refusals(),
+        Refusals {
+            no_task_cell: 0,
+            too_large: 0,
+            heap_refused: 1,
+        }
+    );
+    assert!(
+        local.try_spawn_local(async { 1u8 }).is_ok(),
+        "CONTROL: with the heap's memory the cell takes the task"
+    );
+}
+
+/// A value the heap refuses its memory is handed back, and the same value with the heap's memory
+/// is held. Turned red by a try that ends the program, or drops the value it was refused.
+#[test]
+fn a_value_the_heap_refuses_is_handed_back() {
+    let back = refused(|| crate::kept::Shared::try_boxed(7u32));
+    assert!(matches!(back, Err(7)), "the value comes back");
+    let held = crate::kept::Shared::try_boxed(7u32);
+    assert!(held.is_ok_and(|held| *held == 7), "CONTROL: held");
 }
 
 /// A task no handle waits for is over in the pass that polls it: its cell is free when the pass

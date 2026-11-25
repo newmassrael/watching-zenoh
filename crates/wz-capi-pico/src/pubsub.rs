@@ -26,6 +26,7 @@
 //!   marshaled sample is opaque to the C code — it only borrows it (valid for
 //!   the duration of `call`) and reads the keyexpr / payload back out.
 
+#[cfg(test)]
 use alloc::sync::Arc;
 use core::ffi::{c_int, c_void};
 
@@ -1686,7 +1687,7 @@ impl z_owned_publisher_t {
 /// lies in its place ([`SubscriberPlace`]) beside the C closure the row calls, which outlives it
 /// until the row lets go of it.
 pub(crate) struct SubscriberState {
-    pub(crate) shared: Arc<Engine>,
+    pub(crate) shared: crate::session::EngineHold,
     /// The declaration, once made: the place is filled before the subscriber is declared, as the
     /// closure its row calls lies in it, and one whose declaration was refused is let go of with
     /// none.
@@ -1764,14 +1765,14 @@ pub(crate) type SubscriberPlace = crate::object_slot::Answering<SubscriberState,
 /// `closure` is counted in no owner yet (`CClosure::uncounted`).
 pub(crate) unsafe fn fill_subscriber_place(
     slot: crate::object_slot::Slot<SubscriberPlace>,
-    engine: &Arc<Engine>,
+    engine: &crate::session::EngineHold,
     closure: CClosure,
     session: Option<crate::ffi::HeldIn>,
 ) -> *mut SubscriberState {
     let state = slot
         .fill(crate::object_slot::Answering::keeping(
             SubscriberState {
-                shared: Arc::clone(engine),
+                shared: crate::session::EngineHold::clone(engine),
                 declared: None,
                 loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             },
@@ -3549,7 +3550,7 @@ unsafe fn declare_subscriber_with(
 /// `keyexpr` is a live loan whose key is `ke`; `options` null or valid.
 unsafe fn declare_subscriber_in(
     handle: &crate::session::PicoSessionHandle,
-    engine: &Arc<Engine>,
+    engine: &crate::session::EngineHold,
     keyexpr: *const z_loaned_keyexpr_t,
     ke: &str,
     options: *const crate::session::z_subscriber_options_t,
@@ -3562,14 +3563,14 @@ unsafe fn declare_subscriber_in(
     // the `DeclSubscriber` is then announced on the CALLER's key, a literal for a view
     // (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few lines on).
     let key = DeclaredKeyexpr::declare_non_wild_prefix(engine, ke, declared_of(keyexpr))?;
-    let wire = subscriber_wire(keyexpr, Arc::as_ref(engine), &key);
+    let wire = subscriber_wire(keyexpr, crate::session::EngineHold::as_ref(engine), &key);
     // A peer or router-hat session retracts the subscription naming ITS key
     // (`_z_undeclare_subscriber`), which is the prefix declaration above and not the caller's key
     // the announce went out on. A background subscriber's record holds that declaration
     // (`WireKey::with_own`), so the id it names stays declared as long as it can retract.
     let retraction = key.retraction_naming_in(
         crate::write_filter::session_mode(handle),
-        Arc::as_ref(engine),
+        crate::session::EngineHold::as_ref(engine),
     );
     // A refused subscriber answers pico's code for its cause; the engine dropped the sink, so
     // the closure's drop has run.
@@ -4125,7 +4126,7 @@ mod tests {
         let handle = unsafe { session_handle(z_session_loan(&session)) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many subscriber places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>| {
+        let free = |engine: &crate::session::EngineHold| {
             let claimed: alloc::vec::Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Subscriber))
                     .collect();
