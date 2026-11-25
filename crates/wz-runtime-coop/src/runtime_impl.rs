@@ -530,10 +530,19 @@ impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
 
     /// Keep the runtime's task table to the lock of `O`'s engine: on a host its passes take no
     /// section of the process, a lock every session of the program shares, since that engine's
-    /// lock already keeps the table to one thread. What `O`'s `unsafe impl ConfinedOwner`
-    /// answers for when its engine calls this on a runtime it made and has handed to nothing yet.
-    /// Nothing where the section is not a lock of the host's.
-    pub fn confine_tasks<O: ConfinedOwner>(&self) {
+    /// lock already keeps the table to one thread. Nothing where the section is not a lock of the
+    /// host's.
+    ///
+    /// # Safety
+    ///
+    /// From this call until the runtime's last handle is gone, its task table is reached by one
+    /// thread at a time: every spawn on it or on its local set, every pass over it, and every poll,
+    /// abort and drop of a handle of one of its tasks happens under the one lock of `O`'s engine,
+    /// or in the one frame that owns the runtime before it is put behind that lock or after the
+    /// engine has let go of it; no handle of the runtime or of its local set is handed out of the
+    /// lock to be used without it. A waker of one of its tasks, which only raises a flag, may be
+    /// woken from anywhere.
+    pub unsafe fn confine_tasks<O: ConfinedOwner>(&self) {
         #[cfg(feature = "host-lock")]
         self.inner.executor.confine();
     }

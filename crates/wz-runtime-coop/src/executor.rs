@@ -1046,8 +1046,8 @@ impl ExecutorState {
         }
     }
 
-    /// From now on the table is reached only under one lock of the engine that owns it, as
-    /// `crate::sync::ConfinedOwner` states for that engine (`CoopRuntime::confine_tasks`): a
+    /// From now on the table is reached only under one lock of the engine that owns it, as the
+    /// caller of `CoopRuntime::confine_tasks` states under that function's contract: a
     /// pass over its cells, and a look for the cell at a place, take no section of the process,
     /// which on a host is a lock every session of the program shares. A waker, which only raises
     /// a cell's flag, may still be woken from anywhere.

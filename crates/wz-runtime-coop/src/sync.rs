@@ -193,10 +193,8 @@ impl LockKind for Shared {
 /// for as long as it lives: each `Runtime::with_mutex_mut` / `try_with_mutex_mut` on it runs
 /// under one lock the implementor's engine holds around every path to the session's state, or in
 /// the one frame that owns the value, and nothing that holds such a value is handed out of that
-/// lock to be used without it. A runtime the engine confines to its lock
-/// (`CoopRuntime::confine_tasks`) is reached the same way from that call on: its spawns, its
-/// passes, its local set and the handles of its tasks, all under the lock; only a waker of one of
-/// its tasks, which raises a flag, is woken from anywhere.
+/// lock to be used without it. A runtime the engine confines to its lock is bound by the contract
+/// of `CoopRuntime::confine_tasks`, which its call states.
 #[cfg(feature = "runtime")]
 pub unsafe trait ConfinedOwner: 'static {}
 
