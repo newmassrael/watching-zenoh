@@ -579,11 +579,11 @@ pub(super) struct GroupFace<W> {
     /// What the session's watchers of its faces are told of the members (`connectivity`).
     #[cfg(feature = "connectivity")]
     events: Rc<MemberEvents>,
-    /// The generation a member's query is held and answered under, and the sink its answers are
-    /// queued through (`queryable`).
+    /// The generation a member's query is held and answered under (`queryable`).
     #[cfg(feature = "queryable")]
     generation: u64,
-    #[cfg(feature = "queryable")]
+    /// The sink a member's query is answered through and a declaration of the application's
+    /// answers the members' Interests on ([`Self::replies`]).
     replies: GroupReplies,
     /// The request id the group's next get is asked under: the group's own, as each link's are
     /// its own, so a member's answer names it on this face alone (`query`).
@@ -700,7 +700,6 @@ impl<W: LinkWaits> GroupFace<W> {
             rejoin_at_us: None,
             #[cfg(feature = "queryable")]
             generation,
-            #[cfg(feature = "queryable")]
             replies: MulticastReplySink::new(tx.clone()),
             #[cfg(feature = "query")]
             next_request: Cell::new(0),
