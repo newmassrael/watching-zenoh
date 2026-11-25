@@ -1673,6 +1673,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # dictionary and a parsed document; the filter is the module path. Its reply-frame tests also
     # need `codec-response` and its registry tests `pubsub-put`, so the leg builds both.
     "wz-session-core|hook|shared-key-ids,codec-response,pubsub-put|shared_key_ids::"
+    # A reply whose key a deployment's shared ids name (`lent_response`'s mirrored key): written by
+    # the direct writer as the codec's owned reply names it. Its test is built with
+    # `shared-key-ids`; the filter is the module path.
+    "wz-session-core|hook|shared-key-ids,codec-response|lent_response::"
     # The unicast receive's per-path counts (`rx-in-place`, which the cooperative runtime forwards):
     # a receive built in place starts with none, and each path is counted under its own name. The
     # filter is the module path. The module is built with `storage-profile` and `session-unicast`.
