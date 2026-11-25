@@ -838,6 +838,13 @@ pub trait EngineHolder: Clone + Send + Sync + 'static + Deref<Target: SessionEng
     /// A holder of the engine `handle` reaches, while it can be: `None` once it can no longer.
     fn upgrade(handle: &Self::Handle) -> Option<Self>;
 
+    /// Whether the session of the engine `handle` reaches has been closed, or is gone: what a
+    /// reply asks before anything else. A holder whose handle tells it without reaching the
+    /// engine answers so; the provided answer reaches it for the length of the question.
+    fn handle_closed(handle: &Self::Handle) -> bool {
+        Self::upgrade(handle).is_none_or(|engine| SessionEngine::is_closed(&*engine))
+    }
+
     /// Whether the two hold the same engine.
     fn ptr_eq(this: &Self, other: &Self) -> bool;
 }

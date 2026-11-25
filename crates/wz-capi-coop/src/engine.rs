@@ -6491,6 +6491,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         let redial_ms = core.config.redial_ms;
         if core.poll_links(redial_ms, now_us).is_err() {
+            // A handle reads the session closed from its row from here on, as after a close.
+            self.reach.end();
             self.closed.store(true, Ordering::Release);
             return Stepped::Closed;
         }

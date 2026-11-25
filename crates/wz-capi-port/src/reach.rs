@@ -11,10 +11,13 @@
 //! the close finds another generation, or the row vacant, and reaches nothing, whatever the row
 //! holds since. Reaching takes a count of the engine under the row's lock, the lock the close
 //! takes the engine out under, so an engine is never reached past its close nor once its last
-//! holder has let go. The table takes no memory of the heap, and a reach is two words.
+//! holder has let go. Whether the session is still open is read from the row's mark alone, with
+//! no lock and no count ([`ReachEngine::is_current`]): a reply asks it of every answer. The table
+//! takes no memory of the heap, and a reach is two words.
 
 use core::ops::Deref;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use wz_session_core::caps;
 
@@ -47,30 +50,46 @@ pub unsafe trait Reachable: Send + Sync {
     }
 }
 
-/// One row of the table: the engine it holds while that engine's session is open, and its mark:
-/// the generation it is at, in every bit but [`CLAIMED`], and whether an open has taken it for the
-/// engine it is making, in that bit. Folded in one word, a row is the engine's two words and one
-/// more.
+/// One row of the table: the engine it holds while that engine's session is open. Its mark lies
+/// beside it, in [`MARKS`] at the same place.
 struct Row {
     engine: Option<NonNull<dyn Reachable>>,
-    mark: u32,
 }
 
 /// The bit of a row's mark that says an open has taken the row for the engine it is making.
 const CLAIMED: u32 = 1;
 
-/// What a row's mark moves on by at a close: one generation, in the bits above [`CLAIMED`].
-const GENERATION_STEP: u32 = 2;
+/// The bit of a row's mark that says the session of the engine it holds ended on its own, its
+/// engine still in the row: reached as before, but no longer current ([`ReachEngine::end`]).
+const ENDED: u32 = 2;
 
-impl Row {
-    /// The generation the row is at.
-    fn generation(&self) -> u32 {
-        self.mark & !CLAIMED
-    }
+/// What a row's mark moves on by at a close: one generation, in the bits above [`CLAIMED`] and
+/// [`ENDED`].
+const GENERATION_STEP: u32 = 4;
 
-    /// Whether the row holds no engine and no open has taken it.
-    fn is_vacant(&self) -> bool {
-        self.engine.is_none() && self.mark & CLAIMED == 0
+/// The generation a row's mark is at.
+const fn generation(mark: u32) -> u32 {
+    mark & !(CLAIMED | ENDED)
+}
+
+/// The mark of each row: the generation it is at, whether an open has taken it for the engine it
+/// is making ([`CLAIMED`]), and whether that engine's session ended ([`ENDED`]). Written only
+/// under the table's lock; read under it, and without it by [`ReachEngine::is_current`], which a
+/// lock-free load answers because every change of a mark is one store.
+static MARKS: [AtomicU32; caps::ENGINE_ROWS] = [const { AtomicU32::new(0) }; caps::ENGINE_ROWS];
+
+/// The mark of the row at `row`, read under the table's lock.
+fn mark_of(row: usize) -> u32 {
+    MARKS
+        .get(row)
+        .map_or(0, |mark| mark.load(Ordering::Relaxed))
+}
+
+/// Set the mark of the row at `row`, under the table's lock: published to a lock-free reader of
+/// it with what was written before.
+fn set_mark(row: usize, value: u32) {
+    if let Some(mark) = MARKS.get(row) {
+        mark.store(value, Ordering::Release);
     }
 }
 
@@ -113,11 +132,11 @@ impl ReachEngine {
     /// session. The row is vacant again when the claim is let go of unfilled.
     pub fn claim() -> Option<RowClaim> {
         ROWS.with(|rows| {
-            let (row, held) = rows
-                .iter_mut()
+            let (row, _) = rows
+                .iter()
                 .enumerate()
-                .find(|(_, held)| held.is_vacant())?;
-            held.mark |= CLAIMED;
+                .find(|(row, held)| held.engine.is_none() && mark_of(*row) & CLAIMED == 0)?;
+            set_mark(row, mark_of(row) | CLAIMED);
             Some(RowClaim { row })
         })
     }
@@ -138,14 +157,42 @@ impl ReachEngine {
     /// given back. A reach whose row moved on already takes nothing out.
     pub fn clear(&self) {
         ROWS.with(|rows| {
+            let mark = mark_of(self.row);
             let named = rows
                 .get_mut(self.row)
-                .filter(|held| held.generation() == self.generation && held.engine.is_some());
+                .filter(|held| generation(mark) == self.generation && held.engine.is_some());
             if let Some(held) = named {
                 held.engine = None;
-                held.mark = held.mark.wrapping_add(GENERATION_STEP);
+                set_mark(self.row, generation(mark).wrapping_add(GENERATION_STEP));
             }
         });
+    }
+
+    /// Mark the engine's session as ended on its own, its engine kept in its row: what a session
+    /// a step ended says (its dial role's link lost, with no redial), so that a reach of it is no
+    /// longer current ([`Self::is_current`]) though it still reaches the engine. A reach whose row
+    /// moved on marks nothing; the close that follows clears the mark with the row.
+    pub fn end(&self) {
+        ROWS.with(|rows| {
+            let mark = mark_of(self.row);
+            let named = rows
+                .get(self.row)
+                .is_some_and(|held| generation(mark) == self.generation && held.engine.is_some());
+            if named {
+                set_mark(self.row, mark | ENDED);
+            }
+        });
+    }
+
+    /// Whether the engine is in its row and its session has not ended: what a reply asks before
+    /// anything else, answered by one load of the row's mark, with no lock and no count of the
+    /// engine. A close moves the generation on, and a step that ends the session marks it before
+    /// it says the session closed, so a reach that is not current reaches a closed session or
+    /// none. A vacant reach is never current.
+    pub fn is_current(&self) -> bool {
+        MARKS
+            .get(self.row)
+            .is_some_and(|mark| mark.load(Ordering::Acquire) == self.generation)
     }
 
     /// The engine, with a count of it kept for as long as the answer is held; `None` once its
@@ -153,7 +200,7 @@ impl ReachEngine {
     pub fn reach(&self) -> Option<Reached> {
         let engine = ROWS.with(|rows| {
             let held = rows.get(self.row)?;
-            if held.generation() != self.generation {
+            if generation(mark_of(self.row)) != self.generation {
                 return None;
             }
             let engine = held.engine?;
@@ -181,11 +228,12 @@ impl RowClaim {
         core::mem::forget(self);
         ROWS.with(|rows| {
             rows.get_mut(row).map_or_else(ReachEngine::vacant, |held| {
-                held.mark &= !CLAIMED;
+                let mark = mark_of(row) & !CLAIMED;
+                set_mark(row, mark);
                 held.engine = Some(engine);
                 ReachEngine {
                     row,
-                    generation: held.generation(),
+                    generation: generation(mark),
                 }
             })
         })
@@ -194,11 +242,7 @@ impl RowClaim {
 
 impl Drop for RowClaim {
     fn drop(&mut self) {
-        ROWS.with(|rows| {
-            if let Some(held) = rows.get_mut(self.row) {
-                held.mark &= !CLAIMED;
-            }
-        });
+        ROWS.with(|_| set_mark(self.row, mark_of(self.row) & !CLAIMED));
     }
 }
 
@@ -451,15 +495,46 @@ mod tests {
         );
     }
 
-    /// A row is the engine's two words and one more: its generation and its claim share one word,
-    /// and the table's one lock is not in it. Turned red by a row that holds its claim in a word
-    /// of its own on a 32-bit target, or a lock of its own.
+    /// A row is the engine's two words, its mark one word of 32 bits beside it: the generation,
+    /// the claim and the end share that word, and the table's one lock is in neither. Turned red
+    /// by a row that holds its mark, or a lock, of its own, or a mark wider than 32 bits.
     #[test]
-    fn a_row_is_three_words() {
+    fn a_row_is_the_engines_two_words_and_its_mark_one_word_of_32_bits() {
         assert_eq!(
             core::mem::size_of::<Row>(),
-            3 * core::mem::size_of::<usize>()
+            2 * core::mem::size_of::<usize>()
         );
+        assert_eq!(core::mem::size_of_val(&MARKS), caps::ENGINE_ROWS * 4);
+    }
+
+    /// An open engine's reach is current. Once its session ends on its own the reach is no longer
+    /// current, though it still reaches the engine; the close clears the end with the row, so the
+    /// row's next engine is current, and an old reach's end marks nothing of it. A vacant reach is
+    /// never current. Turned red by an end that marks nothing, an ended engine no longer reached, a
+    /// clear that leaves the end on the row for its next engine, or an old reach that ends it.
+    #[test]
+    fn an_ended_session_is_reached_but_not_current_until_its_row_is_cleared() {
+        let _serial = SERIAL.lock().unwrap_or_else(|held| held.into_inner());
+        let first = Counted::held();
+        let old = put(&first).expect("a vacant row");
+        assert!(old.is_current(), "an open engine's reach is current");
+        old.end();
+        assert!(!old.is_current(), "ended, it is not current");
+        drop(old.reach().expect("an ended engine is still reached"));
+        old.clear();
+        assert!(!old.is_current(), "closed, it is not current");
+        let second = Counted::held();
+        let new = put(&second).expect("a vacant row");
+        assert_eq!(new.row, old.row, "the cleared row takes the next engine");
+        assert!(new.is_current(), "the end went with the clear");
+        old.end();
+        assert!(
+            new.is_current(),
+            "an old reach ends nothing of the next engine"
+        );
+        assert!(!ReachEngine::vacant().is_current());
+        new.clear();
+        assert_eq!(first.holders(), 1, "nothing was kept of the ended engine");
     }
 
     /// With every row holding an engine, one more is refused; a row cleared takes the next.

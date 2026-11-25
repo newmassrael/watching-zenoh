@@ -487,9 +487,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
     }
 
     fn session_closed(&self) -> bool {
-        self.engine
-            .upgrade()
-            .is_none_or(|engine| super::SessionEngine::is_closed(&*engine))
+        !self.engine.is_open()
     }
 }
 

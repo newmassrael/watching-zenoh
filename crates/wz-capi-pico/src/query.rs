@@ -367,9 +367,7 @@ impl Deferred {
 
     /// Whether the session the query came in on has been closed, or is gone.
     fn session_closed(&self) -> bool {
-        self.engine
-            .upgrade()
-            .is_none_or(|engine| wz_capi_port::SessionEngine::is_closed(&*engine))
+        <crate::session::EngineHold as wz_capi_port::EngineHolder>::handle_closed(&self.engine)
     }
 }
 
