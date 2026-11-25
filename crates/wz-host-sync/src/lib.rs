@@ -29,6 +29,9 @@
 //!
 //! [`OnceLock`] is a process-wide value made by its first caller at run time, in the shape of
 //! `std`'s, filled and read without memory of the heap.
+//!
+//! [`env_var`] reads the text the process's environment holds for a name, from the host's own copy
+//! of it, so a setting stated there means the same to a library without `std` as to one with it.
 
 #![no_std]
 #![cfg(any(unix, windows))]
@@ -620,6 +623,15 @@ pub fn current_thread() -> usize {
     sys::current_thread()
 }
 
+/// The text the process's environment holds for `name`, handed to `read` while it reads it, or
+/// `None` for a name the environment does not hold: the C library's `getenv` on a POSIX host, and
+/// the system's copy of the environment block on Windows, whose names are matched without regard
+/// to ASCII case as the system matches them. A program that changes its environment while another
+/// thread reads it races here as it does in C, since no lock of the C library's is reachable.
+pub fn env_var<R>(name: &core::ffi::CStr, read: impl FnOnce(Option<&[u8]>) -> R) -> R {
+    sys::env_var(name, read)
+}
+
 /// Sleep the calling thread for at least `ms` milliseconds.
 pub fn sleep_ms(ms: u64) {
     sys::sleep_ms(ms);
@@ -641,6 +653,19 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use std::vec::Vec;
+
+    /// The text the environment holds for a name is handed over whole, and a name it does not hold
+    /// reads as none. Turned red by an `env_var` that answers none, or the text of another name.
+    #[test]
+    fn the_environment_s_text_is_read_by_its_name() {
+        std::env::set_var("WZ_HOST_SYNC_ENV_READ_BACK", "512");
+        assert_eq!(
+            env_var(c"WZ_HOST_SYNC_ENV_READ_BACK", |value| value
+                .map(<[u8]>::to_vec)),
+            Some(b"512".to_vec())
+        );
+        assert!(!env_var(c"WZ_HOST_SYNC_ENV_NEVER_SET", |value| value.is_some()));
+    }
 
     /// A counter behind a lock, shared by threads.
     struct Counted {

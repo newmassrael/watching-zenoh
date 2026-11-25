@@ -493,6 +493,18 @@ pub(crate) fn current_thread() -> usize {
     unsafe { libc::pthread_self() as usize }
 }
 
+pub(crate) fn env_var<R>(name: &core::ffi::CStr, read: impl FnOnce(Option<&[u8]>) -> R) -> R {
+    // SAFETY: `name` ends with its NUL; a value the C library answers is a string of the
+    // environment's, which ends with its NUL and is read before this returns.
+    let value = unsafe { libc::getenv(name.as_ptr()) };
+    if value.is_null() {
+        read(None)
+    } else {
+        // SAFETY: as above.
+        read(Some(unsafe { core::ffi::CStr::from_ptr(value) }.to_bytes()))
+    }
+}
+
 /// # Safety
 /// `thread` is a started thread that nothing has joined or detached.
 pub(crate) unsafe fn join(thread: Thread) {
