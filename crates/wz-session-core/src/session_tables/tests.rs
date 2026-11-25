@@ -2712,10 +2712,10 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
 }
 
 /// A write filter's row holds the declaration its entity's key is named by from its declaration to
-/// its undeclaration, which hands back that declaration's id when the row held it last; a count
-/// with no room refuses the filter, keeping nothing and opening no Interest. Turned red by a row
-/// that takes no hold or gives none back, an undeclaration that hands back no id, or a filter kept
-/// past a full count.
+/// its undeclaration, which hands the row's hold to the caller, whose giving it back retracts the
+/// declaration when the row held it last; a count with no room refuses the filter, keeping nothing
+/// and opening no Interest. Turned red by a row that takes no hold, an undeclaration that hands
+/// none over or lets it go itself, or a filter kept past a full count.
 #[test]
 fn a_write_filter_holds_its_keys_declaration_until_it_goes() {
     let mut tables = Tables::new();
@@ -2748,7 +2748,21 @@ fn a_write_filter_holds_its_keys_declaration_until_it_goes() {
     let unwatched = tables
         .undeclare_write_filter(filter.handle, |_, _| {})
         .unwrap();
-    assert_eq!(unwatched.keyexpr, Some(declared.id), "the row held it last");
+    assert_eq!(
+        unwatched.held,
+        Some(declared.handle),
+        "the row's hold goes to the caller"
+    );
+    assert_eq!(
+        holds(&tables),
+        Some(1),
+        "kept until the caller gives it back"
+    );
+    assert_eq!(
+        tables.undeclare_keyexpr(declared.handle),
+        Some(declared.id),
+        "the row's was the last hold"
+    );
     assert_eq!(holds(&tables), None, "gone with its last holder");
 
     let full = tables.declare_keyexpr("demo/full").unwrap();

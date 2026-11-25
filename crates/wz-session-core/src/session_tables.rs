@@ -1617,9 +1617,11 @@ pub struct Unwatched<R> {
     pub row: Option<R>,
     /// The id of the Interest it held last, whose Final goes on the wire.
     pub interest_final: Option<EntityId>,
-    /// The id of the declaration it held last ([`WriteFilterRow::own`]), whose retraction goes
-    /// on the wire.
-    pub keyexpr: Option<ExprId>,
+    /// The declaration the row held that the entity's key is named by ([`WriteFilterRow::own`]),
+    /// `None` for none: the row's hold of it is the caller's from here on, given back as any
+    /// holder's is ([`SessionTables::undeclare_keyexpr`]), so a key's last hold is let go of, and
+    /// its retraction sent, by one body whoever held it.
+    pub held: Option<KeyexprHandle>,
 }
 
 /// What ending one leg of a get left of it.
@@ -2741,7 +2743,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Undeclare the write filter `handle` names, and every matching listener declared on it:
     /// `each` is handed each listener's handle and its removal, the row when no call of it runs,
     /// else [`Removal::AfterCalls`], when the call that ends last lets it go
-    /// ([`Self::release_matching_listener`]).
+    /// ([`Self::release_matching_listener`]). The row's hold of the declaration its key is named
+    /// by goes to the caller ([`Unwatched::held`]).
     pub fn undeclare_write_filter(
         &mut self,
         handle: WriteFilterHandle,
@@ -2765,11 +2768,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         }
         let removal = self.kept_write_filters_mut()?.remove(handle)?;
         let interest_final = interest.and_then(|interest| self.close_interest(interest));
-        let keyexpr = own.and_then(|own| release_keyexpr(&mut self.keyexprs, own));
         Some(Unwatched {
             row: removal.taken(),
             interest_final,
-            keyexpr,
+            held: own,
         })
     }
 
@@ -2918,7 +2920,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         Some(Unwatched {
             row: removal.taken(),
             interest_final,
-            keyexpr: None,
+            held: None,
         })
     }
 

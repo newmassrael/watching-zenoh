@@ -2963,15 +2963,16 @@ fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<
 }
 
 /// Take the write filter `handle` names out of `tables`, with the listeners declared on it, let go
-/// of there: the id of the Interest it held last, and of the declaration its key is named by when
-/// it held that last, whose retractions go on the wire; `None` when no filter is there.
+/// of there: the id of the Interest it held last, whose Final goes on the wire, and the declaration
+/// its key is named by, whose hold the row hands over for the caller to give back
+/// ([`Core::let_go_of_keyexpr`]); `None` when no filter is there.
 fn unwatch_filter(
     tables: &mut CoopTables,
     handle: WriteFilterHandle,
-) -> Option<(Option<EntityId>, Option<ExprId>)> {
+) -> Option<(Option<EntityId>, Option<KeyexprHandle>)> {
     tables
         .undeclare_write_filter_quietly(handle)
-        .map(|unwatched| (unwatched.interest_final, unwatched.keyexpr))
+        .map(|unwatched| (unwatched.interest_final, unwatched.held))
 }
 
 /// Whether the session's own entities of `plane`'s kind count for a write filter or a matching
@@ -4659,6 +4660,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .is_some_and(|row| row.holds() <= 1)
         })?;
         Some(self.place_of(DeclaredRow::of(prefix)))
+    }
+
+    /// Give back one hold of the declaration `row` names, the last retracting it: its place read
+    /// while it stands, then its row let go of, then the links told. The one body of a key's
+    /// release, for a holder the program keeps and for a write filter's row alike.
+    fn let_go_of_keyexpr(&mut self, row: KeyexprHandle) {
+        let place = self.prefix_retraction(Some(row));
+        let retracted = tables_mut(&mut self.session.registry).undeclare_keyexpr(row);
+        // The row went before the links are told: a send never finds the table borrowed.
+        self.retract_keyexpr(place, retracted);
     }
 
     /// Tell the links whose peers were told of it, and each group the session joined, that the
@@ -8316,12 +8327,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Key
         let Some(mut core) = self.live() else {
             return;
         };
-        let core = &mut core.0;
         // A row that went names nothing, whichever declaration took its slot or its id since.
-        let place = core.prefix_retraction(Some(row));
-        let retracted = tables_mut(&mut core.session.registry).undeclare_keyexpr(row);
-        // The row went before the links are told: a send never finds the table borrowed.
-        core.retract_keyexpr(place, retracted);
+        core.0.let_go_of_keyexpr(row);
     }
 
     #[inline(never)]
@@ -9066,8 +9073,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // refused, its row given back.
                 let Some(taken) = core.session.take_entity_id() else {
                     // The caller holds the declaration the row held through this call, so the
-                    // row's going is not its last holder's and retracts nothing.
-                    let _ = unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
+                    // row's hold given back is not the last and retracts nothing.
+                    if let Some((_, Some(held))) =
+                        unwatch_filter(tables_mut(&mut core.session.registry), watching.handle)
+                    {
+                        core.let_go_of_keyexpr(held);
+                    }
                     return Err(Declined::NoEntityId);
                 };
                 u64::from(taken)
@@ -9123,26 +9134,27 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             return;
         };
         let core = &mut core.0;
-        // What the links are told is placed while the row stands: its Interest, and the
-        // declaration its key is named by when the row holds that last.
-        let (place, keyexpr_place) = {
+        // Its Interest's place is read while the row stands.
+        let place = {
             let tables = tables(&core.session.registry);
             let Some(row) = tables.write_filters().get(handle) else {
                 return;
             };
-            (
-                interest_rank(tables, row.interest()),
-                core.prefix_retraction(row.own()),
-            )
+            interest_rank(tables, row.interest())
         };
-        let Some((last_held, keyexpr)) =
+        let Some((last_held, held)) =
             unwatch_filter(tables_mut(&mut core.session.registry), handle)
         else {
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
         core.end_interest(last_held, place);
-        core.retract_keyexpr(keyexpr_place, keyexpr);
+        // The row's hold of the declaration its key is named by goes back as a holder's does. The
+        // key expressions come first in the replay's order, so the Interest's end moved no place
+        // of theirs.
+        if let Some(held) = held {
+            core.let_go_of_keyexpr(held);
+        }
         // The groups it asked are told the asking ended.
         #[cfg(feature = "group")]
         for group in &core.transport.groups {
