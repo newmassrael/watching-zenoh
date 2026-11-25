@@ -188,7 +188,7 @@ pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZRes
 /// pico's unicast UDP link (`link-udp`, `Z_FEATURE_LINK_UDP_UNICAST`), `tls/` with its secure
 /// channel (`tls-mbedtls`), `serial/` with the host's ttys (`transport-link-serial`),
 /// `unixpipe/`, which pico has no link for, with the host's named FIFOs
-/// (`transport-link-unixpipe`), and `ws/` with WebSocket links over the host's TCP
+/// (`transport-link-unixpipe`, on Linux and Android; inert on a host with none), and `ws/` with WebSocket links over the host's TCP
 /// (`transport-link-ws`). A group is no unicast endpoint and is not judged here.
 #[cfg(not(feature = "engine-tokio"))]
 fn link_built(scheme: &str) -> bool {
@@ -198,7 +198,10 @@ fn link_built(scheme: &str) -> bool {
         "tls" => cfg!(feature = "tls-mbedtls"),
         "serial" => cfg!(feature = "transport-link-serial"),
         "ws" => cfg!(feature = "transport-link-ws"),
-        "unixpipe" => cfg!(feature = "transport-link-unixpipe"),
+        "unixpipe" => cfg!(all(
+            feature = "transport-link-unixpipe",
+            any(target_os = "linux", target_os = "android")
+        )),
         _ => false,
     }
 }
@@ -480,7 +483,10 @@ mod tests {
             ("ws/127.0.0.1:7447", cfg!(feature = "transport-link-ws")),
             (
                 "unixpipe//tmp/wz-pipe#file_mask=384",
-                cfg!(feature = "transport-link-unixpipe"),
+                cfg!(all(
+                    feature = "transport-link-unixpipe",
+                    any(target_os = "linux", target_os = "android")
+                )),
             ),
         ] {
             let expected = if built {
