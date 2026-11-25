@@ -242,6 +242,48 @@ impl LocalTokenRegistry<Profile> {
     }
 }
 
+/// The rows of a [`LocalTokenRegistry`] of the region policy, `N` tokens, which a region lays out
+/// beside it: none where the session's tables keep its tokens as rows, and the registry holds none.
+pub struct LocalTokenRows<const N: usize> {
+    tokens: [core::mem::MaybeUninit<LocalToken<crate::bounded::Region>>; N],
+}
+
+// SAFETY: the rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl<const N: usize> crate::bounded::ZeroEmpty for LocalTokenRows<N> {}
+
+/// The lines a region's description holds for one [`LocalTokenRegistry`] of the region policy: its
+/// tokens' rows, and its handle to the key arena.
+pub const LOCAL_TOKEN_LINES: usize = 1;
+
+// SAFETY: of the region policy, at all zero bytes: the tokens are a `LentSeq` of no rows, each bound
+// a `Limited` (`ZeroEmpty`) admitting nothing until the session states it, and the handle to the
+// key arena a `LentKeys` of none. Nothing drops a value, the table holding none.
+unsafe impl crate::bounded::ZeroEmpty for LocalTokenRegistry<crate::bounded::Region> {}
+
+impl LocalTokenRegistry<crate::bounded::Region> {
+    /// The description of a registry of the region policy at `at` in a region and its
+    /// [`LocalTokenRows`] of `N` tokens at `rows`: the line of its tokens' rows and its handle to
+    /// the region's key arena. `N` past the build's `MAX_LOCAL_TOKENS` stops the build.
+    pub const fn places<const N: usize>(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<LOCAL_TOKEN_LINES> {
+        assert!(
+            N <= caps::MAX_LOCAL_TOKENS,
+            "a region lays out no token past the build's bound"
+        );
+        crate::bounded::RegionLines::EMPTY
+            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
+            .seq(crate::bounded::SeqPlace::of::<
+                LocalToken<crate::bounded::Region>,
+            >(
+                at.wrapping_add(core::mem::offset_of!(Self, tokens)),
+                rows.wrapping_add(core::mem::offset_of!(LocalTokenRows<N>, tokens)),
+                N,
+            ))
+    }
+}
+
 impl LocalTokenRegistry<Lent> {
     /// An empty registry whose tokens are `rows` rows lent from `arena`, at most
     /// `MAX_LOCAL_TOKENS`, their keys kept in `keys`, the session's key arena: a session's, at

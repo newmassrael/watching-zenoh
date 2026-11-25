@@ -838,6 +838,37 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U, Profile> {
     }
 }
 
+/// The lines a region's description holds for one [`RemoteSubscriberTable`] of the region policy: its
+/// watchers'.
+pub const REMOTE_SUBSCRIBER_TABLE_LINES: usize = crate::decl_sink::DECL_OBSERVER_LINES;
+
+// SAFETY: of the region policy, at all zero bytes: the watchers are a `DeclObserverPair` of the
+// region policy (`ZeroEmpty`); the matching watches a `MatchingWatchList` of none (`ZeroEmpty`) or no
+// field at all. Nothing drops a value, every list holding none.
+unsafe impl<D: DeclSink, U: UndeclSink, M: MatchingReport> crate::bounded::ZeroEmpty
+    for RemoteSubscriberTable<D, U, crate::bounded::Region, M>
+{
+}
+
+impl<D: DeclSink, U: UndeclSink, M: MatchingReport>
+    RemoteSubscriberTable<D, U, crate::bounded::Region, M>
+{
+    /// The description of a table of the region policy at `at` in a region and its watchers'
+    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<REMOTE_SUBSCRIBER_TABLE_LINES> {
+        crate::bounded::RegionLines::EMPTY.with(
+            &DeclObserverPair::<D, U, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, observers)),
+                rows,
+            ),
+            0,
+        )
+    }
+}
+
 impl<D: DeclSink, U: UndeclSink, M: MatchingReport> RemoteSubscriberTable<D, U, Lent, M> {
     /// A table with no observer whose two observer lists are lent from `arena`, `rows` rows each
     /// ([`DeclObserverPair::lent`]). Refused as that refuses.

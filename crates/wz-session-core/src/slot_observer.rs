@@ -1166,6 +1166,103 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     }
 }
 
+/// The rows of a [`SlotObserverOf`] of the region policy apart from its application tables', which
+/// a region lays out beside it: the declaration watchers' lists, at the build's bound, and
+/// `LOCAL_TOKENS` rows of the session's own tokens (none where the tables keep the tokens as rows).
+pub struct ObserverRegionRows<K: ObserverSinks, const LOCAL_TOKENS: usize> {
+    #[cfg(feature = "declare-subscriber")]
+    remote_subscribers: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "declare-queryable")]
+    remote_queryables: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "liveliness-token")]
+    liveliness: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "liveliness-token")]
+    local_tokens: crate::declare::local_token::LocalTokenRows<LOCAL_TOKENS>,
+    _sinks: core::marker::PhantomData<K>,
+}
+
+// SAFETY: every field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
+unsafe impl<K: ObserverSinks, const LOCAL_TOKENS: usize> crate::bounded::ZeroEmpty
+    for ObserverRegionRows<K, LOCAL_TOKENS>
+{
+}
+
+/// The lines a region's description holds for one [`SlotObserverOf`] of the region policy apart
+/// from its application tables', at most: three watcher pairs' and the session's own tokens'.
+pub const SLOT_OBSERVER_LINES: usize = 3 * crate::decl_sink::DECL_OBSERVER_LINES + 1;
+
+// SAFETY: of the region policy, at all zero bytes: the application tables are `ZeroEmpty` (the
+// bound), each watcher table and the registry of the session's own tokens is one of the region
+// policy (`ZeroEmpty`), and the matching sink's place holds no byte. A build with the switchboard
+// keeps a registry that is not empty at zero bytes, and has no observer of the region policy.
+#[cfg(not(feature = "switchboard"))]
+unsafe impl<K: ObserverSinks, M: MatchingReport> crate::bounded::ZeroEmpty
+    for SlotObserverOf<K, crate::bounded::Region, M>
+where
+    K::Tables<crate::bounded::Region>: crate::bounded::ZeroEmpty,
+{
+}
+
+impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::Region, M> {
+    /// The description of an observer of the region policy at `at` in a region and its
+    /// [`ObserverRegionRows`] at `rows`, apart from its application tables, which the region
+    /// describes by their own type (`SessionTables::places` at the offset of [`Self::tables`]):
+    /// the lines of the watchers' lists and of the session's own tokens, and the tokens' handle to
+    /// the key arena, those the build keeps.
+    pub const fn places<const LOCAL_TOKENS: usize>(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<SLOT_OBSERVER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY;
+        #[cfg(feature = "declare-subscriber")]
+        let lines = lines.with(
+            &RemoteSubscriberTable::<K::Declared, K::Undeclared, crate::bounded::Region, M>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, remote_subscribers)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    ObserverRegionRows<K, LOCAL_TOKENS>,
+                    remote_subscribers
+                )),
+            ),
+            0,
+        );
+        #[cfg(feature = "declare-queryable")]
+        let lines = lines.with(
+            &RemoteQueryableTable::<K::Declared, K::Undeclared, crate::bounded::Region, M>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, remote_queryables)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    ObserverRegionRows<K, LOCAL_TOKENS>,
+                    remote_queryables
+                )),
+            ),
+            0,
+        );
+        #[cfg(feature = "liveliness-token")]
+        let lines = lines
+            .with(
+                &LivelinessRegistry::<K::Declared, K::Undeclared, crate::bounded::Region>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, liveliness)),
+                    rows.wrapping_add(core::mem::offset_of!(
+                        ObserverRegionRows<K, LOCAL_TOKENS>,
+                        liveliness
+                    )),
+                ),
+                0,
+            )
+            .with(
+                &LocalTokenRegistry::<crate::bounded::Region>::places::<LOCAL_TOKENS>(
+                    at.wrapping_add(core::mem::offset_of!(Self, local_tokens)),
+                    rows.wrapping_add(core::mem::offset_of!(
+                        ObserverRegionRows<K, LOCAL_TOKENS>,
+                        local_tokens
+                    )),
+                ),
+                0,
+            );
+        let _ = (at, rows);
+        lines
+    }
+}
+
 impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
     /// An observer with nothing registered whose application tables are lent from `arena`, as
     /// many rows each as `rows` states (the subscriptions' table reads its own of them,
