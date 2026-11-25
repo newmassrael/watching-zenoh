@@ -10948,6 +10948,45 @@ pico_tokio_args() {
     echo "${words//abi\//}"
 }
 
+# The cargo words that build the pico C library (`wz-capi-pico-lib`) from the words of a build of
+# the ABI crate (`--no-default-features --features a,b`, as `wz_config.py --features pico`
+# prints them): each feature named through the library's dependency on the ABI crate (`abi/`).
+pico_lib_args() {
+    local word next="" out=()
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    for word in $1; do
+        if [[ "$next" == features ]]; then
+            word="abi/${word//,/,abi/}"
+            next=""
+        elif [[ "$word" == --features ]]; then
+            next=features
+        fi
+        out+=("$word")
+    done
+    echo "${out[*]}"
+}
+
+# The cargo words of the tokio engine's pico C library with the features `$1` (a comma list,
+# optional), as `wz_config.py --bench-cargo-args tokio` prints them, through `abi/`.
+pico_lib_tokio_args() {
+    python3 scripts/lib/wz_config.py --bench-cargo-args tokio "${1:-}"
+}
+
+# The cargo words that build the cooperative engine's pico C library, which has no `std` form
+# (docs/win-budget/std-heap.md, S1): the `capi-nostd` profile and its configuration, for the
+# host's own target, so it lands in `<target dir>/<host>/capi-nostd/`, where
+# wz-integration-tests looks for it under `WZ_PICO_ENGINE=coop` (`pico_cdylib_candidates`).
+# A profile that unwinds cannot build it. Run from `crates/`.
+pico_nostd_args() {
+    local host
+    host="$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')"
+    if [[ -z "$host" ]]; then
+        echo "  rustc named no host target to build the pico C library for" >&2
+        return 1
+    fi
+    echo "--profile capi-nostd --config .cargo/capi-nostd.toml --target $host"
+}
+
 layer_c1bm_cargo_test_pico_failfast() {
     local link suite out passed total=0 tokio_args
     for link in unixpipe quic; do
@@ -19279,7 +19318,14 @@ layer_epico_library_oracles() {
     # binary a machine may legitimately lack, never on a wz one we can produce.
     # A lane that skipped here would go green having compared nothing, and
     # Layer A4 reads "this lane is in ci.yml" as evidence its proofs executed.
-    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    # The library is the default build, the cooperative engine's, which has no `std` form: the C
+    # library's crate without `std` (`pico_nostd_args`) in that engine's directory, which the
+    # legs below read under `WZ_PICO_ENGINE=coop`.
+    local nostd_args
+    nostd_args="$(pico_nostd_args)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico-lib $nostd_args \
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
     # R311y630 — 2 -> 5. The triage of the 27 divergences added the MECHANISM
     # WITNESS for the surviving sixteen (pico's CLOSE verdict is independent of
     # the extension chain, measured rather than read off transport.c); the
@@ -19293,12 +19339,12 @@ layer_epico_library_oracles() {
         || return 1
     wz_test_args wz-integration-tests pico_pure_function_oracle
     _runci_guarded_test "Epico pure-function oracle" 8 \
-        cargo test -p wz-integration-tests \
+        env WZ_PICO_ENGINE=coop cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     wz_test_args wz-integration-tests pico_abi_symbol_census
     _runci_guarded_test "Epico ABI symbol census" 4 \
-        cargo test -p wz-integration-tests \
+        env WZ_PICO_ENGINE=coop cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Epico: wz and the real libzenohpico agree where they are pinned to"
@@ -19734,12 +19780,12 @@ layer_e_ap_demo_round_trip() {
     # link carries every scheme they exercise. It is the tokio engine's channel (rustls), so the
     # build names that engine; the cooperative engine's reference build carries `tls-mbedtls` below.
     local tls_args
-    tls_args="$(pico_tokio_args transport-link-tls)" || return 1
+    tls_args="$(pico_lib_tokio_args transport-link-tls)" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $tls_args --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-pico-lib $tls_args --quiet) || return 1
     # Open-debt items 918, 917 and 914 -- and wz's build of every other pico header arm,
-    # which the `_st` drop-in legs, `pico_header_arm_layout` and Layer Z's local-delivery
-    # leg link. pico's arms differ in the size of structs a C program allocates
+    # which the `_st` drop-in legs and `pico_header_arm_layout`
+    # link. pico's arms differ in the size of structs a C program allocates
     # (`_z_fifo_mt_t` and `z_open_options_t` with `Z_FEATURE_MULTI_THREAD`, every option
     # struct with an unstable field with `Z_FEATURE_UNSTABLE_API`, seven with a locality
     # field with the local switches), so a program compiled against an arm's headers links
@@ -19759,7 +19805,7 @@ layer_e_ap_demo_round_trip() {
         arm_features="$(python3 scripts/lib/wz_config.py --features pico --engine tokio \
             "$WZ_ARTIFACTS/target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-        (cd crates && cargo build -p wz-capi-pico $arm_features \
+        (cd crates && cargo build -p wz-capi-pico-lib $(pico_lib_args "$arm_features") \
             --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-$arm" --quiet) || return 1
         # Each upstream defconfig passes its original's interop lane: the default arm is
         # zenoh-pico configured with no switch passed, so wz's build of it must be the build
@@ -20033,18 +20079,22 @@ layer_e_ap_demo_round_trip() {
     # (`wz_config.py --engine coop`), into a target directory of its own. The single-threaded
     # arm is the cooperative engine's native one: its programs step the session with `zp_read`.
     # The count is exact, so a test that stops being selected is a failure and not a smaller pass.
-    local coop_features
+    # Each is the C library's crate without `std` (`pico_nostd_args`), the one form the
+    # cooperative engine's library has.
+    local coop_features nostd_args
+    nostd_args="$(pico_nostd_args)" || return 1
     coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
         "$WZ_ARTIFACTS/target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $coop_features,tls-mbedtls \
-        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-pico-lib $(pico_lib_args "$coop_features,tls-mbedtls") \
+        $nostd_args --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
     for arm in st default local; do
         coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
             "$WZ_ARTIFACTS/target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-        (cd crates && cargo build -p wz-capi-pico $coop_features \
-            --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-$arm-coop" --quiet) || return 1
+        (cd crates && cargo build -p wz-capi-pico-lib $(pico_lib_args "$coop_features") \
+            $nostd_args --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-$arm-coop" --quiet) \
+            || return 1
     done
     wz_test_args wz-integration-tests pico_c_examples_on_wz_capi_dropin
     _runci_guarded_test "E pico drop-in programs on the cooperative engine" 32 \
@@ -21667,11 +21717,18 @@ layer_s_pico_stability() {
     # headers. One test at a time, since the timing of a stall is what is measured and the
     # group legs join groups of their own. Count-guarded: the legs are `#[ignore]`, so a rename
     # would select nothing and pass.
-    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    # The default build is the cooperative engine's, which has no `std` form: the C library's
+    # crate without `std` (`pico_nostd_args`) in that engine's directory, which the legs read
+    # under `WZ_PICO_ENGINE=coop`.
+    local nostd_args
+    nostd_args="$(pico_nostd_args)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico-lib $nostd_args \
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
     bash scripts/build-zenoh-pico-cli.sh || return 1
     wz_test_args wz-integration-tests pico_link_qos_on_wz_capi
     _runci_guarded_test "S link qos against the real zenoh-pico" 4 \
-        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        env WZ_PICO_ENGINE=coop cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --nocapture --test-threads=1 || return 1
 
     if ! command -v valgrind >/dev/null 2>&1; then
@@ -22204,15 +22261,21 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # second time in that arm, its features read off the switched-on pico's own config.h, into
     # the target the test links.
     # Count-guarded at 12: the legs are `#[ignore]`, so a rename would select nothing and pass.
-    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    # The reference arm these legs link is the tokio engine's, as the switched-on arm's is: one
+    # engine names both arms' directories (`WZ_PICO_ENGINE`). It is the build Layer E's tokio legs
+    # link, since one artifact path holds one feature set.
+    local tls_args
+    tls_args="$(pico_lib_tokio_args transport-link-tls)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico-lib $tls_args --quiet) || return 1
     local mcdecl_features
     # The multicast declarations are the tokio engine's alone (the cooperative engine takes no
     # forward of `multicast-declarations`), so the switched-on arm is built on that engine.
     mcdecl_features=$(python3 scripts/lib/wz_config.py --features pico --engine tokio \
         "$WZ_ARTIFACTS/target/zenoh-pico-build-mcdecl/zenohpico/include/zenoh-pico/config.h") || return 1
     local -a mcdecl_args
-    read -ra mcdecl_args <<< "$mcdecl_features"
-    (cd crates && cargo build -p wz-capi-pico --quiet "${mcdecl_args[@]}" \
+    read -ra mcdecl_args <<< "$(pico_lib_args "$mcdecl_features")"
+    (cd crates && cargo build -p wz-capi-pico-lib --quiet "${mcdecl_args[@]}" \
         --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-mcdecl") || return 1
     wz_test_args wz-integration-tests pico_peer_multicast_on_wz_capi
     _runci_guarded_test "M pico multicast peer test on wz" 12 \
@@ -22226,12 +22289,16 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # Upstream's peer test, whose four members number their keyexprs alike, is the leg that tells
     # a session reading one member's key by another's. Each test is named exactly, and the count is
     # guarded at 5.
-    local mcdecl_coop_features
+    # Built as the C library's crate without `std` (`pico_nostd_args`), the one form the
+    # cooperative engine's library has.
+    local mcdecl_coop_features nostd_args
+    nostd_args="$(pico_nostd_args)" || return 1
     mcdecl_coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
         "$WZ_ARTIFACTS/target/zenoh-pico-build-mcdecl/zenohpico/include/zenoh-pico/config.h")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $mcdecl_coop_features \
-        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-mcdecl-coop" --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-pico-lib $(pico_lib_args "$mcdecl_coop_features") \
+        $nostd_args --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-mcdecl-coop" --quiet) \
+        || return 1
     _runci_guarded_test "M pico multicast declarations on the cooperative engine" 5 \
         env WZ_PICO_ENGINE=coop \
         cargo test -p wz-integration-tests "${WZ_TEST_TARGET[@]}" \
@@ -22284,8 +22351,8 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         reth_features=$(python3 scripts/lib/wz_config.py --features pico --engine tokio \
             "$WZ_ARTIFACTS/target/zenoh-pico-build-reth/zenohpico/include/zenoh-pico/config.h") || return 1
         local -a reth_args
-        read -ra reth_args <<< "$reth_features"
-        (cd crates && cargo build -p wz-capi-pico --quiet "${reth_args[@]}" \
+        read -ra reth_args <<< "$(pico_lib_args "$reth_features")"
+        (cd crates && cargo build -p wz-capi-pico-lib --quiet "${reth_args[@]}" \
             --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-reth") || return 1
         wz_test_args wz-integration-tests pico_raweth_on_wz_capi
         _runci_guarded_test "M pico raweth scenario on wz" 3 \
@@ -23162,31 +23229,37 @@ layer_z_zenohd_interop() {
     # silent peer. Skipping green on a wz artifact we can produce would let the
     # lane report success having linked nothing. The TLS link is the tokio engine's (rustls).
     local tls_args
-    tls_args="$(pico_tokio_args transport-link-tls)" || return 1
+    tls_args="$(pico_lib_tokio_args transport-link-tls)" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $tls_args --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-pico-lib $tls_args --quiet) || return 1
     # Open-debt item 914 -- and wz's build of the LOCAL header arm, which upstream's own
     # local-delivery tests link in the leg below; built from that arm's config.h, as
     # Layer E builds the other arms.
-    local local_features
-    local_features="$(python3 scripts/lib/wz_config.py --features pico \
+    # It is the cooperative engine's, as the pico base's engine is, and so the C library's crate
+    # without `std` (`pico_nostd_args`), in the directory Layer E builds that engine's local arm
+    # into, from the same line; the leg below reads it under `WZ_PICO_ENGINE=coop`.
+    local local_features nostd_args
+    nostd_args="$(pico_nostd_args)" || return 1
+    local_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
         "$WZ_ARTIFACTS/target/zenoh-pico-build-local/zenohpico/include/zenoh-pico/config.h")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $local_features \
-        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-local" --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-pico-lib $(pico_lib_args "$local_features") $nostd_args \
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-local-coop" --quiet) || return 1
     # And wz's build of the INTEGRATION arm, the configuration upstream's integration workflow
     # builds its `tests/z_api_*_test.c` under: the sixteen programs of
     # `pico_upstream_api_tests_on_wz` link it below. That arm states buffer sizes of its own
     # (build-zenoh-pico-cli.sh, the integration arm), so the build takes the header's numbers as
     # well as its switches: `--env pico` gives the `WZ_LIMIT_<NAME>=<n>` of each value switch
-    # whose number is not the limit's default.
+    # whose number is not the limit's default. The cooperative engine's, as the local arm's is.
     local integration_header integration_features integration_env
     integration_header="$WZ_ARTIFACTS/target/zenoh-pico-build-integration/zenohpico/include/zenoh-pico/config.h"
-    integration_features="$(python3 scripts/lib/wz_config.py --features pico "$integration_header")" || return 1
+    integration_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
+        "$integration_header")" || return 1
     integration_env="$(python3 scripts/lib/wz_config.py --env pico "$integration_header")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments and the limits are words on purpose
-    (cd crates && env $integration_env cargo build -p wz-capi-pico $integration_features \
-        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-integration" --quiet) || return 1
+    (cd crates && env $integration_env cargo build -p wz-capi-pico-lib \
+        $(pico_lib_args "$integration_features") $nostd_args \
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-integration-coop" --quiet) || return 1
     # And the reference arm's build for the cooperative engine, which Layer E builds too: the
     # drop-in legs below that need a router run against it as well
     # (`docs/capi-pico-on-coop-engine.md`, step L4). It carries `tls-mbedtls`, the cooperative
@@ -23197,8 +23270,8 @@ layer_z_zenohd_interop() {
     coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
         "$WZ_ARTIFACTS/target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h")" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $coop_features,tls-mbedtls \
-        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-pico-lib $(pico_lib_args "$coop_features,tls-mbedtls") \
+        $nostd_args --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
     # §5.21 token cross-impl leg — the router-hat token lifecycle leg spawns the
     # pico z_sub_liveliness (the liveliness SUBSCRIBER that prints "New alive
     # token" on the future push + "Dropped token" on the undeclare; z_get_liveliness
@@ -24178,7 +24251,8 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # (built above) and run beside a zenohd they find by scouting, as the scouting legs
     # above do. Their own `assert`s over the 27 locality combinations are the oracle.
     wz_test_args wz-integration-tests pico_local_delivery_upstream_tests_on_wz
-    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" WZ_PICO_ENGINE=coop \
+        cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # The other sixteen of zenoh-pico's eighteen `tests/z_api_*_test.c` and its client test
@@ -24210,7 +24284,7 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
         return 1
     else
         wz_test_args wz-integration-tests pico_upstream_api_tests_on_wz
-        _runci_guarded_test Z 17 "${api_wrap[@]}" env WZ_ZENOHD_BIN="$zenohd" \
+        _runci_guarded_test Z 17 "${api_wrap[@]}" env WZ_ZENOHD_BIN="$zenohd" WZ_PICO_ENGINE=coop \
             cargo test -p wz-integration-tests \
             "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
             || return 1
@@ -25324,9 +25398,9 @@ layer_e5_router_forward() {
         return 0
     fi
     local tls_args
-    tls_args="$(pico_tokio_args transport-link-tls)" || return 1
+    tls_args="$(pico_lib_tokio_args transport-link-tls)" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $tls_args --quiet) || return 1
+    (cd crates && cargo build -p wz-capi-pico-lib $tls_args --quiet) || return 1
     wz_test_args wz-integration-tests pico_keyexpr_declaration_twice_and_diff wz_router_hears_a_pico_peer
     _runci_guarded_test "E5 pico peer beside a router" 4 \
         cargo test -p wz-integration-tests \
@@ -28005,11 +28079,17 @@ layer_c1cc_api_compat_c() {
     # oracle its job never had (run 37737894987, job 113186640039). This job
     # provisions the oracle and the precheck above turns an absent one into a
     # failure. The pico cdylib is built here under the rule the demo is: never
-    # SKIP (or crash) on a wz artifact we can just build.
-    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    # SKIP (or crash) on a wz artifact we can just build. It is the default build, the cooperative
+    # engine's, so the C library's crate without `std` (`pico_nostd_args`) in that engine's
+    # directory, read under `WZ_PICO_ENGINE=coop`.
+    local nostd_args
+    nostd_args="$(pico_nostd_args)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico-lib $nostd_args \
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-coop" --quiet) || return 1
     wz_test_args wz-integration-tests pico_initial_interest_twice_and_diff
     _runci_guarded_test "C1cc a pico listener ends what it replays" 1 \
-        cargo test -p wz-integration-tests \
+        env WZ_PICO_ENGINE=coop cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         --exact "${WZ_TEST_PREFIX}a_zenoh_peer_that_dials_a_pico_listener_is_not_left_waiting_on_wz_and_zenoh_pico" \
         || return 1
