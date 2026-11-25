@@ -417,6 +417,7 @@ resource-snapshot = [
     "wz-session-core/resource-snapshot",
     "wz-capi-port/resource-snapshot",
     "wz-capi-core?/resource-snapshot",
+    "wz-capi-coop?/resource-snapshot",
 ]
 # `session-memory`: the most memory a session holds, part by part, computed from the limits it
 # opened under (`wz_ext_session_memory`, `wz_ext_session_memory_row`). wz's own, which zenoh-pico

@@ -2513,6 +2513,11 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
     fn input_seen(&self, ready: bool) {
         self.gate.input_seen(ready);
     }
+
+    #[cfg(feature = "resource-snapshot")]
+    fn message_reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
+        self.actions.message_reading()
+    }
 }
 
 impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<C> {
@@ -6357,6 +6362,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         report
     }
 
+    /// What the receive paths of the session's links counted (`resource-snapshot`), those up and
+    /// those let go of (`LinkSupervisor::message_reading`), as one reading that only grows. Read
+    /// under the session's lock, the one a link is let go of under, so a link that goes meanwhile
+    /// is counted once; a closed session reads what its links had counted when they ended.
+    #[cfg(feature = "resource-snapshot")]
+    pub fn message_reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
+        self.core.lock().0.transport.links.message_reading()
+    }
+
     /// Run the periodic jobs that are due, with no lock held: what a job does (a beacon is a
     /// publish) takes the session's lock itself. One is taken at a time, so a job that stops
     /// another finds it not yet started, and each is put back a period after its run ended. What
@@ -8427,6 +8441,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
 
     fn session_zid(&self) -> SessionZid {
         self.zid
+    }
+
+    #[cfg(feature = "resource-snapshot")]
+    fn message_reading(&self) -> Option<wz_session_core::resource_snapshot::BuildMessageReading> {
+        Some(CoopEngine::message_reading(self))
     }
 
     fn now_ms(&self) -> u64 {
