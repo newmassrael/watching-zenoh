@@ -22,16 +22,11 @@
 use core::ffi::{c_char, c_void, CStr};
 use core::ptr::addr_of_mut;
 
-use wz_session_core::caps;
-
 use crate::abi::{
     handle_ref, impl_value_ownership, z_loaned_config_t, z_moved_config_t, z_owned_config_t,
 };
 use crate::ffi::guarded;
-use crate::result::{
-    ZResult, Z_ERR_CONFIG_FAILED_INSERT, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
-    Z_OK,
-};
+use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 
 /// pico `Z_CONFIG_MODE_KEY` (config.h.in:84).
 pub const Z_CONFIG_MODE_KEY: u8 = 0x40;
@@ -102,175 +97,203 @@ pub const Z_CONFIG_TLS_CONNECT_CERTIFICATE_BASE64_KEY: u8 = 0x55;
 /// `tls/127.0.0.1:<port>` while their bundled cert names `localhost`.
 pub const Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY: u8 = 0x56;
 
-/// One key of a config and the place of its value in the config's text.
-#[derive(Clone, Copy)]
-struct Row {
-    key: u8,
-    /// The value's first byte.
-    start: u32,
-    /// The value's bytes with its terminator.
-    len: u32,
-    /// The bytes its place holds: a later value of the key that fits is written over it.
-    room: u32,
-}
+/// The table of a config's keys and the text their values lie in, in a module of its own so that
+/// only its methods write the text: the invariant [`ConfigEntries::get`] reads by is theirs to
+/// keep and no other code of the crate's can break it.
+mod entries {
+    use core::ffi::c_char;
+    use core::ptr::addr_of_mut;
 
-impl Row {
-    const EMPTY: Self = Self {
-        key: 0,
-        start: 0,
-        len: 0,
-        room: 0,
-    };
+    use wz_session_core::caps;
 
-    /// The first byte past the value's place.
-    fn place_end(&self) -> usize {
-        // A place lies in the text, so its end does not saturate.
-        (self.start as usize).saturating_add(self.room as usize)
+    use crate::result::{ZResult, Z_ERR_CONFIG_FAILED_INSERT, Z_OK};
+
+    /// One key of a config and the place of its value in the config's text.
+    #[derive(Clone, Copy)]
+    struct Row {
+        key: u8,
+        /// The value's first byte.
+        start: u32,
+        /// The value's bytes with its terminator.
+        len: u32,
+        /// The bytes its place holds: a later value of the key that fits is written over it.
+        room: u32,
     }
-}
 
-/// The numbered keys of a config and their values, each value NUL-terminated in one text.
-///
-/// The terminator is stored rather than appended per read because [`zp_config_get`] hands the C
-/// side a `const char *` into this text: zenoh-pico's contract is a borrow of the config, not a
-/// rendered copy, and a borrow is a C string only if the stored bytes are one. A value's place
-/// never moves while the config lives, so a borrow of one key is not disturbed by an insert of
-/// another; a key's new value is written over its old place when it fits there, which zenoh-pico
-/// frees on a replacement, and otherwise after the last place, the old one left unused.
-#[derive(Clone)]
-pub(crate) struct ConfigEntries {
-    /// The keys held, the first `held` of the rows, in the order each was first inserted.
-    rows: [Row; caps::CONFIG_ENTRIES],
-    held: usize,
-    /// The values' places, from the start up to `end`.
-    text: [u8; caps::CONFIG_TEXT_BYTES],
-    end: usize,
-}
+    impl Row {
+        const EMPTY: Self = Self {
+            key: 0,
+            start: 0,
+            len: 0,
+            room: 0,
+        };
 
-impl Default for ConfigEntries {
-    fn default() -> Self {
-        Self {
-            rows: [Row::EMPTY; caps::CONFIG_ENTRIES],
-            held: 0,
-            text: [0; caps::CONFIG_TEXT_BYTES],
-            end: 0,
+        /// The first byte past the value's place.
+        fn place_end(&self) -> usize {
+            // A place lies in the text, so its end does not saturate.
+            (self.start as usize).saturating_add(self.room as usize)
         }
     }
-}
 
-impl ConfigEntries {
-    /// Writes an empty table at `at` in place: the text is most of a config, and a value built on
-    /// the stack and moved would take its size twice.
+    /// The numbered keys of a config and their values, each value NUL-terminated in one text.
     ///
-    /// # Safety
-    /// `at` is a place for a `ConfigEntries` that holds none.
-    unsafe fn write_empty(at: *mut Self) {
-        addr_of_mut!((*at).rows).write([Row::EMPTY; caps::CONFIG_ENTRIES]);
-        addr_of_mut!((*at).held).write(0);
-        addr_of_mut!((*at).end).write(0);
-        addr_of_mut!((*at).text)
-            .cast::<u8>()
-            .write_bytes(0, caps::CONFIG_TEXT_BYTES);
-    }
-
-    /// Writes a copy of `self` at `at` in place. Every field is plain data, so the copy of its bytes
-    /// is the clone.
+    /// The terminator is stored rather than appended per read because [`super::zp_config_get`]
+    /// hands the C side a `const char *` into this text: zenoh-pico's contract is a borrow of the
+    /// config, not a rendered copy, and a borrow is a C string only if the stored bytes are one. A
+    /// value's place never moves while the config lives, so a borrow of one key is not disturbed by
+    /// an insert of another; a key's new value is written over its old place when it fits there,
+    /// which zenoh-pico frees on a replacement, and otherwise after the last place, the old one left
+    /// unused.
     ///
-    /// # Safety
-    /// As [`Self::write_empty`].
-    unsafe fn write_copy(&self, at: *mut Self) {
-        core::ptr::copy_nonoverlapping(self as *const Self, at, 1);
+    /// The invariant [`Self::get`] reads by: the bytes each held row spans before its terminator
+    /// are those of the `&str` the last insert of its key copied there. An insert takes its value as
+    /// a `&str` and writes only over its own key's place or past every place, an empty table holds
+    /// no row and a copy is the bytes of a table that keeps it, so a value is read back as the text
+    /// it was written as, with no second check of its bytes.
+    #[derive(Clone)]
+    pub(crate) struct ConfigEntries {
+        /// The keys held, the first `held` of the rows, in the order each was first inserted.
+        rows: [Row; caps::CONFIG_ENTRIES],
+        held: usize,
+        /// The values' places, from the start up to `end`.
+        text: [u8; caps::CONFIG_TEXT_BYTES],
+        end: usize,
     }
 
-    fn row(&self, key: u8) -> Option<&Row> {
-        self.rows
-            .get(..self.held)?
-            .iter()
-            .find(|row| row.key == key)
-    }
-
-    /// The value of `key` with its terminator, as its place holds it.
-    fn stored(&self, key: u8) -> Option<&[u8]> {
-        let row = self.row(key)?;
-        self.text.get(row.start as usize..)?.get(..row.len as usize)
-    }
-
-    /// The value of `key`, without its terminator. Out of line: an open reads several keys, and
-    /// each read inlined carried the search of the rows of its own.
-    #[inline(never)]
-    pub(crate) fn get(&self, key: u8) -> Option<&str> {
-        let (_terminator, value) = self.stored(key)?.split_last()?;
-        crate::abi::text_of(value)
-    }
-
-    /// The value of `key` as the C string [`zp_config_get`] lends.
-    fn c_str(&self, key: u8) -> Option<*const c_char> {
-        self.stored(key)
-            .map(|stored| stored.as_ptr().cast::<c_char>())
-    }
-
-    /// Keeps `value` under `key`, in place of the value the key held, or
-    /// `Z_ERR_CONFIG_FAILED_INSERT` when a new key finds no row or the value no room, the table
-    /// then as it was.
-    pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
-        // Every refusal is taken before anything is written, so a refused insert leaves the table
-        // as it was; each index is read checked, so no refusal of the config's is a panic.
-        let Some(need) = value.len().checked_add(1) else {
-            return Z_ERR_CONFIG_FAILED_INSERT;
-        };
-        let found = self
-            .rows
-            .get(..self.held)
-            .and_then(|held| held.iter().position(|row| row.key == key));
-        let old = found.and_then(|at| self.rows.get(at).copied());
-        if found.is_none() && self.held >= self.rows.len() {
-            return Z_ERR_CONFIG_FAILED_INSERT;
-        }
-        let fits = |start: usize| {
-            start
-                .checked_add(need)
-                .is_some_and(|end| end <= self.text.len())
-        };
-        let start = match old {
-            Some(row) if need <= row.room as usize => row.start as usize,
-            // The last place grows into the free text after it rather than leaving itself unused.
-            Some(row) if row.place_end() == self.end && fits(row.start as usize) => {
-                row.start as usize
+    impl Default for ConfigEntries {
+        fn default() -> Self {
+            Self {
+                rows: [Row::EMPTY; caps::CONFIG_ENTRIES],
+                held: 0,
+                text: [0; caps::CONFIG_TEXT_BYTES],
+                end: 0,
             }
-            _ if fits(self.end) => self.end,
-            _ => return Z_ERR_CONFIG_FAILED_INSERT,
-        };
-        let room = match old {
-            Some(row) if row.start as usize == start => need.max(row.room as usize),
-            _ => need,
-        };
-        let row = Row {
-            key,
-            start: start as u32,
-            len: need as u32,
-            room: room as u32,
-        };
-        let (Some(place), Some(slot)) = (
-            self.text
-                .get_mut(start..)
-                .and_then(|rest| rest.get_mut(..need)),
-            self.rows.get_mut(found.unwrap_or(self.held)),
-        ) else {
-            return Z_ERR_CONFIG_FAILED_INSERT;
-        };
-        if let Some((terminator, body)) = place.split_last_mut() {
-            body.copy_from_slice(value.as_bytes());
-            *terminator = 0;
         }
-        *slot = row;
-        if found.is_none() {
-            // A new key was refused above unless a row past the held ones was free.
-            self.held = self.held.saturating_add(1);
+    }
+
+    impl ConfigEntries {
+        /// Writes an empty table at `at` in place: the text is most of a config, and a value built
+        /// on the stack and moved would take its size twice.
+        ///
+        /// # Safety
+        /// `at` is a place for a `ConfigEntries` that holds none.
+        pub(super) unsafe fn write_empty(at: *mut Self) {
+            addr_of_mut!((*at).rows).write([Row::EMPTY; caps::CONFIG_ENTRIES]);
+            addr_of_mut!((*at).held).write(0);
+            addr_of_mut!((*at).end).write(0);
+            addr_of_mut!((*at).text)
+                .cast::<u8>()
+                .write_bytes(0, caps::CONFIG_TEXT_BYTES);
         }
-        self.end = self.end.max(start.saturating_add(room));
-        Z_OK
+
+        /// Writes a copy of `self` at `at` in place. Every field is plain data, so the copy of its
+        /// bytes is the clone.
+        ///
+        /// # Safety
+        /// As [`Self::write_empty`].
+        pub(super) unsafe fn write_copy(&self, at: *mut Self) {
+            core::ptr::copy_nonoverlapping(self as *const Self, at, 1);
+        }
+
+        fn row(&self, key: u8) -> Option<&Row> {
+            self.rows
+                .get(..self.held)?
+                .iter()
+                .find(|row| row.key == key)
+        }
+
+        /// The value of `key` with its terminator, as its place holds it.
+        pub(super) fn stored(&self, key: u8) -> Option<&[u8]> {
+            let row = self.row(key)?;
+            self.text.get(row.start as usize..)?.get(..row.len as usize)
+        }
+
+        /// The value of `key`, without its terminator. Out of line: an open reads several keys,
+        /// and each read inlined carried the search of the rows of its own.
+        #[inline(never)]
+        pub(crate) fn get(&self, key: u8) -> Option<&str> {
+            let (_terminator, value) = self.stored(key)?.split_last()?;
+            // SAFETY: `value` is the bytes the row of `key` spans before its terminator, which
+            // are those of the `&str` the last insert of the key copied there (the invariant of
+            // `ConfigEntries`, kept by every write of this module).
+            Some(unsafe { core::str::from_utf8_unchecked(value) })
+        }
+
+        /// The value of `key` as the C string [`super::zp_config_get`] lends.
+        pub(super) fn c_str(&self, key: u8) -> Option<*const c_char> {
+            self.stored(key)
+                .map(|stored| stored.as_ptr().cast::<c_char>())
+        }
+
+        /// Keeps `value` under `key`, in place of the value the key held, or
+        /// `Z_ERR_CONFIG_FAILED_INSERT` when a new key finds no row or the value no room, the
+        /// table then as it was.
+        pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
+            // Every refusal is taken before anything is written, so a refused insert leaves the
+            // table as it was; each index is read checked, so no refusal of the config's is a
+            // panic.
+            let Some(need) = value.len().checked_add(1) else {
+                return Z_ERR_CONFIG_FAILED_INSERT;
+            };
+            let found = self
+                .rows
+                .get(..self.held)
+                .and_then(|held| held.iter().position(|row| row.key == key));
+            let old = found.and_then(|at| self.rows.get(at).copied());
+            if found.is_none() && self.held >= self.rows.len() {
+                return Z_ERR_CONFIG_FAILED_INSERT;
+            }
+            let fits = |start: usize| {
+                start
+                    .checked_add(need)
+                    .is_some_and(|end| end <= self.text.len())
+            };
+            // The value goes over the key's own place or past every place, never into the place
+            // of another key, whose text the invariant of `get` holds whole.
+            let start = match old {
+                Some(row) if need <= row.room as usize => row.start as usize,
+                // The last place grows into the free text after it rather than leaving itself
+                // unused.
+                Some(row) if row.place_end() == self.end && fits(row.start as usize) => {
+                    row.start as usize
+                }
+                _ if fits(self.end) => self.end,
+                _ => return Z_ERR_CONFIG_FAILED_INSERT,
+            };
+            let room = match old {
+                Some(row) if row.start as usize == start => need.max(row.room as usize),
+                _ => need,
+            };
+            let row = Row {
+                key,
+                start: start as u32,
+                len: need as u32,
+                room: room as u32,
+            };
+            let (Some(place), Some(slot)) = (
+                self.text
+                    .get_mut(start..)
+                    .and_then(|rest| rest.get_mut(..need)),
+                self.rows.get_mut(found.unwrap_or(self.held)),
+            ) else {
+                return Z_ERR_CONFIG_FAILED_INSERT;
+            };
+            if let Some((terminator, body)) = place.split_last_mut() {
+                body.copy_from_slice(value.as_bytes());
+                *terminator = 0;
+            }
+            *slot = row;
+            if found.is_none() {
+                // A new key was refused above unless a row past the held ones was free.
+                self.held = self.held.saturating_add(1);
+            }
+            self.end = self.end.max(start.saturating_add(room));
+            Z_OK
+        }
     }
 }
+
+pub(crate) use entries::ConfigEntries;
 
 /// The payload behind a `z_owned_config_t` handle.
 #[derive(Clone, Default)]
@@ -416,9 +439,8 @@ pub unsafe extern "C" fn zp_config_insert(
             return Z_ERR_NULL;
         }
         let state = &mut *(handle as *mut ConfigState);
-        let val = match CStr::from_ptr(value).to_str() {
-            Ok(s) => s,
-            Err(_) => return Z_ERR_INVALID,
+        let Some(val) = crate::abi::text_of(CStr::from_ptr(value).to_bytes()) else {
+            return Z_ERR_INVALID;
         };
         state.insert(key, val)
     })
@@ -482,7 +504,9 @@ pub unsafe extern "C" fn z_config_clone(
 mod tests {
     use super::*;
     use crate::prelude::*;
+    use crate::result::Z_ERR_CONFIG_FAILED_INSERT;
     use alloc::ffi::CString;
+    use wz_session_core::caps;
 
     /// A config the C doors made, dropped through them.
     struct Config(z_owned_config_t);
@@ -652,6 +676,55 @@ mod tests {
         assert_eq!(entries.insert(0, "x"), Z_OK);
         assert_eq!(entries.get(0), Some("x"));
         assert_eq!(entries.get(keys - 1), Some(""));
+    }
+
+    /// Each value a config holds reads back as the text last inserted under its key, after every
+    /// insert and in a copy: an insert writes over only its own key's place or past every place,
+    /// which is the invariant `get` reads its text by without checking it again. Values of several
+    /// bytes a char make a write into another key's place a cut value here. Turned red by an insert
+    /// that writes over a place another key holds.
+    #[test]
+    fn every_held_value_reads_back_whole_after_each_write() {
+        fn check(entries: &ConfigEntries, expected: &[(u8, &str)]) {
+            for &(key, value) in expected {
+                let stored = entries.stored(key).expect("a held key");
+                let (terminator, body) = stored.split_last().expect("a terminated value");
+                assert_eq!(*terminator, 0, "key {key}");
+                assert_eq!(core::str::from_utf8(body), Ok(value), "key {key}");
+                assert_eq!(entries.get(key), Some(value), "key {key}");
+            }
+        }
+        let mut entries = ConfigEntries::default();
+        let mut expected: Vec<(u8, &str)> = Vec::new();
+        // Over its own place, shorter and as long; after the last place, longer; the last place
+        // grown into the free text after it.
+        let writes: [(u8, &str); 9] = [
+            (1, "\u{e9}\u{e9}\u{e9}"),
+            (2, "\u{fc}"),
+            (1, "x"),
+            (1, "\u{e9}\u{e9}"),
+            (1, "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"),
+            (2, "\u{fc}\u{fc}\u{fc}\u{fc}\u{fc}\u{fc}"),
+            (2, "\u{fc}"),
+            (3, "\u{65e5}\u{672c}"),
+            (
+                3,
+                "\u{65e5}\u{672c}\u{8a9e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}",
+            ),
+        ];
+        for (key, value) in writes {
+            assert_eq!(entries.insert(key, value), Z_OK, "{key} {value}");
+            match expected.iter_mut().find(|(held, _)| *held == key) {
+                Some(row) => row.1 = value,
+                None => expected.push((key, value)),
+            }
+            check(&entries, &expected);
+        }
+        // A refused insert writes nothing.
+        let past = "\u{e9}".repeat(caps::CONFIG_TEXT_BYTES);
+        assert_eq!(entries.insert(2, &past), Z_ERR_CONFIG_FAILED_INSERT);
+        check(&entries, &expected);
+        check(&entries.clone(), &expected);
     }
 
     /// A clone holds the values of its source in a text of its own: an insert into one is not read

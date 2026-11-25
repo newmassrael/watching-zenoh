@@ -12,6 +12,10 @@
 //! (`vendor/zenoh-pico/src/protocol/config.c` @ `z_result_t _z_str_intmap_from_strn(`). It
 //! declares no metadata key, so the metadata is read and kept by no link.
 
+// An endpoint's text is cut at an ASCII separator by the locator grammar's one cut, which reads it a
+// byte at a time and searches for no character's encoding.
+use wz_session_core::locator_grammar::{split_byte, split_once_byte as cut};
+
 /// The most config keys a link pico declares reads: the raweth link's four ([`config_keys`]).
 const MAX_KEYS: usize = 4;
 
@@ -33,24 +37,6 @@ pub(crate) fn config_keys(scheme: &str) -> Option<&'static [&'static str]> {
 /// The scheme an endpoint's text opens with, empty when it names none.
 pub(crate) fn scheme_of(endpoint: &str) -> &str {
     cut(endpoint, b'/').map_or("", |(scheme, _)| scheme)
-}
-
-/// `text` cut at its first `separator`, an ASCII byte, which neither half keeps; `None` when
-/// `text` has none. Every separator of an endpoint's text is ASCII, so the text is read a byte at
-/// a time and not searched for a character's encoding, as `str::split_once` searches it, and the
-/// halves are taken without asking again whether the cut lies between two characters: an ASCII
-/// byte is a whole character, so both of its sides do. Each cut a reading makes is inlined, and
-/// that question would be a copy of its own at each.
-fn cut(text: &str, separator: u8) -> Option<(&str, &str)> {
-    debug_assert!(separator.is_ascii());
-    let at = text.bytes().position(|byte| byte == separator)?;
-    // SAFETY: the byte at `at` is the ASCII `separator`, a whole character, so `at` lies on a
-    // character boundary of `text`, and so does the end of that byte, the start of what follows it
-    // in `rest`, at most at its end.
-    unsafe {
-        let rest = text.get_unchecked(at..);
-        Some((text.get_unchecked(..at), rest.get_unchecked(1..)))
-    }
 }
 
 /// An endpoint as pico reads it with a link's `keys`: views into the endpoint's own text.
@@ -77,18 +63,7 @@ impl<'a> PicoEndpoint<'a> {
             malformed: false,
         };
         // The pairs between the `;`, an empty one skipped.
-        let mut rest = Some(config);
-        while let Some(text) = rest {
-            let pair = match cut(text, b';') {
-                Some((pair, after)) => {
-                    rest = Some(after);
-                    pair
-                }
-                None => {
-                    rest = None;
-                    text
-                }
-            };
+        for pair in split_byte(config, b';') {
             if pair.is_empty() {
                 continue;
             }

@@ -201,6 +201,18 @@ fn subscriber_receives_publish_over_loopback_tcp() {
             Z_OK,
             "z_declare_subscriber failed"
         );
+        // The subscriber lends the key it was declared on, which its settled declaration holds:
+        // an empty loan here is a declaration the settle did not keep.
+        let declared =
+            wz_capi_pico::z_subscriber_keyexpr(wz_capi_pico::z_subscriber_loan(&subscriber));
+        let mut held: z_view_string_t = std::mem::zeroed();
+        assert_eq!(z_keyexpr_as_view_string(declared, &mut held), Z_OK);
+        let held = z_view_string_loan(&held);
+        assert_eq!(
+            std::slice::from_raw_parts(z_string_data(held).cast::<u8>(), z_string_len(held)),
+            b"demo/**",
+            "the subscriber lends the key it was declared on"
+        );
     }
 
     // Wait (bounded) for delivery.
