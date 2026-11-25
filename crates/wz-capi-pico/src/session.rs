@@ -106,12 +106,42 @@ use wz_session_core::WhatAmI;
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
 pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
-    let (locator, metadata) = endpoint.split_once('#').unwrap_or((endpoint, ""));
+    // Read as bytes: `#` and `;` are ASCII, so they split no character of the text, and a test an
+    // open makes once links no character searcher.
+    let mut halves = endpoint.as_bytes().splitn(2, |&byte| byte == b'#');
+    let locator = halves.next().unwrap_or_default();
+    let metadata = halves.next().unwrap_or_default();
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
-    if locator.starts_with("reth/") {
+    if locator.starts_with(b"reth/") {
         return true;
     }
-    locator.starts_with("udp/") && metadata.split(';').any(|pair| pair.starts_with("iface="))
+    locator.starts_with(b"udp/")
+        && metadata
+            .split(|&byte| byte == b';')
+            .any(|pair| pair.starts_with(b"iface="))
+}
+
+#[cfg(test)]
+mod group_endpoint_tests {
+    use super::is_group_endpoint;
+
+    /// A group is a `udp/` locator one of whose metadata pairs names an interface: the pairs are
+    /// split at `;` after the first `#`, and a pair that only contains the name is none. Turned
+    /// red by a reading that splits at a later `#`, or finds the name inside another pair.
+    #[test]
+    fn a_group_is_a_udp_locator_whose_metadata_names_an_interface() {
+        assert!(is_group_endpoint("udp/224.0.0.224:7447#iface=lo"));
+        assert!(is_group_endpoint("udp/224.0.0.224:7447#ttl=1;iface=lo"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447#"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447#ttl=1;xiface=lo"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447#ttl=iface=lo"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447#ttl#iface=lo"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447#iface"));
+        assert!(!is_group_endpoint("tcp/127.0.0.1:7447#iface=lo"));
+        assert!(!is_group_endpoint("udp#iface=lo"));
+        assert!(!is_group_endpoint(""));
+    }
 }
 
 /// The endpoint of the group a session joins as its one transport, read once for both engines: the
