@@ -1022,9 +1022,21 @@ impl<H: Holders> RegistryOf<H> {
         }) = self.split(self.place(face))
         {
             match planes {
+                #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
                 Planes::All => {
                     app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others)
                 }
+                // The read that hands each record out as it is read hands every sample out
+                // itself, one subscriber at a time (`pinned`), so the planes hand none to the
+                // round.
+                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+                Planes::All => app.dispatch_event_but_samples(
+                    delivery,
+                    &mut set.peer,
+                    &mut set.gets,
+                    event,
+                    &others,
+                ),
                 // A build with queryables hands each of the frame's queries to them itself
                 // (`queries`); one without leaves them to the queries' plane, which owes each
                 // its Final.
@@ -1218,15 +1230,10 @@ impl<H: Holders> RegistryOf<H> {
         message: &wz_session_core::network_message::NetworkMessage,
         reliability: wz_session_core::sample::Reliability,
     ) -> Option<wz_session_core::sample::Sample> {
-        let Split {
-            app,
-            delivery,
-            face,
-            ..
-        } = self.split(self.place(face))?;
+        let Split { app, face, .. } = self.split(self.place(face))?;
         face.peer
             .subscribers
-            .take_record(&mut app.tables, delivery, message, reliability)
+            .take_record(&mut app.tables, message, reliability)
     }
 
     /// Read the key of `put`, the next plain `Put` of the frame `keys` reads, against the aliases
