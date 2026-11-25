@@ -379,12 +379,14 @@ fn compose_snapshots(
 /// the process pools reserve at the first open among them; `Z_ERR_CONFIG_INVALID_VALUE` when the
 /// build refuses any of it, and then what was written is no resolution, which the caller drops.
 ///
-/// Not inlined: `z_open` and the device requirements' judgement share this one body. The limits
-/// are written in place where the caller holds them, not returned and moved through each layer.
+/// Not inlined where `z_open` and the device requirements' judgement share this one body; a
+/// build without those requirements has `z_open`'s open request its one caller, which holds it
+/// inline. The limits are written in place where the caller holds them, not returned and moved
+/// through each layer.
 ///
 /// [`Stated::OPENING`]: crate::config_limits::Stated::OPENING
 /// [`WZ_EXT_CONFIG_LIMITS_KEY`]: crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY
-#[inline(never)]
+#[cfg_attr(feature = "device-requires", inline(never))]
 pub(crate) fn resolve_open(
     cfg: &ConfigState,
     stated: &mut crate::config_limits::Stated,
@@ -1254,11 +1256,10 @@ unsafe fn open_request(
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         }
     }
-    let limits = stated.limits;
     // The key-wire form, judged for the engine the session opens on, and the key ids every
     // node shares that the config states (`crate::key_ids`).
     #[cfg(feature = "shared-key-ids")]
-    let key_ids = crate::key_ids::admit_at_open(cfg, &policy, &limits)?;
+    let key_ids = crate::key_ids::admit_at_open(cfg, &policy, &stated.limits)?;
     #[cfg(not(feature = "shared-key-ids"))]
     crate::key_ids::admit_at_open(cfg, &policy)?;
     #[cfg(not(feature = "engine-tokio"))]
@@ -1268,7 +1269,7 @@ unsafe fn open_request(
     );
     #[cfg(any(feature = "scout", feature = "scout-mcu"))]
     let scouted: ScoutedLocators = match (connect, listen) {
-        (None, None) => crate::scout::locators_by_scout(cfg, &policy, &limits)?,
+        (None, None) => crate::scout::locators_by_scout(cfg, &policy, &stated.limits)?,
         _ => Vec::new(),
     };
     #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
@@ -1348,7 +1349,7 @@ unsafe fn open_request(
         #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
         tls,
         policy,
-        limits,
+        limits: stated.limits,
         #[cfg(feature = "app-transport")]
         app_transport,
         #[cfg(any(not(feature = "engine-tokio"), feature = "shared-key-ids"))]
