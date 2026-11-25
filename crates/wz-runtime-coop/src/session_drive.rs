@@ -2153,12 +2153,12 @@ where
 /// frame.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 #[inline(never)]
-pub fn place_session_with_router<'p, C, L, R, M, K>(
-    place: &'p mut MaybeUninit<SessionPump<C, L, dyn BoxedLinkDriver, R, K>>,
+pub fn place_session_with_router<C, L, R, M, K>(
+    place: &mut MaybeUninit<SessionPump<C, L, dyn BoxedLinkDriver, R, K>>,
     runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
     fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
     make_router: M,
-) -> Option<&'p mut SessionPump<C, L, dyn BoxedLinkDriver, R, K>>
+) -> Option<&mut SessionPump<C, L, dyn BoxedLinkDriver, R, K>>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
