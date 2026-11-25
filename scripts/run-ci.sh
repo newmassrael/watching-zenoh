@@ -14106,7 +14106,11 @@ layer_c1m_session_lwip() {
     # +1 in every leg that runs the lib without `session-slot` (21 -> 22, 22 -> 23, 25 -> 26): the
     # in-memory network carries an IPv6 host's datagrams (`memory::tests`). The hosted run of
     # 3148fdfc84 printed 22 here; the other numbers are counted from the source.
-    _runci_guarded_test "C1m mcu default" 22 \
+    # 22 -> 23, printed: hosted runs 45386940970 and 45486715960 printed 23. The in-memory link
+    # lends its outbound slots (`7ec73acff`), and its test of them
+    # (`memory::tests::a_frame_written_into_a_lent_slot_reaches_the_peer_and_the_slots_are_bounded`)
+    # runs in every leg without `session-slot`; it landed without moving this guard.
+    _runci_guarded_test "C1m mcu default" 23 \
         cargo test -p wz-session-mcu --quiet || return 1
     # 23 -> 24, printed: the merge of main at `0e24b2486` (Round 4581) into the limits rounds
     # prints one more here, which neither tree printed before it.

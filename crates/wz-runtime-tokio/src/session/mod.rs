@@ -1798,7 +1798,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     ///   via `build_loopback_sample` (threading every `opts` metadata field —
     ///   timestamp / encoding / source_info / attachment / qos, R232), delivers
     ///   it in-process through
-    ///   [`wz_session_core::pubsub::SubscriberTable::local_publish`], then drains the
+    ///   [`wz_session_core::pubsub::LocalSubscribers::local_publish`], then drains the
     ///   deferred-fire queue so the subscriber callbacks run on the caller
     ///   thread OUTSIDE the observer lock (R227+ / R311lh / R311lj). Routed only
     ///   when `opts.allowed_destination` allows local. A
@@ -5101,7 +5101,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// (populated by an earlier
     /// [`SessionLinkActions::send_declare_keyexpr`] from this side),
     /// and routes the loopback branch through the same
-    /// [`wz_session_core::pubsub::SubscriberTable::local_publish`] as
+    /// [`wz_session_core::pubsub::LocalSubscribers::local_publish`] as
     /// [`Session::publish`] using `loopback_keyexpr` as the resolved
     /// literal form.
     ///
@@ -7172,7 +7172,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// callback table entry, then — iff `_z_locality_allows_remote(allowed_origin)`
     /// — emit the wire `DeclQueryable` so a router routes matching `Query`
     /// requests to this session. The callback fires synchronously inside
-    /// [`wz_session_core::query::QueryPeer::dispatch_request`] (wire arrival) and
+    /// `wz_session_core::query::QueryPeer::dispatch_request` (wire arrival) and
     /// [`crate::query::QueryableRegistry::local_query`] (loopback, R238+).
     ///
     /// Returns a [`Queryable`] handle whose `Drop` (RAII) unregisters the local

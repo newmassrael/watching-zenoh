@@ -782,11 +782,7 @@ impl Storage for Reserved {
     }
 }
 
-fn reserved<'s>(
-    schema: &'s SchemaSet,
-    entries: usize,
-    bytes: usize,
-) -> Payload<&'s SchemaSet, Reserved> {
+fn reserved(schema: &SchemaSet, entries: usize, bytes: usize) -> Payload<&SchemaSet, Reserved> {
     let found = schema
         .message("syn.payload.Sample")
         .expect("the message is in the schema");
