@@ -162,7 +162,7 @@ mod tests {
     fn each_form_of_a_watcher_is_told_what_the_other_is() {
         let rows_told: Told<(FaceEventKind, u8, usize, usize)> = Arc::default();
         let into = Arc::clone(&rows_told);
-        let by_snapshot = rows_of_snapshots(FaceRowSink::shared(Arc::new(
+        let by_snapshot = rows_of_snapshots(FaceRowSink::of_arc(Arc::new(
             move |kind, row: &FaceLinkRow| {
                 into.lock()
                     .unwrap()

@@ -235,7 +235,7 @@ mod tests {
     fn shared_sink(
         tell: impl Fn(FaceEventKind, &FaceLinkRow) + Send + Sync + 'static,
     ) -> FaceRowSink {
-        FaceRowSink::shared(Arc::new(tell))
+        FaceRowSink::of_arc(Arc::new(tell))
     }
 
     /// A sink that counts the rows it is told.

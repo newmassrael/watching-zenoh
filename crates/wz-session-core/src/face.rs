@@ -705,22 +705,10 @@ pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>
 /// an engine that writes its rows in place tells them with nothing allocated.
 ///
 /// A count of the watcher, copied out of a registry's lock before it is told, as a
-/// [`FaceEventSink`] is. The watcher lies in a box of its own ([`Self::shared`]) or where its
-/// maker put it, counted by its maker's functions ([`Self::counted`]): one in a place its session
-/// lent takes nothing of the heap.
-#[derive(Clone)]
-pub struct FaceRowSink(RowSinkForm);
-
-/// The count a [`FaceRowSink`] holds.
-#[derive(Clone)]
-enum RowSinkForm {
-    Shared(Arc<dyn Fn(FaceEventKind, &FaceLinkRow) + Send + Sync>),
-    Counted(CountedRowSink),
-}
-
-/// A count of a watcher whose type is named only by the functions that tell it a row and take
-/// and let go of a count of it.
-struct CountedRowSink {
+/// [`FaceEventSink`] is. The watcher lies where its maker put it and is counted by its maker's
+/// functions ([`Self::counted`]), so one in a place its session lent takes nothing of the heap;
+/// one in an `Arc` is counted by the `Arc`'s counts ([`Self::of_arc`]).
+pub struct FaceRowSink {
     raw: NonNull<c_void>,
     tell: unsafe fn(*const c_void, FaceEventKind, &FaceLinkRow),
     retain: unsafe fn(*const c_void),
@@ -729,11 +717,11 @@ struct CountedRowSink {
 
 // SAFETY: made only by `FaceRowSink::counted`, whose caller vouches that the watcher and its counts
 // are reached from any thread.
-unsafe impl Send for CountedRowSink {}
+unsafe impl Send for FaceRowSink {}
 // SAFETY: as `Send`.
-unsafe impl Sync for CountedRowSink {}
+unsafe impl Sync for FaceRowSink {}
 
-impl Clone for CountedRowSink {
+impl Clone for FaceRowSink {
     fn clone(&self) -> Self {
         // SAFETY: this count holds the watcher, so another may be taken from it (`counted`).
         unsafe { (self.retain)(self.raw.as_ptr().cast_const()) };
@@ -746,7 +734,7 @@ impl Clone for CountedRowSink {
     }
 }
 
-impl Drop for CountedRowSink {
+impl Drop for FaceRowSink {
     fn drop(&mut self) {
         // SAFETY: this count was given to the sink (`counted`) and is let go of once, here.
         unsafe { (self.release)(self.raw.as_ptr()) };
@@ -754,9 +742,22 @@ impl Drop for CountedRowSink {
 }
 
 impl FaceRowSink {
-    /// A watcher in a box of its own, counted by its `Arc`.
-    pub fn shared(sink: Arc<dyn Fn(FaceEventKind, &FaceLinkRow) + Send + Sync>) -> Self {
-        Self(RowSinkForm::Shared(sink))
+    /// The watcher `sink` counts, in its `Arc`: each copy one more count of the `Arc`.
+    pub fn of_arc<F>(sink: Arc<F>) -> Self
+    where
+        F: Fn(FaceEventKind, &FaceLinkRow) + Send + Sync + 'static,
+    {
+        // SAFETY: `into_raw` gives up the `Arc`'s count, never null, to the sink; `F` is `Send +
+        // Sync`, stands while a count of its `Arc` is held, and the three functions tell, take
+        // and let go of a count of that `Arc<F>`.
+        unsafe {
+            Self::counted(
+                NonNull::new_unchecked(Arc::into_raw(sink).cast_mut().cast::<c_void>()),
+                tell_arc::<F>,
+                retain_arc::<F>,
+                release_arc::<F>,
+            )
+        }
     }
 
     /// The watcher at `raw`, of which this sink is one count: `tell` tells it a row, `retain`
@@ -773,25 +774,50 @@ impl FaceRowSink {
         retain: unsafe fn(*const c_void),
         release: unsafe fn(*mut c_void),
     ) -> Self {
-        Self(RowSinkForm::Counted(CountedRowSink {
+        Self {
             raw,
             tell,
             retain,
             release,
-        }))
+        }
     }
 
     /// Tell the watcher a row of a face that came up or went.
     pub fn tell(&self, kind: FaceEventKind, row: &FaceLinkRow) {
-        match &self.0 {
-            RowSinkForm::Shared(sink) => sink(kind, row),
-            // SAFETY: this sink is a count of the watcher, which stands while it is held
-            // (`counted`).
-            RowSinkForm::Counted(counted) => unsafe {
-                (counted.tell)(counted.raw.as_ptr().cast_const(), kind, row)
-            },
-        }
+        // SAFETY: this sink is a count of the watcher, which stands while it is held (`counted`).
+        unsafe { (self.tell)(self.raw.as_ptr().cast_const(), kind, row) }
     }
+}
+
+/// Tell the watcher in the `Arc` at `raw` a row.
+///
+/// # Safety
+/// `raw` is an `Arc<F>`'s pointer, of which the caller holds a count for the call.
+unsafe fn tell_arc<F: Fn(FaceEventKind, &FaceLinkRow)>(
+    raw: *const c_void,
+    kind: FaceEventKind,
+    row: &FaceLinkRow,
+) {
+    // SAFETY: the caller's count holds the value.
+    (unsafe { &*raw.cast::<F>() })(kind, row);
+}
+
+/// Take one more count of the `Arc` at `raw`.
+///
+/// # Safety
+/// As [`tell_arc`].
+unsafe fn retain_arc<F>(raw: *const c_void) {
+    // SAFETY: the caller's.
+    unsafe { Arc::increment_strong_count(raw.cast::<F>()) };
+}
+
+/// Let go of one count of the `Arc` at `raw`.
+///
+/// # Safety
+/// `raw` is a count of an `Arc<F>` the caller gives up, once.
+unsafe fn release_arc<F>(raw: *mut c_void) {
+    // SAFETY: the caller's.
+    drop(unsafe { Arc::from_raw(raw.cast_const().cast::<F>()) });
 }
 
 /// The one link of a group member's transport, as the host that joined the group labels it:

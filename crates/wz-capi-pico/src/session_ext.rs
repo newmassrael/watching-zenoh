@@ -141,12 +141,17 @@ impl PicoSessionExt {
             let faces = crate::session::EngineHold::downgrade(engine);
             SessionEngine::watch_face_rows(
                 crate::session::EngineHold::as_ref(engine),
-                wz_session_core::face::FaceRowSink::shared(Arc::new(move |kind, row| {
-                    sink.on_face_row(kind, row, |at| {
-                        let engine = faces.upgrade()?;
-                        SessionEngine::face_link_at(crate::session::EngineHold::as_ref(&engine), at)
-                    });
-                })),
+                wz_session_core::face::FaceRowSink::of_arc(Arc::new(
+                    move |kind, row: &wz_session_core::face::FaceLinkRow| {
+                        sink.on_face_row(kind, row, |at| {
+                            let engine = faces.upgrade()?;
+                            SessionEngine::face_link_at(
+                                crate::session::EngineHold::as_ref(&engine),
+                                at,
+                            )
+                        });
+                    },
+                )),
             )
         };
         // Without the advanced plane or a registrable clock nothing stamps, so there is no clock to

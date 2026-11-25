@@ -218,7 +218,7 @@ fn a_loss_counted(watching: Watching) -> (u64, usize) {
         Watching::Nothing => Ok(0),
         Watching::Rows => SessionEngine::watch_face_rows(
             &*engine,
-            FaceRowSink::shared(Arc::new(move |kind: FaceEventKind, _row: &FaceLinkRow| {
+            FaceRowSink::of_arc(Arc::new(move |kind: FaceEventKind, _row: &FaceLinkRow| {
                 if kind == FaceEventKind::Down {
                     into.fetch_add(1, Ordering::SeqCst);
                 }
@@ -322,7 +322,7 @@ fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_not
     let lost = Arc::new(AtomicUsize::new(0));
     let sink = {
         let (told, losses, lost) = (told.clone(), losses.clone(), lost.clone());
-        FaceRowSink::shared(Arc::new(move |_kind: FaceEventKind, row: &FaceLinkRow| {
+        FaceRowSink::of_arc(Arc::new(move |_kind: FaceEventKind, row: &FaceLinkRow| {
             told.fetch_add(1, Ordering::SeqCst);
             if row.lost_after > 0 {
                 losses.fetch_add(1, Ordering::SeqCst);
