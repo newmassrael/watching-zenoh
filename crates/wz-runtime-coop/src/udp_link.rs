@@ -938,6 +938,9 @@ pub struct PortPeerRow {
     port: u32,
     peer: SocketAddr,
     fresh: bool,
+    /// How many datagrams wait in the queue for this peer, so the backlog and the reads ask the
+    /// row and not the queue. At most [`PORT_PEER_BACKLOG`]; it lies in the row's padding.
+    queued: u16,
 }
 
 /// A datagram one of a stack's udp ports sorted for a peer, held until the peer's link reads it.
@@ -985,22 +988,34 @@ impl<P: Storage> Default for PortRows<P> {
 
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 impl<P: Storage> PortRows<P> {
-    fn knows(&self, port: u32, peer: SocketAddr) -> bool {
+    fn row_mut(&mut self, port: u32, peer: SocketAddr) -> Option<&mut PortPeerRow> {
+        self.peers
+            .iter_mut()
+            .find(|row| row.port == port && row.peer == peer)
+    }
+
+    /// How many datagrams wait for `peer` of `port`, `None` for a peer the port did not take.
+    fn queued_for(&self, port: u32, peer: SocketAddr) -> Option<usize> {
         self.peers
             .iter()
-            .any(|row| row.port == port && row.peer == peer)
+            .find(|row| row.port == port && row.peer == peer)
+            .map(|row| usize::from(row.queued))
     }
 
-    fn queued_for(&self, port: u32, peer: SocketAddr) -> usize {
-        self.queue
-            .iter()
-            .filter(|row| row.port == port && row.peer == peer)
-            .count()
-    }
-
-    /// Queue `held` for `peer` of `port`; `false`, the datagram let go of, when the queue is full.
+    /// Queue `held` for `peer` of `port`, a peer the port took; `false`, the datagram let go of,
+    /// when the queue is full.
     fn enqueue(&mut self, port: u32, peer: SocketAddr, held: Held) -> bool {
-        self.queue.push(QueuedDatagram { port, peer, held }).is_ok()
+        if self
+            .queue
+            .push(QueuedDatagram { port, peer, held })
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(row) = self.row_mut(port, peer) {
+            row.queued = row.queued.saturating_add(1);
+        }
+        true
     }
 
     /// Take `peer` of `port`, whose `InitSyn` opened a link, with `held` its first datagram;
@@ -1013,6 +1028,7 @@ impl<P: Storage> PortRows<P> {
             port,
             peer,
             fresh: true,
+            queued: 0,
         };
         self.peers.push(row).is_ok() && self.enqueue(port, peer, held)
     }
@@ -1026,7 +1042,10 @@ impl<P: Storage> PortRows<P> {
         Some(row.peer)
     }
 
+    // The queue is read only for a peer that has a datagram in it, which its row tells.
     fn take_for(&mut self, port: u32, peer: SocketAddr) -> Option<Held> {
+        let row = self.row_mut(port, peer).filter(|row| row.queued > 0)?;
+        row.queued -= 1;
         let at = self
             .queue
             .iter()
@@ -1035,9 +1054,7 @@ impl<P: Storage> PortRows<P> {
     }
 
     fn holds_for(&self, port: u32, peer: SocketAddr) -> bool {
-        self.queue
-            .iter()
-            .any(|row| row.port == port && row.peer == peer)
+        self.queued_for(port, peer).is_some_and(|queued| queued > 0)
     }
 
     fn forget(&mut self, port: u32, peer: SocketAddr) {
@@ -1289,8 +1306,8 @@ impl<S: DatagramSocket> UdpPort<S> {
         let id = self.id;
         let mut book = self.book.borrow_mut();
         let kept = with_rows!(book, |rows| {
-            if rows.knows(id, from) {
-                rows.queued_for(id, from) < PORT_PEER_BACKLOG
+            if let Some(queued) = rows.queued_for(id, from) {
+                queued < PORT_PEER_BACKLOG
                     && rx
                         .keep(len)
                         .is_some_and(|held| rows.enqueue(id, from, held))
@@ -1690,6 +1707,46 @@ mod tests {
             UdpPort::lent(Loop::default(), table).is_none(),
             "a table with no slot free gives no port"
         );
+    }
+
+    /// A peer's row counts the datagrams that wait for it: each one queued, a peer the port took
+    /// or not, and each one read, in the order they came; the reads and the backlog ask the row.
+    /// Turned red by a count the queue does not move, or a read that takes another peer's.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[test]
+    fn a_peers_row_counts_what_waits_for_it() {
+        let other = SocketAddr::from(([192, 0, 2, 9], 7447));
+        let mut rows = PortRows::<Heap>::default();
+        assert_eq!(
+            rows.queued_for(0, PEER),
+            None,
+            "CONTROL: a peer the port did not take"
+        );
+        assert!(!rows.holds_for(0, PEER));
+        assert!(rows.take(0, PEER, Held::Own(b"syn".to_vec())));
+        assert!(rows.take(0, other, Held::Own(b"theirs".to_vec())));
+        assert!(rows.enqueue(0, PEER, Held::Own(b"two".to_vec())));
+        assert_eq!(rows.queued_for(0, PEER), Some(2));
+        assert_eq!(
+            rows.queued_for(1, PEER),
+            None,
+            "the same peer on another port"
+        );
+        let read = |rows: &mut PortRows<Heap>, peer| {
+            rows.take_for(0, peer).map(|held| held.as_slice().to_vec())
+        };
+        assert_eq!(read(&mut rows, PEER).as_deref(), Some(&b"syn"[..]));
+        assert_eq!(read(&mut rows, PEER).as_deref(), Some(&b"two"[..]));
+        assert_eq!(rows.queued_for(0, PEER), Some(0));
+        assert!(!rows.holds_for(0, PEER));
+        assert_eq!(read(&mut rows, PEER), None);
+        assert!(
+            rows.holds_for(0, other),
+            "the other peer's datagram waits still"
+        );
+        rows.forget(0, other);
+        assert_eq!(rows.queued_for(0, other), None);
+        assert_eq!(read(&mut rows, other), None);
     }
 
     /// A port over the slots and the rows its session lent reads, sorts and hands a peer's link its
