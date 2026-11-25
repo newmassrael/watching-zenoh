@@ -36,16 +36,17 @@
 //! ([`TurnEnd::EndsLink`]).
 
 use super::LinkActions;
-use wz_runtime_coop::faces::FacePlaces;
+use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
+use wz_session_core::link_life::LinkPhase;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
 use wz_session_core::slot_map::Handle;
 use wz_session_core::wire_id::EntityId;
 
-use super::{Core, Face, Link};
+use super::{Core, Face};
 
 /// The order the session's tables of declarations are told in. A declaration names what it depends
 /// on by a mapping id, and the peer's tables are empty, so what a kind depends on comes before it.
@@ -391,7 +392,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[inline(never)]
     pub(super) fn retract_at(&mut self, place: usize, send: &dyn TellTo<C>) {
         for face in self.transport.links.faces_mut() {
-            let Link::Up(wire) = &face.link else {
+            // The wire and the replay are fields apart: the replay's cursor moves while the wire
+            // is held.
+            if face.life.phase() != LinkPhase::Up {
+                continue;
+            }
+            let Some(wire) = face.link.wire() else {
                 continue;
             };
             // A build that reaches no pace told the peer everything when its link came up.
@@ -517,7 +523,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks + 'static>(
     };
     let mut refused_at = None;
     for (at, face) in faces.placed() {
-        let Link::Up(wire) = &face.link else {
+        let Some(wire) = face.up() else {
             continue;
         };
         if emits_now(face) && !send.send_to(&wire.actions) && on_refusal == OnRefusal::Undo {
@@ -527,7 +533,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks + 'static>(
     }
     if let Some(refused) = refused_at {
         for (_, face) in faces.placed().take_while(|(at, _)| *at < refused) {
-            if let Link::Up(wire) = &face.link {
+            if let Some(wire) = face.up() {
                 if emits_now(face) {
                     undo.tell_to(&wire.actions);
                 }
@@ -537,7 +543,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks + 'static>(
     }
     if ReplayPacing::REACHABLE {
         for face in faces.iter_mut() {
-            if matches!(face.link, Link::Up(_)) {
+            if face.up().is_some() {
                 // The face was told it above, or its replay tells it in its turn.
                 let _ = face.replay.cursor.inserted(place);
             }

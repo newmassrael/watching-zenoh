@@ -25,6 +25,7 @@ use wz_runtime_coop::session_drive::{
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
+use wz_session_core::link_life::LinkPhase;
 
 use super::{config, CatchAll, Command, Router, LOOPBACK};
 use crate::{CoopConfig, CoopEngine};
@@ -143,6 +144,15 @@ fn a_dial_under_way_holds_neither_the_session_nor_its_close() {
         std::thread::sleep(Duration::from_millis(1));
     }
 
+    // The lost link is dialled again at once from the first endpoint, and the dial under way is
+    // the life of the face's record: a read that drove a life of its own, or backed off before
+    // dialling a link that was up, leaves the face's life elsewhere.
+    assert_eq!(
+        engine.dial_phase(),
+        Some(LinkPhase::Dialing { row: 0 }),
+        "the face's life dials the first endpoint again"
+    );
+
     let asked = Instant::now();
     assert!(engine.peer_identities().is_empty(), "the link is lost");
     assert!(
@@ -203,6 +213,15 @@ fn a_dial_under_way_holds_no_read_of_one_thread() {
             read.elapsed()
         );
     }
+    // The lost link is dialled again at once from the first endpoint, and the dial under way is
+    // the life of the face's record: a read that drove a life of its own, or backed off before
+    // dialling a link that was up, leaves the face's life elsewhere.
+    assert_eq!(
+        engine.dial_phase(),
+        Some(LinkPhase::Dialing { row: 0 }),
+        "the face's life dials the first endpoint again"
+    );
+
     // The dial begun, a read asks it and goes on.
     let read = Instant::now();
     let _ = SessionDrive::read(&*engine, false);

@@ -14,19 +14,21 @@
 //! reads the session: the face is held. A close from a callback ends the link's life and asks its
 //! session to end; the pump goes once the read that steps it has returned from it.
 //!
-//! Where the link stands is the link's life ([`UnicastLink`]), the session's one record of it:
-//! the face holds what the life's effects are carried out with (the dial under way, the link it
-//! made, the pump) and nothing of where the link stands.
+//! Where the link stands is the life of the face's record ([`UnicastLink`]), the session's one
+//! record of it, as in a build whose links are tasks: the engine's face holds what the life's
+//! effects are carried out with (the dial under way, the link it made, the pump) and nothing of
+//! where the link stands.
 
 use super::*;
 
 use core::mem::MaybeUninit;
 use core::sync::atomic::AtomicBool;
 
-use wz_runtime_coop::faces::{Dial, LinkEnd, DIAL_LOOK_MS};
+use wz_runtime_coop::faces::{Dial, LinkEnd};
+use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::transport::{LinkPump, OpenedAs, PlacedWire, PumpPlace};
 use wz_session_core::driver_loop::DriverLoopOutcome;
-use wz_session_core::link_life::{LinkInput, LinkPhase, LinkTimes, Refused, UnicastLink};
+use wz_session_core::link_life::{LinkInput, LinkPhase, Refused};
 
 use super::registry::Planes;
 
@@ -310,9 +312,6 @@ pub(super) struct DirectSlot<L: SessionLinks + 'static, C: ClockSource + 'static
     router: SessionReassembly,
     /// Where the Router is lent to the pump's receive.
     lend: RouterLend<SessionReassembly, RouterPlace>,
-    /// The link's life, built at the open ([`Self::make_life`]).
-    life: MaybeUninit<UnicastLink>,
-    life_made: bool,
     /// The dial the life asked for, while the network has not answered it.
     dial: Option<Dial<L::Dial>>,
     /// The link a dial made, and the endpoint it reached, until its handshake is begun.
@@ -332,29 +331,6 @@ pub(super) struct DirectSlot<L: SessionLinks + 'static, C: ClockSource + 'static
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> {
-    /// The link's life, once the open built it.
-    fn life(&mut self) -> Option<&mut UnicastLink> {
-        if !self.life_made {
-            return None;
-        }
-        // SAFETY: `life_made` is set once `init_in` wrote the life (`Self::make_life`).
-        Some(unsafe { self.life.assume_init_mut() })
-    }
-
-    /// Build the link's life once, for `endpoints` endpoints dialled under `times`.
-    fn make_life(&mut self, times: LinkTimes, endpoints: usize) {
-        if !self.life_made {
-            UnicastLink::init_in(&mut self.life, times, endpoints);
-            self.life_made = true;
-        }
-    }
-
-    /// Whether the link is up.
-    fn is_up(&mut self) -> bool {
-        self.life()
-            .is_some_and(|life| matches!(life.phase(), LinkPhase::Up))
-    }
-
     /// Drop the pump, when one is written: its deadlines go with it.
     fn drop_pump(&mut self) {
         if self.records.take().is_some() {
@@ -368,13 +344,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, 
         self.pump_due_us = u64::MAX;
     }
 
-    /// Let go of the link: its life is closed, the dial and the link it made are let go of, and
-    /// the pump goes.
+    /// Let go of the link: the dial and the link it made are let go of, and the pump goes. The
+    /// life of the face's record was closed by the session's end of its links (`end_links`).
     fn let_go(&mut self) {
-        if let Some(life) = self.life() {
-            // A close reads no time.
-            life.input(LinkInput::Close, 0);
-        }
         self.dial = None;
         self.opened = None;
         self.drop_pump();
@@ -384,10 +356,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, 
     /// was asked to, a dial the network answered, or only the time.
     fn next_input(&mut self, core: &Core<L, C>, end: &EndFlags) -> LinkInput {
         if self.records.is_some() {
-            let established = matches!(
-                core.transport.links.face(0).map(|face| &face.link),
-                Some(Link::Opening { wire, .. }) if wire.established()
-            );
+            let established = core.transport.links.face(0).is_some_and(|face| {
+                matches!(face.life.phase(), LinkPhase::Handshaking { .. })
+                    && face.link.wire().is_some_and(|wire| wire.established())
+            });
             if established {
                 return LinkInput::Established;
             }
@@ -467,8 +439,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, 
             slot: <CoopForm as LockForm>::new(Confined(DirectSlot {
                 router,
                 lend,
-                life: MaybeUninit::uninit(),
-                life_made: false,
                 dial: None,
                 opened: None,
                 last: None,
@@ -520,12 +490,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let core = &mut core.0;
             core.transport.listen_on_config()?;
             core.join_groups()?;
-            let times = LinkTimes {
-                open_timeout_ms: core.config.open_timeout_ms,
-                redial_ms: core.config.redial_ms,
-                dial_look_ms: DIAL_LOOK_MS,
-            };
-            slot.make_life(times, core.transport.endpoints.dials());
             if !crate::arena::dials_of(
                 core.transport.endpoints.dials(),
                 core.transport.endpoints.listens(),
@@ -536,7 +500,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let now_us = core.now_us();
             self.drive_link(core, slot, LinkInput::Open, now_us)?;
         }
-        while !slot.is_up() {
+        while !self.link_is_up() {
             let Some(mut wait) = self.link_wait(slot) else {
                 return Err(OpenError::NoEndpoint);
             };
@@ -668,9 +632,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             if core.session.matching.moved(written) {
                 self.read_matching(core);
             }
-            slot.life_due_us = slot
-                .life()
-                .and_then(|life| life.wake_at(now_us))
+            slot.life_due_us = core
+                .transport
+                .links
+                .face(0)
+                .and_then(|face| face.life.wake_at(now_us))
                 .unwrap_or(u64::MAX);
             core.link_due_us = slot.life_due_us.min(slot.pump_due_us);
             core.settle_ledger();
@@ -750,17 +716,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ) -> Result<(), OpenError> {
         let (mut input, mut now_us) = (input, now_us);
         loop {
-            let Some(life) = slot.life() else {
+            let Some(face) = core.transport.links.face_mut(0) else {
                 return Ok(());
             };
-            let effects = life.input(input, now_us);
+            let was = face.life.phase();
+            let effects = face.life.input(input, now_us);
             if effects.let_go() {
                 slot.dial = None;
                 slot.opened = None;
                 slot.drop_pump();
-                core.transport
-                    .links
-                    .put_link(0, Link::Waiting { at_us: u64::MAX });
+                core.transport.links.put_link(0, Link::Idle);
             }
             // A dial the life gave up on before the network answered it is its endpoint's refusal
             // for want of an answer in time, as a build whose links are tasks names it.
@@ -775,9 +740,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
             if effects.end_handshake() {
                 // Why the handshake ended is read off its link before the link goes, and names
-                // the endpoint the link was dialled to: the one before the next to dial.
-                let row = match core.transport.links.face(0).map(|face| &face.link) {
-                    Some(Link::Opening { next, .. }) => next.saturating_sub(1),
+                // the endpoint the link was dialled to, which the life stood in.
+                let row = match was {
+                    LinkPhase::Handshaking { row, .. } => row,
                     _ => 0,
                 };
                 let why = core.transport.end_handshake(0);
@@ -786,11 +751,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     why,
                 )));
                 slot.drop_pump();
-                // The life keeps when the link is dialled again: a time left on the face would
-                // end each read's wait at once.
-                core.transport
-                    .links
-                    .put_link(0, Link::Waiting { at_us: u64::MAX });
+                core.transport.links.put_link(0, Link::Idle);
             }
             if effects.lose() {
                 // The lost peer's chains end with its link: the next link's fragments would be
@@ -804,8 +765,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 if let Some(zid) = peer {
                     let _ended = slot.router.abort_peer(zid.as_slice());
                 }
-                // The face waits with no time of its own, as after a handshake that ended.
-                core.lose_face_link(0, DIAL_FACE, u64::MAX);
+                core.lose_face_link(0, DIAL_FACE);
                 slot.drop_pump();
                 if effects.ends_session() {
                     slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
@@ -867,10 +827,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ) -> Result<(), OpenError> {
         slot.drop_pump();
         self.direct.end.ready();
-        let next = match slot.life().map(|life| life.phase()) {
-            Some(LinkPhase::Dialing { row }) => row.saturating_add(1),
-            _ => 0,
-        };
         let params = core.link_params()?;
         let mut calls = LinkMaking {
             session: &mut core.session,
@@ -908,15 +864,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         slot.records = Some(dispatch);
         // A pump not stepped yet is due at once: the read that placed it sends its first frame.
         slot.pump_due_us = 0;
-        let deadline_us = open_deadline_on(&core.clock, core.config.open_timeout_ms);
-        core.transport.links.put_link(
-            0,
-            Link::Opening {
-                wire,
-                next,
-                deadline_us,
-            },
-        );
+        core.transport.links.put_link(0, Link::Wire(wire));
         Ok(())
     }
 
@@ -926,13 +874,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if !ReplayPacing::REACHABLE {
             return;
         }
-        let actions = match core.transport.links.face(0).map(|face| &face.link) {
-            Some(Link::Up(wire)) => wire.actions.clone(),
-            _ => return,
+        let Some(actions) = core
+            .transport
+            .links
+            .face(0)
+            .and_then(|face| face.up())
+            .map(|wire| wire.actions.clone())
+        else {
+            return;
         };
         if core.replay_turn(0, &actions, now_us / 1000) == TurnEnd::EndsLink {
             core.transport.links.abort_link(0);
         }
+    }
+
+    /// Whether the one link is up, as the life of the face's record says.
+    fn link_is_up(&self) -> bool {
+        self.core
+            .lock()
+            .0
+            .transport
+            .links
+            .face(0)
+            .is_some_and(|face| face.life.phase() == LinkPhase::Up)
     }
 
     /// Let go of the one link's session at the close, unless a read steps it now: that read lets

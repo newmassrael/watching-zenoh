@@ -337,14 +337,6 @@ pub mod ip_stack;
     target_has_atomic = "ptr"
 ))]
 pub mod faces;
-// The decisions of a face's life as a value, beside the faces whose links the executor holds.
-#[cfg(all(
-    feature = "session-unicast",
-    feature = "alloc",
-    not(feature = "session-slot"),
-    target_has_atomic = "ptr"
-))]
-pub mod face_life;
 // The decisions of a face's sends as a value: what a publish behind a held session does, what is
 // kept for the faces it is still owed to, and the order of a publish's fan-outs.
 #[cfg(all(
