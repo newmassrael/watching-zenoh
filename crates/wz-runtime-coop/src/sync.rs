@@ -1319,7 +1319,7 @@ mod many_threads_tests {
 ))]
 mod face_place_tests {
     use super::tests::TestOwner;
-    use super::{Confined, FacePlace, FaceTx, Lend, NoFaceWait};
+    use super::{Confined, FacePlace, FaceTx, Lend};
     use wz_session_core::transport_place::TransportPlace;
 
     type Place = FacePlace<Confined<TestOwner>, u32>;
@@ -1333,6 +1333,7 @@ mod face_place_tests {
     #[test]
     fn a_face_is_tried_and_not_waited_on_under_a_mark_that_bars_it() {
         extern crate std;
+        use super::NoFaceWait;
         use std::panic::{catch_unwind, AssertUnwindSafe};
         let marked = cfg!(all(debug_assertions, not(feature = "host-lock-sys")));
         let waits = FacePlace::<super::Shared, u32>::empty();
