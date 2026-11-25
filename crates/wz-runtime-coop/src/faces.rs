@@ -1035,6 +1035,40 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         endpoint
     }
 
+    /// Ask the dial `pending` of `endpoint`, begun for the face at `at`, once, then read the time
+    /// it is given up at with `deadline_us`: read after the ask, so a host whose ask blocks (a
+    /// refused loopback connect on Windows) does not spend the dial's time on it. A dial the network
+    /// has not answered yet is put in the face where it lies, given up at that time, the walk going
+    /// on from row `next` when it fails; one answered at once is let go of, before its link is
+    /// opened, and its answer is handed back with the time, the face keeping what it held. A dial
+    /// for a face past the table is let go of.
+    pub fn ask_dial(
+        &mut self,
+        at: usize,
+        endpoint: DialEndpoint,
+        mut pending: L::Dial,
+        next: usize,
+        deadline_us: impl FnOnce() -> u64,
+    ) -> Option<(Result<OpenedLink<L::Pump>, LinkOpenError>, u64)> {
+        // A dial that answered has handed out all it held (the socket, the link's buffers, the
+        // program's link), and keeps only handles that own nothing, so it is let go of here with
+        // nothing to observe: every stack's dial takes those out as it answers.
+        if let Some(answer) = pending.poll() {
+            return Some((answer, deadline_us()));
+        }
+        let deadline_us = deadline_us();
+        // Written into the face from the dial this frame holds, and not handed back through the
+        // walk and the session's dial, each of which would move it once more.
+        if let Some(face) = self.face_mut(at) {
+            *face.link_mut() = Link::Dialing {
+                dial: Dial::new(endpoint, pending),
+                next,
+                deadline_us,
+            };
+        }
+        None
+    }
+
     /// The face at `at`, whose handshake completed, holds its link up.
     pub fn establish(&mut self, at: usize) {
         let Some(face) = self.face_mut(at) else {
@@ -1623,18 +1657,25 @@ mod tests {
         }
     }
 
-    /// A dial that answers `answer` the first time it is asked, and nothing after.
-    struct Answer(Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>>);
+    /// A dial that answers `.0` the first time it is asked, and nothing after, counting each ask
+    /// in `.1` when it is given a count.
+    struct Answer(
+        Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>>,
+        Option<Rc<Cell<u32>>>,
+    );
 
     impl PendingDial<Rc<Quiet>> for Answer {
         fn poll(&mut self) -> Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>> {
+            if let Some(asks) = &self.1 {
+                asks.set(asks.get() + 1);
+            }
             self.0.take()
         }
     }
 
     impl From<OpenedLink<Rc<Quiet>>> for Answer {
         fn from(opened: OpenedLink<Rc<Quiet>>) -> Self {
-            Answer(Some(Ok(opened)))
+            Answer(Some(Ok(opened)), None)
         }
     }
 
@@ -1646,7 +1687,7 @@ mod tests {
         deadline_us: u64,
     ) -> TestLink {
         Link::Dialing {
-            dial: Dial::new(endpoint, Answer(answer)),
+            dial: Dial::new(endpoint, Answer(answer, None)),
             next,
             deadline_us,
         }
@@ -1757,7 +1798,7 @@ mod tests {
     fn a_dial_answers_once_and_names_its_endpoint() {
         let mut dial = Dial::new(
             DialEndpoint::Listed(1),
-            Answer(Some(Err(LinkOpenError::Refused))),
+            Answer(Some(Err(LinkOpenError::Refused)), None),
         );
         assert_eq!(dial.endpoint(), &DialEndpoint::Listed(1));
         assert!(matches!(dial.answer(), Some(Err(LinkOpenError::Refused))));
@@ -1950,6 +1991,64 @@ mod tests {
 
         assert_eq!(faces.end_dial(5, 11), None, "past the table");
         assert!(matches!(dial(&faces).link, Link::Waiting { at_us: 9 }));
+    }
+
+    /// A dial is asked before the time it is given up at is read, once: one under way is put in the
+    /// face with that time and the row its walk goes on from, and one answered at once is handed
+    /// back with its answer and the time, the face keeping the dial it held. Turned red by a time
+    /// read before the ask, which a host whose ask blocks would spend, or an answered dial put in
+    /// the face.
+    #[test]
+    fn a_dial_is_asked_before_the_time_it_is_given_up_at_is_read() {
+        let asks = Rc::new(Cell::new(0));
+        let read_after = Cell::new(None);
+        let mut faces = supervisor(Link::Waiting { at_us: 0 }, 1);
+        let answered = faces.ask_dial(
+            0,
+            DialEndpoint::Listed(2),
+            Answer(None, Some(asks.clone())),
+            3,
+            || {
+                read_after.set(Some(asks.get()));
+                50
+            },
+        );
+        assert!(answered.is_none(), "the dial is under way");
+        assert_eq!(read_after.get(), Some(1), "read once, after the one ask");
+        match &dial(&faces).link {
+            Link::Dialing {
+                dial,
+                next,
+                deadline_us,
+            } => {
+                assert_eq!(dial.endpoint(), &DialEndpoint::Listed(2));
+                assert_eq!((*next, *deadline_us), (3, 50));
+            }
+            _ => panic!("the face holds the dial under way"),
+        }
+
+        let answered = faces.ask_dial(
+            0,
+            DialEndpoint::Listed(0),
+            Answer(Some(Err(LinkOpenError::Refused)), Some(asks.clone())),
+            1,
+            || {
+                read_after.set(Some(asks.get()));
+                70
+            },
+        );
+        assert!(matches!(answered, Some((Err(LinkOpenError::Refused), 70))));
+        assert_eq!(read_after.get(), Some(2), "read after the second ask");
+        assert!(
+            matches!(
+                dial(&faces).link,
+                Link::Dialing {
+                    deadline_us: 50,
+                    ..
+                }
+            ),
+            "an answered dial is not put in the face"
+        );
     }
 
     /// The node a face's handshake reached is the one it stands by for only while another face

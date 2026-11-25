@@ -3290,6 +3290,14 @@ enum Dialled {
 /// back through every call between.
 struct SessionEnds;
 
+/// When a handshake begun now is given up, in microseconds on `clock`: `open_timeout_ms` past
+/// the clock's reading. A free function so a dial reads it while the transport holds the session.
+fn open_deadline_on<C: ClockSource>(clock: &C, open_timeout_ms: u64) -> u64 {
+    clock
+        .now_us()
+        .saturating_add(open_timeout_ms.saturating_mul(1000))
+}
+
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
     /// spawned on the session's local set and stepped once so that an initiator's InitSyn is sent
@@ -3376,9 +3384,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// When a handshake begun now is given up, in microseconds on the session's clock.
     fn open_deadline_us(&self) -> u64 {
-        self.clock
-            .now_us()
-            .saturating_add(self.config.open_timeout_ms.saturating_mul(1000))
+        open_deadline_on(&self.clock, self.config.open_timeout_ms)
     }
 
     /// Dial the face at `at`, numbered `face`, from `start`: the first of the session's
@@ -3419,23 +3425,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     answer,
                 } => (endpoint, next, deadline_us, answer),
                 DialStart::Row(from) => {
-                    let walked = self.transport.walk_dials(from, last);
-                    let deadline_us = self.open_deadline_us();
-                    match walked {
-                        DialWalk::Dialing { dial, next } => {
-                            self.transport.links.put_link(
-                                at,
-                                Link::Dialing {
-                                    dial,
-                                    next,
-                                    deadline_us,
-                                },
-                            );
-                            return Ok(Dialled::Pending);
-                        }
+                    // The deadline is read from the clock once the dial was asked, which a host
+                    // may block (`LinkSupervisor::ask_dial`).
+                    let (clock, open_timeout_ms) = (&self.clock, self.config.open_timeout_ms);
+                    let deadline_us = || open_deadline_on(clock, open_timeout_ms);
+                    match self.transport.walk_dials(at, from, last, deadline_us) {
+                        DialWalk::Dialing => return Ok(Dialled::Pending),
                         DialWalk::Answered {
                             endpoint,
                             next,
+                            deadline_us,
                             answer,
                         } => (Some(endpoint), next, deadline_us, answer),
                         DialWalk::Ended => return Ok(Dialled::Exhausted),
