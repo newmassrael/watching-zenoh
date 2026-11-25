@@ -871,6 +871,10 @@ pub struct WriteFilterRow<Key> {
     /// general way.
     #[cfg(feature = "alloc")]
     plain: Cell<Option<PlainWay>>,
+    /// The sender's epoch at which the plain way was found written from its head on every link
+    /// ([`Self::keep_plan`]): a put at the same epoch is written from it with nothing asked again.
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
+    planned: Cell<Option<u64>>,
 }
 
 /// How a write of a write filter's entity that brings nothing of its own is sent the plain way.
@@ -885,6 +889,35 @@ pub struct PlainWay {
     /// QoS: `None` for a key the declaration does not name by an id.
     #[cfg(feature = "codec-push")]
     pub head: Option<crate::lent_push::PutHead>,
+}
+
+/// A plain put of a write filter's way as its plan holds it ([`WriteFilterRow::planned_put`]):
+/// the filter's key named by the head's declaration alone, the head and the facts it is sent from.
+/// Made by the row alone, from a plan it checked, so no holder pairs a key with a head of its own.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+#[derive(Clone, Copy, Debug)]
+pub struct PlannedPut<'r> {
+    key: crate::named_key::NamedKey<'r>,
+    head: crate::lent_push::PutHead,
+    params: crate::publish_options::PlainPutParams,
+}
+
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+impl<'r> PlannedPut<'r> {
+    /// The filter's key, named by the declaration the head was written for.
+    pub fn key(&self) -> crate::named_key::NamedKey<'r> {
+        self.key
+    }
+
+    /// The Put's head.
+    pub fn head(&self) -> crate::lent_push::PutHead {
+        self.head
+    }
+
+    /// The facts the Put is sent from.
+    pub fn params(&self) -> crate::publish_options::PlainPutParams {
+        self.params
+    }
 }
 
 /// A key expression declaration as its holder names it: the id the wire names it by, `0` for
@@ -936,6 +969,38 @@ impl<Key: KeyBacking> WriteFilterRow<Key> {
     /// Whether it matched when it was last read for its listeners.
     pub fn matching(&self) -> bool {
         self.matching.get()
+    }
+
+    /// The put of the plain way as planned at `epoch`, while the plan stands there: `None` for a
+    /// row planned at another epoch or never, which the sender plans again.
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
+    pub fn planned_put(&self, epoch: u64) -> Option<PlannedPut<'_>> {
+        if self.planned.get() != Some(epoch) {
+            return None;
+        }
+        let way = self.plain.get()?;
+        let head = way.head?;
+        Some(PlannedPut {
+            key: crate::named_key::NamedKey::by_head(self.key.as_str(), &head)?,
+            head,
+            params: way.params,
+        })
+    }
+
+    /// Plan the plain way at the sender's `epoch`, `named` being the filter's key as the session
+    /// names it: kept when that is the way's head's declaration alone, and dropped otherwise.
+    /// The sender answers for the rest its epoch stands for (its links, and what the filter's
+    /// answer and the put's way are read from). Whether the plan was kept.
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
+    pub fn keep_plan(&self, epoch: u64, named: crate::named_key::NamedKey<'_>) -> bool {
+        let holds = named.text() == self.key.as_str()
+            && self
+                .plain
+                .get()
+                .and_then(|way| way.head)
+                .is_some_and(|head| head.names(named.wire()));
+        self.planned.set(holds.then_some(epoch));
+        holds
     }
 }
 
@@ -2275,6 +2340,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             verdict: Cell::new(None),
             #[cfg(feature = "alloc")]
             plain: Cell::new(None),
+            #[cfg(all(feature = "alloc", feature = "codec-push"))]
+            planned: Cell::new(None),
         };
         let inserted = self
             .kept_write_filters_mut()
@@ -2572,6 +2639,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         else {
             return;
         };
+        // A way stated again is planned again.
+        #[cfg(feature = "codec-push")]
+        row.planned.set(None);
         row.plain.set(plain.map(|(params, key)| PlainWay {
             params,
             key: KeyexprRef {
