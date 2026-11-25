@@ -263,7 +263,39 @@ pub fn canonize_keyexpr_as<P: Storage>(
 /// written, so a caller that needs only the verdict (an outbound declaration's check) holds no
 /// buffer and allocates nothing on any profile.
 pub fn canon_verdict(input: &str, dialect: KeyexprDialect) -> Result<(), KeyexprCanonError> {
+    if is_plain_canon(input) {
+        return Ok(());
+    }
     verdict_walk(input, dialect).map(|_| ())
+}
+
+/// Whether `input` is a text of literal chunks that is its own canonical form, read in one pass
+/// over its bytes: every chunk holds a byte, no byte is `*`, `$`, `#` or `?`, and the byte and
+/// chunk bounds the walk applies admit it. Such a text has no wild run, no `$*` and no chunk the
+/// dialects split on, so [`CanonWalk`] hands it back as it is in both dialects, and with no `**`
+/// chunk no zenoh-pico canonizer aborts on it. `false` says only that the walk is to judge the
+/// text, and gives no refusal of its own, so every refusal is still the walk's.
+// The walk reads a byte at a time out of line, which suits a key judged once; a key a session
+// names is judged at the door and again for each face it is announced on, and is mostly literal.
+fn is_plain_canon(input: &str) -> bool {
+    if exceeds_byte_bound::<Profile, { caps::MAX_KEYEXPR_BYTES }>(input) {
+        return false;
+    }
+    let mut chunks = 1usize;
+    let mut in_chunk = false;
+    for &byte in input.as_bytes() {
+        match byte {
+            b'*' | b'$' | b'#' | b'?' => return false,
+            b'/' if !in_chunk => return false,
+            b'/' => {
+                chunks = chunks.saturating_add(1);
+                in_chunk = false;
+            }
+            _ => in_chunk = true,
+        }
+    }
+    let chunk_bound = <<Profile as Storage>::Scratch as Storage>::ENFORCES_CAPACITY;
+    in_chunk && (!chunk_bound || chunks <= MAX_KEYEXPR_CHUNKS)
 }
 
 /// The walk [`canon_verdict`] steps, run to its end and handed back with what it read on the
@@ -289,6 +321,11 @@ fn verdict_walk(input: &str, dialect: KeyexprDialect) -> Result<CanonWalk, Keyex
 /// against the text where it lies, so nothing is written and nothing is allocated on any profile.
 /// `false` for a text the walk refuses.
 pub fn is_canon(input: &str, dialect: KeyexprDialect) -> bool {
+    is_plain_canon(input) || is_canon_walked(input, dialect)
+}
+
+/// [`is_canon`] as the walk answers it, for any text.
+fn is_canon_walked(input: &str, dialect: KeyexprDialect) -> bool {
     if exceeds_byte_bound::<Profile, { caps::MAX_KEYEXPR_BYTES }>(input) {
         return false;
     }
@@ -1382,6 +1419,15 @@ impl core::error::Error for OutboundKeyexprError {
 /// ```
 #[cfg(feature = "storage-profile")]
 pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyexprError> {
+    if is_plain_canon(input) {
+        return Ok(());
+    }
+    outbound_walked(input)
+}
+
+/// [`check_outbound_keyexpr_pico_safe`] as the walk answers it, for any text.
+#[cfg(feature = "storage-profile")]
+fn outbound_walked(input: &str) -> Result<(), OutboundKeyexprError> {
     // The structural verdict and the abort shape are read in one walk of the text. The verdict
     // comes first: the wire emit path uses the raw suffix verbatim (R300 NARROW scope; pre-emit
     // canonization is the R299 carry #3 architectural decision), so no canonical form is built
@@ -2098,6 +2144,72 @@ mod tests {
         ] {
             assert_eq!(is_canon(text, KeyexprDialect::Pico), canon, "{text}");
         }
+    }
+
+    /// The one pass takes a text of literal chunks and nothing else: an empty text, an empty
+    /// chunk at either end or between two, and a chunk with a `*`, a `$`, a `#` or a `?` are
+    /// left to the walk. Turned red by a pass that reads `/` after `/` as a chunk, or any of
+    /// those four bytes as a literal one.
+    #[test]
+    fn the_one_pass_takes_literal_chunks_only() {
+        for text in ["thr", "a/b/c", "home/temp", "\u{e9}/x"] {
+            assert!(is_plain_canon(text), "{text:?}");
+        }
+        for text in [
+            "", "/", "a/", "/a", "a//b", "a/*", "**", "a/$*", "a$b", "a#b", "a?b",
+        ] {
+            assert!(!is_plain_canon(text), "{text:?}");
+        }
+    }
+
+    /// Each judgement of a text answers as the walk answers it, in both dialects: the canon check,
+    /// the verdict and the outbound check. A text the one pass takes the walk finds canonical and
+    /// keeps as it is; any other is the walk's to judge. Turned red by a pass that takes an empty
+    /// chunk (`a//b`), a `*` or a `$` as a literal byte, or that drops the chunk bound (the corpus
+    /// holds texts at and past it).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_plain_text_is_judged_by_one_pass_as_the_walk_judges_it() {
+        let mut plain = 0usize;
+        let mut other = 0usize;
+        let mut agree = |text: &str| {
+            let taken = is_plain_canon(text);
+            for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+                if taken {
+                    assert!(is_canon_walked(text, dialect), "{text:?} {dialect:?}");
+                }
+                assert_eq!(
+                    is_canon(text, dialect),
+                    is_canon_walked(text, dialect),
+                    "{text:?} {dialect:?}"
+                );
+                assert_eq!(
+                    canon_verdict(text, dialect),
+                    verdict_walk(text, dialect).map(|_| ()),
+                    "{text:?} {dialect:?}"
+                );
+            }
+            #[cfg(feature = "storage-profile")]
+            assert_eq!(
+                check_outbound_keyexpr_pico_safe(text),
+                outbound_walked(text),
+                "{text:?}"
+            );
+            if taken {
+                plain = plain.saturating_add(1);
+            } else {
+                other = other.saturating_add(1);
+            }
+        };
+        for text in canon_corpus() {
+            agree(&text);
+        }
+        walk_alphabet(&mut agree);
+        // Both answers are met, so a pass that took every text or none would fail.
+        assert!(
+            plain > 0 && other > 0,
+            "{plain} taken, {other} left to the walk"
+        );
     }
 
     /// A wild key, which only the passes canonize, is taken whole into a key of the lent policy.
