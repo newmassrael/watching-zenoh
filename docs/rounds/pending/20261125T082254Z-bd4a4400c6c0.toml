@@ -1,0 +1,13 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+The Platform workflow's four red jobs on 20ee0c0a1 (the leg and interop jobs on Windows and macOS) had one cause: 13e4aec98 dropped the `unix` condition from wz-capi-pico's refusal of coop unixpipe, so a build naming transport-link-unixpipe on Windows was refused at compile time, and platform_surface_matrix.py graded that as the feature switched on where it is unserved. Upstream compiles no unixpipe link off Unix (zenoh-link-unixpipe lib.rs @ `#[cfg(unix)] mod unix;`). The coop unixpipe link is now built where a FIFO opener exists (Linux and Android) and inert elsewhere: a unixpipe/ endpoint there is refused as an unknown locator scheme, and the refusal test covers that build. The --promoted listing keeps its stdout for the list and grades on stderr, so a failing grade names its finding in the job log rather than in the listed file.
+'''
+changes = '''
+crates/wz-capi-pico: Cargo.toml, lib.rs, coop_host.rs, session.rs, endpoint.rs, tests/it/files/unixpipe_link_refused.rs. scripts/lib/platform_surface_matrix.py.
+'''
+verification = '''
+Through bx on ci-int: platform_surface_matrix.py --check (rc 0, no finding) and --selftest (OK); wz-capi-pico with transport-link-unixpipe: unixpipe_link_roundtrip and a_scheme_without_a_link_in_this_build_is_unknown (1 each), without it a_unixpipe_endpoint_opens_no_session_without_the_feature (1); clippy -D warnings of wz-capi-pico --all-targets with transport-link-unixpipe. The Windows build of that set is the next hosted Platform run's to judge.
+'''
+carry = '''
+The next hosted Platform run on Windows and macOS; the carries of the previous round.
+'''
