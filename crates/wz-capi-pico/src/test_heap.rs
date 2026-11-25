@@ -44,7 +44,19 @@ pub(crate) fn refused<R>(run: impl FnOnce() -> R) -> R {
     answer
 }
 
-/// The test binary's allocator ([`allocations`], [`refused`]).
+/// `run`'s answer, what the calling thread allocates while it runs neither refused nor counted:
+/// the test binary's own reading of how it is run, which is no allocation of a door under test.
+#[cfg(wz_process_pools)]
+pub(crate) fn uncounted<R>(run: impl FnOnce() -> R) -> R {
+    let was_refusing = REFUSING.with(|refusing| refusing.replace(false));
+    let was_counting = COUNTING.with(Cell::take);
+    let answer = run();
+    COUNTING.with(|count| count.set(was_counting));
+    REFUSING.with(|refusing| refusing.set(was_refusing));
+    answer
+}
+
+/// The test binary's allocator ([`allocations`], [`refused`], [`uncounted`]).
 struct TestHeap;
 
 // SAFETY: every call is the system allocator's, with the arguments it was given, or a refusal
