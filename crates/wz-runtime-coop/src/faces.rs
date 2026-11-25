@@ -663,6 +663,12 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
         }
     }
 
+    /// The end the link's session is ended by: where each face's end lies in its face, what
+    /// names the face whose place the handle reaches.
+    pub fn end(&self) -> &E {
+        &self.end
+    }
+
     /// The site the parts lie in.
     fn site(&self) -> &FaceSite<K, P> {
         // SAFETY: the site outlives the handle where it was when the handle was made

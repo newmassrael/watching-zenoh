@@ -2122,18 +2122,23 @@ impl LinkLeg<'_> {
     }
 }
 
-/// Send `leg` to the peer of the one link, whose record names it by `_wire`, as `how` says,
-/// through its wire `tx`, which the caller holds with the link's place, taken before the
-/// session's lock (`CoopEngine::on_link`). `None` while the place holds no wire.
+/// Send `leg` to the peer of the face whose record holds `wire`, as `how` says: through the
+/// held face's wire in `tx` where `wire` lies in the face whose place the caller holds, taken
+/// before the session's lock (`CoopEngine::on_link`), and by a try of the face's place
+/// otherwise ([`publish_on`]). `None` while the face's place holds no wire, or is not lent.
 #[cfg(not(wz_round))]
 #[inline(always)]
-fn publish_through<C: ClockSource + 'static>(
-    _wire: &impl LendsSession<Session = LinkSession<C>>,
+fn publish_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
+    wire: &direct::DirectWire<L, C>,
     tx: LinkTx<'_, C>,
     leg: &LinkLeg<'_>,
     how: FaceSend,
 ) -> Option<LegSent> {
-    tx.map(|wire| leg.send_to(&wire.actions, how))
+    if tx.holds(wire) {
+        tx.wire().map(|held| leg.send_to(&held.actions, how))
+    } else {
+        publish_on(wire, leg, how)
+    }
 }
 
 /// Send `leg` over the link `wire` holds as `how` says, through the face's record, which the
@@ -2151,7 +2156,6 @@ fn publish_through<C: ClockSource + 'static>(
 
 /// Send `leg` over the link `wire` holds as `how` says, the link's session lent as [`send_on`]
 /// lends it. `None` while the link is not lent.
-#[cfg(wz_round)]
 fn publish_on<C: ClockSource + 'static>(
     wire: &impl LendsSession<Session = LinkSession<C>>,
     leg: &LinkLeg<'_>,
@@ -2893,11 +2897,11 @@ impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
 type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
 
-/// What an operation that holds the one link's place sends through under the session's lock,
-/// taken inside that place (`CoopEngine::live_on_link`): the link's wire, while the place holds
-/// one.
+/// What an operation that holds a face's send place sends through under the session's lock,
+/// taken inside that place (`CoopEngine::live_on_link`): the face held and its wire, while the
+/// place holds one; every other face is reached by a try of its own place.
 #[cfg(not(wz_round))]
-type LinkTx<'a, C> = Option<&'a Wire<C>>;
+type LinkTx<'a, C> = direct::FaceTx<'a, C>;
 
 /// What an operation sends through where each face's record holds its link: nothing beside the
 /// record, which the session's lock alone reaches. That form goes with the record that holds a
@@ -2931,15 +2935,10 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> HeldLink<C> for L {
 /// The link a face of a session over `L` holds (`HeldLink`).
 type FaceLink<C, L> = <L as HeldLink<C>>::Wire;
 
-/// A lend of a face's link that found it held. Never so where the read steps the one link itself:
-/// its one thread holds the link only in the read's step, which seats the link's send part for
-/// every send made inside it, so a debug build of that form fails on it; a release build owes the
-/// send's debt, as any other form does.
-#[cfg(any(
-    wz_round,
-    feature = "transport-stats",
-    all(test, any(feature = "std", feature = "liveliness-get"))
-))]
+/// A lend of a face's link that found it held. Never so where the read steps the faces itself on
+/// the session's one thread: an operation holds one face's place and tries every other's, which
+/// nothing else on the thread holds then, so a debug build of that form fails on it; a release
+/// build owes the send's debt, as any other form does.
 #[inline(always)]
 fn found_held<U>(lent: &Lend<U>) {
     #[cfg(not(wz_round))]
@@ -2959,7 +2958,6 @@ fn found_held<U>(lent: &Lend<U>) {
 /// it; `None` while the link holds no session. A step of the link that answers yes or no (a
 /// batch's, or how the link names a key) is lent through it too.
 // Out of line and over `dyn`: one body lends a link for every send of the session.
-#[cfg(wz_round)]
 #[inline(never)]
 fn send_on<C: ClockSource + 'static>(
     wire: &impl LendsSession<Session = LinkSession<C>>,
@@ -3324,17 +3322,22 @@ fn get_key_on_link<C: ClockSource + 'static, U>(
     f(abi.0, abi.1)
 }
 
-/// Send `send` to the peer of the one link, whose record names it by `_wire`, through its wire
-/// `tx`, which the caller holds with the link's place, taken before the session's lock
-/// (`CoopEngine::live_on_link`): whether the link took it, `None` while the place holds no
-/// wire. The send neither waits nor is owed.
+/// Send `send` to the peer of the face whose record holds `wire`: through the held face's wire
+/// in `tx` where `wire` lies in the face whose place the caller holds, taken before the
+/// session's lock (`CoopEngine::live_on_link`), and by a try of the face's place otherwise
+/// ([`send_on`]). Whether the link took it; `None` while the face's place holds no wire, or is
+/// not lent. The send through the held place neither waits nor is owed.
 #[cfg(not(wz_round))]
-fn send_through<C: ClockSource + 'static>(
-    _wire: &impl LendsSession<Session = LinkSession<C>>,
+fn send_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
+    wire: &direct::DirectWire<L, C>,
     tx: LinkTx<'_, C>,
     send: &(dyn SendTo<C> + Sync),
 ) -> Option<bool> {
-    tx.map(|wire| send.send_to(&wire.actions))
+    if tx.holds(wire) {
+        tx.wire().map(|held| send.send_to(&held.actions))
+    } else {
+        send_on(wire, send)
+    }
 }
 
 /// Send `send` over the link `wire` holds, through the face's record, which the session's lock
@@ -3348,16 +3351,20 @@ fn send_through<C: ClockSource + 'static>(
     send_on(wire, send)
 }
 
-/// `f` on the actions of the one link, whose record names it by `_wire`, through its wire `tx`,
-/// held as [`send_through`] holds it: what a send reads of the link before it is made (an id
-/// the link allocates). `None` while the place holds no wire.
+/// `f` on the actions of the face whose record holds `wire`, reached as [`send_through`]
+/// reaches it: what a send reads of the link before it is made (an id the link allocates).
+/// `None` while the face's place holds no wire, or is not lent.
 #[cfg(all(feature = "query", not(wz_round)))]
-fn lend_through<C: ClockSource + 'static, U>(
-    _wire: &impl LendsSession<Session = LinkSession<C>>,
+fn lend_through<L: CoopLinks + 'static, C: ClockSource + 'static, U: Send>(
+    wire: &direct::DirectWire<L, C>,
     tx: LinkTx<'_, C>,
-    f: impl FnOnce(&LinkActions<C>) -> U,
+    f: impl FnOnce(&LinkActions<C>) -> U + Send,
 ) -> Option<U> {
-    tx.map(|wire| f(&*wire.actions))
+    if tx.holds(wire) {
+        tx.wire().map(|held| f(&*held.actions))
+    } else {
+        lend_actions(wire, f)
+    }
 }
 
 /// `f` on the actions of the link `wire` holds, through the face's record, which the session's
@@ -3389,7 +3396,7 @@ enum LegTurn {
 /// nothing ([`LendsSession::try_session`]): what a send reads of the link before it is made (an
 /// id the link allocates). `None` while the link is not lent.
 #[cfg(any(
-    all(feature = "query", wz_round),
+    feature = "query",
     feature = "transport-stats",
     all(test, any(feature = "std", feature = "liveliness-get"))
 ))]
@@ -5034,8 +5041,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// at the next event of the link's session, a record or a keep-alive, up to a keep-alive
     /// interval later, and not at all while the program does not step the session.
     ///
-    /// `tx` is what the caller holds of the one link, taken with its place before the session's
-    /// lock (`CoopEngine::live_on_link`), through which that link is settled.
+    /// `tx` is what the caller holds of a face, taken with its place before the session's lock
+    /// (`CoopEngine::live_on_link`), through which that face is settled.
     #[cfg(feature = "interest-answer")]
     fn settle_faces(&mut self, tx: LinkTx<'_, C>) {
         #[cfg(wz_round)]
@@ -5052,16 +5059,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 let (held, registry) = carried.get();
                 registry.settle(held, actions);
             };
-            // The one link's record names the wire the caller holds, which is written.
+            // The face whose place the caller holds is settled through the wire it holds.
             #[cfg(not(wz_round))]
-            {
-                let _ = wire;
-                if let Some(link) = tx {
+            if tx.holds(wire) {
+                if let Some(link) = tx.wire() {
                     settle(&*link.actions);
                 }
+                continue;
             }
             // A link another holder has now is settled at its next event.
-            #[cfg(wz_round)]
             let _ = wire.try_session(move |session| settle(&*session.actions));
         }
         // A group's stage is written by the thread that put on it outside the group's own step.

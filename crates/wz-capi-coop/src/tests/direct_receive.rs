@@ -874,6 +874,22 @@ fn a_redeclare_inside_the_reads_step_is_told() {
     );
 }
 
+/// An operation that holds the dial role's send place reaches the dial role's face through the
+/// wire it holds, and reaches no other face by it: each face's record names its face by the flags
+/// its link's end shares with the read. Turned red by a hold that names another face's flags
+/// (`OnLinkHold::face`), or a `FaceTx::holds` that compares anything but those flags.
+#[cfg(not(wz_round))]
+#[test]
+fn a_hold_of_the_dial_place_reaches_the_dial_face_through_its_wire() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.faces_reached_by_the_dial_hold(),
+        (1, 0),
+        "the one face that is up is the dial role's, reached through the held wire"
+    );
+}
+
 /// A callback of a record the read's step hands out finds the link's send place free: the step
 /// holds the link's receive part alone, so a send made there, or by another thread meanwhile,
 /// waits for no step and no callback. Turned red by a step that holds the send place while it

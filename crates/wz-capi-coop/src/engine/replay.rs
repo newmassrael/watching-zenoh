@@ -37,7 +37,9 @@
 
 use super::CoopLinks;
 use super::LinkActions;
-use wz_runtime_coop::faces::{FacePlaces, FaceRecord, LendsSession};
+#[cfg(wz_round)]
+use wz_runtime_coop::faces::LendsSession;
+use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link_life::LinkPhase;
 use wz_session_core::named_key::NamedKey;
@@ -658,18 +660,26 @@ impl Retract<'_> {
     }
 }
 
-/// Tell `retract` to the peer of the one link, whose record names it by `_wire`, through its wire
-/// `tx`, which the caller holds with the link's place, taken before the session's lock
-/// (`CoopEngine::live_on_link`): the send neither waits nor is owed, so the retraction is told
-/// as it is made. Nothing while the place holds no wire.
+/// Tell `retract` to the peer of the face whose record holds `wire`: through the held face's
+/// wire in `tx` where `wire` lies in the face whose place the caller holds, taken before the
+/// session's lock (`CoopEngine::live_on_link`), and by a try of the face's place otherwise
+/// ([`super::send_on`]). It leaves the face owed nothing, as a replay tells only declarations
+/// that stand. Nothing while the face's place holds no wire.
 #[cfg(not(wz_round))]
-fn tell_on<C: ClockSource + 'static>(
-    _wire: &impl LendsSession<Session = super::LinkSession<C>>,
+fn tell_on<L: CoopLinks + 'static, C: ClockSource + 'static>(
+    wire: &super::direct::DirectWire<L, C>,
     tx: super::LinkTx<'_, C>,
     retract: Retract<'_>,
 ) {
-    if let Some(wire) = tx {
-        retract.tell(&wire.actions);
+    if tx.holds(wire) {
+        if let Some(held) = tx.wire() {
+            retract.tell(&held.actions);
+        }
+    } else {
+        let _ = super::send_on(wire, &|actions: &LinkActions<C>| {
+            retract.tell(actions);
+            true
+        });
     }
 }
 
