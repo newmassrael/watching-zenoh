@@ -1913,9 +1913,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     #[cfg(test)]
     link_polls: core::cell::Cell<usize>,
     /// How many steps in a row read a group's datagram and moved nothing, up to
-    /// `group::GROUP_READS_PER_MOVE` (`CoopEngine::step`).
+    /// the deploy `GROUP_READS_PER_MOVE` limit (`CoopEngine::step`).
     #[cfg(feature = "group")]
-    group_reads: u8,
+    group_reads: usize,
     /// How often a pass of the session's tasks read the clock to wake its timers
     /// ([`Self::run_tasks`]), which the tests count.
     #[cfg(test)]
@@ -6476,8 +6476,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 return Stepped::Read;
             }
             #[cfg(feature = "group")]
-            if core.group_reads < group::GROUP_READS_PER_MOVE && core.transport.group_holds_input()
-            {
+            if core.group_reads < caps::GROUP_READS_PER_MOVE && core.transport.group_holds_input() {
                 core.group_reads += 1;
                 return Stepped::Read;
             }

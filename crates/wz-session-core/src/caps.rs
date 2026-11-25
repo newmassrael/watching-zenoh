@@ -598,6 +598,11 @@ pub const MAX_TIMERS: usize = generated::MAX_TIMERS;
 /// refused.
 pub const MAX_TICKERS: usize = generated::MAX_TICKERS;
 
+/// How many datagrams of a multicast group in a row a read of the C ABI's cooperative engine
+/// takes before it moves the session's links, timers and sweeps again (the deploy
+/// `GROUP_READS_PER_MOVE` limit): what they are late by while a group's burst is read.
+pub const GROUP_READS_PER_MOVE: usize = generated::GROUP_READS_PER_MOVE;
+
 /// Maximum byte length of the keyexpr one admin reply is stamped with:
 /// `@/<zid>/<whatami>/<leg>` and, for a per-entity leg, the entity's own
 /// keyexpr of up to [`MAX_KEYEXPR_BYTES`], so two of them cover the prefix and

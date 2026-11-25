@@ -309,14 +309,6 @@ impl Default for MemberRows {
 /// whose stack gives no wait for its input: the tick of the tokio engine's group face, shorter
 /// than any beacon interval an ABI advertises.
 pub(super) const GROUP_TICK_MS: u32 = 50;
-
-/// How many datagrams of a group in a row a read takes, each a step under the session's lock,
-/// before the session's links, timers and sweeps are moved again: what a timer, a get's deadline
-/// or a sweep may be late by while a group's input comes in a burst, where a link's is late by
-/// one receive at most (`CoopEngine::step`). A burst longer than this is
-/// read on after the move, the group's input still waiting.
-pub(super) const GROUP_READS_PER_MOVE: u8 = 16;
-
 /// `GROUP_TICK_MS` on the session's clock, in microseconds: a product the build evaluates, so
 /// one that did not fit a `u64` would not compile.
 const GROUP_TICK_US: u64 = GROUP_TICK_MS as u64 * 1_000;
