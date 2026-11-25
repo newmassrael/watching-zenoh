@@ -157,23 +157,29 @@ impl WriteFilter {
     /// Refused with the code pico's filter answers for the cause ([`Door::WriteFilter`]): the
     /// session holds no more, its table of the entity's filters at the limit it opened under or
     /// no entity id left for the filter's Interest, or the session is closed. Nothing was sent.
+    ///
+    /// Beside the filter, its key as the session's record of it keeps it, valid until the filter
+    /// is undeclared.
     pub(crate) fn declare(
         session: &PicoSession,
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
         count_local: bool,
-    ) -> Result<Self, ZResult> {
+    ) -> Result<(Self, KeyView), ZResult> {
         let shared = session.engine.clone();
         let ask = interest_ask(&shared, session.mode, keyexpr, wire);
-        let id = shared
+        let declared = shared
             .declare_write_filter(plane, keyexpr, wire, ask, count_local)
             .map_err(|refused| refusal_code(refused, Door::WriteFilter))?;
-        Ok(Self {
-            shared,
-            id,
-            listeners: FilterListeners::default(),
-        })
+        Ok((
+            Self {
+                shared,
+                id: declared.id,
+                listeners: FilterListeners::default(),
+            },
+            declared.key,
+        ))
     }
 
     /// Declare a matching listener on this filter (pico `_z_matching_listener_register` on
@@ -246,7 +252,7 @@ impl WriteFilter {
 /// copy of its key.
 pub(crate) struct FilteredKey {
     pub(crate) filter: WriteFilter,
-    /// The key as the record lent it ([`wz_capi_port::SessionEngine::filtered_keyexpr`]).
+    /// The key as the record lent it ([`wz_capi_port::SessionEngine::declare_write_filter`]).
     key: KeyView,
     pub(crate) wire: WireKey,
     /// The `eid` half of the global id the unstable API reports for the entity.
@@ -311,14 +317,9 @@ impl FilteredKey {
         let _ = eid;
         // The record of the filter holds the declaration: the wire form holds nothing.
         let wire = key.wire();
-        let filter = WriteFilter::declare(session, plane, keyexpr, &wire, count_local)?;
-        // The door's hold goes with `key`, the record's standing; the key is lent from the record,
-        // and an engine that keeps none refuses the entity, its filter undeclared.
+        let (filter, lent) = WriteFilter::declare(session, plane, keyexpr, &wire, count_local)?;
+        // The door's hold goes with `key`, the record's standing; the key is lent from the record.
         drop(key);
-        let lent = session
-            .engine
-            .filtered_keyexpr(filter.id)
-            .ok_or(Z_ERR_GENERIC)?;
         // SAFETY: the caller's: `at` is room for one, written field by field, once each.
         unsafe {
             core::ptr::addr_of_mut!((*at).filter).write(filter);

@@ -400,7 +400,7 @@ struct FilterEntry {
     plain: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
     /// The declaration the entity's key is named by, held by the entry until the filter is
     /// undeclared ([`SharedSession::admit_entry`]): the entity keeps no hold of its key and lends
-    /// it from the entry ([`SharedSession::filtered_keyexpr`]).
+    /// it from the entry, as the filter's declaration answers it.
     held: Option<KeyexprHandle>,
 }
 
@@ -6981,7 +6981,7 @@ impl SharedSession {
         wire: &WireKey,
         ask: Option<InterestAsk<'_>>,
         count_local: bool,
-    ) -> Result<FilterId, wz_capi_port::Refusal> {
+    ) -> Result<wz_capi_port::Declared<FilterId>, wz_capi_port::Refusal> {
         let mut guard = self.lock();
         // The Interest's id is taken first, so a filter refused for want of an id leaves no filter
         // id spent either; with it the entry's hold of the declaration its key is named by, a
@@ -7008,6 +7008,9 @@ impl SharedSession {
                 face.filters.insert(id, hold);
             }
         }
+        // The text is the entry's heap buffer, which stays where it is when the entries move and
+        // goes with the entry.
+        let key = lent_entry_key(&guard.tables, &keyexpr, [held, None]);
         guard.filters.push(FilterEntry {
             id,
             plane,
@@ -7019,33 +7022,7 @@ impl SharedSession {
             plain: None,
             held,
         });
-        Ok(id)
-    }
-
-    /// The key write filter `id` was declared on, as its SSOT entry keeps it, with the declaration
-    /// the entry holds that the key is named by. The text is the entry's heap buffer, which stays
-    /// where it is when the entries move and goes with the entry.
-    pub fn filtered_keyexpr(&self, id: FilterId) -> Option<wz_capi_port::KeyView> {
-        let guard = self.lock();
-        let entry = guard.filters.iter().find(|entry| entry.id == id)?;
-        let lent = entry
-            .held
-            .and_then(|handle| Some((handle, guard.tables.keyexprs().get(handle)?)));
-        Some(match lent {
-            // SAFETY: the growable table keeps its rows in chunks that are only ever added
-            // (`Chunked`), so a row stays where it was put while it stands; and the entry holds
-            // the declaration until the filter is undeclared.
-            Some((handle, row)) => unsafe {
-                wz_capi_port::KeyView::holding(
-                    &entry.keyexpr,
-                    handle,
-                    row.key(),
-                    row.id(),
-                    row.head().count(),
-                )
-            },
-            None => wz_capi_port::KeyView::literal(&entry.keyexpr),
-        })
+        Ok(wz_capi_port::Declared { id, key })
     }
 
     /// What write filter `id` counts, the literal it is matched on and whether the session's own
@@ -7905,7 +7882,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         let querier = shared
             .declare_write_filter(
                 FilterPlane::Queryables {
@@ -7916,7 +7894,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         assert_ne!(publisher, querier, "each filter is its own entry");
         assert!(shared.write_filter_active(publisher));
         assert!(shared.write_filter_active(querier));
@@ -8031,7 +8010,10 @@ mod matching_aggregate_tests {
                 .get(row)
                 .map(|row| row.holds())
         };
-        let filter = shared
+        let wz_capi_port::Declared {
+            id: filter,
+            key: lent,
+        } = shared
             .declare_write_filter(
                 FilterPlane::Subscribers,
                 key.to_owned(),
@@ -8041,9 +8023,6 @@ mod matching_aggregate_tests {
             )
             .expect("a session with ids left declares");
         assert_eq!(holds(&shared), Some(2), "the program's and the entry's");
-        let lent = shared
-            .filtered_keyexpr(filter)
-            .expect("the entry keeps the key");
         // SAFETY: the entry keeps the text where it lent it until the filter is undeclared below.
         let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
         assert_eq!(text, key.as_bytes());
@@ -8053,7 +8032,6 @@ mod matching_aggregate_tests {
             (row, hold.mapping_id(), key.len())
         );
         shared.undeclare_write_filter(filter);
-        assert_eq!(shared.filtered_keyexpr(filter), None, "gone with its entry");
         assert_eq!(holds(&shared), Some(1), "the entry gave its hold back");
         hold.release(&shared);
     }
@@ -8310,7 +8288,8 @@ mod matching_aggregate_tests {
                 None,
                 true,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         let remote_only = shared
             .declare_write_filter(
                 FilterPlane::Subscribers,
@@ -8319,7 +8298,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         let heard = Arc::new(StdMutex::new(Vec::new()));
         let log = heard.clone();
         let sink: MatchingSink =
@@ -8726,7 +8706,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         assert_eq!(
             shared.put_kept_plain(filter, "wz/plain/kept", b"x"),
             FilteredPut::Suppressed
@@ -8769,7 +8750,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
 
         // No face has said it matches: suppressed, and the same on every later put.
         for _ in 0..3 {

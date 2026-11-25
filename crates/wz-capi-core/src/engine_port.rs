@@ -384,10 +384,6 @@ impl SessionEngine for SharedSession {
         SharedSession::subscriber_keyexpr(self, id)
     }
 
-    fn filtered_keyexpr(&self, id: FilterId) -> Option<wz_capi_port::KeyView> {
-        SharedSession::filtered_keyexpr(self, id)
-    }
-
     fn acquire_keyexpr(&self, keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         self.declared(|| SharedSession::acquire_keyexpr(self, keyexpr.to_owned()))
     }
@@ -462,7 +458,7 @@ impl SessionEngine for SharedSession {
         wire: &WireKey,
         ask: Option<InterestAsk<'_>>,
         count_local: bool,
-    ) -> Result<FilterId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<FilterId>, Refusal> {
         // A closed session declares nothing: a filter on it would hold every write back for good.
         if SharedSession::is_closed(self) {
             return Err(Refusal::Closed);

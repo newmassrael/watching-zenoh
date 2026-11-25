@@ -101,7 +101,7 @@ use wz_capi_port::os::{self, Mutex, MutexGuard};
 #[cfg(feature = "threads")]
 use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
-    BatchStep, CalledFromReadTask, EngineDeliveries, FanoutError, FilterId, FilterPlane,
+    BatchStep, CalledFromReadTask, Declared, EngineDeliveries, FanoutError, FilterId, FilterPlane,
     FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, KeyView, MatchId,
     MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive,
     SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
@@ -8770,15 +8770,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         None
     }
 
-    // The text is the filter's row's own, which does not move while the row stands.
-    fn filtered_keyexpr(&self, id: FilterId) -> Option<KeyView> {
-        let handle = row_of(id)?;
-        let core = self.live()?;
-        let tables = tables(&core.0.session.registry);
-        let row = tables.write_filters().get(handle)?;
-        Some(lent_key(tables, row.key(), row.own()))
-    }
-
     #[inline(never)]
     fn undeclare_subscriber(&self, id: SubId) {
         // A liveliness subscriber's id is one of these too (the port's one id space): its row goes
@@ -9043,7 +9034,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // See `declare_matching_listener`: the session's own subscribers count with
         // `local-subscriber`.
         count_local: bool,
-    ) -> Result<FilterId, Declined> {
+    ) -> Result<Declared<FilterId>, Declined> {
         if !counts(plane) {
             return Err(Declined::NotBuilt);
         }
@@ -9059,7 +9050,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             aggregate: form.aggregate,
         });
         // The row holds the declaration the key is named by from here on, so the entity keeps no
-        // hold of its key and lends it from the row (`filtered_keyexpr`).
+        // hold of its key and lends it from the row, which the declaration answers.
         let own = tables(&core.session.registry).keyexpr_at(wire.declared());
         let watching = tables_mut(&mut core.session.registry)
             .declare_write_filter_as(
@@ -9106,7 +9097,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         #[cfg(not(feature = "group"))]
         let _ = (spent, wire);
-        Ok(id)
+        // The text is the filter's row's own, which does not move while the row stands. The
+        // tables made the row above; were it gone, the entity is lent the empty key, which no
+        // record has to keep, rather than a refusal that would leave the filter standing.
+        let tables = tables(&core.session.registry);
+        let key = tables
+            .write_filters()
+            .get(watching.handle)
+            .map_or(KeyView::literal(""), |row| {
+                lent_key(tables, row.key(), row.own())
+            });
+        Ok(Declared { id, key })
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {

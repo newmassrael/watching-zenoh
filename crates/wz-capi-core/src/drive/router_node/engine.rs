@@ -127,7 +127,7 @@ pub(super) struct EngineState {
     subscriptions: Mutex<HashMap<SubId, Subscribed>>,
     /// The key each write filter of the program's was declared on, the node's record of the
     /// filter, which a publisher or a querier is lent its key from
-    /// ([`SessionEngine::filtered_keyexpr`]). Each key is a buffer of its own, so it stays where it
+    /// ([`SessionEngine::declare_write_filter`]). Each key is a buffer of its own, so it stays where it
     /// is when the map moves the entry.
     filters: Mutex<HashMap<FilterId, Box<str>>>,
     /// The program's queryables, each with the id the node's data plane holds it under. That id is
@@ -187,23 +187,17 @@ impl EngineState {
 
     /// A write filter on `keyexpr`: its id, the key kept as the filter's record. The node holds
     /// no write back, so the record is all there is of the filter.
-    fn filter_declared(&self, keyexpr: &str) -> FilterId {
+    fn filter_declared(&self, keyexpr: &str) -> wz_capi_port::Declared<FilterId> {
         let id = self.local_id();
+        // Named whole, as the node names every key: the text its record keeps, at one address
+        // until the filter is undeclared.
+        let key: Box<str> = keyexpr.into();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.filters
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, keyexpr.into());
-        id
-    }
-
-    /// The key filter `id` was declared on, named whole as the node names every key: the text
-    /// its record keeps, at one address until the filter is undeclared.
-    fn filter_key(&self, id: FilterId) -> Option<wz_capi_port::KeyView> {
-        self.filters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
-            .map(|key| wz_capi_port::KeyView::literal(key))
+            .insert(id, key);
+        wz_capi_port::Declared { id, key: lent }
     }
 
     /// Filter `id` undeclared: its record goes, the key with it.
@@ -457,10 +451,6 @@ impl SessionEngine for RouterState {
             .map(|subscribed| wz_capi_port::KeyView::literal(&subscribed.key))
     }
 
-    fn filtered_keyexpr(&self, id: FilterId) -> Option<wz_capi_port::KeyView> {
-        self.engine.filter_key(id)
-    }
-
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         // A node names every key whole: there is no alias to hold.
         Err(Refusal::NotBuilt)
@@ -538,7 +528,7 @@ impl SessionEngine for RouterState {
         _wire: &WireKey,
         _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
-    ) -> Result<FilterId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<FilterId>, Refusal> {
         // A node holds no write back: the router forwards by what the faces declared, and asks
         // nothing, so the filter takes no entity id. It keeps the key, which its entity is lent.
         Ok(self.engine.filter_declared(keyexpr))
@@ -915,8 +905,10 @@ mod tests {
     fn a_write_filters_record_lends_its_key_until_it_is_undeclared() {
         let state = EngineState::new();
         let key = "demo/node/pub";
-        let filter = state.filter_declared(key);
-        let lent = state.filter_key(filter).expect("the record keeps the key");
+        let wz_capi_port::Declared {
+            id: filter,
+            key: lent,
+        } = state.filter_declared(key);
         assert_eq!(lent.own, None, "a node names every key whole");
         assert_ne!(
             lent.start,
@@ -924,22 +916,28 @@ mod tests {
             "the record's own text, not the caller's"
         );
         let others: Vec<FilterId> = (0..64)
-            .map(|at| state.filter_declared(&format!("demo/node/other/{at}")))
+            .map(|at| state.filter_declared(&format!("demo/node/other/{at}")).id)
             .collect();
+        let record = |id: FilterId| {
+            state
+                .filters
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&id)
+                .map(|kept| (kept.as_ptr(), kept.len()))
+        };
         assert_eq!(
-            state.filter_key(filter),
-            Some(lent),
+            record(filter),
+            Some((lent.start, lent.len)),
             "the text stays where it was lent while the records move"
         );
         // SAFETY: the record keeps the text where it lent it until the filter is undeclared below.
         let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
         assert_eq!(text, key.as_bytes());
         state.filter_retracted(filter);
-        assert_eq!(state.filter_key(filter), None, "gone with the filter");
+        assert_eq!(record(filter), None, "gone with the filter");
         assert!(
-            others
-                .iter()
-                .all(|&other| state.filter_key(other).is_some()),
+            others.iter().all(|&other| record(other).is_some()),
             "CONTROL: the other filters stand"
         );
     }

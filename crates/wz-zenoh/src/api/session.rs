@@ -1319,7 +1319,8 @@ impl Engine {
                         ask.as_ref().map(|form| form.as_ask()),
                         destination != Locality::Remote,
                     )
-                    .map_err(|refused| zerror!("the engine refused a publisher: {refused}"))?;
+                    .map_err(|refused| zerror!("the engine refused a publisher: {refused}"))?
+                    .id;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a publisher {id}, which is more than an id holds")
                         .into()
@@ -1534,7 +1535,8 @@ impl Engine {
                         ask.as_ref().map(|form| form.as_ask()),
                         destination != Locality::Remote,
                     )
-                    .map_err(|refused| zerror!("the engine refused a querier: {refused}"))?;
+                    .map_err(|refused| zerror!("the engine refused a querier: {refused}"))?
+                    .id;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a querier {id}, which is more than an id holds")
                         .into()

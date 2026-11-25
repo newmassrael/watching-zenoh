@@ -43,9 +43,9 @@ use crate::os::Mutex;
 use crate::peers::PeerIdentity;
 use crate::told::{ToldKey, ToldLedger, ToldPlane};
 use crate::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HoldRefused, KeyHold,
-    KeyView, LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink,
-    Refusal, ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    BatchStep, Declared, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HoldRefused,
+    KeyHold, KeyView, LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId,
+    QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -458,13 +458,6 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// subscriber. Every engine states it, as each keeps its subscriptions its own way.
     fn subscriber_keyexpr(&self, id: SubId) -> Option<KeyView>;
 
-    /// The key the entity holding write filter `id` was declared on, a publisher's or a querier's,
-    /// as the engine's record of the filter keeps it: its text, and the declaration the record
-    /// holds that the key is named by, when it holds one ([`Self::declare_write_filter`]). Valid
-    /// until the filter is undeclared, the record holding both until then; `None` for an id that
-    /// names no filter. Every engine states it, as each keeps its filters its own way.
-    fn filtered_keyexpr(&self, id: FilterId) -> Option<KeyView>;
-
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
     /// names its mapping id and its row. Refused when the session has no id left to give
     /// ([`Refusal::NoEntityId`]), no row or key room left, or is closed; and with
@@ -569,9 +562,10 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     ///
     /// The record of the filter keeps `keyexpr` and holds the declaration `wire` names, as a
     /// subscriber's record holds its key's, until the filter is undeclared: the entity keeps no
-    /// copy of its key and lends it from the record ([`Self::filtered_keyexpr`]). The caller holds
-    /// that declaration through the call; a count with no room for the record refuses the filter
-    /// ([`Refusal::KeyHoldsFull`]).
+    /// copy of its key and lends it from the record, as the declaration answers it with the id
+    /// ([`Declared::key`]), its text and the declaration the record holds that the key is named
+    /// by, when it holds one. The caller holds that declaration through the call; a count with no
+    /// room for the record refuses the filter ([`Refusal::KeyHoldsFull`]).
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
@@ -579,7 +573,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         wire: &WireKey,
         ask: Option<InterestAsk<'_>>,
         count_local: bool,
-    ) -> Result<FilterId, Refusal>;
+    ) -> Result<Declared<FilterId>, Refusal>;
 
     /// Whether filter `id` says nothing matches, so a write is not sent (zenoh-pico's
     /// `_z_write_filter_active`).

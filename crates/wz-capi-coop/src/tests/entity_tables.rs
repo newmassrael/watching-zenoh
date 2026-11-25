@@ -86,17 +86,19 @@ fn declare_subscriber(
 
 /// A write filter that asks for `key`, on `plane`.
 fn filter(engine: &Engine, plane: FilterPlane, key: &str) -> Result<FilterId, Refusal> {
-    engine.declare_write_filter(
-        plane,
-        key,
-        &WireKey::literal(),
-        Some(InterestAsk {
-            mapping_id: 0,
-            suffix: Some(key),
-            aggregate: false,
-        }),
-        false,
-    )
+    engine
+        .declare_write_filter(
+            plane,
+            key,
+            &WireKey::literal(),
+            Some(InterestAsk {
+                mapping_id: 0,
+                suffix: Some(key),
+                aggregate: false,
+            }),
+            false,
+        )
+        .map(|declared| declared.id)
 }
 
 /// Each declaration asked of a closed session is refused as closed, with its callback let go of and
@@ -437,13 +439,15 @@ fn a_filter_that_finds_no_id_left_gives_its_row_back() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     fn quiet(engine: &Engine) -> Result<FilterId, Refusal> {
-        engine.declare_write_filter(
-            FilterPlane::Subscribers,
-            "demo/quiet/1",
-            &WireKey::literal(),
-            None,
-            false,
-        )
+        engine
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "demo/quiet/1",
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .map(|declared| declared.id)
     }
     engine.entity_ids_from(None);
     assert_eq!(quiet(&engine), Err(Refusal::NoEntityId));

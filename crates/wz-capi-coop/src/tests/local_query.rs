@@ -383,6 +383,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
                 count_local,
             )
             .expect("a session with ids left declares")
+            .id
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);

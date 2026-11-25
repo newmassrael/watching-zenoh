@@ -285,10 +285,6 @@ impl SessionEngine for Script {
             .find(|s| s.0 == id)
             .map(|s| wz_capi_port::KeyView::literal(&s.1))
     }
-    // The script keeps no write filter's key.
-    fn filtered_keyexpr(&self, _id: FilterId) -> Option<wz_capi_port::KeyView> {
-        None
-    }
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         Err(Refusal::NotBuilt)
     }
@@ -316,8 +312,12 @@ impl SessionEngine for Script {
         _wire: &WireKey,
         _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
-    ) -> Result<FilterId, Refusal> {
-        Ok(0)
+    ) -> Result<wz_capi_port::Declared<FilterId>, Refusal> {
+        // The script keeps no write filter's key: it lends the empty one, which outlives it.
+        Ok(wz_capi_port::Declared {
+            id: 0,
+            key: wz_capi_port::KeyView::literal(""),
+        })
     }
     fn write_filter_active(&self, _id: FilterId) -> bool {
         false

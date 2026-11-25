@@ -1210,6 +1210,17 @@ impl KeyView {
     }
 }
 
+/// What a declaration of the port answers: the id the entity is retracted by, and its key as the
+/// engine's record of the entity keeps it ([`KeyView`]), valid until the entity is retracted. The
+/// door keeps the key from here on, so it asks the engine for it again nowhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Declared<Id> {
+    /// The id the entity is retracted by.
+    pub id: Id,
+    /// The entity's key, where the engine's record of it keeps it.
+    pub key: KeyView,
+}
+
 /// The declaration an engine's record of an entity holds for the entity's key ([`KeyView`]): the
 /// declaration of the entity's own key, or else the one its key is named by, either of which the
 /// key begins with. What a lent key names on the wire, and what a copy of it takes its own hold
