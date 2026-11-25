@@ -100,14 +100,8 @@ unsafe impl Send for Row {}
 /// The rows, one for each session of the process open at once, under one lock: what each takes it
 /// for (a claim, a fill, a clear, a reach) is a few words read and written, so one lock for the
 /// table costs no wait a lock for each row would spare, and the rows hold no lock of their own.
-static ROWS: Lock<[Row; caps::ENGINE_ROWS]> = Lock::new(
-    [const {
-        Row {
-            engine: None,
-            mark: 0,
-        }
-    }; caps::ENGINE_ROWS],
-);
+static ROWS: Lock<[Row; caps::ENGINE_ROWS]> =
+    Lock::new([const { Row { engine: None } }; caps::ENGINE_ROWS]);
 
 /// A reach of an engine through its row: a row and a generation, copied freely, keeping nothing
 /// of the engine standing.
