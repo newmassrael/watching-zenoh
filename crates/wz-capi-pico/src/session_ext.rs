@@ -24,12 +24,15 @@
 //!   session (`_admin_space_queryable_id`) and clears with it.
 
 #[cfg(feature = "connectivity")]
-use alloc::sync::Arc;
-
+use wz_capi_port::face_rows::{row_sink_of, RowWatcher};
+#[cfg(feature = "connectivity")]
+use wz_capi_port::lodge::{Lent, Strong};
 #[cfg(feature = "connectivity")]
 use wz_capi_port::SessionEngine;
 #[cfg(any(feature = "advanced", feature = "clock-source"))]
 use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
+#[cfg(feature = "connectivity")]
+use wz_session_core::face::{FaceEventKind, FaceLinkRow};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::WhatAmI;
@@ -52,7 +55,7 @@ pub(crate) struct PicoSessionExt {
     pub(crate) time: crate::last_timestamp::SessionTime,
     /// The transport and link listeners a C program declared on this session.
     #[cfg(feature = "connectivity")]
-    pub(crate) connectivity: Arc<Connectivity>,
+    pub(crate) connectivity: Strong<Connectivity>,
     /// The engine whose faces this session's connectivity hub watches, and the id it
     /// watches under, so the watch can be dropped with the session; the engine's refusal when it
     /// would not watch, which the open answers by refusing the session.
@@ -104,8 +107,9 @@ impl PicoSessionExt {
     /// honour): the open asks `clock_refused` and refuses such a session, which would stamp
     /// nothing in place of the clock pico always gives one. Dropping it lets go of the watch.
     ///
-    /// `None` when the heap has no room for the session's last time given, which the open answers
-    /// as pico answers a session it cannot allocate; nothing is watched then.
+    /// `None` when the heap has no room for the session's last time given, or, with the
+    /// connectivity plane, for its hub or the hub's watch, which the open answers as pico answers a
+    /// session it cannot allocate; nothing is watched then.
     pub(crate) fn new(
         mode: WhatAmI,
         zid: &[u8],
@@ -132,26 +136,18 @@ impl PicoSessionExt {
         )))]
         let _ = limits;
         #[cfg(feature = "connectivity")]
-        let connectivity = Connectivity::new();
+        let connectivity = Connectivity::new(Lent::try_boxed().ok()?);
         #[cfg(feature = "connectivity")]
         let watch_id = {
-            let sink = Arc::clone(&connectivity);
             // Weak: the engine holds the watch, and a strong hold in it would keep the engine
             // alive through its own watcher.
-            let faces = crate::session::EngineHold::downgrade(engine);
+            let watch = HubWatch {
+                hub: connectivity.clone(),
+                faces: crate::session::EngineHold::downgrade(engine),
+            };
             SessionEngine::watch_face_rows(
                 crate::session::EngineHold::as_ref(engine),
-                wz_session_core::face::FaceRowSink::of_arc(Arc::new(
-                    move |kind, row: &wz_session_core::face::FaceLinkRow| {
-                        sink.on_face_row(kind, row, |at| {
-                            let engine = faces.upgrade()?;
-                            SessionEngine::face_link_at(
-                                crate::session::EngineHold::as_ref(&engine),
-                                at,
-                            )
-                        });
-                    },
-                )),
+                row_sink_of(Strong::new_at(Lent::try_boxed().ok()?, watch)),
             )
         };
         // Without the advanced plane or a registrable clock nothing stamps, so there is no clock to
@@ -231,6 +227,24 @@ impl PicoSessionExt {
     }
 }
 
+/// The watch of the session's faces its connectivity hub is told through: the hub, and a reach of
+/// the engine that keeps nothing of it standing, through which the hub reads the faces that stand.
+#[cfg(feature = "connectivity")]
+struct HubWatch {
+    hub: Strong<Connectivity>,
+    faces: crate::session::EngineHandle,
+}
+
+#[cfg(feature = "connectivity")]
+impl RowWatcher for HubWatch {
+    fn row(&self, kind: FaceEventKind, row: &FaceLinkRow) {
+        self.hub.on_face_row(kind, row, |at| {
+            let engine = self.faces.upgrade()?;
+            SessionEngine::face_link_at(crate::session::EngineHold::as_ref(&engine), at)
+        });
+    }
+}
+
 #[cfg(feature = "connectivity")]
 impl Drop for PicoSessionExt {
     /// Stop watching, then let go of every listener: their C contexts are
@@ -252,6 +266,8 @@ impl Drop for PicoSessionExt {
 ))]
 mod tests {
     use super::*;
+    #[cfg(feature = "connectivity")]
+    use std::sync::Arc;
     #[cfg(feature = "connectivity")]
     use wz_capi_core::faces::SharedSession;
     #[cfg(feature = "connectivity")]

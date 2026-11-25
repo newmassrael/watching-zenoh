@@ -90,10 +90,10 @@
 //! the same ends inside the loss is told neither. A row past the kept rows is told came again at
 //! each loss, and its departure, when a loss carries it, is not told.
 
-use alloc::sync::Arc;
 use core::ffi::{c_int, c_void};
 use core::ptr::{addr_of_mut, NonNull};
 
+use wz_capi_port::lodge::{Lent, Strong};
 use wz_capi_port::os::{mutex_in, Mutex, MutexGuard};
 
 use wz_capi_port::told::{ToldKey, ToldPlane};
@@ -852,7 +852,7 @@ impl LetGo for LinkListener {
 /// listener's undeclare takes off the hub. It lies in the listener's place, a place of the
 /// session's own for the kind (`crate::object_slot::Kind::TransportEventsListener`).
 pub(crate) struct TransportListenerState {
-    hub: Arc<Connectivity>,
+    hub: Strong<Connectivity>,
     id: u64,
 }
 
@@ -867,7 +867,7 @@ pub(crate) type TransportKept = Delivery<z_loaned_transport_event_t>;
 /// Behind an owned link events listener, as [`TransportListenerState`] is behind a transport one,
 /// in a place of the session's own for the kind (`crate::object_slot::Kind::LinkEventsListener`).
 pub(crate) struct LinkListenerState {
-    hub: Arc<Connectivity>,
+    hub: Strong<Connectivity>,
     id: u64,
 }
 
@@ -1190,11 +1190,13 @@ pub(crate) struct Connectivity {
 }
 
 impl Connectivity {
-    /// A session's hub with no listener and nothing told, its locks made in its `Arc`.
-    pub(crate) fn new() -> Arc<Self> {
+    /// A session's hub with no listener and nothing told, made in `place`, which its session
+    /// lent, with its locks made there; the place goes back with the last count of the hub, which
+    /// a listener's handle may hold past the session.
+    pub(crate) fn new(place: Lent<Self>) -> Strong<Self> {
         let make = |place: NonNull<Self>| {
             let at = place.as_ptr();
-            // SAFETY: the place is its `Arc`'s, valid for one hub, holding none, never moved;
+            // SAFETY: the place is the lent one's, valid for one hub, holding none, never moved;
             // each lock is made once through a pointer to it, not null as it is inside the place.
             unsafe {
                 mutex_in(
@@ -1210,7 +1212,7 @@ impl Connectivity {
             }
         };
         // SAFETY: `make` makes the whole hub in the place it is handed.
-        unsafe { wz_capi_port::os::arc_with_lock_in(make) }
+        unsafe { Strong::lodge_at(place, make) }
     }
 
     /// The transport listener of the first row from `at` on, held for a call (`next_in`).
@@ -1358,7 +1360,7 @@ impl Connectivity {
     /// [`release_transport_listener`]. `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when every place or every
     /// row of the hub is held; the closure is let go of then, which runs its `drop(context)`.
     fn declare_transport(
-        self: &Arc<Self>,
+        hub: &Strong<Self>,
         engine: &crate::session::EngineHold,
         history: bool,
         closure: CClosure<Callback<z_loaned_transport_event_t>>,
@@ -1369,7 +1371,7 @@ impl Connectivity {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         let state = TransportListenerState {
-            hub: Arc::clone(self),
+            hub: hub.clone(),
             id: 0,
         };
         let write_state = |at: NonNull<TransportListenerState>| {
@@ -1401,7 +1403,7 @@ impl Connectivity {
         // SAFETY: the place was filled just above and its owner holds it; the id is written
         // before the entry can be read.
         let Some(slot) =
-            (unsafe { admit(&self.transports, object, |id| (*object).id = id, history) })
+            (unsafe { admit(&hub.transports, object, |id| (*object).id = id, history) })
         else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
@@ -1423,7 +1425,7 @@ impl Connectivity {
                 |delivery| converge_transports(engine, slot, delivery),
             );
             SessionEngine::forget_told(engine, plane, slot);
-            end_replay(&self.transports, slot);
+            end_replay(&hub.transports, slot);
         }
         Ok(object)
     }
@@ -1433,7 +1435,7 @@ impl Connectivity {
     /// its owner lets go of with [`release_link_listener`]; refused as
     /// [`Self::declare_transport`] is, by the session's `MAX_LINK_EVENTS_LISTENERS`.
     fn declare_link(
-        self: &Arc<Self>,
+        hub: &Strong<Self>,
         engine: &crate::session::EngineHold,
         history: bool,
         filter: Option<([u8; 16], bool)>,
@@ -1443,7 +1445,7 @@ impl Connectivity {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         let state = LinkListenerState {
-            hub: Arc::clone(self),
+            hub: hub.clone(),
             id: 0,
         };
         let write_state = |at: NonNull<LinkListenerState>| {
@@ -1480,7 +1482,7 @@ impl Connectivity {
             );
         }
         // SAFETY: as in `declare_transport`.
-        let Some(slot) = (unsafe { admit(&self.links, object, |id| (*object).id = id, history) })
+        let Some(slot) = (unsafe { admit(&hub.links, object, |id| (*object).id = id, history) })
         else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
@@ -1504,7 +1506,7 @@ impl Connectivity {
                 |_| converge_links(engine, slot, listener),
             );
             SessionEngine::forget_told(engine, plane, slot);
-            end_replay(&self.links, slot);
+            end_replay(&hub.links, slot);
         }
         Ok(object)
     }
@@ -2092,7 +2094,7 @@ pub unsafe extern "C" fn z_link_event_link_mut(
 /// The hub of the session behind `zs`, if it is a live session this ABI opened.
 unsafe fn hub_of<'a>(
     zs: *const z_loaned_session_t,
-) -> Option<(&'a PicoSessionHandle, &'a Arc<Connectivity>)> {
+) -> Option<(&'a PicoSessionHandle, &'a Strong<Connectivity>)> {
     let handle = session_handle(zs)?;
     Some((handle, &handle.ext.connectivity))
 }
@@ -2410,7 +2412,7 @@ pub unsafe extern "C" fn z_declare_transport_events_listener(
             return Z_ERR_SESSION_CLOSED;
         }
         let history = !options.is_null() && (*options).history;
-        match hub.declare_transport(engine_held(handle), history, closure) {
+        match Connectivity::declare_transport(hub, engine_held(handle), history, closure) {
             Ok(object) => {
                 *listener = z_owned_transport_events_listener_t::of(object.cast());
                 Z_OK
@@ -2508,7 +2510,7 @@ pub unsafe extern "C" fn z_declare_link_events_listener(
         if handle.drive.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        match hub.declare_link(engine_held(handle), history, filter, closure) {
+        match Connectivity::declare_link(hub, engine_held(handle), history, filter, closure) {
             Ok(object) => {
                 *listener = z_owned_link_events_listener_t::of(object.cast());
                 Z_OK
@@ -2576,6 +2578,7 @@ pub(crate) mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use std::sync::OnceLock;
     use wz_capi_core::faces::SharedSession;
@@ -2592,7 +2595,7 @@ pub(crate) mod tests {
         released: AtomicUsize,
         /// A delivery the transport callback re-enters, to put an arrival in the
         /// middle of a replay.
-        reenter: OnceLock<(Arc<Delivery<z_loaned_transport_event_t>>, u8)>,
+        reenter: OnceLock<(Strong<Delivery<z_loaned_transport_event_t>>, u8)>,
     }
 
     fn log() -> &'static Log {
@@ -2664,16 +2667,21 @@ pub(crate) mod tests {
         CClosure::uncounted(ctx(log), Some(on_transport), Some(released))
     }
 
-    /// A replaying delivery to `log`'s transport closure, made in its `Arc` with its locks made
-    /// there, as a listener's is made in its place.
-    fn replaying_delivery(log: &'static Log) -> Arc<Delivery<z_loaned_transport_event_t>> {
+    /// A replaying delivery to `log`'s transport closure, made in a box of its own with its locks
+    /// made there, as a listener's is made in its place.
+    fn replaying_delivery(log: &'static Log) -> Strong<Delivery<z_loaned_transport_event_t>> {
         let closure = transport_closure(log);
         let make = |place: NonNull<Delivery<z_loaned_transport_event_t>>| {
-            // SAFETY: the place is the `Arc`'s, valid for one delivery, holding none, never moved.
+            // SAFETY: the place is the box's, valid for one delivery, holding none, never moved.
             unsafe { Delivery::write_in(place, closure, true) }
         };
         // SAFETY: `make` makes the whole delivery in the place it is handed.
-        unsafe { wz_capi_port::os::arc_with_lock_in(make) }
+        unsafe { Strong::try_boxed_in(make) }.expect("the test's heap")
+    }
+
+    /// A session's hub in a box of its own.
+    fn hub_in_heap() -> Strong<Connectivity> {
+        Connectivity::new(Lent::try_boxed().expect("the test's heap"))
     }
 
     fn link_closure(log: &'static Log) -> CClosure<Callback<z_loaned_link_event_t>> {
@@ -2894,17 +2902,16 @@ pub(crate) mod tests {
     /// the last two lines.
     #[test]
     fn arrival_is_the_transport_then_the_link_and_departure_the_link_then_the_transport() {
-        let hub = Connectivity::new();
+        let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
         // Declared transport FIRST, so a registry that hands each watcher the
         // event in declaration order would put the transport ahead on a
         // departure too.
-        let transport = hub
-            .declare_transport(&engine, false, transport_closure(log))
-            .expect("a place is free");
-        let link = hub
-            .declare_link(&engine, false, None, link_closure(log))
+        let transport =
+            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
+                .expect("a place is free");
+        let link = Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
             .expect("a place is free");
 
         let peer = face(7, false, "tcp/127.0.0.1:7447");
@@ -2964,14 +2971,13 @@ pub(crate) mod tests {
     /// kept already as it is tells peer 3 again, each of which reds the second.
     #[test]
     fn rows_the_queue_lost_are_told_against_the_faces_that_stand() {
-        let hub = Connectivity::new();
+        let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let transport = hub
-            .declare_transport(&engine, false, transport_closure(log))
-            .expect("a place is free");
-        let link = hub
-            .declare_link(&engine, false, None, link_closure(log))
+        let transport =
+            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
+                .expect("a place is free");
+        let link = Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
             .expect("a place is free");
 
         tell(
@@ -3039,14 +3045,14 @@ pub(crate) mod tests {
     /// Matching on the zid alone reds the multicast leg.
     #[test]
     fn a_link_filter_matches_the_zid_and_the_multicast_flag() {
-        let hub = Connectivity::new();
+        let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
         let mut zid = [0u8; 16];
         zid[0] = 7;
-        let link = hub
-            .declare_link(&engine, false, Some((zid, false)), link_closure(log))
-            .expect("a place is free");
+        let link =
+            Connectivity::declare_link(&hub, &engine, false, Some((zid, false)), link_closure(log))
+                .expect("a place is free");
 
         tell(&hub, FaceEventKind::Up, &face(7, false, "tcp/a"));
         tell(&hub, FaceEventKind::Up, &face(8, false, "tcp/other-zid"));
@@ -3072,7 +3078,7 @@ pub(crate) mod tests {
     fn an_arrival_during_the_history_replay_is_queued_behind_it() {
         let log = log();
         let delivery = replaying_delivery(log);
-        log.reenter.set((Arc::clone(&delivery), 9)).ok();
+        log.reenter.set((delivery.clone(), 9)).ok();
 
         // The replay: two peers connected now.
         for first in [1u8, 2] {
@@ -3246,11 +3252,10 @@ pub(crate) mod tests {
     /// when the last copy goes) reds the release count.
     #[test]
     fn undeclaring_releases_the_context_once_and_silences_the_listener() {
-        let hub = Connectivity::new();
+        let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let object = hub
-            .declare_transport(&engine, false, transport_closure(log))
+        let object = Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
             .expect("a place is free");
         // SAFETY: the listener's owner holds it until the end of the test.
         let id = unsafe { (*object).id };
@@ -3291,14 +3296,13 @@ pub(crate) mod tests {
     /// context, background ones included.
     #[test]
     fn shutting_the_hub_down_releases_every_context() {
-        let hub = Connectivity::new();
+        let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let transport = hub
-            .declare_transport(&engine, false, transport_closure(log))
-            .expect("a place is free");
-        let link = hub
-            .declare_link(&engine, false, None, link_closure(log))
+        let transport =
+            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
+                .expect("a place is free");
+        let link = Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
             .expect("a place is free");
         hub.shutdown();
         assert_eq!(log.released.load(Ordering::SeqCst), 2);
@@ -3317,24 +3321,43 @@ pub(crate) mod tests {
         assert_eq!(log.released.load(Ordering::SeqCst), 2);
     }
 
+    /// A hub lies in the place its session lent until the last count of it is let go of: a
+    /// listener's handle holds one past the session's own. Turned red by a hub that gives its
+    /// place back with the session's count while a listener still reaches it, or never.
+    #[test]
+    fn a_hub_keeps_its_lent_place_while_a_listener_holds_it() {
+        static PLACES: wz_capi_port::lodge::StaticPlaces<Connectivity, 1> =
+            wz_capi_port::lodge::StaticPlaces::new();
+        let hub = Connectivity::new(PLACES.lend().expect("CONTROL: a fresh table lends"));
+        let engine: Arc<Engine> = Arc::new(shared());
+        let log = log();
+        let transport =
+            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
+                .expect("a place is free");
+        drop(hub);
+        assert_eq!(PLACES.lent(), 1, "the listener still holds the hub");
+        // SAFETY: the listener declared above, let go of once.
+        unsafe { release_transport_listener(transport) };
+        assert_eq!(PLACES.lent(), 0, "the last count gave the place back");
+    }
+
     /// A hub holds as many transport listeners as its rows, and one more is refused with
     /// nothing declared and its context released; a row given back is taken again. Turned red by
     /// a hub that admits a listener past its rows, or one whose undeclare leaves its row held.
     #[test]
     fn a_listener_past_the_hubs_rows_is_refused_and_released() {
-        let hub = Connectivity::new();
+        let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
         let rows = wz_session_core::caps::MAX_TRANSPORT_EVENTS_LISTENERS;
         let held: Vec<*mut TransportListenerState> = (0..rows)
             .map(|_| {
-                hub.declare_transport(&engine, false, transport_closure(log))
+                Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
                     .expect("a row is free")
             })
             .collect();
         assert_eq!(
-            hub.declare_transport(&engine, false, transport_closure(log))
-                .err(),
+            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log)).err(),
             Some(Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         assert_eq!(
@@ -3346,8 +3369,7 @@ pub(crate) mod tests {
         let first = held.next().expect("at least one row");
         // SAFETY: each listener declared above, let go of once.
         unsafe { release_transport_listener(first) };
-        let again = hub
-            .declare_transport(&engine, false, transport_closure(log))
+        let again = Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
             .expect("the row given back is taken again");
         for object in held.chain([again]) {
             // SAFETY: as above.
@@ -3363,22 +3385,21 @@ pub(crate) mod tests {
     /// undeclare leaves its row held or its listener told.
     #[test]
     fn a_link_listener_past_the_hubs_rows_is_refused_and_released() {
-        let hub = Connectivity::new();
+        let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let transport = hub
-            .declare_transport(&engine, false, transport_closure(log))
-            .expect("a transport row is free");
+        let transport =
+            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
+                .expect("a transport row is free");
         let rows = wz_session_core::caps::MAX_LINK_EVENTS_LISTENERS;
         let held: Vec<*mut LinkListenerState> = (0..rows)
             .map(|_| {
-                hub.declare_link(&engine, false, None, link_closure(log))
+                Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
                     .expect("a link row is free")
             })
             .collect();
         assert_eq!(
-            hub.declare_link(&engine, false, None, link_closure(log))
-                .err(),
+            Connectivity::declare_link(&hub, &engine, false, None, link_closure(log)).err(),
             Some(Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         assert_eq!(
@@ -3400,8 +3421,7 @@ pub(crate) mod tests {
             rows - 1,
             "the undeclared listener hears nothing"
         );
-        let again = hub
-            .declare_link(&engine, false, None, link_closure(log))
+        let again = Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
             .expect("the row given back is taken again");
         for object in held.chain([again]) {
             // SAFETY: as above.
