@@ -5,9 +5,10 @@
 //!
 //! What the session's registry hands a leg's pending entry happens under the session's lock, and a
 //! callback of the program never runs there, so the entry's sink ([`LegSink`]) hands each reply
-//! on to be called after the lock: to the thread that made it, for an answer of the session's own
-//! queryables ([`PlaneCalls::LocalAnswers`]); to the session's round of deliveries
-//! ([`crate::round`]) otherwise. What the entry's consolidation held to its end waits in the rows
+//! on to be called after the lock: to the thread that holds the lock, for an answer of the
+//! session's own queryables and for every reply where the read hands each record out as it is read
+//! ([`PlaneCalls::Captures`]); to the session's round of deliveries ([`crate::round`])
+//! otherwise. What the entry's consolidation held to its end waits in the rows
 //! it was held in, due ([`LegHold`]), and what the entry gave up whole in the plane's held table;
 //! the leg's end is said when the entry is dropped (its Final, its deadline, its cancellation, the
 //! loss of its link) by a guard the sink owns, with the request id of the timeout that ended it
@@ -28,7 +29,7 @@
 //! row, to be dropped where no lock is held.
 //!
 //! [`LegSink`]: crate::get_plane::LegSink
-//! [`PlaneCalls::LocalAnswers`]: crate::round::PlaneCalls::LocalAnswers
+//! [`PlaneCalls::Captures`]: crate::round::PlaneCalls::Captures
 //! [`LegHold`]: crate::get_plane::LegHold
 //! [`EndedLegs`]: crate::get_plane::EndedLegs
 //! [`GetPlane::forget_end`]: crate::get_plane::GetPlane::forget_end
@@ -252,7 +253,7 @@ enum Capture {
     On(Option<LegId>),
 }
 
-/// The capture of a plane whose session's own queryables answer its gets, under the engine's lock.
+/// The capture of a plane that keeps one ([`PlaneCalls::Captures`]), under the engine's lock.
 struct Capturing<C: GetCalls>(<C::Locks as LockFamily>::Lock<Capture>);
 
 impl<C: GetCalls> Default for Capturing<C> {
@@ -275,9 +276,9 @@ pub struct GetPlane<C: GetCalls> {
     replies: <C::Locks as LockFamily>::Lock<HeldReplies<u64, Lent>>,
     /// The legs' callbacks, each held by count (see the module).
     legs: <C::Locks as LockFamily>::Lock<LegRows<C>>,
-    /// Whether a thread that holds the session's lock takes the callback the answer it makes
-    /// reaches ([`Self::capture`]), where the session's own queryables answer its gets.
-    capture: <C::LocalAnswers as Presence>::Table<Capturing<C>>,
+    /// Whether a thread that holds the session's lock takes the callback the reply it hands the
+    /// sinks reaches ([`Self::capture`]), where the plane keeps a capture.
+    capture: <C::Captures as Presence>::Table<Capturing<C>>,
 }
 
 impl<C: GetCalls> GetPlane<C> {
@@ -289,15 +290,15 @@ impl<C: GetCalls> GetPlane<C> {
             held: Queued::new(VecDeque::new()),
             replies: C::Locks::new(replies),
             legs: C::Locks::new(legs),
-            capture: <C::LocalAnswers as Presence>::empty::<Capturing<C>>(),
+            capture: <C::Captures as Presence>::empty::<Capturing<C>>(),
         }
     }
 
     /// Take out, instead of queueing, the callback of the leg the replies handed to the sinks from
     /// here on reach, until [`Self::captured`]: how the thread that makes an answer of the
-    /// session's own queryables, holding the session's lock, learns what to call to hand it the
-    /// answer itself once it lets go. A plane whose session answers none of its own gets captures
-    /// nothing.
+    /// session's own queryables, or the read that hands a peer's reply out as it is read, holding
+    /// the session's lock, learns what to call to hand it the reply itself once it lets go. A plane
+    /// that keeps no capture ([`PlaneCalls::Captures`]) captures nothing.
     pub fn capture(&self) {
         if let Some(capturing) = self.capturing() {
             C::Locks::with(&capturing.0, |capture| *capture = Capture::On(None));
@@ -316,9 +317,9 @@ impl<C: GetCalls> GetPlane<C> {
         })
     }
 
-    /// The capture, where the session's own queryables answer its gets.
+    /// The capture, where the plane keeps one.
     fn capturing(&self) -> Option<&Capturing<C>> {
-        <C::LocalAnswers as Presence>::get::<Capturing<C>>(&self.capture)
+        <C::Captures as Presence>::get::<Capturing<C>>(&self.capture)
     }
 
     /// Whether leg `leg`'s callback was taken out for the thread that captures, with a count of

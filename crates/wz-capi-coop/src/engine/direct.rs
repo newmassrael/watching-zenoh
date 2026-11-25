@@ -206,6 +206,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
                 self.engine.hand_lent_push(self.records.face, record);
                 self.records.after_pushes = true;
             }
+            // Handed to the get it answers with the session let go of (`replies`), none of it
+            // into the round.
+            #[cfg(feature = "query")]
+            IterationEvent::InPlace(ref record) if record.response().is_some() => {
+                self.engine.hand_lent_reply(self.records.face, record);
+            }
             // The subscribers' side of each record first, a Push's sample handed out one row at a
             // time, then the other planes', as the dispatch of the whole frame orders them.
             IterationEvent::Poll(DriverLoopOutcome::FramePayload {

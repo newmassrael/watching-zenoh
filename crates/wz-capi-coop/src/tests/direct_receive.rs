@@ -24,6 +24,59 @@ use crate::{CoopConfig, EngineHold};
 /// The samples of a batch of `COUNT` the router sends on `demo/in`.
 const COUNT: u8 = 3;
 
+/// A peer's reply is handed to the get it answers by the read itself, with the session free and
+/// nothing of it held in the round. Turned red by a reply offered to the round (the read counts
+/// none) or handed out while the read holds the session.
+#[cfg(all(
+    feature = "query",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
+    use wz_capi_port::ReplyCallback;
+    use wz_session_core::reply_sink::ReplyView;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    super::get::settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
+    let seen: Arc<Mutex<Vec<(bool, Vec<u8>)>>> = Arc::default();
+    let mut session = Some(EngineHold::downgrade(&engine));
+    let issued = engine.get_on_wire(
+        "demo/g/a",
+        &WireKey::literal(),
+        &super::get::remote_get(),
+        None,
+        &mut || {
+            let seen = seen.clone();
+            let session = session.take();
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
+                let free = session
+                    .as_ref()
+                    .and_then(|session| session.upgrade())
+                    .is_some_and(|engine| engine.session_is_free());
+                seen.lock().unwrap().push((free, view.payload().to_vec()));
+            })
+        },
+    );
+    assert!(matches!(issued, Ok(1)), "one leg: the link's peer");
+    assert_eq!(
+        engine.replies_handed_by_the_read(),
+        0,
+        "CONTROL: nothing is handed before a step"
+    );
+    until(&engine, "the reply", || !seen.lock().unwrap().is_empty());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(true, b"r".to_vec())],
+        "the reply's callback found the session held"
+    );
+    assert_eq!(
+        engine.replies_handed_by_the_read(),
+        1,
+        "the reply was held in the round"
+    );
+}
+
 /// Each sample of one frame is handed to its callback with the session's state free: a callback
 /// that takes the session (a put, a declaration) never waits on the read that called it. Turned
 /// red by a read that hands a record out while it holds the session.

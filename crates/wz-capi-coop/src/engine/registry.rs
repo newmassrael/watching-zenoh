@@ -1247,6 +1247,78 @@ impl<H: Holders> RegistryOf<H> {
         face.peer.subscribers.project_in_place(&app.tables, record)
     }
 
+    /// The reply of the Response of face `face` that `record` lends, read over the frame, the
+    /// face's peer and `room` as the face's dispatch reads it
+    /// (`wz_session_core::reply::lend_response`), for a read that hands it to the get it
+    /// answers with the session let go of (`replies`). A record that is no Response, and a face
+    /// the session no longer holds, lend nothing.
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn lend_reply<'s, 'a: 's, 'f>(
+        &'s mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'a, 'f>,
+        room: &'s mut wz_session_core::reply::ReplyRoom,
+    ) -> wz_session_core::reply::LentResponse<'s, 'f> {
+        let Some(response) = record.response() else {
+            return wz_session_core::reply::LentResponse::Nothing;
+        };
+        match self.split_unwritten(self.place(face)) {
+            Some(Split { app, face, .. }) => {
+                let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+                let spaces = face
+                    .peer
+                    .subscribers
+                    .mapping_spaces_over(own)
+                    .from_sender(record.sender());
+                wz_session_core::reply::lend_response(response, spaces, room)
+            }
+            None => wz_session_core::reply::LentResponse::Nothing,
+        }
+    }
+
+    /// The owned projection of the Response of face `face` that `record` lends, which the lent
+    /// form does not represent (`LentResponse::Owned`): the reply the copying receive delivers
+    /// for it. A face the session no longer holds projects nothing.
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn project_reply(
+        &mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'_, '_>,
+    ) -> Option<wz_session_core::reply::InboundReply> {
+        let response = record.response()?;
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face
+            .peer
+            .subscribers
+            .mapping_spaces_over(own)
+            .from_sender(record.sender());
+        face.gets.replies.project_response(response, spaces)
+    }
+
+    /// Hand `reply`, read by [`Self::lend_reply`] or projected by [`Self::project_reply`], to
+    /// the pending gets of face `face` it answers, as the face's dispatch hands a Response to
+    /// them. A face the session no longer holds hands it to none.
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn fire_reply(
+        &mut self,
+        face: HeldFace,
+        reply: &dyn wz_session_core::reply_sink::ReplyView,
+    ) {
+        if let Some(Split { face, .. }) = self.split_unwritten(self.place(face)) {
+            face.gets.replies.dispatch_borrowed(reply);
+        }
+    }
+
     /// How often a face's tables were looked up since the open: what a lent Push's count of its
     /// lookups starts from ([`Self::counted_push`]).
     #[cfg(all(

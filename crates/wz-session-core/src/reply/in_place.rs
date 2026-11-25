@@ -68,7 +68,7 @@ use crate::wireexpr_resolve::{
 ///
 /// `'r` is the delivery's borrow of the decoded record; `'f` is the frame's, in
 /// which the codec's lent timestamp is invariant.
-struct LentReply<'r, 'f> {
+pub struct LentReply<'r, 'f> {
     rid: crate::wire_id::RequestId,
     keyexpr: &'r str,
     /// The key of the session's key arena `keyexpr` is the whole text of, when it is one.
@@ -371,52 +371,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         response: &ResponseView<'_>,
         spaces: MappingSpaces<'_, PS, OS>,
     ) -> Result<(), Fallback> {
-        let Some(body) = lent_body(response)? else {
-            return Ok(());
-        };
-        // The Response's own chain is walked where it lies, once for each field that reads it.
-        // A Response the nodes record on is delivered with a stack of its own to add to.
-        #[cfg(feature = "pubsub-ts-stack")]
-        if crate::ext_view::find_by_eid_in(
-            walked(response.extensions.as_ref()),
-            crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
-        )
-        .is_some()
-        {
-            return Err(Fallback::Instrumented);
+        let mut room = ReplyRoom::default();
+        if let Some(reply) = lent_reply(response, spaces, &mut room)? {
+            self.fire_replies_for(&reply, true);
         }
-        let mut composed = KeyexprBuf::new();
-        let (keyexpr, held) =
-            match resolve_wireexpr_viewed_held(&response.keyexpr.body, spaces, &mut composed) {
-                Ok(Some(resolved)) => resolved,
-                // An error reply is not about a key: a node that expires a query it forwarded
-                // (upstream's routing does) sends its `Timeout` with no key expression at all, and
-                // the error is what the asker is waiting on. It is delivered with none, as the owned
-                // path delivers it.
-                Ok(None) if body.kind == crate::reply_sink::ReplyKind::Err => ("", None),
-                // An id the space does not hold: dropped, as the owned path drops
-                // it. A sliced Put never reaches here, so there are no shared-memory
-                // slices to settle.
-                Ok(None) => return Ok(()),
-                Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
-            };
-        let reply = LentReply {
-            rid: response.request_id,
-            keyexpr,
-            held,
-            kind: body.kind,
-            payload: body.payload,
-            err_encoding: body.err_encoding,
-            put_encoding: body.put_encoding,
-            attachment: body.attachment,
-            source_info: body.source_info,
-            timestamp: body.timestamp,
-            responder: super::response_responder(walked(response.extensions.as_ref())),
-            qos: crate::sample::extract_qos_in(walked(response.extensions.as_ref())),
-            #[cfg(feature = "alloc")]
-            timestamp_hint: OnceCell::new(),
-        };
-        self.fire_replies_for(&reply, true);
         Ok(())
     }
 
@@ -430,19 +388,144 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         response: &ResponseView<'_>,
         spaces: MappingSpaces<'_, PS, OS>,
     ) {
-        // The wire profile is unbounded (`Heap`, or the AP's shared frame
-        // ranges), so this projection cannot refuse a decoded Response. The
-        // view is first filled into the codec's own record (the heap profile has the stack
-        // for its kilobyte, and this is the path of a Response the lent form cannot hold), and
-        // that record consumes itself into the owned one.
-        let mut record = wz_codecs::lent::Response::default();
-        if response.into_builder(&mut record).is_err() {
-            return;
-        }
-        if let Ok(owned) = record.try_into_owned_in::<crate::wire::WireStorage>() {
-            self.dispatch_response(&owned, spaces);
+        if let Some(inbound) = self.project_response(response, spaces) {
+            self.fire_replies_for(&inbound, true);
         }
     }
+
+    /// The owned projection of `response`, which the lent form does not represent
+    /// ([`LentResponse::Owned`]): the reply the copying receive delivers for it, owned, for a
+    /// caller that hands it to the pending gets itself. `None` for one the projection drops, and
+    /// for every one in a build that lends only (`rx-lent-only`).
+    #[cfg(feature = "alloc")]
+    pub fn project_response<PS: Storage, OS: Storage>(
+        &mut self,
+        response: &ResponseView<'_>,
+        spaces: MappingSpaces<'_, PS, OS>,
+    ) -> Option<super::InboundReply> {
+        #[cfg(not(feature = "rx-lent-only"))]
+        {
+            // The wire profile is unbounded (`Heap`, or the AP's shared frame
+            // ranges), so this projection cannot refuse a decoded Response. The
+            // view is first filled into the codec's own record (the heap profile has the stack
+            // for its kilobyte, and this is the path of a Response the lent form cannot hold), and
+            // that record consumes itself into the owned one.
+            let mut record = wz_codecs::lent::Response::default();
+            response.into_builder(&mut record).ok()?;
+            let owned = record
+                .try_into_owned_in::<crate::wire::WireStorage>()
+                .ok()?;
+            self.inbound_reply(&owned, spaces, None)
+        }
+        #[cfg(feature = "rx-lent-only")]
+        {
+            let _ = (response, spaces);
+            None
+        }
+    }
+}
+
+/// Where a lent reply's key is composed when it is not one text of the peer's tables: the
+/// caller's, held for as long as it holds the reply ([`lend_response`]).
+pub struct ReplyRoom {
+    composed: KeyexprBuf,
+}
+
+impl Default for ReplyRoom {
+    fn default() -> Self {
+        Self {
+            composed: KeyexprBuf::new(),
+        }
+    }
+}
+
+/// A Response the in-place receive path lent, read for a caller that hands its reply to the
+/// pending gets itself ([`lend_response`]).
+pub enum LentResponse<'r, 'f> {
+    /// The reply, over the frame, the peer's tables and the caller's room.
+    Reply(LentReply<'r, 'f>),
+    /// A Response the owned path drops too (an unknown body, a kind this build does not
+    /// deliver, a key no space holds), and, in a build with no owned projection to fall back
+    /// on, one the lent form does not represent.
+    Nothing,
+    /// A Response the lent form does not represent, which its owned projection delivers
+    /// (`ReplyRegistry::project_response`).
+    Owned,
+}
+
+/// Read `response` into the reply its pending gets are handed, over its frame, the peer's tables
+/// `spaces` names and `room`, for a caller that hands it to them itself: what
+/// [`ReplyRegistry::dispatch_borrowed`] is then handed is what the registry's own dispatch of the
+/// same record hands its sinks, field for field.
+pub fn lend_response<'r, 'f, PS: Storage, OS: Storage>(
+    response: &'r ResponseView<'f>,
+    spaces: MappingSpaces<'r, PS, OS>,
+    room: &'r mut ReplyRoom,
+) -> LentResponse<'r, 'f> {
+    match lent_reply(response, spaces, room) {
+        Ok(Some(reply)) => LentResponse::Reply(reply),
+        Ok(None) => LentResponse::Nothing,
+        #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
+        Err(_) => LentResponse::Owned,
+        // No owned projection to fall back on: dropped, as the registry's own dispatch drops it.
+        #[cfg(any(not(feature = "alloc"), feature = "rx-lent-only"))]
+        Err(_) => LentResponse::Nothing,
+    }
+}
+
+/// `response` read into the reply its pending gets are handed, over its frame, the peer's tables
+/// `spaces` names and `room`, where its key is composed when it is not one text of those
+/// tables; `Ok(None)` for one the owned path drops too, and the fallback for one the lent form
+/// does not represent.
+fn lent_reply<'r, 'f, PS: Storage, OS: Storage>(
+    response: &'r ResponseView<'f>,
+    spaces: MappingSpaces<'r, PS, OS>,
+    room: &'r mut ReplyRoom,
+) -> Result<Option<LentReply<'r, 'f>>, Fallback> {
+    let Some(body) = lent_body(response)? else {
+        return Ok(None);
+    };
+    // The Response's own chain is walked where it lies, once for each field that reads it.
+    // A Response the nodes record on is delivered with a stack of its own to add to.
+    #[cfg(feature = "pubsub-ts-stack")]
+    if crate::ext_view::find_by_eid_in(
+        walked(response.extensions.as_ref()),
+        crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
+    )
+    .is_some()
+    {
+        return Err(Fallback::Instrumented);
+    }
+    let (keyexpr, held) =
+        match resolve_wireexpr_viewed_held(&response.keyexpr.body, spaces, &mut room.composed) {
+            Ok(Some(resolved)) => resolved,
+            // An error reply is not about a key: a node that expires a query it forwarded
+            // (upstream's routing does) sends its `Timeout` with no key expression at all, and
+            // the error is what the asker is waiting on. It is delivered with none, as the owned
+            // path delivers it.
+            Ok(None) if body.kind == crate::reply_sink::ReplyKind::Err => ("", None),
+            // An id the space does not hold: dropped, as the owned path drops
+            // it. A sliced Put never reaches here, so there are no shared-memory
+            // slices to settle.
+            Ok(None) => return Ok(None),
+            Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
+        };
+    Ok(Some(LentReply {
+        rid: response.request_id,
+        keyexpr,
+        held,
+        kind: body.kind,
+        payload: body.payload,
+        err_encoding: body.err_encoding,
+        put_encoding: body.put_encoding,
+        attachment: body.attachment,
+        source_info: body.source_info,
+        timestamp: body.timestamp,
+        responder: super::response_responder(walked(response.extensions.as_ref())),
+        qos: crate::sample::extract_qos_in(walked(response.extensions.as_ref())),
+        #[cfg(feature = "alloc")]
+        timestamp_hint: OnceCell::new(),
+    }))
 }
 
 // The lent delivery against the owned one on the same wire record: every field
@@ -566,6 +649,54 @@ mod tests {
         let owned_seen = owned_log.lock().expect("not poisoned").clone();
         let lent_seen = lent_log.lock().expect("not poisoned").clone();
         (owned_seen, lent_seen)
+    }
+
+    /// A reply read for a caller that hands it to the pending gets itself is what the registry's
+    /// own dispatch hands them, field for field, through the same matcher; its key composed in the
+    /// caller's room when it is a peer's id with a suffix; and a key no space holds reads nothing.
+    #[test]
+    fn a_reply_lent_to_its_caller_is_what_the_registry_hands_its_sinks() {
+        let peer = peer();
+        let mapped = ResponseReplyBuilder::new(
+            RID,
+            crate::wire_key::WireKey::from_parts(5, Some("/deeper")).expect("a key"),
+            b"composed",
+        )
+        .build()
+        .expect("build");
+        let unknown = ResponseReplyBuilder::new(
+            RID,
+            crate::wire_key::WireKey::from_parts(77, None).expect("a key"),
+            b"nowhere",
+        )
+        .build()
+        .expect("build");
+        let (owned, _) = both(&mapped);
+        assert_eq!(owned.len(), 1, "CONTROL: the owned path delivers it");
+        let wire = mapped
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec();
+        let decoded = ResponseView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+        let mut room = ReplyRoom::default();
+        let LentResponse::Reply(reply) =
+            lend_response(&decoded, MappingSpaces::from(&peer), &mut room)
+        else {
+            panic!("a reply lent where it lies");
+        };
+        let (mut registry, log) = recording();
+        assert_eq!(registry.dispatch_borrowed(&reply), 1);
+        assert_eq!(*log.lock().expect("not poisoned"), owned);
+        let wire = unknown
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec();
+        let decoded = ResponseView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+        let mut room = ReplyRoom::default();
+        assert!(matches!(
+            lend_response(&decoded, MappingSpaces::from(&peer), &mut room),
+            LentResponse::Nothing
+        ));
     }
 
     /// A Response that carries a timestamp stack is delivered with it, as one routed to this node:

@@ -226,6 +226,11 @@ mod direct;
 // The delivery of a lent Push such a read makes, one subscriber at a time (`pinned`).
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 mod pinned;
+#[cfg(all(
+    feature = "query",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+mod replies;
 
 mod registry;
 pub(crate) use registry::FACE_SET_BYTES;
@@ -1202,6 +1207,12 @@ pub(crate) struct Takes {
     /// Of the samples handed one row at a time, those read where their frame lies.
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     pub(crate) pinned_lent: core::sync::atomic::AtomicUsize,
+    /// The peers' replies the read handed to the get each answers itself (`replies`).
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) pinned_replies: core::sync::atomic::AtomicUsize,
     /// The holds of key expression declarations the session handed out (declared or retained)
     /// less those given back, counted whether the session is open or closed: a hold given back to
     /// a closed session is still one given back, and one never given back stays counted.
@@ -5483,6 +5494,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         let pinned = 0;
         self.samples.tally().lent() + pinned
+    }
+
+    /// How many peers' replies the read handed to the get each answers itself, with nothing of
+    /// them held in the round (`replies`).
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) fn replies_handed_by_the_read(&self) -> usize {
+        self.takes.pinned_replies.load(Ordering::Relaxed)
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open

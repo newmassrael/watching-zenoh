@@ -1291,6 +1291,8 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
 /// path lends ([`IterationEvent::InPlace`]).
 #[cfg(all(feature = "storage-profile", feature = "codec-response"))]
 mod in_place;
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
+pub use in_place::{lend_response, LentReply, LentResponse, ReplyRoom};
 
 impl<C: ReplySink> ReplyRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C`. Pending
@@ -1574,6 +1576,20 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
         read: Option<crate::link::RxBytes>,
     ) {
+        if let Some(inbound) = self.inbound_reply(response, peer_keyexpr_table, read) {
+            self.fire_replies_for(&inbound, true);
+        }
+    }
+
+    /// The reply a `Response` is delivered as, its Put value being `read` when the caller read it
+    /// and the response's own otherwise; `None` for one that is dropped.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    fn inbound_reply<PS: Storage, OS: Storage>(
+        &mut self,
+        response: &ResponseOwned,
+        peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
+        read: Option<crate::link::RxBytes>,
+    ) -> Option<InboundReply> {
         // A build that reads no Put reply has nothing to put a read value in.
         #[cfg(not(any(feature = "pubsub-put", feature = "query-reply")))]
         let _ = &read;
@@ -1600,7 +1616,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 if read.is_none() {
                     self.settle_unrouted_reply(response);
                 }
-                return;
+                return None;
             }
         };
         // R311cc — pubsub-put / pubsub-delete gate the inbound Reply
@@ -1628,10 +1644,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                     // caller read already is delivered as it was read.
                     payload: match read {
                         Some(bytes) => bytes,
-                        None => match self.reply_put_payload(put, response) {
-                            Some(bytes) => bytes,
-                            None => return,
-                        },
+                        None => self.reply_put_payload(put, response)?,
                     },
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
@@ -1655,7 +1668,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 // dispatch treats this as a wire-spec violation; the
                 // AP MVP path mirrors that by dropping silently. cfg-off
                 // pubsub-put / -delete arms also fall through here.
-                _ => return,
+                _ => return None,
             },
             ResponseOwnedVariant::CodecZenohErr(err) => {
                 let encoding = err.encoding.as_ref().map(|e| {
@@ -1672,10 +1685,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 }
             }
             // See ResponseVariant::Default rationale on Reply arm.
-            ResponseOwnedVariant::Default { .. } => return,
+            ResponseOwnedVariant::Default { .. } => return None,
         };
         let extensions = response.extensions.entries().unwrap_or(&[]);
-        let inbound = InboundReply {
+        Some(InboundReply {
             rid: response.request_id,
             keyexpr_literal: resolved,
             body,
@@ -1683,8 +1696,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             qos: crate::sample::extract_qos(extensions),
             // The timestamp stack the Response carries, and that it came in over a link.
             stamp: ReplyStamp::received(extensions),
-        };
-        self.fire_replies_for(&inbound, true);
+        })
     }
 
     /// The bytes a Reply's Put delivers. A Put in the inline layout is read as it
