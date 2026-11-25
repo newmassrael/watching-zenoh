@@ -108,6 +108,10 @@ wz_runtime_coop::with_heap_link_seams! {
 }
 #[cfg(unix)]
 pub mod net;
+/// The host's raw packet sockets as the devices of the cooperative engine's `reth/` groups, on
+/// Linux.
+#[cfg(all(feature = "raweth", not(feature = "session-slot")))]
+pub mod raweth;
 /// The host's ttys as the lines of the cooperative engine's serial links, on Linux and Android.
 #[cfg(feature = "serial")]
 pub mod serial;

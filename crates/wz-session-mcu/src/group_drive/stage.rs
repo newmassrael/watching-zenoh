@@ -1374,6 +1374,10 @@ impl<T: GroupTransport> GroupTransport for GroupLink<T> {
     fn give_back_rx(&mut self) -> Option<wz_session_core::byte_cells::ByteBuf> {
         self.0.transport.borrow_mut().give_back_rx()
     }
+
+    fn frame_budget(&self) -> Option<u16> {
+        self.0.transport.borrow().frame_budget()
+    }
 }
 
 #[cfg(test)]

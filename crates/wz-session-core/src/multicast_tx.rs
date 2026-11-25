@@ -3397,6 +3397,26 @@ mod push_tests {
         );
     }
 
+    /// A link that carries less than the group's batch has the group framed to it, and one that
+    /// carries the whole batch, or names no budget, leaves the parameters as they are. Turned red
+    /// by a budget taken when it is the larger.
+    #[test]
+    fn a_group_is_framed_to_the_budget_of_a_link_that_carries_less() {
+        let group = params(2_048);
+        assert_eq!(
+            group.framed_to(Some(1_498)).map(|framed| framed.batch_size),
+            Some(1_498)
+        );
+        assert_eq!(
+            group.framed_to(Some(1_498)).map(|framed| framed.lease_ms),
+            Some(group.lease_ms),
+            "the rest of the group's parameters stay"
+        );
+        assert_eq!(group.framed_to(Some(2_048)), None);
+        assert_eq!(group.framed_to(Some(9_000)), None);
+        assert_eq!(group.framed_to(None), None);
+    }
+
     /// A compressing group's frame is a batch: the `BatchHeader` in front, the payload lz4-compressed
     /// when that is smaller. What the header and the payload give back is the frame the plain group
     /// sends, on the same sequence number; a frame that does not shrink is sent raw behind a clear

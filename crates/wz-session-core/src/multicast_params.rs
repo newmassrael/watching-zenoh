@@ -253,6 +253,19 @@ impl MulticastParams {
         (self.batch_size as usize).saturating_sub(header)
     }
 
+    /// These parameters with their batch held to a link's `budget`, when the link's datagram
+    /// carries less than [`Self::batch_size`] (a raw Ethernet frame): what a group's pipeline
+    /// frames by over that link, while the group's JOIN still states its batch. `None` when the
+    /// link names no budget or carries the whole batch, and the group frames by these.
+    pub fn framed_to(&self, budget: Option<u16>) -> Option<Self> {
+        budget
+            .filter(|budget| *budget < self.batch_size)
+            .map(|batch_size| Self {
+                batch_size,
+                ..self.clone()
+            })
+    }
+
     /// R311kq — whether this node's JOIN must carry the S-flag optionals
     /// (`sn_res` cbyte + `batch_size`): exactly when any of them departs
     /// from the protocol defaults, so an omitted optional stays an honest

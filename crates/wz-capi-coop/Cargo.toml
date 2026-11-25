@@ -252,6 +252,10 @@ group = [
 # link are one decision for both engines. It needs no `std`: a host library without it joins a
 # group as one with it does.
 group-host = ["group", "dep:wz-runtime-posix", "dep:log"]
+# The `reth/` groups of `group` joined on the host's raw packet sockets: the runtime's joiner of
+# them (`raweth_group`), re-exported for the ABI that wraps the host's groups in it beside
+# `wz_runtime_posix::raweth`'s sockets. Linux only, where zenoh-pico has its raweth transport.
+raweth = ["group-host", "wz-runtime-coop/raweth", "wz-runtime-posix/raweth"]
 # The keyexprs the members of a group declare, each member's kept apart (zenoh-pico's
 # `Z_FEATURE_MULTICAST_DECLARATIONS`, the pico ABI's `multicast-declarations`): every key a member
 # names by one of its own ids, in a put, a declaration, a query, a reply or an interest, reaches the

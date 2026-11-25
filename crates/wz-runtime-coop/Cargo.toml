@@ -202,6 +202,19 @@ ws = ["alloc", "session-unicast", "wz-session-core/transport-link-ws"]
 # endpoint is a scheme the build does not carry.
 unixpipe = ["alloc", "session-unicast"]
 
+# Multicast groups over raw Ethernet (`reth/` endpoints, `raweth_group`): the joiner that opens
+# the device a host gives for the interface a `reth/` group names, and hands every other group to
+# the joiner it wraps. What a frame is and where it goes is the session core's raweth link
+# (`transport-link-raweth`), which reads the datagram it routes with the frame decoder
+# (`codec-frame`). The group seam is the heap profile's, so this takes `alloc` and the unicast
+# session, as `unixpipe` does. Without it a `reth/` endpoint is a scheme the build does not carry.
+raweth = [
+    "alloc",
+    "session-unicast",
+    "codec-frame",
+    "wz-session-core/transport-link-raweth",
+]
+
 # The high-water mark of the pump cells (`wz-session-core`'s `pool-monitor`).
 # Without it the table keeps no mark and is the size it was.
 pool-monitor = ["wz-session-core?/pool-monitor"]

@@ -137,6 +137,10 @@ pub use wz_runtime_coop::app_link;
 /// opens this engine with, so the engine it reaches is one type (`either_links::EitherLinks`).
 #[cfg(feature = "app-transport")]
 pub use wz_runtime_coop::either_links;
+/// The joiner of the groups over raw Ethernet (`raweth_group::RawethJoiner`), which an ABI wraps
+/// the host's groups in where its build joins `reth/` groups.
+#[cfg(feature = "raweth")]
+pub use wz_runtime_coop::raweth_group;
 // The tests are a host's: they run a router stand-in on threads of `std`.
 #[cfg(all(test, feature = "std"))]
 mod tests;
