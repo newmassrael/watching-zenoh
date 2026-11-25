@@ -428,6 +428,35 @@ impl Plan {
         filled
     }
 
+    /// The address a link's datagrams to the group leave from when nothing named one
+    /// ([`Self::fill_unspecified`] found no interface), learned by connecting a probe of the
+    /// group's family, pinned as the sender is, to the group: the kernel picks the source it would
+    /// pick for each send. A link-local source is read back without its zone and is given the
+    /// interface that holds it. `None` when the kernel picks none, which leaves the sender on the
+    /// wildcard. A sender bound to its source is one a receiver can tell its own datagrams by.
+    fn learned_source(&self, wildcard: SocketAddr, port: u16) -> Option<SocketAddr> {
+        let probe = Socket::new(self.domain(), Type::DGRAM, Some(Protocol::UDP)).ok()?;
+        self.pin_link_egress(&probe, wildcard).ok()?;
+        probe.connect(&self.peer(port).into()).ok()?;
+        let mut source = probe.local_addr().ok()?.as_socket()?;
+        if source.ip().is_unspecified() {
+            return None;
+        }
+        source.set_port(wildcard.port());
+        if let SocketAddr::V6(v6) = &mut source {
+            // `fe80::/10`, spelled out as `fill_unspecified` spells it.
+            if v6.scope_id() == 0 && v6.ip().segments()[0] & 0xffc0 == 0xfe80 {
+                let zone =
+                    crate::link_interfaces::interface_indices_of_address(IpAddr::V6(*v6.ip()))
+                        .ok()?
+                        .into_iter()
+                        .next()?;
+                v6.set_scope_id(zone);
+            }
+        }
+        Some(source)
+    }
+
     /// Where a datagram is written: the group itself.
     fn peer(&self, port: u16) -> SocketAddr {
         match self {
@@ -721,6 +750,14 @@ pub fn bind_sender(
     // this line used to pass unconditionally. Resolved before the socket exists, so a bad value
     // leaves nothing behind.
     let local = plan.egress_local_addr(cfg.bind, cfg.iface, port)?;
+    // A link's sender is one member's one source: bound to the address its datagrams leave from,
+    // never the wildcard while the kernel names one, so its own datagrams are told apart on the
+    // receive.
+    let local = if link && local.ip().is_unspecified() {
+        plan.learned_source(local, port).unwrap_or(local)
+    } else {
+        local
+    };
     let raw = Socket::new(plan.domain(), Type::DGRAM, Some(Protocol::UDP))?;
     raw.set_nonblocking(true)?;
     if link {
