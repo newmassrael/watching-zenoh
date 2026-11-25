@@ -13,7 +13,7 @@
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
@@ -61,9 +61,26 @@ unsafe impl<T: Send + Sync> Sync for WeakRef<T> {}
 impl<T> Strong<T> {
     /// `value` in a box of its own, given back to the heap with the last count of it.
     pub fn boxed(value: T) -> Self {
+        let write = |at: NonNull<T>| {
+            // SAFETY: the place `boxed_in` hands is valid for writes of a `T` and holds none.
+            unsafe { at.as_ptr().write(value) }
+        };
+        // SAFETY: `write` leaves `value` in the place it is handed.
+        unsafe { Self::boxed_in(write) }
+    }
+
+    /// The value `make` writes in a box of its own, where it stays, as [`Self::boxed`] holds one:
+    /// what a value holding a lock is made in, its locks made there
+    /// ([`crate::os::mutex_in`]).
+    ///
+    /// # Safety
+    /// `make` leaves a valid `T` in the place it is handed, which is valid for writes of one,
+    /// aligned for it and holds none.
+    pub unsafe fn boxed_in(make: impl FnOnce(NonNull<T>)) -> Self {
         let place = NonNull::from(Box::leak(Box::new(Lodging::<T>::vacant())));
-        // SAFETY: the box is this value's alone and is given back by `free_box`, once.
-        unsafe { Self::lodge(place, value, free_box::<T>, place.as_ptr().cast::<c_void>()) }
+        // SAFETY: the box is this value's alone and is given back by `free_box`, once; `make` is
+        // the caller's.
+        unsafe { Self::lodge_in(place, make, free_box::<T>, place.as_ptr().cast::<c_void>()) }
     }
 
     /// `value` in the place at `place`, which `give_back(context)` gives back once, after the
@@ -79,18 +96,43 @@ impl<T> Strong<T> {
         give_back: unsafe fn(*mut c_void),
         context: *mut c_void,
     ) -> Self {
-        let at = place.cast::<Lodging<T>>();
-        // SAFETY: the caller's: the place is free and valid for the write.
+        let write = |at: NonNull<T>| {
+            // SAFETY: the place `lodge_in` hands is valid for writes of a `T` and holds none.
+            unsafe { at.as_ptr().write(value) }
+        };
+        // SAFETY: the caller's, and `write` leaves `value` in the place it is handed.
+        unsafe { Self::lodge_in(place, write, give_back, context) }
+    }
+
+    /// The value `make` writes in the place at `place`, where it stays, as [`Self::lodge`] lodges
+    /// one: what a value holding a lock is made in, its locks made there
+    /// ([`crate::os::mutex_in`]).
+    ///
+    /// # Safety
+    /// As [`Self::lodge`]; and `make` leaves a valid `T` in the place it is handed, which is valid
+    /// for writes of one, aligned for it and holds none.
+    pub unsafe fn lodge_in(
+        place: NonNull<MaybeUninit<Lodging<T>>>,
+        make: impl FnOnce(NonNull<T>),
+        give_back: unsafe fn(*mut c_void),
+        context: *mut c_void,
+    ) -> Self {
+        let at = place.cast::<Lodging<T>>().as_ptr();
+        // SAFETY: the caller's: the place is free and valid for writes of a `Lodging<T>`, and each
+        // field is written once through a pointer to it, the value by `make` in its cell
+        // (`UnsafeCell<MaybeUninit<T>>` has the layout of `T`), not null as it is inside the place.
         unsafe {
-            at.as_ptr().write(Lodging {
-                strong: AtomicUsize::new(1),
-                weak: AtomicUsize::new(1),
-                value: UnsafeCell::new(MaybeUninit::new(value)),
-                give_back,
-                context,
-            });
+            addr_of_mut!((*at).strong).write(AtomicUsize::new(1));
+            addr_of_mut!((*at).weak).write(AtomicUsize::new(1));
+            addr_of_mut!((*at).give_back).write(give_back);
+            addr_of_mut!((*at).context).write(context);
+            make(NonNull::new_unchecked(
+                addr_of_mut!((*at).value).cast::<T>(),
+            ));
         }
-        Self { at }
+        Self {
+            at: place.cast::<Lodging<T>>(),
+        }
     }
 
     fn lodging(&self) -> &Lodging<T> {
@@ -352,6 +394,49 @@ unsafe fn free_box<T>(context: *mut c_void) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value holding a lock, made in its lodging's place with its lock made there, is read and
+    /// locked through every count, and the place goes back once, after the last. Turned red by a
+    /// `lodge_in` that writes the counts or the value anywhere but the place it was handed.
+    #[test]
+    fn a_value_made_in_its_place_is_shared_by_its_counts() {
+        struct Held {
+            count: crate::os::Mutex<u32>,
+        }
+        let mut place = Lodging::<Held>::vacant();
+        let given = AtomicUsize::new(0);
+        let make = |at: NonNull<Held>| {
+            // SAFETY: the place is the lodging's, valid for one `Held`, never moved while counted.
+            unsafe {
+                crate::os::mutex_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at.as_ptr()).count)),
+                    |value| value.write(1),
+                );
+            }
+        };
+        // SAFETY: the place is vacant and stands, as the counter does, past every count here;
+        // `make` makes the whole `Held`.
+        let first = unsafe {
+            Strong::lodge_in(
+                NonNull::from(&mut place),
+                make,
+                count_back,
+                core::ptr::from_ref(&given).cast_mut().cast::<c_void>(),
+            )
+        };
+        let second = first.clone();
+        *second.count.lock() += 1;
+        assert_eq!(*first.count.lock(), 2);
+        assert_eq!(Strong::strong_count(&first), 2);
+        drop(first);
+        assert_eq!(
+            given.load(Ordering::Relaxed),
+            0,
+            "a count still holds the place"
+        );
+        drop(second);
+        assert_eq!(given.load(Ordering::Relaxed), 1);
+    }
 
     /// Count one giving back of a place, in the counter `context` names.
     ///

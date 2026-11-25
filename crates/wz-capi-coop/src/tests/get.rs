@@ -245,7 +245,7 @@ fn a_cancellable_get_allocates_nothing_and_its_fan_ends_it() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
-    let token = CancellationToken::default();
+    let token = CancellationToken::new();
     let fan = CancellableFan::new();
     // SAFETY: the fan does not move until its drop below, and the token outlives it.
     assert!(unsafe { fan.register(TokenRef::placed(&token)) });

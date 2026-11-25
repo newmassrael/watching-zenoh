@@ -41,6 +41,7 @@
 
 use alloc::sync::Arc;
 use core::ffi::{c_char, c_void};
+use core::ptr::{addr_of_mut, NonNull};
 
 use wz_capi_port::cancellation::{CancellationToken, TokenRef};
 use wz_capi_port::FilterPlane;
@@ -430,16 +431,33 @@ pub unsafe extern "C" fn z_declare_querier(
             Ok(filtered) => filtered,
             Err(rc) => return rc,
         };
-        let state = slot.fill(crate::object_slot::Answering::new(QuerierState {
-            #[cfg(feature = "unstable-api")]
-            eid: filtered.eid,
-            filter: filtered.filter,
-            key: filtered.key,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            shape,
-            encoding,
-            cancel: CancellationToken::default(),
-        }));
+        // Written where it stays: the querier's token holds a lock made in its place.
+        let write_state = |place: NonNull<QuerierState>| {
+            let at = place.as_ptr();
+            // SAFETY: the place is the querier's in its slot, valid for one `QuerierState`,
+            // holding none and never moved while the querier stands; each field is written once
+            // through a pointer to it, not null as it is inside the place, the token made there.
+            unsafe {
+                #[cfg(feature = "unstable-api")]
+                addr_of_mut!((*at).eid).write(filtered.eid);
+                addr_of_mut!((*at).filter).write(filtered.filter);
+                addr_of_mut!((*at).key).write(filtered.key);
+                addr_of_mut!((*at).loaned_keyexpr).write(crate::abi::z_loaned_keyexpr_t::borrowed(
+                    core::ptr::null(),
+                    0,
+                ));
+                addr_of_mut!((*at).shape).write(shape);
+                addr_of_mut!((*at).encoding).write(encoding);
+                CancellationToken::init_in(NonNull::new_unchecked(addr_of_mut!((*at).cancel)));
+            }
+        };
+        let write = |at: *mut crate::object_slot::Answering<QuerierState>| {
+            // SAFETY: the slot hands a place valid for writes of the querier's `Answering`,
+            // holding none; `write_state` writes the whole querier.
+            unsafe { crate::object_slot::Answering::write_at(at, write_state) }
+        };
+        // SAFETY: `write` leaves a whole `Answering<QuerierState>` in the place it is handed.
+        let state = unsafe { slot.fill_in_place(write) };
         // The querier is the first thing in its place, so the place is its handle.
         let state = state.cast::<QuerierState>();
         (*state).bind();

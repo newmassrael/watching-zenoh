@@ -1006,13 +1006,23 @@ fn shared_on_key(
     )
     .with_retransmission(true)
     .with_history(1, usize::MAX);
-    Strong::boxed(super::Shared::new(
-        Arc::downgrade(&engine(script)),
-        state,
-        super::fixed_key(base).expect("a key a session stores"),
-        Locality::SessionLocal,
-        1_000,
-    ))
+    let handle = Arc::downgrade(&engine(script));
+    let base_keyexpr = super::fixed_key(base).expect("a key a session stores");
+    let make = |place: core::ptr::NonNull<super::Shared<Arc<dyn SessionEngine>>>| {
+        // SAFETY: the place is the box's, valid for one `Shared`, holding none, never moved.
+        unsafe {
+            super::Shared::write_in(
+                place,
+                handle,
+                state,
+                base_keyexpr,
+                Locality::SessionLocal,
+                1_000,
+            );
+        }
+    };
+    // SAFETY: `make` makes the whole shared part in the place it is handed.
+    unsafe { Strong::boxed_in(make) }
 }
 
 /// A get's slot, its fan's registration, its legs, a reply keyed outside the subscription and

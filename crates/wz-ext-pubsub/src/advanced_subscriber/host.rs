@@ -45,7 +45,7 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::fmt::Write as _;
 use core::mem::{ManuallyDrop, MaybeUninit};
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
@@ -160,24 +160,33 @@ struct Shared<E: EngineHolder> {
 }
 
 impl<E: EngineHolder> Shared<E> {
-    /// A subscriber of `engine` on `base_keyexpr` with no get in flight.
-    fn new(
+    /// A subscriber of `engine` on `base_keyexpr` with no get in flight, made in `place`, where
+    /// it stays: its token holds a lock made in its place ([`CancellationToken::init_in`]).
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self`, aligned for it and holds none; what is made there
+    /// is not moved until it is dropped there.
+    unsafe fn write_in(
+        place: NonNull<Self>,
         engine: E::Handle,
         state: State,
         base_keyexpr: FixedKey,
         dest: Locality,
         timeout_ms: u32,
-    ) -> Self {
-        Self {
-            engine,
-            gets: core::array::from_fn(|_| GetSlot::new()),
-            state: Mutex::new(state),
-            token: CancellationToken::default(),
-            closing: AtomicBool::new(false),
-            base_keyexpr,
-            dest,
-            timeout_ms,
-            late: (None, None),
+    ) {
+        let at = place.as_ptr();
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // it is inside the place, the token made there.
+        unsafe {
+            addr_of_mut!((*at).engine).write(engine);
+            addr_of_mut!((*at).gets).write(core::array::from_fn(|_| GetSlot::new()));
+            addr_of_mut!((*at).state).write(Mutex::new(state));
+            CancellationToken::init_in(NonNull::new_unchecked(addr_of_mut!((*at).token)));
+            addr_of_mut!((*at).closing).write(AtomicBool::new(false));
+            addr_of_mut!((*at).base_keyexpr).write(base_keyexpr);
+            addr_of_mut!((*at).dest).write(dest);
+            addr_of_mut!((*at).timeout_ms).write(timeout_ms);
+            addr_of_mut!((*at).late).write((None, None));
         }
     }
 
@@ -685,8 +694,13 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         misses: MissHandlers,
     ) -> Result<Self, HostError> {
         let base_keyexpr = admitted(engine, keyexpr.as_ref(), &options)?;
-        let part = shared_part(engine, base_keyexpr, &options, on_sample, misses);
-        Self::declare_over(engine, Strong::boxed(part), options)
+        let make = |place: NonNull<Shared<E>>| {
+            // SAFETY: the place is the box's, valid for one `Shared`, holding none, never moved.
+            unsafe { write_shared_part(place, engine, base_keyexpr, &options, on_sample, misses) }
+        };
+        // SAFETY: `make` makes the whole shared part in the place it is handed.
+        let shared = unsafe { Strong::boxed_in(make) };
+        Self::declare_over(engine, shared, options)
     }
 
     /// [`Self::declare_with`] with what the subscriber's callbacks and jobs share lodged in `core`,
@@ -712,13 +726,17 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 return Err(refused);
             }
         };
-        let part = shared_part(engine, base_keyexpr, &options, on_sample, misses);
+        let make = |place: NonNull<Shared<E>>| {
+            // SAFETY: the place is the lent core's, valid for one `Shared`, holding none, never
+            // moved while it is counted.
+            unsafe { write_shared_part(place, engine, base_keyexpr, &options, on_sample, misses) }
+        };
         // SAFETY: `LentCore::new`'s; a `SubscriberCore` is the place of its lodging
-        // (`repr(transparent)`).
+        // (`repr(transparent)`); `make` makes the whole shared part in the place it is handed.
         let shared = unsafe {
-            Strong::lodge(
+            Strong::lodge_in(
                 core.core.cast::<MaybeUninit<Lodging<Shared<E>>>>(),
-                part,
+                make,
                 core.give_back,
                 core.context,
             )
@@ -979,14 +997,18 @@ fn admitted<E: EngineHolder>(
 }
 
 /// What a subscriber of `engine` on `base_keyexpr` shares among its callbacks and jobs, with the
-/// machine `options` asks for delivering to `on_sample` and `misses`.
-fn shared_part<E: EngineHolder>(
+/// machine `options` asks for delivering to `on_sample` and `misses`, made in `place`.
+///
+/// # Safety
+/// As [`Shared::write_in`].
+unsafe fn write_shared_part<E: EngineHolder>(
+    place: NonNull<Shared<E>>,
     engine: &E,
     base_keyexpr: FixedKey,
     options: &AdvancedSubscriberOptions,
     on_sample: OnSample,
     misses: MissHandlers,
-) -> Shared<E> {
+) {
     let history = options.history;
     let state = State::delivering_to(on_sample, misses)
         .with_retransmission(options.recovery.is_some())
@@ -997,17 +1019,20 @@ fn shared_part<E: EngineHolder>(
                 .and_then(|h| h.sample_depth)
                 .unwrap_or(usize::MAX),
         );
-    let mut part = Shared::new(
-        E::downgrade(engine),
-        state,
-        base_keyexpr,
-        options.get_locality,
-        recovery_query_timeout_ms(options.query_timeout),
-    );
-    part.late = history
-        .map(|h| (h.sample_depth, h.max_age))
-        .unwrap_or((None, None));
-    part
+    // SAFETY: the caller's, which is `write_in`'s; the part is whole before its bounds are set.
+    unsafe {
+        Shared::write_in(
+            place,
+            E::downgrade(engine),
+            state,
+            base_keyexpr,
+            options.get_locality,
+            recovery_query_timeout_ms(options.query_timeout),
+        );
+        (*place.as_ptr()).late = history
+            .map(|h| (h.sample_depth, h.max_age))
+            .unwrap_or((None, None));
+    }
 }
 
 /// The identity a subscriber reports: its host's, when the host has one, else its subscription's

@@ -7,6 +7,7 @@
 //! the engine, in the form it tells.
 
 use alloc::sync::Arc;
+use core::ptr::{addr_of_mut, NonNull};
 
 use wz_session_core::face::{
     FaceEventKind, FaceEventSink, FaceLinkRow, FaceRowSink, FaceSnapshot, LinkSnapshot,
@@ -30,10 +31,22 @@ pub fn rows_of_snapshots(sink: FaceRowSink) -> FaceEventSink {
 /// seen, is let go of, and so is its face. Rows lost after a row ([`FaceLinkRow::lost_after`])
 /// are not told: a watcher of snapshots, as zenoh's, has no event that says it missed one.
 pub fn snapshots_of_rows(sink: FaceEventSink) -> FaceRowSink {
-    let gathering: Mutex<Option<FaceSnapshot>> = Mutex::new(None);
+    let make = |place: NonNull<Gathering>| {
+        let at = place.as_ptr();
+        // SAFETY: the place is its `Arc`'s, valid for one `Gathering` and never moved; each field
+        // is written once through a pointer to it, not null as it is inside the place.
+        unsafe {
+            addr_of_mut!((*at).sink).write(sink);
+            crate::os::mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).face)), |face| {
+                face.write(None)
+            });
+        }
+    };
+    // SAFETY: `make` writes both fields of the `Gathering` in the place it is handed.
+    let gathering = unsafe { crate::os::arc_with_lock_in(make) };
     Arc::new(move |kind: FaceEventKind, row: &FaceLinkRow| {
         let whole = {
-            let mut held = gathering.lock();
+            let mut held = gathering.face.lock();
             let face: &mut Option<FaceSnapshot> = &mut held;
             if row.link == 0 {
                 *face = Some(FaceSnapshot::of_face_row(row));
@@ -50,9 +63,17 @@ pub fn snapshots_of_rows(sink: FaceEventSink) -> FaceRowSink {
         // Called with the gathering let go of: the sink may reach back into the session, whose
         // next face's rows would wait on it.
         if let Some(face) = whole {
-            sink(kind, &face);
+            (gathering.sink)(kind, &face);
         }
     })
+}
+
+/// What a watcher of snapshots told through rows holds between rows: the face whose rows are
+/// being gathered, under a lock made in place ([`crate::os::mutex_in`]), and the watcher it is
+/// handed on to.
+struct Gathering {
+    face: Mutex<Option<FaceSnapshot>>,
+    sink: FaceEventSink,
 }
 
 #[cfg(test)]

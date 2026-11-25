@@ -116,6 +116,25 @@ pub unsafe fn condvar_in(place: core::ptr::NonNull<Condvar>) {
     }
 }
 
+/// A value `make` writes in an `Arc` of its own, where it stays: what a value holding a lock is
+/// made in, its locks made there with [`mutex_in`] and [`condvar_in`], as a kernel's lock may
+/// point at itself and so is not made on a stack and moved into its `Arc`.
+///
+/// # Safety
+/// `make` leaves a valid `T` in the place it is handed, which is valid for writes of one, aligned
+/// for it and holds none.
+pub unsafe fn arc_with_lock_in<T>(make: impl FnOnce(core::ptr::NonNull<T>)) -> alloc::sync::Arc<T> {
+    let made = alloc::sync::Arc::<T>::new_uninit();
+    // SAFETY: an `Arc` just made is the one owner of its value: no other count of it and no borrow
+    // of its value exists, so writes through this pointer are the only access to the value until
+    // `assume_init` below; the pointer of a live `Arc` is never null.
+    let place =
+        unsafe { core::ptr::NonNull::new_unchecked(alloc::sync::Arc::as_ptr(&made).cast_mut()) };
+    make(place.cast::<T>());
+    // SAFETY: `make` left a valid `T` there (the caller's contract).
+    unsafe { made.assume_init() }
+}
+
 /// A mutex in a `static`, made where it lies the first time it is reached ([`Self::get`]): a
 /// `static` never moves, so nothing is asked of a pool or a heap for it and it cannot be refused.
 #[cfg(any(feature = "std", feature = "os-sys"))]
@@ -863,6 +882,37 @@ mod tests {
         let elsewhere: &'static mut u32 = std::boxed::Box::leak(std::boxed::Box::new(1));
         let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
         Mutex::new_in(&mut place, |_| elsewhere);
+    }
+
+    /// A value holding a mutex and a condition variable, made in its `Arc` with both made in
+    /// place, holds what its maker wrote and is the `Arc`'s alone. Turned red by a maker whose
+    /// writes do not land in the `Arc` that is handed back.
+    #[test]
+    fn a_value_with_locks_is_made_in_its_arc() {
+        struct Pair {
+            count: Mutex<u32>,
+            woken: Condvar,
+        }
+        let make = |place: core::ptr::NonNull<Pair>| {
+            let at = place.as_ptr();
+            // SAFETY: the place is the `Arc`'s, valid for one `Pair` and never moved; each field
+            // is made once, through a pointer to it.
+            unsafe {
+                mutex_in(
+                    core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*at).count)),
+                    |value| value.write(4),
+                );
+                condvar_in(core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                    (*at).woken
+                )));
+            }
+        };
+        // SAFETY: `make` makes both fields of the `Pair` in the place it is handed.
+        let pair = unsafe { arc_with_lock_in(make) };
+        *pair.count.lock() += 1;
+        pair.woken.notify_all();
+        assert_eq!(*pair.count.lock(), 5);
+        assert_eq!(alloc::sync::Arc::strong_count(&pair), 1);
     }
 
     /// A mutex and a condition variable made in their places hold what their maker wrote and are

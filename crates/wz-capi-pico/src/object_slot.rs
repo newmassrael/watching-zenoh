@@ -515,6 +515,24 @@ impl<T> Answering<T> {
             kept: core::mem::ManuallyDrop::new(()),
         }
     }
+
+    /// As [`Self::new`], the value written by `write` in the place where it stays: what a value
+    /// holding a lock is made in, its lock made there ([`wz_capi_port::os::mutex_in`]).
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it and holds none; `write` leaves a valid
+    /// `T` in the place it is handed.
+    pub(crate) unsafe fn write_at(at: *mut Self, write: impl FnOnce(NonNull<T>)) {
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // `at` is valid, the value by `write` (a `ManuallyDrop<T>` has the layout of `T`).
+        unsafe {
+            write(NonNull::new_unchecked(
+                core::ptr::addr_of_mut!((*at).value).cast::<T>(),
+            ));
+            core::ptr::addr_of_mut!((*at).open).write(crate::ffi::OpenClosures::default());
+            core::ptr::addr_of_mut!((*at).kept).write(core::mem::ManuallyDrop::new(()));
+        }
+    }
 }
 
 /// The count of the closures the entity whose object is at `object` answers for, which its owner

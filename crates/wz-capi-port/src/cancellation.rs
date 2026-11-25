@@ -61,7 +61,7 @@
 
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 
 use crate::os::{Condvar, Mutex, MutexGuard};
 use crate::reach::ReachEngine;
@@ -93,24 +93,38 @@ pub struct CancellationToken {
     idle: Condvar,
 }
 
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self {
-            inner: Mutex::new(Inner {
-                head: None,
-                started: false,
-                active: 0,
-                cancelled: false,
-            }),
-            idle: Condvar::new(),
+impl CancellationToken {
+    /// A fresh, uncancelled token, made in `place`, where it stays: its lock and its condition
+    /// variable are made there ([`crate::os::mutex_in`]).
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The token is not moved from `place` until it is dropped there.
+    pub unsafe fn init_in(place: NonNull<Self>) {
+        let at = place.as_ptr();
+        // SAFETY: each field is a place inside `place`, so not null, and the caller's contract is
+        // `mutex_in`'s and `condvar_in`'s for it; each is made once.
+        unsafe {
+            crate::os::mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).inner)), |inner| {
+                inner.write(Inner {
+                    head: None,
+                    started: false,
+                    active: 0,
+                    cancelled: false,
+                })
+            });
+            crate::os::condvar_in(NonNull::new_unchecked(addr_of_mut!((*at).idle)));
         }
     }
-}
 
-impl CancellationToken {
     /// A fresh, uncancelled token, shared.
     pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+        let make = |place: NonNull<Self>| {
+            // SAFETY: the place is its `Arc`'s, valid for one token, holding none, never moved.
+            unsafe { Self::init_in(place) }
+        };
+        // SAFETY: `make` makes the whole token in the place it is handed.
+        unsafe { crate::os::arc_with_lock_in(make) }
     }
 
     /// Lock. The port's lock treats a poisoned one as usable: every critical
@@ -592,7 +606,7 @@ mod tests {
     /// an unlink that leaves the dropped fan on the list.
     #[test]
     fn a_fan_dropped_from_the_middle_is_off_its_tokens_list() {
-        let token = CancellationToken::default();
+        let token = CancellationToken::new();
         let engine = engine();
         let canceller = canceller_of(engine);
         let mut fans: Vec<Box<CancellableFan>> = (0..3).map(|_| Box::default()).collect();
