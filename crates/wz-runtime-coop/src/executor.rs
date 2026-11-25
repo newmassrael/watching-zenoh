@@ -914,7 +914,8 @@ pub struct ExecutorState {
     /// One past the last of the cells the table was made with that a claim ever took. A claim
     /// takes the first free cell, so the cells past it were never taken and nothing wakes them:
     /// a pass looks at none of them. Only ever raised, so a cell freed below it is looked at
-    /// still, and a waker kept of a task gone finds its cell within it.
+    /// still, and a waker kept of a task gone finds its cell within it. Written and read only in
+    /// the sections a claim and a pass take already: the section's token, no lock of its own.
     claimed: Mutex<Cell<usize>>,
     /// The most cells the table has held at once: zero-sized unless the build keeps the mark
     /// (`pool-monitor`), so the state is the size it was.
@@ -1567,18 +1568,17 @@ impl ExecutorState {
         let mut owed: Option<(&'static TaskCell, Left)> = None;
         // Every cell in the table's order, then the end of the table, whose section settles the
         // cell polled last and after which the pass returns. The cells the table was made with
-        // past the last one a claim took are passed over to those it took memory for; the mark is
-        // read again where the pass reaches it, so a task a poll of this pass spawned is looked at
-        // in this pass, as it was when the pass looked at every cell.
+        // past the last one a claim took are passed over to those it took memory for. The mark is
+        // read in the sections the pass takes, every cell looked at until the first of them; a
+        // pass that owes a cell its settling looks at the next cell all the same, so the section
+        // that settles a task reads the mark its poll may have raised by a spawn, and a task so
+        // spawned is looked at in this pass, as it was when the pass looked at every cell.
         let made = self.fixed_cells().len();
-        let mut claimed = 0usize;
+        let mut claimed = made;
         let mut index = 0usize;
         loop {
-            if index == claimed {
-                claimed = self.section(|cs| self.claimed.borrow(cs).get());
-                if index == claimed {
-                    index = made;
-                }
+            if owed.is_none() && (claimed..made).contains(&index) {
+                index = made;
             }
             let next = self.cell_at(index);
             // Below the count of cells the table holds, so the next place does not wrap.
@@ -1596,6 +1596,7 @@ impl ExecutorState {
                 continue;
             }
             let (settled, mut act) = self.section(|cs| {
+                claimed = self.claimed.borrow(cs).get();
                 let settled = match owed {
                     Some((cell, left)) => Self::settle(cell, left, cs),
                     None => Settled::default(),
@@ -2407,8 +2408,8 @@ mod tests {
     ///
     /// # Control
     ///
-    /// A claim that left the mark where it was reds the first marks and every poll after them; a
-    /// pass that read the mark once, at its start, reds the polls of the spawned task.
+    /// A claim that left the mark where it was reds the first marks; a pass that passed over the
+    /// cells past the mark while it owed a cell its settling reds the polls of the spawned task.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_pass_looks_at_the_cells_up_to_the_last_one_a_claim_took() {
