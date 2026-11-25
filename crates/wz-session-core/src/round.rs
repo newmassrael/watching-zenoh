@@ -1086,14 +1086,15 @@ type Legs<C> = Option<NonNull<dyn LegHolders<C>>>;
 /// The datagram of a group a record of the round reads, its first byte and its length.
 type GroupRead = Option<(*const u8, usize)>;
 
-/// What the round's ends of calls leave the session to let go of: whether a row may wait, and the
-/// drops under way of the rows the session took ([`Round::take_marked`], [`Round::releasing`]).
-/// The rows that wait are found by a walk of the session's tables, each row's latch its own mark
-/// (`SessionTables::release_drained_subscriber` and its kin), so the round keeps no list of them
-/// and none can overflow. Written by whoever ends a call: a delivery emptying the round with no
-/// lock of the session held, the session's own put after its calls, the session refusing a record
-/// under its lock.
-struct Released<C: RoundCalls> {
+/// What the ends of the calls of the session's rows leave it to let go of: whether a row may wait,
+/// and the drops under way of the rows the session took ([`RowReleases::take_marked`],
+/// [`Self::releasing`]). The rows that wait are found by a walk of the session's tables, each
+/// row's latch its own mark (`SessionTables::release_drained_subscriber` and its kin), so no list
+/// of them is kept and none can overflow. The round of a build that queues the calls keeps one
+/// ([`Round::releases`]); an engine that hands each record out as it is read ends each call in
+/// its own walk and keeps one of its own.
+#[derive(Debug, Default)]
+pub struct RowReleases {
     /// Set by a call that was the last of a row undeclared while it ran, after its latch said so;
     /// cleared by the session as it starts a walk. The session walks only while it is set, so the
     /// ends of the calls of live rows cost it no walk.
@@ -1101,6 +1102,55 @@ struct Released<C: RoundCalls> {
     /// The rows taken out of their tables whose drop has not ended ([`Releasing`]): an
     /// undeclaration that waits for its row reads that no drop is under way.
     dropping: AtomicUsize,
+}
+
+impl RowReleases {
+    /// No row waits and no drop is under way.
+    pub const fn new() -> Self {
+        Self {
+            marked: AtomicBool::new(false),
+            dropping: AtomicUsize::new(0),
+        }
+    }
+
+    /// Say that a row waits: set after the row's latch said its last call ended, so a session that
+    /// reads it set finds the row drained when it walks.
+    fn mark(&self) {
+        self.marked.store(true, Ordering::Release);
+    }
+
+    /// Whether a row may wait to be let go of since this was last asked: a call that was the last
+    /// of a row undeclared while it ran has ended. Asking clears it, so the session walks its
+    /// tables for such rows (`SessionTables::release_drained_subscriber` and its kin) once each
+    /// time one may wait, and not at all while none does. A walk begun after the asking finds every
+    /// row marked before it, its latch drained before the mark was set; a row whose last call ends
+    /// after the asking sets it again, for the next walk.
+    pub fn take_marked(&self) -> bool {
+        self.marked.swap(false, Ordering::AcqRel)
+    }
+
+    /// Count the drop of a row the session took out of its tables, under its lock, as under way
+    /// until what this hands back is dropped, after the row was.
+    pub fn releasing(&self) -> Releasing<'_> {
+        self.dropping.fetch_add(1, Ordering::AcqRel);
+        Releasing { releases: self }
+    }
+
+    /// Whether no drop of a row the session took out of its tables is under way: what an
+    /// undeclaration that waits for its row reads once the row left its table.
+    pub fn settled(&self) -> bool {
+        self.dropping.load(Ordering::Acquire) == 0
+    }
+}
+
+/// What the round's ends of calls leave the session to let go of ([`RowReleases`]), and the
+/// holders of the legs' callbacks its replies' records hold counts of. Written by whoever ends a
+/// call: a delivery emptying the round with no lock of the session held, the session's own put
+/// after its calls, the session refusing a record under its lock.
+struct Released<C: RoundCalls> {
+    /// Whether a row waits and the drops under way, which the session reads
+    /// ([`Round::releases`]).
+    rows: RowReleases,
     /// The rows of the legs' callbacks the replies' records hold counts of, once the session told
     /// the round of them ([`Round::calls_legs_of`]): a round never told holds no reply.
     legs: <C::Replies as Presence>::Table<Legs<C>>,
@@ -1109,8 +1159,7 @@ struct Released<C: RoundCalls> {
 impl<C: RoundCalls> Released<C> {
     fn new() -> Self {
         Self {
-            marked: AtomicBool::new(false),
-            dropping: AtomicUsize::new(0),
+            rows: RowReleases::new(),
             legs: <C::Replies as Presence>::empty::<Legs<C>>(),
         }
     }
@@ -1150,10 +1199,9 @@ impl<C: RoundCalls> Released<C> {
         Some(unsafe { legs.as_ref() })
     }
 
-    /// Say that a row waits: set after the row's latch said its last call ended, so a session that
-    /// reads it set finds the row drained when it walks.
+    /// Say that a row waits ([`RowReleases::mark`]).
     fn mark(&self) {
-        self.marked.store(true, Ordering::Release);
+        self.rows.mark();
     }
 
     /// End what `owed` is: a call, by [`Self::end`]; any other callback is let go of here.
@@ -1175,14 +1223,14 @@ impl<C: RoundCalls> Released<C> {
 }
 
 /// The drop of a row the session took out of its tables, under way until this is dropped, which
-/// its taker does once the row was dropped ([`Round::releasing`]).
-pub struct Releasing<'r, C: RoundCalls> {
-    released: &'r Released<C>,
+/// its taker does once the row was dropped ([`RowReleases::releasing`]).
+pub struct Releasing<'r> {
+    releases: &'r RowReleases,
 }
 
-impl<C: RoundCalls> Drop for Releasing<'_, C> {
+impl Drop for Releasing<'_> {
     fn drop(&mut self) {
-        self.released.dropping.fetch_sub(1, Ordering::AcqRel);
+        self.releases.dropping.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -2347,7 +2395,8 @@ impl<C: RoundCalls> Round<C> {
     /// Let go of the round's tables, their records and the callbacks those owe, each call ended,
     /// before the arena that lent them: what the session's end does. The tables left are lent
     /// nothing, so the round's own drop, which may come after the arena's, reads none of the arena.
-    /// A row whose last call this ends is marked ([`Self::take_marked`]) and goes with the tables.
+    /// A row whose last call this ends is marked ([`RowReleases::take_marked`]) and goes with the
+    /// tables.
     ///
     /// # Safety
     /// No delivery runs and none starts: the session's last handle is being let go of.
@@ -2400,47 +2449,28 @@ impl<C: RoundCalls> Round<C> {
     }
 
     /// End `call`, which the session's own put made ([`Self::captured`]): its row is marked to be
-    /// let go of ([`Self::take_marked`]) when it was the row's last call.
+    /// let go of ([`RowReleases::take_marked`]) when it was the row's last call.
     pub fn end_call(&self, call: C::Subscriber) {
         self.released.end(call);
     }
 
     /// End `call`, which the session's own get began on a queryable it asked and handed with no
-    /// lock held: its row is marked to be let go of ([`Self::take_marked`]) when it was the
+    /// lock held: its row is marked to be let go of ([`RowReleases::take_marked`]) when it was the
     /// row's last call.
     pub fn end_query_call(&self, call: C::Queryable) {
         self.released.end_query(call);
     }
 
     /// End `call`, which the session's declaration made of a liveliness subscriber's history: its
-    /// row is marked to be let go of ([`Self::take_marked`]) when it was the row's last call.
+    /// row is marked to be let go of ([`RowReleases::take_marked`]) when it was the row's last call.
     pub fn end_liveliness_call(&self, call: C::Liveliness) {
         self.released.end_liveliness(call);
     }
 
-    /// Whether a row may wait to be let go of since this was last asked: a call that was the last
-    /// of a row undeclared while it ran has ended. Asking clears it, so the session walks its
-    /// tables for such rows (`SessionTables::release_drained_subscriber` and its kin) once each
-    /// time one may wait, and not at all while none does. A walk begun after the asking finds every
-    /// row marked before it, its latch drained before the mark was set; a row whose last call ends
-    /// after the asking sets it again, for the next walk.
-    pub fn take_marked(&self) -> bool {
-        self.released.marked.swap(false, Ordering::AcqRel)
-    }
-
-    /// Count the drop of a row the session took out of its tables, under its lock, as under way
-    /// until what this hands back is dropped, after the row was.
-    pub fn releasing(&self) -> Releasing<'_, C> {
-        self.released.dropping.fetch_add(1, Ordering::AcqRel);
-        Releasing {
-            released: &self.released,
-        }
-    }
-
-    /// Whether no drop of a row the session took out of its tables is under way: what an
-    /// undeclaration that waits for its row reads once the row left its table.
-    pub fn released_settled(&self) -> bool {
-        self.released.dropping.load(Ordering::Acquire) == 0
+    /// What the ends of the calls the round owes leave the session to let go of: a call that was
+    /// the last of a row undeclared while it ran marks it ([`RowReleases::take_marked`]).
+    pub fn releases(&self) -> &RowReleases {
+        &self.released.rows
     }
 
     /// Empty a sealed round no delivery has taken, handing nothing out, its calls ended: what the

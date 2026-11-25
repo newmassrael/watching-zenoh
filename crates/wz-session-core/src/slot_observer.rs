@@ -490,8 +490,11 @@ pub trait ObserverSinks {
     /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples,
     /// its queries and its tokens go to. `()` for rows that deliver themselves ([`SampleSink`],
     /// `crate::query::ResponderSink`, [`LivelinessSampleSink`]). How each kind's rows are told
-    /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`].
-    type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>;
+    /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`]; a
+    /// subscriber's sample is handed to it ([`SampleDelivery`]) only by a dispatch that hands the
+    /// samples out through it, so a caller that hands each sample out itself
+    /// ([`SlotObserverOf::dispatch_event_but_samples`]) names a context that takes none.
+    type Delivery;
     /// The application's tables, of storage `P`, as one bundle: the registries of the storage
     /// policies ([`RegistryTables`]), or the session's one table set, whose rows are the session's
     /// only record of each entity. One type for every kind the bundle holds, so a kind that moves
@@ -1366,7 +1369,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         peers: &mut PeerTables<T>,
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
-    ) {
+    ) where
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
+    {
         self.dispatch_event_among(
             cx,
             peers,
@@ -1395,10 +1400,38 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         event: IterationEvent<'_, '_>,
         others: &O,
         taken: TakenAhead,
-    ) {
+    ) where
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
+    {
         peers
             .subscribers
             .dispatch_iteration_event(&mut self.tables, cx, event);
+        let taken = Taken {
+            replies: false,
+            ahead: taken,
+        };
+        self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
+    }
+
+    /// [`Self::dispatch_event_among`] for a caller that hands every sample of the event out itself,
+    /// one subscriber at a time (`SubscriberPeer::lend_in_place`, `SubscriberPeer::take_record`):
+    /// the subscribers' side takes the rest of the event (`SubscriberPeer::take_control_of_event`),
+    /// binding the aliases the planes below resolve through, and no sample reaches `cx`, so a
+    /// delivery that holds no sample is enough for it. What else the caller took itself it says
+    /// with `taken`, as there.
+    #[inline(never)]
+    pub fn dispatch_event_but_samples<Q: RequesterTables, O: OtherPeers, T: Storage>(
+        &mut self,
+        cx: &mut K::Delivery,
+        peers: &mut PeerTables<T>,
+        requesters: &mut Q,
+        event: IterationEvent<'_, '_>,
+        others: &O,
+        taken: TakenAhead,
+    ) {
+        peers
+            .subscribers
+            .take_control_of_event(&mut self.tables, event);
         let taken = Taken {
             replies: false,
             ahead: taken,
@@ -1431,7 +1464,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     }
 
     /// The planes after the subscribers' side of an event, the pending gets and snapshots told
-    /// its answers and the queryables its queries unless the caller took them (`taken`). Inlined into each of the two calls above, so each keeps the one
+    /// its answers and the queryables its queries unless the caller took them (`taken`). Inlined into each of the three calls above, so each keeps the one
     /// frame the planes' temporaries lie in.
     #[inline(always)]
     fn planes_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
@@ -1691,6 +1724,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
     {
         self.dispatch_event(cx, peers, requesters, event);
         self.flush_pending(peers, requesters, actions);
@@ -2338,6 +2372,69 @@ mod tests {
             *called.lock().unwrap(),
             0,
             "the context delivers, not the row"
+        );
+    }
+
+    /// The fan that leaves a frame's samples to its caller takes the rest of it and delivers no
+    /// sample: the Push beside the `DeclKexpr` reaches no row through the context, and the alias
+    /// the `DeclKexpr` bound resolves a later Push the whole fan delivers.
+    #[test]
+    fn the_fan_but_samples_binds_the_aliases_and_delivers_no_sample() {
+        use crate::session_tables::KeyForm;
+        use wz_codecs::lent::{Push, WireexprLocal};
+        let mut observer = SlotObserverOf::<LoggedTableSinks>::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = Req::new();
+        let reached = observer
+            .tables
+            .declare_subscriber(
+                "topic/a",
+                Locality::Any,
+                KeyForm::default(),
+                BoxedSink::new(|_s: &dyn SampleView| {}),
+            )
+            .expect("a table of the build's bound has room");
+        let outcome = frame(vec![
+            NetworkMessage::Declare(Box::new(fx::declare_envelope_decl_kexpr(fx::decl_kexpr(
+                7, "topic/a",
+            )))),
+            NetworkMessage::Push(Box::new(push_literal("topic/a"))),
+        ]);
+        let mut log = HandleLog::default();
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event_but_samples(
+                &mut log,
+                &mut peers,
+                &mut requesters,
+                event,
+                &NoOtherPeers,
+                TakenAhead::default(),
+            )
+        });
+        assert!(
+            log.0.is_empty(),
+            "no sample of the event reaches the context"
+        );
+        let aliased = Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 7,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .unwrap();
+        let outcome = frame(vec![NetworkMessage::Push(Box::new(aliased))]);
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event(&mut log, &mut peers, &mut requesters, event)
+        });
+        assert_eq!(
+            log.0,
+            vec![reached.handle],
+            "the alias the fan bound resolves the next Push"
         );
     }
 

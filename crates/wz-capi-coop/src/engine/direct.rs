@@ -89,6 +89,7 @@ pub(crate) struct FaceRecords<C: ClockSource + 'static> {
     pub(super) face: HeldFace,
     pub(super) actions: LinkHandle<C>,
     /// The link the records are read from, which keeps where the datagram it lends lies.
+    #[cfg(wz_round)]
     pub(super) link: CellRc<LinkGate<C>>,
     #[cfg(feature = "queryable")]
     pub(super) plane: PlacedRef<QueryPlane>,
@@ -96,7 +97,8 @@ pub(crate) struct FaceRecords<C: ClockSource + 'static> {
     #[cfg(feature = "queryable")]
     pub(super) generation: u64,
     /// The session's round of deliveries, told where a rejoined message lies while its records
-    /// are dispatched.
+    /// are dispatched. A build that puts nothing in the round (`wz_round`) tells it nothing.
+    #[cfg(wz_round)]
     pub(super) lane: PlacedRef<Round>,
     /// Whether Pushes were dispatched whose drains are still owed ([`EventSink::end_records`]).
     pub(super) after_pushes: bool,
@@ -109,11 +111,17 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
     /// alone: the walks that hand a Push's sample out (`pinned`) read it in the event itself, so a
     /// record the planes offer the round is the one the link tells it of.
     fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
+        #[cfg(wz_round)]
         // SAFETY: `registry` is borrowed from the held session, so the session's lock is held.
-        unsafe { self.link.lend_to(&self.lane) };
+        unsafe {
+            self.link.lend_to(&self.lane)
+        };
         self.dispatch_records(registry, event, planes);
+        #[cfg(wz_round)]
         // SAFETY: as above.
-        unsafe { self.lane.set_lending(None) };
+        unsafe {
+            self.lane.set_lending(None)
+        };
     }
 
     /// [`Self::dispatch`], the round told already.
@@ -317,12 +325,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
         false
     }
 
+    // A build that puts nothing in the round has no record that reads a rejoined message past
+    // its walk: the message is let go of as each walk over it ends, as the sink's default does.
+    #[cfg(wz_round)]
     fn lend_rejoined(&mut self, message: &wz_session_core::byte_cells::KeptBytes) {
         let _held = self.engine.core.lock();
         // SAFETY: the session's lock is held, taken above for the lend.
         unsafe { self.records.lane.lend_rejoined(message) };
     }
 
+    #[cfg(wz_round)]
     fn end_rejoined(&mut self, message: wz_session_core::byte_cells::KeptBytes) {
         let _held = self.engine.core.lock();
         // SAFETY: as `lend_rejoined`.
@@ -708,9 +720,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // arena, the rejoined buffer kept for them) is let go of before the link is read, as a
         // gate of a build whose links are tasks lets it go before each receive: a key the peer
         // undeclared goes back with no record after it, and the chain a fragment read now starts
-        // finds its buffer free.
+        // finds its buffer free. A build that puts nothing in the round has nothing to let go of.
+        #[cfg(wz_round)]
         // SAFETY: the session's lock is held (`held`), and no borrow of the round's table.
-        unsafe { self.samples.settle() };
+        unsafe {
+            self.samples.settle()
+        };
         let jobs_due_ms = core.jobs_due_at(now_us);
         Some(LinkTurn {
             #[cfg(feature = "liveliness")]

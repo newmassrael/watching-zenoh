@@ -10,6 +10,8 @@
 #[cfg(any(feature = "listen", feature = "group", not(feature = "threads")))]
 use core::cell::Cell;
 
+// What a link is gated or lent through: the round's gate, and the lending link of a read that
+// tells the round where a datagram lies.
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::limit_binding::Quota;

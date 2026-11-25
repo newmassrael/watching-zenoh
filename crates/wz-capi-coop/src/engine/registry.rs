@@ -1062,7 +1062,20 @@ impl<H: Holders> RegistryOf<H> {
         }) = self.split(self.place(face))
         {
             match planes {
+                #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
                 Planes::All => app.dispatch_event_among(
+                    delivery,
+                    &mut set.peer,
+                    &mut set.gets,
+                    event,
+                    &others,
+                    READ_TAKES,
+                ),
+                // The read that hands each record out as it is read hands every sample out
+                // itself, one subscriber at a time (`pinned`), so the planes hand none to the
+                // round.
+                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+                Planes::All => app.dispatch_event_but_samples(
                     delivery,
                     &mut set.peer,
                     &mut set.gets,
@@ -1265,15 +1278,10 @@ impl<H: Holders> RegistryOf<H> {
         message: &wz_session_core::network_message::NetworkMessage,
         reliability: wz_session_core::sample::Reliability,
     ) -> Option<wz_session_core::sample::Sample> {
-        let Split {
-            app,
-            delivery,
-            face,
-            ..
-        } = self.split(self.place(face))?;
+        let Split { app, face, .. } = self.split(self.place(face))?;
         face.peer
             .subscribers
-            .take_record(&mut app.tables, delivery, message, reliability)
+            .take_record(&mut app.tables, message, reliability)
     }
 
     /// Read the key of `put`, the next plain `Put` of the frame `keys` reads, against the aliases
@@ -1994,12 +2002,13 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
-        let round = crate::round::leaked(4);
-        #[cfg(not(feature = "queryable"))]
-        let delivery = RoundDelivery::new(round);
+        #[cfg(not(wz_round))]
+        let delivery = RoundDelivery::new();
+        #[cfg(all(wz_round, not(feature = "queryable")))]
+        let delivery = RoundDelivery::new(crate::round::leaked(4));
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
-            round,
+            crate::round::leaked(4),
             wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
                 alloc::boxed::Box::new(super::super::query::leaked_plane(1)),
             )),

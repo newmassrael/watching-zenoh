@@ -123,6 +123,8 @@ pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.
 pub mod open_source;
 // What the session hands its callbacks after its lock: one table a round, read where the records lie.
+// A build that puts nothing in it (`wz_round`, the crate's build script) has none.
+#[cfg(wz_round)]
 pub mod round;
 #[cfg(feature = "scout")]
 pub mod scout;
