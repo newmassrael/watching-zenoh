@@ -19,7 +19,7 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     type Lock = SessionLock;
     type Links = L;
     type Session = LinkSession<C>;
-    type Wire = Wire<C>;
+    type Wire = FaceLink<C, L>;
     type Face = Self;
     // A build that takes no face beside its dial role's holds that one alone, so its walks over
     // the faces are one face and no place is looked up (`crate::arena::TAKES_FACES`).

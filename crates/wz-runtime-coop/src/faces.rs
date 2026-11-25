@@ -357,6 +357,12 @@ pub trait SendParts: WireParts {
 
     /// The part a send writes of these parts.
     fn tx(&mut self) -> &mut Self::Tx;
+
+    /// The wire `tx` holds, where the send part is the parts' wire: what a lend of the link's
+    /// session made through this thread's seat reaches ([`FaceAt`]'s
+    /// [`LendsSession::try_session`]). `None` while it holds none, or where the send part is
+    /// not the wire.
+    fn wire_of(tx: &Self::Tx) -> Option<&Self::Wire>;
 }
 
 /// The bit of a site's debts that is its link's close: told through the wire's own close
@@ -646,20 +652,30 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceWire for FaceAt<K, P, E> {
     }
 }
 
-impl<K: LockKind, P: WireParts, E: LinkEnd> LendsSession for FaceAt<K, P, E>
+/// A send made inside the holder's own step on this thread (a callback of what the holder hands
+/// out) reaches the session through the send part the holder seated ([`FaceSite::lend_seating`]),
+/// with no try of the place the holder holds; any other tries the place.
+impl<K: LockKind, P: SendParts, E: LinkEnd> LendsSession for FaceAt<K, P, E>
 where
     P::Wire: LendsSession,
 {
     type Session = <P::Wire as LendsSession>::Session;
 
     fn try_session<U: Send>(&self, f: impl FnOnce(&Self::Session) -> U + Send) -> Lend<U> {
-        match self
-            .site()
-            .try_lend(|held| held.lend(|parts| parts.wire().map(|wire| wire.try_session(f))))
-        {
-            Lend::Lent(Some(lent)) => lent,
-            Lend::Lent(None) | Lend::Empty => Lend::Empty,
-            Lend::Held => Lend::Held,
+        let site = self.site();
+        // SAFETY: the place's seats are made by `FaceSite::lend_seating` alone, each over `P::Tx`.
+        match unsafe { site.place.at_seat_of::<P::Tx>() } {
+            AtSeat::Taken(mut taken) => {
+                P::wire_of(taken.tx()).map_or(Lend::Empty, |wire| wire.try_session(f))
+            }
+            AtSeat::InUse => Lend::Held,
+            AtSeat::None => match site
+                .try_lend(|held| held.lend(|parts| parts.wire().map(|wire| wire.try_session(f))))
+            {
+                Lend::Lent(Some(lent)) => lent,
+                Lend::Lent(None) | Lend::Empty => Lend::Empty,
+                Lend::Held => Lend::Held,
+            },
         }
     }
 
@@ -2387,6 +2403,45 @@ mod tests {
         fn tx(&mut self) -> &mut Ended {
             &mut self.1
         }
+
+        // The send part is a count, not the wire.
+        fn wire_of(_tx: &Ended) -> Option<&ApartWire> {
+            None
+        }
+    }
+
+    /// The parts of a face's link whose send part is its wire, as a session's are where a read
+    /// steps its one link itself.
+    #[cfg(feature = "host-lock")]
+    struct SeatedParts(Option<ApartWire>);
+
+    // SAFETY: the parts' `Rc` is reached by the thread of the test that made them alone. Nothing
+    // of them is bound to a thread.
+    #[cfg(feature = "host-lock")]
+    unsafe impl FaceParts for SeatedParts {}
+
+    #[cfg(feature = "host-lock")]
+    impl WireParts for SeatedParts {
+        type Wire = ApartWire;
+
+        fn wire(&self) -> Option<&ApartWire> {
+            self.0.as_ref()
+        }
+
+        fn pay(&mut self, _owed: u32) {}
+    }
+
+    #[cfg(feature = "host-lock")]
+    impl SendParts for SeatedParts {
+        type Tx = Option<ApartWire>;
+
+        fn tx(&mut self) -> &mut Option<ApartWire> {
+            &mut self.0
+        }
+
+        fn wire_of(tx: &Option<ApartWire>) -> Option<&ApartWire> {
+            tx.as_ref()
+        }
     }
 
     /// The count of the ends a test's link was told.
@@ -2688,6 +2743,56 @@ mod tests {
             );
         });
         assert_eq!(sent.load(Ordering::SeqCst), 1117);
+    }
+
+    /// A lend of the link's session made inside the holder's seated step on the holder's thread
+    /// reaches the wire through the seat, with no try of the place the holder holds; inside the
+    /// holder's lend with no seat it finds the link held. Turned red by a `try_session` that does
+    /// not look at the seat first (the seated lend then finds the place held), or one that reads
+    /// the seat of a thread that stands in none.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_lend_of_the_session_in_the_seated_step_reaches_the_wire_through_the_seat() {
+        let site = FaceSite::<crate::sync::Shared, SeatedParts>::empty();
+        let wire = ApartWire {
+            holds: true,
+            finished: false,
+            aborted: Rc::new(Cell::new(0)),
+            ended: Ended::default(),
+        };
+        // SAFETY: no handle on a cell of the parts lives outside them.
+        assert!(site
+            .hold(unsafe { FaceHeld::gathered(SeatedParts(Some(wire))) })
+            .is_none());
+        let site_ref = &site;
+        // SAFETY: the site outlives the handle, in this frame.
+        let at = unsafe { FaceAt::new(site_ref, Rc::new(HeldEnd::default()), None, None) };
+        assert_eq!(
+            at.try_session(|wire| wire.holds),
+            Lend::Lent(true),
+            "CONTROL: a free place is tried and lent"
+        );
+        let unseated = site.lend(|_| at.try_session(|wire| wire.holds));
+        assert_eq!(
+            unseated,
+            Some(Lend::Held),
+            "the holder's own lend with no seat finds the link held"
+        );
+        let seated = site.lend_seating(|held, seat| {
+            held.lend(move |parts| {
+                seat.seat(&mut parts.0, || {
+                    // SAFETY: the site outlives the handle, in this closure.
+                    let at =
+                        unsafe { FaceAt::new(site_ref, Rc::new(HeldEnd::default()), None, None) };
+                    at.try_session(|wire| wire.holds)
+                })
+            })
+        });
+        assert_eq!(
+            seated,
+            Some(Lend::Lent(true)),
+            "the seated step's lend reached the wire through the seat"
+        );
     }
 
     /// A face whose link lies in a face's place, kept by the supervisor.

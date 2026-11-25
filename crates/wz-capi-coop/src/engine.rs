@@ -1842,11 +1842,13 @@ impl LinkLeg<'_> {
 /// Send `leg` over the link `wire` holds as `how` says, the link's session lent as [`send_on`]
 /// lends it. `None` while the link is not lent.
 fn publish_on<C: ClockSource + 'static>(
-    wire: &Wire<C>,
+    wire: &impl LendsSession<Session = LinkSession<C>>,
     leg: &LinkLeg<'_>,
     how: FaceSend,
 ) -> Option<LegSent> {
-    match wire.try_session(|session| leg.send_to(&session.actions, how)) {
+    let lent = wire.try_session(|session| leg.send_to(&session.actions, how));
+    found_held(&lent);
+    match lent {
         Lend::Lent(sent) => Some(sent),
         Lend::Held | Lend::Empty => None,
     }
@@ -2286,9 +2288,9 @@ impl SessionParts for CoopSession {
 
 /// One face of the session: the link it holds, and where the telling of the session's
 /// declarations to that link's peer stands (`replay`).
-struct Face<C: ClockSource + 'static, L: CoopLinks> {
+struct Face<C: ClockSource + 'static, L: CoopLinks + 'static> {
     id: FaceId,
-    link: Link<Wire<C>, L::Dial>,
+    link: Link<FaceLink<C, L>, L::Dial>,
     replay: Replay,
     /// What the link said of its peer when it came up, while it is up (`bring_up`).
     facts: Option<UpFacts>,
@@ -2298,7 +2300,7 @@ struct Face<C: ClockSource + 'static, L: CoopLinks> {
     told: FaceTold,
 }
 
-impl<C: ClockSource + 'static, L: CoopLinks> Face<C, L> {
+impl<C: ClockSource + 'static, L: CoopLinks + 'static> Face<C, L> {
     /// What the face's link said of its peer when it came up, while the link is up and its
     /// session stands: what is read of a face that stands.
     fn facts(&self) -> Option<&UpFacts> {
@@ -2377,8 +2379,8 @@ impl UpFacts {
     }
 }
 
-impl<C: ClockSource + 'static, L: CoopLinks> FaceRecord<LinkCount> for Face<C, L> {
-    type Wire = Wire<C>;
+impl<C: ClockSource + 'static, L: CoopLinks + 'static> FaceRecord<LinkCount> for Face<C, L> {
+    type Wire = FaceLink<C, L>;
     type Pump = L::Pump;
     type Dial = L::Dial;
 
@@ -2386,11 +2388,11 @@ impl<C: ClockSource + 'static, L: CoopLinks> FaceRecord<LinkCount> for Face<C, L
         self.id
     }
 
-    fn link(&self) -> &Link<Wire<C>, L::Dial> {
+    fn link(&self) -> &Link<FaceLink<C, L>, L::Dial> {
         &self.link
     }
 
-    fn link_mut(&mut self) -> &mut Link<Wire<C>, L::Dial> {
+    fn link_mut(&mut self) -> &mut Link<FaceLink<C, L>, L::Dial> {
         &mut self.link
     }
 }
@@ -2455,6 +2457,40 @@ impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
 type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
 
+/// What a face holds of its link while the link is up or in its handshake: the link's session
+/// itself where each link runs as a task, or a handle on the face's place that holds the session
+/// apart from the session's state where the read steps the one link itself (`direct`). Every
+/// send of the session on a face lends the link's session through it (`send_on`).
+trait HeldLink<C: ClockSource + 'static> {
+    /// The link as the face holds it.
+    type Wire: LendsSession<Session = LinkSession<C>>;
+}
+
+impl<C: ClockSource + 'static, L: CoopLinks + 'static> HeldLink<C> for L {
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    type Wire = Wire<C>;
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    type Wire = direct::DirectWire<L, C>;
+}
+
+/// The link a face of a session over `L` holds (`HeldLink`).
+type FaceLink<C, L> = <L as HeldLink<C>>::Wire;
+
+/// A lend of a face's link that found it held. Never so where the read steps the one link itself:
+/// its one thread holds the link only in the read's step, which seats the link's send part for
+/// every send made inside it, so a debug build of that form fails on it; a release build owes the
+/// send's debt, as any other form does.
+#[inline(always)]
+fn found_held<U>(lent: &Lend<U>) {
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    debug_assert!(
+        !matches!(lent, Lend::Held),
+        "a send on the read's own link found it held with no seat"
+    );
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    let _ = lent;
+}
+
 /// What a face owes the session's sends that found its link held by another holder
 /// ([`LendsSession::owe`]): bits of its parts' debts, each paid by the holder once it lets go of
 /// the link, under the session's lock, from the session's own record of what the face is owed.
@@ -2475,11 +2511,13 @@ mod face_debts {
 // Out of line and over `dyn`: one body lends a link for every send of the session.
 #[inline(never)]
 fn send_on<C: ClockSource + 'static>(
-    wire: &Wire<C>,
+    wire: &impl LendsSession<Session = LinkSession<C>>,
     debt: u32,
     send: &(dyn SendTo<C> + Sync),
 ) -> Option<bool> {
-    match wire.try_session(|session| send.send_to(&session.actions)) {
+    let lent = wire.try_session(|session| send.send_to(&session.actions));
+    found_held(&lent);
+    match lent {
         Lend::Lent(took) => Some(took),
         Lend::Held => {
             wire.owe(debt);
@@ -2828,10 +2866,12 @@ fn get_key_on_link<C: ClockSource + 'static, U>(
     all(test, feature = "std")
 ))]
 fn lend_actions<C: ClockSource + 'static, U: Send>(
-    wire: &Wire<C>,
+    wire: &impl LendsSession<Session = LinkSession<C>>,
     f: impl FnOnce(&LinkActions<C>) -> U + Send,
 ) -> Option<U> {
-    match wire.try_session(|session| f(&session.actions)) {
+    let lent = wire.try_session(|session| f(&session.actions));
+    found_held(&lent);
+    match lent {
         Lend::Lent(answer) => Some(answer),
         Lend::Held | Lend::Empty => None,
     }
@@ -4474,13 +4514,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let Some(wire) = face.link.wire() else {
             return;
         };
+        // The life brings the link up with nothing of it lent: the read that steps it itself does
+        // so between its steps, and a task's link is the face's own.
+        let facts = match wire.try_session(|session| UpFacts::of(session)) {
+            Lend::Lent(facts) => facts,
+            Lend::Held | Lend::Empty => return,
+        };
         #[cfg(feature = "listen")]
         wire.gate.pump().grant();
         // A publish goes to the links that are up, so theirs are the rooms it asks.
         if let Some(on) = wire.room_wait() {
             self.rooms.hold(at, on);
         }
-        let facts = UpFacts::of(wire);
         #[cfg(feature = "connectivity")]
         let told = facts.row.clone().filter(|_| self.session.faces_watched());
         if let Some(face) = self.transport.links.face_mut(at) {
@@ -4643,7 +4688,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// The link of face `id` while it is up, which a send to that face's peer goes over.
     #[cfg(feature = "query")]
-    fn up_wire(&self, id: FaceId) -> Option<&Wire<C>> {
+    fn up_wire(&self, id: FaceId) -> Option<&FaceLink<C, L>> {
         self.transport
             .links
             .faces()
@@ -4654,7 +4699,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The links of the faces that are up, each with its face's place: what a put is sent over.
-    fn up_wires_at(&self) -> impl Iterator<Item = (usize, &Wire<C>)> {
+    fn up_wires_at(&self) -> impl Iterator<Item = (usize, &FaceLink<C, L>)> {
         self.transport
             .links
             .placed()
@@ -4668,7 +4713,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// where the query's answer goes. Found by the face's record of the link, as a lend of the
     /// link may find it held by the face's own read.
     #[cfg(feature = "queryable")]
-    fn answer_wire(&self, generation: u64) -> Option<&Wire<C>> {
+    fn answer_wire(&self, generation: u64) -> Option<&FaceLink<C, L>> {
         self.transport
             .links
             .faces()
@@ -8664,7 +8709,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 .0
                 .up_wires_at()
                 .filter(|(_, wire)| {
-                    send_on(wire, 0, &|actions: &LinkActions<C>| {
+                    send_on(*wire, 0, &|actions: &LinkActions<C>| {
                         batch_link(actions, step)
                     }) == Some(true)
                 })

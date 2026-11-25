@@ -127,7 +127,9 @@ impl FaceTold {
 
 /// The key of `face` when its row stands as `Core::face_link_at` reads it: its link is up and
 /// its row names the link's ends.
-fn standing_key<C: ClockSource + 'static, L: CoopLinks>(face: &Face<C, L>) -> Option<ToldKey> {
+fn standing_key<C: ClockSource + 'static, L: CoopLinks + 'static>(
+    face: &Face<C, L>,
+) -> Option<ToldKey> {
     let row = face.facts()?.standing_row()?;
     Some(ToldKey {
         zid: row.zid,
@@ -195,9 +197,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // What the link says beyond its row is read off it here, with the snapshot that
             // takes the heap anyway: kept in the facts, its names would take the heap when
             // the link comes up, after the open.
-            let link = face.link.wire().map_or_else(LinkFacts::default, |wire| {
-                LinkFacts::of_actions(&*wire.actions)
-            });
+            let link =
+                match face.link.wire().map(|wire| {
+                    wire.try_session(|session| LinkFacts::of_actions(&*session.actions))
+                }) {
+                    Some(Lend::Lent(link)) => link,
+                    _ => LinkFacts::default(),
+                };
             face.facts()?.snapshot(&link)
         });
         #[cfg(feature = "group")]

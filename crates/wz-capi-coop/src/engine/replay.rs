@@ -37,7 +37,7 @@
 
 use super::CoopLinks;
 use super::LinkActions;
-use wz_runtime_coop::faces::FacePlaces;
+use wz_runtime_coop::faces::{FacePlaces, LendsSession};
 use wz_runtime_coop::ClockSource;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
@@ -604,7 +604,10 @@ impl Retract<'_> {
 /// Tell `retract` over the link `wire` holds, as every send of the session on a face is made
 /// ([`super::send_on`]). It leaves the face owed nothing: a replay tells only declarations that
 /// stand, so a retraction is told as it is made or not at all.
-fn tell_retract<C: ClockSource + 'static>(wire: &super::Wire<C>, retract: Retract<'_>) {
+fn tell_retract<C: ClockSource + 'static>(
+    wire: &impl LendsSession<Session = super::LinkSession<C>>,
+    retract: Retract<'_>,
+) {
     let _ = super::send_on(wire, 0, &|actions: &LinkActions<C>| {
         retract.tell(actions);
         true

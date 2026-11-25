@@ -215,6 +215,10 @@ struct Seen {
     declares: usize,
     /// The id of each subscriber the router was declared, in the order the declarations arrived.
     subscribers: Vec<u64>,
+    /// The id of each subscriber the router was told went, in the order the retractions arrived
+    /// (the direct read's tests read it).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    undeclared_subscribers: Vec<u64>,
     interests: usize,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
@@ -512,11 +516,19 @@ fn run_router(
                     match m {
                         NetworkMessage::Declare(declare) => {
                             seen.declares += 1;
-                            if let wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
-                                subscriber,
-                            ) = &declare.body
-                            {
-                                seen.subscribers.push(subscriber.id);
+                            match &declare.body {
+                                wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+                                    subscriber,
+                                ) => seen.subscribers.push(subscriber.id),
+                                #[cfg(not(any(
+                                    feature = "threads",
+                                    feature = "listen",
+                                    feature = "group"
+                                )))]
+                                wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(
+                                    gone,
+                                ) => seen.undeclared_subscribers.push(gone.id),
+                                _ => {}
                             }
                         }
                         NetworkMessage::Interest(_interest) => {
@@ -575,10 +587,19 @@ fn run_router(
                 let mut seen = counted.lock().unwrap();
                 if let Some(declare) = record.declare() {
                     seen.declares += 1;
-                    if let wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) =
-                        &declare.body
-                    {
-                        seen.subscribers.push(subscriber.id);
+                    match &declare.body {
+                        wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) => {
+                            seen.subscribers.push(subscriber.id);
+                        }
+                        #[cfg(not(any(
+                            feature = "threads",
+                            feature = "listen",
+                            feature = "group"
+                        )))]
+                        wz_codecs::lent::DeclareVariant::CodecZenohUndeclSubscriber(gone) => {
+                            seen.undeclared_subscribers.push(gone.id);
+                        }
+                        _ => {}
                     }
                 }
                 if let Some(_interest) = record.interest() {

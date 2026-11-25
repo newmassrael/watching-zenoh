@@ -438,3 +438,87 @@ fn a_frame_of_n_records_is_read_in_one_take() {
         "a pass of the session's tasks ran for the frame"
     );
 }
+
+/// A callback that undeclares its own subscriber from inside the read's step tells the router the
+/// retraction once: the session's record of the link reaches the link's wire through the seat the
+/// read stands in, with no try of the place the read holds. Turned red by a send inside the step
+/// that tries the place (it finds it held: a debug build fails, a release build owes it and sends
+/// no retraction), or by a retraction told twice.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[test]
+fn an_undeclaration_inside_the_reads_step_is_told_once_through_its_seat() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    let id = engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let own = own.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let id = own.lock().unwrap().take();
+                if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                    engine.undeclare_subscriber(id);
+                }
+            })
+        })
+        .expect("the session declares the subscriber");
+    *own.lock().unwrap() = Some(id);
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    let declared = router
+        .seen(|s| s.subscribers.last().copied())
+        .expect("the router was told the subscriber's id");
+    router.send(Command::PushBatch("demo/in", COUNT));
+    until(&engine, "the retraction", || {
+        router.seen(|s| !s.undeclared_subscribers.is_empty())
+    });
+    for _ in 0..10 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        router.seen(|s| s.undeclared_subscribers.clone()),
+        [declared],
+        "the retraction made inside the read's step was told once"
+    );
+}
+
+/// A replay owed to the link's parts from inside the read's step, as a send that found them held
+/// owes it, is paid as the read lets go of them: the next read begins the replay again, and the
+/// router is told the subscriber once more. Turned red by a debt the read's let go does not pay
+/// (`DirectParts::pay`), or a payment the next read does not carry out (`turn_replay`).
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[test]
+fn a_replay_owed_inside_the_reads_step_is_paid_as_the_read_lets_go() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let session = EngineHold::downgrade(&engine);
+    let handed = Arc::new(AtomicUsize::new(0));
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let handed = handed.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let first = handed.fetch_add(1, Ordering::SeqCst) == 0;
+                if let (true, Some(engine)) = (first, session.upgrade()) {
+                    engine.owe_link_replay();
+                }
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    let declared = router.seen(|s| s.subscribers.clone());
+    assert_eq!(declared.len(), 1, "CONTROL: the subscriber was told once");
+    router.send(Command::PushBatch("demo/in", COUNT));
+    until(&engine, "the subscriber told again", || {
+        router.seen(|s| s.subscribers.len()) > declared.len()
+    });
+    assert_eq!(
+        router.seen(|s| s.subscribers.last().copied()),
+        declared.last().copied(),
+        "the replay told the same subscriber again"
+    );
+}

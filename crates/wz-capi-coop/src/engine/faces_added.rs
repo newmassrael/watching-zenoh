@@ -72,7 +72,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// under way or a handshake. It is told the session's declarations at the session's pace, as
     /// every face is. A place the table has no room at, which the callers refuse before they make
     /// the face, lets the face go with its tables.
-    fn push_face(&mut self, held: HeldFace, link: Link<Wire<C>, L::Dial>) {
+    fn push_face(&mut self, held: HeldFace, link: Link<FaceLink<C, L>, L::Dial>) {
         let face = Face {
             id: held.id(),
             link,
