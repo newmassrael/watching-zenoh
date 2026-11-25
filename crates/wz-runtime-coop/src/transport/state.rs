@@ -170,6 +170,10 @@ impl TransportRouter for () {
 type DialOf<T> = <<T as TransportFaces>::Links as SessionLinks<CountOf<T>>>::Dial;
 /// What the drive loop pumps for a link over the network of `T`.
 type PumpOf<T> = <<T as TransportFaces>::Links as SessionLinks<CountOf<T>>>::Pump;
+/// A link over the network of `T` that opened, as its session is made of it.
+type OpenedOf<T> = OpenedLink<PumpOf<T>, CountOf<T>>;
+/// What a row's dial over the network of `T` answers at once.
+type DialRowOf<T> = DialRow<DialOf<T>, PumpOf<T>, CountOf<T>>;
 
 /// The transport of a session over the faces of [`crate::faces`]: the session's links and what
 /// their handshakes and receives are handed. What a link coming up or going does to the session's
@@ -829,7 +833,7 @@ impl<T: TransportFaces> TransportState<T> {
         &self,
         calls: &mut K,
         face: FaceId,
-        opened: OpenedLink<PumpOf<T>, CountOf<T>>,
+        opened: OpenedOf<T>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
         making: WireMaking<'_, T::Clock, SharedOf<T>>,
@@ -858,7 +862,7 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn place_wire<'p, K: LinkCalls<T::Clock, T::Lock>, E: LinkEnd>(
         &self,
         calls: &mut K,
-        opened: OpenedLink<PumpOf<T>, CountOf<T>>,
+        opened: OpenedOf<T>,
         opened_as: OpenedAs<'_>,
         making: WireMaking<'_, T::Clock, SharedOf<T>>,
         place: PumpPlace<'p, T, E>,
@@ -895,7 +899,7 @@ impl<T: TransportFaces> TransportState<T> {
         &self,
         calls: &mut K,
         face: FaceId,
-        opened: OpenedLink<PumpOf<T>, CountOf<T>>,
+        opened: OpenedOf<T>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
         making: WireMaking<'_, T::Clock, SharedOf<T>>,
@@ -966,10 +970,7 @@ impl<T: TransportFaces> TransportState<T> {
     /// the dial at once.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
-    pub fn dial_row(
-        &self,
-        at: usize,
-    ) -> Result<DialRow<DialOf<T>, PumpOf<T>, CountOf<T>>, TransportRefusal> {
+    pub fn dial_row(&self, at: usize) -> Result<DialRowOf<T>, TransportRefusal> {
         let mut pending = self.begin_dial(self.endpoints.dial_text(at))?;
         // A dial that answered has handed out all it held (the socket, the link's buffers, the
         // program's link), and keeps only handles that own nothing, so it is let go of here,
@@ -1016,8 +1017,8 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn dialled(
         &self,
         endpoint: Option<&DialEndpoint>,
-        answer: Result<OpenedLink<PumpOf<T>, CountOf<T>>, LinkOpenError>,
-    ) -> Result<OpenedLink<PumpOf<T>, CountOf<T>>, TransportRefusal> {
+        answer: Result<OpenedOf<T>, LinkOpenError>,
+    ) -> Result<OpenedOf<T>, TransportRefusal> {
         answer.map_err(|refused| {
             TransportRefusal::Unreachable(EndpointRefusal::new(
                 self.endpoint_text(endpoint),
@@ -1048,10 +1049,7 @@ impl<T: TransportFaces> TransportState<T> {
     #[cfg(feature = "listen")]
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
-    pub fn next_accepted(
-        &mut self,
-        at: &mut usize,
-    ) -> Option<(OpenedLink<PumpOf<T>, CountOf<T>>, Option<DialEndpoint>)> {
+    pub fn next_accepted(&mut self, at: &mut usize) -> Option<(OpenedOf<T>, Option<DialEndpoint>)> {
         while let Some(accepted) = self.links.accept_at(*at) {
             match accepted {
                 Accepted::Link(opened, endpoint) => return Some((opened, endpoint)),
