@@ -670,6 +670,16 @@ impl ArenaRegion {
         }
     }
 
+    /// The rows of the session's tables the region lays out ([`ArenaPlan::tables`]).
+    pub const fn tables(&self) -> TableRows {
+        self.plan.tables()
+    }
+
+    /// The limits a session of the region opens under, and no other.
+    pub const fn limits(&self) -> &SessionLimits {
+        &self.limits
+    }
+
     /// Lay out on `plan`, [`ArenaPlan::vacant`] as made, this region's rows for an open of
     /// `config`, the plan [`ArenaPlan::count`] would lay out for a config of the region's shape
     /// and limits. A region holds a row of text for each endpoint it may dial, so a config that
