@@ -135,11 +135,15 @@ const UNLOCKED: u32 = 0;
 const LOCKED: u32 = 1;
 /// [`RawLock`]'s word: a thread holds it and another may be waiting, so the release wakes one.
 const CONTENDED: u32 = 2;
+/// How many times a lock held with nobody waiting is read again before the thread sleeps: a step
+/// under a lock ends sooner than a sleep and a wake, which are two calls of the system and a
+/// switch of threads.
+const SPINS: u32 = 100;
 
 /// A lock of one word, not reentrant: a thread that holds it and takes it again waits for itself.
 ///
-/// The three-state lock of Drepper's "Futexes Are Tricky": a thread that finds it held marks it
-/// contended and sleeps on the word, and only a release that finds the mark wakes a thread, one.
+/// The three-state lock of Drepper's "Futexes Are Tricky": a thread that finds it held spins a
+/// bounded while, as `std`'s futex lock does, then marks it contended and sleeps on the word, and only a release that finds the mark wakes a thread, one.
 /// A thread woken takes the lock marked contended again, since it cannot know whether another
 /// still waits: a wake too many is the price, never one too few.
 pub struct RawLock {
@@ -161,12 +165,44 @@ impl RawLock {
         }
     }
 
-    /// The lock was held when it was tried: mark it contended in the same step that takes it if
-    /// it is free, and otherwise sleep until the word moves from the mark.
+    /// The lock was held when it was tried: spin a little while its holder has it and nobody
+    /// waits, then mark it contended in the same step that takes it if it is free, and otherwise
+    /// sleep until the word moves from the mark.
     #[cold]
     fn lock_contended(&self) {
-        while self.state.swap(CONTENDED, Ordering::Acquire) != UNLOCKED {
+        let mut state = self.spin();
+        if state == UNLOCKED {
+            match self.state.compare_exchange(
+                UNLOCKED,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(now) => state = now,
+            }
+        }
+        loop {
+            if state != CONTENDED && self.state.swap(CONTENDED, Ordering::Acquire) == UNLOCKED {
+                return;
+            }
             sys::wait(&self.state, CONTENDED, None);
+            state = self.spin();
+        }
+    }
+
+    /// Read the word while a holder that nobody waits for has it, at most [`SPINS`] times: the
+    /// word as last read. A lock marked contended is not spun on, as a thread already sleeps
+    /// for it and the holder's release goes to that thread.
+    fn spin(&self) -> u32 {
+        let mut left = SPINS;
+        loop {
+            let state = self.state.load(Ordering::Relaxed);
+            if state != LOCKED || left == 0 {
+                return state;
+            }
+            core::hint::spin_loop();
+            left -= 1;
         }
     }
 
@@ -730,6 +766,26 @@ mod tests {
             UNLOCKED,
             "nothing holds it"
         );
+    }
+
+    /// A spin ends at once on a lock that is free or marked contended, and on one held with
+    /// nobody waiting after its bound, answering the word as it read it. Turned red by a spin
+    /// with no bound (the held read never ends).
+    #[test]
+    fn a_spin_reads_a_plain_hold_a_bounded_while_and_nothing_else() {
+        let lock = RawLock::new();
+        assert_eq!(lock.spin(), UNLOCKED);
+        assert!(lock.try_lock(), "CONTROL: a free lock is taken");
+        assert_eq!(
+            lock.spin(),
+            LOCKED,
+            "a hold nobody lets go ends at the bound"
+        );
+        lock.state.store(CONTENDED, Ordering::SeqCst);
+        assert_eq!(lock.spin(), CONTENDED);
+        // SAFETY: this thread holds it.
+        unsafe { lock.unlock() };
+        assert_eq!(lock.state.load(Ordering::SeqCst), UNLOCKED);
     }
 
     /// A notification with no thread waiting leaves the word as it was, and so calls nothing; a

@@ -36,20 +36,113 @@ mod futex {
     /// monotonic clock reads `deadline_ns`. It may end sooner (a signal, or a wake meant for a
     /// value the word no longer holds): the caller reads the word again.
     pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
-        let at = deadline_ns.map(super::timespec_of);
-        let at = at.as_ref().map_or(core::ptr::null(), core::ptr::from_ref);
+        match deadline_ns {
+            None => {
+                wait_on::<libc::timespec>(libc::SYS_futex, word, expected, None);
+            }
+            Some(deadline) => wait_until(word, expected, deadline),
+        }
+    }
+
+    /// A wait with a deadline, on a host whose `timespec` has a 64-bit `time_t`.
+    #[cfg(not(all(
+        target_pointer_width = "32",
+        any(target_arch = "x86", target_arch = "arm")
+    )))]
+    fn wait_until(word: &AtomicU32, expected: u32, deadline_ns: u64) {
+        wait_on(
+            libc::SYS_futex,
+            word,
+            expected,
+            Some(&super::timespec_of(deadline_ns)),
+        );
+    }
+
+    #[cfg(all(
+        target_pointer_width = "32",
+        any(target_arch = "x86", target_arch = "arm")
+    ))]
+    use time64::wait_until;
+
+    /// A 32-bit x86 or Arm host, whose `timespec` has a 32-bit `time_t`: a deadline is handed
+    /// to the call with 64-bit time (Linux 5.1 and later), and to the one with the 32-bit
+    /// `timespec` on a kernel that has no such call.
+    #[cfg(all(
+        target_pointer_width = "32",
+        any(target_arch = "x86", target_arch = "arm")
+    ))]
+    mod time64 {
+        use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        /// `futex_time64`, one number on every 32-bit x86 and Arm kernel; `libc` names none.
+        const SYS_FUTEX_TIME64: libc::c_long = 422;
+
+        /// The kernel answered the 64-bit time call as one it does not have.
+        static WITHOUT: AtomicBool = AtomicBool::new(false);
+
+        /// The kernel's `__kernel_timespec`: both fields 64 bits on every host.
+        #[repr(C)]
+        struct Timespec64 {
+            tv_sec: i64,
+            tv_nsec: i64,
+        }
+
+        pub(super) fn wait_until(word: &AtomicU32, expected: u32, deadline_ns: u64) {
+            if !WITHOUT.load(Ordering::Relaxed) {
+                let at = Timespec64 {
+                    tv_sec: i64::try_from(deadline_ns / 1_000_000_000).unwrap_or(i64::MAX),
+                    tv_nsec: (deadline_ns % 1_000_000_000) as i64,
+                };
+                if super::wait_on(SYS_FUTEX_TIME64, word, expected, Some(&at)) != -1
+                    || errno() != libc::ENOSYS
+                {
+                    return;
+                }
+                WITHOUT.store(true, Ordering::Relaxed);
+            }
+            super::wait_on(
+                libc::SYS_futex,
+                word,
+                expected,
+                Some(&super::super::timespec_of(deadline_ns)),
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        fn errno() -> libc::c_int {
+            // SAFETY: the calling thread's `errno`, which lives as long as the thread.
+            unsafe { *libc::__errno_location() }
+        }
+
+        #[cfg(target_os = "android")]
+        fn errno() -> libc::c_int {
+            // SAFETY: as on Linux.
+            unsafe { *libc::__errno() }
+        }
+    }
+
+    /// The wait call `number` on `word`, with the time `at` of the call's own `timespec` or
+    /// none: what the call answers, -1 with `errno` set when it failed.
+    fn wait_on<T>(
+        number: libc::c_long,
+        word: &AtomicU32,
+        expected: u32,
+        at: Option<&T>,
+    ) -> libc::c_long {
+        let at = at.map_or(core::ptr::null(), core::ptr::from_ref);
         // SAFETY: the kernel reads the word as the 32-bit integer an `AtomicU32` is, and the time
-        // is a live local or null for none; the word is this process's alone (`PRIVATE`).
+        // is a live value of the layout the call takes, or null for none; the word is this
+        // process's alone (`PRIVATE`).
         unsafe {
             libc::syscall(
-                libc::SYS_futex,
+                number,
                 word.as_ptr(),
                 libc::FUTEX_WAIT_BITSET | libc::FUTEX_PRIVATE_FLAG,
                 expected,
                 at,
                 core::ptr::null::<u32>(),
                 ANY,
-            );
+            )
         }
     }
 
