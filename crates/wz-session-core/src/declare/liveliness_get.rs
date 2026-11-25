@@ -146,6 +146,10 @@ struct PendingGet<C: ReplySink> {
 /// the pending table and the finalized markers are [`BoundedVec`]s of that policy.
 pub struct LivelinessGetRegistry<C: ReplySink, P: Storage = Profile> {
     pending: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }, P>,
+    /// The earliest deadline of a pending get ([`Self::due_ms`]), `u64::MAX` with none: lowered as
+    /// a get with a deadline is registered, and worked out again only when the get that leaves
+    /// the table held it, so a holder reads it without a walk of the gets.
+    due_ms: u64,
     /// F3 — interest ids whose get terminated since the last
     /// [`take_finalized`](Self::take_finalized) drain (inbound
     /// `DeclFinal` or local timeout sweep). The observer's
@@ -182,6 +186,7 @@ impl<C: ReplySink, P: Storage> Default for LivelinessGetRegistry<C, P> {
     fn default() -> Self {
         Self {
             pending: BoundedVec::default(),
+            due_ms: u64::MAX,
             finalized: BoundedVec::default(),
             quota: Default::default(),
             oversize: 0,
@@ -351,6 +356,9 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
                 deadline_ms,
             })
             .map_err(|_| RegisterError::TableFull)?;
+        if let Some(deadline_ms) = deadline_ms {
+            self.due_ms = self.due_ms.min(deadline_ms);
+        }
         Ok(true)
     }
 
@@ -369,6 +377,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     pub fn clear(&mut self) {
         self.pending.clear();
         self.finalized.clear();
+        self.due_ms = u64::MAX;
     }
 
     /// Remove a pending get by `interest_id` without firing `on_final`.
@@ -378,7 +387,16 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// completes.
     pub fn unregister(&mut self, interest_id: u64) -> bool {
         let before = self.pending.len();
-        self.pending.retain(|p| p.interest_id != interest_id);
+        let due_ms = self.due_ms;
+        let mut held_due = false;
+        self.pending.retain(|p| {
+            let keep = p.interest_id != interest_id;
+            held_due |= !keep && p.deadline_ms == Some(due_ms);
+            keep
+        });
+        if held_due {
+            self.rearm_due();
+        }
         before != self.pending.len()
     }
 
@@ -532,7 +550,20 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
                 .sink
                 .on_timeout(crate::wire_id::interest_id_as_read(id));
         }
+        self.rearm_due();
         swept
+    }
+
+    /// The earliest deadline of a pending get, `u64::MAX` when none has one: a sweep before it
+    /// ends nothing ([`Self::sweep_timed_out`]). Kept as the gets come and go, so it is
+    /// [`Self::next_deadline_ms`] read without a walk.
+    pub fn due_ms(&self) -> u64 {
+        self.due_ms
+    }
+
+    /// Work [`Self::due_ms`] out again from the gets left, after one that held it left.
+    fn rearm_due(&mut self) {
+        self.due_ms = self.next_deadline_ms().unwrap_or(u64::MAX);
     }
 
     /// Shared final fan body: take ownership of the (at most one) pending
@@ -545,12 +576,15 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         // R311ig — no-alloc take-then-fire via the shared
         // `BoundedVec::take_next_where` seam (see `sweep_timed_out`).
         let mut any = false;
+        let due_ms = self.due_ms;
+        let mut held_due = false;
         let mut at = 0;
         while let Some(mut entry) = self
             .pending
             .take_next_where(&mut at, |entry| entry.interest_id == interest_id)
         {
             any = true;
+            held_due |= entry.deadline_ms == Some(due_ms);
             let id = entry.interest_id;
             // F3/R311ka — stage the terminated id for the reconnect-cache
             // prune drain. This drain is the cache entry's ONLY prune (a
@@ -570,6 +604,9 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
                  within its lock window (permanent replay-leak hazard)"
             );
             entry.sink.on_final(crate::wire_id::interest_id_as_read(id));
+        }
+        if held_due {
+            self.rearm_due();
         }
         any
     }
@@ -1223,6 +1260,40 @@ mod tests {
         assert_eq!(*f.lock().unwrap(), vec![42], "swept get fires on_final");
         assert_eq!(reg.len(), 1, "never-expiring get 43 retained");
         assert_eq!(reg.sweep_timed_out(5000), 0, "idempotent; 43 never expires");
+    }
+
+    /// The earliest deadline is kept as gets end by every road: a DeclFinal, an unregistration,
+    /// a sweep and the drop of the table, each leaving the earliest of the gets left, as a walk of
+    /// them reads it, and none once none is left. Turned red by a registration that does not
+    /// lower it, or a road that leaves the deadline of a get gone.
+    #[test]
+    fn due_ms_is_the_earliest_left_after_every_end_of_a_get() {
+        let mut reg = LivelinessGetRegistry::new();
+        let r: Captured = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<crate::wire_id::RequestId>>> = Arc::new(Mutex::new(Vec::new()));
+        assert_eq!(reg.due_ms(), u64::MAX, "an empty table is due never");
+        for (id, deadline_ms) in [(1, Some(300)), (2, Some(100)), (3, None), (4, Some(200))] {
+            reg.register(id, deadline_ms, make_get(r.clone(), f.clone()))
+                .unwrap();
+        }
+        assert_eq!(reg.due_ms(), 100, "the earliest deadline registered");
+        assert!(reg.dispatch_final(2));
+        assert_eq!(reg.due_ms(), 200, "the earliest left after the DeclFinal");
+        assert_eq!(Some(reg.due_ms()), reg.next_deadline_ms());
+        assert!(reg.unregister(1));
+        assert_eq!(reg.due_ms(), 200, "a later get's end moved it");
+        assert_eq!(reg.sweep_timed_out(200), 1);
+        assert_eq!(
+            reg.due_ms(),
+            u64::MAX,
+            "only a get that never expires is left"
+        );
+        assert_eq!(reg.next_deadline_ms(), None);
+        drop(reg.take_finalized());
+        reg.register(5, Some(50), make_get(r, f)).unwrap();
+        assert_eq!(reg.due_ms(), 50);
+        reg.clear();
+        assert_eq!(reg.due_ms(), u64::MAX, "the table's drop left a deadline");
     }
 
     /// R311y323 — the SIBLING leg. zenoh synthesizes the same
