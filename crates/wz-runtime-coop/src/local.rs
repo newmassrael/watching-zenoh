@@ -26,7 +26,12 @@ use core::task::{Context, Poll};
 use wz_runtime_core::RuntimeError;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use alloc::rc::Rc;
+use core::alloc::Layout;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use core::ptr::NonNull;
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::kept::{Kept, Shared};
 
 use crate::atomic::{AtomicBool, Ordering};
 use crate::executor::{flag_waker, ClaimedPlace, SpawnRefusal, SpawnRefused, TaskJoin};
@@ -123,7 +128,7 @@ impl<F: Future + 'static> LocalPlace<F> {
 pub struct CoopLocalSet<C: ClockSource> {
     runtime: CoopRuntime<C>,
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    owner: Rc<SetOwner<C>>,
+    owner: Shared<SetOwner<C>>,
     local: PhantomData<*const ()>,
 }
 
@@ -156,7 +161,7 @@ impl<C: ClockSource> Clone for CoopLocalSet<C> {
         Self {
             runtime: self.runtime.clone(),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            owner: Rc::clone(&self.owner),
+            owner: self.owner.clone(),
             local: PhantomData,
         }
     }
@@ -169,7 +174,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
     pub fn new<D: ?Sized, K: LockKind>(runtime: &CoopRuntime<C, D, K>) -> Self {
         let runtime: CoopRuntime<C> = runtime.retyped();
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        let owner = Rc::new(SetOwner {
+        let owner = Shared::boxed(SetOwner {
             set: runtime.inner.executor.new_local_set(),
             runtime: runtime.clone(),
         });
@@ -177,6 +182,36 @@ impl<C: ClockSource> CoopLocalSet<C> {
             runtime,
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             owner,
+            local: PhantomData,
+        }
+    }
+
+    /// The bytes and alignment of the place [`Self::placed`] writes the set's shared owner at.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) const fn owner_layout() -> Layout {
+        Shared::<SetOwner<C>>::layout()
+    }
+
+    /// [`Self::new`] with the set's shared owner written at `at`, in memory `memory` keeps, a
+    /// count of which it holds until the set's last handle lets go: nothing of the heap.
+    ///
+    /// # Safety
+    /// `at` is aligned and valid for a write of [`Self::owner_layout`], and nothing else uses
+    /// those bytes while a count of `memory` is held; `memory` is live and its memory holds `at`.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) unsafe fn placed(
+        runtime: &CoopRuntime<C>,
+        at: NonNull<u8>,
+        memory: NonNull<Kept>,
+    ) -> Self {
+        let owner = SetOwner {
+            set: runtime.inner.executor.new_local_set(),
+            runtime: runtime.clone(),
+        };
+        Self {
+            runtime: runtime.clone(),
+            // SAFETY: the caller's contract, which is the placing's.
+            owner: unsafe { Shared::placed(at, owner, memory) },
             local: PhantomData,
         }
     }

@@ -3693,7 +3693,7 @@ mod tests {
         assert_eq!(plan.rows().count(), 2, "the count and the span, once");
         let mut arena = SessionArena::reserve(&plan, &CountedReleases).expect("the host has it");
         let place = arena.runtime_place(bytes).expect("the plan holds the span");
-        let runtime =
+        let (runtime, local) =
             CoopRuntime::placed(Still, rows, RuntimeForm::Reserved, place).expect("the span fits");
         let before = RELEASES.load(core::sync::atomic::Ordering::SeqCst);
         drop(arena);
@@ -3703,6 +3703,12 @@ mod tests {
             "the runtime keeps the arena"
         );
         drop(runtime);
+        assert_eq!(
+            RELEASES.load(core::sync::atomic::Ordering::SeqCst),
+            before,
+            "the local set's owner, placed in it, keeps the arena too"
+        );
+        drop(local);
         assert_eq!(
             RELEASES.load(core::sync::atomic::Ordering::SeqCst),
             before + 1,

@@ -843,9 +843,9 @@ fn a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_h
     let ((), allocated) = allocations(|| {
         // SAFETY: as above; the span is freed only after its memory's count was given back.
         let place = unsafe { RuntimePlace::new(span, layout.size(), memory) };
-        let runtime = CoopRuntime::placed(Hand(&NOW), rows, form, place).expect("the span fits");
+        let (runtime, local) =
+            CoopRuntime::placed(Hand(&NOW), rows, form, place).expect("the span fits");
         assert_eq!(runtime.timers().capacity(), 1, "the entries are the span's");
-        let local = CoopLocalSet::new(&runtime);
         let handle = local.spawn_local(core::future::poll_fn(move |cx| {
             *stash.borrow_mut() = Some(cx.waker().clone());
             Poll::<()>::Pending

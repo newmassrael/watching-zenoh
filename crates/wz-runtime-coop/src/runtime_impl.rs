@@ -345,6 +345,8 @@ struct PlacedParts {
     store: usize,
     block: usize,
     timers: usize,
+    /// The shared owner of the runtime's local set.
+    set: usize,
     laid: StoreLayout,
     /// The span: its bytes, and the alignment it starts on.
     layout: Layout,
@@ -367,11 +369,15 @@ impl PlacedParts {
         let (layout, block) = layout.extend(laid.layout()).ok()?;
         let timer_entries = Layout::array::<TimerSlot>(rows.timers).ok()?;
         let (layout, timers) = layout.extend(timer_entries).ok()?;
+        let (layout, set) = layout
+            .extend(crate::local::CoopLocalSet::<C>::owner_layout())
+            .ok()?;
         Some(Self {
             inner: 0,
             store,
             block,
             timers,
+            set,
             laid,
             layout: layout.pad_to_align(),
         })
@@ -389,8 +395,8 @@ impl<C: ClockSource> CoopRuntime<C> {
 
     /// The runtime [`Self::reserved`], [`Self::reserved_for_one`] or [`Self::opening`] makes,
     /// as `form` says, with its state, its task table and its timer table placed in `place`
-    /// rather than on the heap: nothing allocates, and the memory of the span is kept until the
-    /// runtime's last holder lets go. `None`, having placed nothing, for a span shorter than
+    /// rather than on the heap, and its local set, whose shared owner lies there too: nothing
+    /// allocates, and the memory of the span is kept until the runtime's last holder lets go. `None`, having placed nothing, for a span shorter than
     /// [`Self::placed_layout`] or not on its alignment. Always inlined, as the other makings: a
     /// maker that states its form and its timers as constants links only the making of those.
     #[inline(always)]
@@ -399,7 +405,7 @@ impl<C: ClockSource> CoopRuntime<C> {
         rows: RuntimeRows,
         form: RuntimeForm,
         place: RuntimePlace,
-    ) -> Option<Self> {
+    ) -> Option<(Self, crate::local::CoopLocalSet<C>)> {
         let parts = PlacedParts::of::<C>(rows, form)?;
         let at = place.at.as_ptr();
         // A layout's alignment is a power of two, so a start on it has none of the bits below it.
@@ -444,7 +450,7 @@ impl<C: ClockSource> CoopRuntime<C> {
             timers,
             clock,
         };
-        Some(Self {
+        let runtime = Self {
             // SAFETY: as above: the state's part of the span.
             inner: unsafe {
                 kept::Shared::placed(
@@ -454,7 +460,16 @@ impl<C: ClockSource> CoopRuntime<C> {
                 )
             },
             driver: PhantomData,
-        })
+        };
+        // SAFETY: as above: the local set's owner's part of the span.
+        let local = unsafe {
+            crate::local::CoopLocalSet::placed(
+                &runtime,
+                NonNull::new_unchecked(at.wrapping_add(parts.set)),
+                place.memory,
+            )
+        };
+        Some((runtime, local))
     }
 }
 

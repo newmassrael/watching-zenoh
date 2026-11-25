@@ -2853,12 +2853,13 @@ impl RuntimeTables {
     /// walk of a table of many cells.
     ///
     /// The runtime is placed in `place`, the span of the session's arena the open lent it
-    /// ([`Self::placed_bytes`]): nothing of it is of the heap. `None` for a span short of it.
+    /// ([`Self::placed_bytes`]), with the session's local set: nothing of them is of the heap.
+    /// `None` for a span short of it.
     pub(crate) fn runtime<C: ClockSource>(
         self,
         clock: C,
         place: RuntimePlace,
-    ) -> Option<CoopRuntime<C>> {
+    ) -> Option<(CoopRuntime<C>, CoopLocalSet<C>)> {
         CoopRuntime::placed(clock, self.rows(), Self::form(self.groups), place)
     }
 
@@ -4235,17 +4236,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if let Some(driver_cells) = lent.transport.cells.driver {
             links.lend_cells(driver_cells);
         }
-        // The task and timer tables, placed here once in the arena: no spawn and no sleep of the
-        // session takes memory after its open (`open_links` seals them).
-        let runtime = tables
-            .runtime(clock.clone(), lent.runtime)
-            .ok_or(OpenError::Arena(ArenaRefused::Lend(
-                LendRefused::Exhausted {
-                    asked: Some(runtime_bytes),
-                    left: 0,
-                },
-            )))?;
-        let local = CoopLocalSet::new(&runtime);
+        // The task and timer tables and the session's local set, placed here once in the arena: no
+        // spawn and no sleep of the session takes memory after its open (`open_links` seals them).
+        let (runtime, local) =
+            tables
+                .runtime(clock.clone(), lent.runtime)
+                .ok_or(OpenError::Arena(ArenaRefused::Lend(
+                    LendRefused::Exhausted {
+                        asked: Some(runtime_bytes),
+                        left: 0,
+                    },
+                )))?;
         let session_time = CoopTime::new(&runtime);
         let wait_room = read_wait_room(&config);
         #[cfg(feature = "time-base")]
