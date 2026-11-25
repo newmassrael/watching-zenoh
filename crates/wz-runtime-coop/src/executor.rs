@@ -1133,7 +1133,7 @@ impl ExecutorState {
     }
 
     /// [`Self::try_opening`] for the tests, on a heap that has room.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn opening(tasks: usize, task_bytes: usize, added: usize) -> Self {
         Self::try_opening(tasks, task_bytes, added).expect("the heap has room")
     }
@@ -1178,7 +1178,7 @@ impl ExecutorState {
     }
 
     /// [`Self::try_reserved`] for the tests, on a heap that has room.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved(tasks: usize, task_bytes: usize) -> Self {
         Self::try_reserved(tasks, task_bytes).expect("the heap has room")
     }
@@ -1200,7 +1200,7 @@ impl ExecutorState {
     }
 
     /// [`Self::try_reserved_one`] for the tests, on a heap that has room.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved_one(tasks: usize, task_bytes: usize) -> Self {
         Self::try_reserved_one(tasks, task_bytes).expect("the heap has room")
     }

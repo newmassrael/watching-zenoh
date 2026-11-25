@@ -903,8 +903,10 @@ pub struct LinkSupervisor<L: SessionLinks<N>, F, P = ManyFaces<F>, N: CountKind 
     /// they were ([`Self::generation`]). A reach of a face to change what the session keeps of
     /// it, which each step makes, does not count. Wraps; only its change is read.
     generation: u64,
-    /// The record each face is kept as: the table `P` holds it, the supervisor names it.
-    records: core::marker::PhantomData<fn() -> F>,
+    /// The record each face is kept as, which the table `P` holds, and how its links' handles
+    /// are counted (`N`), which a build without `listen` names in no field: the supervisor
+    /// names both.
+    records: core::marker::PhantomData<fn() -> (F, N)>,
 }
 
 impl<
