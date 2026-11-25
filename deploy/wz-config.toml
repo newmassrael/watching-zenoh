@@ -774,6 +774,13 @@ help = "Messages larger than one batch, split and put back together."
 [[artifact]]
 id = "capi-pico"
 package = "wz-capi-pico"
+# The ABI crate is an rlib: the file is its C library's crate, which names the ABI crate's features
+# through its dependency on it. The library has no `std` form, so it is built by the profile that
+# does not unwind, with that profile's configuration, for the platform's triple.
+build_package = "wz-capi-pico-lib"
+build_dependency = "abi"
+cargo_profile = "capi-nostd"
+cargo_config = "crates/.cargo/capi-nostd.toml"
 kind = "shared-library"
 file = "wz_capi_pico"
 family = "capi-pico"

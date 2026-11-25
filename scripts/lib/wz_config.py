@@ -935,8 +935,13 @@ def validate_platforms(data: dict) -> list[str]:
 # names its own Cargo.toml, `bin` the binary), the declaration picks its features and constants, and
 # its `os` lists the operating systems the port under it exists for. A platform outside that list is
 # refused by name, with `os_note` as the reason, before anything is built.
+# A library whose ABI crate is an rlib is made by a crate of its own: `build_package` is that crate,
+# which names the ABI crate's features through its dependency on it (`build_dependency`), and a
+# library with no `std` form is built by the profile that does not unwind and its configuration
+# (`cargo_profile`, `cargo_config`, a path from the tree's root).
 ARTIFACT_KEYS = {"id", "package", "kind", "file", "family", "abi", "help", "input", "manifest", "bin",
-                 "os", "os_note"}
+                 "os", "os_note", "build_package", "build_dependency", "cargo_profile", "cargo_config"}
+ARTIFACT_BUILD_PAIRS = (("build_package", "build_dependency"), ("cargo_profile", "cargo_config"))
 ARTIFACT_REQUIRED = {"id", "package", "kind", "file", "family", "help"}
 ARTIFACT_KINDS = ("shared-library", "executable")
 ARTIFACT_INPUTS = ("node",)
@@ -966,6 +971,12 @@ def validate_artifacts(data: dict) -> list[str]:
                 out.append(f"{who}: a library names the ABI whose capabilities it has ({', '.join(ABIS)})")
         elif "abi" in a:
             out.append(f"{who}: only a library has an ABI")
+        for pair in ARTIFACT_BUILD_PAIRS:
+            stated = [k for k in pair if k in a]
+            if stated and len(stated) != len(pair):
+                out.append(f"{who}: `{pair[0]}` and `{pair[1]}` are stated together")
+            if stated and a.get("kind") != "shared-library":
+                out.append(f"{who}: only a library is built by a crate or a profile of its own")
         if "input" in a:
             if a["input"] not in ARTIFACT_INPUTS:
                 out.append(f"{who}: input is `{a['input']}`, not one of {', '.join(ARTIFACT_INPUTS)}")
@@ -7230,6 +7241,16 @@ def cmd_selftest() -> int:
            caps_refused('abi = "pico"\n', "", "names the ABI"))
     expect("an artifact with an unknown key is refused",
            caps_refused('family = "fam-a"', 'family = "fam-a"\nextra = "x"', "unknown key `extra`"))
+    own_build = 'family = "fam-a"\nbuild_package = "lib-a-c"\nbuild_dependency = "abi"\n' \
+                'cargo_profile = "capi-nostd"\ncargo_config = "crates/.cargo/capi-nostd.toml"'
+    expect("a library built by a crate and a profile of its own validates",
+           validate_decl(read_decl_toml(SAMPLE.replace('family = "fam-a"', own_build))) == [])
+    expect("a build package without the dependency it names features through is refused",
+           caps_refused('family = "fam-a"', 'family = "fam-a"\nbuild_package = "lib-a-c"',
+                        "`build_package` and `build_dependency` are stated together"))
+    expect("a profile of its own without its configuration is refused",
+           caps_refused('family = "fam-a"', 'family = "fam-a"\ncargo_profile = "capi-nostd"',
+                        "`cargo_profile` and `cargo_config` are stated together"))
     expect("a role id outside the vocabulary is refused",
            caps_refused('id = "pico-library"', 'id = "daemon"', "is not one of pico-library"))
     expect("a pico role on a library of another ABI is refused",
@@ -7245,6 +7266,10 @@ def cmd_selftest() -> int:
     expect("an executable that names an ABI is refused",
            any("only a library has an ABI" in p for p in validate_decl(read_decl_toml(
                exe.replace('family = "fam-a"', 'family = "fam-a"\nabi = "pico"')))))
+    expect("an executable built by a profile of its own is refused",
+           any("only a library is built by a crate or a profile of its own" in p
+               for p in validate_decl(read_decl_toml(exe.replace(
+                   'family = "fam-a"', 'family = "fam-a"\ncargo_profile = "p"\ncargo_config = "c"')))))
     expect("a library carrying a facts list is refused",
            caps_refused('artifact = "lib-a"\nid = "pico-library"',
                         'artifact = "lib-a"\nid = "pico-library"\nfacts_list = "x"',

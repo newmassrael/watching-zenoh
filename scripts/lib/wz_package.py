@@ -1113,25 +1113,56 @@ def package_name(package_id: str) -> str:
     return package_id.split(" ", 1)[0]
 
 
+def build_package(row: dict) -> str:
+    """The package cargo builds for an artifact: `build_package` when the file is made by a crate
+    of its own (the pico C library, `wz-capi-pico-lib`, over the ABI crate's rlib), else the
+    artifact's `package`, whose features are the artifact's capabilities either way."""
+    return row.get("build_package", row["package"])
+
+
+def through_dependency(row: dict, args: list[str]) -> list[str]:
+    """Cargo arguments that name features of the artifact's `package`, as its `build_package`
+    names them: each feature through the build package's dependency on it (`build_dependency`,
+    `abi/<feature>`). Unchanged for an artifact its own package builds."""
+    dep = row.get("build_dependency")
+    if dep is None:
+        return list(args)
+    out, listing = [], False
+    for arg in args:
+        if listing:
+            arg = ",".join(f"{dep}/{f}" for f in arg.split(",") if f)
+        listing = arg == "--features"
+        out.append(arg)
+    return out
+
+
 def cargo_argv(platform: dict, cross: bool, row: dict, cargo_profile: str,
                extra_args: list[str] | None = None, node: dict | None = None) -> list[str]:
     """The cargo command that builds one artifact. A platform whose `std` is `build-std` has no
     prebuilt standard library, so the command builds it (`-Z` needs a nightly cargo, which is the
     caller's to put first, as it is the caller's to provide the SDK). An artifact built from a node
     declaration is a binary of a package outside the crates workspace: its own manifest, and the
-    features the declaration asks for."""
+    features the declaration asks for.
+
+    An artifact that states its own `cargo_profile` (the pico C library, which has no `std` form
+    and so does not unwind) is built by that profile and its `cargo_config` whichever profile the
+    package asks for, and always for the platform's triple named as the target: the configuration's
+    code generation flags then reach the library and not the build scripts run on the host."""
     if row.get("input") == "node":
         argv = ["cargo", "build", "--manifest-path", str(ROOT / row["manifest"]), "--bin", row["bin"],
                 "--features", ",".join(node["features"]), "--message-format=json-render-diagnostics"]
     else:
-        argv = ["cargo", "build", "-p", row["package"], "--message-format=json-render-diagnostics"]
-    if cargo_profile == "release":
+        argv = ["cargo", "build", "-p", build_package(row), "--message-format=json-render-diagnostics"]
+    own_profile = row.get("cargo_profile")
+    if own_profile is not None:
+        argv += ["--profile", own_profile, "--config", str(ROOT / row["cargo_config"])]
+    elif cargo_profile == "release":
         argv += ["--release"] if row.get("input") == "node" else ["--profile", SHIP_PROFILE]
-    if cross:
+    if cross or own_profile is not None:
         argv += ["--target", platform["triple"]]
-        if platform.get("std") == "build-std":
-            argv += ["-Z", "build-std=std,panic_abort"]
-    return argv + (extra_args or [])
+    if cross and platform.get("std") == "build-std":
+        argv += ["-Z", "build-std=std,panic_abort"]
+    return argv + through_dependency(row, extra_args or [])
 
 
 def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
@@ -1149,14 +1180,15 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
     argv = cargo_argv(platform, cross, row, cargo_profile, extra_args, node)
     env = {**os.environ, **(extra_env or {})}
     if cargo_profile == "release":
-        env.update(ship_debug_env("release" if row.get("input") == "node" else SHIP_PROFILE))
+        env.update(ship_debug_env("release" if row.get("input") == "node"
+                                  else row.get("cargo_profile", SHIP_PROFILE)))
     cwd = ROOT / "crates"
     if row.get("input") == "node":
         env = {**env, "WZ_DECLARED_RS": str(node["generated"]), **node["limits"], **node["policies"]}
         cwd = (ROOT / row["manifest"]).parent
     run = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, text=True, check=False, env=env)
     if run.returncode != 0:
-        raise RuntimeError(f"cargo build -p {row['package']} failed ({run.returncode})")
+        raise RuntimeError(f"cargo build -p {build_package(row)} failed ({run.returncode})")
     found = None
     resolved: dict[str, set[str]] = {}
     kind = "cdylib" if row["kind"] == "shared-library" else "bin"
@@ -1169,7 +1201,7 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
             continue
         pid = msg.get("package_id", "")
         resolved.setdefault(package_name(pid), set()).update(msg.get("features", []))
-        if package_name(pid) != row["package"]:
+        if package_name(pid) != build_package(row):
             continue
         if kind not in msg["target"]["kind"]:
             continue
@@ -1179,8 +1211,11 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
         if files and files[0]:
             found = (pathlib.Path(files[0]), list(msg["features"]))
     if found is None:
-        raise RuntimeError(f"cargo built nothing that is the {row['kind']} of {row['package']}")
-    return found[0], found[1], {p: sorted(f) for p, f in resolved.items()}
+        raise RuntimeError(f"cargo built nothing that is the {row['kind']} of {build_package(row)}")
+    # The capabilities are the artifact's package's features, which a build package of its own
+    # enables through its dependency and does not list among its own.
+    features = found[1] if build_package(row) == row["package"] else sorted(resolved.get(row["package"], ()))
+    return found[0], features, {p: sorted(f) for p, f in resolved.items()}
 
 
 def ship_debug_env(cargo_profile: str) -> dict[str, str]:
@@ -2202,6 +2237,26 @@ def _selftest() -> int:
            shipped[shipped.index("--profile") + 1] == SHIP_PROFILE and "--release" not in shipped)
     expect("a debug build names no profile",
            not {"--profile", "--release"} & set(cargo_argv(qnx_plat, False, demo_row, "debug")))
+    # The pico C library is its own crate's file, built without `std` by its own profile whichever
+    # the package asks for, for the platform's triple once, its features named through the crate's
+    # dependency on the ABI crate.
+    pico_row = next(a for a in decl["artifacts"] if a["id"] == "capi-pico")
+    host_plat = next(p for p in decl["platforms"] if p["id"] == "linux-x86_64-glibc")
+    android = next(p for p in decl["platforms"] if p["id"] == "android-arm64")
+    for plat, cross, asked in ((host_plat, False, "release"), (host_plat, False, "debug"),
+                               (android, True, "release")):
+        lib = cargo_argv(plat, cross, pico_row, asked, ["--no-default-features", "--features", "os-host,peer"])
+        expect(f"the pico C library's {asked} build for {plat['id']} is its crate's, by its profile",
+               lib[:4] == ["cargo", "build", "-p", "wz-capi-pico-lib"]
+               and lib[lib.index("--profile") + 1] == "capi-nostd"
+               and lib[lib.index("--config") + 1] == str(ROOT / "crates" / ".cargo" / "capi-nostd.toml")
+               and lib.count("--target") == 1 and lib[lib.index("--target") + 1] == plat["triple"]
+               and "--release" not in lib
+               and lib[-3:] == ["--no-default-features", "--features", "abi/os-host,abi/peer"])
+    expect("the pico C library's configuration is a file of the tree",
+           (ROOT / pico_row["cargo_config"]).is_file())
+    expect("an artifact its own package builds names its features as they are",
+           through_dependency(demo_row, ["--features", "a,b"]) == ["--features", "a,b"])
     node_release = cargo_argv(platform, False, node_row, "release", None, {"features": ["declared"]})
     expect("a node's release build is its own workspace's release",
            "--release" in node_release and "--profile" not in node_release)
