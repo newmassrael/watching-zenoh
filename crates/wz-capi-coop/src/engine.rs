@@ -2852,7 +2852,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         debug_assert!(dispatched.is_some(), "{UNLENT}");
     }
 
-    /// The drains a run of Pushes put off ([`Registry::after_pushes`]), once for the run: at the
+    /// The drains a run of Pushes put off ([`Registry::settle`]), once for the run: at the
     /// end of the frame, or before the first record of it that is not a Push.
     fn end_records(&mut self) {
         if !core::mem::take(&mut self.after_pushes) {
@@ -2862,7 +2862,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         let actions = &*self.actions;
         let dispatched = self
             .registry
-            .with(|registry| registry.after_pushes(face, actions));
+            .with(|registry| registry.settle(face, actions));
         debug_assert!(dispatched.is_some(), "{UNLENT}");
     }
 
@@ -3811,6 +3811,37 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
                 false
             }
+        }
+    }
+
+    /// Send each face's peer what the application's declaration or undeclaration of a subscriber
+    /// owes its Interests ([`Registry::settle`]) now: the reconcile that stages it otherwise runs
+    /// at the next event of the link's session, a record or a keep-alive, up to a keep-alive
+    /// interval later, and not at all while the program does not step the session.
+    #[cfg(feature = "interest-answer")]
+    fn settle_faces(&mut self) {
+        for at in 0..self.transport.links.places() {
+            let Some(face) = self.transport.links.face(at) else {
+                continue;
+            };
+            if let Link::Up(wire) = &face.link {
+                self.session
+                    .registry
+                    .settle(HeldFace::new(at, face.id), &*wire.actions);
+            }
+        }
+        // A group's stage is written by the thread that put on it outside the group's own step.
+        #[cfg(feature = "group")]
+        for group in self
+            .transport
+            .groups
+            .iter()
+            .filter(|group| !group.has_ended())
+        {
+            self.session
+                .registry
+                .settle(HeldFace::new(group.at(), group.id()), group.replies());
+            group.write_staged();
         }
     }
 
@@ -7432,6 +7463,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 });
             }
         }
+        // What it owes the Interests the peers asked goes now, after the declaration itself.
+        #[cfg(feature = "interest-answer")]
+        core.settle_faces();
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
@@ -7527,6 +7561,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             core.retract_keyexpr(named_place, undeclared.named);
+            // An aggregate answer it alone stood for is retracted now, as it was declared.
+            #[cfg(feature = "interest-answer")]
+            core.settle_faces();
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             self.read_matching(core);

@@ -252,7 +252,12 @@ pub(super) struct HeldFace {
 impl HeldFace {
     /// The key of face `id` whose set lies at `at`: the place the face keeps in every table of
     /// the session while it is held.
-    #[cfg(any(feature = "listen", feature = "group", test))]
+    #[cfg(any(
+        feature = "listen",
+        feature = "group",
+        feature = "interest-answer",
+        test
+    ))]
     pub(super) const fn new(at: usize, id: FaceId) -> Self {
         Self { at, id }
     }
@@ -1107,7 +1112,7 @@ impl<H: Holders> RegistryOf<H> {
     /// subscribers' plane alone, which is the one plane that reads a Push: the fan over every
     /// plane ([`Self::dispatch_event`]) is spared, and so are the watches' staging, which a Push
     /// stages nothing into. What follows the dispatch of a record is put off to the end of the run
-    /// of Pushes it is one of ([`Self::after_pushes`]): a Push stages nothing for it to drain, so
+    /// of Pushes it is one of ([`Self::settle`]): a Push stages nothing for it to drain, so
     /// it is done once for the run and not once for each. A face the session no longer holds hears
     /// nothing.
     pub(super) fn dispatch_push(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
@@ -1128,12 +1133,14 @@ impl<H: Holders> RegistryOf<H> {
         self.counted_push(written);
     }
 
-    /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
-    /// under one lookup of the face: the subscribers' tables reconciled with what the application
-    /// registered since, what anything staged drained through `actions`
-    /// ([`Self::flush_pending_replies`]). A face the session no longer holds owes nothing.
+    /// What face `id`'s peer is owed outside the dispatch of a record that drains it, under one
+    /// lookup of the face: the subscribers' tables reconciled with what the application registered
+    /// since, what anything staged drained through `actions` ([`Self::flush_pending_replies`]).
+    /// Settled once after a run of lent Pushes ([`Self::dispatch_push`]), and after the
+    /// application declares or undeclares a subscriber, which no record of the peer's need follow.
+    /// A face the session no longer holds owes nothing.
     #[cfg(feature = "queryable")]
-    pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S)
+    pub(super) fn settle<S>(&mut self, face: HeldFace, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
@@ -1164,10 +1171,11 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
-    /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
-    /// drained under one lookup of the face, as [`Self::dispatch`] drains after every other record.
+    /// What face `id`'s peer is owed outside the dispatch of a record, drained under one lookup of
+    /// the face, as [`Self::dispatch`] drains after every other record: after a run of lent Pushes
+    /// ([`Self::dispatch_push`]), and after the application declares or undeclares a subscriber.
     #[cfg(not(feature = "queryable"))]
-    pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S)
+    pub(super) fn settle<S>(&mut self, face: HeldFace, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
