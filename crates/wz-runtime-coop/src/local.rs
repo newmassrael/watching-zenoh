@@ -170,18 +170,28 @@ impl<C: ClockSource> Clone for CoopLocalSet<C> {
 impl<C: ClockSource> CoopLocalSet<C> {
     /// Bind a local task pool to `runtime`. The runtime handle is copied, so the
     /// local set and any other holder of the same runtime share one task table and
-    /// one timer table.
-    pub fn new<D: ?Sized, K: LockKind>(runtime: &CoopRuntime<C, D, K>) -> Self {
+    /// one timer table. `None` when the heap has no room for the set's shared owner.
+    pub fn try_new<D: ?Sized, K: LockKind>(runtime: &CoopRuntime<C, D, K>) -> Option<Self> {
         let runtime: CoopRuntime<C> = runtime.retyped();
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        let owner = Shared::boxed(SetOwner {
+        let owner = Shared::try_boxed(SetOwner {
             set: runtime.inner.executor.new_local_set(),
             runtime: runtime.clone(),
-        });
-        Self {
+        })
+        .ok()?;
+        Some(Self {
             runtime,
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             owner,
+            local: PhantomData,
+        })
+    }
+
+    /// [`Self::try_new`] where the set holds nothing of the heap, so it is always made.
+    #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+    pub fn new<D: ?Sized, K: LockKind>(runtime: &CoopRuntime<C, D, K>) -> Self {
+        Self {
+            runtime: runtime.retyped(),
             local: PhantomData,
         }
     }
@@ -192,7 +202,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
         Shared::<SetOwner<C>>::layout()
     }
 
-    /// [`Self::new`] with the set's shared owner written at `at`, in memory `memory` keeps, a
+    /// [`Self::try_new`] with the set's shared owner written at `at`, in memory `memory` keeps, a
     /// count of which it holds until the set's last handle lets go: nothing of the heap.
     ///
     /// # Safety
@@ -383,12 +393,26 @@ mod tests {
         }
     }
 
+    /// A heap with no room for a set's shared owner refuses the set, and the program goes on.
+    /// Turned red by `try_new` making the owner with a maker that ends the program on a refused
+    /// heap.
+    #[test]
+    fn a_set_the_heap_has_no_room_for_is_none() {
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let refused = crate::table_tests::refused(|| CoopLocalSet::try_new(&runtime).is_none());
+        assert!(refused, "a refused heap makes no set");
+        assert!(
+            CoopLocalSet::try_new(&runtime).is_some(),
+            "a heap with room makes one"
+        );
+    }
+
     /// A clone of a local set is the same pool: a task spawned through one is run by a pass of
     /// the other, and it no longer counts as running after.
     #[test]
     fn a_clone_runs_the_tasks_of_the_set_it_was_cloned_from() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let other = local.clone();
         let task = local.spawn_local(async { 7u8 });
         assert!(!task.is_finished(), "nothing ran it yet");
@@ -415,8 +439,8 @@ mod tests {
     #[test]
     fn a_set_told_to_drop_its_tasks_drops_one_that_holds_the_set() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
-        let other = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let other = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mine = alloc::rc::Rc::new(core::cell::Cell::new(false));
         let theirs = alloc::rc::Rc::new(core::cell::Cell::new(false));
         let kept = local.clone();

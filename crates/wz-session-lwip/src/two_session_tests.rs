@@ -286,7 +286,7 @@ impl TwoSessions {
     ) -> Self {
         let clock = StepClock::default();
         let runtime = CoopRuntime::try_new(clock.clone()).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let links = test_links(link.clone());
 
         let OpenedLink { sink, pump } = links.open_acceptor(router_port).expect("bind router");

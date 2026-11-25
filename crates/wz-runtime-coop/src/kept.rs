@@ -102,7 +102,7 @@ struct Held<T> {
 }
 
 /// A value shared by a count of its holders: one of them. Cloning takes a count, dropping gives it
-/// back, and the last drops the value and gives its memory back ([`Self::boxed`],
+/// back, and the last drops the value and gives its memory back ([`Self::try_boxed`],
 /// [`Self::placed`]).
 pub struct Shared<T> {
     at: NonNull<Held<T>>,
@@ -115,20 +115,9 @@ unsafe impl<T: Send + Sync> Send for Shared<T> {}
 unsafe impl<T: Send + Sync> Sync for Shared<T> {}
 
 impl<T> Shared<T> {
-    /// `value` in memory of the heap, freed with it.
-    pub fn boxed(value: T) -> Self {
-        let held = Box::new(Held {
-            kept: Kept::new(Self::last_boxed),
-            memory: None,
-            value,
-        });
-        Self {
-            at: NonNull::from(Box::leak(held)),
-        }
-    }
-
-    /// [`Self::boxed`], or `value` handed back when the heap refuses its memory.
-    pub(crate) fn try_boxed(value: T) -> Result<Self, T> {
+    /// `value` in memory of the heap, freed with it, or `value` handed back when the heap
+    /// refuses its memory.
+    pub fn try_boxed(value: T) -> Result<Self, T> {
         let held = Held {
             kept: Kept::new(Self::last_boxed),
             memory: None,
@@ -260,7 +249,7 @@ impl<T> Shared<T> {
     /// The last holder of a value of the heap let go: the value and its memory go.
     ///
     /// # Safety
-    /// `kept` is the count of a `Held<T>` [`Self::boxed`] made, which no holder is left of.
+    /// `kept` is the count of a `Held<T>` [`Self::try_boxed`] made, which no holder is left of.
     unsafe fn last_boxed(kept: NonNull<Kept>) {
         // SAFETY: the caller's: the box was leaked by `boxed` and is taken back once.
         drop(unsafe { Box::from_raw(kept.cast::<Held<T>>().as_ptr()) });
@@ -341,7 +330,9 @@ mod tests {
     #[test]
     fn a_boxed_value_is_dropped_by_its_last_holder() {
         let drops = Cell::new(0);
-        let first = Shared::boxed(Counted(&drops));
+        let Ok(first) = Shared::try_boxed(Counted(&drops)) else {
+            panic!("the heap has room");
+        };
         let second = first.clone();
         assert_eq!(Shared::holders(&second), 2, "the clone took a count");
         drop(first);

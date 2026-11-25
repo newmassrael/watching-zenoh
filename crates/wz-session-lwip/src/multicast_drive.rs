@@ -823,7 +823,7 @@ mod tests {
             .expect("inject peer JOIN");
 
         let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         // The sibling: a task that counts the passes it was polled in.
         let sibling_turns = Rc::new(Cell::new(0usize));

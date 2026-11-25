@@ -357,7 +357,7 @@ mod tests {
             let (_serial, link) = wz_link_lwip::lwip_test_link();
             let links = test_links(Rc::new(link));
             let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
-            let local = CoopLocalSet::new(&runtime);
+            let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
             let OpenedLink {
                 sink: acceptor_sink,

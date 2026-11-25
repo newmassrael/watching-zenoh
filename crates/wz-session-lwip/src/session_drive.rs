@@ -515,7 +515,7 @@ mod tests {
         };
 
         let (runtime, clock, driver, actions) = make_session(7453);
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         // Assertion 5's probe: an ordinary `Send` task on the shared pool,
         // spawned through the unchanged `Runtime` contract.

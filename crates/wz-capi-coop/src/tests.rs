@@ -386,7 +386,7 @@ fn run_router(
     let OpenedLink { sink, pump } = links.open_acceptor(port).expect("bind the router's end");
     let _ = ready.send(());
     let runtime = CoopRuntime::try_new(PosixClock).expect("the heap has room");
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
     let actions =
         new_session_actions(sink, init, CoopTime::new(&runtime)).expect("the heap has room");

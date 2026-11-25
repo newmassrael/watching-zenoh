@@ -340,7 +340,10 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         log(c"wz: FAIL - the heap has no room for the runtime");
         return 2;
     };
-    let local = CoopLocalSet::new(&runtime);
+    let Some(local) = CoopLocalSet::try_new(&runtime) else {
+        log(c"wz: FAIL - the heap has no room for the local set");
+        return 2;
+    };
     let Ok(zid) = SessionZid::new(&net.zid()) else {
         log(c"wz: FAIL - the board's zid is not 1 to 16 bytes");
         return 2;
@@ -511,7 +514,10 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
         log(c"wz: FAIL - the heap has no room for the runtime");
         return 2;
     };
-    let local = CoopLocalSet::new(&runtime);
+    let Some(local) = CoopLocalSet::try_new(&runtime) else {
+        log(c"wz: FAIL - the heap has no room for the local set");
+        return 2;
+    };
     let Ok(zid) = SessionZid::new(&net.zid()) else {
         log(c"wz: FAIL - the board's zid is not 1 to 16 bytes");
         return 2;

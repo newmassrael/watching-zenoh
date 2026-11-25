@@ -169,9 +169,14 @@ impl<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASKS: usi
         let runtime = cell.start(Frozen).expect("the runtime starts once");
         let sink = wz_link_lwip::test_bind::session_rx(&link, sink_port).expect("bind the sink");
         Self {
-            host: SessionHost::new(CoopLocalSet::new(&runtime), sessions, pumps, link.clone()),
+            host: SessionHost::new(
+                CoopLocalSet::try_new(&runtime).expect("the heap has room"),
+                sessions,
+                pumps,
+                link.clone(),
+            ),
             links: LwipLinks::new(link.clone(), sockets),
-            local: CoopLocalSet::new(&runtime),
+            local: CoopLocalSet::try_new(&runtime).expect("the heap has room"),
             runtime,
             link,
             sessions,

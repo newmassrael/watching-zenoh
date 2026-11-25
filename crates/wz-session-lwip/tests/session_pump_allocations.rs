@@ -682,7 +682,7 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
     // RUNTIME: the runtime and the local set that hosts the tasks.
     let ((runtime, local), n) = m.count("runtime", || {
         let runtime = placing::runtime();
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         (runtime, local)
     });
     costs.check("the runtime and its local set", n);

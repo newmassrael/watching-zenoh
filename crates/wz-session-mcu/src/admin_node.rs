@@ -493,7 +493,7 @@ mod tests {
         let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
         let far_links = MemoryLinks::new(net.clone(), [10, 0, 0, 1]);
         let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         // The peer the write will name: a plain acceptor on 7522.
         let OpenedLink {
@@ -639,7 +639,7 @@ mod tests {
         let net = MemoryNetwork::new();
         let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
         let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let accept_runtime = runtime.clone();
         let mut node = AdminNode::new(
             &local,
@@ -716,7 +716,7 @@ mod tests {
         let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
         let host_links = MemoryLinks::new(net.clone(), [10, 0, 0, 1]);
         let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let accept_runtime = runtime.clone();
         let mut node = AdminNode::new(
             &local,
@@ -820,7 +820,7 @@ mod tests {
         }
         let net = MemoryNetwork::new();
         let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let identity = || NodeIdentity {
             zid_hex: String::from("b4b4b4b4"),
             whatami: "peer",

@@ -132,7 +132,7 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
     let links = test_links(Rc::new(link));
     let clock = StepClock::default();
     let runtime = CoopRuntime::try_new(clock.clone()).expect("the heap has room");
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     let pool = InstalledPool::install();
 
     let OpenedLink { sink, pump } = links.open_acceptor(7561).expect("bind acceptor");

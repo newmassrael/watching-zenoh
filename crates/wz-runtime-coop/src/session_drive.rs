@@ -3163,7 +3163,7 @@ mod wake_budget_tests {
     #[test]
     fn a_session_spawned_over_a_router_made_in_place_runs_and_goes_with_its_task() {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
         let actions =
@@ -3224,7 +3224,7 @@ mod wake_budget_tests {
         use wz_session_core::unicast_rx::RouterLend;
         type Router = crate::reassembly_rx::CoopReassembly;
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
         let actions =
@@ -3289,7 +3289,7 @@ mod wake_budget_tests {
                 },
             )
             .expect("the heap has room");
-            let local = CoopLocalSet::new(&runtime);
+            let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
             let actions =
@@ -3355,7 +3355,7 @@ mod wake_budget_tests {
             },
         )
         .expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
         let actions =
@@ -3432,7 +3432,7 @@ mod wake_budget_tests {
         )
         .expect("the heap has room");
         runtime.seal();
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
         let actions =

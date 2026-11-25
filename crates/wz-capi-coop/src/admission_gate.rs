@@ -196,7 +196,7 @@ mod tests {
     fn a_link_gives_the_session_nothing_between_its_handshake_and_its_admission() {
         let net = MemoryNetwork::new();
         let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         let OpenedLink { sink, pump } = MemoryLinks::new(net.clone(), ACCEPTOR)
             .open_acceptor(7447)

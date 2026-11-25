@@ -257,7 +257,9 @@ fn run_heap() -> ! {
     let Some(runtime) = CoopRuntime::try_new(SystickClockRef) else {
         fail("the heap has no room for the runtime");
     };
-    let local = CoopLocalSet::new(&runtime);
+    let Some(local) = CoopLocalSet::try_new(&runtime) else {
+        fail("the heap has no room for the local set");
+    };
     let zid_hex = zid_to_zenoh_hex(&ZID);
     let accept_runtime = runtime.clone();
     // The node's one source: every session it accepts or dials draws its handshake's secrets
