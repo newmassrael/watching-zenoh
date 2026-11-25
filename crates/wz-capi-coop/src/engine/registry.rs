@@ -445,8 +445,9 @@ pub(super) type Registry = RegistryOf<BuildHolders>;
 pub(super) enum Planes {
     /// Every plane.
     All,
-    /// Every plane but the subscribers', whose side of each of the event's records the caller
-    /// took itself, in their order (`RegistryOf::take_subscriber_record`).
+    /// Every plane but the subscribers' and the pending gets' replies, whose side of each of the
+    /// event's records the caller took itself, in their order
+    /// (`RegistryOf::take_subscriber_record`, `RegistryOf::take_reply`).
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     BesideSubscribers,
 }
@@ -1305,6 +1306,25 @@ impl<H: Holders> RegistryOf<H> {
             .mapping_spaces_over(own)
             .from_sender(record.sender());
         face.gets.replies.project_response(response, spaces)
+    }
+
+    /// The reply `response`, a record of a frame of face `face` the copying receive decoded, is
+    /// delivered as (`ReplyRegistry::take_response`), for a read that hands it to the get it
+    /// answers with the session let go of (`replies`), the frame's other planes told the rest of
+    /// it after (`Planes::BesideSubscribers`). A face the session no longer holds takes nothing.
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn take_reply(
+        &mut self,
+        face: HeldFace,
+        response: &wz_session_core::wire::ResponseOwned,
+    ) -> Option<wz_session_core::reply::InboundReply> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.gets.replies.take_response(response, spaces)
     }
 
     /// Hand `reply`, read by [`Self::lend_reply`] or projected by [`Self::project_reply`], to

@@ -225,6 +225,20 @@ pub trait RequesterTables {
         peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
     );
 
+    /// [`Self::dispatch_iteration_event`] for a caller that handed each Response of a frame the
+    /// copying receive decoded to the pending gets itself (`ReplyRegistry::take_response`): the
+    /// pending snapshots are told the frame, the pending gets its `ResponseFinal`s alone.
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event_but_replies<T: Storage, O: Storage>(
+        &mut self,
+        event: IterationEvent<'_, '_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
+    );
+
     /// Whether a snapshot terminated since the last drain, its prune still to run.
     #[cfg(feature = "liveliness-get")]
     fn has_finalized(&self) -> bool;
@@ -255,6 +269,25 @@ impl<R: ReplySink, G: ReplySink, P: Storage> RequesterTables for Requesters<R, G
             .dispatch_iteration_event(event, peer_table);
         #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
         self.replies.dispatch_iteration_event(event, peer_table);
+    }
+
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event_but_replies<T: Storage, O: Storage>(
+        &mut self,
+        event: IterationEvent<'_, '_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
+    ) {
+        #[cfg(feature = "liveliness-get")]
+        self.liveliness_gets
+            .dispatch_iteration_event(event, peer_table);
+        #[cfg(not(feature = "liveliness-get"))]
+        let _ = peer_table;
+        #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
+        self.replies.dispatch_finals_of(event);
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -288,6 +321,18 @@ impl RequesterTables for NoRequesters {
         feature = "liveliness-get"
     ))]
     fn dispatch_iteration_event<T: Storage, O: Storage>(
+        &mut self,
+        _event: IterationEvent<'_, '_>,
+        _peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
+    ) {
+    }
+
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event_but_replies<T: Storage, O: Storage>(
         &mut self,
         _event: IterationEvent<'_, '_>,
         _peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
@@ -1337,13 +1382,15 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         peers
             .subscribers
             .dispatch_iteration_event(&mut self.tables, cx, event);
-        self.planes_beside_subscribers(cx, peers, requesters, event, others);
+        self.planes_beside_subscribers(cx, peers, requesters, event, others, false);
     }
 
-    /// [`Self::dispatch_event_among`] to every plane but the subscribers', for a caller that took
-    /// the subscribers' side of each of the event's records itself, in their order, before this
-    /// (`SubscriberPeer::take_record`): the planes below then resolve through the aliases the
-    /// subscribers' side bound, as they do after it in [`Self::dispatch_event_among`].
+    /// [`Self::dispatch_event_among`] to every plane but the subscribers' and the pending gets'
+    /// replies, for a caller that took the subscribers' side of each of the event's records and
+    /// handed each Response to the pending gets itself, in their order, before this
+    /// (`SubscriberPeer::take_record`, `ReplyRegistry::take_response`): the planes below then
+    /// resolve through the aliases the subscribers' side bound, as they do after it in
+    /// [`Self::dispatch_event_among`], and a `ResponseFinal` ends its get after its replies.
     #[inline(never)]
     pub fn dispatch_event_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
         &mut self,
@@ -1353,11 +1400,12 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         event: IterationEvent<'_, '_>,
         others: &O,
     ) {
-        self.planes_beside_subscribers(cx, peers, requesters, event, others);
+        self.planes_beside_subscribers(cx, peers, requesters, event, others, true);
     }
 
-    /// The planes after the subscribers' side of an event. Inlined into each of the two calls
-    /// above, so each keeps the one frame the planes' temporaries lie in.
+    /// The planes after the subscribers' side of an event, the pending gets told its Responses
+    /// unless `replies_taken`. Inlined into each of the two calls above, so each keeps the one
+    /// frame the planes' temporaries lie in.
     #[inline(always)]
     fn planes_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
         &mut self,
@@ -1366,6 +1414,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
+        replies_taken: bool,
     ) {
         // A peer's query is resolved through both id spaces while the queryables are asked, so
         // the tables lend the two apart.
@@ -1517,14 +1566,18 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "codec-response-final",
             feature = "liveliness-get"
         ))]
-        requesters.dispatch_iteration_event(event, peer_table);
+        if replies_taken {
+            requesters.dispatch_iteration_event_but_replies(event, peer_table);
+        } else {
+            requesters.dispatch_iteration_event(event, peer_table);
+        }
         // Consumed only by the arms above, which a build with none of them lacks.
         #[cfg(not(any(
             feature = "codec-response",
             feature = "codec-response-final",
             feature = "liveliness-get"
         )))]
-        let _ = &requesters;
+        let _ = (&requesters, replies_taken);
         let _ = (&peers, &cx, event, others);
     }
 

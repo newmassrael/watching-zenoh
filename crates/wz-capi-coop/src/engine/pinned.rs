@@ -76,9 +76,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Take the subscribers' side of `messages`, the records of a frame of face `face` the copying
     /// receive decoded, one record at a time in their order: each Push's sample is handed to each
-    /// subscriber its key reaches, one call at a time with the session let go of, and any other
-    /// record is taken under the lock as the frame's dispatch takes it. What the frame's other
-    /// planes take follows (`Planes::BesideSubscribers`). A session closed meanwhile takes no
+    /// subscriber its key reaches, one call at a time with the session let go of, each Response's
+    /// reply is handed to the get it answers in the same way (`replies`), and any other record is
+    /// taken under the lock as the frame's dispatch takes it. What the frame's other planes take
+    /// follows (`Planes::BesideSubscribers`). A session closed meanwhile takes no
     /// record after the one whose callback closed it.
     pub(super) fn hand_copied_records(
         &self,
@@ -91,6 +92,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let Some(mut held) = self.live() else {
                 return;
             };
+            // A peer's reply is the get's it answers, handed to its callback as a lent one is
+            // (`replies`); the subscribers' side has nothing to take of it.
+            #[cfg(feature = "query")]
+            if let wz_session_core::network_message::NetworkMessage::Response(response) = message {
+                if let Some(reply) = held.0.session.registry.take_reply(face, response) {
+                    self.hand_reply(held, face, &reply);
+                }
+                continue;
+            }
             let Some(owned) =
                 held.0
                     .session

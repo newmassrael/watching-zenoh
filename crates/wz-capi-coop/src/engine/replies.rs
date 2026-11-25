@@ -53,6 +53,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 None => return,
             },
         };
+        self.hand_reply(held, face, reply);
+    }
+
+    /// Hand `reply`, read under `held` for face `face`, to the get it answers: the pending gets
+    /// are handed it under the lock with the get plane capturing the leg it reaches, and the leg's
+    /// callback is called once the lock is let go of, its count given back after.
+    pub(super) fn hand_reply(
+        &self,
+        mut held: LiveCore<'_, L, C>,
+        face: HeldFace,
+        reply: &dyn ReplyView,
+    ) {
         self.gets.capture();
         held.0.session.registry.fire_reply(face, reply);
         let reached = self.gets.captured();
