@@ -1277,4 +1277,71 @@ mod tests {
             );
         }
     }
+
+    /// The arena a session that listens opens, row by row: its tables' rows and the ABI's places
+    /// as the open lays them out for a listener (and for a dialer) under the build's limits, each
+    /// row's limit, count and the bytes of one, and the bytes a real open of a listener reserved.
+    /// What that open reserved past the listener's rows is the engine's own holds: its links'
+    /// cells, the faces' rooms, the runtime's tables, the engine's place, its planes and the
+    /// admission. Run with `cargo test -p wz-capi-pico --lib
+    /// the_arena_a_listening_session_opens_by_row_measured -- --ignored --nocapture` under the
+    /// features and limits of the build to read.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn the_arena_a_listening_session_opens_by_row_measured() {
+        use crate::session::{
+            engine_ref, listening_on_loopback, pico_unicast_batch, session_handle, z_session_drop,
+            z_session_loan, z_session_move, SessionPlace,
+        };
+        use wz_capi_coop::arena::{admitted_faces, admitted_handshakes, ArenaPlan, PlanShape};
+        use wz_session_core::limits::SessionLimits;
+
+        let print = |name: &str, plan: &ArenaPlan| {
+            std::println!("arena-rows: {name}");
+            for row in plan.rows() {
+                std::println!(
+                    "arena-rows:   {:<36} {:<52} {:>6} x {:>7} = {:>9}",
+                    row.part(),
+                    row.basis(),
+                    row.count,
+                    row.entry_bytes,
+                    row.bytes().unwrap_or(usize::MAX),
+                );
+            }
+            std::println!(
+                "arena-rows:   reserved {}",
+                plan.reserved_bytes().unwrap_or(usize::MAX)
+            );
+        };
+        let limits = SessionLimits::defaults();
+        let batch = pico_unicast_batch(&limits);
+        let held = held_places(SessionPlace::LAYOUT);
+        let listener = PlanShape {
+            listens: 1,
+            max_faces: admitted_faces(&limits).expect("the build admits its own faces"),
+            accept_pending: admitted_handshakes(&limits).expect("the build admits its handshakes"),
+            ..PlanShape::dial_only(0, batch)
+        };
+        let mut listens = ArenaPlan::planned(listener, &limits).expect("a listener's rows lay out");
+        listens.holding(&held).expect("the places lay out");
+        print("a listener's tables and places", &listens);
+        let mut dials =
+            ArenaPlan::planned(PlanShape::dial_only(1, batch), &limits).expect("a dial lays out");
+        dials.holding(&held).expect("the places lay out");
+        print("a dialer's tables and places", &dials);
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let opened = engine_ref(handle.expect("an open session has its handle")).arena_bytes();
+        let rows = listens.reserved_bytes().unwrap_or(usize::MAX);
+        std::println!(
+            "arena-rows: a listener's open reserved {opened}, its rows {rows}, the engine's own \
+             holds {}",
+            opened.saturating_sub(rows)
+        );
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
 }

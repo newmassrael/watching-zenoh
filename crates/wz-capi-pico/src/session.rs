@@ -175,7 +175,7 @@ pub(crate) fn group_endpoint<'a>(
 /// The batch size a unicast session of this ABI advertises in its InitSyn, on either engine:
 /// pico's `BATCH_UNICAST_SIZE` as the open's snapshot `limits` holds it
 /// (`PICO_UNICAST_BATCH_BYTES`).
-const fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
+pub(crate) const fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
     pico_batch(limits.pico_unicast_batch_bytes())
 }
 
