@@ -21,6 +21,8 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ffi::c_void;
+use core::ptr::NonNull;
 
 use crate::link::{LinkKind, LinkSubject};
 #[cfg(feature = "session-unicast")]
@@ -701,7 +703,96 @@ pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>
 /// came up or went, its links in order, or the one row of a face with none, the face's facts in
 /// each. The rows of one face are told one after another. A row holds everything in itself, so
 /// an engine that writes its rows in place tells them with nothing allocated.
-pub type FaceRowSink = Arc<dyn Fn(FaceEventKind, &FaceLinkRow) + Send + Sync>;
+///
+/// A count of the watcher, copied out of a registry's lock before it is told, as a
+/// [`FaceEventSink`] is. The watcher lies in a box of its own ([`Self::shared`]) or where its
+/// maker put it, counted by its maker's functions ([`Self::counted`]): one in a place its session
+/// lent takes nothing of the heap.
+#[derive(Clone)]
+pub struct FaceRowSink(RowSinkForm);
+
+/// The count a [`FaceRowSink`] holds.
+#[derive(Clone)]
+enum RowSinkForm {
+    Shared(Arc<dyn Fn(FaceEventKind, &FaceLinkRow) + Send + Sync>),
+    Counted(CountedRowSink),
+}
+
+/// A count of a watcher whose type is named only by the functions that tell it a row and take
+/// and let go of a count of it.
+struct CountedRowSink {
+    raw: NonNull<c_void>,
+    tell: unsafe fn(*const c_void, FaceEventKind, &FaceLinkRow),
+    retain: unsafe fn(*const c_void),
+    release: unsafe fn(*mut c_void),
+}
+
+// SAFETY: made only by `FaceRowSink::counted`, whose caller vouches that the watcher and its counts
+// are reached from any thread.
+unsafe impl Send for CountedRowSink {}
+// SAFETY: as `Send`.
+unsafe impl Sync for CountedRowSink {}
+
+impl Clone for CountedRowSink {
+    fn clone(&self) -> Self {
+        // SAFETY: this count holds the watcher, so another may be taken from it (`counted`).
+        unsafe { (self.retain)(self.raw.as_ptr().cast_const()) };
+        Self {
+            raw: self.raw,
+            tell: self.tell,
+            retain: self.retain,
+            release: self.release,
+        }
+    }
+}
+
+impl Drop for CountedRowSink {
+    fn drop(&mut self) {
+        // SAFETY: this count was given to the sink (`counted`) and is let go of once, here.
+        unsafe { (self.release)(self.raw.as_ptr()) };
+    }
+}
+
+impl FaceRowSink {
+    /// A watcher in a box of its own, counted by its `Arc`.
+    pub fn shared(sink: Arc<dyn Fn(FaceEventKind, &FaceLinkRow) + Send + Sync>) -> Self {
+        Self(RowSinkForm::Shared(sink))
+    }
+
+    /// The watcher at `raw`, of which this sink is one count: `tell` tells it a row, `retain`
+    /// takes one more count of it, and `release` lets one go, the last letting the watcher go as
+    /// its maker said.
+    ///
+    /// # Safety
+    /// `raw` is a count of a watcher that may be reached from any thread, given up to the sink;
+    /// the watcher stands while a count of it is held; each function may be called with `raw`
+    /// from any thread while a count is held, `release` once for each count.
+    pub unsafe fn counted(
+        raw: NonNull<c_void>,
+        tell: unsafe fn(*const c_void, FaceEventKind, &FaceLinkRow),
+        retain: unsafe fn(*const c_void),
+        release: unsafe fn(*mut c_void),
+    ) -> Self {
+        Self(RowSinkForm::Counted(CountedRowSink {
+            raw,
+            tell,
+            retain,
+            release,
+        }))
+    }
+
+    /// Tell the watcher a row of a face that came up or went.
+    pub fn tell(&self, kind: FaceEventKind, row: &FaceLinkRow) {
+        match &self.0 {
+            RowSinkForm::Shared(sink) => sink(kind, row),
+            // SAFETY: this sink is a count of the watcher, which stands while it is held
+            // (`counted`).
+            RowSinkForm::Counted(counted) => unsafe {
+                (counted.tell)(counted.raw.as_ptr().cast_const(), kind, row)
+            },
+        }
+    }
+}
 
 /// The one link of a group member's transport, as the host that joined the group labels it:
 /// this node's end on the group (`src`), the member's end and the kind of link the group is

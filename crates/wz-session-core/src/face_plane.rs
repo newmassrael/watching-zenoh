@@ -123,7 +123,7 @@ impl<K: LockFamily> FacePlane<K> {
         let last = K::with(&self.watchers, |watchers| watchers.last);
         let mut after = 0;
         while let Some((id, sink)) = self.sink_after(after, last) {
-            sink(kind, &row);
+            sink.tell(kind, &row);
             after = id;
         }
         true
@@ -136,7 +136,7 @@ impl<K: LockFamily> FacePlane<K> {
                 .sinks
                 .iter()
                 .find(|(id, _)| *id > after && *id <= last)
-                .map(|(id, sink)| (*id, Arc::clone(sink)))
+                .map(|(id, sink)| (*id, sink.clone()))
         })
     }
 }
@@ -231,10 +231,17 @@ mod tests {
         }
     }
 
+    /// A watcher in a box of its own, told through `tell`.
+    fn shared_sink(
+        tell: impl Fn(FaceEventKind, &FaceLinkRow) + Send + Sync + 'static,
+    ) -> FaceRowSink {
+        FaceRowSink::shared(Arc::new(tell))
+    }
+
     /// A sink that counts the rows it is told.
     fn counting(told: &Arc<AtomicUsize>) -> FaceRowSink {
         let count = Arc::clone(told);
-        Arc::new(move |_, _| {
+        shared_sink(move |_, _| {
             count.fetch_add(1, Ordering::Relaxed);
         })
     }
@@ -330,17 +337,17 @@ mod tests {
         let told = Arc::new(Mutex::new(Vec::new()));
         let second = Arc::new(AtomicU64::new(0));
         let (into, by, stop) = (Arc::clone(&told), Arc::clone(&plane), Arc::clone(&second));
-        plane.watch(Arc::new(move |_, _| {
+        plane.watch(shared_sink(move |_, _| {
             into.lock().unwrap().push(1);
             by.unwatch(stop.load(Ordering::Relaxed));
             let into = Arc::clone(&into);
-            by.watch(Arc::new(move |_, _| into.lock().unwrap().push(4)));
+            by.watch(shared_sink(move |_, _| into.lock().unwrap().push(4)));
         }));
         let into = Arc::clone(&told);
-        let id = plane.watch(Arc::new(move |_, _| into.lock().unwrap().push(2)));
+        let id = plane.watch(shared_sink(move |_, _| into.lock().unwrap().push(2)));
         second.store(id, Ordering::Relaxed);
         let into = Arc::clone(&told);
-        plane.watch(Arc::new(move |_, _| into.lock().unwrap().push(3)));
+        plane.watch(shared_sink(move |_, _| into.lock().unwrap().push(3)));
         plane.happened(FaceEventKind::Up, row(1));
         assert!(plane.hand_out_next());
         assert_eq!(*told.lock().unwrap(), [1, 3]);
@@ -383,7 +390,7 @@ mod tests {
         let room = reserved();
         let told = Arc::new(Mutex::new(Vec::new()));
         let into = Arc::clone(&told);
-        plane.watch(Arc::new(move |_, row: &FaceLinkRow| {
+        plane.watch(shared_sink(move |_, row: &FaceLinkRow| {
             into.lock().unwrap().push((row.zid[0], row.lost_after));
         }));
         for zid in 1..=5 {
@@ -424,5 +431,71 @@ mod tests {
         assert!(plane.hand_out_next());
         assert_eq!(told.load(Ordering::Relaxed), 1);
         assert!(!plane.hand_out_next());
+    }
+
+    /// A watcher counted by its maker's functions is told through the copy the plane takes out of
+    /// its lock, which is let go of after the row, and the plane's own count goes with the watch.
+    /// Turned red by a copy that takes no count, or a sink dropped without letting its count go.
+    #[test]
+    fn a_counted_watcher_is_told_through_its_counts_and_let_go_with_the_watch() {
+        /// A watcher with its own counts, and the rows it was told.
+        struct Watcher {
+            counts: AtomicUsize,
+            told: AtomicUsize,
+        }
+        /// # Safety
+        /// `raw` is a `Watcher` that outlives the call.
+        unsafe fn tell(raw: *const core::ffi::c_void, _: FaceEventKind, _: &FaceLinkRow) {
+            // SAFETY: the caller's.
+            unsafe { &*raw.cast::<Watcher>() }
+                .told
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        /// # Safety
+        /// As `tell`.
+        unsafe fn retain(raw: *const core::ffi::c_void) {
+            // SAFETY: the caller's.
+            unsafe { &*raw.cast::<Watcher>() }
+                .counts
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        /// # Safety
+        /// As `tell`.
+        unsafe fn release(raw: *mut core::ffi::c_void) {
+            // SAFETY: the caller's.
+            unsafe { &*raw.cast::<Watcher>() }
+                .counts
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+        let watcher = Watcher {
+            counts: AtomicUsize::new(1),
+            told: AtomicUsize::new(0),
+        };
+        // SAFETY: the watcher is atomics alone and outlives the plane, made after it and so
+        // dropped before it; the sink is its one count.
+        let sink = unsafe {
+            FaceRowSink::counted(
+                core::ptr::NonNull::from(&watcher).cast(),
+                tell,
+                retain,
+                release,
+            )
+        };
+        let plane = FacePlane::<StdLocks>::default();
+        let id = plane.watch(sink);
+        plane.happened(FaceEventKind::Up, row(1));
+        assert!(plane.hand_out_next());
+        assert_eq!(watcher.told.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            watcher.counts.load(Ordering::Relaxed),
+            1,
+            "the copy told the row was let go of"
+        );
+        assert!(plane.unwatch(id));
+        assert_eq!(
+            watcher.counts.load(Ordering::Relaxed),
+            0,
+            "the watch's count went with it"
+        );
     }
 }
