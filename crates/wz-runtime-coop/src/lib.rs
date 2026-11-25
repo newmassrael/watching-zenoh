@@ -248,6 +248,11 @@ pub mod locator_text;
 #[cfg(feature = "serial")]
 pub mod serial_link;
 
+/// The session's link over a WebSocket: the stream link under RFC 6455's framing
+/// ([`ws_link::WsFraming`]).
+#[cfg(feature = "ws")]
+pub mod ws_link;
+
 /// The session's link over a pair of named FIFOs on this host: the FIFOs a platform opens
 /// ([`unixpipe_link::FifoOpen`], [`unixpipe_link::Fifo`]) under the stream link's framing, and
 /// the stack that opens it beside another's ([`unixpipe_link::UnixpipeLinks`]).

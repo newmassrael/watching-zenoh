@@ -62,7 +62,7 @@ use wz_session_core::sample::EntityGlobalId;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::serde_codec::z_deserialize;
 use wz_session_core::session_zid::SessionZid;
-use wz_session_core::sink::SampleView;
+use wz_session_core::sink::SampleRef;
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
@@ -376,7 +376,7 @@ unsafe fn end_leg<E: SessionEngine + ?Sized>(context: *mut c_void) {
 /// subscriber, which the engine lets go of with the callback: no memory is taken for it.
 fn own_sink<E: SessionEngine + ?Sized>(
     shared: &Strong<Shared<E>>,
-    call: unsafe fn(context: *mut c_void, sample: &dyn SampleView),
+    call: unsafe fn(context: *mut c_void, sample: &SampleRef<'_>),
 ) -> SubscriberSink {
     let context = Strong::into_raw(shared.clone());
     // SAFETY: the context is a count of the subscriber, let go of once by `let_go` after the last
@@ -407,7 +407,7 @@ unsafe fn let_go<E: SessionEngine + ?Sized>(context: *mut c_void) {
 ///
 /// # Safety
 /// As [`held`]'s.
-unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &dyn SampleView) {
+unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &SampleRef<'_>) {
     // SAFETY: the caller's.
     let shared = unsafe { held::<E>(context) };
     if shared.is_closing() {
@@ -427,18 +427,18 @@ unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &dyn Sa
 ///
 /// # Safety
 /// As [`held`]'s.
-unsafe fn on_heartbeat<E: SessionEngine + ?Sized>(context: *mut c_void, view: &dyn SampleView) {
+unsafe fn on_heartbeat<E: SessionEngine + ?Sized>(context: *mut c_void, view: &SampleRef<'_>) {
     // SAFETY: the caller's.
     let shared = unsafe { held::<E>(context) };
-    if shared.is_closing() || view.kind() != SampleKind::Put {
+    if shared.is_closing() || view.kind != SampleKind::Put {
         return;
     }
     // Sequenced only: a heartbeat's payload IS a sequence number.
-    let Some(AdvPublisherSource::Sequenced { zid, eid }) = parse_heartbeat_source(view.keyexpr())
+    let Some(AdvPublisherSource::Sequenced { zid, eid }) = parse_heartbeat_source(view.keyexpr)
     else {
         return;
     };
-    let Ok(last_sn) = z_deserialize::<u32>(view.payload()) else {
+    let Ok(last_sn) = z_deserialize::<u32>(view.payload) else {
         return;
     };
     let now = shared.now_ms();

@@ -392,6 +392,9 @@ pub mod registry_error;
 // R311gh).
 pub mod sink;
 
+#[cfg(feature = "alloc")]
+mod once_built;
+
 // R311gh — the switchboard: a zenoh-keyexpr -> SCXML-domain-event inbound
 // adapter (`EventInjector` DIP port over the SCE engine's
 // `raise_external_by_name` ingress + the AP dynamic `SwitchboardRegistry`).
@@ -683,6 +686,12 @@ pub mod serial_link;
 // charged every consumer a mandatory `tokio` to reach it).
 #[cfg(feature = "transport-link-raweth")]
 pub mod raweth_link;
+
+// The RFC 6455 pieces of a WebSocket link with no heap and no I/O: the opening handshake, its
+// accept value, the frame header, the mask and the mask keys. The engine with no heap reads and
+// writes its `ws/` links with these. Gated on `transport-link-ws`.
+#[cfg(feature = "transport-link-ws")]
+pub mod ws_link;
 
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_body` decoder). Pure no_std +

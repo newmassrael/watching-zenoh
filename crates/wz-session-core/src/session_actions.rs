@@ -518,24 +518,36 @@ struct LentFrameHead {
     mtu: usize,
 }
 
-/// What one lend came to (`SessionLinkActions::send_lent`): the frame left as
-/// the slot, the link lent no slot, or the path refused the slot it was lent
+/// What one lend came to (`SessionLinkActions::send_lent_on`): the message left
+/// as the slot, the link lent no slot, or the writer refused the slot it was lent
 /// for a reason of its own.
-#[cfg(all(
-    feature = "transport-tx-lend",
-    any(feature = "transport-lowlatency", feature = "transport-fragmentation"),
-    any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    )
+#[cfg(any(
+    all(
+        feature = "transport-tx-lend",
+        any(feature = "transport-lowlatency", feature = "transport-fragmentation"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ),
+    all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+        )
+    ),
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lend<E> {
@@ -545,6 +557,123 @@ enum Lend<E> {
     NoSlot,
     /// A slot was lent and given back unsent, for this reason.
     Refused(E),
+}
+
+/// What writes one message into the slot a lend is given (`SessionLinkActions::send_lent_on`),
+/// handed over as a trait object so the lend is one body whatever the message. A trait of its
+/// own and not `dyn Fn`, as `FrameSn` is not, so the table holds no second copy of the
+/// writer's body.
+#[cfg(any(
+    all(
+        feature = "transport-tx-lend",
+        any(feature = "transport-lowlatency", feature = "transport-fragmentation"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ),
+    all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+        )
+    ),
+))]
+trait LentWrite {
+    /// Write the message into `buf`, or refuse it.
+    fn write_lent(
+        &self,
+        buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    ) -> Result<(), sce_forge_runtime::codec::CodecError>;
+}
+
+#[cfg(any(
+    all(
+        feature = "transport-tx-lend",
+        any(feature = "transport-lowlatency", feature = "transport-fragmentation"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ),
+    all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+        )
+    ),
+))]
+impl<F> LentWrite for F
+where
+    F: Fn(&mut crate::tx_buf::EncodeBuf<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+{
+    fn write_lent(
+        &self,
+        buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+        self(buf)
+    }
+}
+
+/// `write` as a [`LentWrite`]: a closure handed to a lend is written here, where its argument's
+/// type comes from the bound, and not where a `dyn LentWrite` is expected, which names none.
+#[cfg(any(
+    all(
+        feature = "transport-tx-lend",
+        any(feature = "transport-lowlatency", feature = "transport-fragmentation"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ),
+    all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+        )
+    ),
+))]
+fn lent_write<F>(write: F) -> F
+where
+    F: Fn(&mut crate::tx_buf::EncodeBuf<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+{
+    write
 }
 
 /// What putting one whole frame into a slot its link lends came to
@@ -1101,7 +1230,8 @@ const fn holds_answer(role: ExtChainRole) -> bool {
 
 /// The message one lend-only control send writes into the slot its link lends
 /// (`SessionLinkActions::send_control_lent`). The message is named and not handed over as a
-/// writer, so the lend, the two refusals and the emit are one body for every control send.
+/// writer, so the write is one body for every control send. `Copy`: the writer the lend calls
+/// is a `Fn`, which reads its message without taking it.
 #[cfg(all(
     feature = "tx-lend-only",
     any(
@@ -1112,6 +1242,7 @@ const fn holds_answer(role: ExtChainRole) -> bool {
         feature = "codec-close",
     )
 ))]
+#[derive(Clone, Copy)]
 enum ControlBody<
     // Only the Init borrows (the cookie an InitAck carries), and a build without it has no use
     // for a lifetime.
@@ -3628,7 +3759,7 @@ enum LentDeclaration<'a> {
     },
     #[cfg(feature = "declare-keyexpr")]
     Keyexpr {
-        mapping_id: crate::wire_id::ExprId,
+        mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
         suffix: &'a str,
     },
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
@@ -6163,11 +6294,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
-    /// The lend for a path that writes its own frame (a lean frame, a fragment): ask the link
-    /// `send_wire` would route to for a slot, let `fill` write the frame into it, and send the
-    /// slot through [`Self::emit_on_link`]. A `Frame`'s lend is [`Self::lend_frame`].
+    /// The lend for a path that writes its own frame (a lean frame, a fragment): the link
+    /// `send_wire` would route to lends the slot ([`Self::send_lent_on`]). A `Frame`'s lend is
+    /// [`Self::lend_frame`].
     ///
-    /// `fill` answers whether the slot now holds a frame to send. `Err(why)`
+    /// `write` answers whether the slot now holds a frame to send. `Err(why)`
     /// abandons the slot (the lease's drop gives it back) and the caller encodes
     /// on the heap, so the answer is also how a path says "this frame does not
     /// fit, or must be cut up", in its own words ([`Lend::Refused`]); a link
@@ -6189,37 +6320,83 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         )
     ))]
-    fn send_lent<F, E>(
+    fn send_lent(
         &self,
         reliability: Reliability,
         priority: Priority,
         want: usize,
-        fill: F,
-    ) -> Lend<E>
-    where
-        F: FnOnce(&mut crate::tx_lease::TxLease<'_, R::Driver>) -> Result<(), E>,
-    {
+        write: &dyn LentWrite,
+    ) -> Lend<sce_forge_runtime::codec::CodecError> {
         self.with_conduit_link(reliability, priority, |link| {
-            // Lent from where `acquire` wrote it, as `lend_frame` lends its slot.
-            let mut lent = self.lease_on(link, want, priority);
-            let Some(slot) = lent.as_mut() else {
-                return Lend::NoSlot;
-            };
-            if let Err(why) = fill(&mut *slot) {
-                return Lend::Refused(why);
-            }
-            self.emit_on_link(link, &[], Some(slot), reliability, priority, false);
-            Lend::Sent
+            self.send_lent_on(link, reliability, priority, want, write)
         })
     }
 
-    /// ARCHITECTURE section 9.1 -- a slot `link` lends for one frame of this session, the lend of
-    /// every frame the session encodes into a slot. A conduit keeps the slot of its open batch
-    /// across the calls of a window, so a link may find every slot held by batches that could
-    /// leave now while another conduit has a frame to open: those batches are sent first, out of
-    /// their band's turn (each conduit's frames keep their own SN order), and the slot that frees
-    /// is lent. `None` only when the link has none even then, which a link that lends
-    /// [`crate::link::SESSION_TX_SLOTS`] of its own never answers.
+    /// The lend of one transport message written whole into a slot `link` lends, a frame the
+    /// batch window never keeps open (a lean frame, a fragment) or a handshake or close message:
+    /// the slot asked for ([`Self::lease_on`]), `write` putting the message into it, and the
+    /// slot sent through [`Self::emit_on_link`]. A link that lent no slot is [`Lend::NoSlot`]; a
+    /// message `write` refused, a slot too short for it among the reasons, is [`Lend::Refused`],
+    /// and the lease's drop gives the slot back unsent.
+    ///
+    /// Out of line, with the message's writer a trait object: every such send is this one body,
+    /// and none carries the lend, the refusal and the emit again.
+    #[cfg(any(
+        all(
+            feature = "transport-tx-lend",
+            any(feature = "transport-lowlatency", feature = "transport-fragmentation"),
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            )
+        ),
+        all(
+            feature = "tx-lend-only",
+            any(
+                all(
+                    any(feature = "codec-init-body", feature = "codec-open-body"),
+                    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+                ),
+                feature = "codec-close",
+            )
+        ),
+    ))]
+    #[inline(never)]
+    fn send_lent_on(
+        &self,
+        link: &LinkState<R>,
+        reliability: Reliability,
+        priority: Priority,
+        want: usize,
+        write: &dyn LentWrite,
+    ) -> Lend<sce_forge_runtime::codec::CodecError> {
+        // Lent from where `acquire` wrote it, as `lend_frame` lends its slot.
+        let mut lent = self.lease_on(link, want, priority);
+        let Some(slot) = lent.as_mut() else {
+            return Lend::NoSlot;
+        };
+        if let Err(why) = write.write_lent(&mut *slot) {
+            return Lend::Refused(why);
+        }
+        self.emit_on_link(link, &[], Some(slot), reliability, priority, false);
+        Lend::Sent
+    }
+
+    /// ARCHITECTURE section 9.1 -- a slot `link` lends for one frame or control message of this
+    /// session, the lend of every message the session encodes into a slot. A conduit keeps the
+    /// slot of its open batch across the calls of a window, so a link may find every slot held by
+    /// batches that could leave now while another conduit has a frame to open: those batches are
+    /// sent first, out of their band's turn (each conduit's frames keep their own SN order), and
+    /// the slot that frees is lent. `None` only when the link has none even then, which a link
+    /// that lends [`crate::link::SESSION_TX_SLOTS`] of its own never answers.
     #[cfg(all(
         feature = "transport-tx-lend",
         any(
@@ -6233,6 +6410,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-token",
             feature = "declare-interest",
             feature = "liveliness-token",
+            all(
+                feature = "tx-lend-only",
+                any(
+                    all(
+                        any(feature = "codec-init-body", feature = "codec-open-body"),
+                        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+                    ),
+                    feature = "codec-close",
+                )
+            ),
         )
     ))]
     fn lease_on<'l>(
@@ -6246,8 +6433,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return Some(slot);
         }
         // With one conduit the only batch a link can hold open is the caller's, whose lock it
-        // holds: there is nothing else to send.
-        #[cfg(feature = "transport-batching")]
+        // holds: there is nothing else to send. A build that sends no data opens no batch.
+        #[cfg(all(
+            feature = "transport-batching",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            )
+        ))]
         if TX_CONDUITS > 1 && self.send_open_lent_batches(link) {
             return crate::tx_lease::TxLease::acquire(driver, want, priority);
         }
@@ -6384,7 +6585,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         encode_body: &P,
     ) -> bool
     where
-        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+            + ?Sized,
     {
         use crate::tx_buf::TxBuf;
         let Some(open) = batch.stage.lent.take() else {
@@ -7310,7 +7512,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// The link is this binding's own, as `send_wire_this_link`'s is and
     /// `send_wire`'s is for a session that does not aggregate links, which the
-    /// lend-only profile is (`transport-multilink` is not covered by it).
+    /// lend-only profile is (`transport-multilink` is not covered by it). The
+    /// lend is the one a lean frame or a fragment takes ([`Self::send_lent_on`]),
+    /// asked for `want` bytes.
     #[cfg(all(
         feature = "tx-lend-only",
         any(
@@ -7322,7 +7526,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     ))]
     // Out of line: every lend-only control send reaches it, and each send that inlined it carried
-    // the lend, the refusals and the emit again.
+    // the writer and the refusal again.
     #[inline(never)]
     fn send_control_lent(
         &self,
@@ -7330,25 +7534,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         want: usize,
         body: ControlBody,
     ) -> Result<(), crate::link::LinkDropCause> {
-        let link = &self.link;
-        // Lent from where `acquire` wrote it, as `lend_frame` lends its slot.
-        let mut lent = crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority);
-        let Some(slot) = lent.as_mut() else {
-            return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
-        };
-        if self.write_control(&mut *slot, body).is_err() {
-            // Dropping the lease gives the slot back unsent.
-            return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
+        let write = lent_write(|buf| self.write_control(buf, body));
+        match self.send_lent_on(&self.link, Reliability::Reliable, priority, want, &write) {
+            Lend::Sent => Ok(()),
+            Lend::NoSlot | Lend::Refused(_) => {
+                Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot))
+            }
         }
-        self.emit_on_link(
-            link,
-            &[],
-            Some(slot),
-            Reliability::Reliable,
-            priority,
-            false,
-        );
-        Ok(())
     }
 
     /// The message `body` names, written into `buf` ([`Self::send_control_lent`]'s slot). An
@@ -7827,7 +8019,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
         let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes(peer);
         let mut params = self.params.clone();
-        params.seq_num_res = seq_num_res;
+        params.seq_num_res = crate::policy::SnResolution::from_wire_code(seq_num_res);
         params.req_id_res = req_id_res;
         params.batch_size = batch_size;
         params
@@ -7842,7 +8034,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let params = &self.params;
         match peer {
             Some(p) => (
-                params.seq_num_res.min(p.seq_num_res),
+                params.seq_num_res.wire_code().min(p.seq_num_res),
                 params.req_id_res.min(p.req_id_res),
                 // R311kl — the min(local, peer) reduction on batch_size is
                 // core transport (pico runs it outside every
@@ -7862,7 +8054,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.own_batch_advertisement().min(p.batch_size),
             ),
             None => (
-                params.seq_num_res,
+                params.seq_num_res.wire_code(),
                 params.req_id_res,
                 self.own_batch_advertisement(),
             ),
@@ -7891,7 +8083,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.init_ack_sizes(peer)
         } else {
             (
-                self.params.seq_num_res,
+                self.params.seq_num_res.wire_code(),
                 self.params.req_id_res,
                 self.own_batch_advertisement(),
             )
@@ -7901,6 +8093,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             req_id_res,
             batch_size,
         }
+    }
+
+    /// The width of sequence numbers this session offers in its Init, as its parameters state it:
+    /// what a host that builds the session in place holds to the build's domain
+    /// ([`crate::sn::sn_resolution_admitted`]) before the session may run.
+    pub fn offered_sn_resolution(&self) -> crate::policy::SnResolution {
+        self.params.seq_num_res
     }
 
     /// R311kb — the session's negotiated SN ring mask
@@ -7927,7 +8126,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `peer` as read by the caller.
     pub(crate) fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> u64 {
         crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
-            self.params.seq_num_res,
+            self.params.seq_num_res.wire_code(),
             peer,
         ))
     }
@@ -7999,7 +8198,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn settle_tx_limits(&self) {
         let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
-        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
+        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res.wire_code(), peer);
         for class in [Reliability::Reliable, Reliability::BestEffort] {
             let budget = self
                 .batch_mtu_for(peer, class)
@@ -8795,7 +8994,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let (peer_whatami, sn_res, batch_size, negotiated, multilink) =
             self.accept_cookie_members();
         crate::accept_cookie::encode_accept_cookie_into(
-            &self.params.cookie_signing_key,
+            self.params.cookie_signing_key.signing_key(),
             &crate::accept_cookie::AcceptCookieView {
                 peer_zid,
                 peer_whatami,
@@ -9033,7 +9232,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             None => return false,
         };
         let carried = match crate::accept_cookie::decode_accept_cookie(
-            &self.params.cookie_signing_key,
+            self.params.cookie_signing_key.signing_key(),
             &echoed,
         ) {
             Ok(c) => c,
@@ -12167,7 +12366,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch_size: Option<u16>,
     ) -> bool {
         !crate::peer_init_caps::init_ack_exceeds_advertisement(
-            self.params.seq_num_res,
+            self.params.seq_num_res.wire_code(),
             self.params.req_id_res,
             // R311kj — compare against the EFFECTIVE advertisement,
             // i.e. exactly the value the InitSyn put on the wire (0 =
@@ -12606,10 +12805,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // A lend-only build asks for the whole batch budget, as each of its frames does.
                 #[cfg(feature = "tx-lend-only")]
                 let want = self.negotiated_tx_limits_for(wire_reliability).0;
-                let lent = self.send_lent(wire_reliability, priority, want, |slot| {
+                let write = lent_write(|slot| {
                     let mut sink = crate::tx_buf::TxSink::new(slot);
                     encode_body(&mut sink)
                 });
+                let lent = self.send_lent(wire_reliability, priority, want, &write);
                 if lent == Lend::Sent {
                     count_pushed();
                     return Ok(Dispatched::Sent);
@@ -12848,6 +13048,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let mut sink = crate::tx_buf::TxSink::new(buf);
                     encode_body(&mut sink)
                 };
+                // Fixed-memory step S4 — under `tx-lend-only` no frame is ever staged on
+                // the heap: the message joins the frame open in a slot the conduit's link
+                // lent, or opens one there, in one call, or is refused and counted. A
+                // message past the budget leaves as a chain of lent fragments (with
+                // fragmentation) or is refused as oversize (without it).
+                #[cfg(feature = "tx-lend-only")]
+                return self.open_frame_lent(batch, true, priority, reliable, &admit, encode_body);
                 // R311y835 — every arm below works on THIS message's own
                 // priority conduit (R2920: the one locked above); a message
                 // never sees, and never flushes, another priority's staged frame.
@@ -12859,8 +13066,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // the stage and returns).
                 // ARCHITECTURE section 9.1 -- the conduit index the frame's slot
                 // is recorded under on the link that lent it.
-                #[cfg(feature = "transport-tx-lend")]
+                #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
                 let idx = TxConduits::<R>::conduit_index(priority);
+                #[cfg(not(feature = "tx-lend-only"))]
                 loop {
                     // ARCHITECTURE section 9.1 -- the open frame is in a slot a
                     // link lent: append the message there, or, when it does not
@@ -12868,20 +13076,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // frame and open a fresh one below.
                     #[cfg(feature = "transport-tx-lend")]
                     if batch.stage.lent.is_some() {
-                        if self.append_lent_batch(batch, idx, priority, reliable, &encode_body) {
+                        if self.append_lent_batch(batch, idx, priority, reliable, encode_body) {
                             return Ok(UnicastPush::Pushed);
                         }
                         continue;
                     }
-                    // Fixed-memory step S4 — under `tx-lend-only` no frame is ever
-                    // staged on the heap, so what follows the lent arm above is
-                    // always an OPEN: the frame opens in a slot the conduit's link
-                    // lends, or the message is refused and counted. A message past
-                    // the budget leaves as a chain of lent fragments (with
-                    // fragmentation) or is refused as oversize (without it).
-                    #[cfg(feature = "tx-lend-only")]
-                    return self.open_frame_lent(batch, true, priority, &admit, encode_body);
-                    #[cfg(not(feature = "tx-lend-only"))]
                     if batch.stage.buf.is_empty() {
                         if congested() {
                             return Ok(UnicastPush::Congested);
@@ -12993,7 +13192,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // (`zenoh-codec` `CurrentFrame`/`NewFrame`).
                     // Read the open frame's reliability once (its own R flag) —
                     // reused as the flush channel below (`prev` is the same bytes).
-                    #[cfg(not(feature = "tx-lend-only"))]
                     {
                         let stage = &mut batch.stage;
                         let open_channel = frame_wire_reliability(&stage.buf);
@@ -13111,7 +13309,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             #[cfg(feature = "tx-lend-only")]
             {
-                self.open_frame_lent(batch, false, priority, &admit, encode_body)
+                self.open_frame_lent(batch, false, priority, reliable, &admit, encode_body)
             }
         };
         // The lock is this conduit's own, and a sender holds it across its wait for room, up to
@@ -13268,16 +13466,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// The frame one message opens under `tx-lend-only`, from the room check to the answer:
-    /// `admit` asks the conduit's link for room and mints the SN once it has, and the frame is
-    /// written into a slot that link lends, kept open for the messages after it when the batch
-    /// window is open (`in_window`) or sent at once. A message past the budget leaves as a
-    /// chain of lent fragments, or is refused as oversize without fragmentation; no slot, or one
-    /// short of what the frame needs, is a refusal, as is a message its encoder refuses, whose
-    /// SN is given back. Nothing is staged on the heap, which this profile has no answer in.
+    /// The frame one message goes into under `tx-lend-only`, from the room check to the answer.
+    /// In the batch window (`in_window`) the message first joins the frame its conduit holds open
+    /// in a lent slot ([`Self::append_lent_batch`]), which needs no room check; a frame it does
+    /// not join is closed there and a fresh one opens. To open one, `admit` asks the conduit's
+    /// link for room and mints the SN once it has, and the frame is written into a slot that link
+    /// lends, kept open for the messages after it in the window or sent at once. A message past
+    /// the budget leaves as a chain of lent fragments, or is refused as oversize without
+    /// fragmentation; no slot, or one short of what the frame needs, is a refusal, as is a
+    /// message its encoder refuses, whose SN is given back. Nothing is staged on the heap, which
+    /// this profile has no answer in.
     ///
-    /// One body for the window's opening and for the frame sent whole: the two differ only in
-    /// the slot they write and what keeps it.
+    /// One body for the window's append, its opening and the frame sent whole: the last two differ
+    /// only in the slot they write and what keeps it.
     #[cfg(all(
         feature = "tx-lend-only",
         any(
@@ -13299,6 +13500,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch: &mut BatchTx,
         in_window: bool,
         priority: Priority,
+        reliable: bool,
         admit: &dyn AdmitFrame,
         encode_body: &P,
     ) -> Result<UnicastPush, SendWireError>
@@ -13306,13 +13508,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
+        // The open frame had its room when it opened; a message of the other reliability, or one
+        // that would carry the frame past the budget, closes it and opens the next below.
+        #[cfg(feature = "transport-batching")]
+        if in_window
+            && batch.stage.lent.is_some()
+            && self.append_lent_batch(
+                batch,
+                TxConduits::<R>::conduit_index(priority),
+                priority,
+                reliable,
+                encode_body,
+            )
+        {
+            return Ok(UnicastPush::Pushed);
+        }
         let Some(mut emit) = admit.admit() else {
             return Ok(UnicastPush::Congested);
         };
-        // A build without batching opens no window.
+        // A build without batching opens no window, and has no open frame to join.
         #[cfg(not(feature = "transport-batching"))]
         let in_window = {
-            let _ = in_window;
+            let _ = (in_window, reliable);
             false
         };
         // Every frame asks for the whole budget, as zenoh-pico's batch is the budget whatever it
@@ -13810,10 +14027,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the heap.
         #[cfg(feature = "tx-lend-only")]
         {
-            let lent = self.send_lent(reliability, priority, span.wire_bound(), |slot| {
+            let write = lent_write(|slot| {
                 crate::frame_encode::write_fragment(slot, span, body, reliable, ext_qos)
             });
-            match lent {
+            match self.send_lent(reliability, priority, span.wire_bound(), &write) {
                 Lend::Sent => {
                     let counts = &mut batch.frag_lend;
                     counts.slot_fragments = counts.slot_fragments.wrapping_add(1);
@@ -13830,9 +14047,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             {
                 // A fragment the slot cannot hold gives the slot back (the
                 // lease's drop) and is written on the heap below.
-                let lent = self.send_lent(reliability, priority, span.wire_bound(), |slot| {
+                let write = lent_write(|slot| {
                     crate::frame_encode::write_fragment(slot, span, body, reliable, ext_qos)
                 });
+                let lent = self.send_lent(reliability, priority, span.wire_bound(), &write);
                 let counts = &mut batch.frag_lend;
                 match lent {
                     Lend::Sent => {
@@ -16109,9 +16327,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R300 — pre-emit gate. Both checks run BEFORE any wire
         // bytes leave or any mapping-table side effect; on Err
         // the session-link state is unchanged.
-        if mapping_id == 0 {
+        let Some(declared) = core::num::NonZero::new(mapping_id) else {
             return Err(SendDeclareError::ReservedMappingIdZero);
-        }
+        };
         // The upper end of the id space is the type: a mapping id is an
         // `ExprId`, as zenoh's `DeclareKeyExpr.id` is and zenoh-pico's
         // `uint16_t _id` is, so no id a caller can name is too wide for the wire.
@@ -16121,10 +16339,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "tx-lend-only")]
         if !self.rewrites_originated_keys() {
             return self
-                .dispatch_declare_lent(&LentDeclaration::Keyexpr { mapping_id, suffix })
+                .dispatch_declare_lent(&LentDeclaration::Keyexpr {
+                    mapping_id: declared,
+                    suffix,
+                })
                 .map_err(SendDeclareError::from);
         }
-        let declare = build_declare_kexpr(mapping_id, suffix)?;
+        let declare = build_declare_kexpr(declared.get(), suffix)?;
         // §5.21 routing-namespace — bake the namespace into the wire alias
         // DEFINITION (this is a direct `dispatch_declare`, below the egress
         // arm). The peer registers `id -> <ns>/<suffix>`, so a later aliased
@@ -18074,11 +18295,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // so does this.
         #[cfg(all(feature = "declare-interest", feature = "tx-lend-only"))]
         {
-            if !current && !future {
-                return Err(SendWireError::from(
-                    sce_forge_runtime::codec::CodecError::PresentIfMismatch,
-                ));
-            }
             let interest = crate::lent_control::interest(
                 interest_id,
                 kinds,
@@ -20213,7 +20429,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 let peer_zid: Option<SessionZid> = a.fact_inbound_peer_zid(|slot| *slot);
                 let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
                     (Some(zid), Some(n)) => encode_accept_cookie(
-                        &a.params.cookie_signing_key,
+                        a.params.cookie_signing_key.signing_key(),
                         &a.accept_cookie_state(zid, n),
                     ),
                     _ => None,
@@ -20573,12 +20789,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // while a decode takes the state OFF the wire. `decode_accept_cookie`
         // verifies the MAC over the whole payload before it parses a field,
         // so anything past this point is bytes this node minted.
-        let carried = match crate::accept_cookie::decode_accept_cookie(
-            &self.params.cookie_signing_key,
-            &echoed,
-        ) {
-            Ok(c) => c,
-            Err(_) => return false,
+        let Some(carried) = self.params.cookie_signing_key.decode(&echoed) else {
+            return false;
         };
         // Upstream's rule, and the reason ONE value still crosses the
         // InitAck/OpenSyn boundary in memory: the MAC says "this node minted

@@ -399,8 +399,13 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     let nonce = actions
         .cookie_nonce()
         .expect("the InitAck drew a cookie nonce through the binding's source");
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies under the deploy key");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies under the deploy key");
     assert_eq!(
         carried.peer_zid, FIXTURE_PEER_ZID,
         "R86: the InitAck cookie MUST bind the peer zid captured on InitSyn \
@@ -425,9 +430,13 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     // implementation back.
     let mut next = carried.clone();
     next.nonce = nonce.wrapping_add(1);
-    let cookie_under_another_nonce =
-        encode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &next)
-            .expect("a re-mint of a cookie this acceptor already emitted encodes");
+    let cookie_under_another_nonce = encode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &next,
+    )
+    .expect("a re-mint of a cookie this acceptor already emitted encodes");
     assert_ne!(
         cookie.as_slice(),
         cookie_under_another_nonce.as_slice(),
@@ -705,8 +714,13 @@ async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
     // it the ONLY place the level can be read here: the acceptor lets go of
     // its slots once the InitAck is out.
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     let negotiated = carried
         .negotiated
         .patch
@@ -777,8 +791,13 @@ async fn the_acceptor_holds_no_negotiated_state_between_init_ack_and_open_syn() 
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     let agreed = carried
         .negotiated
         .patch
@@ -852,8 +871,13 @@ async fn the_peer_region_rides_the_cookie_between_init_ack_and_open_syn() {
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     assert_eq!(
         carried.negotiated.region.name(),
         Some(region.clone()),
@@ -899,7 +923,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     let mut initiator_params = fixture_session_init_params();
     initiator_params.zid = [0x5A; 4].into();
     initiator_params.whatami = WhatAmI::Client;
-    initiator_params.seq_num_res = 0;
+    initiator_params.seq_num_res = wz_session_core::policy::SnResolution::Bits8;
     initiator_params.req_id_res = 1;
     initiator_params.batch_size = 2048;
     let initiator = new_session_actions(initiator_out, initiator_params, TokioTime::new());
@@ -929,7 +953,7 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     let recording = Arc::new(RecordingOutboundDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 2;
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits32;
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
@@ -939,8 +963,13 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     assert_eq!(
         carried.peer_zid,
         announced.zid.as_slice(),
@@ -1152,8 +1181,13 @@ async fn the_qos_band_rides_the_cookie_between_init_ack_and_open_syn() {
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     assert_eq!(
         carried.negotiated.qos,
         narrow.qos_accept_state(),
@@ -1227,7 +1261,9 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
     // `AcceptCookieState` would be a value that means nothing, and offering
     // one invites a caller to mint a cookie it never thought about.
     let unbound = encode_accept_cookie(
-        &fixture_session_init_params().cookie_signing_key,
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
         &AcceptCookieState {
             peer_zid: FIXTURE_PEER_ZID.into(),
             peer_whatami: 0,
@@ -1351,7 +1387,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     // three fields to the peer's stricter values.
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 3;
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits64;
     params.req_id_res = 3;
     params.batch_size = 65535;
     let actions = new_session_actions(driver, params, TokioTime::new());
@@ -1359,7 +1395,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     // No peer InitSyn parsed yet → init_ack_params returns own
     // params verbatim (the slot is `None`).
     let p = actions.init_ack_params();
-    assert_eq!(p.seq_num_res, 3);
+    assert_eq!(p.seq_num_res, wz_session_core::policy::SnResolution::Bits64);
     assert_eq!(p.req_id_res, 3);
     assert_eq!(p.batch_size, 65535);
 
@@ -1370,7 +1406,11 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
         batch_size: 2048,
     }));
     let p = actions.init_ack_params();
-    assert_eq!(p.seq_num_res, 2, "seq_num_res capped to peer");
+    assert_eq!(
+        p.seq_num_res,
+        wz_session_core::policy::SnResolution::Bits32,
+        "seq_num_res capped to peer"
+    );
     assert_eq!(p.req_id_res, 1, "req_id_res capped to peer");
     assert_eq!(p.batch_size, 2048, "batch_size capped to peer");
 }
@@ -1384,7 +1424,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
 fn the_send_limits_are_the_capabilities_of_each_establishment() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 3;
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits64;
     params.req_id_res = 3;
     params.batch_size = 65535;
     let actions = new_session_actions(driver, params, TokioTime::new());
@@ -1435,7 +1475,7 @@ fn r121d_init_ack_params_keeps_own_when_own_lower() {
     // never accidentally promotes a value upward.
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 1;
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits16;
     params.req_id_res = 1;
     params.batch_size = 512;
     let actions = new_session_actions(driver, params, TokioTime::new());
@@ -1446,7 +1486,11 @@ fn r121d_init_ack_params_keeps_own_when_own_lower() {
         batch_size: 65535,
     }));
     let p = actions.init_ack_params();
-    assert_eq!(p.seq_num_res, 1, "own seq_num_res preserved (1 < 3)");
+    assert_eq!(
+        p.seq_num_res,
+        wz_session_core::policy::SnResolution::Bits16,
+        "own seq_num_res preserved (1 < 3)"
+    );
     assert_eq!(p.req_id_res, 1, "own req_id_res preserved (1 < 3)");
     assert_eq!(p.batch_size, 512, "own batch_size preserved (512 < 65535)");
 }

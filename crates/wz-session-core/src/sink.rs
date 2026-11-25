@@ -420,23 +420,19 @@ impl SampleView for SampleRef<'_> {
     fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
         let (time, zid) = self.timestamp?;
         let hints = self.hints.as_ref()?;
-        Some(
-            hints
-                .timestamp
-                .get_or_init(|| crate::sample::TimestampHint {
-                    time,
-                    zid: crate::sample::TimestampZid::new(zid).unwrap_or_default(),
-                }),
-        )
+        crate::once_built::get_or_build(&hints.timestamp, || crate::sample::TimestampHint {
+            time,
+            zid: crate::sample::TimestampZid::new(zid).unwrap_or_default(),
+        })
     }
     #[cfg(feature = "alloc")]
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         let (packed_id, schema) = self.encoding?;
         let hints = self.hints.as_ref()?;
-        Some(hints.encoding.get_or_init(|| crate::sample::EncodingHint {
+        crate::once_built::get_or_build(&hints.encoding, || crate::sample::EncodingHint {
             packed_id,
             schema: schema.map(<[u8]>::to_vec),
-        }))
+        })
     }
     #[cfg(feature = "pubsub-ts-stack")]
     fn routed(&self) -> bool {
@@ -738,9 +734,8 @@ impl SampleView for PlainSample<'_> {
         self.qos
     }
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
-        self.shared
-            .get_or_init(|| self.frame.subslice(self.payload_range()))
-            .as_ref()
+        crate::once_built::get_or_build(&self.shared, || self.frame.subslice(self.payload_range()))
+            .and_then(Option::as_ref)
     }
     fn payload_shared_owned(&self) -> Option<crate::link::RxBytes> {
         // Read through the borrowed answer when it was already built; otherwise built here,

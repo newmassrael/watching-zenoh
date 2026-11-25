@@ -697,7 +697,10 @@ impl ApplicationLayerObserver {
                     &self.app.tables.queryables,
                     &mut self.pending_queryable_replies,
                     interest,
-                    self.peers.subscribers.mapping_spaces(),
+                    self.peers
+                        .subscribers
+                        .mapping_spaces()
+                        .from_sender(record.sender()),
                 );
             }
         }

@@ -170,17 +170,13 @@ fn a_reply_read_in_place_answers_its_get() {
 }
 
 /// The engine's tables are handed an owned record only where its receive projects one: the build
-/// whose session core lends only (`RX_LENT_ONLY`), with neither the counters nor a group's member
-/// keyexprs reading owned messages, hands them none, so their readers of owned messages are left
-/// out of its text; any other build hands them the batch it was given.
+/// whose session core lends only (`RX_LENT_ONLY`), with no counter that reads owned messages, hands
+/// them none, so their readers of owned messages are left out of its text; any other build hands
+/// them the batch it was given.
 #[test]
 fn the_tables_take_owned_records_only_where_the_engine_projects_them() {
     use wz_session_core::driver_loop::{owned_records, OWNED_RECORDS, RX_LENT_ONLY};
-    let lends_only = RX_LENT_ONLY
-        && !cfg!(any(
-            feature = "transport-stats",
-            feature = "multicast-declarations"
-        ));
+    let lends_only = RX_LENT_ONLY && !cfg!(feature = "transport-stats");
     assert_eq!(OWNED_RECORDS, !lends_only);
     assert_eq!(
         owned_records(&[]).is_some(),

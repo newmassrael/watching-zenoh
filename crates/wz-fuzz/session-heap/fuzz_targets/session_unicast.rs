@@ -122,7 +122,7 @@ fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [0x0A, 0x0B, 0x0C, 0x0D].into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: BATCH,
         lease_ms: 10_000,
@@ -133,7 +133,9 @@ fn params() -> SessionInitParams {
         link_rx: LinkRxConf::default(),
         policy: SessionPolicy::defaults(),
         limits: SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("a key of 32 bytes"),
+        cookie_signing_key: SigningKey::new(vec![7u8; 32])
+            .expect("a key of 32 bytes")
+            .into(),
         region: None,
     }
 }

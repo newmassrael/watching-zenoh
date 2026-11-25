@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use wz_capi_port::lodge::Kept;
 use wz_capi_port::sync::SessionHeld;
-use wz_capi_port::{KeyHolds, LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
+use wz_capi_port::{LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::RetractionKey;
 
@@ -144,10 +144,11 @@ fn a_token_holds_the_declaration_its_key_is_named_by() {
             .collect()
     };
     let alone = engine.acquire_keyexpr("demo/alone").expect("a row is free");
-    engine.release_keyexpr(alone);
+    alone.release(&*engine);
     assert!(declared(&engine).is_empty(), "CONTROL: let go of, it goes");
 
-    let prefix = engine.acquire_keyexpr("demo/alive").expect("a row is free");
+    let held = engine.acquire_keyexpr("demo/alive").expect("a row is free");
+    let prefix = held.mapping_id();
     let token = engine
         .declare_liveliness_token_on_wire(
             "demo/alive/x",
@@ -159,7 +160,7 @@ fn a_token_holds_the_declaration_its_key_is_named_by() {
     until(&engine, "the router to hold the token", || {
         router.seen(|s| s.tokens == [(on_wire, "demo/alive/x".to_owned())])
     });
-    engine.release_keyexpr(prefix);
+    held.release(&*engine);
     assert_eq!(
         declared(&engine),
         ["demo/alive".to_owned()],

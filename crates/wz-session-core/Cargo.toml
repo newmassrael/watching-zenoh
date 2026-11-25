@@ -544,6 +544,11 @@ transport-link-serial = ["wz-codecs/codec-serial", "alloc"]
 # the feature of the same name there; this half stays no_std so an MCU raweth
 # port has the framing without the socket.
 transport-link-raweth = ["alloc"]
+# `transport-link-ws`: the WebSocket link's RFC 6455 pieces, the `ws_link` module (the opening
+# handshake and its SHA-1 accept value, the frame header, the mask, the ChaCha20 mask keys). No
+# heap and no dependency: the engine with no heap (`wz-runtime-coop`'s `ws`) frames its links
+# with it; the tokio leaf frames its own with tokio-tungstenite.
+transport-link-ws = []
 
 # attachment domain primitive: gates the `attachment` SSOT module (the
 # one attachment-ext encode/decode pair). Selected by the

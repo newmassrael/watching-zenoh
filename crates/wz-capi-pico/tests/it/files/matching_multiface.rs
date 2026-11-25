@@ -593,7 +593,7 @@ fn vanishing_subscriber_peer(
             SessionInitParams {
                 whatami: WhatAmI::Client,
                 zid: zid.into(),
-                seq_num_res: 2,
+                seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                 req_id_res: 2,
                 batch_size: 65535,
                 lease_ms: 10_000,
@@ -607,7 +607,7 @@ fn vanishing_subscriber_peer(
                 link_rx: wz_capi_core::runtime::session_glue::LinkRxConf::default(),
                 policy: wz_session_core::policy::SessionPolicy::defaults(),
                 limits: wz_session_core::limits::SessionLimits::BUILD,
-                cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte key"),
+                cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte key").into(),
                 region: None,
             },
             clock,

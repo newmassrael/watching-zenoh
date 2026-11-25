@@ -300,7 +300,7 @@ fn params(
     SessionInitParams {
         whatami,
         zid,
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: BATCH_SIZE,
         lease_ms: 10_000,
@@ -311,7 +311,9 @@ fn params(
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
         limits: *limits,
-        cookie_signing_key: SigningKey::new(signing_key.to_vec()).expect("32-byte key"),
+        cookie_signing_key: SigningKey::new(signing_key.to_vec())
+            .expect("32-byte key")
+            .into(),
     }
 }
 

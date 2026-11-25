@@ -819,6 +819,21 @@ fn handle_late_timestamped_publisher_opens_one_slot_per_zid() {
     assert_eq!(state.timestamped[&ts_src(&zid)].pending_queries, 1);
 }
 
+/// The in-flight count of a source is 0 or 1 however often its publisher is met again, which
+/// is what lets a `u32` hold what upstream counts in a `u64`.
+#[cfg(feature = "advanced-history")]
+#[test]
+fn a_source_has_at_most_one_get_in_flight() {
+    let mut state = silent(false);
+    let zid = vec![0x0Bu8];
+    for _ in 0..1_000 {
+        state.handle_late_publisher(zid.clone(), 4, NOW);
+        state.handle_late_timestamped_publisher(zid.clone(), NOW);
+    }
+    assert_eq!(state.sequenced[&src(&zid, 4)].pending_queries, 1);
+    assert_eq!(state.timestamped[&ts_src(&zid)].pending_queries, 1);
+}
+
 /// What the machine hands its callback, recorded as whether it was lent and its payload byte.
 #[cfg(feature = "advanced-recovery")]
 fn lent_recording(record: Arc<Mutex<Vec<(bool, u8)>>>) -> Box<dyn FnMut(Delivery<'_>) + Send> {

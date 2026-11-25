@@ -1190,10 +1190,13 @@ impl<W: LinkWaits> GroupFace<W> {
     /// keyexprs (`GroupDeclarations::declares_keyexprs`), as the tokio engine's group is told it,
     /// and hold it for the members that ask for it.
     pub(super) fn announce_keyexpr(&self, id: ExprId, keyexpr: &str) {
-        if id == 0 || self.has_ended() || !self.join.declarations.declares_keyexprs() {
+        let Some(declared) = core::num::NonZero::new(id) else {
+            return;
+        };
+        if self.has_ended() || !self.join.declarations.declares_keyexprs() {
             return;
         }
-        if let Ok(declaration) = kexpr_declaration(id, keyexpr) {
+        if let Ok(declaration) = kexpr_declaration(declared, keyexpr) {
             self.keyexprs.borrow_mut().declared(id, keyexpr);
             multicast_tx_declaration(&declaration, |message| self.push_lent(message));
         }

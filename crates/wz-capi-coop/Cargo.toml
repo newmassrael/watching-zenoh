@@ -129,8 +129,16 @@ wz-tls-mbedtls = { path = "../wz-tls-mbedtls", optional = true }
 # The host: `std`'s mutex, threads and sleep behind the port's `os`, and the process's lock behind
 # the runtime's critical sections. Without it the engine is `no_std` with `alloc` and the image
 # supplies both (docs/upstream-parity.md section 5a).
-default = ["std"]
+default = ["std", "key-matching-listener", "threads"]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
+# A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
+# thread of its own, so a callback's call may end on one thread while another undeclares its row,
+# and the rows count their calls on an atomic latch (`row_callback::Threads`). Off, which is
+# pico's single-threaded arm, every call runs on the thread that steps the session: the latches
+# count with no read-modify-write, an undeclaration waits for nothing, no read task starts, and a
+# program that calls one session from two threads at once orders those calls itself, as it does
+# on zenoh-pico's single-threaded arm.
+threads = []
 # The host without `std` (the pico C ABI's `os-posix` and `os-windows`): the port's `os` and the
 # runtime's critical sections made of the host's own calls (`os-sys`, `host-lock-sys`), so a host
 # library built without `std` runs the read task and holds the locks as one with `std` does, and
@@ -194,6 +202,12 @@ queryable = [
 # which is pico's default build, the session delivers nothing locally. It needs nothing of
 # session-core that the engine does not already have.
 local-subscriber = []
+# A matching listener declared on a key rather than on an entity's write filter
+# (`SessionEngine::declare_matching_listener`): it judges through a write filter of its own, so
+# the session's filter table and its Interests take one row more for each matching listener. The
+# pico C ABI declares every listener on its entity's filter and leaves it out, so its tables keep
+# no such rows; without it the engine refuses the listener as not built.
+key-matching-listener = []
 # The listening role: a session that takes inbound links off the ports it listens on, each as a
 # face of its own beside the dial role's (`CoopConfig::listen`). The link layer's listener is the
 # stack's (`SessionLinks::open_listener`); a stack that gives none answers the endpoint as
@@ -241,13 +255,13 @@ group-host = ["group", "dep:wz-runtime-posix", "dep:log"]
 # The keyexprs the members of a group declare, each member's kept apart (zenoh-pico's
 # `Z_FEATURE_MULTICAST_DECLARATIONS`, the pico ABI's `multicast-declarations`): every key a member
 # names by one of its own ids, in a put, a declaration, a query, a reply or an interest, reaches the
-# session as the literal that member declared, resolved by the session core's
-# `MulticastDispatcher::apply_declared_aliases` as the tokio engine's group resolves it. Two
-# zenoh-pico members number their keyexprs from the same counter, so the one table of the group's
-# face would hand one member's put the other's key. A group then reads each datagram whole into an
-# owned batch, as a build with `transport-stats` does. Off, which is pico's default build, whose
-# members declare no keyexpr on a group, the text has no table of them.
-multicast-declarations = ["group", "wz-session-core/multicast-declarations"]
+# session as the literal that member declared. Two zenoh-pico members number their keyexprs from
+# the same counter, so the group's face reads each record under the tag of the member that sent it
+# (the session core's lent group walk, `MemberRecords`) and keys its aliases by tag and id; the walk
+# stays where the datagram lies. The face holds `MAX_MEMBER_KEYEXPRS` aliases for each of its
+# `MAX_GROUP_MEMBERS` members, reserved in the session's pool at the open. Off, which is pico's
+# default build, whose members declare no keyexpr on a group, the face holds one peer's aliases.
+multicast-declarations = ["group"]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the
@@ -352,6 +366,9 @@ runtime-plan = []
 time-base = []
 
 [dev-dependencies]
+# The stand-in names the subscriber of each declaration it is told, in both forms its session reads
+# one in (owned and where its frame lies), so a test of the replay reads what was told in order.
+wz-codecs = { path = "../wz-codecs", default-features = false }
 # The `tls/` provider's tests (`tests/tls_provider.rs`) make a certificate authority and its end
 # certificates, as `wz-tls-mbedtls`'s own tests do, and share that crate's helper for it.
 rcgen = "0.13"

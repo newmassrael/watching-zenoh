@@ -681,6 +681,18 @@ config WZ_LIMIT_MAX_GROUP_MEMBERS
 	  session. A JOIN from one more member is not admitted while every row is
 	  held, and is heard again once a member is lost.
 
+config WZ_LIMIT_MAX_MEMBER_KEYEXPRS
+	int "MAX_MEMBER_KEYEXPRS"
+	default 16
+	help
+	  The key expressions one member of a multicast group may have declared to
+	  this session at a time, to name them by a short id of its own. Each member
+	  holds its own, and they are let go of when it leaves. One more is refused
+	  and counted, and a message that names it is dropped, as one naming an
+	  undeclared id is. The group's face reserves this many aliases for each of
+	  its MAX_GROUP_MEMBERS members when the session opens. The default is
+	  MAX_PEER_KEYEXPR_ALIASES, one peer's.
+
 config WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS
 	int "MAX_CONNECTIVITY_REPLAY_EVENTS"
 	default 8

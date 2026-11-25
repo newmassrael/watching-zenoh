@@ -743,7 +743,7 @@ impl NodeIdentity {
         SessionInitParams {
             whatami,
             zid: self.zid,
-            seq_num_res: 2,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size,
             lease_ms: 10_000,
@@ -757,7 +757,7 @@ impl NodeIdentity {
             link_rx: LinkRxConf::default(),
             policy: *policy,
             limits: *limits,
-            cookie_signing_key: self.key.clone(),
+            cookie_signing_key: self.key.clone().into(),
             region: None,
         }
     }
@@ -1716,7 +1716,10 @@ mod tests {
         );
         assert_eq!(params.batch_size, 1472);
         assert_eq!(params.lease_ms, 10_000);
-        assert_eq!(params.seq_num_res, 2);
+        assert_eq!(
+            params.seq_num_res,
+            wz_session_core::policy::SnResolution::Bits32
+        );
         assert_eq!(params.req_id_res, 2);
         assert_eq!(params.initial_sn, 0);
     }

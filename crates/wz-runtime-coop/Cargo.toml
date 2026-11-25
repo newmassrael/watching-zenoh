@@ -189,6 +189,13 @@ udp-listen = ["alloc", "session-unicast"]
 # endpoint is a scheme the build does not carry.
 serial = ["alloc", "session-unicast", "wz-session-core/transport-link-serial"]
 
+# WebSocket links (`ws/` locators): the locator of one, read at the socket address a TCP link is
+# reached at and written under its own scheme, and the session core's RFC 6455 pieces the link is
+# made with. The link itself is the heap profile's, as the serial
+# link is, so this takes `alloc` and the unicast session. Without it a `ws/` endpoint is a scheme
+# the build does not carry.
+ws = ["alloc", "session-unicast", "wz-session-core/transport-link-ws"]
+
 # Links over a pair of named FIFOs on this host (`unixpipe/` locators): the locator of one, read
 # and written with the session core's grammar. The link over the FIFOs is the heap profile's, so
 # this takes `alloc` and the unicast session, as the serial links do. Without it a `unixpipe/`

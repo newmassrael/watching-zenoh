@@ -44,7 +44,7 @@ pub fn fixture_session_init_params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [0x01; 4].into(),
-        seq_num_res: 0,
+        seq_num_res: wz_runtime_tokio::policy::SnResolution::Bits8,
         req_id_res: 0,
         batch_size: 0,
         lease_ms: 10_000,
@@ -61,7 +61,8 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         policy,
         limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key satisfies >= 32 invariant"),
+            .expect("32-byte test key satisfies >= 32 invariant")
+            .into(),
         region: None,
     }
 }
@@ -95,7 +96,7 @@ pub fn zenoh_interop_session_init_params(
     SessionInitParams {
         whatami,
         zid: SessionZid::new(zid.as_ref()).expect("a fixture zid is 1 to 16 bytes"),
-        seq_num_res: 2,
+        seq_num_res: wz_runtime_tokio::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 65535,
         lease_ms: 10_000,
@@ -111,7 +112,8 @@ pub fn zenoh_interop_session_init_params(
         policy,
         limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key satisfies >= 32 invariant"),
+            .expect("32-byte test key satisfies >= 32 invariant")
+            .into(),
         region: None,
     }
 }

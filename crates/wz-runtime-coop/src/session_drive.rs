@@ -616,6 +616,9 @@ pub enum Locator {
     /// A link over a serial line: `serial/` to a device or a pin pair, at a baud rate.
     #[cfg(feature = "serial")]
     Serial(SerialLocator),
+    /// A WebSocket link: `ws/` to an address and a port, over a TCP connection.
+    #[cfg(feature = "ws")]
+    Ws(WsLocator),
     /// A link over a pair of named FIFOs on this host: `unixpipe/` to a base path.
     #[cfg(feature = "unixpipe")]
     Unixpipe(UnixpipeLocator),
@@ -648,6 +651,26 @@ impl IpLocator {
     /// Write zenoh's text of the locator into `out`.
     fn write<W: TextOut>(&self, out: &mut W) {
         wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at).write_src(out);
+    }
+}
+
+/// The locator of a WebSocket link, as zenoh's WebSocket link reads one: `ws/<address>:<port>`,
+/// the socket address a TCP connection is made to and the RFC 6455 upgrade runs over
+/// (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `pub async fn get_ws_addr(`). Upstream's link
+/// reads no config key and no metadata of its own, so a locator holds the end alone.
+#[cfg(feature = "ws")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsLocator {
+    /// The end the link reaches.
+    pub at: SocketAddr,
+}
+
+#[cfg(feature = "ws")]
+impl WsLocator {
+    /// Write zenoh's text of the locator into `out`: the IP form under the `ws` scheme.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        wz_session_core::link::LinkEnds::ip(wz_session_core::link::LinkKind::Ws, self.at, self.at)
+            .write_src(out);
     }
 }
 
@@ -817,6 +840,12 @@ impl Locator {
         Self::ip(LinkProto::Tls, at)
     }
 
+    /// A WebSocket locator.
+    #[cfg(feature = "ws")]
+    pub const fn ws(at: SocketAddr) -> Self {
+        Self::Ws(WsLocator { at })
+    }
+
     /// The locator of an IP link, or `None` for a link of another kind, which a stack of IP links
     /// alone refuses as [`LinkOpenError::Unsupported`].
     pub const fn as_ip(self) -> Option<IpLocator> {
@@ -824,6 +853,8 @@ impl Locator {
             Self::Ip(ip) => Some(ip),
             #[cfg(feature = "serial")]
             Self::Serial(_) => None,
+            #[cfg(feature = "ws")]
+            Self::Ws(_) => None,
             #[cfg(feature = "unixpipe")]
             Self::Unixpipe(_) => None,
         }
@@ -834,6 +865,15 @@ impl Locator {
     pub const fn as_serial(self) -> Option<SerialLocator> {
         match self {
             Self::Serial(serial) => Some(serial),
+            _ => None,
+        }
+    }
+
+    /// The locator of a WebSocket link, or `None` for a link of another kind.
+    #[cfg(feature = "ws")]
+    pub const fn as_ws(self) -> Option<WsLocator> {
+        match self {
+            Self::Ws(ws) => Some(ws),
             _ => None,
         }
     }
@@ -855,6 +895,8 @@ impl Locator {
             Self::Ip(ip) => ip.write(&mut text),
             #[cfg(feature = "serial")]
             Self::Serial(serial) => serial.write(&mut text),
+            #[cfg(feature = "ws")]
+            Self::Ws(ws) => ws.write(&mut text),
             #[cfg(feature = "unixpipe")]
             Self::Unixpipe(unixpipe) => unixpipe.write(&mut text),
         }
@@ -2750,7 +2792,7 @@ mod wake_budget_tests {
         SessionInitParams {
             whatami: wz_session_core::WhatAmI::Peer,
             zid: [0x0A, 0x0B, 0x0C, 0x0D].into(),
-            seq_num_res: 2,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size: 1024,
             lease_ms: 10_000,
@@ -2764,7 +2806,9 @@ mod wake_budget_tests {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
             limits: wz_session_core::limits::SessionLimits::BUILD,
-            cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+            cookie_signing_key: SigningKey::new(vec![7u8; 32])
+                .expect(">=32-byte key")
+                .into(),
             region: None,
         }
     }

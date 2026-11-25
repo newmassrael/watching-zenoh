@@ -271,7 +271,7 @@ fn pico_group(
         join_interval_ms: 2_500,
         // pico has no cap on a group's members: its list grows while its allocator gives.
         max_sessions: None,
-        seq_num_res: sn_resolution.wire_code(),
+        seq_num_res: sn_resolution,
         req_id_res: 0x02,
         batch_size: pico_multicast_batch(limits),
         is_qos: false,
@@ -2242,7 +2242,9 @@ fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
         // `z_open` judged the form before this (`crate::key_ids::admit_at_open`), and the engine
         // judges it again with the same rule.
         OpenError::KeyWireForm(_) => crate::result::Z_ERR_INVALID,
-        OpenError::Arena(ArenaRefused::Limit { .. }) => crate::result::Z_ERR_CONFIG_INVALID_VALUE,
+        OpenError::Arena(ArenaRefused::Limit { .. }) | OpenError::SnResolution(_) => {
+            crate::result::Z_ERR_CONFIG_INVALID_VALUE
+        }
         OpenError::Arena(
             ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. } | ArenaRefused::Lend(_),
         )
@@ -2296,6 +2298,20 @@ mod coop_open_refusal_tests {
         assert_eq!(
             coop_open_refusal(&OpenError::NoTask(SpawnRefusal::TooLarge)),
             Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+    }
+
+    /// A width of sequence numbers the build's domain leaves out is a value this build refuses,
+    /// as a limit over the build's value is.
+    #[test]
+    fn a_width_outside_the_domain_is_an_invalid_value() {
+        use wz_session_core::policy::SnResolution;
+        use wz_session_core::policy_binding::OutsideDomain;
+        assert_eq!(
+            coop_open_refusal(&OpenError::SnResolution(OutsideDomain {
+                value: SnResolution::Bits64,
+            })),
+            Z_ERR_CONFIG_INVALID_VALUE
         );
     }
 
@@ -3714,7 +3730,7 @@ mod build_numbers {
             (SnResolution::Bits64, 0x03),
         ] {
             let profile = pico_group(width, &limits);
-            assert_eq!(profile.seq_num_res, code, "{}", width.id());
+            assert_eq!(profile.seq_num_res.wire_code(), code, "{}", width.id());
             assert_eq!(profile.req_id_res, default.req_id_res);
             assert_eq!(profile.batch_size, default.batch_size);
             assert_eq!(profile.lease_ms, default.lease_ms);

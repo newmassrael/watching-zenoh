@@ -1454,7 +1454,7 @@ pub(crate) fn init_params(
     Ok(SessionInitParams {
         whatami,
         zid,
-        seq_num_res: link_conf.tx.sn_resolution.wire_code(),
+        seq_num_res: link_conf.tx.sn_resolution,
         req_id_res: 2,
         batch_size: link_conf.tx.batch_size,
         lease_ms: link_conf.tx.lease_ms,
@@ -1465,7 +1465,7 @@ pub(crate) fn init_params(
         link_rx: link_conf.rx,
         policy: link_conf.policy,
         limits: link_conf.limits,
-        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
+        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?.into(),
         region: None,
     })
 }
@@ -5037,7 +5037,7 @@ mod tests {
             limits: SessionLimits::BUILD,
         };
         let params = init_params(WhatAmI::Client, [0xC1; 4].into(), stated).expect("entropy");
-        assert_eq!(params.seq_num_res, SnResolution::Bits8.wire_code());
+        assert_eq!(params.seq_num_res, SnResolution::Bits8);
         assert_eq!(params.batch_size, 2048);
         assert_eq!(params.lease_ms, 4000);
         assert_eq!(params.keep_alive, KeepAliveConf::ZENOH);
@@ -6717,7 +6717,7 @@ mod multicast_face_tests {
                 lease_ms: 10_000,
                 join_interval_ms: 100,
                 max_sessions: None,
-                seq_num_res: 0x02,
+                seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                 req_id_res: 0x02,
                 batch_size: 2_048,
                 is_qos: false,
@@ -6783,7 +6783,7 @@ mod multicast_face_tests {
                 lease_ms: 10_000,
                 join_interval_ms: 100,
                 max_sessions: None,
-                seq_num_res: 0x02,
+                seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                 req_id_res: 0x02,
                 batch_size: 2_048,
                 is_qos: false,

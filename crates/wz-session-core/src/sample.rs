@@ -509,21 +509,32 @@ impl BoundedEncoding {
     /// A kept copy of `encoding`, or the refusal of a schema longer than
     /// [`crate::caps::MAX_ENCODING_SCHEMA_BYTES`].
     pub fn of(encoding: EncodingRef<'_>) -> Result<Self, SchemaPastBound> {
-        let mut schema = [0u8; crate::caps::MAX_ENCODING_SCHEMA_BYTES];
-        let len = match encoding.schema {
-            None => None,
-            Some(bytes) => {
-                let past = SchemaPastBound { len: bytes.len() };
-                let room = schema.get_mut(..bytes.len()).ok_or(past)?;
-                room.copy_from_slice(bytes);
-                Some(u8::try_from(bytes.len()).map_err(|_| past)?)
-            }
-        };
-        Ok(Self {
+        Self::write_into(&mut core::mem::MaybeUninit::uninit(), encoding).copied()
+    }
+
+    /// A kept copy of `encoding` written where `room` lies, over whatever kept encoding it held,
+    /// so that a holder of a large place keeps one without a copy made on the stack first. A schema
+    /// longer than [`crate::caps::MAX_ENCODING_SCHEMA_BYTES`] is refused before anything is
+    /// written, so the room keeps what it held.
+    pub fn write_into(
+        room: &mut core::mem::MaybeUninit<Self>,
+        encoding: EncodingRef<'_>,
+    ) -> Result<&mut Self, SchemaPastBound> {
+        let bytes = encoding.schema.unwrap_or_default();
+        let past = SchemaPastBound { len: bytes.len() };
+        if bytes.len() > crate::caps::MAX_ENCODING_SCHEMA_BYTES {
+            return Err(past);
+        }
+        let len = u8::try_from(bytes.len()).map_err(|_| past)?;
+        let kept = room.write(Self {
             packed_id: encoding.packed_id,
-            len,
-            schema,
-        })
+            len: encoding.schema.map(|_| len),
+            schema: [0u8; crate::caps::MAX_ENCODING_SCHEMA_BYTES],
+        });
+        if let Some(at) = kept.schema.get_mut(..bytes.len()) {
+            at.copy_from_slice(bytes);
+        }
+        Ok(kept)
     }
 
     /// The kept encoding, read where it lies.
@@ -749,6 +760,18 @@ impl SourceInfo {
         Self {
             zid,
             zid_len: zid_bytes.len() as u8,
+            eid,
+            sn,
+        }
+    }
+
+    /// The `SourceInfo` of a zid held in the sixteen bytes a zenoh id has, as pico's `_z_id_t`
+    /// holds one, zero tail included: every byte is kept, so the length is the array's and there
+    /// is no length to refuse.
+    pub fn of_padded(zid: [u8; 16], eid: u32, sn: u32) -> Self {
+        Self {
+            zid,
+            zid_len: 16,
             eid,
             sn,
         }
@@ -1351,6 +1374,54 @@ mod tests {
         );
     }
 
+    /// A kept encoding written over a longer one reads as the new one alone and is equal to the
+    /// one made apart, so no byte of the old schema is left behind it; a schema past the room is
+    /// refused with its length, and an encoding of no schema written after reads as none.
+    #[test]
+    fn a_kept_encoding_written_over_another_is_the_new_one_alone() {
+        let mut room = core::mem::MaybeUninit::uninit();
+        let first = EncodingRef {
+            packed_id: 0x2d,
+            schema: Some(&b"a-longer-schema"[..]),
+        };
+        BoundedEncoding::write_into(&mut room, first).expect("a schema within the room is kept");
+        let second = EncodingRef {
+            packed_id: 0x2c,
+            schema: Some(&b"short"[..]),
+        };
+        let kept = *BoundedEncoding::write_into(&mut room, second).expect("kept over the first");
+        assert_eq!(kept.view(), second);
+        assert_eq!(
+            Ok(kept),
+            BoundedEncoding::of(second),
+            "nothing of the first schema is left in the room"
+        );
+        let past = [b's'; crate::caps::MAX_ENCODING_SCHEMA_BYTES + 1];
+        let refused = BoundedEncoding::write_into(
+            &mut room,
+            EncodingRef {
+                packed_id: 1,
+                schema: Some(&past),
+            },
+        );
+        assert_eq!(
+            refused.err(),
+            Some(SchemaPastBound {
+                len: crate::caps::MAX_ENCODING_SCHEMA_BYTES + 1
+            })
+        );
+        let none = EncodingRef {
+            packed_id: 0x2c,
+            schema: None,
+        };
+        let cleared = *BoundedEncoding::write_into(&mut room, none).expect("no schema is kept");
+        assert_eq!(
+            cleared,
+            BoundedEncoding::of(none).expect("no schema is kept")
+        );
+        assert_eq!(cleared.view(), none);
+    }
+
     /// A hint read where it lies and copied back is the hint, and its codec form is the one the
     /// view makes.
     #[test]
@@ -1522,6 +1593,17 @@ mod tests {
             sn: 0,
         };
         assert!(info.zid_prefix().is_empty());
+    }
+
+    /// Turned red by a padded constructor that keeps a length other than the sixteen bytes it
+    /// is given, which `new` keeps for the same bytes.
+    #[test]
+    fn a_padded_zid_is_kept_as_its_sixteen_bytes() {
+        let mut zid = [0u8; 16];
+        zid[..3].copy_from_slice(&[0xA1, 0xA2, 0xA3]);
+        let padded = SourceInfo::of_padded(zid, 7, 42);
+        assert_eq!(padded, SourceInfo::new(&zid, 7, 42));
+        assert_eq!(padded.zid_prefix(), &zid[..]);
     }
 
     #[test]
