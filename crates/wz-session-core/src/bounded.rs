@@ -17,8 +17,9 @@
 //!
 //! The backing is a type parameter, a [`Storage`](crate::bounded::Storage) policy, not a feature
 //! that selects code, so heap or no heap is the instantiation and the algorithm exists once.
-//! There are three policies, because "an allocator is linked", "the declared capacities are
-//! hard" and "the capacities are known when the session opens" are different facts about a build:
+//! There are four policies, because "an allocator is linked", "the declared capacities are
+//! hard", "the capacities are known when the session opens" and "the build lays the session out"
+//! are different facts about a build:
 //!
 //! - [`Heap`](crate::bounded::Heap) (needs `alloc`) -- backed by `alloc::vec::Vec<T>` and
 //!   `alloc::string::String`. [`push`](crate::bounded::BoundedVec::push) never fails; the
@@ -36,6 +37,9 @@
 //!   rows as [`Static`](crate::bounded::Static) refuses past `N`. A C library whose limits come
 //!   from its configuration document sizes its tables when a session opens, and allocates
 //!   nothing after (`docs/c-abi-no-heap-pools.md`, section 2).
+//! - [`Region`](crate::bounded::Region) -- [`Lent`](crate::bounded::Lent)'s rows, placed where a
+//!   struct the build lays out holds them ([`place_seqs`](crate::bounded::place_seqs)), every
+//!   table and row of it empty as the allocator's zeroed bytes ([`ZeroEmpty`](crate::bounded::ZeroEmpty)).
 //!
 //! A container names its policy as its last parameter and defaults it to
 //! [`Profile`](crate::bounded::Profile), the policy this build's features choose (`alloc` on and
@@ -179,6 +183,47 @@ pub trait Storage: 'static {
     #[cfg(feature = "storage-profile")]
     type Compose: crate::wireexpr_resolve::ComposeRoom;
 }
+
+/// A type whose value of all zero bytes is valid and is its empty state: a table of no rows, a count
+/// of nothing, a key arena not yet opened. A region the build lays out holds only such types, so the
+/// block the allocator hands zeroed is every table of a session empty, written by nothing and built
+/// on no stack (`bytemuck`'s `Zeroable`, the emptiness stated besides).
+///
+/// # Safety
+/// A value of the type whose every byte is zero is a valid value of it, and it holds nothing a drop
+/// would give back.
+pub unsafe trait ZeroEmpty {}
+
+macro_rules! zero_empty_scalars {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            // SAFETY: zero is a valid value of every integer type, `false` of `bool`, and the unit is
+            // no bytes; none holds anything to give back.
+            unsafe impl ZeroEmpty for $ty {}
+        )*
+    };
+}
+
+zero_empty_scalars!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, bool, ());
+
+// SAFETY: an array of zero bytes is its elements' zero values, each valid and empty.
+unsafe impl<T: ZeroEmpty, const N: usize> ZeroEmpty for [T; N] {}
+
+// SAFETY: `MaybeUninit` is valid as any bytes, and dropping it drops nothing.
+unsafe impl<T> ZeroEmpty for core::mem::MaybeUninit<T> {}
+
+// SAFETY: a `Cell` has its value's layout, which zero bytes make its zero value.
+unsafe impl<T: ZeroEmpty> ZeroEmpty for Cell<T> {}
+
+// SAFETY: the null pointer is `None`, guaranteed for an `Option` of a `NonNull`.
+unsafe impl<T> ZeroEmpty for Option<NonNull<T>> {}
+
+// SAFETY: heapless 0.8's `Vec` is its length and an array of `MaybeUninit` rows; a length of zero is
+// a sequence of no rows, which holds nothing to drop. The crate pins `heapless = "0.8"`.
+unsafe impl<T, const N: usize> ZeroEmpty for heapless::Vec<T, N> {}
+
+// SAFETY: heapless 0.8's `String` is a `Vec<u8, N>` of its bytes; of none, the empty text.
+unsafe impl<const N: usize> ZeroEmpty for heapless::String<N> {}
 
 /// The counter of a table's changes; see [`Storage::Epoch`].
 pub trait EpochCounter: Default {
@@ -478,6 +523,36 @@ impl Storage for Lent {
     type Compose = crate::wireexpr_resolve::ComposeRow;
 }
 
+/// The policy of storage a region the build laid out places: [`Lent`]'s rows, where the build's
+/// layout puts them rather than an arena's walk. A session whose shape the build fixes is one
+/// struct of its layers' tables and their rows, zeroed by the allocator in one block
+/// ([`ZeroEmpty`]); [`place_seqs`] tells each table where its rows lie, and nothing is planned or
+/// lent.
+///
+/// The rows of a table lie outside the table, as [`Lent`]'s do, so a call that reads its row where
+/// it lies, with the tables let go, is not reached by a `&mut` of the table. A row keeps its key in
+/// the region's [`KeyArena`](crate::key_arena::KeyArena), as [`Lent`]'s does in the arena's. A table
+/// a peer writes keeps its rows inline at its build capacity, as the static policy's do: the
+/// region holds one face, so there is no pool to share. A key composed while a peer's message is
+/// delivered is composed in a row inline in the table (`wireexpr_resolve::ComposeInline`).
+pub struct Region;
+
+impl Storage for Region {
+    const ENFORCES_CAPACITY: bool = true;
+    const LENT_AT_OPEN: bool = true;
+    type Scratch = Static;
+    type Seq<T, const N: usize> = LentSeq<T>;
+    type Text<const N: usize> = heapless::String<N>;
+    type Key = crate::key_arena::KeyRef;
+    type Keys = crate::key_arena::LentKeys;
+    type Offset = u32;
+    type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
+    type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
+    type Epoch = ();
+    #[cfg(feature = "storage-profile")]
+    type Compose = crate::wireexpr_resolve::ComposeInline;
+}
+
 /// The policy this build's features choose, and the default of every container's
 /// policy parameter: [`Heap`] when `alloc` is on and `bounded-heapless` is off.
 #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
@@ -739,8 +814,16 @@ impl<const N: usize> TextBacking for heapless::String<N> {
 
 /// Capacity-generic owned sequence. See the [module docs](self) for the
 /// [`Heap`] vs [`Static`] policy contract.
+// Transparent, so a region's layout finds a table's sequence where it finds the table.
+#[repr(transparent)]
 pub struct BoundedVec<T, const N: usize, P: Storage = Profile> {
     inner: P::Seq<T, N>,
+}
+
+// SAFETY: a `BoundedVec` is its policy's sequence alone, whose zero bytes are a sequence of no rows.
+unsafe impl<T, const N: usize, P: Storage> ZeroEmpty for BoundedVec<T, N, P> where
+    P::Seq<T, N>: ZeroEmpty
+{
 }
 
 impl<T, const N: usize> BoundedVec<T, N, Lent> {
@@ -776,7 +859,7 @@ impl<T, const N: usize> BoundedVec<T, N, Lent> {
         // value; a `MaybeUninit<T>` has the layout of `T`.
         let row = unsafe {
             &mut *seq
-                .base
+                .rows()
                 .as_ptr()
                 .add(seq.len())
                 .cast::<core::mem::MaybeUninit<T>>()
@@ -1054,10 +1137,13 @@ impl<T: fmt::Debug, const N: usize, P: Storage> fmt::Debug for BoundedVec<T, N, 
 /// The rows of a table of the [`Lent`] policy: a span of an [`Arena`], its values at the start.
 /// It owns its values and not its memory: dropped, it drops what it holds and gives no memory
 /// back, the memory being the arena's owner's to release whole.
+// `repr(C)`: the same three words for every `T`, so a region's layout places the rows of any
+// table through one body (`place_seqs`).
+#[repr(C)]
 pub struct LentSeq<T> {
-    /// The first row, or for a table made by `Default`, which was lent none and is no table to
-    /// put a value in (`refuse_unlent`), `NonNull::dangling`: no arena lends there.
-    base: NonNull<T>,
+    /// The first row, or `None` for a table made by `Default` or of all zero bytes, which was
+    /// lent none and is no table to put a value in (`refuse_unlent`).
+    base: Option<NonNull<T>>,
     /// The rows that hold values, and the rows the arena lent, the most the table holds: each
     /// under `u32::MAX`, which [`Arena::lend`] holds a table to, so a table is a pointer and two
     /// words of 32 bits on every target.
@@ -1081,7 +1167,7 @@ impl<T> LentSeq<T> {
     /// writes, hold no value and are used by nothing else for as long as the table lives.
     const unsafe fn lent(base: NonNull<T>, room: u32) -> Self {
         Self {
-            base,
+            base: Some(base),
             len: 0,
             room,
             _owns: PhantomData,
@@ -1092,6 +1178,16 @@ impl<T> LentSeq<T> {
     #[inline(always)]
     fn len(&self) -> usize {
         self.len as usize
+    }
+
+    /// The first row: aligned and non-null even for a table lent none, whose `room` of zero keeps
+    /// every write away from it.
+    #[inline(always)]
+    fn rows(&self) -> NonNull<T> {
+        match self.base {
+            Some(base) => base,
+            None => NonNull::dangling(),
+        }
     }
 
     /// The rows the arena lent.
@@ -1107,7 +1203,7 @@ impl<T> LentSeq<T> {
     #[inline(always)]
     fn refuse_unlent(&self) {
         debug_assert!(
-            self.base != NonNull::dangling(),
+            self.base.is_some(),
             "a value was put in a lent table no arena lent rows to: a table of this policy is \
              made by `Arena::lend`, and a working buffer takes the policy's `Storage::Scratch`"
         );
@@ -1130,7 +1226,7 @@ impl<T> LentSeq<T> {
         // which the length no longer covers, so each is dropped here once, by `drop_row::<T>`.
         unsafe {
             drop_rows(
-                self.base.as_ptr().add(len).cast::<u8>(),
+                self.rows().as_ptr().add(len).cast::<u8>(),
                 tail,
                 core::mem::size_of::<T>(),
                 drop_row::<T>,
@@ -1163,6 +1259,70 @@ unsafe fn drop_row<T>(row: *mut u8) {
     unsafe { core::ptr::drop_in_place(row.cast::<T>()) }
 }
 
+// SAFETY: `LentSeq` is `repr(C)` of an `Option<NonNull<T>>`, whose null is `None`, two `u32`s and a
+// `PhantomData`: all zero bytes are a table lent no rows and holding no value, which drops nothing.
+unsafe impl<T> ZeroEmpty for LentSeq<T> {}
+
+/// Where a region the build lays out keeps the rows of one table of the [`Lent`] shape: a line of
+/// the region's own description, which [`place_seqs`] reads. Offsets are bytes from the region's
+/// start, so the description is a constant of the region's type (`core::mem::offset_of!`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeqPlace {
+    /// Where the table's [`LentSeq`] lies.
+    pub seq: usize,
+    /// Where its rows lie.
+    pub rows: usize,
+    /// How many rows lie there.
+    pub room: u32,
+}
+
+impl SeqPlace {
+    /// The place of a table of rows of `T` whose sequence lies at `seq`, its `room` rows at `rows`.
+    /// A room past what a lent table counts stops the build that describes it.
+    pub const fn of<T>(seq: usize, rows: usize, room: usize) -> Self {
+        assert!(
+            room <= u32::MAX as usize,
+            "a lent table counts its rows in 32 bits"
+        );
+        assert!(
+            rows % core::mem::align_of::<T>() == 0,
+            "a table's rows start where their type's alignment allows"
+        );
+        Self {
+            seq,
+            rows,
+            room: room as u32,
+        }
+    }
+}
+
+/// Tell each table `places` names where its rows lie in the region at `region`, and how many: the
+/// one body that joins a region's tables to their rows, a walk of the region's description and not
+/// of a plan. Each table is left holding no value, as one an arena lent.
+///
+/// # Safety
+/// For each place: a [`LentSeq`] of a table of rows of some `T` lies at `seq` in the region and
+/// holds no value; the `room` rows of `T` from `rows` lie in the region, are aligned for `T`, and
+/// are reached by nothing but that table for as long as it lives; no two places name the same rows.
+pub unsafe fn place_seqs(region: NonNull<u8>, places: &[SeqPlace]) {
+    for place in places {
+        // `LentSeq` is `repr(C)`, so its fields lie at the same offsets whatever its row type.
+        let seq = region
+            .as_ptr()
+            .wrapping_add(place.seq)
+            .cast::<LentSeq<u8>>();
+        // SAFETY: the caller's contract: `seq` is a sequence in the region and `rows` its rows,
+        // inside the region, which is not null; the fields are written through the raw pointer, so
+        // no reference to the sequence or its rows is made.
+        unsafe {
+            let rows = NonNull::new_unchecked(region.as_ptr().add(place.rows));
+            core::ptr::addr_of_mut!((*seq).base).write(Some(rows));
+            core::ptr::addr_of_mut!((*seq).len).write(0);
+            core::ptr::addr_of_mut!((*seq).room).write(place.room);
+        }
+    }
+}
+
 impl<T> Drop for LentSeq<T> {
     fn drop(&mut self) {
         self.drop_from(0);
@@ -1173,7 +1333,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     #[inline(always)]
     fn empty() -> Self {
         Self {
-            base: NonNull::dangling(),
+            base: None,
             len: 0,
             room: 0,
             _owns: PhantomData,
@@ -1183,12 +1343,12 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     fn as_slice(&self) -> &[T] {
         // SAFETY: the first `len` rows hold values, and `base` is aligned and non-null even for a
         // table lent nothing.
-        unsafe { core::slice::from_raw_parts(self.base.as_ptr(), self.len()) }
+        unsafe { core::slice::from_raw_parts(self.rows().as_ptr(), self.len()) }
     }
 
     fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: as `as_slice`, and `&mut self` makes this the only borrow of them.
-        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len()) }
+        unsafe { core::slice::from_raw_parts_mut(self.rows().as_ptr(), self.len()) }
     }
 
     // `len` never passes `room`, so the counts below are exact.
@@ -1202,7 +1362,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             return Err(CapacityFull(value));
         }
         // SAFETY: `len < room`, so the row at `len` is one this table was lent and holds no value.
-        unsafe { self.base.as_ptr().add(self.len()).write(value) };
+        unsafe { self.rows().as_ptr().add(self.len()).write(value) };
         self.len = self.len.wrapping_add(1);
         Ok(())
     }
@@ -1213,7 +1373,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             return false;
         }
         // SAFETY: as `push`; `make` panicking leaves the row and the length as they were.
-        unsafe { self.base.as_ptr().add(self.len()).write(make()) };
+        unsafe { self.rows().as_ptr().add(self.len()).write(make()) };
         self.len = self.len.wrapping_add(1);
         true
     }
@@ -1225,7 +1385,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         self.len = self.len.wrapping_sub(1);
         // SAFETY: the row at the old last index held a value, which the length no longer covers,
         // so it is read out once.
-        Some(unsafe { self.base.as_ptr().add(self.len()).read() })
+        Some(unsafe { self.rows().as_ptr().add(self.len()).read() })
     }
 
     fn remove(&mut self, index: usize) -> T {
@@ -1237,7 +1397,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         // SAFETY: `index < len`: the value at `index` is read out once, and the rows after it, which
         // hold values, move down over it before the length drops by one.
         unsafe {
-            let at = self.base.as_ptr().add(index);
+            let at = self.rows().as_ptr().add(index);
             let value = at.read();
             core::ptr::copy(
                 at.add(1),
@@ -1300,7 +1460,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 src.as_ptr(),
-                self.base.as_ptr().add(self.len()),
+                self.rows().as_ptr().add(self.len()),
                 src.len(),
             );
         }
@@ -1317,7 +1477,7 @@ impl<T> IntoIterator for LentSeq<T> {
         // The values move to the iterator, which drops what it is not asked for.
         let seq = core::mem::ManuallyDrop::new(self);
         LentIntoIter {
-            base: seq.base,
+            base: seq.rows(),
             next: 0,
             end: seq.len(),
             _owns: PhantomData,
@@ -1869,6 +2029,10 @@ impl Arena {
 pub struct BoundedString<const N: usize, P: Storage = Profile> {
     inner: P::Text<N>,
 }
+
+// SAFETY: a `BoundedString` is its policy's text alone, whose zero bytes are the empty text.
+unsafe impl<const N: usize, P: Storage> ZeroEmpty for BoundedString<N, P> where P::Text<N>: ZeroEmpty
+{}
 
 impl<const N: usize> BoundedString<N, Static> {
     /// An empty string of the static policy. `const`; see [`BoundedVec::new_static`].
@@ -2860,5 +3024,108 @@ mod tests {
         a.push_str("k/v").unwrap();
         b.push_str("k/v").unwrap();
         assert!(a == b);
+    }
+
+    /// A value of all zero bytes of a type a region holds, as the allocator's zeroed block is.
+    fn zeroed<T: ZeroEmpty>() -> T {
+        // SAFETY: `ZeroEmpty`: all zero bytes are a valid value of `T`.
+        unsafe { core::mem::zeroed() }
+    }
+
+    /// Every container a region holds reads as empty from all zero bytes: the sequences of each
+    /// policy, the texts, a pointer of none. Turned red by a `ZeroEmpty` type whose zero is not its
+    /// empty state (a `LentSeq` whose `None` were not its first word's zero, say).
+    #[test]
+    fn zero_bytes_are_every_container_empty() {
+        assert!(zeroed::<heapless::Vec<u32, 4>>().is_empty());
+        assert!(zeroed::<heapless::String<4>>().is_empty());
+        assert!(zeroed::<BoundedVec<u32, 4, Static>>().is_empty());
+        assert!(zeroed::<BoundedString<8, Static>>().is_empty());
+        let unplaced = zeroed::<BoundedVec<u32, 4, Region>>();
+        assert!(unplaced.is_empty());
+        assert_eq!(unplaced.free_slots(), 0, "a table placed no rows has none");
+        assert!(zeroed::<Option<NonNull<u8>>>().is_none());
+        assert_eq!(zeroed::<[u16; 3]>(), [0; 3]);
+        assert_eq!(zeroed::<Cell<u32>>().get(), 0);
+    }
+
+    /// A region of two tables of the lent shape and one of the static policy, with the rows of
+    /// the first two beside them, as a session's region lays its layers' out.
+    #[repr(C)]
+    struct TwoTables {
+        names: BoundedVec<u32, 4, Region>,
+        words: BoundedVec<u64, 3, Region>,
+        inline: BoundedVec<u16, 2, Static>,
+        name_rows: [core::mem::MaybeUninit<u32>; 4],
+        word_rows: [core::mem::MaybeUninit<u64>; 3],
+    }
+
+    // SAFETY: every field is `ZeroEmpty`.
+    unsafe impl ZeroEmpty for TwoTables {}
+
+    /// The region's description: each table of the lent shape, where its rows lie, how many.
+    const TWO_TABLES: [SeqPlace; 2] = [
+        SeqPlace::of::<u32>(
+            core::mem::offset_of!(TwoTables, names),
+            core::mem::offset_of!(TwoTables, name_rows),
+            4,
+        ),
+        SeqPlace::of::<u64>(
+            core::mem::offset_of!(TwoTables, words),
+            core::mem::offset_of!(TwoTables, word_rows),
+            3,
+        ),
+    ];
+
+    /// A region zeroed by the allocator in one block is every table empty; placed by its
+    /// description, each table of the lent shape takes as many values as it has rows and refuses
+    /// the next, and the static table beside them is untouched. Turned red by `place_seqs` writing
+    /// a room other than the description's, or a row place other than its own.
+    #[test]
+    fn a_region_placed_by_its_description_holds_each_tables_rows() {
+        let layout = std::alloc::Layout::new::<TwoTables>();
+        // SAFETY: the layout is of a type of some bytes.
+        let block = unsafe { std::alloc::alloc_zeroed(layout) };
+        let region = NonNull::new(block.cast::<TwoTables>()).expect("the test allocator answers");
+        // SAFETY: the block is the region's, zeroed, which `ZeroEmpty` makes every table empty.
+        let tables = unsafe { &mut *region.as_ptr() };
+        assert!(tables.names.is_empty() && tables.words.is_empty() && tables.inline.is_empty());
+        // SAFETY: the description names the region's two tables and their own rows, aligned
+        // (`SeqPlace::of`), which nothing else reaches while the tables live.
+        unsafe { place_seqs(region.cast::<u8>(), &TWO_TABLES) };
+        for name in 0..4 {
+            assert!(tables.names.push(name).is_ok());
+        }
+        assert!(matches!(tables.names.push(9), Err(CapacityFull(9))));
+        for word in [7u64, 8, 9] {
+            assert!(tables.words.push(word).is_ok());
+        }
+        assert!(matches!(tables.words.push(10), Err(CapacityFull(10))));
+        assert_eq!(tables.names.as_ref(), &[0, 1, 2, 3]);
+        assert_eq!(tables.words.as_ref(), &[7, 8, 9]);
+        assert_eq!(
+            tables.names.as_ptr().cast::<u8>(),
+            block
+                .wrapping_add(core::mem::offset_of!(TwoTables, name_rows))
+                .cast_const(),
+            "the rows lie where the description says"
+        );
+        assert!(tables.inline.is_empty());
+        tables.names.clear();
+        assert_eq!(tables.names.free_slots(), 4);
+        // SAFETY: the tables hold nothing that drops; the block goes back with its layout.
+        unsafe { std::alloc::dealloc(block, layout) };
+    }
+
+    /// The region's room composes a key in the row it holds, and of all zero bytes holds none.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn an_inline_room_composes_in_its_own_row() {
+        use crate::wireexpr_resolve::{ComposeInline, ComposeRoom, KeyexprOut};
+        let mut room = zeroed::<ComposeInline>();
+        let buffer = room.buffer(&mut ());
+        assert_eq!(buffer.as_str(), "");
+        assert!(buffer.push_str("demo/key").is_ok());
+        assert_eq!(buffer.as_str(), "demo/key");
     }
 }

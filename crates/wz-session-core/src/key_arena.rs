@@ -55,7 +55,7 @@ use core::ptr::NonNull;
 #[cfg(debug_assertions)]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept};
+use crate::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept, ZeroEmpty};
 
 /// The bytes of a block's header: its length and how many keys hold it (or, free, the next free
 /// block), each a `u32`.
@@ -314,8 +314,11 @@ pub struct KeyCounts {
 }
 
 /// The key arena of a session, which makes its keys ([`Self::key`]). A handle: copies of it name
-/// the same arena. Made by [`Arena::lend_keys`].
+/// the same arena. Made by [`Arena::lend_keys`] or by a [`KeyArena`] a region holds.
+// Transparent over its pointer, so an `Option` of it is null for `None` and a table's
+// [`LentKeys`] of all zero bytes is one handed no arena ([`ZeroEmpty`]).
 #[derive(Clone, Copy)]
+#[repr(transparent)]
 pub struct KeySpace {
     store: NonNull<KeyStore>,
 }
@@ -562,6 +565,58 @@ impl From<KeySpace> for LentKeys {
         Self(Some(keys))
     }
 }
+
+// SAFETY: `LentKeys` is an `Option` of a transparent `NonNull`, whose `None` is the null pointer:
+// all zero bytes are the table handed no key arena, which holds nothing to give back.
+unsafe impl ZeroEmpty for LentKeys {}
+
+/// A key arena a region of the build's shape holds as a field: its state and `BYTES` bytes of
+/// blocks inline, laid out as [`Arena::lend_keys`] lays out the span it lends, so the blocks are
+/// managed by the same [`KeySpace`] and no arena is planned or lent for them.
+///
+/// All zero bytes are an arena not yet opened ([`ZeroEmpty`]): its state is written once, by
+/// [`Self::space`], when the session that holds it opens, and every key is made after.
+#[repr(C, align(16))]
+pub struct KeyArena<const BYTES: usize> {
+    state: core::mem::MaybeUninit<[u8; KeySpace::STATE_BYTES]>,
+    blocks: [core::mem::MaybeUninit<u8>; BYTES],
+}
+
+impl<const BYTES: usize> KeyArena<BYTES> {
+    /// Open the arena, none of its blocks taken, keeping keys of at most `longest` bytes: the
+    /// handle its session's tables make their keys with.
+    ///
+    /// # Safety
+    /// For as long as the space or any key made from it lives, the arena neither moves nor is given
+    /// back, and is reached only through the space; no key made from a space it gave before lives.
+    pub unsafe fn space(&mut self, longest: crate::limits::MaxKeyexprBytesHeld) -> KeySpace {
+        const {
+            assert!(
+                BYTES <= MAX_KEY_ARENA_BYTES,
+                "a key arena's blocks are addressed by u32 offsets"
+            );
+            assert!(
+                core::mem::align_of::<Self>() == crate::bounded::ARENA_ALIGN,
+                "a key arena starts on the boundary an arena's spans start on"
+            );
+            assert!(
+                match KeySpace::span_bytes(BYTES) {
+                    Some(span) => span == core::mem::size_of::<Self>(),
+                    None => false,
+                },
+                "a key arena is the span an arena would lend it"
+            );
+        }
+        // SAFETY: the arena is aligned to `ARENA_ALIGN` and is the `span_bytes(BYTES)` bytes of
+        // its state then its blocks (both asserted above), which are `MaybeUninit` and so valid
+        // for any write; the caller's contract keeps them in place and unused by anything else
+        // while the space or a key of it lives, and `BYTES` is within what a key arena addresses.
+        unsafe { KeySpace::over(NonNull::from(self).cast::<u8>(), BYTES, longest) }
+    }
+}
+
+// SAFETY: both fields are `MaybeUninit`, valid as any bytes; an arena not yet opened holds no key.
+unsafe impl<const BYTES: usize> ZeroEmpty for KeyArena<BYTES> {}
 
 impl KeyMaker<KeyRef> for LentKeys {
     /// A key past the session's `MAX_KEYEXPR_BYTES` the arena was lent with is refused before any
@@ -1198,5 +1253,34 @@ mod tests {
         assert_eq!(arena.high_water(), 0, "a refused key arena takes nothing");
         assert_eq!(KeySpace::span_bytes(MAX_KEY_ARENA_BYTES + 1), None);
         assert!(arena.lend_keys(64, longest).is_ok());
+    }
+
+    /// A key arena a region holds is all zero bytes until its session opens; opened, its blocks are
+    /// every byte it holds, none taken, so one key of all of them is kept and the next refused. A
+    /// table's key maker of zero bytes was handed no arena. Turned red by a `KeyArena` whose
+    /// blocks are not the span `KeySpace::over` is told of.
+    #[test]
+    fn a_key_arena_of_zero_bytes_opens_to_every_block() {
+        const BYTES: usize = 256;
+        // SAFETY: `KeyArena` is `ZeroEmpty`: all zero bytes are an arena not yet opened.
+        let zeroed: KeyArena<BYTES> = unsafe { core::mem::zeroed() };
+        let arena: &'static mut KeyArena<BYTES> =
+            std::boxed::Box::leak(std::boxed::Box::new(zeroed));
+        // SAFETY: leaked, so the arena never moves nor goes back, and only the space reaches it.
+        let keys = unsafe { arena.space(SessionLimits::defaults().max_keyexpr_bytes_held()) };
+        let counts = keys.counts();
+        assert_eq!(
+            (counts.bytes, counts.used, counts.untouched, counts.refused),
+            (BYTES, 0, BYTES, 0)
+        );
+        let whole = "k".repeat(BYTES - BLOCK_HEADER);
+        let held = keys.key(&whole).expect("one key takes every block");
+        assert_eq!(held.block_bytes(), BYTES);
+        assert!(keys.key("k").is_err(), "no block is left");
+        drop(held);
+        assert_eq!(keys.counts().used, 0);
+        // SAFETY: `LentKeys` is `ZeroEmpty`.
+        let unhanded: LentKeys = unsafe { core::mem::zeroed() };
+        assert!(unhanded.space().is_none());
     }
 }

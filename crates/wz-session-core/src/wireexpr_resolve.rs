@@ -905,6 +905,25 @@ impl ComposeRoom for ComposeRow {
     }
 }
 
+/// The region policy's room: one [`KeyexprRow`] inline in the table that composes, which the
+/// region holds zeroed with the rest of the table, so composing a key takes no memory after the
+/// open and nothing of the delivering call's frame.
+#[derive(Default)]
+pub struct ComposeInline {
+    row: KeyexprRow,
+}
+
+impl ComposeRoom for ComposeInline {
+    type Frame = ();
+
+    fn buffer(&mut self, _frame: &mut ()) -> &mut dyn KeyexprOut {
+        &mut self.row
+    }
+}
+
+// SAFETY: the room is a `KeyexprRow`, a static text whose zero bytes are the empty text.
+unsafe impl crate::bounded::ZeroEmpty for ComposeInline {}
+
 /// The buffer of a room lent no row: it holds nothing and takes nothing.
 #[derive(Default)]
 struct Unlent;
