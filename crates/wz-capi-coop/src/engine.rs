@@ -7270,6 +7270,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.faces.watch(sink).map_err(|_| Declined::TableFull)
     }
 
+    // Without the plane no face is told, so a watch of the rows is refused as one of the
+    // snapshots is: the provided answer would lend a place of the heap to a watcher it then lets
+    // go of untold.
+    #[cfg(not(feature = "connectivity"))]
+    fn watch_face_rows(&self, sink: FaceRowSink) -> Result<u64, Declined> {
+        let _ = sink;
+        Err(Declined::NotBuilt)
+    }
+
     #[cfg(feature = "connectivity")]
     fn unwatch_faces(&self, id: u64) -> bool {
         self.faces.unwatch(id)

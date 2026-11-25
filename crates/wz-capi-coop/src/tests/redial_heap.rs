@@ -388,6 +388,34 @@ fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_not
     );
 }
 
+/// A session built without the connectivity plane tells no face, so a watch of the faces' rows is
+/// refused as not built, with nothing of the heap taken and the sink let go of with the refusal.
+/// Turned red by an engine that answers through the provided watch, which takes a place of the
+/// heap for the watcher before it is refused.
+#[cfg(not(feature = "connectivity"))]
+#[test]
+fn a_watch_of_face_rows_without_the_plane_is_refused_with_nothing_allocated() {
+    use wz_capi_port::{Refusal, SessionEngine};
+    use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceRowSink};
+
+    let router = Router::start(CatchAll::None);
+    let engine = CoopEngine::open(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        config(&router),
+    )
+    .expect("the session opens");
+    let watcher = Arc::new(|_: FaceEventKind, _: &FaceLinkRow| {});
+    let held = Arc::downgrade(&watcher);
+    let sink = FaceRowSink::of_arc(watcher);
+    let mut answer = None;
+    let watching = counted(|| answer = Some(SessionEngine::watch_face_rows(&*engine, sink)));
+    assert_eq!(answer, Some(Err(Refusal::NotBuilt)));
+    assert_eq!(watching, 0, "a refused watch takes nothing of the heap");
+    assert!(held.upgrade().is_none(), "the refused sink is let go of");
+}
+
 /// A session reserves two rows for each face it may hold, its going and its coming back, its
 /// groups' members among them, and never more than the build's rows. Turned red by a session that
 /// reserves the build's rows whatever it holds, or one past them for a session of many faces.
