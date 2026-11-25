@@ -191,26 +191,42 @@ fn read(endpoint: &str, _role: Role) -> Result<EndpointReading, Refused> {
 /// The cooperative engine's reading of one endpoint, which pico's reading already admitted
 /// (`requirement_of`): a unicast endpoint is the text that reading keeps (`with_engine_text`,
 /// the one the engine is handed), read by the engine's own grammar (`locator_text`), which
-/// dials and listens on an address and refuses a host name, a config or metadata part and a port
-/// it cannot use (a scheme the build has no link for that reading refused already); `z_open`
-/// answers that refusal as a link it could not open. A group is read by the grammar its host joiner reads it with.
+/// dials an address or a host name (`read_dial_target`), listens on an address, and refuses a
+/// config or metadata part and a port it cannot use (a scheme the build has no link for that
+/// reading refused already); `z_open` answers that refusal as a link it could not open. A host
+/// name asks for the resolver where the build's network has one, and is refused as the open
+/// refuses it where it has none ([`admit_name`]). A group is read by the grammar its host joiner
+/// reads it with.
 #[cfg(not(feature = "engine-tokio"))]
 fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
-    use wz_capi_coop::locator_text::{parse_listen_locator, parse_locator};
+    use wz_capi_coop::locator_text::{parse_listen_locator, read_dial_target, DialTarget};
     use wz_capi_coop::LinkProto;
     use wz_session_core::facilities::Endpoint;
     use wz_session_core::locator::Proto;
+    // A name is read where the engine reads it, and the link it opens at any address of the host
+    // is its kind; the address a resolver answers is no part of what the open asks for.
     let parsed = match role {
-        Role::Dial => crate::endpoint::with_engine_text(endpoint, parse_locator),
-        Role::Listen => crate::endpoint::with_engine_text(endpoint, parse_listen_locator),
+        Role::Dial => crate::endpoint::with_engine_text(endpoint, |text: &str| {
+            read_dial_target(text).map(|target| match target {
+                DialTarget::At(at) => (at, false),
+                DialTarget::Named(name) => (
+                    name.locator(core::net::SocketAddr::from(([0, 0, 0, 0], name.port()))),
+                    true,
+                ),
+            })
+        }),
+        Role::Listen => crate::endpoint::with_engine_text(endpoint, |text: &str| {
+            parse_listen_locator(text).map(|at| (at, false))
+        }),
         Role::Group => return read_group(endpoint),
     };
-    let locator = parsed.map_err(|_| {
+    let (locator, named) = parsed.map_err(|_| {
         (
             crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
             "the open refuses this config: the engine reads no address it can open in an endpoint",
         )
     })?;
+    admit_name(named, resolves::<crate::coop_host::Links>())?;
     // A link of another kind, a serial line or a pair of named FIFOs, is a request no facility of
     // the vocabulary names: the vocabulary's own reading says so, in its words.
     let Some(ip) = locator.as_ip() else {
@@ -221,10 +237,28 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
         LinkProto::Tcp => Proto::Tcp,
         LinkProto::Tls => Proto::Tls,
     };
-    Ok(Ok(Endpoint::Ip {
-        proto,
-        named: false,
-    }))
+    Ok(Ok(Endpoint::Ip { proto, named }))
+}
+
+/// Whether the build's network answers a host name with its addresses (`SessionLinks::RESOLVES`):
+/// a host's (`getaddrinfo`), and not an image's whose platform has no resolver.
+#[cfg(not(feature = "engine-tokio"))]
+fn resolves<L: wz_capi_coop::CoopLinks>() -> bool {
+    L::RESOLVES
+}
+
+/// A host name in an endpoint, over a network that `resolves` names or not: the open dials the
+/// addresses its resolver answers where it does, and refuses the name before any dial where it
+/// does not, with the code it answers a link it could not open with.
+#[cfg(not(feature = "engine-tokio"))]
+fn admit_name(named: bool, resolves: bool) -> Result<(), Refused> {
+    if named && !resolves {
+        return Err((
+            crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+            "the open refuses this config: the build's network has no resolver for a host name",
+        ));
+    }
+    Ok(())
 }
 
 /// A group as the cooperative engine reads it before its host joiner is asked
@@ -281,8 +315,8 @@ mod tests {
         );
     }
 
-    /// The tokio engine's runtime resolves a host name, so the door asks for the resolver.
-    #[cfg(feature = "engine-tokio")]
+    /// A host's network resolves a host name, on either engine, so the door asks for the
+    /// resolver. Turned red by a name refused, or read as an address that asks for none.
     #[test]
     fn a_host_named_locator_requires_the_resolver() {
         let got = requirement_of(&config(&[(
@@ -410,18 +444,23 @@ mod tests {
         }
     }
 
-    /// The cooperative engine has no resolver: its open refuses a host name as a link it could not
-    /// open, and so does the door.
+    /// A name the cooperative engine dials is admitted where the network resolves names and
+    /// refused, with the code of a link the open could not open, where it does not (an image whose
+    /// platform has no resolver); an address is admitted either way. Turned red by a name admitted
+    /// over a network without a resolver, or one refused over a network with one.
     #[cfg(not(feature = "engine-tokio"))]
     #[test]
-    fn a_host_named_locator_is_refused_as_the_open_refuses_it() {
-        let (code, reason) = requirement_of(&config(&[(
-            Z_CONFIG_CONNECT_KEY,
-            "tcp/router.example:7447",
-        )]))
-        .unwrap_err();
+    fn a_host_name_is_admitted_only_where_the_network_resolves_it() {
+        assert_eq!(admit_name(true, true), Ok(()));
+        assert_eq!(admit_name(false, false), Ok(()));
+        assert_eq!(admit_name(false, true), Ok(()));
+        let (code, reason) = admit_name(true, false).unwrap_err();
         assert_eq!(code, crate::result::Z_ERR_TRANSPORT_OPEN_FAILED);
-        assert!(reason.contains("address"), "{reason}");
+        assert!(reason.contains("resolver"), "{reason}");
+        assert!(
+            resolves::<crate::coop_host::Links>(),
+            "a host build resolves"
+        );
     }
 
     /// A listened `reth/` endpoint is a group over raw Ethernet where the build joins one, which
