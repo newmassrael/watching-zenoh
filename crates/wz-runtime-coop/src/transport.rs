@@ -230,6 +230,10 @@ pub trait GroupRecord {
     /// Whether the group's task took a datagram since this was last asked.
     fn took_input(&self) -> bool;
 
+    /// Whether the group's task took a datagram since [`Self::took_input`] was last asked,
+    /// without asking it: what the step that read it goes on by.
+    fn holds_input(&self) -> bool;
+
     /// What a read waits on for the group socket's next datagram, while the group's session runs
     /// and its stack gives one.
     fn input(&self) -> Option<LinkWait>;
@@ -331,6 +335,9 @@ mod tests {
                 7
             }
             fn took_input(&self) -> bool {
+                false
+            }
+            fn holds_input(&self) -> bool {
                 false
             }
             fn input(&self) -> Option<LinkWait> {

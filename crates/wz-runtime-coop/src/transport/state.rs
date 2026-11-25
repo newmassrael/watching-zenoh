@@ -892,6 +892,13 @@ impl<T: TransportFaces> TransportState<T> {
         self.groups.iter().any(GroupRecord::took_input)
     }
 
+    /// Whether a group took a datagram this step reads, leaving the mark for the read that asks
+    /// [`Self::group_took_input`] (`group`).
+    #[cfg(feature = "group")]
+    pub fn group_holds_input(&self) -> bool {
+        self.groups.iter().any(GroupRecord::holds_input)
+    }
+
     /// When a group's session is next due with nothing arriving, in whole milliseconds of the
     /// session's clock rounded up (`group`): its beacon, its sweep, what the session pushed onto
     /// it, its join again.

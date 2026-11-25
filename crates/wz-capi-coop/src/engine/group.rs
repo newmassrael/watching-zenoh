@@ -310,6 +310,13 @@ impl Default for MemberRows {
 /// than any beacon interval an ABI advertises.
 pub(super) const GROUP_TICK_MS: u32 = 50;
 
+/// How many datagrams of a group in a row a read takes, each a step under the session's lock,
+/// before the session's links, timers and sweeps are moved again: what a timer, a get's deadline
+/// or a sweep may be late by while a group's input comes in a burst, where a link's is late by
+/// one receive at most (`CoopEngine::step`). A burst longer than this is
+/// read on after the move, the group's input still waiting.
+pub(super) const GROUP_READS_PER_MOVE: u8 = 16;
+
 /// `GROUP_TICK_MS` on the session's clock, in microseconds: a product the build evaluates, so
 /// one that did not fit a `u64` would not compile.
 const GROUP_TICK_US: u64 = GROUP_TICK_MS as u64 * 1_000;
@@ -968,6 +975,12 @@ impl<W: LinkWaits> GroupFace<W> {
         self.took.replace(false)
     }
 
+    /// Whether the group's task took a datagram since `took_input` was last asked, the mark left
+    /// for it.
+    pub(super) fn holds_input(&self) -> bool {
+        self.took.get()
+    }
+
     /// What a read waits on for the group socket's next datagram, while the group's session runs
     /// and its stack gives one.
     pub(super) fn input(&self) -> Option<LinkWait> {
@@ -1362,6 +1375,10 @@ impl<W: LinkWaits> GroupRecord for GroupFace<W> {
 
     fn took_input(&self) -> bool {
         GroupFace::took_input(self)
+    }
+
+    fn holds_input(&self) -> bool {
+        GroupFace::holds_input(self)
     }
 
     fn input(&self) -> Option<LinkWait> {
