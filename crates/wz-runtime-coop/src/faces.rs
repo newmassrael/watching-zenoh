@@ -456,6 +456,10 @@ impl<D> Dial<D> {
 /// still being made.
 pub type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
 
+/// A dial answered as soon as it was asked ([`LinkSupervisor::ask_dial`]): the link it made or the
+/// refusal, and the time it would have been given up at.
+pub type AnsweredDial<P> = (Result<OpenedLink<P>, LinkOpenError>, u64);
+
 /// What a session reads of a face at a step ([`LinkSupervisor::read_face`]): its role, where its
 /// link stands, and what it did since. The answer of its dial, kept for the link it made, is
 /// written where the reader asked for it, so a step that reads an established face moves no
@@ -1075,7 +1079,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         mut pending: L::Dial,
         next: usize,
         deadline_us: impl FnOnce() -> u64,
-    ) -> Option<(Result<OpenedLink<L::Pump>, LinkOpenError>, u64)> {
+    ) -> Option<AnsweredDial<L::Pump>> {
         // A dial that answered has handed out all it held (the socket, the link's buffers, the
         // program's link), and keeps only handles that own nothing, so it is let go of here with
         // nothing to observe: every stack's dial takes those out as it answers.
