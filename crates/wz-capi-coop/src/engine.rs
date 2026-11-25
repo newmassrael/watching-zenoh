@@ -2207,14 +2207,14 @@ unsafe impl<T> Send for Confined<T> {}
 /// closure of such a lend, which runs on the lending thread and returns before the lend does.
 struct OnThisThread<T>(T);
 
-// SAFETY: a carrier is moved only into a closure run by a lend of a link's parts
-// (`FaceHeld::lend`) or of its session (`LendsSession::try_session`, the send of `send_on` among
-// them), each of which runs its closure on the calling thread and returns before it returns: what
-// is carried in
-// or out never reaches another thread. A handle on a cell of the link made in such a lend is kept
-// in the parts, as the parts' contract asks (`direct::DirectParts`), and what is carried in keeps
-// none of the session's handles it is lent: what leaves a lend in a carrier is the session's own
-// values and the link's waits.
+// SAFETY: a carrier is moved only into a closure run by the making of a link's parts
+// (`FaceHeld::gather`), a lend of them (`FaceHeld::lend`) or of its session
+// (`LendsSession::try_session`, the send of `send_on` among them), each of which runs its closure on
+// the calling thread and returns before it returns: what is carried in or out never reaches
+// another thread. A handle on a cell of the link made in such a lend is kept in the parts, as the
+// parts' contract asks (`direct::DirectParts`), and what is carried in keeps none of the session's
+// handles it is lent: what leaves a lend in a carrier is the session's own values and the link's
+// waits.
 unsafe impl<T> Send for OnThisThread<T> {}
 
 impl<T> OnThisThread<T> {

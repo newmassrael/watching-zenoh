@@ -526,10 +526,10 @@ pub(super) struct DirectParts<L: CoopLinks + 'static, C: ClockSource + 'static> 
 unsafe impl<L: CoopLinks + 'static, C: ClockSource + 'static> FaceParts for DirectParts<L, C> {}
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectParts<L, C> {
-    /// Parts of no link yet.
-    fn none() -> Self {
+    /// The parts of the link whose wire is `wire`.
+    fn holding(wire: Wire<C>) -> Self {
         Self {
-            wire: None,
+            wire: Some(wire),
             of: PhantomData,
         }
     }
@@ -1594,9 +1594,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> Result<(), OpenError> {
         slot.drop_link(&face.site);
         face.end.ready();
-        // SAFETY: the parts hold no handle on a cell of a link yet.
-        let parts = unsafe { FaceHeld::gathered(DirectParts::none()) };
-        drop(face.site.hold(parts));
         let params = core.link_params()?;
         // The face's record at the slot's row names the face its link's session dispatches to.
         let face_id = slot.face_id(core).ok_or(OpenError::NoEndpoint)?;
@@ -1641,17 +1638,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let (input, room) = (wire.input_wait(), wire.room_wait());
         #[cfg(feature = "resource-snapshot")]
         let count = KernelCount(CellRc::clone(&wire.actions.core));
-        // The wire goes into its place by a try alone, under the session's lock: a send that holds
-        // the place waits for that lock, so the place is never waited for here.
+        // The place held no parts from the drop of the last link; the wire goes in whole, as the
+        // parts' making takes it, and what was owed to the last link is let go of
+        // (`FaceSite::hold`).
         let carried = OnThisThread(wire);
-        let seated = face.site.try_lend(|held| {
-            held.lend(move |parts| {
-                parts.wire = Some(carried.get());
-            })
-        });
-        if !matches!(seated, Lend::Lent(())) {
-            return Err(OpenError::NoEndpoint);
-        }
+        let parts = FaceHeld::gather(move || DirectParts::holding(carried.get()));
+        drop(face.site.hold(parts));
         // A pump not stepped yet is due at once: the read that placed it sends its first frame,
         // and the next wait, the open's too, is none.
         slot.pump_due_us = 0;
