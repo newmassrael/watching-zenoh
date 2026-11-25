@@ -7514,6 +7514,28 @@
       "carry_forward_bullets": [
         "Open: the Windows release DLL at 4.797 (x64) and 5.6461 (x86) times zenoh-pico, its bulk in the extension doors; lanes are folding their per-caller copies and moving the open-time schema readers to a crate of their own. Whether a .proto may be compiled to a descriptor at build time, rather than read at run time as the door's contract says, is the owner's to decide. The pico release case reads sessions 2.88, transport 2.77, doors 2.09, driver 1.46. The ABI performance matrix is being run again after the keep-alive repair. The SCE items wait behind the runtime size branch."
       ]
+    },
+    "Round 4638": {
+      "decision_summary": "A twelfth integration of the pico C ABI release toward docs/c-abi-architecture.md: the sessions, transport and driver structure lanes, the one-thread forms, the SN width, the panic-free and heap-refusing allocation paths, and the cooperative links.\n\nSessions and transport: a session's round, rooms, registry and Router lends lie in the session's arena behind handles that count nothing; the runtime's state and task table are placed there by count; a table's slot and a filter's undeclaration are each one body. A dial-only session runs its one task in one cell, and reserves timers only where a task sleeps on them.\n\nOne-thread forms: a build without threads counts its calls without atomics, calls back each record before the next, keeps a round's records in itself and lends one longest key.\n\nSN width: a session holds the offered width as its policy value, refuses a width outside the domain at the open, and walks fragment chains and judges known rings in the Sn word; an observer judges a ring at the wire's width.\n\nHeap and panics: the object doors answer a full heap with pico's out-of-memory code, a handler channel holds its elements in a fixed ring, a link cell the heap refuses is refused, and the no-heap gate measures the no_std put and subscriber legs, which read no allocation after open.\n\nLinks on the cooperative engine: WebSocket (heap and session-slot profiles, POSIX and Windows openers), unixpipe, raweth and group endpoints read once into sized fields; a connect locator that names a group joins it, as pico does.\n\nKeys: a key hold gives its declaration back by its row, and a copy past a declaration's count is refused with pico's overflow code.\n\nThe size ledger reads 1.4166 times zenoh-pico in total (from 1.5581): sessions 2.5710, doors 2.0852, transport 2.3719, driver 1.3641; keyexpr, codec and language win.",
+      "changes_bullets": [
+        "crates/wz-session-core, wz-runtime-coop, wz-capi-coop, wz-capi-pico, wz-capi-port, wz-capi-core, wz-session-mcu, wz-session-lwip, wz-runtime-posix, wz-runtime-zephyr, wz-runtime-tokio and their tests: the lanes merged into the integration branch (sessions S2-S8, transport, driver, one-thread forms, SN width, panic-free and heap-refusing paths, WebSocket, unixpipe, raweth and group locators, key holds, coop group statistics).",
+        "scripts/lib/wz_config.py: a policy's wire codes; deploy/wz-config.toml and the generated limits, policies and Kconfig.",
+        "scripts/lib/no_heap_ratchet_gate.py and deploy/no_heap_ratchet.json: the no_std legs measured and locked.",
+        "scripts/host-bench, docs/zenoh-logic-as-sce-kinds, docs/upstream-parity.md rows.",
+        "deploy/size_ledger.json rows tightened."
+      ],
+      "verification_bullets": [
+        "Run through bx from the integration worktree on f833cf0e8 and its parents: each changed crate checked alone (no feature unification across crates), the changed crates' tests and clippy with -D warnings, the coop, pico, lwIP and MCU feature combinations, wz-session-mcu with every feature, Layer C1nh (every family 0 allocations after open, the no_std put and subscriber legs included), logic_census_coverage_gate, totality_debt_gate, wz_config.py --check and --selftest. Two failures of the run on 6d74e7958 were the build host's lost connection, not the code; both tests passed on the run before and after. The size ledger --measure on b3990d0ba: sessions 81,494 / doors 43,817 / transport 34,966 / driver 25,594 / keyexpr 11,848 / codec 28,825 / language 14,933 bytes against zenoh-pico, total 1.4166. Locally: mnemosyne-cli validate-workspace (T1 orphan new +0), reason_review_pin_gate, reason_citation_gate, store_reason_citation_gate, upstream_citation_anchor_gate, prose_named_identifier_gate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: throughput on the pico C ABI is far behind zenoh-pico (190k against 2.16M messages a second, measured with a session that ran poll_links and accept once per message); the receive path that moves the links once a receive, accepts only on a ready port and reads the clock once a receive waits in its lane for the next landing, then the matrix is measured again on a quiet host. The SCE pin moves to f98f6e9 (ADR 0124 event data, ADR 0125 static exit and entry rows), which drops the general walk where every document is in the class. The engine's place in the arena by count and its generation handle (D2) and the planes placed uncounted wait for the next landing. sessions 2.57, transport 2.37, doors 2.09, driver 1.36 remain the size debt."
+      ]
     }
   },
   "inventory_entries": {
