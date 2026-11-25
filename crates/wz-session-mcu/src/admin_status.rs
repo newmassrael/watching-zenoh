@@ -550,6 +550,8 @@ mod tests {
                 },
                 clock,
             );
+        // The answers leave as data sends, which a session lets through only once established.
+        actions.enter_established();
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let mut on_event = dispatch_to(observer.clone(), actions.clone());
 
@@ -668,6 +670,8 @@ mod tests {
                 },
                 clock,
             );
+        // The answers leave as data sends, which a session lets through only once established.
+        actions.enter_established();
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let on_event = dispatch_to(observer.clone(), actions.clone());
         status.set_sessions(vec![AdminSession {
