@@ -93,9 +93,9 @@ impl Network {
 }
 
 pub(super) struct Joined {
-    member: u8,
-    link: LinkHandle,
-    transport: Weak<AppTransport>,
+    pub(super) member: u8,
+    pub(super) link: LinkHandle,
+    pub(super) transport: Weak<AppTransport>,
 }
 
 /// One member's stack: it joins [`GROUP`], with whatever keys follow it, and refuses anything

@@ -286,6 +286,18 @@ pub const HELD_SESSIONS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::CALLBACK_THREADS`] is bound.
+pub const CALLBACK_THREADS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::HELD_SAMPLES`] is bound.
 pub const HELD_SAMPLES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

@@ -736,7 +736,9 @@ fn hand_status(closure: &MatchingCClosure, matching: bool) {
     };
     let status = z_matching_status_t { matching };
     let ctx = closure.context.0;
-    let _in_callback = InCallback::enter();
+    let Some(_in_callback) = InCallback::enter() else {
+        return;
+    };
     // SAFETY: `context` is the caller's, alive until `drop` runs, which comes after the last
     // call (`MatchingCClosure`).
     let _ = catch(|| unsafe {

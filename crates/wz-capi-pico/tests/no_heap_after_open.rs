@@ -13,14 +13,17 @@
 //! closed (`Stage`). One line per family is printed:
 //!
 //! ```text
-//! no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>
+//! no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m> grown=<g>
 //! no-heap: <family> not-built
 //! ```
 //!
 //! `allocs` and `bytes` are the window that allocated least, `max_allocs` the window that
-//! allocated most. The threads' interleaving (how many turns the receiving thread takes in a round,
-//! what one round's messages leave for the next) only adds allocations to a window and never takes
-//! away the ones the operation makes, so the least window is the operation's own cost and is what a
+//! allocated most, and `grown` the blocks the family's whole run took and still held at its end,
+//! its warm-ups' among them: a table that grows its capacity at its first use after open and keeps
+//! it allocates in a warm-up and in no counted round, which only `grown` sees. The threads'
+//! interleaving (how many turns the receiving thread takes in a round, what one round's messages
+//! leave for the next) only adds allocations to a window and never takes away the ones the
+//! operation makes, so the least window is the operation's own cost and is what a
 //! row grades; a row locked at 0 grades the most, since it claims no window allocates at all.
 //!
 //! With `WZ_NO_HEAP_READING` set, the lines are written to the file it names as well.
@@ -85,7 +88,7 @@ mod pipe_pair;
 use pipe_pair::GroupPair;
 use pipe_pair::{
     close_window, count_panics, get, mark_calling_thread, open_window, payload, put, reply_closure,
-    view, wait_for, Injecting, Pair, Seen, DATA_KEY, PANICS, WAIT_BOUND,
+    view, wait_for, Injecting, Pair, Seen, DATA_KEY, LIVE_ALLOCATIONS, PANICS, WAIT_BOUND,
 };
 
 #[global_allocator]
@@ -2673,13 +2676,20 @@ unsafe fn window(open: &mut Open, round: Round, index: usize) -> Seen {
     seen
 }
 
-/// Every window of `round`.
-unsafe fn measure(open: &mut Open, round: Round) -> Vec<Seen> {
+/// Every window of `round`, and the blocks its run took and still held at its end, its warm-ups'
+/// among them: capacity a warm-up grows once is heap taken after open as well, and no counted round
+/// sees it again.
+unsafe fn measure(open: &mut Open, round: Round) -> (Vec<Seen>, u64) {
     let mut seen = Vec::with_capacity(WINDOWS);
+    let before = LIVE_ALLOCATIONS.load(Ordering::SeqCst);
     for index in 0..WINDOWS {
         seen.push(window(open, round, index));
     }
-    seen
+    let after = LIVE_ALLOCATIONS.load(Ordering::SeqCst);
+    (
+        seen,
+        u64::try_from(after.saturating_sub(before)).unwrap_or(0),
+    )
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2707,7 +2717,7 @@ fn allocations_after_open_are_counted_per_operation_family() {
     count_panics();
     mark_calling_thread();
     let (seen, balanced, dropped) = unsafe {
-        let mut seen: Vec<(Round, Vec<Seen>)> = Vec::new();
+        let mut seen: Vec<(Round, Vec<Seen>, u64)> = Vec::new();
         let (mut balanced, mut dropped) = (true, true);
         for stage in Stage::ALL {
             let rounds: Vec<Round> = Round::ALL
@@ -2721,7 +2731,8 @@ fn allocations_after_open_are_counted_per_operation_family() {
                 continue;
             };
             for round in rounds {
-                seen.push((round, measure(&mut open, round)));
+                let (windows, grown) = measure(&mut open, round);
+                seen.push((round, windows, grown));
             }
             let (closures, transports) = open.close();
             balanced &= closures;
@@ -2748,11 +2759,12 @@ fn allocations_after_open_are_counted_per_operation_family() {
 
     let mut reading = String::new();
     for (name, round, part) in FAMILIES {
-        let line = match seen.iter().find(|(of, _)| *of == round) {
-            Some((_, windows)) => {
+        let line = match seen.iter().find(|(of, _, _)| *of == round) {
+            Some((_, windows, grown)) => {
                 let (allocs, bytes, most) = reading_of(windows, part);
                 let least = format!("allocs={allocs} bytes={bytes} rounds={ROUNDS}");
-                format!("{PREFIX} {name} {least} windows={WINDOWS} max_allocs={most}")
+                let most = format!("windows={WINDOWS} max_allocs={most} grown={grown}");
+                format!("{PREFIX} {name} {least} {most}")
             }
             None => format!("{PREFIX} {name} not-built"),
         };

@@ -40,7 +40,7 @@ use core::mem::size_of;
 use crate::abi::z_loaned_bytes_t;
 use crate::bytes::bytes_ref;
 use crate::ffi::{guarded, InCallback};
-use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 #[cfg(feature = "query")]
 use crate::session::{session_handle, z_loaned_session_t};
 #[cfg(feature = "query")]
@@ -283,7 +283,9 @@ pub unsafe extern "C" fn wz_ext_interface_bytes_view(
 /// waiting when `body` calls it, as it does inside a callback the core runs itself, since the
 /// wait would be for the callback that is waiting.
 ///
-/// Returns `Z_OK` once `body` has returned; `Z_ERR_NULL` for no `body`, which runs nothing.
+/// Returns `Z_OK` once `body` has returned; `Z_ERR_NULL` for no `body`, which runs nothing;
+/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, running nothing, when the build marks the threads in callbacks
+/// in a table of fixed room (no `std`) and other threads fill it (`wz_ext_callbacks_refused`).
 ///
 /// # Safety
 /// `body` is null or safe to call with `context`.
@@ -295,7 +297,9 @@ pub unsafe extern "C" fn wz_ext_interface_run_in_callback(
     let Some(body) = body else {
         return Z_ERR_NULL;
     };
-    let _in_callback = InCallback::enter();
+    let Some(_in_callback) = InCallback::enter() else {
+        return Z_ERR_SYSTEM_OUT_OF_MEMORY;
+    };
     // `body` is a C function: nothing unwinds out of it into this frame.
     body(context);
     Z_OK

@@ -45,6 +45,7 @@ pub(super) const MAX_LINK_EVENTS_LISTENERS: usize =
 pub(super) const MAX_DECLARED_KEYEXPRS: usize =
     limit(option_env!("WZ_LIMIT_MAX_DECLARED_KEYEXPRS"), 332);
 pub(super) const HELD_SESSIONS: usize = limit(option_env!("WZ_LIMIT_HELD_SESSIONS"), 4);
+pub(super) const CALLBACK_THREADS: usize = limit(option_env!("WZ_LIMIT_CALLBACK_THREADS"), 8);
 pub(super) const HELD_SAMPLES: usize = limit(option_env!("WZ_LIMIT_HELD_SAMPLES"), 18);
 pub(super) const HELD_REPLIES: usize = limit(option_env!("WZ_LIMIT_HELD_REPLIES"), 18);
 pub(super) const HELD_QUERIES: usize = limit(option_env!("WZ_LIMIT_HELD_QUERIES"), 18);

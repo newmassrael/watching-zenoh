@@ -6060,6 +6060,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // a buffer of shared memory as its page, as it keeps the owned projection's.
             let reply = wz_session_core::reply::LocalReplyView::new(parts);
             self.gets.capture();
+            // Mutable here alone: the link's path only reads the session.
+            let mut core = core;
             core.0
                 .session
                 .registry
@@ -6109,6 +6111,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The session's own get is answered to its pending entry, which is the registry's.
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
+            // Mutable here alone: the link's path only reads the session.
+            let mut core = core;
             if due.is_some() {
                 core.0
                     .session
