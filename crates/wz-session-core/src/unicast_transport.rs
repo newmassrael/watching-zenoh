@@ -119,7 +119,7 @@ impl<Router, Life> UnicastTransport<Router, Life> {
     /// rounded up to the millisecond, so a look is never early) or the first of the session's
     /// timers ([`TransportTimers::next_due_ms`]), whichever is sooner. `None` when neither has
     /// one. A state of the machine the timers see for the first time has its handshake deadline
-    /// armed from `now_ms`.
+    /// armed from the end of the millisecond `now_ms` names.
     pub fn due_ms<R: SessionRuntime, T: TimeSource>(
         &mut self,
         engine: &SessionEngine<R, T>,
