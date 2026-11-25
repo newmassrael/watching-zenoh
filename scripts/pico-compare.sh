@@ -114,7 +114,8 @@
 # and the server side to PICO_CMP_SERVER_CPUS (unset, from the topology: two whole cores a side where the host
 # has them, because zenoh-c and zenoh run several threads a process and one SMT pair would bind them where it
 # binds pico's one); PICO_CMP_PINGS (default 20000), PICO_CMP_WARMUP_S (3) and
-# PICO_CMP_WINDOW_S (10) set the round trips and the throughput window.
+# PICO_CMP_WINDOW_S (10) set the round trips and the window of the free-running throughput pair (a diagnostic of
+# `parity`, not a cell), and PICO_CMP_NODROP_TRIAL_S (3) the seconds of a trial of parity's no-drop search.
 #
 # What it does NOT show: anything about an MCU, and the cost in CPU of a lower round trip: read the
 # per-process CPU separately before claiming a latency win.
@@ -1009,6 +1010,9 @@ nodrop_c() {
 # PARITY_SIZE_W (the file each arm's size cells read) and PARITY_NOTES (lines for the run's record.txt).
 
 PARITY_PROGRAMS=(z_put z_sub z_get z_queryable z_pub_thr z_sub_thr z_ping z_pong)
+# The paced pair of the throughput cell (parity.py's no-drop search), scripts/host-bench's C sources, built for the
+# C families against each arm's library as the examples are; the Rust family has none.
+PARITY_BENCHES=(paced_pub count_sub)
 
 parity_fail() {
     echo "pico-compare: NOT-MEASURED, $*"
@@ -1072,6 +1076,17 @@ parity_build_pico() {
                 || parity_fail "$example against $variant did not build (see $dir/build-${example}_$variant.log)"
         done
     done
+    for example in "${PARITY_BENCHES[@]}"; do
+        for variant in P W; do
+            name=zenohpico
+            [ "$variant" = W ] && name=wz_capi_pico
+            cc -std=gnu11 -O2 "$root/scripts/host-bench/$example.c" -DZENOH_LINUX \
+                -I"$default/zenohpico/include" -I"$root/vendor/zenoh-pico/include" -o "$dir/bin/${example}_$variant" \
+                -L"$dir/lib-$variant" "-l$name" "-Wl,-rpath,$dir/lib-$variant" -lpthread \
+                2>"$dir/build-${example}_$variant.log" \
+                || parity_fail "$example against $variant did not build (see $dir/build-${example}_$variant.log)"
+        done
+    done
     PARITY_REFERENCE="zenoh-pico-$(git -C "$root/vendor/zenoh-pico" rev-parse --short=12 HEAD)"
     PARITY_IMAGE="wz-zenoh-pico_defconfig"
     PARITY_SIZE_P="$(readlink -f "$dir/lib-P/libzenohpico.so")"
@@ -1109,6 +1124,16 @@ parity_build_c() {
             name=zenohc
             [ "$variant" = W ] && name=wz_capi_c
             cc -std=gnu11 -O2 "$ref/examples/$example.c" -I"$ref/examples" -I"$prefix/include" \
+                -o "$dir/bin/${example}_$variant" -L"$dir/lib-$variant" "-l$name" "-Wl,-rpath,$dir/lib-$variant" -lpthread \
+                2>"$dir/build-${example}_$variant.log" \
+                || parity_fail "$example against $variant did not build (see $dir/build-${example}_$variant.log)"
+        done
+    done
+    for example in "${PARITY_BENCHES[@]}"; do
+        for variant in P W; do
+            name=zenohc
+            [ "$variant" = W ] && name=wz_capi_c
+            cc -std=gnu11 -O2 -DBENCH_ZENOHC "$root/scripts/host-bench/$example.c" -I"$prefix/include" \
                 -o "$dir/bin/${example}_$variant" -L"$dir/lib-$variant" "-l$name" "-Wl,-rpath,$dir/lib-$variant" -lpthread \
                 2>"$dir/build-${example}_$variant.log" \
                 || parity_fail "$example against $variant did not build (see $dir/build-${example}_$variant.log)"
@@ -1193,6 +1218,7 @@ parity() {
         --boots "$boots" --sizes "$sizes" --image "$PARITY_IMAGE" --reference "$PARITY_REFERENCE" \
         --client-cpus "$client_cpus" --server-cpus "$server_cpus" \
         --pings "${PICO_CMP_PINGS:-20000}" --warmup-s "${PICO_CMP_WARMUP_S:-3}" --window-s "${PICO_CMP_WINDOW_S:-10}" \
+        --nodrop-trial-s "${PICO_CMP_NODROP_TRIAL_S:-3}" \
         --heap-shim "$dir/bin/heap_peak.so" --rss-wrapper "$dir/bin/fork_rss" \
         --size-binary "P=$PARITY_SIZE_P" --size-binary "W=$PARITY_SIZE_W"
     rc=$?
