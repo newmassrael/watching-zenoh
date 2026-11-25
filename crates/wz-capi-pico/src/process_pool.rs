@@ -717,8 +717,22 @@ impl Plan {
 
     /// The pools `objects` make, unchecked: a plan of no slot, or of more bytes than the address
     /// space holds, is laid out all the same, and refused where its pools are laid
-    /// ([`lay_stage`]).
+    /// ([`lay_stage`]). Its slots' bytes are copied from [`Self::SIZES`] whole, not written one
+    /// pool at a time where an open lays its plan.
     const fn laid(objects: &Counts) -> Self {
+        Self {
+            slots: Self::listed(objects).slots,
+            sizes: Self::SIZES,
+        }
+    }
+
+    /// The bytes of a slot of each pool in every plan the build lays, whatever its counts: each
+    /// kind's object's, then the payload blocks', smallest first.
+    const SIZES: [usize; POOLS] = Self::listed(&Counts::NONE).sizes;
+
+    /// Each kind's pool of its count of `objects` and the payload blocks' pools: the one listing
+    /// of the pools a build has, which [`Self::laid`] takes the slots of.
+    const fn listed(objects: &Counts) -> Self {
         let mut plan = Self {
             slots: [0; POOLS],
             sizes: [0; POOLS],
@@ -2797,6 +2811,25 @@ mod tests {
             built_counts().and_then(|objects| Plan::of(&objects))
         );
         assert!(BUILT_PLAN.is_ok(), "the build's counts make pools");
+    }
+
+    /// A slot's bytes are its pool's whatever the counts, so a plan takes them whole from the
+    /// build's: the plan of no object, of the build's counts and of one sample and one key each
+    /// lists the same sizes, and laying it is listing it. Turned red by a pool whose slot's bytes
+    /// hang on its count, or a laid plan whose sizes are not the listing's.
+    #[test]
+    fn a_plans_slot_sizes_are_the_builds_whatever_its_counts() {
+        let built = built_counts().expect("the build's counts make pools");
+        let ones = Counts {
+            samples: 1,
+            keyexprs: 1,
+            ..Counts::NONE
+        };
+        for objects in [Counts::NONE, built, ones] {
+            let listed = Plan::listed(&objects);
+            assert_eq!(listed.sizes, Plan::SIZES, "{objects:?}");
+            assert_eq!(Plan::laid(&objects), listed, "{objects:?}");
+        }
     }
 
     /// The plan an open lays is the one every entity's count makes: reading only the limits of
