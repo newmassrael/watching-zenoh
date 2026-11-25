@@ -711,10 +711,10 @@ impl TakesMemory for Taking {
             return Ok(Taken::Cell(cell, buf));
         }
         match fit_cell(cell, need, align) {
-            Some(buf) => Ok(Taken::Cell(cell, buf)),
-            None => {
+            Ok(buf) => Ok(Taken::Cell(cell, buf)),
+            Err(why) => {
                 ExecutorState::release(cell);
-                Err(SpawnRefusal::TooLarge)
+                Err(why)
             }
         }
     }
@@ -732,6 +732,9 @@ pub enum SpawnRefusal {
     /// The future and its output do not fit a cell, or ask for more alignment than
     /// a cell has.
     TooLarge,
+    /// The heap refused the bytes a cell that takes them at the spawn (a grown table's, or one
+    /// an open adds) was to be given: a full heap, not a task past what a cell can hold.
+    HeapRefused,
 }
 
 /// How a pass left a cell it took (`Polling`).
@@ -872,6 +875,8 @@ pub struct Refusals {
     pub no_task_cell: u32,
     /// Spawns refused because the future and its output do not fit a cell.
     pub too_large: u32,
+    /// Spawns refused because the heap refused the bytes of their cell.
+    pub heap_refused: u32,
 }
 
 /// Where an executor's cells are.
@@ -964,21 +969,22 @@ unsafe fn drop_erased<T>(ptr: *mut u8) {
 
 /// Give a bare `cell` (a cell of a `Taking`), which the caller has taken (`Spawning`), bytes for
 /// a task of `need` bytes at `align`: the ones it has when they are enough, which is what lets a
-/// grown table spawn again without allocating, or new ones in their place. `None` for a size and
-/// alignment no allocation can have, the cell's bytes as they were.
+/// grown table spawn again without allocating, or new ones in their place. Refused, the cell's
+/// bytes as they were, as `TooLarge` for a size and alignment no allocation can have, and as
+/// `HeapRefused` when the heap has none to give.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-fn fit_cell(cell: &TaskCell, need: usize, align: usize) -> Option<*mut u8> {
+fn fit_cell(cell: &TaskCell, need: usize, align: usize) -> Result<*mut u8, SpawnRefusal> {
     let align = align.max(CELL_ALIGN);
     let (held, cap, held_align) = cell.with_meta(|meta| (meta.buf, meta.cap, meta.buf_align));
     if !held.is_null() && cap >= need && held_align >= align {
-        return Some(held);
+        return Ok(held);
     }
     let size = need.max(1);
-    let layout = Layout::from_size_align(size, align).ok()?;
+    let layout = Layout::from_size_align(size, align).map_err(|_| SpawnRefusal::TooLarge)?;
     // SAFETY: the layout's size is not zero.
     let fresh = unsafe { alloc::alloc::alloc(layout) };
     if fresh.is_null() {
-        alloc::alloc::handle_alloc_error(layout);
+        return Err(SpawnRefusal::HeapRefused);
     }
     if !held.is_null() {
         // SAFETY: the bytes were allocated with the cell's recorded size and alignment, and the
@@ -990,7 +996,7 @@ fn fit_cell(cell: &TaskCell, need: usize, align: usize) -> Option<*mut u8> {
         meta.cap = size;
         meta.buf_align = align;
     });
-    Some(fresh)
+    Ok(fresh)
 }
 
 /// How an executor's passes, spawns and sweeps walk its cells: over any count of them
@@ -1197,6 +1203,7 @@ impl ExecutorState {
             match why {
                 SpawnRefusal::NoTaskCell => now.no_task_cell = now.no_task_cell.saturating_add(1),
                 SpawnRefusal::TooLarge => now.too_large = now.too_large.saturating_add(1),
+                SpawnRefusal::HeapRefused => now.heap_refused = now.heap_refused.saturating_add(1),
             }
             counts.set(now);
         });
@@ -1944,7 +1951,10 @@ mod tests {
     #[test]
     fn a_cell_asked_for_more_than_an_allocation_can_have_is_refused() {
         let cell = TaskCell::owned(ptr::null_mut(), 0, ptr::null());
-        assert_eq!(fit_cell(&cell, usize::MAX, CELL_ALIGN), None);
+        assert_eq!(
+            fit_cell(&cell, usize::MAX, CELL_ALIGN),
+            Err(SpawnRefusal::TooLarge)
+        );
         assert!(cell.with_meta(|meta| meta.buf.is_null() && meta.cap == 0));
     }
 
@@ -2070,6 +2080,7 @@ mod tests {
             Refusals {
                 no_task_cell: 1,
                 too_large: 2,
+                heap_refused: 0,
             }
         );
     }
@@ -2100,6 +2111,7 @@ mod tests {
             Refusals {
                 no_task_cell: 1,
                 too_large: 0,
+                heap_refused: 0,
             },
             "a refusal the added cells answer is counted once, by its cause"
         );
@@ -2206,6 +2218,7 @@ mod tests {
             Refusals {
                 no_task_cell: 1,
                 too_large: 1,
+                heap_refused: 0,
             }
         );
         state.run_until_idle();

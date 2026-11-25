@@ -622,6 +622,7 @@ fn an_opening_runtime_places_what_its_open_spawns_and_nothing_once_sealed() {
         Refusals {
             no_task_cell: 1,
             too_large: 1,
+            heap_refused: 0,
         }
     );
     small.abort();
@@ -667,6 +668,7 @@ fn an_opening_runtime_adds_no_cell_past_the_ones_it_may_add() {
         Refusals {
             no_task_cell: 1,
             too_large: 0,
+            heap_refused: 0,
         }
     );
     small.abort();
@@ -928,6 +930,40 @@ fn a_runtime_placed_for_an_open_that_adds_cells_is_refused_by_a_full_heap() {
         std::alloc::dealloc(span.as_ptr(), layout);
         drop(std::boxed::Box::from_raw(memory.as_ptr()));
     }
+}
+
+/// A spawn during an open whose added cell the heap refuses its bytes is refused as the heap's,
+/// counted apart from a task too large, and ends nothing; the same spawn with the heap's memory
+/// takes the cell. Turned red by a refusal that ends the program, or one named or counted as a
+/// task too large.
+#[test]
+fn a_spawn_whose_cell_bytes_the_heap_refuses_is_refused_as_the_heaps() {
+    let rows = RuntimeRows {
+        tasks: 0,
+        task_bytes: 0,
+        timers: 0,
+    };
+    let runtime = CoopRuntime::opening(Still, rows, 1);
+    let local = CoopLocalSet::new(&runtime);
+    let spawned = refused(|| {
+        local
+            .try_spawn_local(async { 1u8 })
+            .map(drop)
+            .map_err(|refused| refused.why)
+    });
+    assert_eq!(spawned, Err(SpawnRefusal::HeapRefused));
+    assert_eq!(
+        runtime.task_refusals(),
+        Refusals {
+            no_task_cell: 0,
+            too_large: 0,
+            heap_refused: 1,
+        }
+    );
+    assert!(
+        local.try_spawn_local(async { 1u8 }).is_ok(),
+        "CONTROL: with the heap's memory the cell takes the task"
+    );
 }
 
 /// A value the heap refuses its memory is handed back, and the same value with the heap's memory
