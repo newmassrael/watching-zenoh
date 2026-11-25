@@ -448,7 +448,7 @@ pub unsafe extern "C" fn zp_config_insert(
             // A constant, so the judgement reads the limits where the build keeps them.
             const OPENING: wz_session_core::limits::SessionLimits =
                 crate::session::opening_limits();
-            if let Err(code) = crate::config_limits::state_over(val, &OPENING) {
+            if let Err(code) = crate::config_limits::state_over(Some(val), &OPENING) {
                 return code;
             }
         }

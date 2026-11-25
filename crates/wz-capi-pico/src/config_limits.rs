@@ -73,16 +73,18 @@ impl Stated {
     }
 }
 
-/// What an open composes over `limits`: [`Stated::over`] them, each count `text` states selected
-/// over it ([`Stated::select`]); `Z_ERR_CONFIG_INVALID_VALUE` for an item that is not
-/// `NAME=count` or one the build refuses. One body for every door that reads the key:
-/// `zp_config_insert` judges a value with it as the open composes it.
+/// What an open composes over `limits`: [`Stated::over`] them, each count `text`, the key's value
+/// where the config holds one, states selected over it ([`Stated::select`]);
+/// `Z_ERR_CONFIG_INVALID_VALUE` for an item that is not `NAME=count` or one the build refuses.
+/// One body for every door that reads the key: `zp_config_insert` judges a value with it as the
+/// open composes it, and an open whose config holds none composes through it too.
 #[inline(never)]
-pub(crate) fn state_over(text: &str, limits: &SessionLimits) -> Result<Stated, ZResult> {
+pub(crate) fn state_over(text: Option<&str>, limits: &SessionLimits) -> Result<Stated, ZResult> {
     let mut next = Stated::over(*limits);
     // Read as bytes: the separators are ASCII, and a byte's search is a plain loop where a
-    // `char`'s pulls in the string searcher.
+    // `char`'s pulls in the string searcher. No value states nothing, as an empty one does.
     for item in text
+        .unwrap_or_default()
         .as_bytes()
         .split(|byte| *byte == b',')
         .map(<[u8]>::trim_ascii)
@@ -150,7 +152,7 @@ mod tests {
         {
             return;
         }
-        let stated = state_over(" MAX_SUBSCRIPTIONS = 2 ,", &opening.limits)
+        let stated = state_over(Some(" MAX_SUBSCRIPTIONS = 2 ,"), &opening.limits)
             .expect("a count under the bound is stated");
         assert_eq!(stated.limits.max_subscriptions(), Quota::at_most(2));
         assert_eq!(
@@ -169,7 +171,7 @@ mod tests {
         };
         let past = alloc::format!("MAX_PUBLISHERS=1,MAX_SUBSCRIPTIONS={}", bound + 1);
         assert_eq!(
-            state_over(&past, &opening().limits),
+            state_over(Some(past.as_str()), &opening().limits),
             Err(Z_ERR_CONFIG_INVALID_VALUE)
         );
     }
@@ -192,7 +194,7 @@ mod tests {
             "MAX_SUBSCRIPTIONS=-1",
         ] {
             assert_eq!(
-                state_over(text, &opening.limits),
+                state_over(Some(text), &opening.limits),
                 Err(Z_ERR_CONFIG_INVALID_VALUE),
                 "{text}"
             );
@@ -244,12 +246,14 @@ mod tests {
         assert_eq!(count_of(past.as_bytes()), None);
     }
 
-    /// A text that states nothing leaves the statement as it is.
+    /// A text that states nothing, and no text, leave the statement as it is. Turned red by a
+    /// door that refuses a config without the key, or an empty item.
     #[test]
     fn an_empty_text_states_nothing() {
         let opening = opening();
-        assert_eq!(state_over("", &opening.limits), Ok(opening));
-        assert_eq!(state_over(" , ,", &opening.limits), Ok(opening));
+        assert_eq!(state_over(None, &opening.limits), Ok(opening));
+        assert_eq!(state_over(Some(""), &opening.limits), Ok(opening));
+        assert_eq!(state_over(Some(" , ,"), &opening.limits), Ok(opening));
     }
 
     /// A held value's count is stated beside the session's limits, and one past the build's value
@@ -264,7 +268,8 @@ mod tests {
             "HELD_SAMPLES={},HELD_LARGE_PAYLOAD_BLOCKS=0",
             caps::HELD_SAMPLES
         );
-        let stated = state_over(&text, &opening.limits).expect("held values under their bounds");
+        let stated = state_over(Some(text.as_str()), &opening.limits)
+            .expect("held values under their bounds");
         let mut expected = crate::process_pool::Held::BUILD;
         assert_eq!(expected.select(b"HELD_LARGE_PAYLOAD_BLOCKS", 0), Some(true));
         assert_eq!(stated.held, expected);
@@ -272,7 +277,7 @@ mod tests {
 
         let past = alloc::format!("HELD_SAMPLES=1,HELD_REPLIES={}", caps::HELD_REPLIES + 1);
         assert_eq!(
-            state_over(&past, &opening.limits),
+            state_over(Some(past.as_str()), &opening.limits),
             Err(Z_ERR_CONFIG_INVALID_VALUE)
         );
     }

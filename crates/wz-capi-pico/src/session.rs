@@ -363,11 +363,8 @@ pub(crate) fn resolve_open(
     cfg: &ConfigState,
 ) -> Result<(SessionPolicy, crate::config_limits::Stated), ZResult> {
     let (policy, limits) = resolve_snapshots(&cfg.policies)?;
-    let stated = match cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY) {
-        Some(text) => crate::config_limits::state_over(text, &limits)?,
-        None => crate::config_limits::Stated::over(limits),
-    };
-    Ok((policy, stated))
+    let text = cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY);
+    Ok((policy, crate::config_limits::state_over(text, &limits)?))
 }
 
 /// The limits a session of this ABI opens under before its config states any: zenoh-pico's, as
